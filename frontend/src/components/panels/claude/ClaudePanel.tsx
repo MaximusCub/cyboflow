@@ -62,8 +62,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // approvalRunId — prefer the SessionProvider's freshly-fetched session, fall
   // back to the store copy keyed by the panel's sessionId. Null-safe: an
   // interactive session whose chatRunId has not landed yet keeps the SDK surface.
+  // Check activeMainRepoSession FIRST: sessionStore.updateSession early-returns
+  // for the active main-repo session, writing the update ONLY there and leaving
+  // any `sessions` copy stale. Reading just `sessions` would therefore freeze this
+  // panel's status (and with it `composerWorking` → the Stop button) for a
+  // main-repo quick session. Claude masks that via the live-tail isGenerating
+  // flag; codex-sdk emits no stream deltas, so it would never show Stop at all.
   const panelStoreSession = useSessionStore((state) =>
-    state.sessions.find((s) => s.id === panel.sessionId),
+    state.activeMainRepoSession?.id === panel.sessionId
+      ? state.activeMainRepoSession
+      : state.sessions.find((s) => s.id === panel.sessionId),
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
   const isCodexPtySession = substrateSession?.agentRuntime === 'codex-pty';

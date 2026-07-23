@@ -197,11 +197,13 @@ vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
     ptyOpen,
     activeSession,
     activeQuestion,
+    working,
   }: {
     interactive: boolean;
     ptyOpen?: boolean;
     activeSession?: { id?: string; effort?: string };
     activeQuestion?: { id: string } | null;
+    working?: boolean;
   }) => (
     <div
       data-testid="quick-session-composer"
@@ -210,6 +212,7 @@ vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
       data-session-id={activeSession?.id ?? ''}
       data-effort={activeSession?.effort ?? ''}
       data-active-question={activeQuestion?.id ?? ''}
+      data-working={String(working)}
     >
       QuickSessionComposer
     </div>
@@ -463,6 +466,36 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(composer).toHaveAttribute('data-session-id', 's1');
     expect(composer).toHaveAttribute('data-effort', 'ultracode');
     expect(composer).toHaveAttribute('data-interactive', 'true');
+  });
+
+  it('reads a main-repo session from activeMainRepoSession so `working` tracks its live status', () => {
+    // sessionStore.updateSession early-returns for the ACTIVE MAIN-REPO session,
+    // writing only to activeMainRepoSession and leaving any `sessions` copy stale.
+    // Rendered WITHOUT a SessionProvider (production has none), so the panel falls
+    // back to the store — it must prefer activeMainRepoSession or `working` (and
+    // with it the Stop button) freezes for a main-repo quick session.
+    const stale = makeSession({ id: 's1', status: 'ready' });
+    const live = makeSession({ id: 's1', status: 'running' });
+    mocks.holder.activeSession = live;
+    useSessionStore.setState({
+      sessions: [stale],
+      activeSessionId: 's1',
+      activeMainRepoSession: live,
+    });
+
+    render(<ClaudePanel panel={PANEL} isActive />);
+
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-working', 'true');
+  });
+
+  it('`working` is false for a non-running session (Stop stays hidden)', () => {
+    const idle = makeSession({ id: 's1', status: 'waiting' });
+    mocks.holder.activeSession = idle;
+    useSessionStore.setState({ sessions: [idle], activeSessionId: 's1', activeMainRepoSession: null });
+
+    render(<ClaudePanel panel={PANEL} isActive />);
+
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-working', 'false');
   });
 
   // -------------------------------------------------------------------------
