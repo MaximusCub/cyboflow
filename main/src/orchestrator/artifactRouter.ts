@@ -325,6 +325,12 @@ export interface ArtifactDbRow {
   source_ref: string | null;
   created_at: string;
   committed_at: string | null;
+  /** Monotonic content-revision counter (migration 078; DEFAULT 1). Bumped by
+   *  runCreate's enrich branch ONLY when a field actually changed — the CAS
+   *  material the Design Mode design-spec draft binds against. OPTIONAL on the
+   *  row shape: a test DB (or any pre-078 SELECT *) that has not seeded the
+   *  column returns rows without it, so shapeRow reads `undefined` there. */
+  revision?: number;
 }
 
 interface FieldDelta {
@@ -786,15 +792,12 @@ export class ArtifactRouter {
         const nextPayload = change.payloadJson ?? existing.payload_json;
         const nextSourceRef = change.sourceRef ?? existing.source_ref;
         const nextIsNew = change.isNew === false ? 0 : 1;
-        this.db
-          .prepare(
-            `UPDATE artifacts
-                SET label = ?, step_origin = ?, mode = ?, payload_json = ?, source_ref = ?,
-                    session_id = COALESCE(?, session_id), is_new = ?
-              WHERE id = ?`,
-          )
-          .run(change.label, nextStepOrigin, mode, nextPayload, nextSourceRef, change.sessionId ?? null, nextIsNew, existing.id);
 
+        // Compute the field deltas BEFORE the UPDATE so the revision bump can be
+        // gated on them (migration 078): revision advances IFF at least one field
+        // actually changed. An idempotent no-op re-report must NOT bump it — the
+        // design-spec draft binds against this counter and would spuriously go
+        // stale otherwise (design-mode.md "Design-spec draft").
         const deltas: FieldDelta[] = [];
         if (change.label !== existing.label) deltas.push({ field: 'label', from: existing.label, to: change.label });
         if (mode !== existing.mode) deltas.push({ field: 'mode', from: existing.mode, to: mode });
@@ -806,6 +809,16 @@ export class ArtifactRouter {
             to: nextPayload == null ? 'cleared' : 'present',
           });
         }
+        const bumpRevision = deltas.length > 0;
+
+        this.db
+          .prepare(
+            `UPDATE artifacts
+                SET label = ?, step_origin = ?, mode = ?, payload_json = ?, source_ref = ?,
+                    session_id = COALESCE(?, session_id), is_new = ?${bumpRevision ? ', revision = revision + 1' : ''}
+              WHERE id = ?`,
+          )
+          .run(change.label, nextStepOrigin, mode, nextPayload, nextSourceRef, change.sessionId ?? null, nextIsNew, existing.id);
 
         if (deltas.length === 0) {
           const last = this.db
@@ -1237,6 +1250,7 @@ export class ArtifactRouter {
       sourceRef: row.source_ref,
       createdAt: row.created_at,
       committedAt: row.committed_at,
+      revision: row.revision,
     };
   }
 

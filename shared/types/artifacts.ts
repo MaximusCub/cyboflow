@@ -487,6 +487,19 @@ export interface Artifact {
   sourceRef: string | null;
   createdAt: string;
   committedAt: string | null;
+  /**
+   * Monotonic content-revision counter (migration 078). Starts at 1 on create
+   * and bumps by 1 on every enrich-in-place update that changes a field (a
+   * no-op re-report does NOT bump). This is the CAS material the Design Mode
+   * design-spec draft binds against — Approve rejects a draft whose bound
+   * revision no longer equals the prototype artifact's CURRENT revision
+   * (design-mode.md "Design-spec draft"). OPTIONAL in the API shape: a
+   * committed SNAPSHOT-sourced artifact (past the design-session mutation
+   * window) carries no live counter, so `snapshotManifestToArtifact` leaves it
+   * unset — the CAS always reads the live `artifacts.revision` column directly,
+   * never this field.
+   */
+  revision?: number;
 }
 
 /**

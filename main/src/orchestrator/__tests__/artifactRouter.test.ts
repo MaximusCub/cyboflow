@@ -90,6 +90,12 @@ function buildDb(): Database.Database {
   // resolution (`SELECT session_id FROM workflow_runs WHERE id = ?`) has
   // something to select.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // artifacts.revision (migration 078) — the monotonic content-revision counter
+  // ArtifactRouter bumps on an enrich-with-deltas. Added directly (like the
+  // session_id column above) since this entity test DB hand-picks a migration
+  // subset that predates 078; without it the enrich UPDATE's `revision =
+  // revision + 1` would hit a missing column.
+  db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;
 }
 
@@ -1299,5 +1305,86 @@ describe('ArtifactRouter.mergeScreenshots (atomic §5.9)', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content-revision counter (migration 082) — the CAS material the Design Mode
+// design-spec draft binds against. Create → revision 1; an enrich that CHANGES
+// a field bumps it; an idempotent no-op re-report leaves it untouched.
+// ---------------------------------------------------------------------------
+describe('ArtifactRouter revision counter (migration 082)', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+  });
+
+  function revisionOf(db: Database.Database, artifactId: string): number {
+    return (db.prepare('SELECT revision FROM artifacts WHERE id = ?').get(artifactId) as { revision: number }).revision;
+  }
+
+  it('create starts at revision 1; an enrich with a changed payload bumps to 2; an identical re-report stays 2', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-rev');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    // create → revision 1, and the shaped Artifact carries it.
+    const created = await router.apply(1, {
+      op: 'create',
+      runId: 'run-rev',
+      atype: 'ui-prototype',
+      label: 'mockup',
+      payloadJson: JSON.stringify({ fileName: 'prototype/index.html' }),
+      actor: 'agent:designer',
+    });
+    expect(revisionOf(db, created.artifactId)).toBe(1);
+    const afterCreate = await router.getById(created.artifactId);
+    expect(afterCreate?.revision).toBe(1);
+
+    // enrich with a CHANGED payload (a real delta) → bump to 2.
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-rev',
+      atype: 'ui-prototype',
+      label: 'mockup',
+      payloadJson: JSON.stringify({ fileName: 'prototype/index.html', v: 2 }),
+      actor: 'agent:designer',
+    });
+    expect(revisionOf(db, created.artifactId)).toBe(2);
+
+    // idempotent re-report with IDENTICAL fields (no delta) → still 2 (no bump).
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-rev',
+      atype: 'ui-prototype',
+      label: 'mockup',
+      payloadJson: JSON.stringify({ fileName: 'prototype/index.html', v: 2 }),
+      actor: 'agent:designer',
+    });
+    expect(revisionOf(db, created.artifactId)).toBe(2);
+  });
+
+  it('a label-only change also bumps the revision (any field delta counts)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-rev2');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    const { artifactId } = await router.apply(1, {
+      op: 'create',
+      runId: 'run-rev2',
+      atype: 'idea-spec',
+      label: 'v1',
+      actor: 'agent:x',
+    });
+    expect(revisionOf(db, artifactId)).toBe(1);
+
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-rev2',
+      atype: 'idea-spec',
+      label: 'v2', // label delta
+      actor: 'agent:x',
+    });
+    expect(revisionOf(db, artifactId)).toBe(2);
   });
 });

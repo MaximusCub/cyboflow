@@ -65,6 +65,9 @@ function buildDb(): Database.Database {
   // session_id, backfilled by 041) — layer the additive column onto this
   // pre-020 chain so the emit-path SELECT resolves.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // artifacts.revision (migration 078) — ArtifactRouter bumps it on the verdict
+  // enrich-with-deltas; add the additive column onto this pre-078 chain.
+  db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;
 }
 
@@ -686,8 +689,9 @@ function buildSprintDb(): Database.Database {
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
   for (const f of SPRINT_MIGRATIONS) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
-  // Same session_id layering as buildDb — see the comment there.
+  // Same session_id + artifacts.revision layering as buildDb — see the comments there.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;
 }
 
