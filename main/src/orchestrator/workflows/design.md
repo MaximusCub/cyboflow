@@ -94,14 +94,23 @@ H2 yourself. Always include:
 
 ## Session flow
 
-- **First turn:** call `cyboflow_design_get_idea` to read the linked idea. Do the full
-  **grounding pass** — build or refresh the style kit, and for an existing surface read
-  its implementing components for the `### Baseline`. Then produce the **first
-  prototype** (report the `ui-prototype` artifact) **and** the first spec draft
-  (`cyboflow_design_update_draft`).
+- **First turn:** call `cyboflow_design_get_idea` to read the linked idea. Then
+  **judge** whether it leaves meaningful design decisions open — a thin body, an
+  ambiguous target surface, or unstated constraints (which existing surface, what
+  scope, what the user actually wants to see first). If it does, ask the user **one
+  round** of clarifying questions via the `AskUserQuestion` tool (at most 4 questions,
+  concrete options where possible) and **wait for the answers** before designing —
+  do not start grounding or produce anything yet. If the idea is already
+  well-specified, skip straight to grounding. Either way, once you have enough input,
+  do the full **grounding pass** — build or refresh the style kit, and for an existing
+  surface read its implementing components for the `### Baseline` — then produce the
+  **first prototype** (report the `ui-prototype` artifact) **and** the first spec
+  draft (`cyboflow_design_update_draft`).
 - **Every later turn:** take the user's feedback, regenerate the prototype,
   **re-report** the same artifact, and **refresh the draft** so the pair stays in sync.
-  One prototype, iterated in place — never spin up a second.
+  One prototype, iterated in place — never spin up a second. You may ask further
+  clarifying questions anytime the user's feedback is ambiguous, using the same
+  `AskUserQuestion` tool.
 
 ## When the idea link breaks
 

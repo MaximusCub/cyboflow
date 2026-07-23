@@ -9,8 +9,10 @@
  *         spawned the persistent PTY REPL)
  *      b. Terminal panel (cwd = worktreePath) — always
  *   3. Calls useCyboflowStore.getState().setActiveQuickSession(sessionId, runId)
- *   4. Calls opts.onSuccess?.(sessionId)
- *   5. Clears isStarting (finally)
+ *   4. If `kickoffPrompt` was passed AND a Claude panel was created above (2a),
+ *      fires it as that panel's first turn — fire-and-forget, see `start`'s doc.
+ *   5. Calls opts.onSuccess?.(sessionId)
+ *   6. Clears isStarting (finally)
  *
  * Guards:
  *   - No-ops when projectId is null or a start is already in-flight.
@@ -25,6 +27,8 @@ import { API } from '../utils/api';
 import { panelApi } from '../services/panelApi';
 import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import { dispatchQuickSessionInput } from './useClaudePanel';
+import type { Session } from '../types/session';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
@@ -75,6 +79,21 @@ interface UseQuickSessionReturn {
    * 'claude-sdk' regardless of the caller's other params (a security boundary
    * — the MCP scope mechanism that limits a design session's toolset exists
    * only on the SDK path). Omitted for every non-design launch.
+   *
+   * `kickoffPrompt` (Design Mode v0.5, "Auto-start"): an optional canonical
+   * first-turn message sent as the session's first panel input immediately
+   * after the Claude panel is created and setActiveQuickSession has run —
+   * NOT via createQuick's `prompt` field, which the SDK path ignores entirely
+   * (createQuickSessionCore hardcodes `prompt: ''`). Uses the same dispatch
+   * the chat composer uses (`dispatchQuickSessionInput`), so it renders as a
+   * real, visible, restart-safe first user turn — deliberately not a
+   * synthetic/hidden one. Only fires when a Claude panel was created on THIS
+   * client call (the `claudePanelId === undefined` branch below) — an
+   * eagerly server-spawned panel (interactive substrate) has no seam here,
+   * and design sessions are SDK-pinned regardless. Dispatched
+   * fire-and-forget: a failed kickoff send is logged and must never fail
+   * session creation. Omitted for every non-design launch (every existing
+   * caller keeps its current behavior unchanged).
    */
   start: (
     agentPermissionMode?: PermissionMode,
@@ -89,6 +108,7 @@ interface UseQuickSessionReturn {
     agentRuntime?: SessionAgentRuntime,
     reasoningEffort?: ReasoningEffort,
     designIdeaId?: string,
+    kickoffPrompt?: string,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -112,6 +132,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       agentRuntime?: SessionAgentRuntime,
       reasoningEffort?: ReasoningEffort,
       designIdeaId?: string,
+      kickoffPrompt?: string,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -172,12 +193,14 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         // Agent panel first (unless the server eagerly created it — interactive
         // PTY sessions spawn during create-quick and return their panel id),
         // then Terminal.
+        let createdClaudePanelId: string | undefined;
         if (claudePanelId === undefined) {
           const claudePanel = await panelApi.createPanel({
             sessionId,
             type: 'claude',
             title: 'Chat',
           });
+          createdClaudePanelId = claudePanel.id;
           // Persist the launch model + fast-mode on the SDK panel so the first
           // (and every) sessions:input turn spawns with them — the request's
           // claudeConfig only reaches the interactive eager spawn, never this
@@ -205,6 +228,30 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
 
         useCyboflowStore.getState().setActiveQuickSession(sessionId, runId);
         trackEvent('session_created', { kind: 'quick', substrate });
+
+        // Design Mode auto-start kickoff — see `start`'s doc above. Fired
+        // fire-and-forget so a kickoff-send failure never fails session
+        // creation; the composer's own dispatch path handles UI reflection of
+        // the sent turn once loaded.
+        if (kickoffPrompt !== undefined && kickoffPrompt.length > 0 && createdClaudePanelId !== undefined) {
+          const kickoffSession: Session = {
+            id: sessionId,
+            name: sessionId,
+            worktreePath,
+            prompt: '',
+            status: 'ready',
+            createdAt: new Date().toISOString(),
+            output: [],
+            jsonMessages: [],
+            agentRuntime: agentRuntime ?? 'claude-sdk',
+          };
+          dispatchQuickSessionInput(kickoffSession, createdClaudePanelId, kickoffPrompt, 'initial').catch(
+            (err: unknown) => {
+              console.error('[useQuickSession] Failed to send design kickoff turn:', err);
+            },
+          );
+        }
+
         opts.onSuccess?.(sessionId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to create quick session');

@@ -53,7 +53,12 @@
  *     runtime hard-coded to 'sdk'/'claude'/'claude-sdk' regardless of the
  *     wizard's agentRuntime state (a security boundary — the MCP scope
  *     mechanism that limits a design session's toolset exists only on the SDK
- *     path) and the picked idea id threaded as the new `designIdeaId` param.
+ *     path), the picked idea id threaded as the new `designIdeaId` param, and
+ *     `DESIGN_KICKOFF_PROMPT` threaded as `kickoffPrompt` (design-mode.md
+ *     v0.5 "Auto-start") so the session's first turn is sent automatically.
+ *     Its `onSuccess` additionally calls `useDesignModeStore.enterDesignMode`
+ *     (gated by `isDesignLaunchRef`, set by `launchDesign`) so the wizard
+ *     lands directly in the fullscreen design surface.
  *
  * A synchronous in-flight latch (`startInFlightRef`) guards every launch against
  * the double-submit duplicate-run bug (mirrors WorkflowPicker).
@@ -72,6 +77,8 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useConfigStore } from '../../../stores/configStore';
 import { useQuickSession } from '../../../hooks/useQuickSession';
 import { useAgentPermissionMode } from '../../../hooks/useAgentPermissionMode';
+import { useDesignModeStore } from '../../../stores/designModeStore';
+import { DESIGN_KICKOFF_PROMPT } from '../design/designKickoff';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
 import { IdeaPickerModal } from '../IdeaPickerModal';
 import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
@@ -460,6 +467,14 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const startInFlightRef = useRef(false);
+  // Design-launch detection for the shared useQuickSession onSuccess below
+  // (design-mode.md v0.5 "Auto-start"): launchDesign sets this synchronously,
+  // in the same tick it invokes startQuickSession, before any of the hook's
+  // awaited work resolves — so it is race-free within this component. Reset
+  // on every startQuickSession call site (not only design's own success path)
+  // so a failed design launch (onSuccess never fires) can never leak `true`
+  // into a later non-design launch.
+  const isDesignLaunchRef = useRef(false);
 
   // Mixed-provider retry prompt (Phase 2 slice D2). launchRun / launchBatch
   // detect isMixedProviderOrchestratedError in their catch and, instead of
@@ -491,9 +506,15 @@ export default function SessionStartWizard(): React.JSX.Element {
     error: quickError,
   } = useQuickSession({
     projectId: allowQuick ? selectedProjectId : null,
-    onSuccess: () => {
+    onSuccess: (sessionId) => {
       setToast(`Starting quick session on ${banner.name}`);
       notifyQuickSessionCreated({ projectId: selectedProjectId });
+      // Design-only: drop straight into the fullscreen surface (design-mode.md
+      // v0.5 "Auto-start"). See isDesignLaunchRef's declaration above.
+      if (isDesignLaunchRef.current) {
+        isDesignLaunchRef.current = false;
+        useDesignModeStore.getState().enterDesignMode(sessionId);
+      }
       useNavigationStore.getState().goToSession();
     },
   });
@@ -841,6 +862,9 @@ export default function SessionStartWizard(): React.JSX.Element {
   const launchDesign = useCallback(
     (ideaId: string) => {
       const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
+      // Set BEFORE invoking startQuickSession — see isDesignLaunchRef's
+      // declaration for the race-free reasoning.
+      isDesignLaunchRef.current = true;
       void startQuickSession(
         permissionMode,
         'sdk',
@@ -854,6 +878,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         'claude-sdk',
         reasoningEffort ?? undefined,
         ideaId,
+        DESIGN_KICKOFF_PROMPT,
       );
     },
     [
@@ -886,6 +911,10 @@ export default function SessionStartWizard(): React.JSX.Element {
       const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
       const quickSubstrate = substrateForRuntime(sessionRuntime);
       const quickProvider = providerForRuntime(sessionRuntime);
+      // Defensive reset: a previously FAILED design launch never reaches
+      // onSuccess (where the flag is normally cleared) — guard against it
+      // leaking into this non-design launch.
+      isDesignLaunchRef.current = false;
       void startQuickSession(
         permissionMode,
         quickSubstrate,
@@ -913,6 +942,8 @@ export default function SessionStartWizard(): React.JSX.Element {
       // spawn receives the model via claudeConfig and enforces the deny/plugin
       // sets. Fast mode stays QUICK-only (its toggle never shows here).
       const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
+      // Defensive reset — see the 'quick' branch above.
+      isDesignLaunchRef.current = false;
       void startQuickSession(
         permissionMode,
         'interactive',

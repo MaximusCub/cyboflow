@@ -151,6 +151,11 @@ vi.mock('../../../../utils/api', () => ({
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
       setEffort: vi.fn().mockResolvedValue({ success: true }),
     },
+    // panels.sendInput — the design kickoff's dispatch target
+    // (dispatchQuickSessionInput's non-codex-sdk 'initial' branch).
+    panels: {
+      sendInput: vi.fn().mockResolvedValue({ success: true }),
+    },
     models: {
       getCodexCatalog: vi.fn().mockResolvedValue({
         success: true,
@@ -168,6 +173,8 @@ import SessionStartWizard from '../SessionStartWizard';
 import { useCyboflowStore } from '../../../../stores/cyboflowStore';
 import { useConfigStore } from '../../../../stores/configStore';
 import { useNavigationStore } from '../../../../stores/navigationStore';
+import { useDesignModeStore } from '../../../../stores/designModeStore';
+import { DESIGN_KICKOFF_PROMPT } from '../../design/designKickoff';
 import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
 import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
@@ -178,6 +185,7 @@ const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockEnsureSession = vi.mocked(ensureSessionForLaunch);
+const mockPanelsSendInput = vi.mocked(API.panels.sendInput);
 
 /** A non-gated custom workflow row (neither planner nor sprint → direct launch). */
 const CUSTOM_WORKFLOW_ROW: WorkflowRow = {
@@ -282,10 +290,15 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
     useConfigStore.setState({ config: null });
+    // Fullscreen design surface state (design-mode.md v0.5) — never restored
+    // across app restart, so tests start from the same "no active surface"
+    // baseline the real app does.
+    useDesignModeStore.setState({ activeDesignSessionId: null });
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
   mockEnsureSession.mockClear();
+  mockPanelsSendInput.mockClear();
   modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -1190,6 +1203,53 @@ describe('SessionStartWizard — Design idea gate + launch', () => {
         designIdeaId: 'IDEA-7',
       }),
     );
+  });
+
+  // Auto-start kickoff + fullscreen-surface entry (design-mode.md v0.5
+  // "Auto-start"). useQuickSession is NOT mocked in this file — the real hook
+  // runs, so the kickoff surfaces at its actual dispatch target
+  // (dispatchQuickSessionInput → API.panels.sendInput for the SDK 'initial'
+  // path, since createQuick's `prompt` field is ignored) rather than as a
+  // spy on `startQuickSession` itself.
+  it('sends DESIGN_KICKOFF_PROMPT as the first panel input after a design launch', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(mockPanelsSendInput).toHaveBeenCalledWith('panel-001', `${DESIGN_KICKOFF_PROMPT}\n`);
+  });
+
+  it('enters the fullscreen design surface for the created session on a design launch', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(useDesignModeStore.getState().activeDesignSessionId).toBe('session-quick-001');
+  });
+
+  it('a non-design quick launch sends no kickoff and never enters the design surface', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockPanelsSendInput).not.toHaveBeenCalled();
+    expect(useDesignModeStore.getState().activeDesignSessionId).toBeNull();
   });
 });
 
