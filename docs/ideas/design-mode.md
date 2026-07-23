@@ -1,6 +1,6 @@
 # Idea: Design Mode — in-app iterative design sessions
 
-**Scope hint:** large (decomposes into epics). **Status:** draft rev 4 (Codex rounds 1–3 folded; round 3 confirmed comment-freeze/Approve-machine/process-isolation resolved and flagged 4 remaining items, folded below), not yet filed to backlog.
+**Scope hint:** large (decomposes into epics). **Status:** rev 5 — **v0 IMPLEMENTED** on `zesty-owl-20260722` (spec rev 4 + Codex rounds 1–3 folded; see "v0 implementation notes" at the end for the three deliberate deviations). v1 (interactive tier) not started.
 
 ## Problem
 
@@ -146,4 +146,20 @@ The detached `revisionWorker` generalization stays out of scope until the planne
 - Approve action placement: canvas-header button vs chat command (leaning canvas button with a confirm).
 - One prototype per session (aligned with one-artifact-per-atype-per-run) vs multiple named prototypes — v0 assumes one, iterated in place.
 - Stub-idea auto-mint defaults: which stage/priority does the stub land in, and should it be flagged as design-originated for later planner pickup?
-- Whether the approved-design read model lives on the artifacts table (`source_ref` + status column) or a small dedicated table — decide at implementation with the registry design.
+- Whether the approved-design read model lives on the artifacts table (`source_ref` + status column) or a small dedicated table — decide at implementation with the registry design. *(Resolved in v0: dedicated `approved_designs` table — see implementation notes.)*
+
+## v0 implementation notes (rev 5)
+
+v0 shipped on `zesty-owl-20260722` (migration **078**; commits `9e2dd928`…`9af69f49`). The architecture above was implemented as specified, with the following concretizations and three deliberate deviations:
+
+**Concretizations.**
+- **Schema (migration 078):** `sessions.design_idea_id` (plain nullable ADD COLUMN, no FK); `artifacts.revision INTEGER NOT NULL DEFAULT 1` (the draft↔prototype CAS material — bumped by `ArtifactRouter.runCreate`'s enrich branch only when a field actually changed); `design_spec_drafts` (UNIQUE(session_id, draft_revision), bound artifact id+revision nullable pre-prototype); `design_handoffs` (state CHECK `intent→snapshotted→folded→complete | superseded | failed`); `approved_designs` (dedicated read-model table; current = `superseded_at IS NULL`; re-approve supersedes the prior row in the same transaction as the insert). No FKs anywhere — the read model must survive run/artifact cascade-deletes; `snapshot_path` holds the durable bytes under `<data dir>/design-snapshots/`.
+- **Prompt injection:** SDK quick sessions have no first-turn briefing seam, so `design.md` rides `ClaudeSpawnOptions.systemPromptAppend`, derived from `sessions.design_idea_id` at the `spawnClaudeCode` chokepoint (every turn, restart-safe, warm-fingerprint-stable) — not a synthetic first user turn.
+- **Fold atomicity:** `TaskChangeRouter.applyChange` cannot join an ambient transaction, so Approve Step 2 uses the sanctioned co-write-exception pattern (`design/entityBodyFold.ts`, mirroring `reviewItemListing.ts`): CAS + guarded UPDATE + shape-identical `entity_events` row (`kind='design-spec-folded'`) inside one `db.transaction()` with the handoff state transition; the idea-changed event is emitted after commit.
+- **Approve idempotency:** no deterministic idempotency key — a non-terminal `design_handoffs` row for `(session_id, draft_revision)` is resumed; `complete` returns already-complete; `superseded`/`failed` mint a fresh row. Boot recovery (`recoverDesignHandoffs`) drives non-terminal rows through the same step functions.
+- **Zero-export read path:** `cyboflow_report_artifact` stamps `source_ref` server-side from the session's validated `design_idea_id`; `cyboflow_get_task` for an idea includes `approved_design { approved_at, draft_revision, prototype_revision, snapshot_path }` with a resolved absolute snapshot path.
+
+**Deviations from the spec text.**
+1. **Stub mint is picker-side, not backend.** The idea-link picker reuses `IdeaPickerModal`, whose existing "new idea" tab mints the stub through the normal `tasks.create` chokepoint *before* session creation. The backend mint-after-session + archive-compensation machinery was dropped: the integrity invariant ("a stranded stub is flagged, never silently kept") is preserved differently — a launch failure leaves an ordinary, board-visible idea created by an explicit user action, which can be re-linked on retry. One uniform validation path for picked and minted ideas.
+2. **No fidelity control in the v0 wizard.** v0 is static-only, so the lo-fi/hi-fi choice would have exactly one enabled option; the control arrives with v1's interactive tier.
+3. **Gate-surface prototype visual deferred.** The folded `## Design spec` is already gate-visible (gate surfaces render the idea body), and the prototype is flow-discoverable via `cyboflow_get_task`; an inline visual embed of the approved prototype in the approve-ideas/planner gate surfaces is a small follow-up, not in v0.
