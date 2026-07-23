@@ -215,17 +215,19 @@ and normalize in the transcript formatter; also confirm the assistant row is
 committed BEFORE the turn-end event fires on both substrates (composition
 test, §8).
 
-## 4. Persistence (migration 081)
+## 4. Persistence (migration 082)
 
 Separate tables, not `sessions` columns — summary writes must never bump
 `sessions.updated_at` (activity clock), and cascade-delete stays clean.
-`081` is the next free number on this branch (`080_agent_thread_last_turn.sql`
-is the ceiling); renumber-on-land applies if another branch lands first.
+Target number: **082** — `080_agent_thread_last_turn.sql` is this branch's
+ceiling, but 081 is already claimed by the in-flight final-gate auto-handover
+branch (misty-birch, merging as of 2026-07-23). Renumber-on-land applies;
+re-check `main/src/database/migrations/` ceiling at implementation time.
 Runtime FK enforcement was verified during review, so `ON DELETE CASCADE` is
 live (migration-file rule regardless: FK pragma toggles stay outside the
 per-file transaction, `docs/CODE-PATTERNS.md`).
 
-`main/src/database/migrations/081_session_summaries.sql`:
+`main/src/database/migrations/082_session_summaries.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS session_summaries (
@@ -431,7 +433,7 @@ SDK/db underneath; scheduler methods are NOT called by hand):
 
 ## 9. Commit plan (atomic, in order)
 
-1. `feat: migration 081 session summaries + db CRUD` (migration, models.ts,
+1. `feat: migration 082 session summaries + db CRUD` (migration, models.ts,
    database.ts, db tests)
 2. `feat: one-shot haiku session summary query` (sessionSummaryQuery.ts,
    segmentIntoSittings, clipDeltaForPrompt, tests)
