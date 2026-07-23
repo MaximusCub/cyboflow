@@ -6,7 +6,14 @@
  * Fetches `cyboflow.design.draftStatus` on mount, whenever `sessionId` changes,
  * and whenever the passed `artifactRevision` (the canvas's current prototype
  * revision) changes — the freshness line must react the moment the agent
- * regenerates the prototype. Renders, in state-precedence order:
+ * regenerates the prototype. While the status is UNSETTLED (no draft yet, or
+ * draft/prototype out of sync) and no approve is in flight, it additionally
+ * re-polls silently every few seconds: a draft update does NOT bump the
+ * artifact revision (the agent's normal order is report-prototype → refresh-
+ * draft), so revision-keyed refetches alone would strand a mounted control on
+ * "No design-spec draft yet" / a stale line until remount — the v0 live smoke
+ * hit exactly that window. Polling stops once in sync (or link-broken), so the
+ * steady state costs nothing. Renders, in state-precedence order:
  *
  *   1. no draft yet (`status === null`)        -> a muted hint, no button.
  *   2. `status.linkBroken`                      -> a warning chip, Approve disabled.
@@ -36,6 +43,9 @@ type DesignDraftStatus = RouterOutputs['cyboflow']['design']['draftStatus'];
 type DesignApproveResult = RouterOutputs['cyboflow']['design']['approve'];
 
 type ApprovePhase = 'idle' | 'confirming' | 'pending' | 'success';
+
+/** Silent re-poll cadence while the draft status is unsettled (exported for tests). */
+export const DRAFT_STATUS_POLL_MS = 5000;
 
 const INK = 'var(--color-text-primary)';
 const FAINT = 'var(--color-text-tertiary)';
@@ -93,8 +103,10 @@ export function DesignApproveControl({ sessionId, artifactRevision }: DesignAppr
     };
   }, []);
 
-  const fetchStatus = useCallback((): Promise<void> => {
-    setLoading(true);
+  const fetchStatus = useCallback((opts?: { background?: boolean }): Promise<void> => {
+    // Background polls stay silent — flipping `loading` would flicker the
+    // control back to "…" every poll tick.
+    if (!opts?.background) setLoading(true);
     return trpc.cyboflow.design.draftStatus.query({ sessionId }).then(
       (result) => {
         if (!mountedRef.current) return;
@@ -103,6 +115,7 @@ export function DesignApproveControl({ sessionId, artifactRevision }: DesignAppr
       },
       () => {
         if (!mountedRef.current) return;
+        if (opts?.background) return; // keep the last good status on a failed poll
         setStatus(null);
         setLoading(false);
       },
@@ -117,6 +130,27 @@ export function DesignApproveControl({ sessionId, artifactRevision }: DesignAppr
     // canvas passes the prototype's current revision so the freshness line
     // reacts the moment the agent regenerates it.
   }, [fetchStatus, artifactRevision]);
+
+  // Silent re-poll while unsettled (see the header comment): a draft write does
+  // not bump the artifact revision, so without this a control mounted between
+  // the artifact report and the draft write never leaves "No design-spec draft
+  // yet" (nor a stale line) until remount. Runs only while idle — never under a
+  // confirm/pending/success interaction — and stops once in sync or link-broken.
+  const unsettled =
+    status === null ||
+    (!status.linkBroken &&
+      !(
+        status.boundArtifactRevision !== null &&
+        status.currentPrototypeRevision !== null &&
+        status.boundArtifactRevision === status.currentPrototypeRevision
+      ));
+  useEffect(() => {
+    if (!unsettled || phase !== 'idle') return;
+    const timer = setInterval(() => {
+      void fetchStatus({ background: true });
+    }, DRAFT_STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [unsettled, phase, fetchStatus]);
 
   const handleApproveClick = (): void => {
     setResultMessage(null);

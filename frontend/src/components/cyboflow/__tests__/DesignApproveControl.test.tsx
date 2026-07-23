@@ -9,7 +9,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DesignApproveControl } from '../DesignApproveControl';
+import { DesignApproveControl, DRAFT_STATUS_POLL_MS } from '../DesignApproveControl';
 
 const draftStatusQuery = vi.fn();
 const approveMutate = vi.fn();
@@ -158,5 +158,56 @@ describe('DesignApproveControl', () => {
 
     rerender(<DesignApproveControl sessionId="sess-1" artifactRevision={6} />);
     await waitFor(() => expect(draftStatusQuery).toHaveBeenCalledTimes(2));
+  });
+
+  it('silently re-polls out of the no-draft state (draft written after the artifact, no revision bump)', async () => {
+    // Live-smoke regression: the draft lands AFTER the artifact report without
+    // bumping the artifact revision, so a mounted control saw "No design-spec
+    // draft yet" forever. The unsettled-state poll must pick the draft up.
+    vi.useFakeTimers();
+    try {
+      draftStatusQuery.mockResolvedValueOnce(null); // mount: no draft yet
+      draftStatusQuery.mockResolvedValue(makeStatus({ latestDraftRevision: 1, boundArtifactRevision: 5 })); // poll: in sync
+      render(<DesignApproveControl sessionId="sess-1" artifactRevision={5} />);
+
+      await vi.waitFor(() => expect(screen.getByTestId('design-approve-no-draft')).toBeInTheDocument());
+      expect(draftStatusQuery).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(DRAFT_STATUS_POLL_MS);
+      await vi.waitFor(() => expect(screen.getByTestId('design-approve-freshness')).toHaveTextContent('Draft r1 · in sync'));
+      expect(draftStatusQuery).toHaveBeenCalledTimes(2);
+
+      // Settled (in sync) → polling stops: no further queries on later ticks.
+      await vi.advanceTimersByTimeAsync(DRAFT_STATUS_POLL_MS * 3);
+      expect(draftStatusQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-polls a stale draft into sync without flickering the loading state', async () => {
+    vi.useFakeTimers();
+    try {
+      draftStatusQuery.mockResolvedValueOnce(
+        makeStatus({ latestDraftRevision: 3, boundArtifactRevision: 3, currentPrototypeRevision: 5 }),
+      ); // mount: stale
+      draftStatusQuery.mockResolvedValue(
+        makeStatus({ latestDraftRevision: 4, boundArtifactRevision: 5, currentPrototypeRevision: 5 }),
+      ); // poll: agent refreshed the draft
+      render(<DesignApproveControl sessionId="sess-1" artifactRevision={5} />);
+
+      await vi.waitFor(() =>
+        expect(screen.getByTestId('design-approve-freshness')).toHaveTextContent('prototype at r5'),
+      );
+
+      await vi.advanceTimersByTimeAsync(DRAFT_STATUS_POLL_MS);
+      await vi.waitFor(() => expect(screen.getByTestId('design-approve-freshness')).toHaveTextContent('Draft r4 · in sync'));
+      // Background poll never showed the "…" loading placeholder — the
+      // freshness element stayed mounted throughout (queried above both times).
+      expect(screen.queryByTestId('design-approve-loading')).not.toBeInTheDocument();
+      expect(screen.getByTestId('design-approve-button')).not.toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
