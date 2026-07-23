@@ -3910,6 +3910,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
+   * Whether a logical SDK turn is currently IN FLIGHT for this panel. NOT the
+   * same as {@link isPanelRunning}: a warm session parked idle between turns
+   * still reports running=true with no turn in flight. Mirrors continuePanel's
+   * own in-flight probe (the sdkRuns record's turnInFlight when one exists,
+   * else the base process map for a cold spawn).
+   *
+   * `panels:continue` uses this to route a mid-turn send into the input queue
+   * instead of calling continuePanel: a turn parked at an AskUserQuestion gate
+   * holds the `claude-continue-<panelId>` lock for its entire duration, so a
+   * concurrent continuePanel would starve on the mutex (30s timeout → the send
+   * fails) rather than ever reaching its abort-and-respawn path.
+   */
+  isPanelTurnInFlight(panelId: string): boolean {
+    const run = this.sdkRuns.get(panelId);
+    if (run) return run.turnInFlight;
+    return this.processes.has(panelId);
+  }
+
+  /**
    * Buffer a mid-turn chat message for a running quick-session panel. `id` is the
    * client pending-send id (so a later {@link dequeuePanelInput} can target it).
    * Blank-after-trim text is ignored. Ordering is preserved (FIFO append).

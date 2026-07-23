@@ -1,4 +1,5 @@
 import { IpcMain } from 'electron';
+import { randomUUID } from 'crypto';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
@@ -2175,6 +2176,28 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             const session = await sessionManager.getSession(panel.sessionId);
             if (!session) {
               return { success: false, error: 'Session not found' };
+            }
+
+            // Mid-turn guard: when a logical turn is IN FLIGHT (including a turn
+            // PARKED at an AskUserQuestion gate), continuePanel would either
+            // destructively abort it or — when the turn was itself started by a
+            // continue — starve for 30s on the `claude-continue-<panelId>` lock
+            // that the parked turn holds, and fail. Route the text into the
+            // panel input queue instead (delivered as the next continuation at
+            // the turn's rest boundary — same path the composer's running-state
+            // send uses). The queue deliverer persists the user turn on
+            // delivery, so do NOT addPanelConversationMessage here.
+            if (
+              input &&
+              claudeCodeManager instanceof ClaudeCodeManager &&
+              claudeCodeManager.isPanelTurnInFlight(panelId)
+            ) {
+              console.log(`[IPC] panels:continue mid-turn for panel ${panelId} — queueing at the rest boundary`);
+              claudeCodeManager.enqueuePanelInput(panelId, randomUUID(), input);
+              // Race guard: the turn may have ended between the probe and the
+              // enqueue — deliver now instead of stranding the message.
+              claudeCodeManager.flushPanelInputQueueIfIdle(panelId);
+              return { success: true, data: { queued: true } };
             }
 
             // Save the user input as a conversation message

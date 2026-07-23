@@ -178,4 +178,51 @@ describe('ClaudeCodeManager — panel input queue', () => {
     await flushImmediate();
     expect(deliver).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // isPanelTurnInFlight — the panels:continue mid-turn probe. A turn parked at
+  // an AskUserQuestion gate holds the claude-continue lock, so panels:continue
+  // must detect the in-flight turn and queue instead of starving on the mutex.
+  // -------------------------------------------------------------------------
+
+  it('isPanelTurnInFlight: true while a turn is parked mid-flight, false once it rests, false for unknown panels', async () => {
+    const panelId = 'panel-q-4';
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(false);
+
+    const spawnPromise = mgr.spawnCliProcess({
+      panelId,
+      sessionId: 'session-q-4',
+      worktreePath: '/tmp/wt',
+      prompt: 'park until abort',
+      permissionMode: 'ignore',
+    });
+    await waitForProcess(mgr, panelId);
+
+    // Turn is in flight (parked in the mock query until abort).
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(true);
+
+    await mgr.killProcess(panelId);
+    await spawnPromise;
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(false);
+    expect(mgr.isPanelTurnInFlight('never-spawned')).toBe(false);
+  });
+
+  it('isPanelTurnInFlight: false for a WARM session parked idle between turns (isPanelRunning stays true)', async () => {
+    mockState.mode = 'natural';
+    const panelId = 'panel-q-5';
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: 'session-q-5',
+      worktreePath: '/tmp/wt',
+      prompt: 'go',
+      permissionMode: 'ignore',
+    });
+    await flushImmediate();
+
+    // If the process parked warm (sdkRuns record retained), the panel still
+    // reports "running" while NO turn is in flight — the exact divergence the
+    // probe exists for. If the run record is gone (cold single-shot teardown),
+    // both are false; either way no turn is in flight.
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(false);
+  });
 });
