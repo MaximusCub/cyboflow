@@ -202,16 +202,20 @@ export function makeFenceState(): FenceState {
 }
 
 /**
- * Extract the '## Architecture design' section from an idea body: everything
- * after the heading line up to (not including) the next H2 line or EOF,
- * trimmed. Line-based and fenced-code-block-aware, so '## '-prefixed lines
- * inside ``` fences neither start nor terminate a section. When the body
+ * Extract the section delimited by `headingLineRe` from a markdown body:
+ * everything after the heading line up to (not including) the next H2 line or
+ * EOF, trimmed. Line-based and fenced-code-block-aware, so '## '-prefixed
+ * lines inside ``` fences neither start nor terminate a section. When the body
  * carries MORE than one such heading (e.g. a revise round appended a fresh
  * section instead of replacing), the LAST section wins — it is the freshest
  * fold. Returns null when the body is empty, the heading is absent, or the
  * section has no content.
+ *
+ * The generalized engine behind {@link extractArchDesignSection} and
+ * {@link extractDesignSpecSection} — ONE fence-aware scan shared by every
+ * heading-delimited section extractor, keyed by the caller's `headingLineRe`.
  */
-export function extractArchDesignSection(body: string | null | undefined): string | null {
+export function extractSection(body: string | null | undefined, headingLineRe: RegExp): string | null {
   if (!body) return null;
   const lines = body.split(/\r?\n/);
 
@@ -223,7 +227,7 @@ export function extractArchDesignSection(body: string | null | undefined): strin
     const line = lines[i];
     if (fence.handleLine(line)) continue;
     if (fence.inFence()) continue;
-    if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
+    if (headingLineRe.test(line)) {
       // A later heading supersedes any earlier one (last section wins).
       sectionStart = i + 1;
       sectionEnd = lines.length;
@@ -238,29 +242,37 @@ export function extractArchDesignSection(body: string | null | undefined): strin
 }
 
 /**
- * Byte-preserving inverse-companion of {@link extractArchDesignSection}: replace
- * the WHOLE '## Architecture design' section — the heading line through the same
- * next-H2-or-EOF boundary extract uses, and the same "last heading wins" choice —
- * with `newSection`, leaving every other byte of `body` untouched. When no such
- * section exists, `newSection` is appended after a blank-line separator (the body's
- * existing bytes are never rewritten).
+ * Byte-preserving inverse-companion of {@link extractSection}: replace the
+ * WHOLE section delimited by `headingLineRe` — the heading line through the
+ * same next-H2-or-EOF boundary extract uses, and the same "last heading wins"
+ * choice — with `newSection`, leaving every other byte of `body` untouched.
+ * When no such section exists, `newSection` is appended after a blank-line
+ * separator (the body's existing bytes are never rewritten).
  *
  * `newSection` is expected to be a COMPLETE section that begins with its own
- * '## Architecture design' heading line (what the architecture agent emits, and
- * what the append path needs to produce a re-extractable section). The original
- * section's trailing blank-line run is preserved after the splice so the following
- * H2 stays visually separated.
+ * heading line matching `headingLineRe` (what the producing agent emits, and
+ * what the append path needs to produce a re-extractable section). The
+ * original section's trailing blank-line run is preserved after the splice so
+ * the following H2 stays visually separated.
  *
- * Round-trip: `extractArchDesignSection(replaceArchDesignSection(body, s))` equals
- * `extractArchDesignSection(s)` — the content of `s` after its heading, trimmed the
- * same way extract trims — for any `s` that carries the heading line.
+ * Round-trip: `extractSection(replaceSection(body, headingLineRe, s), headingLineRe)`
+ * equals `extractSection(s, headingLineRe)` — the content of `s` after its
+ * heading, trimmed the same way extract trims — for any `s` that carries the
+ * heading line.
+ *
+ * The generalized engine behind {@link replaceArchDesignSection} and
+ * {@link replaceDesignSpecSection}.
  */
-export function replaceArchDesignSection(body: string | null | undefined, newSection: string): string {
+export function replaceSection(
+  body: string | null | undefined,
+  headingLineRe: RegExp,
+  newSection: string,
+): string {
   const base = body ?? '';
   const lines = base.split(/\r?\n/);
 
-  // Re-run the exact scan extractArchDesignSection uses to locate the span, but
-  // keep the heading LINE index (sectionStart - 1) so the whole section is swapped.
+  // Re-run the exact scan extractSection uses to locate the span, but keep the
+  // heading LINE index (sectionStart - 1) so the whole section is swapped.
   const fence = makeFenceState();
   let sectionStart = -1; // line index AFTER the most recent heading match
   let sectionEnd = lines.length;
@@ -268,7 +280,7 @@ export function replaceArchDesignSection(body: string | null | undefined, newSec
     const line = lines[i];
     if (fence.handleLine(line)) continue;
     if (fence.inFence()) continue;
-    if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
+    if (headingLineRe.test(line)) {
       sectionStart = i + 1;
       sectionEnd = lines.length;
     } else if (sectionStart !== -1 && sectionEnd === lines.length && H2_LINE_RE.test(line)) {
@@ -299,6 +311,72 @@ export function replaceArchDesignSection(body: string | null | undefined, newSec
   const coreNew = newSection.replace(/(?:\r?\n)*$/, '');
 
   return base.slice(0, headingStart) + coreNew + trailing + base.slice(endOffset);
+}
+
+/**
+ * Extract the '## Architecture design' section from an idea body. Thin
+ * wrapper around {@link extractSection} bound to
+ * {@link ARCH_DESIGN_HEADING_LINE_RE} — kept as its own named export because
+ * callers (autoMintArtifacts, revisionWorker, the frontend renderer) reference
+ * it directly; behavior is identical to the pre-generalization implementation.
+ */
+export function extractArchDesignSection(body: string | null | undefined): string | null {
+  return extractSection(body, ARCH_DESIGN_HEADING_LINE_RE);
+}
+
+/**
+ * Replace the '## Architecture design' section of an idea body. Thin wrapper
+ * around {@link replaceSection} bound to {@link ARCH_DESIGN_HEADING_LINE_RE} —
+ * kept as its own named export (see {@link extractArchDesignSection}); the
+ * exported signature (`body, newSection` — no `headingLineRe` param) is
+ * unchanged from the pre-generalization implementation so existing call sites
+ * need no updates.
+ */
+export function replaceArchDesignSection(body: string | null | undefined, newSection: string): string {
+  return replaceSection(body, ARCH_DESIGN_HEADING_LINE_RE, newSection);
+}
+
+// ===========================================================================
+// design-spec — the templated design-spec section extractor (Design Mode v0).
+//
+// The design-spec draft (see docs/ideas/design-mode.md "Design-spec draft")
+// is folded into the linked idea's body under a '## Design spec' H2 by the
+// Approve state machine (design-mode.md "Approve" Step 2), using the SAME
+// fence-aware, last-heading-wins section grammar as arch-design so the two
+// sections can coexist in one body without either replacer reaching into the
+// other's content (H2_LINE_RE terminates each at the other's heading).
+// ===========================================================================
+
+/** The H2 heading text that delimits the design-spec section. */
+export const DESIGN_SPEC_SECTION_HEADING = 'Design spec';
+
+/**
+ * Matches the '## Design spec' heading as a single LINE (case-insensitive;
+ * tolerates trailing whitespace). Deliberately uses `[ \t]` — never `\s`,
+ * which spans newlines and lets a bare '##' line plus a later 'Design spec'
+ * text line spoof the heading.
+ */
+export const DESIGN_SPEC_HEADING_LINE_RE = new RegExp(
+  `^##[ \\t]+${DESIGN_SPEC_SECTION_HEADING}[ \\t]*$`,
+  'i',
+);
+
+/**
+ * Extract the '## Design spec' section from an idea body. Thin wrapper around
+ * {@link extractSection} bound to {@link DESIGN_SPEC_HEADING_LINE_RE} — see
+ * {@link extractArchDesignSection} for the shared grammar this rides on.
+ */
+export function extractDesignSpecSection(body: string | null | undefined): string | null {
+  return extractSection(body, DESIGN_SPEC_HEADING_LINE_RE);
+}
+
+/**
+ * Replace the '## Design spec' section of an idea body. Thin wrapper around
+ * {@link replaceSection} bound to {@link DESIGN_SPEC_HEADING_LINE_RE} — see
+ * {@link replaceArchDesignSection} for the shared grammar this rides on.
+ */
+export function replaceDesignSpecSection(body: string | null | undefined, newSection: string): string {
+  return replaceSection(body, DESIGN_SPEC_HEADING_LINE_RE, newSection);
 }
 
 /**
