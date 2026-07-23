@@ -317,6 +317,25 @@ describe('QuickSessionComposer — Interrupt & send', () => {
     expect(cont).not.toHaveBeenCalled();
   });
 
+  it('offers Interrupt & send for a running codex-sdk session (parity with Claude)', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: true });
+    render(
+      <Harness
+        session={makeSession({ status: 'running', agentProvider: 'codex', agentRuntime: 'codex-sdk' })}
+        interactive={false}
+        handleContinueConversation={cont}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'abort and do this' } });
+    // The trio (Queue / Interrupt & send / Stop) is present for codex too.
+    expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, shiftKey: true });
+
+    await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
+    expect(cont.mock.calls[0][4]).toBe(true);
+  });
+
   it('does NOT offer interrupt on the interactive substrate', () => {
     render(
       <Harness session={makeSession({ status: 'running', substrate: 'interactive' })} interactive />,

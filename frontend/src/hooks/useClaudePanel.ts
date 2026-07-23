@@ -15,8 +15,19 @@ export async function dispatchQuickSessionInput(
   pendingId?: string,
 ): Promise<{ success: boolean; error?: string; queued?: boolean }> {
   if (session.agentRuntime === 'codex-sdk') {
-    const response = await API.sessions.sendInput(session.id, input);
-    return { success: response.success, error: response.error };
+    // The FIRST message starts the codex turn via the session-scoped input path
+    // (the panel is idle, so there is nothing to guard against). A CONTINUE routes
+    // through the panel-scoped panels:continue — the codex branch there gives it
+    // the SAME mid-turn queue guard + Interrupt & send behavior Claude gets,
+    // instead of the old sessions:input hard-reject ("Codex is still processing")
+    // that turned a mid-turn send into a FAILED row.
+    if (mode === 'initial') {
+      const response = await API.sessions.sendInput(session.id, input);
+      return { success: response.success, error: response.error };
+    }
+    const response = await API.panels.continue(panelId, input, modelOverride, interrupt, pendingId);
+    const queued = (response.data as { queued?: boolean } | undefined)?.queued === true;
+    return { success: response.success, error: response.error, queued };
   }
   if (mode === 'initial') {
     const response = await API.panels.sendInput(panelId, `${input}\n`);

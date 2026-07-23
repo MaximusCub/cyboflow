@@ -434,13 +434,13 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     [input, setInput, hostKey, addPending, setPendingStatus, handleContinueConversation, modelId],
   );
 
-  // The interrupt affordance is a Claude-SDK-only, running-with-no-open-question
-  // capability: PTY relays its own input, Codex-SDK routes through a different
-  // send path (no panels:continue interrupt), and an open question gate must be
-  // ANSWERED rather than interrupted. Gate the handler here so UnifiedComposer
-  // keeps its plain Stop button everywhere else.
-  const supportsInterrupt =
-    !interactive && activeSession.agentRuntime !== 'codex-sdk' && activeQuestion == null;
+  // The interrupt affordance is an SDK, running-with-no-open-question capability
+  // for BOTH Claude and Codex (they share the panels:continue interrupt path — the
+  // codex branch aborts the app-server turn, then delivers the message as a fresh
+  // resumed turn). PTY relays its own input (no queue/interrupt), and an open
+  // question gate must be ANSWERED rather than interrupted. Gate the handler here
+  // so UnifiedComposer keeps its plain Stop button everywhere else.
+  const supportsInterrupt = !interactive && activeQuestion == null;
 
 
   const placeholder = interactive

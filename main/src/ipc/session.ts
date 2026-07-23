@@ -339,6 +339,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     });
   };
 
+  // Buffer one codex-sdk mid-turn message and try an immediate flush (the turn may
+  // have ended between the caller's running-probe and here). `id` is the client
+  // pending-send id so panels:dequeue-input (click-to-reopen) targets this exact
+  // entry. Shared by panels:queue-input and the panels:continue codex branch.
+  const enqueueCodexPanelInput = (panelId: string, id: string, text: string): void => {
+    const queue = codexPanelInputQueues.get(panelId) ?? [];
+    queue.push({ id, text: text.trim() });
+    codexPanelInputQueues.set(panelId, queue);
+    flushCodexPanelInputQueueIfIdle(panelId);
+  };
+
   codexSdkManager?.on('output', (payload: {
     panelId?: string;
     sessionId?: string;
@@ -2167,6 +2178,45 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       switch (panel.type) {
         case 'claude':
           try {
+            // Codex-sdk quick sessions ride the SAME 'claude'-typed panel, but their
+            // turns run on the Codex app-server, not claudePanelManager. Give them
+            // the same mid-turn queue guard + Interrupt & send affordances Claude
+            // gets (this is the panel-scoped continue the composer routes codex
+            // continues through — see dispatchQuickSessionInput). isPanelRunning is
+            // exact for codex: warm-parked entries are NOT in `processes`, so there
+            // is no warm-idle false-positive (unlike Claude's isPanelTurnInFlight).
+            const continueDbSession = sessionManager.getDbSession(panel.sessionId);
+            if (continueDbSession?.agent_runtime === 'codex-sdk') {
+              if (!codexSdkManager) {
+                return { success: false, error: 'Codex SDK manager is not available' };
+              }
+              const codexRunning = codexSdkManager.isPanelRunning(panelId);
+              // Mid-turn (not interrupt): buffer + deliver at the turn's rest
+              // boundary (via the codex 'exit' → flushCodexPanelInputQueueIfIdle),
+              // exactly like the Claude queue guard. Returns queued so the composer
+              // flips its optimistic 'sending' row to the addressable 'queued' state
+              // instead of surfacing the old "Codex is still processing" failure.
+              if (codexRunning && !interrupt) {
+                console.log(`[IPC] panels:continue mid-turn (codex) for panel ${panelId} — queueing at the rest boundary`);
+                enqueueCodexPanelInput(panelId, pendingId ?? randomUUID(), input);
+                return { success: true, data: { queued: true } };
+              }
+              // Interrupt & send: abort the live app-server turn, then enqueue the
+              // message. The abort's 'exit' fires flushCodexPanelInputQueueIfIdle,
+              // which drives the queued message as a fresh (resumed) turn — so the
+              // deliver is race-free even if teardown outlives stopPanel here.
+              if (codexRunning && interrupt) {
+                console.log(`[IPC] panels:continue interrupt (codex) for panel ${panelId} — aborting the in-flight turn first`);
+                await codexSdkManager.stopPanel(panelId);
+                enqueueCodexPanelInput(panelId, pendingId ?? randomUUID(), input);
+                return { success: true };
+              }
+              // Idle: start the turn now (startCodexSdkTurn resumes the conversation
+              // via the persisted external session id).
+              await startCodexSdkTurn(panelId, input);
+              return { success: true };
+            }
+
             const { claudePanelManager } = require('./claudePanel');
             if (!claudePanelManager) {
               return { success: false, error: 'Claude panel manager not available' };
@@ -2317,10 +2367,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panel = panelManager.getPanel(panelId);
       const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
       if (dbSession?.agent_runtime === 'codex-sdk') {
-        const queue = codexPanelInputQueues.get(panelId) ?? [];
-        queue.push({ id, text: text.trim() });
-        codexPanelInputQueues.set(panelId, queue);
-        flushCodexPanelInputQueueIfIdle(panelId);
+        enqueueCodexPanelInput(panelId, id, text);
         return { success: true, data: { queued: true } };
       }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
