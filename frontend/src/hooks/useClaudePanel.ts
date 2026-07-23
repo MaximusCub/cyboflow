@@ -11,12 +11,13 @@ export async function dispatchQuickSessionInput(
   input: string,
   mode: 'initial' | 'continue',
   modelOverride?: string,
+  interrupt?: boolean,
 ): Promise<{ success: boolean; error?: string }> {
   const response = session.agentRuntime === 'codex-sdk'
     ? await API.sessions.sendInput(session.id, input)
     : mode === 'initial'
       ? await API.panels.sendInput(panelId, `${input}\n`)
-      : await API.panels.continue(panelId, input, modelOverride);
+      : await API.panels.continue(panelId, input, modelOverride, interrupt);
   return { success: response.success, error: response.error };
 }
 
@@ -312,7 +313,8 @@ export const useClaudePanel = (
     text: string,
     attachedImages?: AttachedImage[],
     attachedTexts?: AttachedText[],
-    modelOverride?: string
+    modelOverride?: string,
+    interrupt?: boolean,
   ): Promise<{ success: boolean; error?: string }> => {
     if (!text.trim() || !activeSession) return { success: false, error: 'Nothing to send' };
 
@@ -378,7 +380,7 @@ export const useClaudePanel = (
     }
     
     // Output will be loaded automatically when session status changes.
-    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride);
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt);
   };
 
   const handleTerminalCommand = async () => {

@@ -525,9 +525,13 @@ export class API {
       return window.electronAPI.panels.sendInput(panelId, input);
     },
 
-    async continue(panelId: string, input: string, model?: string) {
+    // `interrupt` aborts the in-flight turn and drives the message as a fresh
+    // turn NOW (the "Interrupt & send" affordance), rather than queueing it for
+    // the turn's rest boundary. Omit/false for the normal idle continue + the
+    // mid-turn queue path.
+    async continue(panelId: string, input: string, model?: string, interrupt?: boolean) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.panels.continue(panelId, input, model);
+      return window.electronAPI.panels.continue(panelId, input, model, interrupt);
     },
 
     // Mid-turn input queue ("always allow messaging a running quick session").

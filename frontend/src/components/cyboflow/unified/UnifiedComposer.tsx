@@ -52,6 +52,17 @@ export interface UnifiedComposerProps {
   onSubmit: (atts: ComposerAttachments) => void | Promise<void>;
   /** stop handler, shown as the primary button while running. */
   onStop?: () => void;
+  /**
+   * "Interrupt & send" handler (quick SDK only). When provided AND the agent is
+   * running AND there is a draft, the running-state cluster becomes a pair —
+   * `[Queue]` (onSubmit, buffers for the rest boundary) + `[Interrupt & send]`
+   * (this, aborts the live turn and drives the message NOW). Omitted elsewhere
+   * (flow runs, PTY, Codex, a pending question), where the plain Stop button is
+   * kept. Cmd/Ctrl+Shift+Enter triggers it.
+   */
+  onInterruptSend?: (atts: ComposerAttachments) => void | Promise<void>;
+  /** label for the interrupt button; defaults to 'Interrupt & send'. */
+  interruptLabel?: string;
   /** external send-in-flight flag (host may also track its own). */
   sending?: boolean;
   sendError?: string | null;
@@ -106,6 +117,8 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     primaryLabel = 'Send',
     onSubmit,
     onStop,
+    onInterruptSend,
+    interruptLabel = 'Interrupt & send',
     sending = false,
     sendError,
     onTogglePtyOpen,
@@ -136,7 +149,8 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
   }, [value, textareaRef]);
 
   const isSubmitting = busy || sending;
-  const canSend = !disabled && !isSubmitting && (value.trim().length > 0 || hasAttachments(atts));
+  const hasDraft = value.trim().length > 0 || hasAttachments(atts);
+  const canSend = !disabled && !isSubmitting && hasDraft;
 
   // -- attachments ----------------------------------------------------------
   const addImages = useCallback(async (files: File[]) => {
@@ -202,9 +216,32 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     }
   }, [canSend, onSubmit, atts]);
 
+  // "Interrupt & send" — abort the live turn and drive the message now. Only
+  // meaningful while running with a draft (the button is gated the same way).
+  const interruptSubmit = useCallback(async () => {
+    if (!canSend || !onInterruptSend) return;
+    setBusy(true);
+    try {
+      await onInterruptSend(atts);
+      setAtts(emptyAttachments());
+    } catch (err: unknown) {
+      // Mirror submit(): the host owns error surfacing via `sendError`; this
+      // only stops the fire-and-forget rejection from floating out unhandled.
+      console.error('[UnifiedComposer] onInterruptSend rejected', err);
+    } finally {
+      setBusy(false);
+    }
+  }, [canSend, onInterruptSend, atts]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
+      // ⌘⇧↵ while running → interrupt & send (when the host offers it); else the
+      // normal submit (send when idle, queue when running).
+      if (e.shiftKey && running && onInterruptSend) {
+        void interruptSubmit();
+        return;
+      }
       void submit();
       return;
     }
@@ -376,16 +413,58 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
 
         {/* right cluster */}
         <div className="ml-auto flex items-center gap-2">
-          {running && onStop ? (
-            <button
-              type="button"
-              onClick={onStop}
-              data-testid="unified-composer-stop"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em]"
-              style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
-            >
-              <Square className="h-3 w-3 fill-current" /> Stop <kbd className="opacity-70">esc</kbd>
-            </button>
+          {running ? (
+            hasDraft && onInterruptSend ? (
+              // Running WITH a draft + an interrupt-capable host: offer both a
+              // Queue (buffer for the rest boundary) and an Interrupt & send
+              // (abort the live turn, drive the message now). Esc still stops
+              // without sending (onKeyDown), so no plain Stop button is needed.
+              // Gated on hasDraft (not canSend) so the pair stays visible — just
+              // disabled — while a send is in flight, instead of collapsing to Stop.
+              <>
+                <button
+                  type="button"
+                  onClick={() => void submit()}
+                  disabled={!canSend}
+                  data-testid="unified-composer-queue"
+                  className={cn(
+                    'inline-flex items-center gap-2 border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] transition-[filter]',
+                    'border-interactive bg-interactive text-[color:var(--color-text-on-interactive)]',
+                    canSend ? 'hover:brightness-110' : 'cursor-not-allowed opacity-50',
+                  )}
+                >
+                  {isSubmitting ? 'Sending…' : 'Queue'}
+                  <kbd className="inline-flex items-center gap-0.5 text-[10px] opacity-70">
+                    <CornerDownLeft className="h-3 w-3" />
+                  </kbd>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void interruptSubmit()}
+                  disabled={!canSend}
+                  data-testid="unified-composer-interrupt-send"
+                  title="Stop the agent and send this message now (⌘⇧↵)"
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] transition-[filter]',
+                    canSend ? 'hover:brightness-110' : 'cursor-not-allowed opacity-50',
+                  )}
+                  style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
+                >
+                  <Square className="h-3 w-3 fill-current" /> {interruptLabel}
+                  <kbd className="opacity-70">⌘⇧↵</kbd>
+                </button>
+              </>
+            ) : onStop ? (
+              <button
+                type="button"
+                onClick={onStop}
+                data-testid="unified-composer-stop"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em]"
+                style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
+              >
+                <Square className="h-3 w-3 fill-current" /> Stop <kbd className="opacity-70">esc</kbd>
+              </button>
+            ) : null
           ) : (
             <button
               type="button"

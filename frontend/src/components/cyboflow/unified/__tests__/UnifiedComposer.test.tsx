@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { useRef } from 'react';
+
+/** Flush the microtask queue so an async submit's busy→false settles. */
+const flush = () => act(async () => { await Promise.resolve(); });
 import { UnifiedComposer, type UnifiedComposerProps } from '../UnifiedComposer';
 import { resolveChatVisibility } from '../useChatVisibility';
 import { emptyAttachments } from '../attachments';
@@ -27,6 +30,7 @@ function Harness(props: Partial<UnifiedComposerProps> & { ptyOpen?: boolean; run
       placeholder="Message…"
       onSubmit={props.onSubmit ?? (() => {})}
       onStop={props.onStop}
+      onInterruptSend={props.onInterruptSend}
       onTogglePtyOpen={props.onTogglePtyOpen}
     />
   );
@@ -65,5 +69,86 @@ describe('UnifiedComposer', () => {
     expect(screen.queryByTestId('unified-composer-send')).toBeNull();
     fireEvent.click(screen.getByTestId('unified-composer-stop'));
     expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  describe('Interrupt & send (running + interrupt-capable host)', () => {
+    it('shows Queue + Interrupt & send (not Stop) while running WITH a draft', () => {
+      render(
+        <Harness ptyOpen running value="hi" onStop={vi.fn()} onInterruptSend={vi.fn()} />,
+      );
+      expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
+      expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
+      // The plain Stop button is replaced by the pair when a draft exists.
+      expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+      expect(screen.queryByTestId('unified-composer-send')).toBeNull();
+    });
+
+    it('falls back to the plain Stop button while running with NO draft', () => {
+      render(<Harness ptyOpen running value="" onStop={vi.fn()} onInterruptSend={vi.fn()} />);
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+      expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+      expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    });
+
+    it('Queue button calls onSubmit; Interrupt & send calls onInterruptSend', async () => {
+      const onSubmit = vi.fn();
+      const onInterruptSend = vi.fn();
+      render(
+        <Harness
+          ptyOpen
+          running
+          value="hi"
+          onStop={vi.fn()}
+          onSubmit={onSubmit}
+          onInterruptSend={onInterruptSend}
+        />,
+      );
+      fireEvent.click(screen.getByTestId('unified-composer-queue'));
+      expect(onSubmit).toHaveBeenCalledWith(emptyAttachments());
+      expect(onInterruptSend).not.toHaveBeenCalled();
+      // Let the queue submit's busy→false settle; the pair stays visible (gated
+      // on hasDraft, not canSend), just briefly disabled during the send.
+      await flush();
+
+      fireEvent.click(screen.getByTestId('unified-composer-interrupt-send'));
+      expect(onInterruptSend).toHaveBeenCalledWith(emptyAttachments());
+    });
+
+    it('⌘↵ queues, ⌘⇧↵ interrupts', async () => {
+      const onSubmit = vi.fn();
+      const onInterruptSend = vi.fn();
+      render(
+        <Harness
+          ptyOpen
+          running
+          value="hi"
+          onStop={vi.fn()}
+          onSubmit={onSubmit}
+          onInterruptSend={onInterruptSend}
+        />,
+      );
+      const textarea = screen.getByTestId('unified-composer').querySelector('textarea')!;
+
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      expect(onInterruptSend).not.toHaveBeenCalled();
+      await flush();
+
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, shiftKey: true });
+      expect(onInterruptSend).toHaveBeenCalledTimes(1);
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    it('Esc still stops without sending even when the interrupt pair is shown', () => {
+      const onStop = vi.fn();
+      const onInterruptSend = vi.fn();
+      render(
+        <Harness ptyOpen running value="hi" onStop={onStop} onInterruptSend={onInterruptSend} />,
+      );
+      const textarea = screen.getByTestId('unified-composer').querySelector('textarea')!;
+      fireEvent.keyDown(textarea, { key: 'Escape' });
+      expect(onStop).toHaveBeenCalledTimes(1);
+      expect(onInterruptSend).not.toHaveBeenCalled();
+    });
   });
 });

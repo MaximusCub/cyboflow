@@ -233,6 +233,70 @@ describe('QuickSessionComposer — SDK', () => {
   });
 });
 
+describe('QuickSessionComposer — Interrupt & send', () => {
+  it('running SDK with a draft: Interrupt & send dispatches continue with interrupt=true (a sending row, not queued)', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: true });
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        handleContinueConversation={cont}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'stop and do this now' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, shiftKey: true });
+
+    await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
+    // The 5th arg is the interrupt flag.
+    expect(cont.mock.calls[0][0]).toBe('stop and do this now');
+    expect(cont.mock.calls[0][4]).toBe(true);
+    // Interrupt drives a real turn now — NOT the queue path.
+    expect(mockQueueInput).not.toHaveBeenCalled();
+    const rows = usePendingSendStore.getState().byHost['panel-1'] ?? [];
+    expect(rows.some((r) => r.status === 'sending')).toBe(true);
+  });
+
+  it('⌘↵ (plain) still QUEUES while running — interrupt is ⌘⇧↵ only', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: true });
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        handleContinueConversation={cont}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'queue me' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => expect(mockQueueInput).toHaveBeenCalledTimes(1));
+    expect(cont).not.toHaveBeenCalled();
+  });
+
+  it('does NOT offer interrupt on the interactive substrate', () => {
+    render(
+      <Harness session={makeSession({ status: 'running', substrate: 'interactive' })} interactive />,
+    );
+    // Interactive is a PTY relay — no Queue/Interrupt pair, no Stop composer button.
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+  });
+
+  it('does NOT offer interrupt while a question gate is open (send answers it)', () => {
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        activeQuestion={makeQuestion()}
+      />,
+    );
+    // With a pending question + a draft, running shows the plain Stop (interrupt
+    // is suppressed) — the send path answers the question instead.
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+  });
+});
+
 describe('QuickSessionComposer — pending question gate', () => {
   it('answers a SINGLE-question gate directly as free text (no continue, no queue)', async () => {
     const cont = vi.fn();

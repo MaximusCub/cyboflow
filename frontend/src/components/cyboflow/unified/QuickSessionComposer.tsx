@@ -48,6 +48,8 @@ export interface QuickSessionComposerProps {
     images?: AttachedImage[],
     texts?: AttachedText[],
     modelOverride?: string,
+    /** abort the in-flight turn and drive this message now (Interrupt & send). */
+    interrupt?: boolean,
   ) => Promise<{ success: boolean; error?: string }>;
   handleStopSession?: () => void;
   handleCompactContext?: () => void;
@@ -353,6 +355,36 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ],
   );
 
+  // "Interrupt & send": abort the live turn and drive the message as a fresh
+  // turn NOW (interrupt=true → continuePanel's abort-then-continue), instead of
+  // queueing it for the rest boundary. Shows a normal 'sending' pending row
+  // (reconciled away when the real user turn lands), NOT a 'queued' one.
+  const onInterruptSend = useCallback(
+    (atts: ComposerAttachments) => {
+      const text = input;
+      if (!text.trim()) return;
+      setInput('');
+      const id = addPending(hostKey, text, 'sending');
+      void Promise.resolve(
+        handleContinueConversation(text, atts.images, atts.texts, modelId ?? undefined, true),
+      )
+        .then((res) => {
+          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed');
+        })
+        .catch(() => setPendingStatus(hostKey, id, 'failed'));
+    },
+    [input, setInput, hostKey, addPending, setPendingStatus, handleContinueConversation, modelId],
+  );
+
+  // The interrupt affordance is a Claude-SDK-only, running-with-no-open-question
+  // capability: PTY relays its own input, Codex-SDK routes through a different
+  // send path (no panels:continue interrupt), and an open question gate must be
+  // ANSWERED rather than interrupted. Gate the handler here so UnifiedComposer
+  // keeps its plain Stop button everywhere else.
+  const supportsInterrupt =
+    !interactive && activeSession.agentRuntime !== 'codex-sdk' && activeQuestion == null;
+
+
   const placeholder = interactive
     ? 'Message the live session…  (⌘↵ to send)'
     : activeQuestion != null
@@ -476,6 +508,9 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       // Stop is an SDK-generation affordance; a live PTY REPL is always "running"
       // and is interrupted by typing into the terminal, not a composer Stop.
       onStop={!interactive && running ? handleStopSession : undefined}
+      // Interrupt & send (Claude SDK, running, no open question): abort the live
+      // turn and drive this message now — offered alongside Queue while running.
+      onInterruptSend={supportsInterrupt && running ? onInterruptSend : undefined}
       onTogglePtyOpen={interactive ? onTogglePtyOpen : undefined}
       supportsAttachments={!interactive}
       modelLabel={modelLabel}
