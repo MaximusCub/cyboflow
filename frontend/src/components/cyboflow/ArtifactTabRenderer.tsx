@@ -29,6 +29,7 @@ import type { CSSProperties, ReactElement, ReactNode } from 'react';
 import { trpc } from '../../trpc/client';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
+import { DesignApproveControl } from './DesignApproveControl';
 import { TaskDetailModal } from './TaskDetailModal';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { FeedbackDocPanel } from './feedback/FeedbackDocPanel';
@@ -1600,6 +1601,25 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
     </a>
   ) : null;
 
+  // A design session's prototype: sourceRef is server-stamped ONLY for
+  // design-scoped artifact reports (see cyboflow_report_artifact / design.ts),
+  // so its presence (alongside a sessionId) is what distinguishes a design
+  // canvas from an ordinary ui-prototype/generic live canvas. Non-design
+  // canvas tabs (sourceRef null, or sessionId null) get NO Approve control —
+  // `actions` stays exactly `openInBrowser`, unchanged from before.
+  const designControl: ReactNode =
+    artifact.atype === 'ui-prototype' && artifact.sourceRef !== null && artifact.sessionId !== null ? (
+      <DesignApproveControl sessionId={artifact.sessionId} artifactRevision={artifact.revision} />
+    ) : null;
+  const actions: ReactNode = designControl ? (
+    <>
+      {designControl}
+      {openInBrowser}
+    </>
+  ) : (
+    openInBrowser
+  );
+
   let body: ReactNode;
   if (loading) {
     body = <StateRow testid="artifact-canvas-loading" color={MUTED} text="Loading prototype…" />;
@@ -1669,7 +1689,7 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
         accent={accent}
         eyebrow={`◳ Live canvas · ${label}`}
         meta={<span style={{ fontStyle: 'italic' }}>no template — embedded live</span>}
-        actions={openInBrowser}
+        actions={actions}
       />
       {body}
     </Shell>

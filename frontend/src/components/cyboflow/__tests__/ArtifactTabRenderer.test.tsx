@@ -80,6 +80,14 @@ const questionsAnswerMutate = vi.fn().mockResolvedValue({ ok: true });
 // approve-ideas resolves a row's display ref to its full entity (incl. body)
 // via tasks.list — the artifact payload carries only ref/title/scope/summary.
 const tasksListQuery = vi.fn();
+// CanvasBody's DesignApproveControl (design-session ui-prototype only) reads
+// draftStatus/approve. Defaults to a never-resolving promise so the many
+// PRE-EXISTING (non-design) canvas tests in this file — which use the default
+// fixture's sourceRef/sessionId and therefore mount the control — never see a
+// post-assertion async state flip; the dedicated design-canvas tests below
+// override with mockResolvedValueOnce + waitFor.
+const designDraftStatusQuery = vi.fn();
+const designApproveMutate = vi.fn();
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -94,6 +102,10 @@ vi.mock('../../../trpc/client', () => ({
       },
       tasks: {
         list: { query: (...args: unknown[]) => tasksListQuery(...args) },
+      },
+      design: {
+        draftStatus: { query: (...args: unknown[]) => designDraftStatusQuery(...args) },
+        approve: { mutate: (...args: unknown[]) => designApproveMutate(...args) },
       },
     },
   },
@@ -214,6 +226,9 @@ describe('ArtifactTabRenderer', () => {
     setQuestions([]);
     mockReviewInit.mockClear();
     mockQuestionInit.mockClear();
+    designDraftStatusQuery.mockReset();
+    designDraftStatusQuery.mockImplementation(() => new Promise(() => {})); // never resolves by default
+    designApproveMutate.mockReset();
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -1075,6 +1090,45 @@ describe('ArtifactTabRenderer', () => {
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
     expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
     expect(screen.queryByTestId('artifact-canvas-open-disabled')).not.toBeInTheDocument();
+  });
+
+  // --- ui-prototype: DesignApproveControl wiring (Design Mode v0) ----------
+  //
+  // The control mounts ONLY for a design session's prototype: atype
+  // 'ui-prototype' AND a non-null sourceRef AND a non-null sessionId (sourceRef
+  // is server-stamped exclusively for design-scoped artifact reports). The
+  // default `makeArtifact()` fixture already carries sourceRef 'IDEA-018' +
+  // sessionId 'sess-1', so the general canvas tests above (unmocked design
+  // query) rely on the never-resolving default so they never observe it.
+
+  it('does NOT render the design Approve control for a sourceRef-less ui-prototype', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null })} {...PROPS} />,
+    );
+    expect(screen.queryByTestId('design-approve-control')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('design-approve-no-draft')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('design-approve-loading')).not.toBeInTheDocument();
+    // Never even called — no fetch is fired for a non-design canvas.
+    expect(designDraftStatusQuery).not.toHaveBeenCalled();
+  });
+
+  it('does NOT render the design Approve control for a sessionId-less ui-prototype', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sessionId: null })} {...PROPS} />,
+    );
+    expect(screen.queryByTestId('design-approve-control')).not.toBeInTheDocument();
+    expect(designDraftStatusQuery).not.toHaveBeenCalled();
+  });
+
+  it('renders the design Approve control for a design-session ui-prototype (sourceRef + sessionId present)', async () => {
+    designDraftStatusQuery.mockResolvedValueOnce(null); // no draft yet
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+
+    expect(await screen.findByTestId('design-approve-no-draft')).toHaveTextContent('No design-spec draft yet');
+    expect(designDraftStatusQuery).toHaveBeenCalledWith({ sessionId: 'sess-1' });
   });
 
   // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---
