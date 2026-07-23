@@ -2137,7 +2137,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('panels:continue', async (_event, panelId: string, input: string, model?: string) => {
+  ipcMain.handle('panels:continue', async (_event, panelId: string, input: string, model?: string, interrupt?: boolean) => {
     try {
       console.log(`[IPC] panels:continue called for panel: ${panelId}`);
 
@@ -2187,7 +2187,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // the turn's rest boundary — same path the composer's running-state
             // send uses). The queue deliverer persists the user turn on
             // delivery, so do NOT addPanelConversationMessage here.
+            //
+            // `interrupt` OPTS OUT of the guard: the "Interrupt & send" affordance
+            // wants exactly continuePanel's native abort-the-in-flight-turn-then-
+            // continue behavior (it acquires the lock, aborts the live turn, waits
+            // for it to settle, then drives the new turn). Falling through here is
+            // safe because that turn is ABORTED (not lock-held) once continuePanel
+            // runs, so the mutex is released rather than starved.
             if (
+              !interrupt &&
               input &&
               claudeCodeManager instanceof ClaudeCodeManager &&
               claudeCodeManager.isPanelTurnInFlight(panelId)
