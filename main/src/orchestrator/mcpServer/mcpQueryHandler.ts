@@ -3292,11 +3292,13 @@ export class McpQueryHandler {
     }
     const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
     // Design Mode v0 (design-mode.md "Idea-bound artifact + read path"): stamp
-    // source_ref SERVER-SIDE from the session's validated design_idea_id (NEVER
-    // from the agent payload) so a design prototype is discoverable by its idea
-    // downstream (planner/sprint). A non-design session (or a run without a
-    // session) resolves null → no source_ref is set and behavior is unchanged.
-    const designIdeaId = this.resolveSessionDesignIdeaId(msg.runId);
+    // source_ref AND session_id SERVER-SIDE from the session's validated
+    // design_idea_id (NEVER from the agent payload) — source_ref makes the
+    // prototype discoverable by its idea downstream (planner/sprint), session_id
+    // is what the canvas's DesignApproveControl render gate + tRPC calls key on.
+    // A non-design session (or a run without a session) resolves null → neither
+    // field is set and behavior is unchanged.
+    const designStamp = this.resolveSessionDesignStamp(msg.runId);
     try {
       // Content-blesser (IDEA-039 / Approach C). This handler is the SOLE
       // authority on ui-prototype/generic payload content:
@@ -3328,7 +3330,8 @@ export class McpQueryHandler {
         atype: msg.atype,
         label: msg.label,
         payloadJson,
-        sourceRef: designIdeaId,
+        sourceRef: designStamp?.designIdeaId ?? null,
+        ...(designStamp ? { sessionId: designStamp.sessionId } : {}),
         isNew: true,
         actor,
       });
@@ -3449,29 +3452,37 @@ export class McpQueryHandler {
   //
   // Both start from resolveDesignRunContext, which re-validates the session's
   // idea link on EVERY call (integrity is chokepoint-enforced, not FK-enforced;
-  // migration 078). source_ref stamping for the design prototype rides the
-  // shared handleReportArtifact path (resolveSessionDesignIdeaId), not here.
+  // migration 078). source_ref/session_id stamping for the design prototype
+  // rides the shared handleReportArtifact path (resolveSessionDesignStamp).
   // --------------------------------------------------------------------------
 
   /**
-   * The run's session design_idea_id, or null for a non-design session (or a run
-   * without a session). Read via the SAME `workflow_runs LEFT JOIN sessions`
-   * shape as resolveRunPermissionMode. Used ONLY to stamp an artifact's
-   * source_ref SERVER-SIDE (never from the agent payload) so a design prototype
-   * is discoverable by its idea downstream (design-mode.md "Idea-bound artifact
-   * + read path"). A join miss / NULL column yields null → no source_ref, so the
-   * report path for a non-design session stays byte-identical.
+   * The run's design-session stamp — `{ designIdeaId, sessionId }` — or null for
+   * a non-design session (or a run without a session). Read via the SAME
+   * `workflow_runs LEFT JOIN sessions` shape as resolveRunPermissionMode. Used
+   * ONLY to stamp an artifact's source_ref AND session_id SERVER-SIDE (never
+   * from the agent payload): source_ref makes a design prototype discoverable by
+   * its idea downstream (design-mode.md "Idea-bound artifact + read path"), and
+   * session_id is what the frontend DesignApproveControl render gate keys on
+   * (ArtifactTabRenderer's CanvasBody needs `artifact.sessionId` to call
+   * `cyboflow.design.draftStatus`/`approve` — without it the Approve control
+   * never renders, which the v0 live smoke caught). A join miss / NULL
+   * design_idea_id yields null → neither field is set, so the report path for a
+   * non-design session stays byte-identical.
    */
-  private resolveSessionDesignIdeaId(runId: string): string | null {
+  private resolveSessionDesignStamp(runId: string): { designIdeaId: string; sessionId: string } | null {
     const row = this.db
       .prepare(
-        `SELECT s.design_idea_id AS designIdeaId
+        `SELECT s.design_idea_id AS designIdeaId, r.session_id AS sessionId
            FROM workflow_runs r LEFT JOIN sessions s ON s.id = r.session_id
           WHERE r.id = ?`,
       )
-      .get(runId) as { designIdeaId?: unknown } | undefined;
-    const v = row?.designIdeaId;
-    return typeof v === 'string' && v.length > 0 ? v : null;
+      .get(runId) as { designIdeaId?: unknown; sessionId?: unknown } | undefined;
+    const ideaId = row?.designIdeaId;
+    const sessionId = row?.sessionId;
+    if (typeof ideaId !== 'string' || ideaId.length === 0) return null;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+    return { designIdeaId: ideaId, sessionId };
   }
 
   /**

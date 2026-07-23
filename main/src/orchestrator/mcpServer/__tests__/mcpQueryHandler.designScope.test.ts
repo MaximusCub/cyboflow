@@ -340,38 +340,48 @@ describe('McpQueryHandler design-scope handlers', () => {
       return parseLastWrite(writes);
     }
 
-    it('stamps source_ref = the session design_idea_id for a design session', async () => {
+    it('stamps source_ref = the design_idea_id AND session_id = the run session for a design session', async () => {
       seedDesignSession(db, { runId: 'run-src', sessionId: 'sess-src', ideaId: 'ide_src' });
       const res = await reportIdeaSpec('run-src');
       expect(res.ok).toBe(true);
       const { artifactId } = res.data as { artifactId: string };
-      expect(artifactRow(db, artifactId)!.source_ref).toBe('ide_src');
+      const row = artifactRow(db, artifactId)!;
+      expect(row.source_ref).toBe('ide_src');
+      // session_id is what the frontend DesignApproveControl render gate keys on
+      // (live-smoke regression: sourceRef alone left the Approve control unreachable).
+      expect(row.session_id).toBe('sess-src');
     });
 
-    it('leaves source_ref NULL for a non-design session (behavior unchanged)', async () => {
+    it('leaves source_ref AND session_id NULL for a non-design session (behavior unchanged)', async () => {
       seedSession(db, 'sess-plain2', 1, null);
       seedRun(db, 'run-plain2', 1, 'sess-plain2');
       const res = await reportIdeaSpec('run-plain2');
       expect(res.ok).toBe(true);
       const { artifactId } = res.data as { artifactId: string };
-      expect(artifactRow(db, artifactId)!.source_ref).toBeNull();
+      const row = artifactRow(db, artifactId)!;
+      expect(row.source_ref).toBeNull();
+      expect(row.session_id).toBeNull();
     });
 
-    it('leaves source_ref NULL for a run with no session at all', async () => {
+    it('leaves source_ref AND session_id NULL for a run with no session at all', async () => {
       seedRun(db, 'run-nosess2', 1, null);
       const res = await reportIdeaSpec('run-nosess2');
       expect(res.ok).toBe(true);
       const { artifactId } = res.data as { artifactId: string };
-      expect(artifactRow(db, artifactId)!.source_ref).toBeNull();
+      const row = artifactRow(db, artifactId)!;
+      expect(row.source_ref).toBeNull();
+      expect(row.session_id).toBeNull();
     });
 
-    it('re-report from a design session keeps source_ref pinned to the idea (enrich)', async () => {
+    it('re-report from a design session keeps source_ref + session_id pinned (enrich)', async () => {
       seedDesignSession(db, { runId: 'run-src2', sessionId: 'sess-src2', ideaId: 'ide_src2' });
       const first = await reportIdeaSpec('run-src2');
       const { artifactId } = first.data as { artifactId: string };
-      // Re-report (enrich in place) — source_ref must stay the idea.
+      // Re-report (enrich in place) — source_ref and session_id must stay pinned.
       await reportIdeaSpec('run-src2');
-      expect(artifactRow(db, artifactId)!.source_ref).toBe('ide_src2');
+      const row = artifactRow(db, artifactId)!;
+      expect(row.source_ref).toBe('ide_src2');
+      expect(row.session_id).toBe('sess-src2');
     });
   });
 });
