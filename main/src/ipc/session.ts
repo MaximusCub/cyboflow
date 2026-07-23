@@ -2208,6 +2208,22 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               return { success: true, data: { queued: true } };
             }
 
+            // Interrupt & send: abort the in-flight turn BEFORE continuePanel runs.
+            // continuePanel wraps its whole turn (incl. the warm dispatch's await)
+            // in the `claude-continue-<panelId>` lock, so its OWN abort-then-continue
+            // would first block on that lock — held by the turn it means to abort —
+            // and 30s-timeout. abortInFlightTurn aborts OUTSIDE the lock, releasing
+            // it; continuePanel below then sees no turn in flight and drives the new
+            // one immediately. No-op when already idle.
+            if (
+              interrupt &&
+              claudeCodeManager instanceof ClaudeCodeManager &&
+              claudeCodeManager.isPanelTurnInFlight(panelId)
+            ) {
+              console.log(`[IPC] panels:continue interrupt for panel ${panelId} — aborting the in-flight turn first`);
+              await claudeCodeManager.abortInFlightTurn(panelId);
+            }
+
             // Save the user input as a conversation message
             if (input) {
               sessionManager.addPanelConversationMessage(panelId, 'user', input);

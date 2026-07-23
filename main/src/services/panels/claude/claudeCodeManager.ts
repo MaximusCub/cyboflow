@@ -3929,6 +3929,26 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
+   * Interrupt seam for "Interrupt & send": abort the in-flight turn WITHOUT
+   * acquiring the `claude-continue-<panelId>` lock, so a subsequent
+   * {@link continuePanel} can take that lock to drive the replacement turn.
+   *
+   * This is load-bearing for correct lock ordering. A turn — parked at a gate OR
+   * mid-generation — holds the continue lock for its ENTIRE life (continuePanel
+   * wraps the whole turn in `withLock`, and the warm dispatch awaits `turn.done`
+   * inside it). So continuePanel's OWN abort-then-continue would first block on
+   * that lock and 30s-timeout before it could abort. abortCurrentRun is NOT
+   * lock-serialized, so aborting HERE resolves the in-flight turn's await and
+   * releases the lock; continuePanel then sees no turn in flight and proceeds.
+   * No-op when idle. Keyed by panelId (quick-session spawnKey === panelId).
+   */
+  async abortInFlightTurn(panelId: string): Promise<void> {
+    if (!this.isPanelTurnInFlight(panelId)) return;
+    await this.abortCurrentRun(panelId);
+    this.processes.delete(panelId);
+  }
+
+  /**
    * Buffer a mid-turn chat message for a running quick-session panel. `id` is the
    * client pending-send id (so a later {@link dequeuePanelInput} can target it).
    * Blank-after-trim text is ignored. Ordering is preserved (FIFO append).

@@ -207,6 +207,29 @@ describe('ClaudeCodeManager — panel input queue', () => {
     expect(mgr.isPanelTurnInFlight('never-spawned')).toBe(false);
   });
 
+  it('abortInFlightTurn aborts the live turn WITHOUT the continue lock (interrupt seam)', async () => {
+    const panelId = 'panel-q-int';
+    const spawnPromise = mgr.spawnCliProcess({
+      panelId,
+      sessionId: 'session-q-int',
+      worktreePath: '/tmp/wt',
+      prompt: 'park until abort',
+      permissionMode: 'ignore',
+    });
+    await waitForProcess(mgr, panelId);
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(true);
+
+    // Interrupt seam: aborts the parked turn and settles it — no continue lock.
+    await mgr.abortInFlightTurn(panelId);
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(false);
+    expect(getProcesses(mgr).has(panelId)).toBe(false);
+
+    await spawnPromise;
+    // Idempotent when already idle.
+    await mgr.abortInFlightTurn(panelId);
+    expect(mgr.isPanelTurnInFlight(panelId)).toBe(false);
+  });
+
   it('isPanelTurnInFlight: false for a WARM session parked idle between turns (isPanelRunning stays true)', async () => {
     mockState.mode = 'natural';
     const panelId = 'panel-q-5';
