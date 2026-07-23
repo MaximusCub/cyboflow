@@ -286,6 +286,14 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const sessionRunning = paneSession.status === 'running';
   const hasSendingPending = pendingSends?.some((entry) => entry.status === 'sending') ?? false;
   const sessionWorking = sessionRunning || liveTailState.isGenerating || hasSendingPending;
+  // The composer's authoritative turn-in-flight signal for its Stop / Queue /
+  // Interrupt affordances. Same as `sessionWorking` MINUS the optimistic
+  // 'sending' pending row: that row can linger after the backend turn ends (it
+  // reconciles only when the settled message lands), which would freeze the Stop
+  // button ON with no turn to abort. `isGenerating` self-clears at the turn's
+  // `result` (and on a user cancel via the useIPCEvents buffer reset), so it is
+  // safe to fold in here where the sticky pending row is not.
+  const composerWorking = sessionRunning || liveTailState.isGenerating;
   // Working indicator parity with the prior RichOutputView: show it while the
   // agent is producing, as soon as an SDK send is dispatched, OR when the
   // session is waiting and the last turn was the user's. The optimistic-send
@@ -392,6 +400,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             onModelFallback={setPermissionToast}
             onFastModeDeclined={setPermissionToast}
             activeQuestion={pendingQuestions[0] ?? null}
+            working={composerWorking}
           />
         ))}
 

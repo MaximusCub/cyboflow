@@ -63,6 +63,25 @@ describe('panelLiveEventsStore', () => {
     expect(state.byPanel['panel-b']).toHaveLength(1);
   });
 
+  it('clearPanel resets one panel buffer (cancel turn-end), leaving others intact', () => {
+    const { appendEvent, clearPanel } = usePanelLiveEventsStore.getState();
+    appendEvent('panel-a', streamEvent(1));
+    appendEvent('panel-a', streamEvent(2));
+    appendEvent('panel-b', streamEvent(1));
+
+    clearPanel('panel-a');
+
+    const state = usePanelLiveEventsStore.getState();
+    expect(state.byPanel['panel-a']).toEqual([]);
+    expect(state.byPanel['panel-b']).toHaveLength(1);
+  });
+
+  it('clearPanel on an unknown panel is a no-op (no phantom key)', () => {
+    const before = usePanelLiveEventsStore.getState().byPanel;
+    usePanelLiveEventsStore.getState().clearPanel('never-seen');
+    expect(usePanelLiveEventsStore.getState().byPanel).toBe(before);
+  });
+
   it('caps the buffer at MAX_EVENTS_PER_PANEL, dropping the oldest first', () => {
     const { appendEvent } = usePanelLiveEventsStore.getState();
     for (let i = 0; i < MAX_EVENTS_PER_PANEL + 50; i++) {

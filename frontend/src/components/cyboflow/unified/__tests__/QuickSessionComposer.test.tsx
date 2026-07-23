@@ -117,6 +117,8 @@ function Harness(props: {
   onModelFallback?: (message: string) => void;
   onFastModeDeclined?: (message: string) => void;
   activeQuestion?: Question | null;
+  working?: boolean;
+  handleStopSession?: ReturnType<typeof vi.fn>;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -129,7 +131,7 @@ function Harness(props: {
       textareaRef={textareaRef}
       handleSendInput={props.handleSendInput ?? vi.fn()}
       handleContinueConversation={props.handleContinueConversation ?? vi.fn()}
-      handleStopSession={vi.fn()}
+      handleStopSession={props.handleStopSession ?? vi.fn()}
       panelId="panel-1"
       interactive={props.interactive}
       ptyOpen={ptyOpen}
@@ -138,6 +140,7 @@ function Harness(props: {
       onModelFallback={props.onModelFallback}
       onFastModeDeclined={props.onFastModeDeclined}
       activeQuestion={props.activeQuestion ?? null}
+      working={props.working}
     />
   );
 }
@@ -245,6 +248,29 @@ describe('QuickSessionComposer — Stop reflects the authoritative running statu
     // Turn settles: status flips off 'running' → Stop self-clears back to Send
     // (it does NOT stick on an optimistic pending-send / live-tail signal).
     rerender(<Harness session={makeSession({ status: 'waiting' })} interactive={false} />);
+    expect(screen.getByTestId('unified-composer-send')).toBeTruthy();
+    expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+  });
+
+  it('shows Stop while working=true even though status is not running (SDK streams without flipping status)', () => {
+    const { rerender } = render(
+      // The quick SDK turn is generating: the host folds the live-tail
+      // isGenerating flag into `working`, but the durable status is still 'waiting'.
+      <Harness session={makeSession({ status: 'waiting' })} interactive={false} working />,
+    );
+    expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+    expect(screen.queryByTestId('unified-composer-send')).toBeNull();
+
+    // Turn ends / cancel resets the buffer → working flips false → back to Send.
+    rerender(<Harness session={makeSession({ status: 'waiting' })} interactive={false} working={false} />);
+    expect(screen.getByTestId('unified-composer-send')).toBeTruthy();
+    expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+  });
+
+  it('working=false wins over a stale status==running (host says the turn ended)', () => {
+    // Defensive: if the host computes working=false, the composer trusts it even
+    // if the raw status row lags at 'running'.
+    render(<Harness session={makeSession({ status: 'running' })} interactive={false} working={false} />);
     expect(screen.getByTestId('unified-composer-send')).toBeTruthy();
     expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
   });

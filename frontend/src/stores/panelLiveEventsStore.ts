@@ -32,6 +32,15 @@ interface PanelLiveEventsState {
   byPanel: Record<string, StreamEvent[]>;
   /** Append one envelope; resets the panel's buffer instead on a `result`. */
   appendEvent: (panelId: string, event: StreamEvent) => void;
+  /**
+   * Reset ONE panel's buffer — the turn-end equivalent of a `result` envelope
+   * for paths that never project one. A user cancel (Stop) breaks the SDK loop
+   * before the result is handled, so no `result` reaches the renderer; without
+   * this the buffer's trailing stream_events keep `isGenerating` stuck true
+   * (freezing the working spinner + the composer's Stop button). useIPCEvents
+   * calls this on the cancellation message.
+   */
+  clearPanel: (panelId: string) => void;
   /** Test/reset hook — clears every panel's buffer. */
   clearAll: () => void;
 }
@@ -52,6 +61,12 @@ export const usePanelLiveEventsStore = create<PanelLiveEventsState>((set) => ({
           ? [...existing.slice(existing.length - MAX_EVENTS_PER_PANEL + 1), event]
           : [...existing, event];
       return { byPanel: { ...s.byPanel, [panelId]: next } };
+    }),
+
+  clearPanel: (panelId) =>
+    set((s) => {
+      if (!(panelId in s.byPanel)) return s;
+      return { byPanel: { ...s.byPanel, [panelId]: [] } };
     }),
 
   clearAll: () => set({ byPanel: {} }),

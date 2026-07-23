@@ -65,6 +65,22 @@ function toLiveTailEnvelope(raw: unknown, timestamp: string): LiveTailEnvelope |
   return null;
 }
 
+/**
+ * Detect the user-cancel (Stop) message the main process emits over
+ * `session-output` — `{ type: 'session', data: { status: 'cancelled', … } }`
+ * (see ipc/session.ts stop handler). It is NOT a `result`/`stream_event`
+ * envelope, so it slips past toLiveTailEnvelope; the live-tail buffer needs a
+ * turn-end reset on it regardless, else `isGenerating` sticks after Stop.
+ */
+function isCancellationOutput(raw: unknown): boolean {
+  if (raw === null || typeof raw !== 'object') return false;
+  const obj = raw as Record<string, unknown>;
+  if (obj.type !== 'session') return false;
+  const inner = obj.data;
+  if (inner === null || typeof inner !== 'object') return false;
+  return (inner as Record<string, unknown>).status === 'cancelled';
+}
+
 // Throttle utility function
 function throttle<T extends (...args: never[]) => void>(
   func: T,
@@ -279,6 +295,12 @@ export function useIPCEvents() {
         const envelope = toLiveTailEnvelope(output.data, timestamp);
         if (envelope !== null) {
           usePanelLiveEventsStore.getState().appendEvent(output.panelId, envelope);
+        } else if (isCancellationOutput(output.data)) {
+          // A user cancel (Stop) emits a `{ type: 'session', status: 'cancelled' }`
+          // message, NOT a `result` — the SDK loop breaks before the result is
+          // handled. Reset the live-tail buffer so `isGenerating` clears (freeing
+          // the working spinner + the composer's Stop button); see clearPanel.
+          usePanelLiveEventsStore.getState().clearPanel(output.panelId);
         }
       }
 

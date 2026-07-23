@@ -87,6 +87,17 @@ export interface QuickSessionComposerProps {
    * or starve on the claude-continue lock the parked turn is holding.
    */
   activeQuestion?: Question | null;
+  /**
+   * Host-computed turn-in-flight signal (`sessionRunning || live-tail
+   * isGenerating`). The composer uses this as its authoritative running state
+   * for the Stop / Queue / Interrupt affordances — `activeSession.status` alone
+   * is unreliable for quick SDK turns (the backend does not always flip it to
+   * 'running' while the SDK streams, so a genuinely generating turn would show
+   * no Stop button). Deliberately EXCLUDES the optimistic 'sending' pending row
+   * (which can stick after the turn ends and freeze Stop ON). Undefined falls
+   * back to the status check.
+   */
+  working?: boolean;
 }
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
@@ -108,19 +119,23 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     onModelFallback,
     onFastModeDeclined,
     activeQuestion = null,
+    working,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
   const agentProvider = activeSession.agentProvider
     ?? (activeSession.agentRuntime?.startsWith('codex-') ? 'codex' : 'claude');
-  // `running` is the AUTHORITATIVE, self-clearing turn-in-flight signal — the
-  // session status the backend flips to 'running' for the turn's life and off at
-  // its rest boundary. It deliberately does NOT fold in the optimistic 'sending'
-  // pending row or the live-tail generating flag (the host's `sessionWorking`
-  // spinner): those can stick after the backend turn ends, which would freeze the
-  // Stop button ON with no turn to abort. The brief pre-'running' send window is
-  // covered backend-side by the panels:continue mid-turn queue guard.
-  const running = activeSession.status === 'running';
+  // `running` is the AUTHORITATIVE, self-clearing turn-in-flight signal. The host
+  // (ClaudePanel) supplies it as `working` = `sessionRunning || live-tail
+  // isGenerating` — a genuinely generating quick SDK turn frequently does NOT
+  // have `activeSession.status === 'running'` (the backend does not reliably flip
+  // the durable status while the SDK streams), so relying on status alone hides
+  // the Stop button mid-generation. `working` deliberately EXCLUDES the optimistic
+  // 'sending' pending row (which can stick after the turn ends and freeze Stop
+  // ON); isGenerating self-clears at the turn's `result` — or, on a user cancel,
+  // when useIPCEvents resets the live-tail buffer on the cancellation message.
+  // Falls back to the status check when the host does not pass `working`.
+  const running = working ?? activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
 
   // Question-gate answer plumbing: direct-answer submits reuse the card's

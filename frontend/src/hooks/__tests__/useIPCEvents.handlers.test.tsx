@@ -15,6 +15,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { usePanelLiveEventsStore } from '../../stores/panelLiveEventsStore';
+import type { StreamEvent } from '../../utils/cyboflowApi';
 import type { Session, SessionOutput, GitStatus } from '../../types/session';
 
 // ---------------------------------------------------------------------------
@@ -204,6 +206,54 @@ describe('output handlers — validateEventSession missing-sessionId drop', () =
     fire('onSessionOutput', { sessionId: 's1', type: 'stdout', data: 'x', panelId: 'p1' } as SessionOutput);
     expect(events).toHaveLength(1);
     expect(events[0].detail).toEqual({ sessionId: 's1', panelId: 'p1' });
+  });
+
+  it('onSessionOutput feeds a stream_event into the live-tail buffer, then clears it on cancel', () => {
+    usePanelLiveEventsStore.getState().clearAll();
+    renderHook(() => useIPCEvents());
+
+    // A streaming delta buffers → isGenerating would be true.
+    fire('onSessionOutput', {
+      sessionId: 's1',
+      panelId: 'p1',
+      type: 'json',
+      data: {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      },
+      timestamp: '2026-07-23T00:00:00.000Z',
+    } as unknown as SessionOutput);
+    expect(usePanelLiveEventsStore.getState().byPanel['p1']).toHaveLength(1);
+
+    // The user-cancel message ({type:'session', status:'cancelled'}) is NOT a
+    // result/stream_event envelope, but must still reset the buffer so the Stop
+    // button + working spinner clear.
+    fire('onSessionOutput', {
+      sessionId: 's1',
+      panelId: 'p1',
+      type: 'json',
+      data: { type: 'session', data: { status: 'cancelled', message: 'Cancelled by user', source: 'user' } },
+      timestamp: '2026-07-23T00:00:01.000Z',
+    } as unknown as SessionOutput);
+    expect(usePanelLiveEventsStore.getState().byPanel['p1']).toEqual([]);
+  });
+
+  it('onSessionOutput ignores a non-cancel session message (leaves the buffer intact)', () => {
+    usePanelLiveEventsStore.getState().clearAll();
+    usePanelLiveEventsStore.getState().appendEvent('p1', {
+      type: 'stream_event',
+      payload: { event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } },
+    } as unknown as StreamEvent);
+    renderHook(() => useIPCEvents());
+
+    fire('onSessionOutput', {
+      sessionId: 's1',
+      panelId: 'p1',
+      type: 'json',
+      data: { type: 'session', data: { status: 'running' } },
+      timestamp: '2026-07-23T00:00:02.000Z',
+    } as unknown as SessionOutput);
+    expect(usePanelLiveEventsStore.getState().byPanel['p1']).toHaveLength(1);
   });
 
   it('onSessionOutputAvailable preserves panel identity for transcript refetches', () => {
