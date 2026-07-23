@@ -44,7 +44,10 @@ export function DesignStageCanvas({ artifact }: DesignStageCanvasProps): ReactEl
   }
 
   return (
-    <div data-testid="design-stage-canvas" className="h-full w-full">
+    // MUST be a flex column: LiveCanvasEmbed sizes itself `flex: 1` and its
+    // iframe collapses to the ~150px default height when the parent isn't a
+    // flex container (live-smoke finding: prototype rendered as a thin strip).
+    <div data-testid="design-stage-canvas" className="h-full w-full flex flex-col min-h-0">
       <LiveCanvasEmbed html={html} />
     </div>
   );
