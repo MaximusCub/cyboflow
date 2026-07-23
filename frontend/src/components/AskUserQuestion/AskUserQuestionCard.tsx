@@ -504,9 +504,14 @@ export function AskUserQuestionCard({ item, onAnswered, onOpenArtifact, openArti
       data-question-id={item.id}
       className="px-4 py-3 border-b border-border-primary"
     >
-      <div className="mb-3">
-        <span className="text-xs text-text-muted">{item.workflowName}</span>
-      </div>
+      {/* The '__quick__' chat-sentinel is an internal workflow name — a quick/
+          design session's gate card has no meaningful workflow to label, so
+          suppress the header line entirely rather than leak the sentinel. */}
+      {item.workflowName !== '__quick__' && (
+        <div className="mb-3">
+          <span className="text-xs text-text-muted">{item.workflowName}</span>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit}>
         <div className="space-y-4">

@@ -824,4 +824,14 @@ describe('image attachment on answer', () => {
       expect(screen.queryByRole('button', { name: /remove shot\.png/i })).toBeNull();
     });
   });
+
+  it("suppresses the internal '__quick__' sentinel as the header workflow name", () => {
+    render(<AskUserQuestionCard item={makeQuestion({ workflowName: '__quick__' })} />);
+    expect(screen.queryByText('__quick__')).toBeNull();
+  });
+
+  it('still shows a real workflow name in the header', () => {
+    render(<AskUserQuestionCard item={makeQuestion({ workflowName: 'planner' })} />);
+    expect(screen.getByText('planner')).toBeInTheDocument();
+  });
 });

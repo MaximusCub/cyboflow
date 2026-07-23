@@ -41,6 +41,22 @@ const WORKING_STATUS_LINES = ['Reading the idea…', 'Grounding in your codebase
 /** Cycle interval for the working status line, in ms (exported for tests). */
 export const WORKING_STATUS_CYCLE_MS = 2200;
 
+/**
+ * The stage's liveness indicator: a ring with a rotating arc (animate-spin).
+ * A plain `animate-pulse` on a hollow ring read as a static blank circle in the
+ * live smoke — the arc gives unambiguous motion. Arc color via inline var()
+ * because the Tailwind border palette doesn't map the semantic text tokens.
+ */
+function StageSpinner(): ReactElement {
+  return (
+    <div
+      data-testid="design-stage-spinner"
+      className="h-10 w-10 rounded-full border-2 border-border-primary animate-spin"
+      style={{ borderTopColor: 'var(--color-text-secondary)' }}
+    />
+  );
+}
+
 function WorkingState(): ReactElement {
   const [statusIndex, setStatusIndex] = useState(0);
 
@@ -54,7 +70,7 @@ function WorkingState(): ReactElement {
   return (
     <div data-testid="design-stage-working" className="h-full w-full flex items-center justify-center">
       <div className="flex flex-col items-center gap-4">
-        <div className="h-10 w-10 rounded-full border border-border-primary animate-pulse" />
+        <StageSpinner />
         <span className="text-sm text-text-muted" data-testid="design-stage-working-status">
           {WORKING_STATUS_LINES[statusIndex]}
         </span>
@@ -71,7 +87,7 @@ function IntroState(): ReactElement {
   return (
     <div data-testid="design-stage-intro" className="h-full w-full flex items-center justify-center">
       <div className="max-w-md flex flex-col items-center gap-4 text-center px-8 py-10 border border-border-primary rounded-lg">
-        <div className="h-10 w-10 rounded-full border border-border-primary animate-pulse" />
+        <StageSpinner />
         <p className="text-sm text-text-muted">
           Design session starting — the designer will read the linked idea and check in here.
         </p>
