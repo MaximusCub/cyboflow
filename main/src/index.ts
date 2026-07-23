@@ -107,6 +107,7 @@ import { VerificationScheduler, verificationEvents, verificationChannel } from '
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
+import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
@@ -1596,6 +1597,8 @@ async function initializeServices() {
     : path.join(__dirname, 'orchestrator', 'verify', 'driver', 'driverCli.js');
   const verificationAgentRunner = new VerificationAgentRunner({
     query: makeVerificationAgentQuery(cyboflowLogger),
+    // Codex runtime for a codex-pinned/inherited visual-verify agent; absent Codex CLI fails open to skipped.
+    codexQuery: makeCodexVerificationAgentQuery(cyboflowLogger),
     // The workflow-defined 'visual-verify' agent + the run's provider/model, for the
     // Claude-namespace model rule (§5.4). Mirrors the resolveStepAgent thunk below
     // but returns the FULL EffectiveAgent for 'visual-verify'.

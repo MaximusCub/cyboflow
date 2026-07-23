@@ -17,13 +17,15 @@
  * module owns steps 1-6 of §5.4 (resolve → provision → deploy → validate →
  * mutation-check → teardown) and returns the mapped verdict.
  *
- * Claude-scoped (§5.4 step 1 / §5.12): model resolution is Claude-namespace-only.
- * A pinned Claude alias resolves through the injected alias→concrete mechanism; an
- * unpinned agent inherits the RUN model only when the run's provider is Claude,
- * else a validated Claude default. A `runtime: 'codex-sdk'` pin is DROPPED (logged
- * + Sentry seam breadcrumb). A `gpt-*` / `codexModel` id is unreachable by
- * construction — `agent.codexModel` is never read and the only model sources are a
- * Claude alias, the Claude-provider run model, or the Claude default.
+ * Provider dispatch (§5.4 step 1): the resolved agent's runtime picks the query
+ * seam. An explicit `runtime: 'codex-sdk'` pin — or an unpinned agent inheriting a
+ * Codex-provider run — routes to the injected `codexQuery`; everything else routes
+ * to the Claude `query`. On the Claude branch model resolution is
+ * Claude-namespace-only (a pinned alias → concrete, else the Claude-provider run
+ * model, else a validated Claude default). On the Codex branch the model is
+ * `agent.codexModel`, else the Codex-provider run model, else the account default
+ * the query resolves. When a request routes to Codex but no `codexQuery` dep is
+ * wired, it maps to the fail-open `skipped` bucket — never a silent Claude fallback.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -41,7 +43,7 @@ import {
 } from '../../../../shared/types/visualVerification';
 import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
-import type { AgentProvider } from '../../../../shared/types/agentRuntime';
+import { providerForRuntime, type AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { EffectiveAgent } from '../agents/effectiveAgents';
 import {
   provisionSnapshot,
@@ -189,6 +191,13 @@ export interface VerificationAgentRunnerLike {
 
 export interface VerificationAgentRunnerDeps {
   query: VerificationAgentQueryFn;
+  /**
+   * The Codex-runtime query seam, dispatched to when the resolved agent's provider
+   * is `codex` (a `runtime: 'codex-sdk'` pin or an unpinned agent inheriting a
+   * Codex-provider run). ABSENT ⇒ a codex-routed request maps to the fail-open
+   * `skipped` bucket with an actionable message — never a silent Claude fallback.
+   */
+  codexQuery?: VerificationAgentQueryFn;
   resolveVerifyAgent: (runId: string) => ResolvedVerifyAgent | undefined;
   /** Alias→concrete Claude model id (wraps `bareModelId` at index.ts); null when unresolvable. */
   resolveClaudeAlias: (alias: AgentModelAlias) => string | null;
@@ -224,12 +233,11 @@ export interface VerificationAgentRunnerDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Appended to the workflow-defined system prompt at deploy time (§5.4 step 3).
- * Restates the environment, the required output schema, and the prohibitions the
- * sandbox enforces — so an edited/overridden prompt can shape HOW the agent judges
- * but never what environment it believes it has or what it is allowed to do.
+ * The head of the harness contract (environment + framing) — shared verbatim
+ * across the Claude and Codex variants. Ends at the `Rules:` label; the
+ * provider-specific rules block and the shared tail complete the contract.
  */
-export const VERIFY_HARNESS_CONTRACT = `
+const VERIFY_CONTRACT_HEAD = `
 === VERIFICATION HARNESS CONTRACT (immutable) ===
 You are a visual-verification agent deployed by cyboflow. You run in a git worktree
 checked out at the code under test. Your job: build/serve the deliverable, drive its
@@ -255,7 +263,11 @@ Environment (already set for your Bash tool):
   and usually no goto: the app window is already the surface under test).
 
 Rules:
-- Use ONLY Bash, Read, Grep, Glob. You have NO Write/Edit and NO MCP tools. Do not
+`;
+
+/** The Claude-runtime rules block — the tool ceiling is Bash/Read/Grep/Glob and
+ * screenshots are viewed via the Read tool. */
+const VERIFY_CONTRACT_CLAUDE_RULES = `- Use ONLY Bash, Read, Grep, Glob. You have NO Write/Edit and NO MCP tools. Do not
   attempt to modify tracked source files — you are JUDGING code, not changing it.
 - Run the task's build steps first. If the build or the server launch fails, set
   outcome to "build_failed" / "launch_failed" and put the failing log tail in
@@ -263,7 +275,22 @@ Rules:
 - Read your own screenshots (Read renders PNGs) and judge each behavior honestly.
   Mark a behavior "not_testable" when you genuinely could not exercise it; never
   guess a pass.
+`;
 
+/** The Codex-runtime rules block — the enforcement is the shell + view_image (no
+ * Bash/Read tool ceiling), and there are no MCP tools on this runtime. */
+const VERIFY_CONTRACT_CODEX_RULES = `- Use ONLY your shell and view_image tools. View each screenshot you capture with
+  view_image and judge it honestly. You have NO MCP tools. Do not modify tracked
+  source files — you are JUDGING code, not changing it.
+- Run the task's build steps first. If the build or the server launch fails, set
+  outcome to "build_failed" / "launch_failed" and put the failing log tail in
+  buildLogExcerpt — do not fabricate screenshots.
+- Mark a behavior "not_testable" when you genuinely could not exercise it; never
+  guess a pass.
+`;
+
+/** The tail of the harness contract (the required output schema) — shared verbatim. */
+const VERIFY_CONTRACT_TAIL = `
 Return a VerificationReportV1 as the structured output:
 {
   "version": 1,
@@ -280,16 +307,42 @@ Return a VerificationReportV1 as the structured output:
 Every screenshots[].fileName MUST be a file you actually wrote to VERIFY_ARTIFACTS_DIR.
 === END HARNESS CONTRACT ===`;
 
+/**
+ * Appended to the workflow-defined system prompt at deploy time (§5.4 step 3).
+ * Restates the environment, the required output schema, and the prohibitions the
+ * sandbox enforces — so an edited/overridden prompt can shape HOW the agent judges
+ * but never what environment it believes it has or what it is allowed to do. Built
+ * from the shared head/tail + the CLAUDE rules block so the Claude and Codex
+ * variants cannot drift in their environment/schema framing.
+ */
+export const VERIFY_HARNESS_CONTRACT =
+  VERIFY_CONTRACT_HEAD + VERIFY_CONTRACT_CLAUDE_RULES + VERIFY_CONTRACT_TAIL;
+
+/**
+ * The Codex-runtime harness contract — identical head/tail to
+ * {@link VERIFY_HARNESS_CONTRACT}, with the Codex rules block (shell + view_image,
+ * no Bash/Read tool ceiling) swapped in.
+ */
+export const VERIFY_HARNESS_CONTRACT_CODEX =
+  VERIFY_CONTRACT_HEAD + VERIFY_CONTRACT_CODEX_RULES + VERIFY_CONTRACT_TAIL;
+
+/** Pick the harness contract for the resolved provider (§5.4 step 3). */
+export function verifyHarnessContract(provider: AgentProvider): string {
+  return provider === 'codex' ? VERIFY_HARNESS_CONTRACT_CODEX : VERIFY_HARNESS_CONTRACT;
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
 /**
- * Claude-namespace-only model resolution (§5.4 step 1). A pinned alias resolves
- * through the injected alias→concrete mechanism; an unpinned agent inherits the run
- * model ONLY on a Claude-provider run; otherwise the validated Claude default. The
- * result is ALWAYS a Claude id — `agent.codexModel` is never consulted and the run
- * model is used only when the run is Claude, so a `gpt-*` id cannot reach the query.
+ * The CLAUDE branch of the provider dispatch (§5.4 step 1): Claude-namespace-only
+ * model resolution, reached when {@link resolveVerifyProvider} returns `claude`. A
+ * pinned alias resolves through the injected alias→concrete mechanism; an unpinned
+ * agent inherits the run model ONLY on a Claude-provider run; otherwise the
+ * validated Claude default. The result is ALWAYS a Claude id — `agent.codexModel`
+ * is never consulted and the run model is used only when the run is Claude, so a
+ * `gpt-*` id cannot reach the Claude query.
  */
 export function resolveVerifyModel(
   resolved: ResolvedVerifyAgent,
@@ -304,6 +357,33 @@ export function resolveVerifyModel(
     return runModel;
   }
   return claudeDefaultModel;
+}
+
+/**
+ * The provider the verifier deploys on (§5.4 step 1). An explicit agent runtime pin
+ * wins (`providerForRuntime` maps `codex-sdk` → codex, the Claude runtimes → claude);
+ * an unpinned agent inherits the RUN provider — so an unpinned visual-verify on a
+ * Codex-provider run resolves to Codex.
+ */
+export function resolveVerifyProvider(resolved: ResolvedVerifyAgent): AgentProvider {
+  return resolved.agent.runtime ? providerForRuntime(resolved.agent.runtime) : resolved.runProvider;
+}
+
+/**
+ * The CODEX branch model (§5.4 step 1), reached when {@link resolveVerifyProvider}
+ * returns `codex`. A pinned `agent.codexModel` wins; else the run model when the run
+ * itself is Codex and the model is a non-empty trimmed string; else `undefined` — the
+ * Codex query then resolves the account's default model.
+ */
+export function resolveVerifyCodexModel(resolved: ResolvedVerifyAgent): string | undefined {
+  const { agent, runProvider, runModel } = resolved;
+  if (typeof agent.codexModel === 'string' && agent.codexModel.trim().length > 0) {
+    return agent.codexModel;
+  }
+  if (runProvider === 'codex' && typeof runModel === 'string' && runModel.trim().length > 0) {
+    return runModel;
+  }
+  return undefined;
 }
 
 /** Compose the agent's user prompt from the task: the JSON payload plus a short framing. */
@@ -522,16 +602,26 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       };
     }
 
-    // Claude-namespace model + a dropped codex runtime pin (§5.4 step 1).
-    if (resolved.agent.runtime === 'codex-sdk') {
-      const msg = 'visual-verify is Claude-only; dropping codex-sdk runtime pin';
-      logger?.warn(`[VerificationAgentRunner] ${msg}`, { runId: req.runId });
-      emitSeamError('verify-agent-runtime-dropped', new Error(msg), {
-        agentKey: 'visual-verify',
-        droppedRuntime: 'codex-sdk',
-      });
+    // Provider dispatch (§5.4 step 1): the resolved agent's runtime picks the query
+    // seam + model rule. A codex request with no wired codexQuery dep fails open.
+    const provider = resolveVerifyProvider(resolved);
+    let queryFn: VerificationAgentQueryFn;
+    let model: string | undefined;
+    let verdictModel: string;
+    if (provider === 'codex') {
+      if (!this.deps.codexQuery) {
+        return { status: 'skipped', errorMessage: 'codex verify runtime not wired', fileNames: [] };
+      }
+      queryFn = this.deps.codexQuery;
+      // May be undefined — the Codex query resolves the account default in that case.
+      model = resolveVerifyCodexModel(resolved);
+      // The verdict label must stay a string even when the model is account-default.
+      verdictModel = model ?? 'codex-default';
+    } else {
+      queryFn = this.deps.query;
+      model = resolveVerifyModel(resolved, this.deps.resolveClaudeAlias, this.deps.claudeDefaultModel);
+      verdictModel = model;
     }
-    const model = resolveVerifyModel(resolved, this.deps.resolveClaudeAlias, this.deps.claudeDefaultModel);
 
     const controller = new AbortController();
     const onAbort = (): void => controller.abort();
@@ -601,11 +691,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         return { status: 'timeout', errorMessage: 'aborted before deploy', fileNames: [] };
       }
 
-      // (c) Deploy ONE structured SDK session.
-      const systemPrompt = `${resolved.agent.systemPrompt}\n\n${VERIFY_HARNESS_CONTRACT}`;
+      // (c) Deploy ONE structured session on the resolved provider's query seam,
+      // with the provider-matched harness contract appended to the agent prompt.
+      const systemPrompt = `${resolved.agent.systemPrompt}\n\n${verifyHarnessContract(provider)}`;
       let raw: unknown;
       try {
-        const outcome = await this.deps.query({
+        const outcome = await queryFn({
           prompt: composeVerifyUserPrompt(req.task),
           systemPrompt,
           cwd,
@@ -674,7 +765,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         mutated = await checkMutated(snapshot.worktreePath);
       }
 
-      return mapReportToResult(report, mode, mutated, model);
+      return mapReportToResult(report, mode, mutated, verdictModel);
     } catch (err) {
       if (controller.signal.aborted) {
         return { status: 'timeout', errorMessage: 'deadline exceeded', fileNames: [] };

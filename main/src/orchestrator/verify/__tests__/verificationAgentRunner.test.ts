@@ -13,6 +13,8 @@ import {
   VerificationAgentRunner,
   VerificationAgentQueryError,
   resolveVerifyModel,
+  resolveVerifyProvider,
+  resolveVerifyCodexModel,
   mapReportToResult,
   type VerificationAgentRunnerDeps,
   type VerificationAgentRequest,
@@ -96,12 +98,14 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   dispose: ReturnType<typeof vi.fn>;
   stopDriver: ReturnType<typeof vi.fn>;
   query: ReturnType<typeof vi.fn>;
+  codexQuery: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
   writeTranscript: ReturnType<typeof vi.fn>;
 } {
   const dispose = vi.fn(async () => {});
   const stopDriver = vi.fn(async () => {});
   const query = vi.fn(async () => makeOutcome(validReport()));
+  const codexQuery = vi.fn(async () => makeOutcome(validReport()));
   const warn = vi.fn();
   const writeTranscript = vi.fn(async () => {});
   const provision = vi.fn(
@@ -114,6 +118,7 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   };
   const deps: VerificationAgentRunnerDeps = {
     query,
+    codexQuery,
     resolveVerifyAgent: () => resolvedAgent,
     resolveClaudeAlias: (alias) => `claude-${alias}-resolved`,
     claudeDefaultModel: CLAUDE_DEFAULT,
@@ -129,7 +134,7 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     writeTranscript,
     ...overrides,
   };
-  return { runner: new VerificationAgentRunner(deps), dispose, stopDriver, query, warn, writeTranscript };
+  return { runner: new VerificationAgentRunner(deps), dispose, stopDriver, query, codexQuery, warn, writeTranscript };
 }
 
 beforeEach(() => {
@@ -179,6 +184,81 @@ describe('resolveVerifyModel', () => {
       runModel: 'claude-run',
     };
     expect(resolveVerifyModel(r, () => null, CLAUDE_DEFAULT)).toBe(CLAUDE_DEFAULT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveVerifyProvider — runtime pin wins, else inherit the run provider
+// ---------------------------------------------------------------------------
+
+describe('resolveVerifyProvider', () => {
+  it('maps a codex-sdk runtime pin to codex', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ runtime: 'codex-sdk' }),
+      runProvider: 'claude',
+      runModel: 'claude-run',
+    };
+    expect(resolveVerifyProvider(r)).toBe('codex');
+  });
+
+  it('maps a claude-sdk runtime pin to claude even on a codex run', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ runtime: 'claude-sdk' }),
+      runProvider: 'codex',
+      runModel: 'gpt-5.4',
+    };
+    expect(resolveVerifyProvider(r)).toBe('claude');
+  });
+
+  it('inherits the run provider when the agent is unpinned', () => {
+    expect(
+      resolveVerifyProvider({ agent: makeAgent({ runtime: undefined }), runProvider: 'codex', runModel: 'gpt-5.4' }),
+    ).toBe('codex');
+    expect(
+      resolveVerifyProvider({ agent: makeAgent({ runtime: undefined }), runProvider: 'claude', runModel: 'claude-run' }),
+    ).toBe('claude');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveVerifyCodexModel — codexModel pin wins, else the codex run model, else undefined
+// ---------------------------------------------------------------------------
+
+describe('resolveVerifyCodexModel', () => {
+  it('returns a pinned codexModel', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: 'gpt-5.4-pinned' }),
+      runProvider: 'claude',
+      runModel: 'claude-run',
+    };
+    expect(resolveVerifyCodexModel(r)).toBe('gpt-5.4-pinned');
+  });
+
+  it('inherits the run model on a Codex-provider run when the codexModel is unset', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: undefined }),
+      runProvider: 'codex',
+      runModel: 'gpt-5.4-run',
+    };
+    expect(resolveVerifyCodexModel(r)).toBe('gpt-5.4-run');
+  });
+
+  it('returns undefined when unpinned and the run is not Codex (account default resolves later)', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: undefined }),
+      runProvider: 'claude',
+      runModel: 'claude-run',
+    };
+    expect(resolveVerifyCodexModel(r)).toBeUndefined();
+  });
+
+  it('returns undefined when the run model is a blank string', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: undefined }),
+      runProvider: 'codex',
+      runModel: '   ',
+    };
+    expect(resolveVerifyCodexModel(r)).toBeUndefined();
   });
 });
 
@@ -262,10 +342,8 @@ describe('VerificationAgentRunner.run', () => {
     expect(stopDriver).toHaveBeenCalledTimes(1);
   });
 
-  it('drops a codex-sdk runtime pin with a warning + a Sentry seam breadcrumb', async () => {
-    const seam = vi.fn();
-    setSeamErrorSink(seam);
-    const { runner, warn, query } = makeRunner({
+  it('routes a codex-sdk runtime pin to the Codex query with the codexModel + the Codex harness contract', async () => {
+    const { runner, query, codexQuery } = makeRunner({
       resolveVerifyAgent: () => ({
         agent: makeAgent({ runtime: 'codex-sdk', codexModel: 'gpt-5.4' }),
         runProvider: 'claude',
@@ -274,14 +352,65 @@ describe('VerificationAgentRunner.run', () => {
     });
     const result = await runner.run(makeReq());
     expect(result.status).toBe('passed');
-    expect(warn).toHaveBeenCalled();
-    expect(seam).toHaveBeenCalledWith(
-      'verify-agent-runtime-dropped',
-      expect.any(Error),
-      expect.objectContaining({ droppedRuntime: 'codex-sdk' }),
-    );
-    // The gpt codexModel never reaches the query — the model stays Claude.
-    expect(query.mock.calls[0][0].model).toBe('claude-run');
+    expect(codexQuery).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+    const args = codexQuery.mock.calls[0][0];
+    expect(args.model).toBe('gpt-5.4');
+    // The Codex harness contract is swapped in (shell + view_image, not the Bash ceiling).
+    expect(args.systemPrompt).toContain('view_image');
+    expect(args.systemPrompt).not.toContain('Use ONLY Bash');
+  });
+
+  it('a codex-routed request with NO codexQuery dep fails open to skipped', async () => {
+    const { runner, query } = makeRunner({
+      codexQuery: undefined,
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: 'codex-sdk' }),
+        runProvider: 'claude',
+        runModel: 'claude-run',
+      }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.errorMessage).toBe('codex verify runtime not wired');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('an unpinned agent inherits a Codex-provider run — codexQuery with the run model', async () => {
+    const { runner, query, codexQuery } = makeRunner({
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: undefined, codexModel: undefined }),
+        runProvider: 'codex',
+        runModel: 'gpt-5.4',
+      }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect(codexQuery).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+    expect(codexQuery.mock.calls[0][0].model).toBe('gpt-5.4');
+  });
+
+  it('an unpinned agent on a Claude-provider run stays on the Claude query (regression guard)', async () => {
+    const { runner, query, codexQuery } = makeRunner();
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(codexQuery).not.toHaveBeenCalled();
+  });
+
+  it('a claude-sdk pin on a Codex-provider run routes to the Claude query', async () => {
+    const { runner, query, codexQuery } = makeRunner({
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: 'claude-sdk' }),
+        runProvider: 'codex',
+        runModel: 'gpt-5.4',
+      }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(codexQuery).not.toHaveBeenCalled();
   });
 
   it('skips (fail-open) when the visual-verify agent is unresolvable', async () => {
