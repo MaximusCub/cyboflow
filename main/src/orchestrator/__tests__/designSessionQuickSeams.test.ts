@@ -67,6 +67,9 @@ const SCHEMA = `
     id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, project_id INTEGER NOT NULL,
     worktree_path TEXT, status TEXT NOT NULL, policy_json TEXT NOT NULL DEFAULT '{}',
     error_message TEXT, ended_at TEXT, started_at TEXT,
+    -- outcome (migration 014-era column on the real chain): reviveQuickRunToRunning
+    -- conditionally clears machine-stamped terminal outcomes on revival.
+    outcome TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   -- Additive column per migration 082 (design-mode.md "Idea link — integrity
