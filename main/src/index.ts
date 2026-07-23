@@ -29,7 +29,15 @@ import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
-import { bareModelId } from './services/panels/claude/modelContext';
+import { bareModelId, resolveModelAlias } from './services/panels/claude/modelContext';
+import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
+import { loadSdkQuery } from './utils/lazyAgentSdk';
+import { makeSessionSummarizer } from './orchestrator/sessionSummary/sessionSummaryQuery';
+import {
+  makeSessionSummaryScheduler,
+  type SessionSummarySchedulerLike,
+} from './orchestrator/sessionSummary/sessionSummaryScheduler';
+import { wireSessionSummaryScheduler } from './orchestrator/sessionSummary/wireSessionSummaryScheduler';
 import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
 import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { ClaudeModelCatalogService } from './services/claudeModelCatalogService';
@@ -347,6 +355,10 @@ let substrateFacade: SubstrateDispatchFacade;
 // is assigned in app.whenReady()'s orchestrator wiring block (it needs
 // substrateFacade + the routers). A pre-boot call is a logged no-op.
 let cancelHostedRunsImpl: ((sessionId: string) => Promise<void>) | null = null;
+// Idle-debounced quick-session summarizer (session-summary-plan.md §5). Declared
+// at module scope so the before-quit handler can dispose its pending timers; the
+// instance is built + wired in app.whenReady() where the substrate managers exist.
+let sessionSummaryScheduler: SessionSummarySchedulerLike | undefined;
 
 // Service instances
 let configManager: ConfigManager;
@@ -2724,6 +2736,56 @@ async function initializeServices() {
       cyboflowLogger.error(`[Cyboflow MCP] lifecycle start failed: ${String(err)}`);
     });
 
+  // Idle-debounced quick-session summarizer (session-summary-plan.md §5). Built
+  // here (services layer, where cross-layer glue lives): the summarizer's
+  // environment couplings are resolved as plain values (a bare `'haiku'` string
+  // would NOT alias-resolve through the SDK), and the two state probes translate
+  // a sessionId onto the same signals the sessions:list-quick board reads. The
+  // scheduler module itself imports nothing from services/*.
+  const sessionSummarizer = makeSessionSummarizer(
+    {
+      sdkQueryLoader: loadSdkQuery,
+      // Pin the concrete snapshot id; the alias table only applies via the resolver.
+      modelId: resolveModelAlias('haiku') ?? 'claude-haiku-4-5',
+      claudeExecutablePath: resolveClaudeExecutablePath(),
+    },
+    cyboflowLogger,
+  );
+  sessionSummaryScheduler = makeSessionSummaryScheduler({
+    db: databaseService,
+    isEnabled: () => configManager.isSessionSummaryEnabled(),
+    summarize: sessionSummarizer,
+    // Turn-in-flight probe: the session's live DB status. 'running'/'pending'
+    // means a turn is active (the same mapping quickSessionListing uses for
+    // 'running'); a warm-idle SDK session rests at a completed/stopped status.
+    // (The manager-level per-panel turn-in-flight state has no public accessor
+    // and lives under services/panels/claude/, which this feature must not touch
+    // — the DB status is the equivalent session-scoped signal.)
+    isTurnInFlight: (sessionId: string): boolean => {
+      const status = databaseService.getSession(sessionId)?.status;
+      return status === 'running' || status === 'pending';
+    },
+    // Open-gate probe: the session's chat run has a pending AskUserQuestion /
+    // permission gate — assembled from the SAME blocked-set sources as
+    // sessions:list-quick (QuestionRouter / ApprovalRouter / PTY awaiting-input).
+    hasOpenGate: (sessionId: string): boolean => {
+      const runId = databaseService.getSession(sessionId)?.chat_run_id;
+      if (!runId) return false;
+      if (QuestionRouter.getInstance().getPending().some((q) => q.runId === runId)) return true;
+      if (ApprovalRouter.getInstance().getPending().some((a) => a.runId === runId)) return true;
+      return interactiveCliManager.getAwaitingInputRunIds().has(runId);
+    },
+    logger: cyboflowLogger,
+  });
+  // Subscribe to the substrate turn seams: SDK 'exit' arms / 'spawned' clears;
+  // the facade's re-emitted PTY 'turn-end' arms. The PTY relay input seam
+  // (no 'spawned') is cleared directly from the sessions:input IPC handler.
+  wireSessionSummaryScheduler({
+    claudeManager: defaultCliManager,
+    facade: substrateFacade,
+    scheduler: sessionSummaryScheduler,
+  });
+
   const services: AppServices = {
     app,
     configManager,
@@ -2753,6 +2815,10 @@ async function initializeServices() {
       substrateFacade.registerInteractivePanel(runId, panelId),
     registerCodexPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
+    // Idle-debounced quick-session summarizer — the sessions:input handler calls
+    // noteTurnStart on it (the PTY relay input-seam clear, §2.2) and
+    // sessions:get-summary kicks lazy catch-up (§2.7).
+    sessionSummaryScheduler,
     gitDiffManager,
     gitStatusManager,
     executionTracker,
@@ -4455,6 +4521,11 @@ app.on('before-quit', async (event) => {
     return;
   }
   
+  // Clear any pending idle session-summary timers (session-summary-plan.md §5).
+  if (sessionSummaryScheduler) {
+    sessionSummaryScheduler.dispose();
+  }
+
   // Stop orchestrator (drains run queues)
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');

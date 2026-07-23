@@ -1460,6 +1460,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return createValidationError(sessionValidation);
       }
 
+      // Session-summary debounce reset (session-summary-plan.md §2.2). This is
+      // the load-bearing turn-start signal for the PTY relay path: a composer
+      // turn on a live REPL goes through relayUserTurn and emits NO 'spawned'
+      // event, so the scheduler's SDK 'spawned' clear never fires for it. Clear
+      // the pending idle timer here, before dispatching the user turn, so a stale
+      // timer cannot fire mid-turn (the turn's own turn-end re-arms).
+      services.sessionSummaryScheduler?.noteTurnStart(sessionId);
+
       // Update session status back to running when user sends input
       const currentSession = await sessionManager.getSession(sessionId);
       if (currentSession && currentSession.status === 'waiting') {
@@ -1808,6 +1816,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         logValidationFailure('sessions:continue', sessionValidation);
         return createValidationError(sessionValidation);
       }
+
+      // Session-summary debounce reset (session-summary-plan.md §2.2) — mirror of
+      // the sessions:input clear for the continue/relay dispatch path.
+      services.sessionSummaryScheduler?.noteTurnStart(sessionId);
 
       // Get session details
       const session = sessionManager.getSession(sessionId);

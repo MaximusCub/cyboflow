@@ -19,6 +19,7 @@ import type { Logger } from '../utils/logger';
 import type { ArchiveProgressManager } from '../services/archiveProgressManager';
 import type { WorkflowRegistry } from '../orchestrator/workflowRegistry';
 import type { RunLauncher } from '../orchestrator/runLauncher';
+import type { SessionSummarySchedulerLike } from '../orchestrator/sessionSummary/sessionSummaryScheduler';
 
 export interface AppServices {
   app: App;
@@ -67,6 +68,15 @@ export interface AppServices {
   registerLivePanel: (runId: string, panelId: string) => void;
   /** Deterministic at-spawn registration for Codex PTY quick-session panels. */
   registerCodexPtyPanel: (runId: string, panelId: string) => void;
+  /**
+   * Idle-debounced quick-session summarizer (session-summary-plan.md §5). The
+   * sessions:input handler calls `noteTurnStart` before dispatching a user turn
+   * (the PTY relay input-seam clear, §2.2 — the PTY substrate emits no 'spawned'
+   * for composer turns); the sessions:get-summary read fires the lazy catch-up
+   * kick (§2.7). Optional so the IPC test harnesses that build a partial
+   * AppServices need not stub it.
+   */
+  sessionSummaryScheduler?: SessionSummarySchedulerLike;
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
