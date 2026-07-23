@@ -50,7 +50,9 @@ export interface QuickSessionComposerProps {
     modelOverride?: string,
     /** abort the in-flight turn and drive this message now (Interrupt & send). */
     interrupt?: boolean,
-  ) => Promise<{ success: boolean; error?: string }>;
+    /** client pending-send id, so a status-flap queue fallback is addressable. */
+    pendingId?: string,
+  ) => Promise<{ success: boolean; error?: string; queued?: boolean }>;
   handleStopSession?: () => void;
   handleCompactContext?: () => void;
   hasConversationHistory?: boolean;
@@ -296,17 +298,43 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       // Checked BEFORE the `running` branch: a queued message would strand
       // behind a gate only the card could clear.
       if (activeQuestion != null) {
-        if (activeQuestion.questions.length === 1) {
-          const qp = activeQuestion.questions[0];
+        const q = activeQuestion;
+        if (q.questions.length === 1) {
+          const qp = q.questions[0];
           setInput('');
-          void trpc.cyboflow.questions.answer
-            .mutate({ questionId: activeQuestion.id, answers: { [qp.question]: text.trim() } })
-            .then(() => clearOtherText(activeQuestion.id))
-            .catch(() => setInput(text));
-        } else {
-          setOtherText(activeQuestion.id, text);
-          setInput('');
+          // Return the promise so UnifiedComposer awaits it and clears the
+          // composer attachments ONLY on success — a throw preserves them (and
+          // the draft) for retry, instead of silently discarding the images.
+          return (async () => {
+            try {
+              // Persist attachments to disk and fold their paths into the answer
+              // (QuestionRouter embeds them via <attachments>), mirroring
+              // AskUserQuestionCard — text answers must not drop their images.
+              const attachmentPaths: string[] = [];
+              for (const t of atts.texts) {
+                attachmentPaths.push(await window.electronAPI.sessions.saveLargeText(q.runId, t.content));
+              }
+              if (atts.images.length > 0) {
+                const imagePaths = await window.electronAPI.sessions.saveImages(
+                  q.runId,
+                  atts.images.map((img) => ({ name: img.name, dataUrl: img.dataUrl, type: img.type })),
+                );
+                attachmentPaths.push(...imagePaths);
+              }
+              await trpc.cyboflow.questions.answer.mutate({
+                questionId: q.id,
+                answers: { [qp.question]: text.trim() },
+                ...(attachmentPaths.length > 0 ? { attachments: attachmentPaths } : {}),
+              });
+              clearOtherText(q.id);
+            } catch (err) {
+              setInput(text);
+              throw err;
+            }
+          })();
         }
+        setOtherText(q.id, text);
+        setInput('');
         return;
       }
 
@@ -333,12 +361,20 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       const dispatch =
         activeSession.status === 'waiting'
           ? handleSendInput(text, atts.images, atts.texts)
-          : handleContinueConversation(text, atts.images, atts.texts, modelId ?? undefined);
+          // Thread the pending-send id so a status-flap continue that reaches an
+          // already-running backend turn is queued UNDER this id — the displayed
+          // 'queued' row can then dequeue the real server entry (behavior below).
+          : handleContinueConversation(text, atts.images, atts.texts, modelId ?? undefined, false, id);
       // Promise.resolve tolerates a non-promise return (e.g. a test stub);
       // `res && res.success === false` only flips on an explicit failure result.
       void Promise.resolve(dispatch)
         .then((res) => {
           if (res && res.success === false) setPendingStatus(hostKey, id, 'failed');
+          // Status-flap fallback: the backend queued this continue (keyed by `id`)
+          // instead of dispatching it. Flip the optimistic 'sending' row to the
+          // addressable 'queued' state so it reconciles/dequeues like a normal
+          // running-state queue, instead of lingering as a stuck 'sending' row.
+          else if (res && (res as { queued?: boolean }).queued === true) setPendingStatus(hostKey, id, 'queued');
         })
         .catch(() => setPendingStatus(hostKey, id, 'failed'));
     },
