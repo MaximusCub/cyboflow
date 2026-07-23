@@ -128,6 +128,14 @@ export interface Session {
    * Next-turn apply.
    */
   enabled_plugins_json?: string;
+  /**
+   * Design-session idea link (migration 082) — nullable pointer to ideas.id.
+   * NO FK: integrity (project ownership, liveness, not-decomposed) is
+   * enforced at the design-scoped MCP write chokepoints, not the database,
+   * per design-mode.md "Idea link — integrity contract". NULL for every
+   * non-design session and for a design session whose link has been broken.
+   */
+  design_idea_id?: string | null;
 }
 
 export interface SessionOutput {
@@ -623,4 +631,83 @@ export interface AgentOverrideRow {
   codex_model: string | null; // migration 070: free-form Codex model id (runtime='codex-sdk'), or NULL = Codex default
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * `design_spec_drafts` row (migration 082) — the durable, versioned
+ * design-spec markdown a design session maintains across chat turns
+ * (design-mode.md "Design-spec draft — the authoritative Approve input").
+ * UNIQUE(session_id, draft_revision) makes draft_revision a per-session
+ * monotonic counter. bound_artifact_id/bound_artifact_revision are NULL
+ * until a prototype exists to describe; once set, Approve's CAS check
+ * compares bound_artifact_revision against the artifact's CURRENT
+ * `artifacts.revision` (migration 082) to reject a stale draft.
+ */
+export interface DesignSpecDraftRow {
+  id: string;
+  session_id: string;
+  idea_id: string;
+  draft_revision: number;
+  spec_markdown: string;
+  bound_artifact_id: string | null;
+  bound_artifact_revision: number | null;
+  created_at: string;
+}
+
+/**
+ * State column of `design_handoffs` (migration 082) — the Approve
+ * intent-first recoverable state machine's CHECK-constrained values, in
+ * forward-path order: intent -> snapshotted -> folded -> complete, with
+ * superseded/failed as the off-happy-path terminals (design-mode.md
+ * "Approve — intent-first recoverable state machine").
+ */
+export type DesignHandoffState = 'intent' | 'snapshotted' | 'folded' | 'complete' | 'superseded' | 'failed';
+
+/**
+ * `design_handoffs` row (migration 082) — the durable record of one Approve
+ * invocation, persisted at state='intent' BEFORE any side effect so recovery
+ * (boot, or re-invocation with the same idempotency key) always has a row to
+ * resume from. expected_idea_version is the CAS material for the idea-body
+ * fold step; a stale value flips state to 'superseded' rather than retrying
+ * past a concurrent edit. snapshot_path is filled once step 1 (prototype
+ * snapshot) lands. NO FK out to sessions/ideas/artifacts (see migration
+ * 082's file-header comment) — this row must survive their deletion.
+ */
+export interface DesignHandoffRow {
+  id: string;
+  session_id: string;
+  idea_id: string;
+  project_id: number;
+  draft_revision: number;
+  prototype_artifact_id: string;
+  prototype_revision: number;
+  expected_idea_version: number;
+  state: DesignHandoffState;
+  error: string | null;
+  snapshot_path: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `approved_designs` row (migration 082) — the "current approved design for
+ * an idea" read model: current == WHERE idea_id=? AND superseded_at IS NULL.
+ * A re-approve supersedes the prior row (stamps superseded_at) in the same
+ * transaction as the new row's insert (write logic lands in a later lane).
+ * NO FK out to sessions/handoffs/artifacts — snapshot_path holds the durable
+ * bytes on disk, so this row stays resolvable even after the run/artifact
+ * rows that produced it are gone (migration 082's file-header comment).
+ */
+export interface ApprovedDesignRow {
+  id: string;
+  idea_id: string;
+  project_id: number;
+  handoff_id: string;
+  session_id: string;
+  draft_revision: number;
+  prototype_artifact_id: string;
+  prototype_revision: number;
+  snapshot_path: string;
+  approved_at: string;
+  superseded_at: string | null;
 }
