@@ -26,6 +26,7 @@ import {
   TypedEventNarrowing,
 } from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
+import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
@@ -2152,6 +2153,45 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to get conversation messages:', error);
       return { success: false, error: 'Failed to get conversation messages' };
+    }
+  });
+
+  // Quick-session rolling summary + append-only history (session-summary-plan.md
+  // §7). A pure read: it never blocks on or mutates summary state. When it
+  // observes content above the summarizer's watermark it fires the §2.7 lazy
+  // catch-up kick — fire-and-forget, bounded by the scheduler's own cooldown so
+  // the renderer's 30s poll cannot become a hot retry loop.
+  ipcMain.handle('sessions:get-summary', async (_event, sessionId: string) => {
+    try {
+      const sessionValidation = validateSessionExists(sessionId);
+      if (!sessionValidation.valid) {
+        logValidationFailure('sessions:get-summary', sessionValidation);
+        return createValidationError(sessionValidation);
+      }
+
+      const enabled = configManager.isSessionSummaryEnabled();
+      const summaryRow = databaseService.getSessionSummary(sessionId);
+      const entryRows = databaseService.listSessionSummaryEntries(sessionId);
+
+      // Lazy catch-up decision (§2.7): any conversation_messages row above the
+      // watermark means unsummarized content — kick the scheduler (which re-runs
+      // every other gate). The read itself is not awaited and mutates nothing.
+      const watermark = summaryRow?.last_turn_id ?? 0;
+      const hasNewerContent = databaseService.getConversationMessagesAfter(sessionId, watermark).length > 0;
+      if (enabled && hasNewerContent) {
+        services.sessionSummaryScheduler?.maybeSummarizeNow(sessionId, 'lazy-catchup');
+      }
+
+      const payload: SessionSummaryPayload = {
+        enabled,
+        summary: summaryRow ? summaryRow.summary : null,
+        updatedAt: summaryRow ? summaryRow.updated_at : null,
+        entries: entryRows.map((row) => ({ id: row.id, entry: row.entry, createdAt: row.created_at })),
+      };
+      return { success: true, data: payload };
+    } catch (error) {
+      console.error('Failed to get session summary:', error);
+      return { success: false, error: 'Failed to get session summary' };
     }
   });
 

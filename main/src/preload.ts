@@ -15,6 +15,7 @@ import type {
   OpenArtifactHtmlExternalResult,
 } from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
+import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import {
   CLAUDE_DETECT_CHANNEL,
   CODEX_DETECT_CHANNEL,
@@ -241,6 +242,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getConversationMessages: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation-messages', sessionId),
     generateCompactedContext: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:generate-compacted-context', sessionId),
     markViewed: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:mark-viewed', sessionId),
+    getSummary: (sessionId: string): Promise<IPCResponse<SessionSummaryPayload>> => ipcRenderer.invoke('sessions:get-summary', sessionId),
     listQuick: (projectId?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:list-quick', projectId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     

@@ -8,6 +8,7 @@ import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
+import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 // Type for IPC response.
@@ -131,6 +132,11 @@ export class API {
     async markViewed(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.markViewed(sessionId);
+    },
+
+    async getSummary(sessionId: string): Promise<IPCResponse<SessionSummaryPayload>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.getSummary(sessionId);
     },
 
     async listQuick(projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> {
