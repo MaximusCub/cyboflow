@@ -13,6 +13,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { VerificationRequest } from '../../../hooks/useVerificationRequests';
 
@@ -69,6 +70,10 @@ function baseRow(over: Partial<VerificationRequest> = {}): VerificationRequest {
     delivery_state: null,
     snapshot_sha: null,
     enqueue_key: null,
+    // Origin-session columns (LEFT-JOINed by the list query) — a run with no
+    // session row reads back NULL on both.
+    session_id: 'sess-1',
+    session_name: 'twilight-leaf',
     ...over,
   };
 }
@@ -269,5 +274,178 @@ describe('VerifyQueueView', () => {
 
     expect(await screen.findByTestId('verify-queue-engine-vr-2')).toHaveTextContent('legacy');
     expect(screen.getByText(/pass · 92% — Looks correct/)).toBeInTheDocument();
+  });
+
+  // --- pending-first sectioning ------------------------------------------
+
+  it('lists in-flight requests above history, oldest-enqueued first', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      // The hook hands back newest-enqueued FIRST (the list query's order).
+      requests: [
+        baseRow({ id: 'vr-new-pending', status: 'running', enqueued_at: '2026-06-28T00:00:30.000Z' }),
+        baseRow({ id: 'vr-old-pending', status: 'queued', enqueued_at: '2026-06-28T00:00:10.000Z' }),
+        baseRow({ id: 'vr-done', status: 'passed', enqueued_at: '2026-06-28T00:00:05.000Z' }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    const pending = await screen.findByTestId('verify-queue-pending-list');
+    const history = screen.getByTestId('verify-queue-history-list');
+
+    // Section membership: terminal rows never appear in the pending section.
+    expect(pending).toContainElement(screen.getByTestId('verify-queue-row-vr-old-pending'));
+    expect(pending).toContainElement(screen.getByTestId('verify-queue-row-vr-new-pending'));
+    expect(history).toContainElement(screen.getByTestId('verify-queue-row-vr-done'));
+
+    // Pending is drain order (oldest first), not the newest-first list order.
+    const ids = Array.from(pending.children).map((el) => el.getAttribute('data-testid'));
+    expect(ids).toEqual(['verify-queue-row-vr-old-pending', 'verify-queue-row-vr-new-pending']);
+
+    // The pending section renders before history in the DOM.
+    expect(pending.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    expect(screen.getByTestId('verify-queue-pending-list-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('verify-queue-history-list-count')).toHaveTextContent('1');
+  });
+
+  it('shows a per-section empty line when one side of the split is empty', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-pending-list-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('verify-queue-history-list')).toBeInTheDocument();
+  });
+
+  // --- session pill --------------------------------------------------------
+
+  it('shows the origin-session pill, falling back to the run id when unattributed', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({ id: 'vr-1', session_name: 'twilight-leaf' }),
+        baseRow({ id: 'vr-2', run_id: 'run-orphan', session_id: null, session_name: null }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-session-vr-1')).toHaveTextContent('twilight-leaf');
+    expect(screen.getByTestId('verify-queue-session-vr-2')).toHaveTextContent('run-orphan');
+  });
+
+  // --- detail dialog -------------------------------------------------------
+
+  it('opens the detail dialog on card click and shows tested behaviors + criteria results', async () => {
+    const user = userEvent.setup();
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'failed',
+          task_json: JSON.stringify({
+            version: 1,
+            summary: 'Login redirects to the dashboard',
+            behaviors: [
+              { id: 'b1', description: 'Submit valid credentials', expected: 'Dashboard renders' },
+              { id: 'b2', description: 'Submit bad credentials', expected: 'Inline error renders' },
+            ],
+          }),
+          report_json: JSON.stringify({
+            version: 1,
+            behaviors: [
+              { id: 'b1', result: 'pass', evidence: { screenshots: ['dash.png'], notes: 'dashboard visible' } },
+              { id: 'b2', result: 'fail', evidence: { screenshots: [], notes: 'no error shown' } },
+            ],
+            screenshots: [{ fileName: 'dash.png', caption: 'Dashboard after login' }],
+            outcome: 'fail',
+            confidence: 0.8,
+            feedback: 'The error path regressed.',
+            issues: [],
+          }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    await user.click(await screen.findByTestId('verify-queue-row-vr-1'));
+
+    expect(await screen.findByTestId('verify-detail-modal')).toBeInTheDocument();
+    // What was tested.
+    expect(screen.getByTestId('verify-detail-summary')).toHaveTextContent(
+      'Login redirects to the dashboard',
+    );
+    expect(screen.getByText('Submit valid credentials')).toBeInTheDocument();
+    // Which criteria passed / failed.
+    expect(screen.getByTestId('verify-detail-result-b1')).toHaveTextContent('pass');
+    expect(screen.getByTestId('verify-detail-result-b2')).toHaveTextContent('fail');
+    // What was captured (the byte load fails without electronAPI — the tile
+    // still lists the file so the user knows what SHOULD be there).
+    expect(screen.getByTestId('verify-detail-screenshots')).toHaveTextContent('dash.png');
+    expect(screen.getByTestId('verify-detail-feedback')).toHaveTextContent('The error path regressed.');
+  });
+
+  it('renders a task behavior with no report entry as pending', async () => {
+    const user = userEvent.setup();
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'running',
+          task_json: JSON.stringify({
+            version: 1,
+            summary: 'Checks the dashboard',
+            behaviors: [{ id: 'b1', description: 'Loads', expected: 'Renders' }],
+          }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    await user.click(await screen.findByTestId('verify-queue-row-vr-1'));
+
+    expect(await screen.findByTestId('verify-detail-result-b1')).toHaveTextContent('pending');
+    expect(screen.getByTestId('verify-detail-no-screenshots')).toBeInTheDocument();
+  });
+
+  it('closes the detail dialog when the project filter changes', async () => {
+    const user = userEvent.setup();
+    getAllSpy.mockResolvedValue({
+      success: true,
+      data: [
+        { id: 1, name: 'ProjA', path: '/tmp/a' },
+        { id: 2, name: 'ProjB', path: '/tmp/b' },
+      ],
+    });
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1' })],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    await user.click(await screen.findByTestId('verify-queue-row-vr-1'));
+    expect(await screen.findByTestId('verify-detail-modal')).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByTestId('verify-queue-project-filter'), '2');
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('verify-detail-modal')).not.toBeInTheDocument(),
+    );
   });
 });

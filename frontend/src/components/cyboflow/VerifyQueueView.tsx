@@ -3,19 +3,29 @@
  *
  * A read-only, full-width observability view over the `verification_requests`
  * work queue. Live state comes from {@link useVerificationRequests} (the polling
- * list hook over `cyboflow.verificationRequests.list`). Per row it shows the
- * request id, verify type, an engine-identity chip (agent vs legacy — see
- * {@link isAgentEngineRow}), a status badge, the task summary, the current
- * backend + attempt counter, and a lifecycle/verdict summary line.
+ * list hook over `cyboflow.verificationRequests.list`).
+ *
+ * The panel is split into TWO sections, because the single newest-first list it
+ * used to render buried the thing the panel exists for: work still IN FLIGHT
+ * scrolls away under history as soon as a few requests finish.
+ *
+ *   - IN FLIGHT (top) — every non-terminal request (queued / leased / running),
+ *     oldest-enqueued FIRST, i.e. the order the scheduler actually drains them.
+ *   - HISTORY (below) — terminal requests, newest-first (the pre-existing order).
+ *
+ * Each card carries an ORIGIN-SESSION pill (`sessions.name`, LEFT-JOINed onto
+ * the row by the list query) so a queue shared by several parallel sessions is
+ * attributable at a glance, and is CLICKABLE — opening
+ * {@link VerifyRequestDetailModal}, which reads the composed task, the agent's
+ * per-behavior results, and the captured screenshots off the same row.
  *
  * verification-agent redesign §5.11: an agent-engine row (migration 078
  * `task_json` populated) carries a composed `VerificationTaskV1` instead of a
  * bare intent, and its terminal state is a `VerificationReportV1` in
- * `report_json` rather than a `VerdictV1` in `verdict_json` — a legacy-only
- * reader showed blank summaries and stale "Capturing / judging…" copy for
- * these rows. {@link taskSummary} / {@link statusSummary} branch on
- * {@link isAgentEngineRow} so both row formats render correctly; a legacy row
- * (`task_json === null`) renders byte-identical to before.
+ * `report_json` rather than a `VerdictV1` in `verdict_json`. The row derivations
+ * (engine identity, summary, status line) live in ./verifyRequestModel and are
+ * shared with the detail dialog; a legacy row (`task_json === null`) renders
+ * exactly as before.
  *
  * NO mutations originate here (Accept-as-baseline was retired outright, §5.10).
  * The header carries a project filter — the list query is project-scoped (no
@@ -34,166 +44,39 @@ import {
   useVerificationRequests,
   type VerificationRequest,
 } from '../../hooks/useVerificationRequests';
-import type {
-  RequestStatus,
-  VerdictV1,
-  VerificationRequestInput,
-  VerificationTaskV1,
-  VerificationReportV1,
-} from '../../../../shared/types/visualVerification';
-
-// ---------------------------------------------------------------------------
-// Status badge palette — same compact rounded-full pill convention as
-// SprintLanesPanel's lane-status pills, extended across the full RequestStatus
-// lifecycle.
-// ---------------------------------------------------------------------------
-
-const STATUS_PILL_CLASS: Readonly<Record<RequestStatus, string>> = {
-  queued: 'bg-bg-tertiary text-text-tertiary',
-  leased: 'bg-interactive/15 text-interactive',
-  running: 'bg-interactive/15 text-interactive',
-  passed: 'bg-status-success/15 text-status-success',
-  failed: 'bg-status-error/15 text-status-error',
-  low_confidence: 'bg-status-warning/15 text-status-warning',
-  skipped: 'bg-bg-tertiary text-text-tertiary',
-  timeout: 'bg-status-error/15 text-status-error',
-};
-
-// ---------------------------------------------------------------------------
-// JSON-column parsers — the JSON columns are stored as TEXT; the renderer
-// parses them defensively (a malformed payload degrades to a neutral fallback,
-// never throws and never blanks the panel).
-// ---------------------------------------------------------------------------
-
-/** Parse the serialized VerificationRequestInput; null on any parse failure. */
-function parseDeliverable(json: string): VerificationRequestInput | null {
-  try {
-    return JSON.parse(json) as VerificationRequestInput;
-  } catch {
-    return null;
-  }
-}
-
-/** Parse the serialized VerdictV1; null when absent or malformed. */
-function parseVerdict(json: string | null): VerdictV1 | null {
-  if (json === null) return null;
-  try {
-    return JSON.parse(json) as VerdictV1;
-  } catch {
-    return null;
-  }
-}
-
-/** Parse the serialized composed VerificationTaskV1 (migration 078 `task_json`); null when absent/malformed. */
-function parseTask(json: string | null): VerificationTaskV1 | null {
-  if (json === null) return null;
-  try {
-    const parsed = JSON.parse(json) as { summary?: unknown };
-    return typeof parsed.summary === 'string' ? (parsed as VerificationTaskV1) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Just the `outcome` member of a serialized `VerificationReportV1` (migration
- * 078 `report_json`) — §5.11 asks for the report OUTCOME only, not the whole
- * report (behaviors/evidence live on the screenshots artifact's "Behaviors
- * tested" table, §5.9).
- */
-function parseReportOutcome(json: string | null): VerificationReportV1['outcome'] | null {
-  if (json === null) return null;
-  try {
-    const parsed = JSON.parse(json) as { outcome?: unknown };
-    const outcome = parsed.outcome;
-    return outcome === 'pass' || outcome === 'fail' || outcome === 'build_failed' || outcome === 'launch_failed'
-      ? outcome
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Terminal request statuses — a row past this point has a final report/verdict (or none, if it failed to produce one). */
-const TERMINAL_STATUSES: ReadonlySet<RequestStatus> = new Set([
-  'passed',
-  'failed',
-  'low_confidence',
-  'skipped',
-  'timeout',
-]);
-
-/**
- * Engine identity: the CHEAPEST correct signal already on the row is
- * `task_json` presence — the dual-write contract (§5.2) populates it for
- * every request enqueued via the composed-task path (the agent engine), and
- * leaves it NULL for every legacy capture/judge request. The alternative
- * (joining the run's stamped `verify_chain`) needs a second read this
- * observability panel has no reason to pay for.
- */
-function isAgentEngineRow(req: VerificationRequest): boolean {
-  return req.task_json !== null;
-}
-
-/** The task summary line: the composed task's `summary` (agent rows), else the legacy `deliverable_json.intent`. */
-function taskSummary(req: VerificationRequest): string {
-  const task = parseTask(req.task_json);
-  if (task !== null) return task.summary.trim();
-  const deliverable = parseDeliverable(req.deliverable_json);
-  return deliverable?.intent?.trim() ?? '';
-}
-
-/** Agent-appropriate lifecycle copy for a non-terminal agent-engine row. */
-function agentLifecycleSummary(req: VerificationRequest): string {
-  if (req.status === 'queued' || req.status === 'leased') return 'Awaiting the verification agent';
-  if (req.status === 'running') return 'Agent building + driving the deliverable';
-  return 'No verdict yet';
-}
-
-/** Legacy capture/judge lifecycle copy for a non-terminal legacy-engine row (unchanged from pre-§5.11). */
-function legacyLifecycleSummary(req: VerificationRequest): string {
-  if (req.status === 'queued') return 'Awaiting a free capture slot';
-  if (req.status === 'leased' || req.status === 'running') return 'Capturing / judging…';
-  if (req.status === 'skipped') return 'No backend could satisfy this type';
-  return 'No verdict yet';
-}
-
-/**
- * A one-line status summary for a row: the judged VerdictV1 (legacy terminal
- * rows), else the report's `outcome` (agent terminal rows, §5.11), else the
- * last runtime error, else lifecycle-derived copy branched on engine identity.
- */
-function statusSummary(req: VerificationRequest, isAgent: boolean): string {
-  const verdict = parseVerdict(req.verdict_json);
-  if (verdict !== null) {
-    const pct = Math.round(verdict.confidence * 100);
-    const feedback = verdict.feedback.trim();
-    const head = `${verdict.status} · ${pct}%`;
-    return feedback.length > 0 ? `${head} — ${feedback}` : head;
-  }
-  if (TERMINAL_STATUSES.has(req.status)) {
-    const outcome = parseReportOutcome(req.report_json);
-    if (outcome !== null) return `report outcome: ${outcome.replace('_', ' ')}`;
-  }
-  if (req.error_message !== null && req.error_message.trim().length > 0) {
-    return req.error_message;
-  }
-  return isAgent ? agentLifecycleSummary(req) : legacyLifecycleSummary(req);
-}
+import { VerifyRequestDetailModal } from './VerifyRequestDetailModal';
+import {
+  STATUS_PILL_CLASS,
+  isAgentEngineRow,
+  isPending,
+  sessionLabel,
+  statusSummary,
+  taskSummary,
+} from './verifyRequestModel';
 
 // ---------------------------------------------------------------------------
 // Row
 // ---------------------------------------------------------------------------
 
-function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
+function VerifyQueueRow({
+  req,
+  onSelect,
+}: {
+  req: VerificationRequest;
+  onSelect: (req: VerificationRequest) => void;
+}): ReactElement {
   const isAgent = isAgentEngineRow(req);
   const summary = taskSummary(req);
   const status = statusSummary(req, isAgent);
+  const session = sessionLabel(req);
 
   return (
-    <div
+    <button
+      type="button"
       data-testid={`verify-queue-row-${req.id}`}
-      className="flex flex-col gap-1 rounded-card border border-border-primary bg-bg-primary p-3"
+      onClick={() => onSelect(req)}
+      title="Open verification detail"
+      className="flex w-full flex-col gap-1 rounded-card border border-border-primary bg-bg-primary p-3 text-left transition-colors hover:border-border-emphasized hover:bg-bg-hover focus:border-border-emphasized focus:outline-none"
     >
       <div className="flex items-center gap-2">
         <span className="font-mono text-[11px] text-text-tertiary">{req.id}</span>
@@ -208,6 +91,13 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
           {isAgent ? 'agent' : 'legacy'}
         </span>
         <span
+          data-testid={`verify-queue-session-${req.id}`}
+          className="max-w-[180px] truncate rounded-button bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-secondary"
+          title={`Session: ${session}`}
+        >
+          {session}
+        </span>
+        <span
           data-testid={`verify-queue-status-${req.id}`}
           className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_PILL_CLASS[req.status]}`}
         >
@@ -216,7 +106,7 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
       </div>
 
       {summary.length > 0 && (
-        <span className="truncate text-xs text-text-primary" title={summary}>
+        <span className="w-full truncate text-xs text-text-primary" title={summary}>
           {summary}
         </span>
       )}
@@ -227,10 +117,53 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
         <span className="font-mono">{req.run_id}</span>
       </div>
 
-      <span className="truncate text-[11px] text-text-secondary" title={status}>
+      <span className="w-full truncate text-[11px] text-text-secondary" title={status}>
         {status}
       </span>
-    </div>
+    </button>
+  );
+}
+
+/** A titled group of rows with a count chip; renders its own empty copy. */
+function QueueSection({
+  testId,
+  title,
+  hint,
+  rows,
+  emptyCopy,
+  onSelect,
+}: {
+  testId: string;
+  title: string;
+  hint: string;
+  rows: VerificationRequest[];
+  emptyCopy: string;
+  onSelect: (req: VerificationRequest) => void;
+}): ReactElement {
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex items-baseline gap-2">
+        <h2 className="eyebrow text-text-tertiary">{title}</h2>
+        <span
+          data-testid={`${testId}-count`}
+          className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-secondary"
+        >
+          {rows.length}
+        </span>
+        <span className="text-[10px] text-text-tertiary">{hint}</span>
+      </div>
+      {rows.length === 0 ? (
+        <p data-testid={`${testId}-empty`} className="text-xs text-text-tertiary">
+          {emptyCopy}
+        </p>
+      ) : (
+        <div data-testid={testId} className="flex flex-col gap-2">
+          {rows.map((req) => (
+            <VerifyQueueRow key={req.id} req={req} onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -244,6 +177,8 @@ export function VerifyQueueView(): ReactElement {
   // The selected project for the queue. Seeds from the active project; the user
   // can switch via the header filter. Null until a project is resolved.
   const [projectId, setProjectId] = useState<number | null>(activeProjectId);
+  // The request whose detail dialog is open (null = closed).
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // One-shot project load on mount (the ProjectFilter / SessionStartWizard
   // pattern). A failure leaves the list empty — the control degrades to the
@@ -275,7 +210,25 @@ export function VerifyQueueView(): ReactElement {
   const handleProjectChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const raw = event.target.value;
     setProjectId(raw === '' ? null : Number(raw));
+    // The dialog belongs to the previous project's queue — close it on switch.
+    setSelectedId(null);
   };
+
+  // Pending first (oldest-enqueued first = drain order), history after (the
+  // hook's newest-first order, untouched).
+  const { pending, history } = useMemo(() => {
+    const pendingRows = requests.filter(isPending).slice().reverse();
+    const historyRows = requests.filter((req) => !isPending(req));
+    return { pending: pendingRows, history: historyRows };
+  }, [requests]);
+
+  // Track the selection by ID, not by object identity: the poll hands back a new
+  // row object every time the request advances, and an open dialog must follow
+  // that row's live status rather than freezing on the snapshot it was opened on.
+  const selected = useMemo(
+    () => (selectedId === null ? null : requests.find((req) => req.id === selectedId) ?? null),
+    [requests, selectedId],
+  );
 
   const body = useMemo<ReactElement>(() => {
     if (projectId === null) {
@@ -305,13 +258,26 @@ export function VerifyQueueView(): ReactElement {
       );
     }
     return (
-      <div data-testid="verify-queue-list" className="flex flex-col gap-2">
-        {requests.map((req) => (
-          <VerifyQueueRow key={req.id} req={req} />
-        ))}
+      <div data-testid="verify-queue-list" className="flex flex-col gap-6">
+        <QueueSection
+          testId="verify-queue-pending-list"
+          title="In flight"
+          hint="oldest first — the order the scheduler drains them"
+          rows={pending}
+          emptyCopy="Nothing is waiting on verification right now."
+          onSelect={(req) => setSelectedId(req.id)}
+        />
+        <QueueSection
+          testId="verify-queue-history-list"
+          title="History"
+          hint="newest first"
+          rows={history}
+          emptyCopy="No verifications have finished yet."
+          onSelect={(req) => setSelectedId(req.id)}
+        />
       </div>
     );
-  }, [projectId, isLoading, requests]);
+  }, [projectId, isLoading, requests, pending, history]);
 
   return (
     <div
@@ -356,6 +322,8 @@ export function VerifyQueueView(): ReactElement {
       )}
 
       <div className="flex-1 overflow-y-auto p-5">{body}</div>
+
+      <VerifyRequestDetailModal request={selected} onClose={() => setSelectedId(null)} />
     </div>
   );
 }
