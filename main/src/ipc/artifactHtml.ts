@@ -148,6 +148,25 @@ function coerceAtype(atype: unknown): LoadArtifactHtmlAtype | null {
   return atype === 'ui-prototype' || atype === 'generic' ? atype : null;
 }
 
+/**
+ * Load the CANONICAL prototype HTML bytes for `(runId, atype)` — the RAW document
+ * (NO CSP injection, unlike the IPC handler), sourced from the live run subtree
+ * first, then the committed snapshot store. Reuses the SAME hardened loaders the
+ * `artifacts:load-html` handler uses (no duplicated path resolution). Exported for
+ * the design Approve snapshot step (designHandoffService), which stores the raw
+ * bytes and lets the render path inject the CSP. Fail-soft: null when absent /
+ * invalid / oversized.
+ */
+export async function loadCanonicalPrototypeHtml(
+  services: AppServices,
+  runId: string,
+  atype: string,
+): Promise<string | null> {
+  const subtree = await loadRunSubtreeHtml(runId);
+  if (subtree !== null) return subtree;
+  return loadCommittedStoreHtml(services, runId, atype);
+}
+
 export function registerArtifactHtmlHandlers(ipcMain: IpcMain, services: AppServices): void {
   ipcMain.handle(
     'artifacts:load-html',

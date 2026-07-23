@@ -20,7 +20,7 @@ import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
-import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
+import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
 import { shouldBlockArtifactFrameNavigation, isExternallyOpenable } from './ipc/artifactFrameGuard';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
@@ -49,6 +49,8 @@ import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
+import { DesignHandoffService } from './orchestrator/design/designHandoffService';
+import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
@@ -2781,6 +2783,18 @@ async function initializeServices() {
   // prototype/index.html for a ui-prototype/generic artifact (run subtree, else
   // the committed snapshot store) with a restrictive CSP <meta> injected.
   registerArtifactHtmlHandlers(ipcMain, services);
+  // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
+  // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
+  // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
+  // + snapshot base dir are injected here (electron-backed) so the service module
+  // stays standalone-typecheck-safe. loadPrototypeHtml returns the RAW canonical
+  // bytes (live subtree, else committed store); the render path injects the CSP.
+  DesignHandoffService.initialize({
+    db: cyboflowDb,
+    loadPrototypeHtml: (runId: string) => loadCanonicalPrototypeHtml(services, runId, 'ui-prototype'),
+    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
+    logger: cyboflowLogger,
+  });
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   
@@ -3137,6 +3151,22 @@ app.whenReady().then(async () => {
       await TaskChangeRouter.getInstance().sweepStaleDerivedStageTasks();
     } catch (sweepErr) {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
+    }
+
+    // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
+    // a previous process (state intent/snapshotted/folded) forward through the SAME
+    // step functions the first-run approve uses — a crash after the body fold cannot
+    // strand the operation (design-mode.md "Approve" Recovery). Non-fatal: the sweep
+    // is itself per-row fail-soft, and any top-level error is logged, never blocks boot.
+    try {
+      const designRecovery = await recoverDesignHandoffs(DesignHandoffService.getInstance().depsBag);
+      if (designRecovery.completed > 0 || designRecovery.unresolved > 0 || designRecovery.errored > 0) {
+        console.log(
+          `[Main] Recovered design handoffs (completed: ${designRecovery.completed}, unresolved: ${designRecovery.unresolved}, errored: ${designRecovery.errored})`,
+        );
+      }
+    } catch (designErr) {
+      console.warn('[Main] design-handoff recovery failed (continuing boot):', designErr instanceof Error ? designErr.message : String(designErr));
     }
 
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
