@@ -468,6 +468,26 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(composer).toHaveAttribute('data-interactive', 'true');
   });
 
+  it('`working` follows the LIVE store status, not the frozen SessionContext snapshot (codex Stop regression)', () => {
+    // CyboflowRoot's SessionProvider passes an `effectiveSession` resolved ONCE —
+    // its status never updates. Observed live: ctx said 'initializing' while the
+    // store (and the DB) said 'running', which froze composerWorking=false and
+    // hid Stop/Interrupt for the whole turn. Claude masked it via the live-tail
+    // isGenerating flag; codex-sdk emits no stream deltas, so Stop never showed.
+    const frozenCtx = makeSession({ id: 's1', status: 'initializing', agentRuntime: 'codex-sdk' });
+    const live = makeSession({ id: 's1', status: 'running', agentRuntime: 'codex-sdk' });
+    mocks.holder.activeSession = live;
+    useSessionStore.setState({ sessions: [live], activeSessionId: 's1', activeMainRepoSession: null });
+
+    render(
+      <SessionProvider session={frozenCtx} projectName="tester-mctest">
+        <ClaudePanel panel={PANEL} isActive />
+      </SessionProvider>,
+    );
+
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-working', 'true');
+  });
+
   it('reads a main-repo session from activeMainRepoSession so `working` tracks its live status', () => {
     // sessionStore.updateSession early-returns for the ACTIVE MAIN-REPO session,
     // writing only to activeMainRepoSession and leaving any `sessions` copy stale.

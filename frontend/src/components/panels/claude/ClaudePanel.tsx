@@ -204,7 +204,17 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // session (substrateSession), falling back to the global activeSession only
   // when neither context nor store copy is present — the global store
   // activeSession can point at a different / lagging session than this panel.
-  const paneSession = substrateSession ?? activeSession;
+  // Prefer the LIVE store copy here — deliberately the opposite preference from
+  // `substrateSession` above. The SessionContext session (CyboflowRoot's
+  // `effectiveSession`) is resolved ONCE and its `status` never updates: it was
+  // observed frozen at 'initializing' while the session was actually running,
+  // which froze `sessionRunning` → `composerWorking` → the Stop / Queue /
+  // Interrupt affordances. Claude hid that behind the live-tail isGenerating
+  // flag; codex-sdk emits no stream deltas, so its Stop button never appeared at
+  // all. substrateSession keeps its context-first preference because it is read
+  // for chatRunId / substrate, which the store copy can still be lagging on
+  // right after a quick-session create.
+  const paneSession = panelStoreSession ?? sessionCtx?.session ?? activeSession;
   const isInteractive = interactiveRunId !== null;
   const agentName =
     isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
