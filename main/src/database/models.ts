@@ -711,3 +711,34 @@ export interface ApprovedDesignRow {
   approved_at: string;
   superseded_at: string | null;
 }
+
+/**
+ * `session_summaries` row (migration 082) — one row per session, upserted in
+ * place by the idle-gated quick-session summarizer
+ * (docs/proposals/session-summary-plan.md §4). `summary` is the current
+ * 1-2 sentence rolling summary. `last_turn_id` is the content watermark —
+ * the highest `conversation_messages.id` already folded into the summary
+ * (§2.4); 0 means never summarized. `calls_count` / `cost_usd_total`
+ * accumulate across every summarizer call for the session (§3). Deleting the
+ * owning session cascades this row.
+ */
+export interface SessionSummary {
+  session_id: string;
+  summary: string;
+  last_turn_id: number;
+  calls_count: number;
+  cost_usd_total: number;
+  updated_at: string;
+}
+
+/**
+ * `session_summary_entries` row (migration 082) — one append-only "past
+ * sitting" history sentence per row, oldest first via `id ASC`. Deleting the
+ * owning session cascades these rows.
+ */
+export interface SessionSummaryEntry {
+  id: number;
+  session_id: string;
+  entry: string;
+  created_at: string;
+}

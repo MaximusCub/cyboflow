@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
-import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData } from './models';
+import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
@@ -3684,12 +3684,96 @@ export class DatabaseService {
 
   getPanelConversationMessageCount(panelId: string): number {
     const result = this.db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM conversation_messages 
+      SELECT COUNT(*) as count
+      FROM conversation_messages
       WHERE panel_id = ?
     `).get(panelId) as { count: number } | undefined;
-    
+
     return result?.count || 0;
+  }
+
+  // Content-watermark read for the idle-gated session summarizer (plan §2.4):
+  // only rows appended since `afterId` (the highest already-summarized
+  // conversation_messages.id) — AUTOINCREMENT `id`, never `timestamp`, is the
+  // monotonic key, mirroring getSessionTokenUsage's lastId pattern above.
+  getConversationMessagesAfter(sessionId: string, afterId: number): ConversationMessage[] {
+    return this.db.prepare(`
+      SELECT * FROM conversation_messages
+      WHERE session_id = ? AND id > ?
+      ORDER BY id ASC
+    `).all(sessionId, afterId) as ConversationMessage[];
+  }
+
+  // Session-summary operations (migration 082, session-summary-plan.md §4).
+  getSessionSummary(sessionId: string): SessionSummary | undefined {
+    return this.db.prepare(`
+      SELECT * FROM session_summaries WHERE session_id = ?
+    `).get(sessionId) as SessionSummary | undefined;
+  }
+
+  // Single UPSERT: replaces summary/last_turn_id with the freshly computed
+  // values, but ACCUMULATES calls_count/cost_usd_total across every call for
+  // the session (§3 cost surfacing). Never touches `sessions.updated_at` —
+  // the activity-clock contract (sessionUpdatedAtSemantics.test.ts).
+  upsertSessionSummary(params: { sessionId: string; summary: string; lastTurnId: number; costUsdDelta: number }): void {
+    this.db.prepare(`
+      INSERT INTO session_summaries (session_id, summary, last_turn_id, calls_count, cost_usd_total, updated_at)
+      VALUES (?, ?, ?, 1, ?, datetime('now'))
+      ON CONFLICT(session_id) DO UPDATE SET
+        summary = excluded.summary,
+        last_turn_id = excluded.last_turn_id,
+        calls_count = calls_count + 1,
+        cost_usd_total = cost_usd_total + excluded.cost_usd_total,
+        updated_at = datetime('now')
+    `).run(params.sessionId, params.summary, params.lastTurnId, params.costUsdDelta);
+  }
+
+  // Append-only per-sitting history sentences (§1), oldest first via id ASC.
+  appendSessionSummaryEntries(sessionId: string, entries: string[]): void {
+    if (entries.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO session_summary_entries (session_id, entry) VALUES (?, ?)
+    `);
+    const insertMany = this.db.transaction((rows: string[]) => {
+      for (const entry of rows) {
+        stmt.run(sessionId, entry);
+      }
+    });
+    insertMany(entries);
+  }
+
+  listSessionSummaryEntries(sessionId: string): SessionSummaryEntry[] {
+    return this.db.prepare(`
+      SELECT * FROM session_summary_entries
+      WHERE session_id = ?
+      ORDER BY id ASC
+    `).all(sessionId) as SessionSummaryEntry[];
+  }
+
+  // One transaction: re-checks the session still exists (it may have been
+  // deleted while the summarizer call was in flight) before writing, and
+  // returns false without touching either table if it hasn't.
+  persistSessionSummaryResult(params: {
+    sessionId: string;
+    summary: string;
+    lastTurnId: number;
+    costUsdDelta: number;
+    entries: string[];
+  }): boolean {
+    const persist = this.db.transaction(() => {
+      const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(params.sessionId);
+      if (!session) return false;
+
+      this.upsertSessionSummary({
+        sessionId: params.sessionId,
+        summary: params.summary,
+        lastTurnId: params.lastTurnId,
+        costUsdDelta: params.costUsdDelta,
+      });
+      this.appendSessionSummaryEntries(params.sessionId, params.entries);
+      return true;
+    });
+    return persist();
   }
 
   getSessionToolUsage(sessionId: string): {
