@@ -683,6 +683,15 @@ export default function SessionStartWizard(): React.JSX.Element {
     }
   }, []);
 
+  // Leaving the wizard while the decision is pending must not strand the
+  // pre-created host. A successful launch clears the ref before navigation;
+  // cancel and ordinary launch failures clear it through the helper above.
+  useEffect(() => {
+    return () => {
+      void cleanupUnusedHostedSession(pendingHostedSessionIdRef.current);
+    };
+  }, [cleanupUnusedHostedSession]);
+
   // ── Launch ───────────────────────────────────────────────────────────────
   const launchRun = useCallback(
     async (
@@ -945,7 +954,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   );
 
   const handleStart = useCallback(() => {
-    if (selection === null || startInFlightRef.current) return;
+    if (selection === null || startInFlightRef.current || mixedProviderPrompt !== null) return;
 
     if (selection.kind === 'quick') {
       const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
@@ -1051,7 +1060,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride, mixedProviderPrompt]);
 
   const handleIdeaPicked = useCallback(
     // `opts.separateIdeaIds` ("Plan separately", IDEA-009) is deliberately NOT
@@ -1799,7 +1808,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               <button
                 type="button"
                 onClick={handleStart}
-                disabled={selection === null || ctaBusy || workflowRuntimeBlocked}
+                disabled={selection === null || ctaBusy || workflowRuntimeBlocked || mixedProviderPrompt !== null}
                 data-testid="wizard-cta"
                 className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
               >

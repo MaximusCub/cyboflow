@@ -987,6 +987,7 @@ describe('SessionStartWizard — mixed-provider retry prompt', () => {
     expect(screen.getByTestId('mixed-provider-switch-confirm')).toBeInTheDocument();
     expect(screen.getByTestId('mixed-provider-switch-cancel')).toBeInTheDocument();
     expect(screen.getByTestId('mixed-provider-switch-prompt')).toHaveClass('sticky');
+    expect(screen.getByTestId('wizard-cta')).toBeDisabled();
     // No raw launch error rendered.
     expect(screen.queryByRole('alert')).toBeNull();
     expect(mockRunStart).toHaveBeenCalledOnce();
@@ -1050,6 +1051,35 @@ describe('SessionStartWizard — mixed-provider retry prompt', () => {
 
     expect(screen.queryByTestId('mixed-provider-switch-confirm')).toBeNull();
     expect(screen.getByRole('alert')).toHaveTextContent('boom');
+  });
+
+  it('reuses the pre-created session for the Sprint batch retry', async () => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+    mockRunStart.mockRejectedValueOnce(new Error('[MIXED_PROVIDER_REQUIRES_PROGRAMMATIC] needs programmatic'));
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-batch-pick'));
+    });
+    await screen.findByTestId('mixed-provider-switch-confirm');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mixed-provider-switch-confirm'));
+    });
+
+    expect(mockEnsureSession).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledTimes(2);
+    expect(mockRunStart.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        sessionId: 'session-ensured-001',
+        taskIds: ['IDEA-1', 'IDEA-2'],
+        executionModel: 'programmatic',
+      }),
+    );
   });
 });
 
