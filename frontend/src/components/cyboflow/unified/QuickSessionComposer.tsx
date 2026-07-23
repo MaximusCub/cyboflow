@@ -12,6 +12,9 @@ import { resolveChatVisibility } from './useChatVisibility';
 import type { AttachedImage, AttachedText, ComposerAttachments } from './attachments';
 import type { FastModeStateNotice } from '../../../../../shared/types/panels';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
+import type { Question } from '../../../../../shared/types/questions';
+import { useQuestionStore } from '../../../stores/questionStore';
+import { trpc } from '../../../trpc/client';
 
 /**
  * QuickSessionComposer — the panel-host adapter for the unified composer.
@@ -72,6 +75,14 @@ export interface QuickSessionComposerProps {
    * Naturally one-off: the main process only pushes fast-mode-state CHANGES.
    */
   onFastModeDeclined?: (message: string) => void;
+  /**
+   * The oldest pending AskUserQuestion gate for this session (keyed on the
+   * __quick__ chat_run_id sentinel), or null. While a gate is open the composer
+   * send ANSWERS it instead of continuing the conversation — the turn is parked
+   * inside the question hook, so a continue would either destructively abort it
+   * or starve on the claude-continue lock the parked turn is holding.
+   */
+  activeQuestion?: Question | null;
 }
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
@@ -92,6 +103,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     onPermissionApplied,
     onModelFallback,
     onFastModeDeclined,
+    activeQuestion = null,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
@@ -99,6 +111,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ?? (activeSession.agentRuntime?.startsWith('codex-') ? 'codex' : 'claude');
   const running = activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
+
+  // Question-gate answer plumbing: direct-answer submits reuse the card's
+  // trpc mutation; multi-question gates go through the card's Other-text bus.
+  const setOtherText = useQuestionStore((s) => s.setOtherText);
+  const clearOtherText = useQuestionStore((s) => s.clearOtherText);
 
   // Pending-send (optimistic echo). Keyed by the panel id — the same key the host
   // (ClaudePanel) uses as railId and reconciles against the transcript.
@@ -261,6 +278,29 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
           .catch(() => setInput(text));
         return;
       }
+      // SDK, question gate open: the turn is PARKED inside the AskUserQuestion
+      // hook awaiting the human's answer — the send IS the answer. A single-
+      // question gate is answered directly as free text (same payload the card's
+      // "Other" submit builds); a multi-question gate can't be answered by one
+      // text blob, so route the text onto the card's Other-input bus instead
+      // (mirrors ChatInput's workflow-question mode) and let the card submit.
+      // Checked BEFORE the `running` branch: a queued message would strand
+      // behind a gate only the card could clear.
+      if (activeQuestion != null) {
+        if (activeQuestion.questions.length === 1) {
+          const qp = activeQuestion.questions[0];
+          setInput('');
+          void trpc.cyboflow.questions.answer
+            .mutate({ questionId: activeQuestion.id, answers: { [qp.question]: text.trim() } })
+            .then(() => clearOtherText(activeQuestion.id))
+            .catch(() => setInput(text));
+        } else {
+          setOtherText(activeQuestion.id, text);
+          setInput('');
+        }
+        return;
+      }
+
       // SDK, mid-turn: the run is RUNNING, so continuing would destructively abort
       // the in-flight turn. Instead QUEUE the message (buffered server-side,
       // delivered at the turn's rest boundary) and show a distinct 'queued' row.
@@ -307,14 +347,19 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       setPendingStatus,
       handleSendInput,
       handleContinueConversation,
+      activeQuestion,
+      setOtherText,
+      clearOtherText,
     ],
   );
 
   const placeholder = interactive
     ? 'Message the live session…  (⌘↵ to send)'
-    : activeSession.status === 'waiting'
-      ? 'Enter your response…  (⌘↵ to send)'
-      : 'Write a command…  (⌘↵ to send)';
+    : activeQuestion != null
+      ? 'Answer the question…  (⌘↵ to send)'
+      : activeSession.status === 'waiting'
+        ? 'Enter your response…  (⌘↵ to send)'
+        : 'Write a command…  (⌘↵ to send)';
 
   const modelLabel = interactive
     ? null

@@ -1,4 +1,5 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import { AIPanelProps } from '../ai/AbstractAIPanel';
 import { useClaudePanel } from '../../../hooks/useClaudePanel';
 import { useConfigStore } from '../../../stores/configStore';
@@ -15,6 +16,8 @@ import { UnifiedChatView } from '../../cyboflow/unified/UnifiedChatView';
 import { useUnifiedPanelMessages } from '../../cyboflow/unified/useUnifiedPanelMessages';
 import { SessionActionToast } from '../../cyboflow/SessionActionToast';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
+import { useQuestionStore } from '../../../stores/questionStore';
+import { AskUserQuestionCard } from '../../AskUserQuestion/AskUserQuestionCard';
 import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
 import { LiveTail } from '../../chat/LiveTail';
 import { reduceLiveTail } from '../../../utils/liveTailReducer';
@@ -232,6 +235,42 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
       <LiveTail blocks={liveTailState.activeBlocks} agentName={agentName} />
     ) : undefined;
 
+  // -------------------------------------------------------------------------
+  // Pending AskUserQuestion gates for this quick session. Chat turns gate on
+  // the persistent __quick__ chat_run_id sentinel (the same key the approvals
+  // strip uses), so filter the global question queue by approvalRunId. Mirrors
+  // RunChatView's wiring: an inline card at the AskUserQuestion tool_use
+  // position when the transcript carries the anchor, plus a bottom fallback for
+  // questions with no transcript tool row to anchor against (the tool_use stays
+  // in-progress until the human answers, so the anchor can be absent — and the
+  // interactive substrate never renders ChatTranscript at all).
+  // -------------------------------------------------------------------------
+  const questionQueue = useQuestionStore((s) => s.queue);
+  const pendingQuestions = useMemo(
+    () => (approvalRunId === null ? [] : questionQueue.filter((q) => q.runId === approvalRunId)),
+    [questionQueue, approvalRunId],
+  );
+  const renderToolCallExtra = useCallback(
+    (toolCallId: string): ReactNode => {
+      const question = pendingQuestions.find((q) => q.toolUseId === toolCallId);
+      return question != null ? <AskUserQuestionCard item={question} /> : null;
+    },
+    [pendingQuestions],
+  );
+  const transcriptToolCallIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const message of messages) {
+      for (const segment of message.segments) {
+        if (segment.type === 'tool_call') ids.add(segment.tool.id);
+      }
+    }
+    return ids;
+  }, [messages]);
+  const unanchoredQuestions = useMemo(
+    () => pendingQuestions.filter((q) => !transcriptToolCallIds.has(q.toolUseId)),
+    [pendingQuestions, transcriptToolCallIds],
+  );
+
   if (!activeSession || !paneSession) {
     return (
       <div className="flex-1 flex items-center justify-center text-text-secondary">
@@ -298,6 +337,21 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // composer inside DemoTerminalView, so suppress the relay composer there.
   const bottomSlot = (
     <>
+      {/* Pending AskUserQuestion gates with no transcript anchor to render under
+          (in-progress tool_use not yet in the structured transcript, or the
+          interactive substrate whose xterm replaces ChatTranscript). Anchored
+          questions render inline via renderToolCallExtra instead. */}
+      {unanchoredQuestions.length > 0 && (
+        <div
+          className="shrink-0 mx-4 mb-2 overflow-hidden rounded border border-border-primary bg-bg-secondary"
+          data-testid="quick-session-unanchored-questions"
+        >
+          {unanchoredQuestions.map((question) => (
+            <AskUserQuestionCard key={question.id} item={question} />
+          ))}
+        </div>
+      )}
+
       {/* Inline permission prompts — surfaces ApprovalRouter approvals directly
           above the input. Returns null when there is no pending approval. */}
       <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
@@ -337,6 +391,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             onPermissionApplied={setPermissionToast}
             onModelFallback={setPermissionToast}
             onFastModeDeclined={setPermissionToast}
+            activeQuestion={pendingQuestions[0] ?? null}
           />
         ))}
 
@@ -364,6 +419,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         branchName={branchName}
         contextUsage={contextUsage}
         railId={panel.id}
+        renderToolCallExtra={renderToolCallExtra}
         interactiveBody={interactiveBody}
         bottomSlot={bottomSlot}
         pendingSends={isInteractive ? undefined : pendingSends}

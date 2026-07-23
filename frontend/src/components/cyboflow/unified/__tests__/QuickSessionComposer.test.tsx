@@ -52,11 +52,13 @@ vi.mock('../../../../utils/api', () => ({
 // mount; stub the tRPC client so the composer renders without a real IPC bridge.
 const mockMcpsList = vi.fn();
 const mockPluginsList = vi.fn();
+const mockAnswerQuestion = vi.fn();
 vi.mock('../../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       mcps: { list: { query: (...args: unknown[]) => mockMcpsList(...args) } },
       plugins: { list: { query: (...args: unknown[]) => mockPluginsList(...args) } },
+      questions: { answer: { mutate: (...args: unknown[]) => mockAnswerQuestion(...args) } },
     },
   },
 }));
@@ -88,7 +90,9 @@ vi.mock('../../../FilePathAutocomplete', () => ({
 
 import { QuickSessionComposer } from '../QuickSessionComposer';
 import { usePendingSendStore } from '../../../../stores/pendingSendStore';
+import { useQuestionStore } from '../../../../stores/questionStore';
 import type { Session } from '../../../../types/session';
+import type { Question } from '../../../../../../shared/types/questions';
 
 function makeSession(over: Partial<Session> = {}): Session {
   return {
@@ -112,6 +116,7 @@ function Harness(props: {
   onPermissionApplied?: (message: string) => void;
   onModelFallback?: (message: string) => void;
   onFastModeDeclined?: (message: string) => void;
+  activeQuestion?: Question | null;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -131,8 +136,31 @@ function Harness(props: {
       onPermissionApplied={props.onPermissionApplied}
       onModelFallback={props.onModelFallback}
       onFastModeDeclined={props.onFastModeDeclined}
+      activeQuestion={props.activeQuestion ?? null}
     />
   );
+}
+
+function makeQuestion(over: Partial<Question> = {}): Question {
+  return {
+    id: 'q-1',
+    runId: 'sentinel-run',
+    workflowName: 'quick',
+    toolUseId: 'tool-1',
+    questions: [
+      {
+        question: 'Which branch should I use?',
+        header: 'Branch',
+        multiSelect: false,
+        options: [{ label: 'main' }, { label: 'dev' }],
+      },
+    ],
+    status: 'pending',
+    createdAt: '2026-07-23T00:00:00.000Z',
+    answeredAt: null,
+    answerJson: null,
+    ...over,
+  };
 }
 
 beforeEach(() => {
@@ -152,7 +180,9 @@ beforeEach(() => {
   mockQueueInput.mockReset().mockResolvedValue({ success: true, data: { queued: true } });
   mockGetEffort.mockReset().mockResolvedValue({ success: true, data: null });
   mockSetEffort.mockReset().mockResolvedValue({ success: true });
+  mockAnswerQuestion.mockReset().mockResolvedValue(undefined);
   usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
+  useQuestionStore.setState({ queue: [], otherText: {} });
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -200,6 +230,90 @@ describe('QuickSessionComposer — SDK', () => {
     fireEvent.click(await screen.findByText('GPT-5.4'));
     expect(await screen.findByText('GPT-5.6 Sol')).toBeInTheDocument();
     expect(screen.queryByText(/Fable 5/)).toBeNull();
+  });
+});
+
+describe('QuickSessionComposer — pending question gate', () => {
+  it('answers a SINGLE-question gate directly as free text (no continue, no queue)', async () => {
+    const cont = vi.fn();
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        handleContinueConversation={cont}
+        activeQuestion={makeQuestion()}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).toHaveAttribute('placeholder', expect.stringContaining('Answer the question'));
+    fireEvent.change(textarea, { target: { value: 'use the dev branch' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() =>
+      expect(mockAnswerQuestion).toHaveBeenCalledWith({
+        questionId: 'q-1',
+        answers: { 'Which branch should I use?': 'use the dev branch' },
+      }),
+    );
+    // The gate answer must NOT also continue/queue — the turn is parked inside
+    // the question hook and resumes when the answer lands.
+    expect(cont).not.toHaveBeenCalled();
+    expect(mockQueueInput).not.toHaveBeenCalled();
+    // Draft cleared on dispatch.
+    expect((textarea as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('restores the draft when the direct answer mutation fails', async () => {
+    mockAnswerQuestion.mockRejectedValue(new Error('gate gone'));
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        activeQuestion={makeQuestion()}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'my answer' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toBe('my answer'));
+  });
+
+  it('routes a MULTI-question gate send onto the card Other-text bus instead of submitting', async () => {
+    const multi = makeQuestion({
+      questions: [
+        makeQuestion().questions[0],
+        { question: 'And which model?', header: 'Model', multiSelect: false, options: [{ label: 'opus' }, { label: 'sonnet' }] },
+      ],
+    });
+    render(
+      <Harness session={makeSession({ status: 'running' })} interactive={false} activeQuestion={multi} />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'free text for the card' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() =>
+      expect(useQuestionStore.getState().otherText['q-1']).toBe('free text for the card'),
+    );
+    expect(mockAnswerQuestion).not.toHaveBeenCalled();
+    expect((textarea as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('takes precedence over the running-state queue branch', async () => {
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        activeQuestion={makeQuestion()}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'answer wins' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => expect(mockAnswerQuestion).toHaveBeenCalled());
+    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 });
 

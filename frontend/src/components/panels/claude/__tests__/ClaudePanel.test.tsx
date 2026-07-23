@@ -31,7 +31,10 @@ import type { ReactNode } from 'react';
 // ---------------------------------------------------------------------------
 
 const mocks = vi.hoisted(() => {
-  const holder: { activeSession: unknown } = { activeSession: undefined };
+  const holder: { activeSession: unknown; messages: unknown[] } = {
+    activeSession: undefined,
+    messages: [],
+  };
   return { holder };
 });
 
@@ -138,6 +141,7 @@ vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
     isWaitingForResponse,
     interactiveBody,
     bottomSlot,
+    renderToolCallExtra,
   }: {
     name: string;
     transport: string;
@@ -145,6 +149,7 @@ vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
     isWaitingForResponse?: boolean;
     interactiveBody?: ReactNode;
     bottomSlot?: ReactNode;
+    renderToolCallExtra?: (toolCallId: string) => ReactNode;
   }) => (
     <div
       data-testid="unified-chat-view"
@@ -153,6 +158,9 @@ vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
       data-running={String(running)}
       data-waiting={String(isWaitingForResponse)}
     >
+      {/* Echo the inline extra for a fixed anchor id so tests can assert the
+          anchored AskUserQuestionCard injection without the real transcript. */}
+      <div data-testid="tool-call-extra-slot">{renderToolCallExtra?.('tool-1')}</div>
       {interactiveBody}
       {bottomSlot}
     </div>
@@ -161,8 +169,23 @@ vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
 
 // The panel-scoped message source is exercised in useUnifiedPanelMessages tests;
 // here it is stubbed so ClaudePanel's branch logic does not hit the panels API.
+// Reads the hoisted holder so question-anchoring tests can supply a transcript.
 vi.mock('../../../cyboflow/unified/useUnifiedPanelMessages', () => ({
-  useUnifiedPanelMessages: () => ({ messages: [], isLoading: false, loadError: null }),
+  useUnifiedPanelMessages: () => ({
+    messages: mocks.holder.messages,
+    isLoading: false,
+    loadError: null,
+  }),
+}));
+
+// The question card's internals (radio groups, trpc submit) are covered in
+// AskUserQuestionCard.test — stub it so these tests assert only the wiring.
+vi.mock('../../../AskUserQuestion/AskUserQuestionCard', () => ({
+  AskUserQuestionCard: ({ item }: { item: { id: string } }) => (
+    <div data-testid="ask-user-question-card" data-question-id={item.id}>
+      AskUserQuestionCard:{item.id}
+    </div>
+  ),
 }));
 
 // The composer is now the shared QuickSessionComposer; its send behavior lives
@@ -173,10 +196,12 @@ vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
     interactive,
     ptyOpen,
     activeSession,
+    activeQuestion,
   }: {
     interactive: boolean;
     ptyOpen?: boolean;
     activeSession?: { id?: string; effort?: string };
+    activeQuestion?: { id: string } | null;
   }) => (
     <div
       data-testid="quick-session-composer"
@@ -184,6 +209,7 @@ vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
       data-pty-open={String(ptyOpen)}
       data-session-id={activeSession?.id ?? ''}
       data-effort={activeSession?.effort ?? ''}
+      data-active-question={activeQuestion?.id ?? ''}
     >
       QuickSessionComposer
     </div>
@@ -204,8 +230,10 @@ import { ClaudePanel, __resetDeclinedResumeForTests } from '../ClaudePanel';
 import { SessionProvider } from '../../../../contexts/SessionContext';
 import { useSessionStore } from '../../../../stores/sessionStore';
 import { usePendingSendStore } from '../../../../stores/pendingSendStore';
+import { useQuestionStore } from '../../../../stores/questionStore';
 import type { Session } from '../../../../types/session';
 import type { ToolPanel } from '../../../../../../shared/types/panels';
+import type { Question } from '../../../../../../shared/types/questions';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,10 +283,34 @@ function renderWithProvider(session: Session) {
   );
 }
 
+function makeQuestion(overrides: Partial<Question> = {}): Question {
+  return {
+    id: 'q-1',
+    runId: 'run-q1',
+    workflowName: 'quick',
+    toolUseId: 'tool-1',
+    questions: [
+      {
+        question: 'Which branch?',
+        header: 'Branch',
+        multiSelect: false,
+        options: [{ label: 'main' }, { label: 'dev' }],
+      },
+    ],
+    status: 'pending',
+    createdAt: '2026-07-23T00:00:00.000Z',
+    answeredAt: null,
+    answerJson: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mocks.holder.activeSession = undefined;
+  mocks.holder.messages = [];
   useSessionStore.setState({ sessions: [], activeSessionId: null, activeMainRepoSession: null });
   usePendingSendStore.setState({ byHost: {} });
+  useQuestionStore.setState({ queue: [], otherText: {} });
   mockSendInput.mockReset();
   // Default: sendInput succeeds.
   mockSendInput.mockResolvedValue({ success: true });
@@ -411,6 +463,74 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(composer).toHaveAttribute('data-session-id', 's1');
     expect(composer).toHaveAttribute('data-effort', 'ultracode');
     expect(composer).toHaveAttribute('data-interactive', 'true');
+  });
+
+  // -------------------------------------------------------------------------
+  // Pending AskUserQuestion gates (quick-session inline question cards)
+  // -------------------------------------------------------------------------
+  describe('pending AskUserQuestion gates', () => {
+    it('renders an UNANCHORED pending question above the composer when the transcript has no tool anchor', () => {
+      useQuestionStore.setState({ queue: [makeQuestion({ toolUseId: 'tool-unseen' })] });
+      renderWithProvider(makeSession({ runId: 'run-q1' }));
+
+      const block = screen.getByTestId('quick-session-unanchored-questions');
+      expect(block).toBeInTheDocument();
+      expect(screen.getByTestId('ask-user-question-card')).toHaveAttribute(
+        'data-question-id',
+        'q-1',
+      );
+      // The composer flips into answer mode for the same gate.
+      expect(screen.getByTestId('quick-session-composer')).toHaveAttribute(
+        'data-active-question',
+        'q-1',
+      );
+    });
+
+    it('renders an ANCHORED pending question inline at its tool_use position (not in the bottom block)', () => {
+      // The transcript carries the tool_call anchor 'tool-1' (the id the
+      // UnifiedChatView stub echoes through renderToolCallExtra).
+      mocks.holder.messages = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          segments: [{ type: 'tool_call', tool: { id: 'tool-1', name: 'AskUserQuestion' } }],
+        },
+      ];
+      useQuestionStore.setState({ queue: [makeQuestion({ toolUseId: 'tool-1' })] });
+      renderWithProvider(makeSession({ runId: 'run-q1' }));
+
+      // Inline card injected at the anchor…
+      const extraSlot = screen.getByTestId('tool-call-extra-slot');
+      expect(extraSlot).toHaveTextContent('AskUserQuestionCard:q-1');
+      // …and NOT duplicated in the unanchored bottom block.
+      expect(screen.queryByTestId('quick-session-unanchored-questions')).not.toBeInTheDocument();
+    });
+
+    it("ignores questions belonging to a different run (another session's gate)", () => {
+      useQuestionStore.setState({ queue: [makeQuestion({ runId: 'other-run' })] });
+      renderWithProvider(makeSession({ runId: 'run-q1' }));
+
+      expect(screen.queryByTestId('ask-user-question-card')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('quick-session-unanchored-questions')).not.toBeInTheDocument();
+      expect(screen.getByTestId('quick-session-composer')).toHaveAttribute(
+        'data-active-question',
+        '',
+      );
+    });
+
+    it('keys questions on chatRunId (the __quick__ sentinel), not the latest flow runId', () => {
+      useQuestionStore.setState({
+        queue: [makeQuestion({ runId: 'sentinel-run', toolUseId: 'tool-unseen' })],
+      });
+      renderWithProvider(
+        makeSession({ runId: 'flow-run', chatRunId: 'sentinel-run' }),
+      );
+
+      expect(screen.getByTestId('ask-user-question-card')).toHaveAttribute(
+        'data-question-id',
+        'q-1',
+      );
+    });
   });
 
   // -------------------------------------------------------------------------

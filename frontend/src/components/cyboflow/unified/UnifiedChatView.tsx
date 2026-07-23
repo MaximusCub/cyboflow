@@ -114,7 +114,8 @@ export interface UnifiedChatViewProps {
   interactiveBody?: ReactNode;
   /**
    * Inject extra UI directly beneath a tool_call at its tool_use position (the
-   * workflow-run inline AskUserQuestionCard). No-op for the quick-session host.
+   * inline AskUserQuestionCard — passed by BOTH hosts: RunChatView keyed on the
+   * run id, ClaudePanel keyed on the quick session's chat_run_id sentinel).
    */
   renderToolCallExtra?: (toolCallId: string) => ReactNode;
   /**
