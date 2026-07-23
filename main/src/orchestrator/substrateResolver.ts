@@ -33,6 +33,12 @@ export const SUBSTRATE_ENV_VAR = 'CYBOFLOW_SUBSTRATE';
  */
 export interface SubstrateResolverInputs {
   /**
+   * Optional per-panel override for a panel continuation. This is deliberately
+   * above the run/session defaults: an added chat may opt into a different CLI
+   * substrate while the session-level value remains unchanged.
+   */
+  panelOverrideSubstrate?: string | null;
+  /**
    * Explicit per-run choice from the run-launch UI (WorkflowPicker → runs.start
    * → RunLauncher.launch → createRun). HIGHEST precedence — a deliberate
    * per-launch override beats any standing default. IDEA-013 / TASK-812.
@@ -67,6 +73,7 @@ export function resolveSubstrate(inputs: SubstrateResolverInputs): CliSubstrate 
   const env = inputs.env ?? process.env;
 
   const candidates: Array<string | null | undefined> = [
+    inputs.panelOverrideSubstrate,
     inputs.requestedSubstrate,
     inputs.frontmatterSubstrate,
     inputs.projectConfigSubstrate,

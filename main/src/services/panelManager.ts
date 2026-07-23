@@ -175,7 +175,10 @@ export class PanelManager {
     });
   }
   
-  async updatePanel(panelId: string, updates: Partial<ToolPanel>): Promise<void> {
+  async updatePanel(
+    panelId: string,
+    updates: Omit<Partial<ToolPanel>, 'substrate'> & { substrate?: ToolPanel['substrate'] | null },
+  ): Promise<void> {
     return await withLock(`panel-update-${panelId}`, async () => {
       const panel = this.getPanel(panelId);
       if (!panel) {

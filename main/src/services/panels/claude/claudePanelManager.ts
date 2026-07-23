@@ -7,7 +7,9 @@ import { AIPanelConfig, StartPanelConfig, ContinuePanelConfig } from '../../../.
 import { ClaudePanelState } from '../../../../../shared/types/panels';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
-import { panelManager } from '../../panelManager';
+import { resolveSubstrate } from '../../../orchestrator/substrateResolver';
+
+export type PanelSubstrateLookup = (panelId: string) => CliSubstrate | null | undefined;
 
 /**
  * Manager for Claude Code panels
@@ -21,17 +23,29 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
     logger?: Logger,
     configManager?: ConfigManager,
     interactiveCliManager?: AbstractCliManager,
+    panelSubstrateLookup?: PanelSubstrateLookup,
   ) {
     super(claudeCodeManager, sessionManager, logger, configManager, interactiveCliManager ? [interactiveCliManager] : []);
     this.interactiveCliManager = interactiveCliManager;
+    this.panelSubstrateLookup = panelSubstrateLookup;
   }
 
   private readonly interactiveCliManager?: AbstractCliManager;
+  private readonly panelSubstrateLookup?: PanelSubstrateLookup;
 
   protected getCliManager(panelId: string): AbstractCliManager {
-    const panel = panelManager.getPanel(panelId);
-    const session = panel ? this.sessionManager.getDbSession(panel.sessionId) : undefined;
-    const substrate: CliSubstrate = panel?.substrate ?? session?.substrate ?? 'sdk';
+    const sessionId = this.panelMappings.get(panelId)?.sessionId;
+    const session = sessionId && typeof this.sessionManager.getDbSession === 'function'
+      ? this.sessionManager.getDbSession(sessionId)
+      : undefined;
+    const substrate = resolveSubstrate({
+      panelOverrideSubstrate: this.panelSubstrateLookup?.(panelId),
+      requestedSubstrate: session?.substrate,
+      // Panel routing inherits only the session value. Do not consult the
+      // process environment here: doing so would change legacy session-level
+      // routing for panels without an override.
+      env: {},
+    });
     if (substrate === 'interactive' && this.interactiveCliManager) {
       return this.interactiveCliManager;
     }

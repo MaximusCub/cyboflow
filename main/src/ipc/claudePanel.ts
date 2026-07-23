@@ -20,6 +20,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       logger,
       configManager,
       this.services.interactiveCliManager,
+      (panelId) => panelManager.getPanel(panelId)?.substrate,
     );
   }
 

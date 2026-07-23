@@ -35,6 +35,30 @@ function makeManager() {
   return { cli, manager };
 }
 
+function makeRoutingManager(panelSubstrate: 'sdk' | 'interactive' | null, sessionSubstrate?: 'sdk' | 'interactive') {
+  const sdk = Object.assign(new EventEmitter(), {
+    startPanel: vi.fn(async () => {}),
+    continuePanel: vi.fn(async () => {}),
+  });
+  const interactive = Object.assign(new EventEmitter(), {
+    startPanel: vi.fn(async () => {}),
+    continuePanel: vi.fn(async () => {}),
+  });
+  const sessionManager = {
+    getDbSession: vi.fn(() => (sessionSubstrate ? { substrate: sessionSubstrate } : undefined)),
+  };
+  const manager = new ClaudePanelManager(
+    sdk as unknown as AbstractCliManager,
+    sessionManager as unknown as SessionManager,
+    undefined,
+    undefined,
+    interactive as unknown as AbstractCliManager,
+    () => panelSubstrate,
+  );
+  manager.registerPanel('panel-1', 'sess-1');
+  return { sdk, interactive, manager };
+}
+
 describe('ClaudePanelManager fast-mode threading', () => {
   it('legacy startPanel signature threads fastMode through to the cli manager', async () => {
     const { cli, manager } = makeManager();
@@ -76,5 +100,40 @@ describe('ClaudePanelManager fast-mode threading', () => {
     expect(cli.continuePanel).toHaveBeenCalledWith(
       'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', undefined, undefined,
     );
+  });
+});
+
+describe('ClaudePanelManager panel substrate routing', () => {
+  it('routes an interactive panel override through the interactive manager', async () => {
+    const { sdk, interactive, manager } = makeRoutingManager('interactive', 'sdk');
+
+    await manager.continuePanel('panel-1', '/wt', 'hi', [], 'opus', true);
+
+    expect(interactive.continuePanel).toHaveBeenCalledWith(
+      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus',
+    );
+    expect(sdk.continuePanel).not.toHaveBeenCalled();
+  });
+
+  it('inherits the session substrate when the panel has no override', async () => {
+    const { sdk, interactive, manager } = makeRoutingManager(null, 'interactive');
+
+    await manager.continuePanel('panel-1', '/wt', 'hi', [], 'opus');
+
+    expect(interactive.continuePanel).toHaveBeenCalledWith(
+      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus',
+    );
+    expect(sdk.continuePanel).not.toHaveBeenCalled();
+  });
+
+  it('keeps the SDK path when the panel override is absent and the session is legacy/SDK', async () => {
+    const { sdk, interactive, manager } = makeRoutingManager(null, 'sdk');
+
+    await manager.continuePanel('panel-1', '/wt', 'hi', [], 'opus', true);
+
+    expect(sdk.continuePanel).toHaveBeenCalledWith(
+      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', true, undefined,
+    );
+    expect(interactive.continuePanel).not.toHaveBeenCalled();
   });
 });

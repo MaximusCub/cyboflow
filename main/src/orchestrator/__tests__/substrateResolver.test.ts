@@ -42,6 +42,23 @@ describe('resolveSubstrate — override ladder', () => {
     expect(result).toBe('interactive');
   });
 
+  it('panelOverrideSubstrate wins over session/run defaults for panel routing', () => {
+    expect(resolveSubstrate({
+      panelOverrideSubstrate: 'interactive',
+      requestedSubstrate: 'sdk',
+      globalDefaultSubstrate: 'sdk',
+      env: { [SUBSTRATE_ENV_VAR]: 'sdk' },
+    })).toBe('interactive');
+  });
+
+  it('an absent panel override preserves the inherited session value', () => {
+    expect(resolveSubstrate({
+      panelOverrideSubstrate: undefined,
+      requestedSubstrate: 'interactive',
+      env: {},
+    })).toBe('interactive');
+  });
+
   it('an absent/invalid requestedSubstrate falls through to the next level (fail-soft)', () => {
     // Picker not consulted (undefined) → frontmatter wins.
     expect(
