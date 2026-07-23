@@ -22,6 +22,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const gateMocks = vi.hoisted(() => ({
+  clearQuestion: vi.fn(),
+  clearApproval: vi.fn(),
+}));
+
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
   app: {
@@ -42,6 +47,25 @@ vi.mock('../../services/panelManager', () => ({
 
 vi.mock('../../services/database', () => ({
   databaseService: { getSession: vi.fn(() => undefined) },
+}));
+
+// session.ts imports telemetry for the renderer-facing dismiss event. Keep the
+// focused IPC harness independent of Sentry's Electron runtime module, which
+// expects Electron's native named exports under the host Node test runner.
+vi.mock('../../services/telemetry', () => ({
+  trackUsage: vi.fn(),
+}));
+
+vi.mock('../../orchestrator/questionRouter', () => ({
+  QuestionRouter: {
+    getInstance: vi.fn(() => ({ clearPendingForRun: gateMocks.clearQuestion })),
+  },
+}));
+
+vi.mock('../../orchestrator/approvalRouter', () => ({
+  ApprovalRouter: {
+    getInstance: vi.fn(() => ({ clearPendingForRun: gateMocks.clearApproval })),
+  },
 }));
 
 import { registerSessionHandlers } from '../session';
@@ -178,6 +202,8 @@ function register(services: AppServices) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  gateMocks.clearQuestion.mockReset();
+  gateMocks.clearApproval.mockReset();
   vi.mocked(panelManager.getPanelsForSession).mockReturnValue([]);
 });
 
@@ -231,9 +257,69 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
     expect(made.killLiveSession.mock.invocationCallOrder[0]).toBeLessThan(
       made.removeWorktree.mock.invocationCallOrder[0],
     );
+    // The process must also be gone before the session archive write, not merely
+    // before the later background worktree cleanup.
+    expect(made.killLiveSession.mock.invocationCallOrder[0]).toBeLessThan(
+      made.archiveSession.mock.invocationCallOrder[0],
+    );
   });
 
-  it('does NOT kill a live REPL for an SDK-substrate session', async () => {
+  it('cancels hosted SDK/quick-agent runs BEFORE archiving and removing the worktree', async () => {
+    const made = makeServices({
+      id: 's1',
+      substrate: 'sdk',
+      worktree_name: 'wt-s1',
+      project_id: 7,
+      is_main_repo: false,
+      name: 'sess',
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('s1');
+    expect(made.cancelHostedRuns.mock.invocationCallOrder[0]).toBeLessThan(
+      made.archiveSession.mock.invocationCallOrder[0],
+    );
+    expect(made.archiveSession.mock.invocationCallOrder[0]).toBeLessThan(
+      made.removeWorktree.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('stops a live Claude SDK panel BEFORE archiving and removing the worktree', async () => {
+    const made = makeServices({
+      id: 's1',
+      substrate: 'sdk',
+      agent_runtime: 'claude-sdk',
+      worktree_name: 'wt-s1',
+      project_id: 7,
+      is_main_repo: false,
+      name: 'sess',
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: 'panel-claude-sdk',
+      sessionId: 's1',
+      type: 'claude',
+      title: 'Claude',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(made.stopClaudePanel).toHaveBeenCalledWith('panel-claude-sdk');
+    expect(made.stopClaudePanel.mock.invocationCallOrder[0]).toBeLessThan(
+      made.archiveSession.mock.invocationCallOrder[0],
+    );
+    expect(made.archiveSession.mock.invocationCallOrder[0]).toBeLessThan(
+      made.removeWorktree.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('kills a live SDK quick-agent fallback BEFORE archiving the session', async () => {
     const made = makeServices({
       id: 's1',
       substrate: 'sdk',
@@ -242,8 +328,13 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
     });
     const handlers = register(made.services);
 
-    await invoke(handlers, 'sessions:delete', 's1');
-    expect(made.killLiveSession).not.toHaveBeenCalled();
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(made.killLiveSession).toHaveBeenCalledWith('chat-run-9');
+    expect(made.killLiveSession.mock.invocationCallOrder[0]).toBeLessThan(
+      made.archiveSession.mock.invocationCallOrder[0],
+    );
   });
 
   it('cancels a Codex SDK turn by its live panel before removing the worktree', async () => {
