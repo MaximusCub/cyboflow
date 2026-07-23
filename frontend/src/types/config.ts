@@ -28,6 +28,10 @@ export interface AppConfig {
   // read-only filesystem tools (each an exact project path). Absent/empty ⇒
   // every project folder is readable (the default).
   assistantExcludedProjectPaths?: string[];
+  // Session-summary global on/off; absent ⇒ enabled. When false, the idle-
+  // debounced scheduler and lazy catch-up kick fire no Haiku calls (zero
+  // tokens) and the session canvas hides the summary card.
+  sessionSummaryEnabled?: boolean;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive

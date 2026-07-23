@@ -274,6 +274,17 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Session-summary global on/off — consulted by the idle-debounced scheduler
+   * and the lazy catch-up kick before firing the Haiku summarizer call. Floors
+   * to TRUE (enabled) when unset, so existing users keep summaries on. Like
+   * `assistantEnabled`, NOT seeded into constructor defaults, so existing
+   * config.json files stay byte-identical for users who never touch the toggle.
+   */
+  isSessionSummaryEnabled(): boolean {
+    return this.config.sessionSummaryEnabled !== false;
+  }
+
+  /**
    * How the assistant's standing SDK conversation handles the local-day
    * boundary, consumed by AgentThreadService per turn (a Settings change takes
    * effect on the very next turn, no restart). Floors absent OR invalid stored

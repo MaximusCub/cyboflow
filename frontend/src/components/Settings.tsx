@@ -83,6 +83,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // start fresh (default), start with a /compact, or rely on SDK auto-compaction.
   const [assistantContextRetention, setAssistantContextRetention] =
     useState<AssistantContextRetention>('clear-daily');
+  // Idle-session summary global on/off (default ON). Off means no Haiku calls
+  // fire on idle and the session canvas hides the summary card. Independent of
+  // assistantEnabled — it lives on this tab but is not gated by the rail toggle.
+  const [sessionSummaryEnabled, setSessionSummaryEnabled] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
@@ -185,6 +189,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setAssistantEnabled(data.assistantEnabled !== false);
       setAssistantFolderPathsText((data.assistantFolderAccess ?? []).join('\n'));
       setAssistantContextRetention(data.assistantContextRetention ?? 'clear-daily');
+      setSessionSummaryEnabled(data.sessionSummaryEnabled !== false);
       setExcludedProjectPaths(new Set(data.assistantExcludedProjectPaths ?? []));
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
@@ -254,6 +259,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Always the explicit value — updateConfig merges partials, so sending
         // undefined for the default would fail to overwrite a stored override.
         assistantContextRetention,
+        // Explicit boolean, never undefined — same reasoning as assistantEnabled.
+        sessionSummaryEnabled,
         // Explicit array (possibly empty) so re-enabling a folder clears the
         // stored exclusion; only paths of still-registered projects are kept.
         assistantExcludedProjectPaths: projects
@@ -1187,6 +1194,24 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     compaction, so context accumulates across days.
                   </p>
                 </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Session summaries"
+                description="Idle-session summaries on the quick-session canvas"
+                icon={<FileText className="w-4 h-4" />}
+              >
+                <Switch
+                  id="session-summary-enabled"
+                  label="Summarize idle sessions"
+                  checked={sessionSummaryEnabled}
+                  onCheckedChange={setSessionSummaryEnabled}
+                />
+                <p className="text-xs text-text-tertiary mt-2">
+                  After a Claude quick session sits idle for 5 minutes, a small Haiku call updates
+                  its summary and history on the session canvas. Fractions of a cent per sitting;
+                  off means no calls and the canvas hides the summary.
+                </p>
               </SettingsSection>
             </CollapsibleCard>
 

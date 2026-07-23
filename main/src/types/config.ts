@@ -73,6 +73,12 @@ export interface AppConfig {
   // NOT seeded into constructor defaults (config.json stays byte-identical for
   // users who never exclude a folder).
   assistantExcludedProjectPaths?: string[];
+  // Session-summary global on/off; absent ⇒ enabled. When false, the idle-
+  // debounced scheduler and lazy catch-up kick fire no Haiku calls (zero
+  // tokens) — enforced authoritatively via ConfigManager.isSessionSummaryEnabled(),
+  // and the sessions:get-summary response carries enabled: false so the
+  // renderer hides the summary card without a separate config fetch.
+  sessionSummaryEnabled?: boolean;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -217,6 +223,8 @@ export interface UpdateConfigRequest {
   assistantContextRetention?: AssistantContextRetention;
   // Project folders excluded from the assistant's fs tools (see AppConfig.assistantExcludedProjectPaths).
   assistantExcludedProjectPaths?: string[];
+  // Session-summary global on/off (see AppConfig.sessionSummaryEnabled).
+  sessionSummaryEnabled?: boolean;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK

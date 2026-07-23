@@ -127,6 +127,69 @@ describe('Settings — Assistant tab', () => {
     );
   });
 
+  describe('session summaries', () => {
+    it('loads checked by default (absent ⇒ ON)', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      expect(await screen.findByLabelText('Summarize idle sessions')).toBeChecked();
+    });
+
+    it('reflects a stored false value as unchecked', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ sessionSummaryEnabled: false }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      expect(await screen.findByLabelText('Summarize idle sessions')).not.toBeChecked();
+    });
+
+    it('toggling off and saving carries sessionSummaryEnabled: false into API.config.update', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const toggle = await screen.findByLabelText('Summarize idle sessions');
+      fireEvent.click(toggle);
+      expect(toggle).not.toBeChecked();
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionSummaryEnabled: false }),
+        ),
+      );
+    });
+
+    it('saving without touching the switch still sends the explicit default (merge-partial guard)', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+      await screen.findByLabelText('Summarize idle sessions');
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionSummaryEnabled: true }),
+        ),
+      );
+    });
+
+    it('stays interactive when the assistant toggle is off (not wrapped in the disable overlay)', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantEnabled: false }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const assistantToggle = await screen.findByLabelText('Enable assistant');
+      expect(assistantToggle).not.toBeChecked();
+
+      const summaryToggle = screen.getByLabelText('Summarize idle sessions');
+      expect(summaryToggle).toBeChecked();
+      fireEvent.click(summaryToggle);
+      expect(summaryToggle).not.toBeChecked();
+    });
+  });
+
   describe('project folder access', () => {
     it('lists each registered project with an access toggle, on by default', async () => {
       render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
