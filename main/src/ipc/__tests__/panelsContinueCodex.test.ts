@@ -42,6 +42,14 @@ vi.mock('../../services/database', () => ({
   databaseService: { getSession: vi.fn(() => undefined) },
 }));
 
+vi.mock('../../orchestrator/agentInvocationStore', () => ({
+  AgentInvocationStore: class {
+    getLatestTopLevelResumeTarget() {
+      return undefined;
+    }
+  },
+}));
+
 // Always-valid panel/session so the handler reaches the codex branch.
 vi.mock('../../utils/sessionValidation', () => ({
   validateSessionExists: vi.fn(() => ({ valid: true })),
@@ -72,10 +80,16 @@ function invoke(handlers: Map<string, Handler>, channel: string, ...args: unknow
 
 const CODEX_PANEL = { id: 'panel-1', sessionId: 's1', type: 'claude' } as never;
 
+type CodexHandler = (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => void;
+
 function makeServices(over: { isPanelRunning: boolean }) {
-  const isPanelRunning = vi.fn(() => over.isPanelRunning);
+  // Mutable so a test can flip the panel idle (as the real 'exit' does) and then
+  // drive the queue flush.
+  const state = { running: over.isPanelRunning };
+  const isPanelRunning = vi.fn(() => state.running);
   const stopPanel = vi.fn(async () => {});
-  const spawnCliProcess = vi.fn(async () => {});
+  const spawnCliProcess = vi.fn(async (_options: Record<string, unknown>) => {});
+  const codexHandlers = new Map<string, CodexHandler>();
   const services = {
     sessionManager: {
       getDbSession: vi.fn(() => ({ id: 's1', agent_runtime: 'codex-sdk' })),
@@ -86,16 +100,26 @@ function makeServices(over: { isPanelRunning: boolean }) {
       emit: vi.fn(),
     },
     databaseService: {
-      getSession: vi.fn(() => ({ id: 's1', agent_runtime: 'codex-sdk' })),
+      getSession: vi.fn(() => ({ id: 's1', agent_runtime: 'codex-sdk', chat_run_id: 'quick-run-1' })),
       getPanelSettings: vi.fn(() => ({})),
       getDb: vi.fn(() => ({})),
     },
     claudeCodeManager: { on: vi.fn(), setPanelInputDeliverer: vi.fn() },
-    codexSdkManager: { on: vi.fn(), isPanelRunning, stopPanel, spawnCliProcess },
+    codexSdkManager: {
+      on: vi.fn((evt: string, fn: CodexHandler) => codexHandlers.set(evt, fn)),
+      isPanelRunning,
+      stopPanel,
+      spawnCliProcess,
+    },
     codexPtyManager: { on: vi.fn() },
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
-  return { services, isPanelRunning, stopPanel, spawnCliProcess };
+  return { services, isPanelRunning, stopPanel, spawnCliProcess, codexHandlers, state };
+}
+
+/** Let the flush's setImmediate (and startCodexSdkTurn's awaits) settle. */
+function flushImmediates(): Promise<void> {
+  return new Promise((resolve) => setImmediate(() => setImmediate(() => resolve())));
 }
 
 function register(services: AppServices) {
@@ -155,5 +179,75 @@ describe('panels:continue — codex-sdk parity branch', () => {
       data: Array<{ id: string; text: string }>;
     };
     expect(listed.data).toEqual([{ id: 'pending-i', text: 'now' }]);
+  });
+});
+
+describe('codex queued-input delivery at the rest boundary', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(panelManager.getPanel).mockReturnValue(CODEX_PANEL);
+  });
+
+  it('defers delivery off the exit stack so the spawn-key reservation can clear', async () => {
+    const { services, spawnCliProcess, codexHandlers, state } = makeServices({ isPanelRunning: true });
+    const handlers = register(services);
+
+    await invoke(handlers, 'panels:continue', 'panel-1', 'do more', undefined, false, 'pending-9');
+    expect(spawnCliProcess).not.toHaveBeenCalled();
+
+    // The turn ends: processes are dropped BEFORE 'exit' is emitted, so the panel
+    // reads idle — but the emit still runs inside spawnCliProcess's try block.
+    state.running = false;
+    codexHandlers.get('exit')?.({ panelId: 'panel-1', sessionId: 's1', exitCode: 0 });
+    // Nothing spawned synchronously — that would throw "already running".
+    expect(spawnCliProcess).not.toHaveBeenCalled();
+
+    await flushImmediates();
+    expect(spawnCliProcess).toHaveBeenCalledTimes(1);
+    expect(spawnCliProcess.mock.calls[0][0]).toMatchObject({ panelId: 'panel-1', prompt: 'do more' });
+
+    // Delivered — the queue is drained.
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: Array<{ id: string; text: string }>;
+    };
+    expect(listed.data).toEqual([]);
+  });
+
+  it('re-queues (never drops) the message when delivery fails', async () => {
+    const { services, spawnCliProcess, codexHandlers, state } = makeServices({ isPanelRunning: true });
+    spawnCliProcess.mockRejectedValueOnce(new Error('Codex app-server process already running for spawn panel-1'));
+    const handlers = register(services);
+
+    await invoke(handlers, 'panels:continue', 'panel-1', 'keep me', undefined, false, 'pending-k');
+
+    state.running = false;
+    codexHandlers.get('exit')?.({ panelId: 'panel-1', sessionId: 's1', exitCode: 0 });
+    await flushImmediates();
+
+    expect(spawnCliProcess).toHaveBeenCalledTimes(1);
+    // The user's message survives the failure and stays addressable.
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: Array<{ id: string; text: string }>;
+    };
+    expect(listed.data).toEqual([{ id: 'pending-k', text: 'keep me' }]);
+  });
+
+  it('hands the message back when a new turn started on the deferred tick', async () => {
+    const { services, spawnCliProcess, codexHandlers, state } = makeServices({ isPanelRunning: true });
+    const handlers = register(services);
+
+    await invoke(handlers, 'panels:continue', 'panel-1', 'later', undefined, false, 'pending-l');
+
+    state.running = false;
+    codexHandlers.get('exit')?.({ panelId: 'panel-1', sessionId: 's1', exitCode: 0 });
+    // A fresh turn claims the panel before the deferred delivery runs.
+    state.running = true;
+    await flushImmediates();
+
+    expect(spawnCliProcess).not.toHaveBeenCalled();
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: Array<{ id: string; text: string }>;
+    };
+    expect(listed.data).toEqual([{ id: 'pending-l', text: 'later' }]);
   });
 });

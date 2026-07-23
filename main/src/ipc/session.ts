@@ -328,14 +328,40 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     });
   };
 
+  // Put un-delivered entries BACK at the front of the queue. A queued message is
+  // the user's, so it must never be silently dropped: if delivery cannot happen
+  // now it stays queued (still listed + dequeuable by click-to-reopen) and the
+  // next rest boundary retries it.
+  const requeueCodexPanelInput = (panelId: string, entries: QueuedCodexPanelInput[]): void => {
+    if (entries.length === 0) return;
+    const current = codexPanelInputQueues.get(panelId) ?? [];
+    codexPanelInputQueues.set(panelId, [...entries, ...current]);
+  };
+
   const flushCodexPanelInputQueueIfIdle = (panelId: string): void => {
     if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) return;
     const queued = codexPanelInputQueues.get(panelId);
     if (!queued?.length) return;
     codexPanelInputQueues.delete(panelId);
-    const combined = queued.map((entry) => entry.text).join('\n\n');
-    void startCodexSdkTurn(panelId, combined).catch((error: unknown) => {
-      console.error(`[IPC] Codex panel-input queue delivery failed for ${panelId}:`, error);
+    // Deliver on a LATER macrotask, never inline. This flush normally runs inside
+    // the codex 'exit' emit, which fires from within spawnCliProcess's own try
+    // block — its `finally` has NOT yet released the spawnKey reservation, so
+    // spawning here synchronously always throws "Codex app-server process already
+    // running for spawn <panelId>" and would strand the message. setImmediate lets
+    // that reservation (and the awaited spawn promise) settle first; this mirrors
+    // ClaudeCodeManager's setImmediate quick-input drain for the same reason.
+    setImmediate(() => {
+      // A new turn may have started on the deferred tick — hand the messages back
+      // so they ride that turn's rest boundary instead of racing it.
+      if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) {
+        requeueCodexPanelInput(panelId, queued);
+        return;
+      }
+      const combined = queued.map((entry) => entry.text).join('\n\n');
+      void startCodexSdkTurn(panelId, combined).catch((error: unknown) => {
+        console.error(`[IPC] Codex panel-input queue delivery failed for ${panelId}:`, error);
+        requeueCodexPanelInput(panelId, queued);
+      });
     });
   };
 
