@@ -617,7 +617,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getJsonMessages: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-json-messages', panelId),
     getPrompts: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-prompts', panelId),
     sendInput: (panelId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:send-input', panelId, input),
-    continue: (panelId: string, input: string, model?: string, interrupt?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('panels:continue', panelId, input, model, interrupt),
+    continue: (panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:continue', panelId, input, model, interrupt, pendingId),
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string): Promise<IPCResponse<{ queued: boolean }>> =>
       ipcRenderer.invoke('panels:queue-input', panelId, id, text),

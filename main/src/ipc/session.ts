@@ -2137,7 +2137,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('panels:continue', async (_event, panelId: string, input: string, model?: string, interrupt?: boolean) => {
+  ipcMain.handle('panels:continue', async (_event, panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string) => {
     try {
       console.log(`[IPC] panels:continue called for panel: ${panelId}`);
 
@@ -2201,7 +2201,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               claudeCodeManager.isPanelTurnInFlight(panelId)
             ) {
               console.log(`[IPC] panels:continue mid-turn for panel ${panelId} — queueing at the rest boundary`);
-              claudeCodeManager.enqueuePanelInput(panelId, randomUUID(), input);
+              // Key the queue entry by the CLIENT pending-send id when supplied, so
+              // the displayed 'queued' row can dequeue this exact server entry
+              // (click-to-reopen); fall back to a fresh id for id-less callers.
+              claudeCodeManager.enqueuePanelInput(panelId, pendingId ?? randomUUID(), input);
               // Race guard: the turn may have ended between the probe and the
               // enqueue — deliver now instead of stranding the message.
               claudeCodeManager.flushPanelInputQueueIfIdle(panelId);

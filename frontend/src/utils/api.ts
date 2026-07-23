@@ -528,10 +528,12 @@ export class API {
     // `interrupt` aborts the in-flight turn and drives the message as a fresh
     // turn NOW (the "Interrupt & send" affordance), rather than queueing it for
     // the turn's rest boundary. Omit/false for the normal idle continue + the
-    // mid-turn queue path.
-    async continue(panelId: string, input: string, model?: string, interrupt?: boolean) {
+    // mid-turn queue path. `pendingId` is the client pending-send id so a
+    // status-flap queue fallback (renderer thought the panel idle but the backend
+    // turn was in flight) is keyed by the displayed row and can be dequeued.
+    async continue(panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.panels.continue(panelId, input, model, interrupt);
+      return window.electronAPI.panels.continue(panelId, input, model, interrupt, pendingId);
     },
 
     // Mid-turn input queue ("always allow messaging a running quick session").

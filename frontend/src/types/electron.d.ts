@@ -371,7 +371,7 @@ interface ElectronAPI {
     getJsonMessages: (panelId: string) => Promise<IPCResponse<UnifiedMessage[]>>;
     // PromptMarker is locally typed; IPCDataResponse for direct .data access
     getPrompts: (panelId: string) => Promise<IPCDataResponse<unknown[]>>;
-    continue: (panelId: string, input: string, model?: string, interrupt?: boolean) => Promise<IPCResponse<void>>;
+    continue: (panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string) => Promise<IPCResponse<{ queued?: boolean } | void>>;
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string) => Promise<IPCResponse<{ queued: boolean }>>;
     listQueuedInput: (panelId: string) => Promise<IPCResponse<QueuedPanelInput[]>>;

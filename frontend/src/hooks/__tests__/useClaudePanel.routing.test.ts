@@ -48,14 +48,14 @@ describe('dispatchQuickSessionInput', () => {
   it('preserves the Claude panel continuation path', async () => {
     await dispatchQuickSessionInput(session('claude-sdk'), 'panel-1', 'continue Claude', 'continue', 'opus');
 
-    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'continue Claude', 'opus', undefined);
+    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'continue Claude', 'opus', undefined, undefined);
     expect(mocks.sessionSendInput).not.toHaveBeenCalled();
   });
 
-  it('threads the interrupt flag into the Claude panel continuation (Interrupt & send)', async () => {
-    await dispatchQuickSessionInput(session('claude-sdk'), 'panel-1', 'do it now', 'continue', 'opus', true);
+  it('threads the interrupt flag + pending id into the Claude panel continuation', async () => {
+    await dispatchQuickSessionInput(session('claude-sdk'), 'panel-1', 'do it now', 'continue', 'opus', true, 'pending-9');
 
-    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'do it now', 'opus', true);
+    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'do it now', 'opus', true, 'pending-9');
     expect(mocks.sessionSendInput).not.toHaveBeenCalled();
   });
 });

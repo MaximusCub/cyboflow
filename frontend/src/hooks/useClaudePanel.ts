@@ -12,13 +12,22 @@ export async function dispatchQuickSessionInput(
   mode: 'initial' | 'continue',
   modelOverride?: string,
   interrupt?: boolean,
-): Promise<{ success: boolean; error?: string }> {
-  const response = session.agentRuntime === 'codex-sdk'
-    ? await API.sessions.sendInput(session.id, input)
-    : mode === 'initial'
-      ? await API.panels.sendInput(panelId, `${input}\n`)
-      : await API.panels.continue(panelId, input, modelOverride, interrupt);
-  return { success: response.success, error: response.error };
+  pendingId?: string,
+): Promise<{ success: boolean; error?: string; queued?: boolean }> {
+  if (session.agentRuntime === 'codex-sdk') {
+    const response = await API.sessions.sendInput(session.id, input);
+    return { success: response.success, error: response.error };
+  }
+  if (mode === 'initial') {
+    const response = await API.panels.sendInput(panelId, `${input}\n`);
+    return { success: response.success, error: response.error };
+  }
+  const response = await API.panels.continue(panelId, input, modelOverride, interrupt, pendingId);
+  // A status-flap continue that reached an already-running backend turn is
+  // queued (keyed by pendingId) rather than dispatched — surface it so the
+  // caller can flip the pending-send row to the addressable 'queued' state.
+  const queued = (response.data as { queued?: boolean } | undefined)?.queued === true;
+  return { success: response.success, error: response.error, queued };
 }
 
 export const useClaudePanel = (
@@ -315,7 +324,8 @@ export const useClaudePanel = (
     attachedTexts?: AttachedText[],
     modelOverride?: string,
     interrupt?: boolean,
-  ): Promise<{ success: boolean; error?: string }> => {
+    pendingId?: string,
+  ): Promise<{ success: boolean; error?: string; queued?: boolean }> => {
     if (!text.trim() || !activeSession) return { success: false, error: 'Nothing to send' };
 
     // Mark that we're continuing a conversation to prevent output reload
@@ -380,7 +390,7 @@ export const useClaudePanel = (
     }
     
     // Output will be loaded automatically when session status changes.
-    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt);
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt, pendingId);
   };
 
   const handleTerminalCommand = async () => {
