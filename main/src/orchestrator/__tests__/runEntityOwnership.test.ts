@@ -24,6 +24,8 @@ import {
   listRunCreatedTaskIds,
   listRunDecomposedIdeaIds,
   listRunOwnedOrBatchIdeaIds,
+  listRunBatchIdeaIds,
+  resolveRunBatchIdeaId,
 } from '../runEntityOwnership';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -99,6 +101,62 @@ function insertChild(
   originatingIdeaId: string | null,
 ): void {
   db.prepare(`INSERT INTO ${table} (id, originating_idea_id) VALUES (?, ?)`).run(id, originatingIdeaId);
+}
+
+/**
+ * A sprint-batch-aware DB: workflow_runs additionally carries batch_id + task_id,
+ * tasks carry parent_epic_id (so a task's idea can resolve via its epic), and a
+ * sprint_batch_tasks join table (migration 022) links a batch to its tasks. This
+ * is what listRunBatchIdeaIds / resolveRunBatchIdeaId read.
+ */
+function buildDbWithBatch(): Database.Database {
+  const db = buildDbWithSeedIds();
+  db.exec(`
+    ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT;
+    ALTER TABLE workflow_runs ADD COLUMN task_id  TEXT;
+    CREATE TABLE epics (
+      id                  TEXT PRIMARY KEY,
+      originating_idea_id TEXT
+    );
+    CREATE TABLE tasks (
+      id                  TEXT PRIMARY KEY,
+      originating_idea_id TEXT,
+      parent_epic_id      TEXT
+    );
+    CREATE TABLE sprint_batch_tasks (
+      batch_id TEXT NOT NULL,
+      task_id  TEXT NOT NULL
+    );
+  `);
+  return db;
+}
+
+function insertRunWithBatch(
+  db: Database.Database,
+  id: string,
+  batchId: string | null,
+  taskId: string | null,
+): void {
+  db.prepare('INSERT INTO workflow_runs (id, seed_idea_id, batch_id, task_id) VALUES (?, NULL, ?, ?)').run(
+    id,
+    batchId,
+    taskId,
+  );
+}
+
+function insertBatchTask(
+  db: Database.Database,
+  batchId: string,
+  taskId: string,
+  originatingIdeaId: string | null,
+  parentEpicId: string | null = null,
+): void {
+  db.prepare('INSERT INTO tasks (id, originating_idea_id, parent_epic_id) VALUES (?, ?, ?)').run(
+    taskId,
+    originatingIdeaId,
+    parentEpicId,
+  );
+  db.prepare('INSERT INTO sprint_batch_tasks (batch_id, task_id) VALUES (?, ?)').run(batchId, taskId);
 }
 
 let seqCounter = 0;
@@ -319,6 +377,70 @@ describe('runEntityOwnership.listRunOwnedOrBatchIdeaIds', () => {
 
     expect(() => listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-none')).not.toThrow();
     expect(listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-none')).toEqual([]);
+  });
+
+  it('falls back to ALL of the sprint batch ideas (not just the dominant one) when the run owns none', () => {
+    const db = buildDbWithBatch();
+    insertRunWithBatch(db, 'run-batch', 'batch-1', null);
+    // ide_a dominates (2 tasks), ide_b has 1 — a standalone sprint owns no ideas
+    // so this must surface BOTH, dominant-first.
+    insertBatchTask(db, 'batch-1', 'tsk_1', 'ide_a');
+    insertBatchTask(db, 'batch-1', 'tsk_2', 'ide_a');
+    insertBatchTask(db, 'batch-1', 'tsk_3', 'ide_b');
+
+    expect(listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-batch')).toEqual(['ide_a', 'ide_b']);
+  });
+});
+
+describe('runEntityOwnership.listRunBatchIdeaIds', () => {
+  it('returns EVERY distinct batch idea, dominant-first (task count DESC, id tiebreak)', () => {
+    const db = buildDbWithBatch();
+    insertRunWithBatch(db, 'run-multi', 'batch-1', null);
+    insertBatchTask(db, 'batch-1', 'tsk_1', 'ide_b'); // ide_b: 1 task
+    insertBatchTask(db, 'batch-1', 'tsk_2', 'ide_a'); // ide_a: 2 tasks (dominant)
+    insertBatchTask(db, 'batch-1', 'tsk_3', 'ide_a');
+    insertBatchTask(db, 'batch-1', 'tsk_4', 'ide_c'); // ide_c: 1 task — tie with ide_b
+
+    // ide_a (2) first; ide_b/ide_c tie at 1, broken by id ASC.
+    expect(listRunBatchIdeaIds(dbAdapter(db), 'run-multi')).toEqual(['ide_a', 'ide_b', 'ide_c']);
+  });
+
+  it('resolves a batch task idea via its parent epic when the task carries no direct lineage', () => {
+    const db = buildDbWithBatch();
+    insertRunWithBatch(db, 'run-epic', 'batch-2', null);
+    db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run('epc_1', 'ide_via_epic');
+    insertBatchTask(db, 'batch-2', 'tsk_1', null, 'epc_1'); // NULL direct lineage → via epic
+
+    expect(listRunBatchIdeaIds(dbAdapter(db), 'run-epic')).toEqual(['ide_via_epic']);
+  });
+
+  it('falls back (rung 2) to the run task_id idea when there is no sprint batch', () => {
+    const db = buildDbWithBatch();
+    insertRunWithBatch(db, 'run-single', null, 'tsk_solo');
+    db.prepare('INSERT INTO tasks (id, originating_idea_id, parent_epic_id) VALUES (?, ?, NULL)').run(
+      'tsk_solo',
+      'ide_solo',
+    );
+
+    expect(listRunBatchIdeaIds(dbAdapter(db), 'run-single')).toEqual(['ide_solo']);
+  });
+
+  it('returns [] (no throw) when no sprint-batch tables exist (fail-soft)', () => {
+    const db = buildDb();
+    insertRun(db, 'run-none', null);
+
+    expect(() => listRunBatchIdeaIds(dbAdapter(db), 'run-none')).not.toThrow();
+    expect(listRunBatchIdeaIds(dbAdapter(db), 'run-none')).toEqual([]);
+  });
+
+  it('resolveRunBatchIdeaId returns the head (dominant idea) of the full batch list', () => {
+    const db = buildDbWithBatch();
+    insertRunWithBatch(db, 'run-dom', 'batch-3', null);
+    insertBatchTask(db, 'batch-3', 'tsk_1', 'ide_minor');
+    insertBatchTask(db, 'batch-3', 'tsk_2', 'ide_major');
+    insertBatchTask(db, 'batch-3', 'tsk_3', 'ide_major');
+
+    expect(resolveRunBatchIdeaId(dbAdapter(db), 'run-dom')).toBe('ide_major');
   });
 });
 

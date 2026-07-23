@@ -234,9 +234,36 @@ export function listRunCreatedIdeaIds(db: DatabaseLike, runId: string): string[]
  * @param runId The workflow_runs.id whose operating idea to resolve.
  */
 export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string | null {
-  // 1. Dominant idea across the run's sprint-batch tasks (direct or via epic).
+  // The dominant idea is the FIRST of the full batch-idea list (ordered by task
+  // count DESC). Sharing listRunBatchIdeaIds keeps the two resolvers consistent —
+  // "the dominant idea" is always the head of "all the batch ideas".
+  const ideaIds = listRunBatchIdeaIds(db, runId);
+  return ideaIds.length > 0 ? ideaIds[0] : null;
+}
+
+/**
+ * ALL distinct ideas a run's sprint batch operates on, ordered dominant-first
+ * (by number of batch tasks pointing at the idea, DESC; ties broken by idea id
+ * for determinism). This is the multi-idea counterpart to
+ * {@link resolveRunBatchIdeaId}: a sprint batch fanned out across tasks from
+ * several ideas must inherit EVERY idea's planning artifacts, not just the
+ * dominant one. A task's idea is resolved directly (`tasks.originating_idea_id`)
+ * or via its parent epic (`epics.originating_idea_id`), COALESCEd.
+ *
+ * Fallback (rung 2): when the run has no sprint batch, the single
+ * `workflow_runs.task_id`'s idea, as a one-element list. Returns [] when neither
+ * resolves. Fail-soft — a pre-sprint-batch DB lacking `sprint_batch_tasks` /
+ * `batch_id` / `task_id`, or any thrown query, degrades to [] (never a throw),
+ * mirroring {@link listRunOwnedIdeaIds}.
+ *
+ * @param db    Narrow DatabaseLike interface.
+ * @param runId The workflow_runs.id whose batch ideas to resolve.
+ */
+export function listRunBatchIdeaIds(db: DatabaseLike, runId: string): string[] {
+  // 1. Every distinct idea across the run's sprint-batch tasks (direct or via
+  //    epic), dominant-first. No LIMIT — the whole point vs resolveRunBatchIdeaId.
   try {
-    const row = db
+    const rows = db
       .prepare(
         `SELECT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId, COUNT(*) AS n
            FROM workflow_runs r
@@ -245,11 +272,13 @@ export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string |
            LEFT JOIN epics e ON e.id = t.parent_epic_id
           WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL
           GROUP BY COALESCE(t.originating_idea_id, e.originating_idea_id)
-          ORDER BY n DESC
-          LIMIT 1`,
+          ORDER BY n DESC, ideaId ASC`,
       )
-      .get(runId) as { ideaId: unknown } | undefined;
-    if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return row.ideaId;
+      .all(runId) as Array<{ ideaId: unknown }>;
+    const ideaIds = rows
+      .map((row) => row.ideaId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (ideaIds.length > 0) return ideaIds;
   } catch {
     // No sprint_batch_tasks table / no batch_id column — fall through.
   }
@@ -265,20 +294,26 @@ export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string |
           WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL`,
       )
       .get(runId) as { ideaId: unknown } | undefined;
-    if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return row.ideaId;
+    if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return [row.ideaId];
   } catch {
     // No task_id column — fall through.
   }
 
-  return null;
+  return [];
 }
 
 /**
  * The idea ids to derive owned-idea artifacts FROM: {@link listRunOwnedIdeaIds}
- * (seed ideas UNION run-created ideas) when non-empty, else a single-element
- * array holding the run's sprint-batch idea (a standalone sprint owns no ideas
- * directly but still executes one idea's decomposition, resolved via
- * {@link resolveRunBatchIdeaId}). Returns [] when neither resolves.
+ * (seed ideas UNION run-created ideas) when non-empty, else ALL of the run's
+ * sprint-batch ideas (a standalone sprint owns no ideas directly but still
+ * executes the decompositions of every idea its batch tasks span, resolved via
+ * {@link listRunBatchIdeaIds}). Returns [] when neither resolves.
+ *
+ * Batch-fallback is the FULL idea set, not just the dominant one: a sprint
+ * whose tasks derive from several ideas must inherit every idea's planning
+ * artifacts (idea-spec + arch-design), so the already-multi-idea mint helpers
+ * (mintIdeaSpecForOwnedIdeas / mintArchDesignForOwnedIdeas) and the read-side
+ * taskListing.selectRunDecomposition each cover the whole batch.
  *
  * SINGLE HOME for the owned-else-batch-fallback resolution: previously inlined
  * in autoMintArtifacts.mintIdeaSpecForOwnedIdeas, extracted here so every
@@ -292,6 +327,5 @@ export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string |
 export function listRunOwnedOrBatchIdeaIds(db: DatabaseLike, runId: string): string[] {
   const ownedIds = listRunOwnedIdeaIds(db, runId);
   if (ownedIds.length > 0) return ownedIds;
-  const batchIdeaId = resolveRunBatchIdeaId(db, runId);
-  return batchIdeaId !== null ? [batchIdeaId] : [];
+  return listRunBatchIdeaIds(db, runId);
 }
