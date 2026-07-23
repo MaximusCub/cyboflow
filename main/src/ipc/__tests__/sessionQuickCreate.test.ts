@@ -59,6 +59,19 @@ vi.mock('../../services/database', () => ({
   },
 }));
 
+// Design Mode's Claude/SDK availability pre-flight (design-mode.md "Session
+// plumbing — SDK-pinned, fail-closed") calls these directly (they are not
+// service-injected). Mocked to a deterministic "available" default so the
+// design-branch happy-path tests below never touch the real Keychain/`claude`
+// binary; individual tests override via mockResolvedValueOnce for the
+// unavailable-Claude negative case.
+vi.mock('../../utils/claudeCredentials', () => ({
+  detectClaudeCredentials: vi.fn(async () => ({ found: true, source: 'keychain', account: null })),
+}));
+vi.mock('../../utils/claudeCodeTest', () => ({
+  detectClaudeBinary: vi.fn(async () => ({ found: true, path: '/usr/local/bin/claude', version: '1.0.0' })),
+}));
+
 import {
   generateQuickWorktreeBranchName,
   registerSessionHandlers,
@@ -66,6 +79,8 @@ import {
   QUICK_NAME_NOUNS,
 } from '../session';
 import { panelManager } from '../../services/panelManager';
+import { detectClaudeCredentials } from '../../utils/claudeCredentials';
+import { detectClaudeBinary } from '../../utils/claudeCodeTest';
 import type { AppServices } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -155,6 +170,22 @@ function makeServices(opts?: {
    * request carried no substrate. Defaults to 'sdk' (the ladder floor).
    */
   resolvedSubstrateDefault?: 'sdk' | 'interactive';
+  /**
+   * Design Mode (design-mode.md "Idea link — integrity contract"): what the
+   * fake db returns for validateDesignIdeaLink's
+   * `SELECT ... FROM ideas WHERE id = ?`. undefined = idea not found.
+   */
+  ideaRow?: { project_id: number; decomposed_at: string | null; archived_at: string | null };
+  /**
+   * Design Mode belt-guard test knob: when set, the fake registry's createRun
+   * IGNORES the requested substrate and always resolves to this value —
+   * simulating a config race that defeats the requireSdkSubstrate guard (the
+   * fake, unlike the real WorkflowRegistry, does not itself implement that
+   * guard) so the IPC handler's own post-resolution assert can be exercised.
+   */
+  forceResolvedSubstrate?: 'sdk' | 'interactive';
+  /** configManager.isInteractivePtyOnly() — the design pre-flight's 2nd gate. */
+  interactivePtyOnly?: boolean;
 }) {
   const dbRunCalls: Array<{ sql: string; args: unknown[] }> = [];
   let lastPreparedSql = '';
@@ -163,7 +194,7 @@ function makeServices(opts?: {
       dbRunCalls.push({ sql: lastPreparedSql, args });
       return { changes: 1, lastInsertRowid: 1 };
     },
-    get: () => undefined,
+    get: (..._args: unknown[]) => (lastPreparedSql.includes('FROM ideas') ? opts?.ideaRow : undefined),
     all: () => [],
   };
   const fakeDb = {
@@ -188,11 +219,15 @@ function makeServices(opts?: {
       // Mirror the real createRun resolution ladder shape: the explicit
       // REQUESTED substrate wins; an absent request falls through to the
       // configurable "global default" rung (resolvedSubstrateDefault), floor 'sdk'.
+      // forceResolvedSubstrate overrides even an explicit request — the fake
+      // does not itself implement WorkflowRegistry's requireSdkSubstrate
+      // throw, so this is how Design Mode belt-guard tests simulate a config
+      // race defeating that guard.
       const requested = args[1] as 'sdk' | 'interactive' | undefined;
       return {
         runId: 'test-run-id-abc',
         permissionMode: 'default' as const,
-        substrate: requested ?? opts?.resolvedSubstrateDefault ?? ('sdk' as const),
+        substrate: opts?.forceResolvedSubstrate ?? requested ?? opts?.resolvedSubstrateDefault ?? ('sdk' as const),
       };
     },
   };
@@ -303,7 +338,16 @@ function makeServices(opts?: {
     // interactive path runs as before. getQuickSessionWorktreeMode (migration 047)
     // is read by create-quick to decide worktree vs in-place — floored to 'worktree'
     // here so these tests exercise the ordinary worktree-backed path.
-    configManager: { isDemoMode: () => false, getQuickSessionWorktreeMode: () => 'worktree' },
+    // isInteractivePtyOnly/getConfig back the Design Mode pre-flight
+    // (design-mode.md); interactivePtyOnly defaults false so non-design and
+    // happy-path design tests aren't gated, and opts.interactivePtyOnly opts a
+    // test into the locked-down case.
+    configManager: {
+      isDemoMode: () => false,
+      getQuickSessionWorktreeMode: () => 'worktree',
+      isInteractivePtyOnly: () => opts?.interactivePtyOnly === true,
+      getConfig: () => ({}),
+    },
     cyboflow: {
       workflowRegistry: fakeWorkflowRegistry,
       runLauncher: {},
@@ -885,6 +929,199 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
     const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as Record<string, unknown>;
     expect(callArg.inPlace).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B (cont.) sessions:create-quick - Design Mode (design-mode.md "Session
+// plumbing — SDK-pinned, fail-closed" + "Idea link — integrity contract")
+// ---------------------------------------------------------------------------
+
+const DESIGN_IDEA_ID = 'idea-1';
+const VALID_IDEA_ROW = { project_id: 42, decomposed_at: null, archived_at: null };
+
+describe('sessions:create-quick handler - Design Mode', () => {
+  it('rejects a design launch when the linked idea does not exist, creating NO session', async () => {
+    // ideaRow omitted -> the fake db's `FROM ideas` SELECT resolves undefined.
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not found/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a design launch when the idea belongs to a different project, creating NO session', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      ideaRow: { project_id: 999, decomposed_at: null, archived_at: null },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/different project/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a design launch when the idea is already decomposed, creating NO session', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      ideaRow: { project_id: 42, decomposed_at: '2026-07-01T00:00:00Z', archived_at: null },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/decomposed/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a design launch when the idea is archived, creating NO session', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      ideaRow: { project_id: 42, decomposed_at: null, archived_at: '2026-07-01T00:00:00Z' },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/archived/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (no session created) when Claude credentials are not detected', async () => {
+    vi.mocked(detectClaudeCredentials).mockResolvedValueOnce({ found: false, source: null, account: null });
+    const { services, fakeTaskQueue } = makeServices({ ideaRow: VALID_IDEA_ROW });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Claude SDK substrate/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (no session created) when the app is locked to interactive-PTY-only mode', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      ideaRow: VALID_IDEA_ROW,
+      interactivePtyOnly: true,
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/interactive-PTY-only/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('creates an SDK-pinned session, stamps design_idea_id, and IGNORES conflicting substrate/runtime request fields (never spawns the eager Codex PTY panel)', async () => {
+    const { services, dbRunCalls, createRunArgs, fakeCodexPtyManager, fakeInteractiveCliManager, fakeRegisterCodexPtyPanel } =
+      makeServices({ ideaRow: VALID_IDEA_ROW });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+      // Deliberately conflicting/attacker-shaped fields: a well-formed
+      // wizard launch never sends these alongside designIdeaId, but the
+      // handler must hard-override to Claude SDK regardless of what a
+      // request claims.
+      substrate: 'interactive',
+      agentRuntime: 'codex-pty',
+    })) as { success: boolean; data?: { sessionId?: string; claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data?.claudePanelId).toBeUndefined();
+
+    // The forced opts reached WorkflowRegistry.createRun: requestedSubstrate
+    // (2nd positional arg) is 'sdk', and the opts object (5th arg) carries
+    // the Claude SDK provider/runtime pin + the belt guard flag.
+    expect(createRunArgs[0][1]).toBe('sdk');
+    const createRunOpts = createRunArgs[0][4] as Record<string, unknown>;
+    expect(createRunOpts.requestedAgentProvider).toBe('claude');
+    expect(createRunOpts.requestedAgentRuntime).toBe('claude-sdk');
+    expect(createRunOpts.requireSdkSubstrate).toBe(true);
+
+    // Neither PTY-spawn path fired: no Codex PTY panel, no interactive REPL.
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeRegisterCodexPtyPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+
+    // The idea link was stamped via the :253-precedent backfill UPDATE.
+    const stampCall = dbRunCalls.find((c) => c.sql.includes('design_idea_id'));
+    expect(stampCall).toBeDefined();
+    expect(stampCall?.args).toEqual([DESIGN_IDEA_ID, result.data?.sessionId]);
+  });
+
+  it('fails closed and does NOT stamp design_idea_id if a config race defeats requireSdkSubstrate (belt guard)', async () => {
+    // forceResolvedSubstrate simulates WorkflowRegistry.createRun somehow
+    // still resolving 'interactive' despite the requireSdkSubstrate request —
+    // the real registry would throw first (tested at the workflowRegistry
+    // unit level); this exercises the IPC handler's OWN belt-and-suspenders
+    // assert for the same invariant.
+    const { services, dbRunCalls, fakeInteractiveCliManager } = makeServices({
+      ideaRow: VALID_IDEA_ROW,
+      forceResolvedSubstrate: 'interactive',
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Claude SDK substrate/i);
+    expect(dbRunCalls.some((c) => c.sql.includes('design_idea_id'))).toBe(false);
+    // The handler returned before reaching the eager interactive-spawn code.
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('a non-design launch (no designIdeaId) is byte-identical: no idea validation, no Claude pre-flight', async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+    vi.mocked(detectClaudeCredentials).mockClear();
+    vi.mocked(detectClaudeBinary).mockClear();
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledTimes(1);
+    expect(detectClaudeCredentials).not.toHaveBeenCalled();
+    expect(detectClaudeBinary).not.toHaveBeenCalled();
   });
 });
 

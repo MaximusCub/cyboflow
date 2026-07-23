@@ -51,6 +51,10 @@ import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermiss
 import { listQuickSessions } from '../orchestrator/quickSessionListing';
 import { QuestionRouter } from '../orchestrator/questionRouter';
 import { ApprovalRouter } from '../orchestrator/approvalRouter';
+import { validateDesignIdeaLink } from '../services/designIdeaValidation';
+import { detectClaudeCredentials } from '../utils/claudeCredentials';
+import { detectClaudeBinary } from '../utils/claudeCodeTest';
+import { computeState as computeClaudeDetectionState } from './claudeDetection';
 
 /**
  * Whether claude's own on-disk transcript for a resumable session still exists at
@@ -689,6 +693,62 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Project not found' };
       }
 
+      // Design Mode (design-mode.md "Session plumbing — SDK-pinned,
+      // fail-closed" + "Idea link — integrity contract"): a non-empty
+      // designIdeaId opts this launch into the design branch. Every
+      // non-design launch (absent or blank field) is byte-identical to
+      // before. BEFORE creating anything: (a) validate the idea is live and
+      // owned by this project, then (b) fail-closed on Claude/SDK
+      // availability so a design session never silently degrades onto a
+      // substrate without the design MCP scope contract.
+      const designIdeaId =
+        typeof request.designIdeaId === 'string' && request.designIdeaId.trim().length > 0
+          ? request.designIdeaId
+          : undefined;
+      const isDesignSession = designIdeaId !== undefined;
+      if (isDesignSession) {
+        const ideaValidation = validateDesignIdeaLink(databaseService.getDb(), designIdeaId, targetProject.id);
+        if (!ideaValidation.ok) {
+          return { success: false, error: ideaValidation.error };
+        }
+
+        // Fail-closed Claude/SDK availability pre-flight. Design sessions are
+        // hard-pinned to the Claude SDK substrate below (step 2), so an
+        // unavailable Claude login/binary must reject HERE — before any
+        // worktree is cut — rather than let normal substrate resolution
+        // silently fall through to a substrate the design MCP scope doesn't
+        // cover. Reuses the same detection helpers + state mapping as
+        // onboarding (claudeDetection.ts computeState) so "available" means
+        // the same thing in both places.
+        const [designCredentials, designBinary] = await Promise.all([
+          detectClaudeCredentials(),
+          detectClaudeBinary(configManager.getConfig()?.claudeExecutablePath),
+        ]);
+        if (computeClaudeDetectionState(designCredentials.found, designBinary.found) !== 'detected') {
+          return {
+            success: false,
+            error:
+              'Design sessions require the Claude SDK substrate — Claude credentials/binary not detected. Sign in to Claude Code and try again.',
+          };
+        }
+
+        // Second pre-flight: the global interactivePtyOnly lock
+        // (configManager.isInteractivePtyOnly, folded into getForcedSubstrate)
+        // forces EVERY run/session onto the interactive PTY substrate, which
+        // conflicts with the design session's hard SDK pin — fail closed
+        // before creating anything rather than let createRun's post-resolution
+        // guard (requireSdkSubstrate, below) throw after a worktree already
+        // exists. Demo mode's forced 'sdk' pin is compatible with the design
+        // pin and is NOT checked here.
+        if (configManager.isInteractivePtyOnly()) {
+          return {
+            success: false,
+            error:
+              'Design sessions cannot run on the interactive substrate, but this app is locked to interactive-PTY-only mode. Disable that lock in Settings to start a design session.',
+          };
+        }
+      }
+
       const branchName = request.branchName ?? generateQuickWorktreeBranchName();
       const toolType: 'claude' | 'none' = request.toolType ?? 'claude';
 
@@ -727,11 +787,19 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         };
       }
 
+      // Design Mode (design-mode.md "Session plumbing — SDK-pinned,
+      // fail-closed"): neither Codex flag may ever resolve true for a design
+      // launch, regardless of what the request's own provider/runtime fields
+      // say — this is what keeps the eager-PTY-spawn blocks below (gated on
+      // `useCodexPty`, independently of the resolved substrate) from ever
+      // firing for a design session. isDesignSession is computed above from
+      // designIdeaId, before this point.
       const useCodexSdk =
-        requestedAgentRuntime === 'codex-sdk' ||
-        (requestedAgentProvider === 'codex' && requestedAgentRuntime === undefined);
+        !isDesignSession &&
+        (requestedAgentRuntime === 'codex-sdk' ||
+          (requestedAgentProvider === 'codex' && requestedAgentRuntime === undefined));
       const useCodexPty =
-        requestedAgentRuntime === 'codex-pty';
+        !isDesignSession && requestedAgentRuntime === 'codex-pty';
 
       const substrateFromAgentRuntime =
         requestedAgentRuntime === 'claude-interactive'
@@ -783,6 +851,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         : undefined;
       const inPlace = (requestedWorktreeMode ?? configManager.getQuickSessionWorktreeMode()) === 'in-place';
 
+      // Design Mode (design-mode.md "Session plumbing — SDK-pinned,
+      // fail-closed"): step 2 — force the launch provider/runtime/substrate to
+      // Claude SDK, HARD-CODED here and never sourced from the request's own
+      // substrate/agentProvider/agentRuntime fields (a malformed or malicious
+      // request must not be able to smuggle a different substrate through).
+      // requireSdkSubstrate threads WorkflowRegistry.createRun's
+      // post-resolution belt-guard (step 3) for the same invariant. (Note:
+      // isDesignSession itself is declared earlier, alongside designIdeaId,
+      // because it also gates useCodexSdk/useCodexPty above.)
+      const quickAgentProviderForLaunch: AgentProvider = isDesignSession ? 'claude' : quickAgentProvider;
+      const quickAgentRuntimeForLaunch = isDesignSession
+        ? 'claude-sdk'
+        : useCodexSdk
+          ? 'codex-sdk'
+          : useCodexPty
+            ? 'codex-pty'
+            : requestedAgentRuntime;
+      const quickRequestedSubstrateForLaunch = isDesignSession ? 'sdk' : requestedSubstrate;
+
       // Create the session + wire the __quick__ sentinel run via the SHARED core
       // (createQuickSessionCore) — the same path experiments.startSideBySide uses
       // for its SHA-pinned arm sessions. The core: enqueues the session-create job
@@ -806,23 +893,48 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           baseBranch: request.baseBranch,
           folderId: request.folderId,
           toolType,
-          claudeConfig: quickAgentProvider === 'claude' ? normalizedClaudeConfig : undefined,
-          requestedSubstrate,
+          claudeConfig: quickAgentProviderForLaunch === 'claude' ? normalizedClaudeConfig : undefined,
+          requestedSubstrate: quickRequestedSubstrateForLaunch,
           requestedAgentMode,
-          agentProvider: quickAgentProvider,
-          agentRuntime: useCodexSdk
-            ? 'codex-sdk'
-            : useCodexPty
-              ? 'codex-pty'
-              : requestedAgentRuntime,
+          agentProvider: quickAgentProviderForLaunch,
+          agentRuntime: quickAgentRuntimeForLaunch,
           agentModel: requestedModel ?? null,
           // In-place quick session (migration 047): the core switches session
           // matching to the NAME fallback.
           inPlace,
+          ...(isDesignSession ? { requireSdkSubstrate: true } : {}),
         },
       );
 
       const db = databaseService.getDb();
+
+      // Design Mode step 4 (design-mode.md "Session plumbing"): a second belt
+      // for the same SDK-substrate invariant — createQuickSessionCore already
+      // resolved (the requireSdkSubstrate guard inside createRun would have
+      // thrown and propagated out of the await above otherwise), so this
+      // branch is expected to be unreachable in practice. If a future
+      // refactor ever defeats both the pre-flight AND the createRun guard,
+      // fail closed here too: return failure WITHOUT stamping
+      // design_idea_id and WITHOUT running any of the per-session config /
+      // eager-PTY-spawn logic below — the already-created session is left as
+      // an ordinary UNLINKED quick session rather than a design session on
+      // the wrong substrate (which would expose the full run-scoped MCP
+      // toolset instead of the design-scoped one).
+      if (isDesignSession) {
+        if (resolvedSubstrate !== 'sdk') {
+          console.error(
+            `[IPC] Design session ${session.id} resolved to substrate '${resolvedSubstrate}' instead of 'sdk'; leaving it unlinked (design_idea_id not stamped).`,
+          );
+          return {
+            success: false,
+            error: 'Design sessions require the Claude SDK substrate. The session was created but could not be linked to the idea — please retry.',
+          };
+        }
+        // Only NOW stamp the link (:253-precedent backfill UPDATE inside
+        // createQuickSessionCore is the pattern this mirrors) — after the
+        // resolved-substrate belt confirms 'sdk'.
+        db.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(designIdeaId, session.id);
+      }
 
       // NOTE: the sentinel run's session_id is now stamped by createRun above (it
       // received session.id), for BOTH substrates — the prior interactive-only

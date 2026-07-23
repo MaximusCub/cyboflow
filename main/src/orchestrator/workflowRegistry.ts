@@ -1073,6 +1073,20 @@ export class WorkflowRegistry {
       verifyDeliverable?: VerificationRequestInput | null;
       requestedAgentProvider?: AgentProvider;
       requestedAgentRuntime?: WorkflowAgentRuntime;
+      /**
+       * Defense-in-depth guard for Design Mode (design-mode.md "Session plumbing
+       * — SDK-pinned, fail-closed"): design sessions MUST resolve to the SDK
+       * substrate — never interactive-PTY, never Codex — because the MCP
+       * scope mechanism that limits a design session's toolset exists only on
+       * the SDK path. The caller (sessions:create-quick's design branch)
+       * already fail-closes BEFORE calling createRun (Claude availability
+       * pre-flight + an isInteractivePtyOnly() pre-check); this flag is the
+       * belt for the same race — a config change landing between the
+       * pre-flight and this call. Set true => throw post-resolution if the
+       * substrate ladder above resolved anything other than 'sdk'. Mirrors the
+       * codexSdkRequested guard immediately below.
+       */
+      requireSdkSubstrate?: boolean;
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1218,6 +1232,11 @@ export class WorkflowRegistry {
     if (codexSdkRequested && substrate !== 'sdk') {
       throw new Error(
         `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
+      );
+    }
+    if (opts?.requireSdkSubstrate && substrate !== 'sdk') {
+      throw new Error(
+        `WorkflowRegistry.createRun: design sessions require sdk substrate compatibility (got ${substrate})`,
       );
     }
     const agentProvider: AgentProvider = demoMode

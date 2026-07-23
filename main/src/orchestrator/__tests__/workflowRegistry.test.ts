@@ -987,6 +987,51 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    // ───── requireSdkSubstrate guard (Design Mode belt, design-mode.md
+    // "Session plumbing — SDK-pinned, fail-closed") ─────
+
+    it('throws when requireSdkSubstrate is set and the resolved substrate is interactive', () => {
+      // Design sessions ride the __quick__ sentinel (createQuickSessionCore),
+      // so exercise the guard against that workflow, mirroring the real caller.
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      interface CountRow { count: number }
+      const countBefore = (
+        db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+      ).count;
+
+      expect(() =>
+        registry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+          requireSdkSubstrate: true,
+        }),
+      ).toThrow(/design sessions require sdk substrate compatibility \(got interactive\)/);
+
+      // No workflow_runs row was created for the rejected launch.
+      const countAfter = (
+        db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+      ).count;
+      expect(countAfter).toBe(countBefore);
+    });
+
+    it('does NOT throw when requireSdkSubstrate is set and the resolved substrate is sdk', () => {
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      const result = registry.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
+        requireSdkSubstrate: true,
+      });
+
+      expect(result.substrate).toBe('sdk');
+      expect(registry.getRunById(result.runId)).not.toBeNull();
+    });
+
+    it('does NOT throw for an interactive resolution when requireSdkSubstrate is absent (byte-identical to every non-design launch)', () => {
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      const result = registry.createRun(workflowId, 'interactive', TEST_SESSION_ID);
+
+      expect(result.substrate).toBe('interactive');
+    });
+
     it("resolves the QUICK sentinel to the quick-session substrate default (interactive) when no per-run request is set", () => {
       // The __quick__ sentinel resolves against getQuickSessionDefaultSubstrate
       // (floor 'interactive') as its global-default rung, NOT getDefaultSubstrate

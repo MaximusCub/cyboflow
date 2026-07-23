@@ -74,8 +74,15 @@ export interface CreateQuickSessionCoreDeps {
         requestedModel?: string;
         requestedAgentProvider?: AgentProvider;
         requestedAgentRuntime?: WorkflowAgentRuntime;
+        requireSdkSubstrate?: boolean;
       },
     ): { runId: string; substrate: CliSubstrate };
+    // NOTE: this structural interface only declares the subset of
+    // WorkflowRegistry.createRun's opts the core actually threads (model /
+    // provider / runtime / requireSdkSubstrate) — TypeScript structural typing
+    // means the REAL WorkflowRegistry (whose createRun opts object carries many
+    // more optional fields) still satisfies this shape at the real injection
+    // site (cyboflow.workflowRegistry in ipc/session.ts).
   };
   getDb(): Database.Database;
 }
@@ -97,6 +104,15 @@ export interface CreateQuickSessionCoreOptions {
   /** Per-run substrate/permission choice threaded into the sentinel createRun (quick handler). */
   requestedSubstrate?: CliSubstrate;
   requestedAgentMode?: PermissionMode;
+  /**
+   * Design Mode defense-in-depth (design-mode.md "Session plumbing —
+   * SDK-pinned, fail-closed"): set true by the design branch of
+   * sessions:create-quick to thread WorkflowRegistry.createRun's
+   * requireSdkSubstrate guard, which throws post-resolution if the substrate
+   * ladder resolves to anything other than 'sdk'. Undefined/false for every
+   * non-design quick session (byte-identical behavior).
+   */
+  requireSdkSubstrate?: boolean;
   /**
    * Work directly in the project checkout — no dedicated worktree (migration 047,
    * quick handler only; A/B arms are always worktree-isolated so they never set
@@ -213,6 +229,7 @@ export async function createQuickSessionCore(
         ? { requestedAgentProvider: opts.agentProvider }
         : {}),
       ...(sentinelAgentRuntime ? { requestedAgentRuntime: sentinelAgentRuntime } : {}),
+      ...(opts.requireSdkSubstrate ? { requireSdkSubstrate: true } : {}),
     },
   );
 
