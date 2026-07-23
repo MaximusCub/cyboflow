@@ -1882,6 +1882,28 @@ describe('McpQueryHandler', () => {
       // Migration 059: category (feature|bug|chore) — an unconditional column in
       // insertEntity/readEntity now (mirrors priority), so every create needs it.
       db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+      // Migration 078 (Design Mode v0): handleGetTask now unconditionally reads
+      // approved_designs for every idea — the table must exist even for tests
+      // that never touch design sessions. The fixture's minimal schema has no
+      // `sessions`/`artifacts` tables (006 doesn't create them), so this seeds
+      // ONLY the approved_designs table verbatim from migration 078 (its other
+      // statements ALTER those two tables and would fail against this fixture).
+      db.exec(`
+        CREATE TABLE approved_designs (
+          id TEXT PRIMARY KEY,
+          idea_id TEXT NOT NULL,
+          project_id INTEGER NOT NULL,
+          handoff_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          draft_revision INTEGER NOT NULL,
+          prototype_artifact_id TEXT NOT NULL,
+          prototype_revision INTEGER NOT NULL,
+          snapshot_path TEXT NOT NULL,
+          approved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          superseded_at DATETIME
+        );
+        CREATE INDEX idx_approved_designs_idea ON approved_designs(idea_id);
+      `);
       return db;
     }
 
@@ -2339,6 +2361,141 @@ describe('McpQueryHandler', () => {
 
         const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
         expect(data.task['attachments']).toEqual([]);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Design Mode v0 (design-mode.md "Idea-bound artifact + read path"): the
+    // approved-design prototype-snapshot exposure on cyboflow_get_task. The
+    // '## Design spec' half already lives in `item.body` via the existing
+    // full-projection path tested above — this covers the other half.
+    // -----------------------------------------------------------------------
+    describe('mcp-get-task approved_design (Design Mode v0)', () => {
+      let designCounter = 0;
+
+      /** Insert a raw approved_designs row (migration 078) with sane defaults. */
+      function seedApprovedDesign(
+        ideaId: string,
+        projectId: number,
+        overrides: { supersededAt?: string | null } = {},
+      ): { id: string; approvedAt: string; draftRevision: number; prototypeRevision: number; snapshotPath: string } {
+        designCounter += 1;
+        const id = `apd_${designCounter}`;
+        const approvedAt = `2026-01-0${designCounter}T00:00:00.000Z`;
+        const draftRevision = designCounter;
+        const prototypeRevision = designCounter;
+        const snapshotPath = `/tmp/design-snapshots/${ideaId}/handoff-${designCounter}.html`;
+        listDb
+          .prepare(
+            `INSERT INTO approved_designs
+               (id, idea_id, project_id, handoff_id, session_id, draft_revision,
+                prototype_artifact_id, prototype_revision, snapshot_path, approved_at, superseded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            id,
+            ideaId,
+            projectId,
+            `handoff_${designCounter}`,
+            `sess_${designCounter}`,
+            draftRevision,
+            `art_${designCounter}`,
+            prototypeRevision,
+            snapshotPath,
+            approvedAt,
+            overrides.supersededAt ?? null,
+          );
+        return { id, approvedAt, draftRevision, prototypeRevision, snapshotPath };
+      }
+
+      it('surfaces approved_design with the right fields, RESOLVED to an absolute path', async () => {
+        listSeedRun(listDb, 'run-get-des-1');
+        const idea = await createEntity('run-get-des-1', 'Idea with an approved design');
+        const seeded = seedApprovedDesign(idea.id, 1);
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-1', runId: 'run-get-des-1', taskId: idea.id },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task: Record<string, unknown> };
+        expect(data.task['approved_design']).toEqual({
+          approved_at: seeded.approvedAt,
+          draft_revision: seeded.draftRevision,
+          prototype_revision: seeded.prototypeRevision,
+          snapshot_path: seeded.snapshotPath,
+        });
+        expect(isAbsolute((data.task['approved_design'] as Record<string, unknown>)['snapshot_path'] as string)).toBe(
+          true,
+        );
+      });
+
+      it('omits approved_design for an idea that has never been approved', async () => {
+        listSeedRun(listDb, 'run-get-des-2');
+        const idea = await createEntity('run-get-des-2', 'Idea with no approved design');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-2', runId: 'run-get-des-2', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect('approved_design' in data.task).toBe(false);
+      });
+
+      it('never surfaces approved_design for an epic/task, even if a row exists for the same id', async () => {
+        listSeedRun(listDb, 'run-get-des-3');
+        const task = await createEntity('run-get-des-3', 'A plain task', 'task');
+        // Nothing stops a stray row keyed by a non-idea id from existing; the
+        // handler must gate on item.type, not on row presence.
+        seedApprovedDesign(task.id, 1);
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-3', runId: 'run-get-des-3', taskId: task.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect('approved_design' in data.task).toBe(false);
+      });
+
+      it('omits approved_design when the idea\'s only approval row is superseded', async () => {
+        listSeedRun(listDb, 'run-get-des-4');
+        const idea = await createEntity('run-get-des-4', 'Idea with a superseded-only approval');
+        seedApprovedDesign(idea.id, 1, { supersededAt: '2026-01-02T00:00:00.000Z' });
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-4', runId: 'run-get-des-4', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect('approved_design' in data.task).toBe(false);
+      });
+
+      it('surfaces the CURRENT row (superseded_at IS NULL) when a superseded row also exists', async () => {
+        listSeedRun(listDb, 'run-get-des-5');
+        const idea = await createEntity('run-get-des-5', 'Idea with a re-approved design');
+        seedApprovedDesign(idea.id, 1, { supersededAt: '2026-01-02T00:00:00.000Z' });
+        const current = seedApprovedDesign(idea.id, 1);
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-5', runId: 'run-get-des-5', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect(data.task['approved_design']).toMatchObject({
+          approved_at: current.approvedAt,
+          draft_revision: current.draftRevision,
+        });
       });
     });
   });

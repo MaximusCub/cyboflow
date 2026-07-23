@@ -17,7 +17,12 @@
  *                                  response, RESOLVED to an absolute on-disk path
  *                                  via the same containment guard as
  *                                  ideas:load-attachments, IDEA-006. Epics/tasks
- *                                  get no `attachments` key at all.)
+ *                                  get no `attachments` key at all. An idea with
+ *                                  a current approved_designs row (Design Mode
+ *                                  v0, migration 078) also gets an
+ *                                  `approved_design` block with a RESOLVED
+ *                                  absolute path to the approved prototype
+ *                                  snapshot — the zero-export handoff read path.)
  *
  * Plus the INTERACTIVE-substrate PreToolUse gate (IDEA-013 S5 / TASK-810):
  *   - shell-approval-request      (ASYNC-DEFERRED — the first handler that does
@@ -102,6 +107,7 @@ import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
+import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
@@ -2500,6 +2506,28 @@ export class McpQueryHandler {
     if (item.type === 'idea') {
       const attachments = selectIdeaAttachments(this.db, item.id);
       task['attachments'] = McpQueryHandler.toMcpAttachments(attachments);
+
+      // Design Mode v0 (design-mode.md "Idea-bound artifact + read path"): the
+      // zero-export handoff's prototype half. The '## Design spec' half is
+      // already folded into `item.body` (Approve Step 2), so this is the other
+      // half — the current approved prototype snapshot, when one exists. Absent
+      // (never approved, or the only approval was superseded with no
+      // replacement — which the Approve transaction prevents) omits the key
+      // entirely, matching this handler's existing optional-field style.
+      const approvedDesign = getCurrentApprovedDesign(this.db, item.id);
+      if (approvedDesign) {
+        task['approved_design'] = {
+          approved_at: approvedDesign.approvedAt,
+          draft_revision: approvedDesign.draftRevision,
+          prototype_revision: approvedDesign.prototypeRevision,
+          // RESOLVED absolute on-disk path (mirrors toMcpAttachments below) so a
+          // planner/sprint agent can Read the file directly with no export step.
+          // Host-written only (Approve's snapshot step, never agent-supplied),
+          // so no containment check is needed here — snapshotBaseDir is already
+          // an absolute CYBOFLOW_DIR path (main/src/index.ts).
+          snapshot_path: path.resolve(approvedDesign.snapshotPath),
+        };
+      }
     }
 
     this.writeResponse(client, {
