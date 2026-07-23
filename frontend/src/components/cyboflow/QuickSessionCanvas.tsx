@@ -25,6 +25,7 @@ import {
 } from '../../../../shared/types/workflows';
 import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
+import { useSessionSummary } from '../../hooks/useSessionSummary';
 import { computeSessionCostUsd, formatCostUsd } from '../../utils/modelPricing';
 import { DEFAULT_QUICK_MODEL } from './ModelSelector';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
@@ -55,6 +56,20 @@ interface QuickSessionCanvasProps {
    * SEPARATE new session (CyboflowRoot owns the confirm dialog + force-new picker).
    */
   onAddWorkflowToNewSession?: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// History date label — short "Mon D" for a session-summary-entry row. Manual
+// month table (not Intl/toLocaleString) so the label is locale-independent
+// and deterministic under test.
+// ---------------------------------------------------------------------------
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function formatHistoryDate(createdAt: string): string {
+  const d = new Date(createdAt);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${MONTH_ABBR[d.getMonth()]} ${d.getDate()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +214,8 @@ export function QuickSessionCanvas({
   onAddWorkflowToNewSession,
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
+  const { summary: summaryPayload } = useSessionSummary(session.id);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Interactive (PTY) sessions can't host a second workflow inside their live
   // REPL (descoped) — every add-a-workflow click routes to the confirm + config
   // flow that launches in a SEPARATE session instead of the fast-lane launch.
@@ -413,6 +430,15 @@ export function QuickSessionCanvas({
   const costLabel = formatCostUsd(computeSessionCostUsd(metrics.tokenBreakdown, pricingModel));
   const error = launchError ?? listError;
 
+  // Summary / history — hidden entirely while the feature is disabled (config
+  // toggle) or before the idle-debounced summarizer has ever fired for this
+  // session (session-summary-plan.md §7).
+  const summaryEnabled = summaryPayload?.enabled === true;
+  const summaryText = summaryEnabled ? summaryPayload?.summary ?? null : null;
+  const showSummaryBlock = summaryText !== null && summaryText.length > 0;
+  const historyEntries = summaryEnabled ? (summaryPayload?.entries ?? []) : [];
+  const showHistoryCard = historyEntries.length > 0;
+
   return (
     <div
       className="flex flex-col h-full bg-bg-primary"
@@ -544,7 +570,7 @@ export function QuickSessionCanvas({
             flex: 1,
             overflow: 'auto',
             display: 'flex',
-            alignItems: 'center',
+            alignItems: 'flex-start',
             padding: '26px 30px',
             background:
               'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
@@ -553,7 +579,10 @@ export function QuickSessionCanvas({
           }}
           data-testid="quick-session-canvas-body"
         >
-          {/* 1 · Session node */}
+          {/* 1 · Session node + history card, stacked in a column so the card
+              never disturbs the edge / add-workflow node's top alignment
+              (canvas body switched to alignItems: 'flex-start' above). */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
           <div
             style={{
               width: 300,
@@ -715,7 +744,97 @@ export function QuickSessionCanvas({
                   </span>
                 </div>
               </div>
+
+              {/* Rolling summary (session-summary-plan.md §7) — a Haiku call
+                  updates this after the session sits idle. Hidden entirely
+                  (no divider, no empty block) until a non-null summary exists
+                  and the feature is enabled. */}
+              {showSummaryBlock && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    paddingTop: 10,
+                    borderTop: '1px solid var(--color-border-primary)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4,
+                  }}
+                  data-testid="quick-session-summary"
+                >
+                  <span
+                    style={{
+                      fontSize: 8.5,
+                      letterSpacing: '0.14em',
+                      textTransform: 'uppercase',
+                      color: 'var(--color-text-tertiary)',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Summary
+                  </span>
+                  <p style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--color-text-primary)', margin: 0 }}>
+                    {summaryText}
+                  </p>
+                </div>
+              )}
             </div>
+          </div>
+
+          {/* History card — append-only per-sitting sentences, oldest first,
+              collapsed by default. Hidden entirely when there is no history
+              yet or the feature is disabled. */}
+          {showHistoryCard && (
+            <div
+              style={{
+                width: 300,
+                background: 'var(--color-surface-primary)',
+                border: '1px solid var(--color-border-primary)',
+                padding: '10px 12px',
+              }}
+              data-testid="quick-session-history-card"
+            >
+              <button
+                type="button"
+                data-testid="quick-session-history-toggle"
+                onClick={() => setHistoryOpen((v) => !v)}
+                style={{
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  color: 'var(--color-text-secondary)',
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                }}
+              >
+                {historyOpen ? '▾' : '▸'} History ({historyEntries.length})
+              </button>
+              {historyOpen && (
+                <div
+                  data-testid="quick-session-history-list"
+                  style={{
+                    marginTop: 8,
+                    maxHeight: 160,
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  {historyEntries.map((entry) => (
+                    <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 9, color: 'var(--color-text-tertiary)' }}>
+                        {formatHistoryDate(entry.createdAt)}
+                      </span>
+                      <span style={{ fontSize: 10.5, color: 'var(--color-text-primary)', lineHeight: 1.4 }}>
+                        {entry.entry}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           </div>
 
           {/* 2 · Dashed edge with a ＋ chip */}

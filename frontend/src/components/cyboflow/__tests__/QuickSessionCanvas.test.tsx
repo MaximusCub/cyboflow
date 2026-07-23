@@ -9,14 +9,14 @@ import '@testing-library/jest-dom';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession } = vi.hoisted(
-  () => ({
+const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession, mockUseSessionSummary } =
+  vi.hoisted(() => ({
     mockLaunch: vi.fn(),
     mockListQuery: vi.fn(),
     mockDynamicInit: vi.fn(),
     mockUseDynamicForSession: vi.fn(),
-  }),
-);
+    mockUseSessionSummary: vi.fn(),
+  }));
 
 vi.mock('../../../hooks/useSessionMetrics', () => ({
   formatTokenCount: (n: number) =>
@@ -34,6 +34,10 @@ vi.mock('../../../hooks/useSessionMetrics', () => ({
 
 vi.mock('../../../hooks/useLaunchWorkflow', () => ({
   useLaunchWorkflow: () => ({ launch: mockLaunch, isLaunching: false, error: null }),
+}));
+
+vi.mock('../../../hooks/useSessionSummary', () => ({
+  useSessionSummary: mockUseSessionSummary,
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -136,6 +140,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockListQuery.mockResolvedValue(WORKFLOWS);
   mockUseDynamicForSession.mockReturnValue([]);
+  mockUseSessionSummary.mockReturnValue({ summary: null, loading: false, error: null });
 });
 
 describe('QuickSessionCanvas', () => {
@@ -328,6 +333,108 @@ describe('QuickSessionCanvas', () => {
     expect(screen.getAllByTestId('dynamic-workflow-agents')).toHaveLength(1);
     expect(screen.getByTestId('dynamic-workflow-agent-a1')).toBeInTheDocument();
     expect(screen.queryByTestId('dynamic-workflow-agent-b1')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session summary + history (session-summary-plan.md §7) — useSessionSummary
+// is mocked wholesale (it has its own hook unit test); these tests only cover
+// the canvas's render/hide/disclosure logic over the payload it returns.
+// ---------------------------------------------------------------------------
+
+describe('QuickSessionCanvas — session summary + history', () => {
+  it('renders the summary block when a non-null summary is enabled', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'Refactoring the auth middleware and adding tests.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary')).toHaveTextContent(
+      'Refactoring the auth middleware and adding tests.',
+    );
+  });
+
+  it('renders nothing when the summary is null', () => {
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
+  });
+
+  it('renders nothing when the feature is disabled, even with a summary present', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: false,
+        summary: 'Refactoring the auth middleware.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
+  });
+
+  it('hides the history card entirely when there are zero entries', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: { enabled: true, summary: 'State.', updatedAt: null, entries: [] },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-history-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-history-toggle')).not.toBeInTheDocument();
+  });
+
+  it('hides the history card when the feature is disabled, even with entries present', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: false,
+        summary: null,
+        updatedAt: null,
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-history-card')).not.toBeInTheDocument();
+  });
+
+  it('collapses by default, showing the count, and expands to list entries oldest-first', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-01-06T12:00:00.000Z',
+        entries: [
+          { id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' },
+          { id: 2, entry: 'Did B.', createdAt: '2026-01-06T11:00:00.000Z' },
+        ],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+
+    const toggle = screen.getByTestId('quick-session-history-toggle');
+    expect(toggle).toHaveTextContent('▸ History (2)');
+    expect(screen.queryByTestId('quick-session-history-list')).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveTextContent('▾ History (2)');
+    const list = screen.getByTestId('quick-session-history-list');
+    // Oldest-first ordering preserved verbatim from the payload.
+    const rows = list.textContent ?? '';
+    expect(rows.indexOf('Did A.')).toBeLessThan(rows.indexOf('Did B.'));
+    expect(list).toHaveTextContent('Jan 5');
+    expect(list).toHaveTextContent('Jan 6');
   });
 });
 
