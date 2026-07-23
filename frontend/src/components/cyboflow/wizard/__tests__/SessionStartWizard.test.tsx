@@ -269,6 +269,14 @@ async function selectUltracodeAndConfigure(): Promise<void> {
   await screen.findByTestId('wizard-step3');
 }
 
+/** Click the Design card → auto-advances to ③ Configure. */
+async function selectDesignAndConfigure(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('design-card'));
+  });
+  await screen.findByTestId('wizard-step3');
+}
+
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
@@ -1114,6 +1122,74 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
     });
     await selectUltracodeAndConfigure();
     expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design idea gate + launch (design-mode.md v0) — Design is idea-bound: the
+// CTA does NOT launch directly, it opens the idea picker (single-select, like
+// Ship — NOT Planner's multi mode). A confirm fires the SAME useQuickSession
+// hook Quick uses, but hard-pinned to the Claude SDK substrate/provider/
+// runtime regardless of the wizard's agentRuntime state, with the picked idea
+// threaded as the new `designIdeaId` param.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Design idea gate + launch', () => {
+  beforeEach(() => {
+    mockIdeaPickerMulti.mockClear();
+  });
+
+  it('renders the Design option on step ② alongside Quick/Ultracode', async () => {
+    await renderLockedWizard();
+    expect(screen.getByTestId('design-card')).toBeInTheDocument();
+  });
+
+  it('hides the substrate/runtime picker but keeps the model + permission controls on ③', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Start design session');
+    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
+    expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
+  });
+
+  it('opens the idea picker (single-select, not a direct launch) when Design is started', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The idea picker is shown, single-select — no launch has fired yet (the
+    // gate is freely cancellable, mirroring the Planner/Ship/Sprint gates).
+    expect(screen.getByTestId('mock-idea-pick')).toBeInTheDocument();
+    expect(mockIdeaPickerMulti).toHaveBeenLastCalledWith(false);
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
+  it('threads designIdeaId + the hard-pinned SDK substrate into createQuick on confirm', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 1,
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        designIdeaId: 'IDEA-7',
+      }),
+    );
   });
 });
 

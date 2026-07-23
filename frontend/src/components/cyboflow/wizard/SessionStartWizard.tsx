@@ -27,6 +27,10 @@
  *   - quick: agent-permission override + agent runtime (+ caveats) + model pin
  *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
  *     edit, so the blueprint editor is omitted).
+ *   - design: agent-permission override + model pin + launch summary ONLY — the
+ *     agent-runtime picker is HIDDEN (design sessions are hard-pinned to the
+ *     Claude SDK substrate, see below) and there is no fidelity control in v0
+ *     (design-mode.md "Scope and phasing" — static-only until v1).
  *
  * Launch paths (all fire from step ③):
  *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
@@ -43,6 +47,13 @@
  *   - quick: the {@link useQuickSession} hook — it creates the session + panels
  *     (passing the chosen agentPermissionMode + substrate) and calls
  *     setActiveQuickSession itself.
+ *   - design: also gated behind {@link IdeaPickerModal} (single-select — a
+ *     design session is idea-bound, design-mode.md "Idea link"), then the SAME
+ *     {@link useQuickSession} hook as `quick`, but with the substrate/provider/
+ *     runtime hard-coded to 'sdk'/'claude'/'claude-sdk' regardless of the
+ *     wizard's agentRuntime state (a security boundary — the MCP scope
+ *     mechanism that limits a design session's toolset exists only on the SDK
+ *     path) and the picked idea id threaded as the new `designIdeaId` param.
  *
  * A synchronous in-flight latch (`startInFlightRef`) guards every launch against
  * the double-submit duplicate-run bug (mirrors WorkflowPicker).
@@ -86,6 +97,7 @@ import { ProjectFilingCard } from './ProjectFilingCard';
 import { WorkflowListRow } from './WorkflowListRow';
 import { QuickSessionCard } from './QuickSessionCard';
 import { UltracodeCard } from './UltracodeCard';
+import { DesignCard } from './DesignCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
@@ -133,7 +145,12 @@ type WizardSelection =
   // Ultracode: opens an interactive session launched with the ultracode setting
   // (no structured run). Behaves like 'quick' at launch but pins the substrate
   // to interactive and threads the effort flag.
-  | { kind: 'ultracode' };
+  | { kind: 'ultracode' }
+  // Design (design-mode.md, v0): idea-bound design session. Does NOT launch
+  // directly from the CTA — it gates behind the idea picker (like Planner/Ship)
+  // and then starts a quick-session variant hard-pinned to the Claude SDK
+  // substrate, threading the picked idea id as `designIdeaId`. See handleStart.
+  | { kind: 'design' };
 
 /**
  * The faint graph-paper grid backing the wizard surface. Matches the
@@ -271,7 +288,11 @@ export default function SessionStartWizard(): React.JSX.Element {
   }, [selection?.kind, agentRuntime]);
   useEffect(() => {
     const effectiveRuntime: LaunchAgentRuntime =
-      selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
+      selection?.kind === 'ultracode'
+        ? 'claude-interactive'
+        : selection?.kind === 'design'
+          ? 'claude-sdk'
+          : agentRuntime;
     // A runtime flip changes the effective provider, and the effort scales
     // differ (Claude low..max vs Codex none..xhigh). Clear any pending
     // reasoning-effort selection ONLY on an actual runtime transition (not on a
@@ -319,15 +340,21 @@ export default function SessionStartWizard(): React.JSX.Element {
   // substrate preference projected onto a Claude runtime (PTY → 'claude-interactive',
   // SDK → 'claude-sdk'); WORKFLOW launches keep the SDK default runtime so an SDK
   // flow run can still resolve 'programmatic' (interactive hard-pins orchestrated).
+  // DESIGN always seeds 'claude-sdk' — the runtime picker is hidden for it (design
+  // sessions are hard-pinned to the Claude SDK substrate, a security boundary; see
+  // design-mode.md "Session plumbing"), but keeping the state itself consistent
+  // avoids relying solely on the render-time effectiveRuntime override.
   const seedDefaultRuntimeFor = useCallback(
     (kind: WizardSelection['kind']) => {
       if (runtimeTouchedRef.current) return;
       setAgentRuntime(
         kind === 'workflow'
           ? DEFAULT_SESSION_AGENT_RUNTIME
-          : quickDefaultSubstrate === 'interactive'
-            ? 'claude-interactive'
-            : 'claude-sdk',
+          : kind === 'design'
+            ? 'claude-sdk'
+            : quickDefaultSubstrate === 'interactive'
+              ? 'claude-interactive'
+              : 'claude-sdk',
       );
     },
     [quickDefaultSubstrate],
@@ -416,6 +443,13 @@ export default function SessionStartWizard(): React.JSX.Element {
   // Planner pre-launch idea gate.
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
+  // Design pre-launch idea gate (design-mode.md "Idea link" — required, no
+  // idealess design). Shares `ideaPickerOpen` with the Planner/Ship gate above
+  // (see handleIdeaPicked); a boolean latch is enough since design binds to
+  // exactly one idea (no batch). handleStart resets the OTHER pending target
+  // whenever it opens the picker for one flow, so a cancelled attempt can never
+  // leak into a later pick of the other kind.
+  const [pendingDesign, setPendingDesign] = useState(false);
 
   // Sprint pre-launch task-batch gate. A sprint run is seeded with the
   // multi-selected task ids (single-run lane model), so its launch goes through
@@ -795,6 +829,46 @@ export default function SessionStartWizard(): React.JSX.Element {
     [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection],
   );
 
+  // Design launch — fires from the idea-picker confirm callback
+  // (handleIdeaPicked), never directly from the CTA (see handleStart's design
+  // arm below). Hard-pins the SDK substrate + Claude provider/runtime
+  // regardless of the wizard's agentRuntime state (design-mode.md "Session
+  // plumbing": design sessions resolve to the Claude SDK substrate
+  // unconditionally — a security boundary, since the MCP scope mechanism that
+  // limits a design session's toolset exists only on that path) and threads
+  // the picked idea id as `designIdeaId` so createQuick can validate ownership
+  // and stamp sessions.design_idea_id server-side.
+  const launchDesign = useCallback(
+    (ideaId: string) => {
+      const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
+      void startQuickSession(
+        permissionMode,
+        'sdk',
+        undefined,
+        model,
+        fastMode,
+        disabledMcpServers,
+        pluginSelection,
+        worktreeModeOverride !== 'inherit' ? worktreeModeOverride : undefined,
+        'claude',
+        'claude-sdk',
+        reasoningEffort ?? undefined,
+        ideaId,
+      );
+    },
+    [
+      startQuickSession,
+      permissionMode,
+      model,
+      fastMode,
+      disabledMcpServers,
+      enabledPlugins,
+      pluginBaseline,
+      worktreeModeOverride,
+      reasoningEffort,
+    ],
+  );
+
   const handleStart = useCallback(() => {
     if (selection === null || startInFlightRef.current) return;
 
@@ -857,14 +931,32 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
 
+    if (selection.kind === 'design') {
+      // Design is idea-bound (design-mode.md "Idea link — integrity contract"):
+      // gate behind the idea picker, single-select, exactly like the Planner/
+      // Ship gate below — but do NOT flip the launch latch yet (the picker
+      // stays freely cancellable). Reset pendingWorkflowId so a stale
+      // planner/ship target from an earlier cancelled attempt can never make
+      // this picker open in `multi` mode (see handleIdeaPicked / its `multi`
+      // computation below).
+      setLaunchError(null);
+      setPendingWorkflowId(null);
+      setPendingDesign(true);
+      setIdeaPickerOpen(true);
+      return;
+    }
+
     // selection.kind === 'workflow'
     const meta = workflowMetas.find((m) => m.id === selection.workflowId);
     if (meta?.name === 'planner' || meta?.name === 'ship') {
       // Gate behind the idea picker — do NOT flip the latch yet. Ship (planner ⊕
       // sprint in one continuous run) is IDEA-seeded like the planner, so it
       // shares the idea gate; the human task-subset selection happens later, at
-      // the in-run approve-plan gate.
+      // the in-run approve-plan gate. Reset pendingDesign so a stale design
+      // latch from an earlier cancelled attempt can never route this pick into
+      // launchDesign (see handleIdeaPicked).
       setLaunchError(null);
+      setPendingDesign(false);
       setPendingWorkflowId(selection.workflowId);
       setIdeaPickerOpen(true);
       return;
@@ -889,6 +981,14 @@ export default function SessionStartWizard(): React.JSX.Element {
     // launch fires; peeled-off ideas are left unlaunched.
     (ideaIds: string[]) => {
       setIdeaPickerOpen(false);
+      if (pendingDesign) {
+        // Design is single-select (the modal's `multi` prop is forced false
+        // for it below), so exactly one id comes back.
+        setPendingDesign(false);
+        const ideaId = ideaIds[0];
+        if (ideaId !== undefined) void launchDesign(ideaId);
+        return;
+      }
       if (pendingWorkflowId === null) return;
       // A 1-element batch and a single-idea launch are behaviorally identical
       // downstream, but the singular `ideaId` path is the well-trodden one —
@@ -899,7 +999,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         void launchRun(pendingWorkflowId, { ideaIds });
       }
     },
-    [pendingWorkflowId, launchRun],
+    [pendingDesign, pendingWorkflowId, launchRun, launchDesign],
   );
 
   const handleBatchPicked = useCallback(
@@ -931,7 +1031,11 @@ export default function SessionStartWizard(): React.JSX.Element {
   const workflowRuntimeBlocked =
     selection?.kind === 'workflow' && workflowRuntimeForLaunch(agentRuntime) === null;
   const effectiveRuntime: LaunchAgentRuntime =
-    selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
+    selection?.kind === 'ultracode'
+      ? 'claude-interactive'
+      : selection?.kind === 'design'
+        ? 'claude-sdk'
+        : agentRuntime;
   const effectiveProvider = providerForRuntime(effectiveRuntime);
   const effectiveSubstrate = substrateForRuntime(effectiveRuntime);
   const selectedMeta =
@@ -945,6 +1049,8 @@ export default function SessionStartWizard(): React.JSX.Element {
     ctaLabel = 'Start quick session';
   } else if (selection.kind === 'ultracode') {
     ctaLabel = 'Run /ultracode';
+  } else if (selection.kind === 'design') {
+    ctaLabel = 'Start design session';
   } else {
     ctaLabel = `Run ${selectedMeta?.slashCommand ?? '/workflow'}`;
   }
@@ -1053,6 +1159,24 @@ export default function SessionStartWizard(): React.JSX.Element {
               }}
             />
 
+            {/* Design (design-mode.md, v0) — featured peer of Quick/Ultracode,
+                gated on allowQuick like Quick: its launch ultimately calls
+                startQuickSession (useQuickSession's hook is constructed with
+                `projectId: allowQuick ? selectedProjectId : null` above), which
+                no-ops without a project id. Selecting it does NOT launch from
+                here — the CTA on ③ opens the idea picker first (handleStart). */}
+            {allowQuick && (
+              <DesignCard
+                selected={selection?.kind === 'design'}
+                onSelect={() => {
+                  setSelection({ kind: 'design' });
+                  seedDefaultModelFor('design');
+                  seedDefaultRuntimeFor('design');
+                  setStep(3);
+                }}
+              />
+            )}
+
             {/* Divider — separates the featured launchers from the structured
                 workflow list (shown only when quick launches are allowed). */}
             {allowQuick && (
@@ -1103,9 +1227,13 @@ export default function SessionStartWizard(): React.JSX.Element {
 
             {/* Agent runtime — shown before the model because runtime controls
                 which model family is available. Workflow launches allow workflow
-                runtimes only; quick launches also allow Codex PTY. Hidden for Ultracode, which always uses Claude
-                interactive PTY. */}
-            {selection.kind !== 'ultracode' && (
+                runtimes only; quick launches also allow Codex PTY. Hidden for
+                Ultracode, which always uses Claude interactive PTY, AND for
+                Design, which is hard-pinned to the Claude SDK substrate
+                (design-mode.md "Session plumbing" — a security boundary, since
+                the MCP scope mechanism that limits a design session's toolset
+                exists only on the SDK path). */}
+            {selection.kind !== 'ultracode' && selection.kind !== 'design' && (
               <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
                 <SubstrateSelector
                   value={agentRuntime}
@@ -1506,7 +1634,9 @@ export default function SessionStartWizard(): React.JSX.Element {
                     ? 'Quick session'
                     : selection.kind === 'ultracode'
                       ? 'Ultracode (/ultracode)'
-                      : selectedMeta?.slashCommand ?? '/workflow'
+                      : selection.kind === 'design'
+                        ? 'Design session'
+                        : selectedMeta?.slashCommand ?? '/workflow'
                 }
               />
               <SummaryRow label="Permission" value={permissionLabel} />
@@ -1611,7 +1741,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         </div>
       )}
 
-      {/* ── Planner idea gate ── */}
+      {/* ── Planner / Ship / Design idea gate ── */}
       {ideaPickerOpen && selectedProjectId !== null && (
         <IdeaPickerModal
           isOpen
@@ -1619,11 +1749,23 @@ export default function SessionStartWizard(): React.JSX.Element {
           onClose={() => setIdeaPickerOpen(false)}
           onPicked={handleIdeaPicked}
           // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
-          // stays single-select (it consumes exactly one idea per run).
-          multi={workflowMetas.find((m) => m.id === pendingWorkflowId)?.name === 'planner'}
+          // and Design both stay single-select (Ship consumes exactly one idea
+          // per run; Design binds to exactly one idea, see design-mode.md
+          // "Idea link"). `!pendingDesign` short-circuits the multi check so a
+          // stale pendingWorkflowId can never flip a design pick into multi
+          // mode (defense in depth — handleStart already resets it on open).
+          multi={
+            !pendingDesign &&
+            workflowMetas.find((m) => m.id === pendingWorkflowId)?.name === 'planner'
+          }
+          // Design's picker opens straight on the "pick existing idea" tab; its
+          // "new idea" tab IS the spec's auto-mint-stub affordance (already the
+          // modal's default, named explicitly here for self-documentation).
+          defaultMode="pick"
           // The wizard's launch navigates away on success and cannot fire the
           // per-idea N+1 separate launches, so the pick-time split is hidden
-          // here (handleIdeaPicked drops opts — see its doc comment).
+          // here (handleIdeaPicked drops opts — see its doc comment). Design
+          // picks are single-select regardless, so this is moot for it.
           allowPlanSeparately={false}
         />
       )}

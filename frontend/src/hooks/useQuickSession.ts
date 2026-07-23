@@ -66,6 +66,15 @@ interface UseQuickSessionReturn {
    * claudeConfig ride stays Claude-only (create-quick reads it for
    * `quickAgentProvider === 'claude'`); codex-sdk relies solely on the setEffort
    * persistence below.
+   *
+   * `designIdeaId` (Design Mode, design-mode.md): the idea a design session
+   * binds to, threaded into createQuick so the server can validate the idea
+   * (exists, owned by the project, not decomposed) and stamp
+   * sessions.design_idea_id. Only sent by the wizard's Design arm, which also
+   * forces `substrate`/`agentProvider`/`agentRuntime` to 'sdk'/'claude'/
+   * 'claude-sdk' regardless of the caller's other params (a security boundary
+   * — the MCP scope mechanism that limits a design session's toolset exists
+   * only on the SDK path). Omitted for every non-design launch.
    */
   start: (
     agentPermissionMode?: PermissionMode,
@@ -79,6 +88,7 @@ interface UseQuickSessionReturn {
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
     reasoningEffort?: ReasoningEffort,
+    designIdeaId?: string,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -101,6 +111,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       agentProvider?: AgentProvider,
       agentRuntime?: SessionAgentRuntime,
       reasoningEffort?: ReasoningEffort,
+      designIdeaId?: string,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -146,6 +157,10 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // Only sent when explicitly chosen; omitted → the server floors to the
           // global quickSessionWorktreeMode default.
           ...(worktreeMode ? { worktreeMode } : {}),
+          // Design Mode (design-mode.md "Idea link"): the idea this design
+          // session binds to. Only sent by the wizard's Design arm; every other
+          // launch omits it.
+          ...(designIdeaId !== undefined ? { designIdeaId } : {}),
         });
 
         if (!result.success || !result.data) {

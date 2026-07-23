@@ -167,6 +167,14 @@ export interface Session {
    * inherit file settings. Mirror of main/src/types/session.ts.
    */
   enabledPlugins?: string[];
+  /**
+   * Design Mode (design-mode.md) idea link — the idea a design session is
+   * bound to. Snake-case to match the DB-row field name in
+   * main/src/database/models.ts Session (`design_idea_id`) verbatim, unlike
+   * the camelCase projections above; a later UI lane reads it directly off
+   * this field. undefined/null → not a design session (or link broken).
+   */
+  design_idea_id?: string | null;
 }
 
 export interface GitStatus {
@@ -255,6 +263,14 @@ export interface CreateSessionRequest {
    * IN SYNC with the main twin in main/src/types/session.ts (request-parity rule).
    */
   worktreeMode?: QuickSessionWorktreeMode;
+  /**
+   * Design Mode: idea to link the design session to; forces SDK substrate +
+   * Claude; see design-mode.md. Omitted for every non-design launch; the
+   * server validates the idea (exists, owned by the project, not decomposed)
+   * and stamps sessions.design_idea_id. KEEP IN SYNC with the main twin in
+   * main/src/types/session.ts (request-parity rule).
+   */
+  designIdeaId?: string;
   projectId?: number;
   folderId?: string;
   baseBranch?: string;

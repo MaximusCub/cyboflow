@@ -194,6 +194,14 @@ export interface CreateSessionRequest {
    * frontend twin in frontend/src/types/session.ts (request-parity rule).
    */
   worktreeMode?: QuickSessionWorktreeMode;
+  /**
+   * Design Mode: idea to link the design session to; forces SDK substrate +
+   * Claude; see design-mode.md. Omitted for every non-design launch; the
+   * server validates the idea (exists, owned by the project, not decomposed)
+   * and stamps sessions.design_idea_id. KEEP IN SYNC with the frontend twin in
+   * frontend/src/types/session.ts (request-parity rule).
+   */
+  designIdeaId?: string;
   projectId?: number;
   folderId?: string;
   baseBranch?: string;
