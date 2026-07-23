@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ToolPanel } from '../../../../../shared/types/panels';
 import { PanelTabBar } from '../PanelTabBar';
@@ -55,5 +55,30 @@ describe('PanelTabBar chat labels', () => {
     );
 
     expect(screen.getByText('Planning notes')).toBeInTheDocument();
+  });
+});
+
+describe('PanelTabBar add chat action', () => {
+  it('renders Add chat next to Add terminal and invokes the chat callback', () => {
+    const onAddTerminal = vi.fn();
+    const onAddChat = vi.fn();
+
+    render(
+      <PanelTabBar
+        panels={[]}
+        onPanelSelect={vi.fn()}
+        onPanelClose={vi.fn()}
+        onAddTerminal={onAddTerminal}
+        onAddChat={onAddChat}
+      />,
+    );
+
+    expect(screen.getAllByRole('button').map((button) => button.getAttribute('aria-label')))
+      .toEqual(['Add terminal panel', 'Add chat panel']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+
+    expect(onAddChat).toHaveBeenCalledTimes(1);
+    expect(onAddTerminal).not.toHaveBeenCalled();
   });
 });

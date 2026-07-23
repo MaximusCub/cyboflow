@@ -6,6 +6,7 @@ import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './Mode
 import { FastModePill } from './FastModePill';
 import { EffortPill } from './EffortPill';
 import { PermissionModePill } from './PermissionModePill';
+import { PanelSubstratePill } from './PanelSubstratePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
@@ -527,6 +528,10 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     />
   );
 
+  const substrateSlot = agentProvider === 'claude' && panelId && panelId !== activeSession.id ? (
+    <PanelSubstratePill panelId={panelId} sessionSubstrate={activeSession.substrate} />
+  ) : undefined;
+
   // MCP / plugin selection is a SESSION-START decision now (the launch wizard's
   // Advanced section), not a mid-conversation toggle — a quick SDK session
   // spawns its MCP config once and the deny-list is enforced at spawn, so a
@@ -574,6 +579,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       modelLabel={modelLabel}
       modelSlot={modelSlot}
       permissionSlot={permissionSlot}
+      substrateSlot={substrateSlot}
       effortLabel={effortLabel}
       fastSlot={fastModeSlot}
       effortSlot={effortSlot}

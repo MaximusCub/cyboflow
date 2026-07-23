@@ -24,7 +24,8 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   onPanelSelect,
   onPanelClose,
   context = 'worktree',  // Default to worktree for backward compatibility
-  onAddTerminal
+  onAddTerminal,
+  onAddChat,
 }) => {
   const sessionContext = useSession();
   const { gitBranchActions, isMerging } = sessionContext || {};
@@ -104,6 +105,16 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       });
     }
   }, [onAddTerminal]);
+
+  const handleAddChat = useCallback(() => {
+    if (!onAddChat) return;
+    const result = onAddChat();
+    if (result instanceof Promise) {
+      result.catch((err: unknown) => {
+        console.error('[PanelTabBar] Failed to add chat:', err);
+      });
+    }
+  }, [onAddChat]);
 
   // Focus input when editing starts
   useEffect(() => {
@@ -275,6 +286,22 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
               <Plus className="w-4 h-4" />
               <Terminal className="w-4 h-4" />
               <span className="sr-only">Add terminal panel</span>
+            </button>
+          </div>
+        )}
+
+        {onAddChat && (
+          <div className="flex items-center h-8">
+            <button
+              type="button"
+              onClick={handleAddChat}
+              aria-label="Add chat panel"
+              title="Add chat panel"
+              className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+            >
+              <Plus className="w-4 h-4" />
+              <MessageSquare className="w-4 h-4" />
+              <span className="sr-only">Add chat panel</span>
             </button>
           </div>
         )}

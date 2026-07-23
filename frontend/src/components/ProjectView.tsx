@@ -5,6 +5,7 @@ import { PanelContainer } from './panels/PanelContainer';
 import { SessionProvider } from '../contexts/SessionContext';
 import { useAddTerminalShortcut } from '../hooks/useAddTerminalShortcut';
 import { useAddTerminalPanel } from '../hooks/useAddTerminalPanel';
+import { useAddClaudePanel } from '../hooks/useAddClaudePanel';
 import { useEnsureClaudePanel } from '../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../hooks/useAddClaudeShortcut';
 import { usePanelSurface } from '../hooks/usePanelSurface';
@@ -42,6 +43,9 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
   const ensureClaudePanel = useEnsureClaudePanel(mainRepoSession, { logTag: 'ProjectView' });
 
   const handleAddTerminal = useAddTerminalPanel(mainRepoSession, {
+    logTag: 'ProjectView',
+  });
+  const handleAddChat = useAddClaudePanel(mainRepoSession, {
     logTag: 'ProjectView',
   });
 
@@ -132,6 +136,7 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
             onPanelClose={handlePanelClose}
             context="project"
             onAddTerminal={handleAddTerminal}
+            onAddChat={handleAddChat}
           />
         </SessionProvider>
       )}

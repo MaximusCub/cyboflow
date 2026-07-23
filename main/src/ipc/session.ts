@@ -1245,6 +1245,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Session is already archived' };
       }
 
+      // Dismissal has the same gate settlement contract as Stop. Resolve gates
+      // before killing the owner so a parked SDK/PTY turn cannot emit against an
+      // archived session while the worktree is being removed.
+      const dismissGateRunId = dbSession.chat_run_id ?? dbSession.run_id;
+      if (dismissGateRunId) {
+        QuestionRouter.getInstance().clearPendingForRun(dismissGateRunId);
+        ApprovalRouter.getInstance().clearPendingForRun(dismissGateRunId);
+      }
+
       // Dismissing a session must not strand its hosted workflow runs: cancel
       // every non-terminal run FIRST (git-neutral — stops the live agent and
       // settles pending approvals/questions so no orphaned review-queue items;
@@ -1277,29 +1286,34 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // runId to the live panelId and NO-OPs for the SDK substrate. Fail-soft:
       // a kill failure must never block the dismiss. Role-G: the live REPL gates on
       // the chat_run_id sentinel (the gate vehicle), not sessions.run_id.
-      if (dbSession.agent_runtime === 'codex-sdk') {
+      const dismissPanels = panelManager.getPanelsForSession(sessionId).filter((p) => p.type === 'claude');
+      for (const panel of dismissPanels) {
         try {
-          const panelId = resolveClaudePanelId(sessionId);
-          if (panelId) {
-            await codexSdkManager.stopPanel(panelId);
+          if (dbSession.agent_runtime === 'codex-sdk') {
+            await codexSdkManager.stopPanel(panel.id);
+          } else if (dbSession.agent_runtime === 'codex-pty') {
+            await codexPtyManager.stopPanel(panel.id);
+          } else if (panel.substrate === 'interactive' || (panel.substrate === undefined && dbSession.substrate === 'interactive')) {
+            if (interactiveCliManager) {
+              await interactiveCliManager.stopPanel(panel.id);
+            } else if (dismissGateRunId) {
+              await killLiveSession(dismissGateRunId);
+            }
+          } else {
+            await claudeCodeManager.stopPanel(panel.id);
           }
         } catch (err) {
-          console.warn(`[IPC:session] Failed to cancel live Codex SDK turn for dismissed session ${sessionId}:`, err);
+          console.warn(`[IPC:session] Failed to tear down live panel ${panel.id} for dismissed session ${sessionId}:`, err);
         }
-      } else if (dbSession.agent_runtime === 'codex-pty') {
+      }
+      // A quick session can lose its panel row during startup recovery. Keep the
+      // sentinel kill as a final fallback so a warm SDK query or PTY REPL cannot
+      // survive archive/worktree removal.
+      if (dismissPanels.length === 0 && dismissGateRunId) {
         try {
-          const panelId = resolveClaudePanelId(sessionId);
-          if (panelId) {
-            await codexPtyManager.stopPanel(panelId);
-          }
+          await killLiveSession(dismissGateRunId);
         } catch (err) {
-          console.warn(`[IPC:session] Failed to kill live Codex PTY for dismissed session ${sessionId}:`, err);
-        }
-      } else if (dbSession.substrate === 'interactive' && dbSession.chat_run_id) {
-        try {
-          await killLiveSession(dbSession.chat_run_id);
-        } catch (err) {
-          console.warn(`[IPC:session] Failed to kill live interactive REPL for dismissed session ${sessionId}:`, err);
+          console.warn(`[IPC:session] Failed to kill live quick agent for dismissed session ${sessionId}:`, err);
         }
       }
 

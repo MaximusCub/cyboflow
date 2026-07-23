@@ -40,6 +40,7 @@ import { SessionProvider } from '../../contexts/SessionContext';
 import { PanelTabBar } from '../panels/PanelTabBar';
 import { PanelContainer } from '../panels/PanelContainer';
 import { useAddTerminalPanel } from '../../hooks/useAddTerminalPanel';
+import { useAddClaudePanel } from '../../hooks/useAddClaudePanel';
 import { useAddTerminalShortcut } from '../../hooks/useAddTerminalShortcut';
 import { useEditWorkflowShortcut } from '../../hooks/useEditWorkflowShortcut';
 import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
@@ -140,6 +141,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   } = usePanelSurface(projectId, { autoCreatePermanentPanels: false });
 
   const handleAddTerminal = useAddTerminalPanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
+  const handleAddChat = useAddClaudePanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
   const ensureClaudePanel = useEnsureClaudePanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
 
   useAddTerminalShortcut(handleAddTerminal);
@@ -158,6 +160,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         onPanelClose={handlePanelClose}
         context="project"
         onAddTerminal={handleAddTerminal}
+        onAddChat={handleAddChat}
       />
       {currentActivePanel && (
         <div className="flex-1 overflow-hidden relative">

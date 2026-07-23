@@ -9,6 +9,7 @@ export interface PanelTabBarProps {
   onPanelClose: (panel: ToolPanel) => void;
   context?: PanelContext;  // Optional context to filter available panels
   onAddTerminal?: () => void | Promise<void>;
+  onAddChat?: () => void | Promise<void>;
 }
 
 export interface PanelContainerProps {

@@ -475,13 +475,21 @@ export default function SessionStartWizard(): React.JSX.Element {
   // so a failed design launch (onSuccess never fires) can never leak `true`
   // into a later non-design launch.
   const isDesignLaunchRef = useRef(false);
+  // A wizard workflow launch creates a host session before runs.start can
+  // validate the provider mix. Keep that session attached to the pending
+  // attempt so a mixed-provider retry reuses its worktree instead of creating
+  // a second one.
+  const pendingHostedSessionIdRef = useRef<string | null>(null);
 
   // Mixed-provider retry prompt (Phase 2 slice D2). launchRun / launchBatch
   // detect isMixedProviderOrchestratedError in their catch and, instead of
   // calling setLaunchError, stash a retry thunk here that re-invokes the exact
   // same launch with executionModel forced to 'programmatic'. The CTA area
   // renders a confirm/cancel prompt off this instead of the raw error.
-  const [mixedProviderPrompt, setMixedProviderPrompt] = useState<{ retry: () => void } | null>(null);
+  const [mixedProviderPrompt, setMixedProviderPrompt] = useState<{
+    retry: () => void;
+    sessionId: string | null;
+  } | null>(null);
 
   // One-shot latch for the explicit `preselectWorkflowName` auto-advance. Set
   // the moment the preselect resolves and drives ② → ③ once, so later
@@ -659,6 +667,22 @@ export default function SessionStartWizard(): React.JSX.Element {
     useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
   }, []);
 
+  // A host session created for a failed launch is not user content. Delete it
+  // when the user declines the retry (or when a non-retryable launch failure
+  // occurs), including its worktree via the normal sessions:delete path.
+  const cleanupUnusedHostedSession = useCallback(async (sessionId: string | null): Promise<void> => {
+    if (sessionId === null) return;
+    if (pendingHostedSessionIdRef.current === sessionId) {
+      pendingHostedSessionIdRef.current = null;
+    }
+    try {
+      await API.sessions.delete(sessionId);
+    } catch {
+      // Cleanup is best-effort here; the original launch error remains the
+      // useful user-facing result and the backend delete path is fail-soft.
+    }
+  }, []);
+
   // ── Launch ───────────────────────────────────────────────────────────────
   const launchRun = useCallback(
     async (
@@ -668,12 +692,16 @@ export default function SessionStartWizard(): React.JSX.Element {
       // this exact launch to programmatic, overriding the Advanced Orchestration
       // control. Absent on every ordinary launch.
       forceExecutionModel?: ExecutionModel,
+      // The mixed-provider retry passes the session created by the first
+      // attempt. Omitting this creates and records a fresh host session.
+      existingSessionId?: string,
     ): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
       setLaunchError(null);
       setIsLaunching(true);
+      let sessionId: string | null = existingSessionId ?? null;
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
@@ -688,12 +716,15 @@ export default function SessionStartWizard(): React.JSX.Element {
         // a session the run would take the legacy PARENTLESS path
         // (workflow_runs.session_id null), with nothing to bind the close-out
         // (Merge / PR / Dismiss) or the File Explorer / Diff to.
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
-          forceNew: true,
-          agentProvider: providerForRuntime(workflowRuntime),
-          agentRuntime: workflowRuntime,
-          agentModel: model,
-        });
+        if (sessionId === null) {
+          sessionId = await ensureSessionForLaunch(selectedProjectId, {
+            forceNew: true,
+            agentProvider: providerForRuntime(workflowRuntime),
+            agentRuntime: workflowRuntime,
+            agentModel: model,
+          });
+          pendingHostedSessionIdRef.current = sessionId;
+        }
         // Resolve the launched flow's meta BEFORE the mutate so the seed gate can
         // read meta?.name — the triage-tray finding ids are only seeded into a
         // `compound` run.
@@ -739,6 +770,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         // (setActiveRun's parentSessionId sets selectedSessionId).
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
+        if (pendingHostedSessionIdRef.current === sessionId) {
+          pendingHostedSessionIdRef.current = null;
+        }
 
         const slash = meta?.slashCommand ?? '/workflow';
         setToast(`Launching ${slash} on ${banner.name} ⌥ ${result.branchName}`);
@@ -757,17 +791,21 @@ export default function SessionStartWizard(): React.JSX.Element {
       } catch (err: unknown) {
         if (isMixedProviderOrchestratedError(err)) {
           // Do NOT surface a raw error — offer to retry as programmatic instead.
-          setMixedProviderPrompt({ retry: () => void launchRun(workflowId, ideaSeed, 'programmatic') });
+          setMixedProviderPrompt({
+            sessionId,
+            retry: () => void launchRun(workflowId, ideaSeed, 'programmatic', sessionId ?? undefined),
+          });
           startInFlightRef.current = false;
           return;
         }
+        await cleanupUnusedHostedSession(sessionId);
         setLaunchError(err instanceof Error ? err.message : 'Failed to start run');
         startInFlightRef.current = false;
       } finally {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, cleanupUnusedHostedSession],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -783,12 +821,14 @@ export default function SessionStartWizard(): React.JSX.Element {
       // Set on the mixed-provider retry (see mixedProviderPrompt above) — mirrors
       // launchRun's forceExecutionModel.
       forceExecutionModel?: ExecutionModel,
+      existingSessionId?: string,
     ): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
       setLaunchError(null);
       setIsLaunching(true);
+      let sessionId: string | null = existingSessionId ?? null;
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
@@ -796,12 +836,15 @@ export default function SessionStartWizard(): React.JSX.Element {
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // forceNew: the wizard always starts a NEW session (see launchRun).
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
-          forceNew: true,
-          agentProvider: providerForRuntime(workflowRuntime),
-          agentRuntime: workflowRuntime,
-          agentModel: model,
-        });
+        if (sessionId === null) {
+          sessionId = await ensureSessionForLaunch(selectedProjectId, {
+            forceNew: true,
+            agentProvider: providerForRuntime(workflowRuntime),
+            agentRuntime: workflowRuntime,
+            agentModel: model,
+          });
+          pendingHostedSessionIdRef.current = sessionId;
+        }
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId: selectedProjectId,
@@ -827,6 +870,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
+        if (pendingHostedSessionIdRef.current === sessionId) {
+          pendingHostedSessionIdRef.current = null;
+        }
 
         const meta = workflowMetas.find((m) => m.id === workflowId);
         const slash = meta?.slashCommand ?? '/sprint';
@@ -837,17 +883,21 @@ export default function SessionStartWizard(): React.JSX.Element {
       } catch (err: unknown) {
         if (isMixedProviderOrchestratedError(err)) {
           // Do NOT surface a raw error — offer to retry as programmatic instead.
-          setMixedProviderPrompt({ retry: () => void launchBatch(workflowId, taskIds, 'programmatic') });
+          setMixedProviderPrompt({
+            sessionId,
+            retry: () => void launchBatch(workflowId, taskIds, 'programmatic', sessionId ?? undefined),
+          });
           startInFlightRef.current = false;
           return;
         }
+        await cleanupUnusedHostedSession(sessionId);
         setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint run');
         startInFlightRef.current = false;
       } finally {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, cleanupUnusedHostedSession],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1054,8 +1104,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   }, [mixedProviderPrompt]);
 
   const handleMixedProviderCancel = useCallback(() => {
+    const pending = mixedProviderPrompt;
     setMixedProviderPrompt(null);
-  }, []);
+    void cleanupUnusedHostedSession(pending?.sessionId ?? null);
+  }, [mixedProviderPrompt, cleanupUnusedHostedSession]);
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
   const ctaBusy = isLaunching || isQuickStarting;
@@ -1132,6 +1184,40 @@ export default function SessionStartWizard(): React.JSX.Element {
               onChangeProject={handleChangeProject}
               onBackToWorkflow={handleBackToWorkflow}
             />
+
+            {/* Keep the mixed-provider decision at the top of the wizard card.
+                It is sticky so a long Configure form cannot hide the user's
+                only actionable retry/cancel choice below the fold. */}
+            {mixedProviderPrompt !== null && (
+              <div
+                data-testid="mixed-provider-switch-prompt"
+                role="alertdialog"
+                aria-label="Switch to programmatic execution"
+                className="sticky top-2 z-20 flex flex-col gap-2 border border-status-warning/30 bg-status-warning/10 p-3"
+              >
+                <p className="text-sm text-status-warning">
+                  This flow runs one or more steps on Codex, which requires programmatic execution. Switch this run to programmatic and launch?
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleMixedProviderConfirm}
+                    data-testid="mixed-provider-switch-confirm"
+                    className="flex-1 bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+                  >
+                    Switch & launch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleMixedProviderCancel}
+                    data-testid="mixed-provider-switch-cancel"
+                    className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
         {/* ── Step 1: project grid (unlocked only) ── */}
         {!locked && step === 1 && (
@@ -1705,39 +1791,6 @@ export default function SessionStartWizard(): React.JSX.Element {
 
             {/* Launch CTA — last element inside the card. */}
             <div className="flex flex-col gap-2 pt-1">
-              {/* Mixed-provider retry prompt (Phase 2 slice D2) — a launch failed
-                  because a step is pinned to Codex under orchestrated execution;
-                  offer to switch to programmatic and retry instead of a raw error. */}
-              {mixedProviderPrompt !== null && (
-                <div
-                  data-testid="mixed-provider-switch-prompt"
-                  role="alertdialog"
-                  aria-label="Switch to programmatic execution"
-                  className="flex flex-col gap-2 border border-status-warning/30 bg-status-warning/10 p-3"
-                >
-                  <p className="text-sm text-status-warning">
-                    This flow runs one or more steps on Codex, which requires programmatic execution. Switch this run to programmatic and launch?
-                  </p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={handleMixedProviderConfirm}
-                      data-testid="mixed-provider-switch-confirm"
-                      className="flex-1 bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
-                    >
-                      Switch & launch
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleMixedProviderCancel}
-                      data-testid="mixed-provider-switch-cancel"
-                      className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
               {combinedError !== null && combinedError !== undefined && (
                 <p className="text-xs text-status-error" role="alert">
                   {combinedError}

@@ -398,6 +398,8 @@ interface ElectronAPI {
   claudePanels: {
     getModel: (panelId: string) => Promise<IPCResponse<string>>;
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
+    getSubstrate: (panelId: string) => Promise<IPCResponse<'sdk' | 'interactive' | null>>;
+    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null) => Promise<IPCResponse<void>>;
     setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
     getFastMode: (panelId: string) => Promise<IPCResponse<boolean>>;
     /** Latest CLI-reported fast-mode state (null until a turn has reported). */

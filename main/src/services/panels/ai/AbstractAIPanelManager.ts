@@ -28,9 +28,15 @@ export abstract class AbstractAIPanelManager {
     protected cliManager: AbstractCliManager,
     protected sessionManager: import('../../sessionManager').SessionManager,
     protected logger?: Logger,
-    protected configManager?: ConfigManager
+    protected configManager?: ConfigManager,
+    protected additionalCliManagers: AbstractCliManager[] = [],
   ) {
     this.setupEventHandlers();
+  }
+
+  /** Resolve the owner for a panel. Subclasses may route by panel metadata. */
+  protected getCliManager(_panelId: string): AbstractCliManager {
+    return this.cliManager;
   }
 
   /**
@@ -42,7 +48,7 @@ export abstract class AbstractAIPanelManager {
    * Extract agent-specific configuration from the unified config
    * Each subclass implements this to pick out its relevant fields
    */
-  protected abstract extractAgentConfig(config: AIPanelConfig): unknown[];
+  protected abstract extractAgentConfig(config: AIPanelConfig, manager?: AbstractCliManager): unknown[];
 
   /**
    * Generate a resume ID for conversation continuation
@@ -55,8 +61,13 @@ export abstract class AbstractAIPanelManager {
    * Setup event handlers to forward CLI manager events to panel events
    */
   protected setupEventHandlers(): void {
+    const managers = [this.cliManager, ...this.additionalCliManagers];
+    for (const manager of managers) this.setupEventHandlersForManager(manager);
+  }
+
+  private setupEventHandlersForManager(manager: AbstractCliManager): void {
     // Forward output events
-    this.cliManager.on('output', (data: { panelId: string; sessionId: string; type: string; data: unknown; timestamp: Date }) => {
+    manager.on('output', (data: { panelId: string; sessionId: string; type: string; data: unknown; timestamp: Date }) => {
       const { panelId, sessionId } = data;
       if (panelId && this.panelMappings.has(panelId)) {
         try {
@@ -71,7 +82,7 @@ export abstract class AbstractAIPanelManager {
           this.logger?.error(`[${this.getAgentName()}PanelManager] Failed to store panel output: ${error}`);
         }
 
-        this.cliManager.emit('panel-output', {
+        manager.emit('panel-output', {
           panelId,
           sessionId,
           type: data.type,
@@ -82,10 +93,10 @@ export abstract class AbstractAIPanelManager {
     });
 
     // Forward spawned events
-    this.cliManager.on('spawned', (data: { panelId: string; sessionId: string }) => {
+    manager.on('spawned', (data: { panelId: string; sessionId: string }) => {
       const { panelId, sessionId } = data;
       if (panelId && this.panelMappings.has(panelId)) {
-        this.cliManager.emit('panel-spawned', {
+        manager.emit('panel-spawned', {
           panelId,
           sessionId
         });
@@ -93,7 +104,7 @@ export abstract class AbstractAIPanelManager {
     });
 
     // Forward exit events
-    this.cliManager.on('exit', (data: { panelId: string; sessionId: string; exitCode?: number; signal?: string }) => {
+    manager.on('exit', (data: { panelId: string; sessionId: string; exitCode?: number; signal?: string }) => {
       const { panelId, sessionId, exitCode, signal } = data;
       if (!panelId) {
         this.logger?.warn(`[${this.getAgentName()}PanelManager] Received exit event without panelId`);
@@ -108,7 +119,7 @@ export abstract class AbstractAIPanelManager {
         return;
       }
 
-      this.cliManager.emit('panel-exit', {
+      manager.emit('panel-exit', {
         panelId,
         sessionId: resolvedSessionId,
         exitCode,
@@ -117,10 +128,10 @@ export abstract class AbstractAIPanelManager {
     });
 
     // Forward error events
-    this.cliManager.on('error', (data: { panelId: string; sessionId: string; error: Error | string }) => {
+    manager.on('error', (data: { panelId: string; sessionId: string; error: Error | string }) => {
       const { panelId, sessionId, error } = data;
       if (panelId && this.panelMappings.has(panelId)) {
-        this.cliManager.emit('panel-error', {
+        manager.emit('panel-error', {
           panelId,
           sessionId,
           error
@@ -246,9 +257,10 @@ export abstract class AbstractAIPanelManager {
     this.logger?.info(`[${this.getAgentName()}PanelManager] Starting panel ${panelId} (session: ${resolvedSessionId})`);
 
     // Extract agent-specific parameters using the subclass implementation
-    const agentParams = this.extractAgentConfig(config);
+    const manager = this.getCliManager(panelId);
+    const agentParams = this.extractAgentConfig(config, manager);
 
-    return this.cliManager.startPanel(
+    return manager.startPanel(
       panelId,
       resolvedSessionId,
       worktreePath,
@@ -283,9 +295,10 @@ export abstract class AbstractAIPanelManager {
     }));
 
     // Extract agent-specific parameters
-    const agentParams = this.extractAgentConfig(config);
+    const manager = this.getCliManager(panelId);
+    const agentParams = this.extractAgentConfig(config, manager);
 
-    return this.cliManager.continuePanel(
+    return manager.continuePanel(
       panelId,
       mapping.sessionId,
       worktreePath,
@@ -305,7 +318,7 @@ export abstract class AbstractAIPanelManager {
     }
 
     this.logger?.info(`[${this.getAgentName()}PanelManager] Stopping panel ${panelId}`);
-    return this.cliManager.stopPanel(panelId);
+    return this.getCliManager(panelId).stopPanel(panelId);
   }
 
   /**
@@ -318,7 +331,7 @@ export abstract class AbstractAIPanelManager {
     }
 
     this.logger?.verbose(`[${this.getAgentName()}PanelManager] Sending input to panel ${panelId}`);
-    this.cliManager.sendInput(panelId, input);
+    this.getCliManager(panelId).sendInput(panelId, input);
   }
 
   /**
@@ -326,7 +339,7 @@ export abstract class AbstractAIPanelManager {
    */
   isPanelRunning(panelId: string): boolean {
     const mapping = this.panelMappings.get(panelId);
-    return mapping ? this.cliManager.isPanelRunning(panelId) : false;
+    return mapping ? this.getCliManager(panelId).isPanelRunning(panelId) : false;
   }
 
   /**
@@ -338,7 +351,7 @@ export abstract class AbstractAIPanelManager {
       return undefined;
     }
 
-    return this.cliManager.getProcess(panelId);
+    return this.getCliManager(panelId).getProcess(panelId);
   }
 
   /**

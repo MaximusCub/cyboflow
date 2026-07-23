@@ -97,6 +97,8 @@ export interface UnifiedComposerProps {
   /** interactive reasoning-effort selector (IDEA-029, quick SDK, idle) — host
    *  supplies the node, rendered next to the fast-mode toggle. */
   effortSlot?: React.ReactNode;
+  /** Per-panel substrate override for added chats. */
+  substrateSlot?: React.ReactNode;
   /** compact-context control (SDK quick) — host supplies the node. */
   compactSlot?: React.ReactNode;
 }
@@ -130,6 +132,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     effortLabel,
     fastSlot,
     effortSlot,
+    substrateSlot,
     compactSlot,
   } = props;
 
@@ -401,6 +404,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {visibility.showModelEffort &&
           (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} title={modelLabelTitle} /> : null))}
         {permissionSlot}
+        {substrateSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
         {/* Opus-only fast-mode toggle (speed), then reasoning-effort selector —

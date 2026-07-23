@@ -1,3 +1,5 @@
+import type { CliSubstrate } from './substrate';
+
 export interface ToolPanel {
   id: string;                    // Unique panel instance ID (uuid)
   sessionId: string;             // Associated session/worktree
@@ -5,6 +7,8 @@ export interface ToolPanel {
   title: string;                 // Display title (e.g., "Terminal 1" or "Chat 1")
   state: ToolPanelState;         // Panel-specific state
   metadata: ToolPanelMetadata;   // Creation time, position, etc.
+  /** Optional per-panel substrate; absent inherits the session substrate. */
+  substrate?: CliSubstrate;
 }
 
 export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'editor' | 'logs' | 'dashboard' | 'setup-tasks';
@@ -178,6 +182,8 @@ export interface CreatePanelRequest {
   title?: string;                // Optional custom title
   initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
+  /** Optional per-panel substrate override; absent inherits the session. */
+  substrate?: CliSubstrate;
 }
 
 export interface UpdatePanelRequest {

@@ -6,6 +6,8 @@ import type { ConversationMessage } from '../../../database/models';
 import { AIPanelConfig, StartPanelConfig, ContinuePanelConfig } from '../../../../../shared/types/aiPanelConfig';
 import { ClaudePanelState } from '../../../../../shared/types/panels';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
+import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import { panelManager } from '../../panelManager';
 
 /**
  * Manager for Claude Code panels
@@ -17,9 +19,23 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
     claudeCodeManager: AbstractCliManager,
     sessionManager: import('../../sessionManager').SessionManager,
     logger?: Logger,
-    configManager?: ConfigManager
+    configManager?: ConfigManager,
+    interactiveCliManager?: AbstractCliManager,
   ) {
-    super(claudeCodeManager, sessionManager, logger, configManager);
+    super(claudeCodeManager, sessionManager, logger, configManager, interactiveCliManager ? [interactiveCliManager] : []);
+    this.interactiveCliManager = interactiveCliManager;
+  }
+
+  private readonly interactiveCliManager?: AbstractCliManager;
+
+  protected getCliManager(panelId: string): AbstractCliManager {
+    const panel = panelManager.getPanel(panelId);
+    const session = panel ? this.sessionManager.getDbSession(panel.sessionId) : undefined;
+    const substrate: CliSubstrate = panel?.substrate ?? session?.substrate ?? 'sdk';
+    if (substrate === 'interactive' && this.interactiveCliManager) {
+      return this.interactiveCliManager;
+    }
+    return this.cliManager;
   }
 
   /**
@@ -33,7 +49,13 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
    * Extract Claude-specific configuration parameters
    * Claude uses: permissionMode, model, fastMode, reasoningEffort
    */
-  protected extractAgentConfig(config: AIPanelConfig): [string | undefined, string | undefined, boolean | undefined, ReasoningEffort | undefined] {
+  protected extractAgentConfig(config: AIPanelConfig, manager?: AbstractCliManager): unknown[] {
+    if (manager && manager !== this.cliManager) {
+      // InteractiveClaudeManager accepts permission + model for a panel turn;
+      // fast-mode/reasoning are SDK-only spawn options and must not shift the
+      // interactive manager's positional arguments.
+      return [config.permissionMode, config.model];
+    }
     return [
       config.permissionMode, // 'approve' | 'ignore' | undefined
       config.model,          // model string

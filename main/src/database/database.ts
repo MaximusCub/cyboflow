@@ -29,6 +29,7 @@ interface ToolPanelRow {
   state: string | null;
   metadata: string | null;
   created_at: string;
+  substrate?: 'sdk' | 'interactive' | null;
 }
 
 // Interface for execution diff database rows
@@ -3266,15 +3267,16 @@ export class DatabaseService {
     title: string;
     state?: unknown;
     metadata?: unknown;
+    substrate?: 'sdk' | 'interactive';
   }): void {
     this.transaction(() => {
       const stateJson = data.state ? JSON.stringify(data.state) : null;
       const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
       
       this.db.prepare(`
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(data.id, data.sessionId, data.type, data.title, stateJson, metadataJson);
+        INSERT INTO tool_panels (id, session_id, type, title, state, metadata, substrate)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(data.id, data.sessionId, data.type, data.title, stateJson, metadataJson, data.substrate ?? null);
     });
   }
 
@@ -3282,6 +3284,7 @@ export class DatabaseService {
     title?: string;
     state?: unknown;
     metadata?: unknown;
+    substrate?: 'sdk' | 'interactive' | null;
   }): void {
     // Get existing panel first to merge state
     const existingPanel = this.getPanel(panelId);
@@ -3336,6 +3339,11 @@ export class DatabaseService {
         setClauses.push('metadata = ?');
         values.push(JSON.stringify(updates.metadata));
       }
+
+      if (updates.substrate !== undefined) {
+        setClauses.push('substrate = ?');
+        values.push(updates.substrate);
+      }
       
       if (setClauses.length > 0) {
         setClauses.push('updated_at = CURRENT_TIMESTAMP');
@@ -3373,6 +3381,7 @@ export class DatabaseService {
     title: string;
     state?: unknown;
     metadata?: unknown;
+    substrate?: 'sdk' | 'interactive';
   }): void {
     this.transaction(() => {
       // Create the panel
@@ -3380,9 +3389,9 @@ export class DatabaseService {
       const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
       
       this.db.prepare(`
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(data.id, data.sessionId, data.type, data.title, stateJson, metadataJson);
+        INSERT INTO tool_panels (id, session_id, type, title, state, metadata, substrate)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(data.id, data.sessionId, data.type, data.title, stateJson, metadataJson, data.substrate ?? null);
 
       // Set as active panel
       this.db.prepare('UPDATE sessions SET active_panel_id = ? WHERE id = ?').run(data.id, data.sessionId);
@@ -3408,7 +3417,8 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 }
+      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
+      substrate: row.substrate ?? undefined,
     };
   }
 
@@ -3430,7 +3440,8 @@ export class DatabaseService {
         type: row.type as ToolPanelType,
         title: row.title,
         state,
-        metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 }
+        metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
+        substrate: row.substrate ?? undefined,
       };
     });
   }
@@ -3444,7 +3455,8 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state: row.state ? JSON.parse(row.state) as ToolPanelState : { isActive: false },
-      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 }
+      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
+      substrate: row.substrate ?? undefined,
     }));
   }
 
@@ -3462,7 +3474,8 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state: row.state ? JSON.parse(row.state) as ToolPanelState : { isActive: false },
-      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 }
+      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
+      substrate: row.substrate ?? undefined,
     }));
   }
 
@@ -3489,7 +3502,8 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 }
+      metadata: row.metadata ? JSON.parse(row.metadata) as ToolPanelMetadata : { createdAt: row.created_at, lastActiveAt: row.created_at, position: 0 },
+      substrate: row.substrate ?? undefined,
     };
   }
 

@@ -144,7 +144,10 @@ vi.mock('../../../../utils/api', () => ({
       getAll: vi.fn().mockResolvedValue({ success: true, data: [{ id: 1, name: 'Proj', path: '/tmp/p' }] }),
       detectBranch: vi.fn().mockResolvedValue({ success: true, data: 'main' }),
     },
-    sessions: { createQuick: vi.fn() },
+    sessions: {
+      createQuick: vi.fn(),
+      delete: vi.fn().mockResolvedValue({ success: true }),
+    },
     // useQuickSession persists the launch model + fast-mode + effort on the panel.
     claudePanels: {
       setModel: vi.fn().mockResolvedValue({ success: true }),
@@ -187,6 +190,7 @@ import type { WorkflowRow } from '../../../../../../shared/types/workflows';
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
+const mockDeleteSession = vi.mocked(API.sessions.delete);
 const mockEnsureSession = vi.mocked(ensureSessionForLaunch);
 const mockPanelsContinue = vi.mocked(API.panels.continue);
 
@@ -300,8 +304,10 @@ beforeEach(() => {
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
+  mockDeleteSession.mockClear();
   mockEnsureSession.mockClear();
   mockPanelsContinue.mockClear();
+  mockDeleteSession.mockResolvedValue({ success: true });
   modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -980,6 +986,7 @@ describe('SessionStartWizard — mixed-provider retry prompt', () => {
 
     expect(screen.getByTestId('mixed-provider-switch-confirm')).toBeInTheDocument();
     expect(screen.getByTestId('mixed-provider-switch-cancel')).toBeInTheDocument();
+    expect(screen.getByTestId('mixed-provider-switch-prompt')).toHaveClass('sticky');
     // No raw launch error rendered.
     expect(screen.queryByRole('alert')).toBeNull();
     expect(mockRunStart).toHaveBeenCalledOnce();
@@ -1000,6 +1007,10 @@ describe('SessionStartWizard — mixed-provider retry prompt', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledTimes(2);
+    expect(mockEnsureSession).toHaveBeenCalledOnce();
+    expect(mockRunStart.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ sessionId: 'session-ensured-001' }),
+    );
     expect(mockRunStart).toHaveBeenLastCalledWith(
       expect.objectContaining({ workflowId: 'wf-1', executionModel: 'programmatic' }),
     );
@@ -1023,6 +1034,7 @@ describe('SessionStartWizard — mixed-provider retry prompt', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockDeleteSession).toHaveBeenCalledWith('session-ensured-001');
     expect(screen.queryByTestId('mixed-provider-switch-confirm')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
   });

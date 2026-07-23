@@ -249,6 +249,7 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
+import { panelApi } from '../../../services/panelApi';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -462,6 +463,32 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
     await waitFor(() => {
       expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
     });
+  });
+
+  it('wires Add chat to a fresh Claude panel for the active main-repo session', async () => {
+    vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({
+      success: true,
+      data: mockMainRepoSession,
+    });
+    vi.mocked(panelApi.createPanel).mockClear();
+    vi.mocked(panelApi.setActivePanel).mockClear();
+
+    render(<CyboflowRoot projectId={1} />);
+
+    const addChat = await screen.findByRole('button', { name: 'Add chat panel' });
+    expect(screen.getByRole('button', { name: 'Add terminal panel' })).toBeInTheDocument();
+
+    fireEvent.click(addChat);
+
+    await waitFor(() => {
+      expect(panelApi.createPanel).toHaveBeenCalledWith({
+        sessionId: mockMainRepoSession.id,
+        type: 'claude',
+        initialState: { cwd: mockMainRepoSession.worktreePath },
+      });
+    });
+    expect(panelApi.createPanel.mock.calls[0][0]).not.toHaveProperty('title');
+    expect(panelApi.setActivePanel).toHaveBeenCalledWith(mockMainRepoSession.id, 'panel-qs-1');
   });
 
   it('renders empty-state CTA when both activeRunId and mainRepoSession are null', () => {

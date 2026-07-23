@@ -10,6 +10,7 @@ import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/type
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -570,6 +571,16 @@ export class API {
     async setModel(panelId: string, model: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.claudePanels.setModel(panelId, model);
+    },
+
+    async getSubstrate(panelId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.getSubstrate(panelId);
+    },
+
+    async setSubstrate(panelId: string, substrate: CliSubstrate | null) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.setSubstrate(panelId, substrate);
     },
 
     async setFastMode(panelId: string, fastMode: boolean) {

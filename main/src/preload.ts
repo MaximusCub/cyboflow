@@ -645,6 +645,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude Panels - specific API for Claude panels
   claudePanels: {
     getModel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-model', panelId),
+    getSubstrate: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-substrate', panelId),
+    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null): Promise<IPCResponse> =>
+      ipcRenderer.invoke('claude-panels:set-substrate', panelId, substrate),
     setModel: (panelId: string, model: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-model', panelId, model),
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
     getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),

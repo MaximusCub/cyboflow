@@ -72,7 +72,8 @@ export class PanelManager {
         type: request.type,
         title,
         state,
-        metadata
+        metadata,
+        substrate: request.substrate,
       };
       
       // Save to database and set as active in a single transaction
@@ -82,7 +83,8 @@ export class PanelManager {
         type: panel.type,
         title: panel.title,
         state: panel.state,
-        metadata: panel.metadata
+        metadata: panel.metadata,
+        substrate: request.substrate,
       });
       
       // Update the panel state to reflect it's now active
@@ -185,13 +187,15 @@ export class PanelManager {
       databaseService.updatePanel(panelId, {
         title: updates.title,
         state: updates.state,
-        metadata: updates.metadata
+        metadata: updates.metadata,
+        substrate: updates.substrate,
       });
       
       // Update in cache
       if (updates.title !== undefined) panel.title = updates.title;
       if (updates.state !== undefined) panel.state = updates.state;
       if (updates.metadata !== undefined) panel.metadata = updates.metadata;
+      if (updates.substrate !== undefined) panel.substrate = updates.substrate ?? undefined;
       
       // Emit IPC event to notify frontend
       if (mainWindow) {
