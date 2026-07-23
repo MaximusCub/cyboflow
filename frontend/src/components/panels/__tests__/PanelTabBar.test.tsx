@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ToolPanel } from '../../../../../shared/types/panels';
 import { PanelTabBar } from '../PanelTabBar';
@@ -80,5 +80,28 @@ describe('PanelTabBar add chat action', () => {
 
     expect(onAddChat).toHaveBeenCalledTimes(1);
     expect(onAddTerminal).not.toHaveBeenCalled();
+  });
+
+  it('logs rejected async add-chat callbacks instead of leaking an unhandled rejection', async () => {
+    const error = new Error('create chat failed');
+    const onAddChat = vi.fn().mockRejectedValue(error);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(
+      <PanelTabBar
+        panels={[]}
+        onPanelSelect={vi.fn()}
+        onPanelClose={vi.fn()}
+        onAddChat={onAddChat}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith('[PanelTabBar] Failed to add chat:', error);
+    });
+
+    errorSpy.mockRestore();
   });
 });
