@@ -14,6 +14,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { AgentEntry } from '../../../../../shared/types/agents';
 
+// Partial mock of the shared runtime module: keeps every real export except
+// isClaudeOnlyAgentKey, which is overridden to answer true ONLY for a
+// synthetic 'mock-claude-only-agent' key. Production CLAUDE_ONLY_AGENT_KEYS is
+// empty (visual-verify moved off it once it gained a Codex runtime), so the
+// claude-only render branch in AgentConfigSection is otherwise unreachable —
+// this mock lets one describe block below still exercise it.
+vi.mock('../../../../../shared/types/agentRuntime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../../shared/types/agentRuntime')>();
+  return {
+    ...actual,
+    isClaudeOnlyAgentKey: (key: string) => key === 'mock-claude-only-agent',
+  };
+});
+
 // The customizable body's MCP chips fetch the CLI catalogue via mcps.list —
 // stub it so the useMcpOptions effect resolves in jsdom.
 const mockMcpsList = vi.fn();
@@ -280,10 +294,12 @@ describe('AgentConfigSection — Codex model picker', () => {
   });
 });
 
-describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
-  // verification-agent redesign §5.12: `visual-verify` always deploys on Claude
-  // regardless of agentConfigs / the run's provider — no runtime select, no
-  // Codex controls, but the Claude model pin stays fully editable.
+describe('AgentConfigSection — visual-verify now gets the normal runtime treatment', () => {
+  // The verification agent gained a Codex runtime implementation
+  // (codexVerificationAgentQuery — the runner dispatches on the resolved
+  // provider), so `visual-verify` was removed from CLAUDE_ONLY_AGENT_KEYS. It
+  // now renders the full runtime select + Codex controls exactly like any
+  // other agent key — the claude-only lock no longer applies to it.
   function makeVisualVerifyDefinition(agentConfigs?: WorkflowDefinition['agentConfigs']): WorkflowDefinition {
     return {
       id: 'sprint',
@@ -301,7 +317,7 @@ describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
 
   const visualVerifyEntry = () => makeEntry({ agentKey: 'visual-verify', name: 'cyboflow-visual-verify' });
 
-  it('renders a static "Always runs on Claude" line instead of a runtime select', () => {
+  it('renders the normal runtime select, not the claude-only note', () => {
     renderInspector({
       definition: makeVisualVerifyDefinition(),
       selectedStepId: 'verify',
@@ -309,13 +325,23 @@ describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
     });
     openAgentTab();
 
-    expect(screen.getByTestId('inspector-agent-runtime-select-claude-only')).toHaveTextContent(
-      'Always runs on Claude',
-    );
-    expect(screen.queryByTestId('inspector-agent-runtime-select')).not.toBeInTheDocument();
+    expect(screen.getByTestId('inspector-agent-runtime-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-agent-runtime-select-claude-only')).not.toBeInTheDocument();
   });
 
-  it('never shows Codex controls, even when the run provider is codex', () => {
+  it('shows Codex controls once the Codex runtime is pinned', () => {
+    renderInspector({
+      definition: makeVisualVerifyDefinition({ 'visual-verify': { runtime: 'codex-sdk' } }),
+      selectedStepId: 'verify',
+      agentEntries: [visualVerifyEntry()],
+    });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-codex-model-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-model-select')).not.toBeInTheDocument();
+  });
+
+  it('replaces the per-agent model pin with a single-model note when the run provider is codex', () => {
     renderInspector({
       definition: makeVisualVerifyDefinition(),
       selectedStepId: 'verify',
@@ -324,9 +350,8 @@ describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
     });
     openAgentTab();
 
-    expect(screen.queryByTestId('inspector-codex-model-select')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('inspector-model-select-codex-note')).not.toBeInTheDocument();
-    expect(screen.getByTestId('inspector-model-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-model-select')).not.toBeInTheDocument();
+    expect(screen.getByTestId('inspector-model-select-codex-note')).toBeInTheDocument();
   });
 
   it('keeps the Claude model select editable and dispatches SET_AGENT_MODEL', () => {
@@ -341,8 +366,76 @@ describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
     fireEvent.change(select, { target: { value: 'opus' } });
     expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_MODEL', agentKey: 'visual-verify', model: 'opus' });
   });
+});
 
-  it('leaves the full runtime select in place for a non-Claude-only agent (implement)', () => {
+describe('AgentConfigSection — claude-only render branch (isClaudeOnlyAgentKey mocked)', () => {
+  // CLAUDE_ONLY_AGENT_KEYS is empty in production, so this branch is
+  // currently unreachable for any shipped agent key (visual-verify moved off
+  // it above). Mock isClaudeOnlyAgentKey for a synthetic key so the branch
+  // itself — the "Always runs on Claude" note replacing the runtime select —
+  // still gets exercised.
+  const MOCK_CLAUDE_ONLY_KEY = 'mock-claude-only-agent';
+
+  function makeMockClaudeOnlyDefinition(agentConfigs?: WorkflowDefinition['agentConfigs']): WorkflowDefinition {
+    return {
+      id: 'sprint',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [{ id: 'verify', name: 'Mocked', agent: MOCK_CLAUDE_ONLY_KEY, mcps: [], retries: 0 }],
+        },
+      ],
+      ...(agentConfigs ? { agentConfigs } : {}),
+    };
+  }
+
+  const mockClaudeOnlyEntry = () =>
+    makeEntry({ agentKey: MOCK_CLAUDE_ONLY_KEY, name: `cyboflow-${MOCK_CLAUDE_ONLY_KEY}` });
+
+  it('renders a static "Always runs on Claude" line instead of a runtime select', () => {
+    renderInspector({
+      definition: makeMockClaudeOnlyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [mockClaudeOnlyEntry()],
+    });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-agent-runtime-select-claude-only')).toHaveTextContent(
+      'Always runs on Claude',
+    );
+    expect(screen.queryByTestId('inspector-agent-runtime-select')).not.toBeInTheDocument();
+  });
+
+  it('never shows Codex controls, even when the run provider is codex', () => {
+    renderInspector({
+      definition: makeMockClaudeOnlyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [mockClaudeOnlyEntry()],
+      agentProvider: 'codex',
+    });
+    openAgentTab();
+
+    expect(screen.queryByTestId('inspector-codex-model-select')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-model-select-codex-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('inspector-model-select')).toBeInTheDocument();
+  });
+
+  it('keeps the Claude model select editable and dispatches SET_AGENT_MODEL', () => {
+    const { dispatch } = renderInspector({
+      definition: makeMockClaudeOnlyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [mockClaudeOnlyEntry()],
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-model-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'opus' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_MODEL', agentKey: MOCK_CLAUDE_ONLY_KEY, model: 'opus' });
+  });
+
+  it('leaves the full runtime select in place for a non-mocked agent (implement)', () => {
     renderInspector({ definition: makeDefinition(), selectedStepId: 'impl' });
     openAgentTab();
 

@@ -1071,9 +1071,11 @@ function AgentConfigSection({
   const inheritSentence =
     pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
   const selectedRuntime: WorkflowAgentRuntime | '' = config?.runtime ?? '';
-  // Claude-only agent key (verification-agent redesign §5.12) — always runs on
-  // Claude regardless of the run's provider or any per-agent runtime pin. No
-  // runtime select, no Codex controls; the Claude model picker stays available.
+  // Claude-only agent key — always runs on Claude regardless of the run's
+  // provider or any per-agent runtime pin. No runtime select, no Codex
+  // controls; the Claude model picker stays available. CLAUDE_ONLY_AGENT_KEYS
+  // is empty today, so this branch is currently unreachable — kept for a
+  // future key that genuinely can't run on Codex.
   const claudeOnly = isClaudeOnlyAgentKey(agentKey);
   // The effort scale is provider-specific: Codex when the base agent is a Codex
   // agent OR a per-agent `codex-sdk` runtime is pinned (Codex's none..xhigh),
@@ -1093,8 +1095,7 @@ function AgentConfigSection({
           <div>
             <label style={labelStyle}>runtime</label>
             <p style={hintStyle} data-testid={`${runtimeTestId}-claude-only`}>
-              <b>Always runs on Claude.</b> Visual verification runs on Claude (vision judging +
-              structured report). A Codex runtime isn&apos;t available for this agent.
+              <b>Always runs on Claude.</b> A Codex runtime isn&apos;t available for this agent.
             </p>
           </div>
           <div>

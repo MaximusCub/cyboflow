@@ -48,11 +48,12 @@ export interface AgentEditorFormProps {
   /** Client-side description error (e.g. empty or contains `cyboflow_`), or null. */
   descriptionError: string | null;
   /**
-   * The bare agent key being edited (e.g. `'visual-verify'`), empty in create
-   * mode. Drives the {@link isClaudeOnlyAgentKey} check (verification-agent
-   * redesign §5.12): a Claude-only key gets no runtime select and no Codex
-   * controls — the invariant is server-enforced at the deploy seam, this only
-   * communicates it.
+   * The bare agent key being edited (e.g. `'implement'`), empty in create
+   * mode. Drives the {@link isClaudeOnlyAgentKey} check: a Claude-only key
+   * gets no runtime select and no Codex controls — the invariant is
+   * server-enforced at the deploy seam, this only communicates it.
+   * `CLAUDE_ONLY_AGENT_KEYS` is empty today, so this branch is currently
+   * unreachable for any shipped agent key.
    */
   agentKey: string;
 }
@@ -183,16 +184,16 @@ export function AgentEditorForm({
           <span className="flex-1 h-px bg-border-subtle" />
         </div>
         {claudeOnly ? (
-          // Claude-only agent key (verification-agent redesign §5.12): no runtime
-          // select at all — a stray 'inherits run runtime' option would misstate
-          // the invariant (inheritance is provider-conditional server-side; this
-          // agent never resolves off the Claude namespace regardless of the run's
-          // provider). The resolver enforces this at the deploy seam; this note
-          // only communicates it.
+          // Claude-only agent key: no runtime select at all — a stray 'inherits
+          // run runtime' option would misstate the invariant (inheritance is
+          // provider-conditional server-side; this agent never resolves off the
+          // Claude namespace regardless of the run's provider). The resolver
+          // enforces this at the deploy seam; this note only communicates it.
+          // CLAUDE_ONLY_AGENT_KEYS is empty today, so this branch is currently
+          // unreachable — kept for a future key that genuinely can't run on Codex.
           <p className="text-[10px] text-text-tertiary" data-testid="agent-runtime-claude-only">
             <b className="font-semibold text-text-primary">Always runs on Claude.</b>{' '}
-            Visual verification runs on Claude (vision judging + structured report). A Codex
-            runtime isn&apos;t available for this agent.
+            A Codex runtime isn&apos;t available for this agent.
           </p>
         ) : (
           <>
@@ -240,9 +241,9 @@ export function AgentEditorForm({
           non-deterministic (and is dropped outright on a programmatic run) —
           the picker is hidden rather than offering a pin that may not apply.
           Pinned Codex gets the Codex model picker, pinned Claude the alias.
-          A Claude-only agentKey (§5.12) always gets the plain Claude-alias
-          picker — there is no runtime pin to gate on, and Codex controls never
-          apply to this agent. ─── */}
+          A Claude-only agentKey always gets the plain Claude-alias picker —
+          there is no runtime pin to gate on, and Codex controls never apply
+          to this agent. ─── */}
       {claudeOnly ? (
         <div className="mt-6">
           <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">

@@ -93,6 +93,20 @@ const CUSTOM_ENTRY: AgentEntry = {
 // tRPC mock
 // ---------------------------------------------------------------------------
 
+// Partial mock of the shared runtime module: keeps every real export except
+// isClaudeOnlyAgentKey, which is overridden to answer true ONLY for a
+// synthetic 'mock-claude-only-agent' key. Production CLAUDE_ONLY_AGENT_KEYS is
+// empty (visual-verify moved off it once it gained a Codex runtime), so the
+// claude-only render branch in AgentEditorForm is otherwise unreachable — this
+// mock lets one describe block below still exercise it.
+vi.mock('../../../../../../shared/types/agentRuntime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../../../shared/types/agentRuntime')>();
+  return {
+    ...actual,
+    isClaudeOnlyAgentKey: (key: string) => key === 'mock-claude-only-agent',
+  };
+});
+
 vi.mock('../../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -466,21 +480,63 @@ describe('AgentEditorModal — model picker', () => {
   });
 });
 
-describe('AgentEditorModal — Claude-only agent key (visual-verify)', () => {
-  // verification-agent redesign §5.12: `visual-verify` always deploys on Claude,
-  // no matter what agentConfigs/project overrides say. The editor communicates
-  // this by NOT rendering a runtime select or any Codex controls for it — a
-  // static line replaces them — while the Claude model picker stays fully
-  // editable (this agent's model resolution is Claude-namespace-only, not
-  // gated on a runtime pin).
+describe('AgentEditorModal — visual-verify now gets the normal runtime treatment', () => {
+  // The verification agent gained a Codex runtime implementation
+  // (codexVerificationAgentQuery — the runner dispatches on the resolved
+  // provider), so `visual-verify` was removed from CLAUDE_ONLY_AGENT_KEYS. It
+  // now renders the full runtime select + Codex controls exactly like any
+  // other agent key — the claude-only lock no longer applies to it.
   const VISUAL_VERIFY_ENTRY: AgentEntry = {
     ...BUILTIN_ENTRY,
     agentKey: 'visual-verify',
     name: 'cyboflow-visual-verify',
   };
 
-  it('renders a static "Always runs on Claude" line instead of a runtime select', async () => {
+  it('renders the normal runtime select, not the claude-only note', async () => {
     await renderModal({ entry: VISUAL_VERIFY_ENTRY, agentKey: 'visual-verify' });
+
+    expect(screen.getByTestId('agent-runtime-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-runtime-claude-only')).not.toBeInTheDocument();
+  });
+
+  it('shows Codex model controls once the Codex runtime is pinned', async () => {
+    await renderModal({
+      entry: { ...VISUAL_VERIFY_ENTRY, runtime: 'codex-sdk' },
+      agentKey: 'visual-verify',
+    });
+
+    expect(screen.getByTestId('agent-codex-model-select')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-runtime-plane-note')).toBeInTheDocument();
+  });
+
+  it('keeps the Claude model picker editable when no runtime is pinned', async () => {
+    await renderModal({ entry: VISUAL_VERIFY_ENTRY, agentKey: 'visual-verify' });
+
+    // No runtime pinned yet, so the model picker is replaced by the
+    // "pin a runtime to choose a model" note — matches any other agent key.
+    expect(screen.getByTestId('agent-model-requires-runtime')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('agent-runtime-select'), { target: { value: 'claude-sdk' } });
+    const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
+    expect(select.value).toBe(''); // '' = inherit the run model
+    fireEvent.change(select, { target: { value: 'haiku' } });
+    await waitFor(() => expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled());
+  });
+});
+
+describe('AgentEditorModal — claude-only render branch (isClaudeOnlyAgentKey mocked)', () => {
+  // CLAUDE_ONLY_AGENT_KEYS is empty in production, so this branch is
+  // currently unreachable for any shipped agent key (visual-verify moved off
+  // it above). Mock isClaudeOnlyAgentKey for a synthetic key so the branch
+  // itself — the "Always runs on Claude" note replacing the runtime select —
+  // still gets exercised.
+  const MOCK_CLAUDE_ONLY_KEY = 'mock-claude-only-agent';
+
+  it('renders a static "Always runs on Claude" line instead of a runtime select', async () => {
+    await renderModal({
+      entry: { ...BUILTIN_ENTRY, agentKey: MOCK_CLAUDE_ONLY_KEY, name: `cyboflow-${MOCK_CLAUDE_ONLY_KEY}` },
+      agentKey: MOCK_CLAUDE_ONLY_KEY,
+    });
 
     expect(screen.getByTestId('agent-runtime-claude-only')).toHaveTextContent(
       'Always runs on Claude',
@@ -488,18 +544,11 @@ describe('AgentEditorModal — Claude-only agent key (visual-verify)', () => {
     expect(screen.queryByTestId('agent-runtime-select')).not.toBeInTheDocument();
   });
 
-  it('never shows Codex model controls', async () => {
-    await renderModal({
-      entry: { ...VISUAL_VERIFY_ENTRY, runtime: 'codex-sdk' },
-      agentKey: 'visual-verify',
-    });
-
-    expect(screen.queryByTestId('agent-codex-model-select')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('agent-runtime-plane-note')).not.toBeInTheDocument();
-  });
-
   it('keeps the Claude model picker editable', async () => {
-    await renderModal({ entry: VISUAL_VERIFY_ENTRY, agentKey: 'visual-verify' });
+    await renderModal({
+      entry: { ...BUILTIN_ENTRY, agentKey: MOCK_CLAUDE_ONLY_KEY, name: `cyboflow-${MOCK_CLAUDE_ONLY_KEY}` },
+      agentKey: MOCK_CLAUDE_ONLY_KEY,
+    });
 
     const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
     expect(select.value).toBe(''); // '' = inherit the run model
@@ -507,7 +556,7 @@ describe('AgentEditorModal — Claude-only agent key (visual-verify)', () => {
     await waitFor(() => expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled());
   });
 
-  it('leaves the full runtime select in place for a non-Claude-only agent (implement)', async () => {
+  it('leaves the full runtime select in place for a non-mocked agent (implement)', async () => {
     await renderModal(); // BUILTIN_KEY = 'implement'
 
     expect(screen.getByTestId('agent-runtime-select')).toBeInTheDocument();
