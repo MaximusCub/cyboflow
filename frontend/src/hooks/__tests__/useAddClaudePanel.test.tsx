@@ -61,6 +61,10 @@ describe('useAddClaudePanel', () => {
       initialState: { cwd: '/path/to/worktree' },
     });
     expect(mockCreatePanel.mock.calls[0][0]).not.toHaveProperty('title');
+    // The add-chat affordance creates a neutral panel and lets the backend
+    // apply normal session inheritance; it must not copy a provider/substrate
+    // override from whichever panel was active.
+    expect(mockCreatePanel.mock.calls[0][0]).not.toHaveProperty('substrate');
   });
 
   it('creates and explicitly activates every requested panel', async () => {

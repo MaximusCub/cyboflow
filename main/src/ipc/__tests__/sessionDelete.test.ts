@@ -319,6 +319,40 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
     );
   });
 
+  it('waits for live Claude panel teardown to settle before archiving', async () => {
+    let releaseTeardown = () => {};
+    const teardown = new Promise<void>((resolve) => {
+      releaseTeardown = resolve;
+    });
+    const made = makeServices({
+      id: 's1',
+      substrate: 'sdk',
+      agent_runtime: 'claude-sdk',
+      is_main_repo: true,
+    });
+    made.stopClaudePanel.mockImplementation(async () => {
+      await teardown;
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: 'panel-pending-stop',
+      sessionId: 's1',
+      type: 'claude',
+      title: 'Claude',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    const dismissal = invoke(handlers, 'sessions:delete', 's1');
+    await vi.waitFor(() => expect(made.stopClaudePanel).toHaveBeenCalledWith('panel-pending-stop'));
+
+    expect(made.archiveSession).not.toHaveBeenCalled();
+
+    releaseTeardown();
+    await dismissal;
+    expect(made.archiveSession).toHaveBeenCalledWith('s1');
+  });
+
   it('kills a live SDK quick-agent fallback BEFORE archiving the session', async () => {
     const made = makeServices({
       id: 's1',
