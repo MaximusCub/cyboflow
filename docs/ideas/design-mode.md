@@ -1,6 +1,6 @@
 # Idea: Design Mode — in-app iterative design sessions
 
-**Scope hint:** large (decomposes into epics). **Status:** rev 5 — **v0 IMPLEMENTED** on `zesty-owl-20260722` (spec rev 4 + Codex rounds 1–3 folded; see "v0 implementation notes" at the end for the three deliberate deviations). v1 (interactive tier) not started.
+**Scope hint:** large (decomposes into epics). **Status:** rev 6 — **v0 IMPLEMENTED + live-smoked** on `zesty-owl-20260722` (spec rev 4 + Codex rounds 1–3 folded; see "v0 implementation notes" at the end for the three deliberate deviations). Rev 6 adds the **v0.5 fullscreen design surface** (post-testing direction: ship the fullscreen shell against the static prototype first; the interactive backend swaps in behind the same entry seam when v1 lands). v1 (interactive tier) not started.
 
 ## Problem
 
@@ -25,7 +25,7 @@ The current design workflow is: design in Claude Design on the web → export a 
 - **Design-system curation UI.** Style-kit generation happens inline in the session (agent checks, generates if missing); a dedicated curation flow is separate scope.
 - **Planner design-review entry point** (follow-on; entry is the new-session screen only for now).
 - **Direct user edits / arbitrary interaction surfaces** beyond comments.
-- **Full-screen as a perf mechanism.** Verified unnecessary and ineffective: background canvases unmount on tab switch, the stream subscription is a singleton for the active run only, the left rail is event-driven (150ms debounce, memoized rows, no polling — git-status polling is disabled), and `display:none`/overlays don't stop JS anyway. A focus-mode *UX* may come later as its own small feature.
+- **Full-screen as a perf mechanism.** Verified unnecessary and ineffective: background canvases unmount on tab switch, the stream subscription is a singleton for the active run only, the left rail is event-driven (150ms debounce, memoized rows, no polling — git-status polling is disabled), and `display:none`/overlays don't stop JS anyway. *(The focus-mode UX this bullet anticipated is now scoped as the v0.5 fullscreen design surface — a UX-identity feature, still not a perf one.)*
 
 ## UX walkthrough
 
@@ -53,6 +53,16 @@ The current design workflow is: design in Claude Design on the web → export a 
 - **In-session feedback = chat turns only.** (The folded idea body still gets the full existing doc-comment/highlight machinery *at the next planner gate* — that path already works today and needs nothing from v0. In-session doc comments are NOT claimed: the existing send path requires a parked run with a pending blocking gate, which a design session never satisfies.)
 - Handoff = the durable **design-spec draft** + the host-owned **Approve** state machine + the idea-bound read path that makes both discoverable by later planner/sprint runs.
 
+### v0.5 — fullscreen design surface (~1 sprint)
+
+Post-v0-testing direction: design mode gets its **own fullscreen takeover surface** — a deliberate UI-pattern divergence that gives the mode an identity distinct from normal sessions. Ships against the **static** prototype; the v1 interactive backend later boots behind the same entry seam with no UX change.
+
+- **Layout:** left rail becomes the **chat panel** (the session's existing Claude panel rendered in a rail-width column); the center pane is a **stage** with three states — *clarify* (pending question gates rendered as cards center-stage), *working* (a clear working animation while the agent designs), *prototype* (the rendered prototype, presented when the artifact lands/updates). Approve control + freshness line live in the surface's top bar.
+- **Auto-start + clarify-first:** entering design mode and picking an idea immediately sends a canonical kickoff first turn (no more idle-until-typed). `design.md` gains a clarify-first instruction: the agent's first pass asks the user clarifying questions about the idea (question gates → center stage); once it judges it has enough input it starts designing (working state), then presents.
+- **Entry (two doors):** the quick-start wizard's Design card, and an **"Enter design mode" CTA on the ui-prototype artifact screen** (render gate identical to the Approve control: server-stamped `sourceRef` + `sessionId`). Entering activates the fullscreen takeover and launches the prototype backend — in v0.5 that renders the static prototype through the same seam that will boot the isolated interactive frame in v1.
+- **Exit (top-left button):** leaves the takeover; the session **continues as a normal session** with the agent working in the background (already true today — design sessions are ordinary quick sessions). Re-entry: sidebar → session → prototype artifact → the CTA. Fullscreen state is not restored across app restart — re-entry is always explicit.
+- **Dependency:** center-stage question cards ride the quick-session question-gate render/answer plumbing fixed on `lively-valley-20260723` (unpushed at rev 6 time) — that branch must merge first.
+
 ### v1 — interactive tier (~3 sprints)
 
 - New **`interactive-prototype`** artifact type: JS-enabled canvas in a **process-isolated, independently destroyable** frame, introduced together with a **canonical artifact-policy registry** (see Architecture) so loader/blessing/snapshot guards can't silently miss the new type.
@@ -71,6 +81,8 @@ Real-app tier (playground harness → promote-to-branch), design-system curation
 **Idea link — integrity contract.** Additive migration `sessions.design_idea_id` (plain `ALTER TABLE ADD COLUMN`; SQLite FK enforcement is not retrofitted — integrity is enforced at the write chokepoints): (a) creation validates the idea exists, belongs to the session's project, and is not decomposed; (b) **every** design-scoped MCP operation re-validates project ownership and target liveness (cross-project ids rejected); (c) if the idea is deleted or decomposed mid-session, design-scoped writes fail soft with a user-visible "link broken — relink or end session" state (parity with the existing decomposed-idea influence guard); (d) stub minting is ordered *after* worktree+session creation succeeds and links in the same write; a launch failure after mint compensates by archiving the stub (a stranded stub is flagged, never silently kept). Tests cover launch failure, concurrent idea deletion, cross-project ids, and create retries.
 
 **Canvas v0.** Reuse the static `ui-prototype` pipeline exactly as-is (content-blessed file write → `LiveCanvasEmbed` `sandbox=""` srcdoc + injected `ARTIFACT_PROTOTYPE_CSP`).
+
+**Fullscreen design surface (v0.5).** A renderer-level takeover, not a window/route change: a `DesignModeSurface` overlay keyed by `activeDesignSessionId` in a small frontend store; entering sets it, the top-left Exit clears it, and it is never persisted (no restore across app restart). While active, the normal app layout beneath is unmounted-or-hidden such that only one chat view and one canvas subscribe per session (the stream subscription is a singleton for the active run — two live mounts would double-subscribe). The left rail hosts the session's existing Claude chat panel component at rail width; the center stage renders by precedence: **pending question gate → working animation → prototype → intro/empty**, where *pending gate* reuses the quick-session question-gate card + answer path, *working* derives from the session's running/generating state, and *prototype* is the existing static `ui-prototype` render behind a `DesignStageCanvas` seam — the single place v1 later swaps in the isolated interactive frame. The Approve control + freshness line move into the surface top bar (same component, same tRPC calls). **Auto-start:** the wizard's design arm passes a canonical kickoff prompt through the existing `createQuick` prompt field (a real first user turn — restart-safe, no synthetic-turn machinery), and `design.md` gains the clarify-first contract (ask clarifying questions when the idea is thin; the agent judges when it has enough input and proceeds). **Second entry door:** an "Enter design mode" CTA in the ui-prototype `ArtifactHeader`, gated exactly like the Approve control (`sourceRef !== null && sessionId !== null`), which sets `activeDesignSessionId` for that artifact's session.
 
 **Canvas v1 — `interactive-prototype` atype + artifact-policy registry.** The new atype is introduced by way of a **canonical per-atype policy registry** (single source of truth consumed by report validation, payload blessing, IPC HTML loading, CSP selection, byte requirements, snapshot lookup, and rendering) — generalizing the lesson that made `VALID_ATYPES` derived. This is required, not optional: today `LoadArtifactHtmlAtype`/`coerceAtype` accept only `ui-prototype`/`generic`, blessing is per-atype, and `requiredBytePaths` treats unknown atypes as byte-free — added naively, an interactive artifact could bypass canonical-file validation, fail to load, or "successfully" commit with zero HTML bytes and then lose the only copy when the DB row is deleted. A **report→commit→row-delete→reload durability test** proves the HTML survives with the interactive CSP intact. Remaining touch-set as previously mapped: migration widening the `artifacts.atype` CHECK (rebuild recipe of migration 073); `shared/types/artifacts.ts` union + render-mode/color/glyph maps + payload type; MCP tool enum + `validAtypes`; `ArtifactTabRenderer` case (compiler-forced); frame sandbox `allow-scripts` (**no** `allow-same-origin`) and a new interactive CSP — `script-src 'unsafe-inline'` with `default-src 'none'` egress blocking retained.
 
@@ -121,6 +133,15 @@ The detached `revisionWorker` generalization stays out of scope until the planne
 - A subsequent planner/sprint run can **discover and read** both the folded spec and the bound prototype with no export step (read-model + gate-surface test).
 - Idea-link integrity: cross-project ids rejected; deletion/decomposition mid-session fails soft into the relink state; stub-mint launch failure leaves no silently-stranded stub.
 - `pnpm test:unit` green; the `__quick__` two-way seams (`transitions.ts`, `variantResolver.ts`, `experimentStore.ts`, `interactiveClaudeManager.ts`) behave correctly for design sessions (rotation skipped, revival policy unchanged).
+
+**v0.5**
+
+- Starting a design session from the wizard lands directly in the fullscreen surface with the agent already working (kickoff turn sent); no idle empty-chat state.
+- A thin idea produces a clarify-first pass: question gates render center-stage and answering them resumes the agent (quick-session gate plumbing — requires the `lively-valley-20260723` fixes merged).
+- Stage precedence holds: pending gate beats working beats prototype; the working animation shows whenever the agent is generating with no pending gate; the prototype presents when the artifact lands/updates.
+- Exit returns to the normal app with the session live and continuing in the background; the "Enter design mode" CTA on the session's ui-prototype artifact re-enters the same surface (gated on server-stamped `sourceRef` + `sessionId`).
+- Only one chat/canvas subscription exists per session while the surface is active (no double-subscribe from the underlying layout); fullscreen state does not survive app restart.
+- Approve + freshness work from the surface top bar identically to the canvas header (same component and tRPC path).
 
 **v1**
 
