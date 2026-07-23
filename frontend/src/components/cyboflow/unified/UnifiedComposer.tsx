@@ -415,12 +415,12 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         <div className="ml-auto flex items-center gap-2">
           {running ? (
             hasDraft && onInterruptSend ? (
-              // Running WITH a draft + an interrupt-capable host: offer both a
-              // Queue (buffer for the rest boundary) and an Interrupt & send
-              // (abort the live turn, drive the message now). Esc still stops
-              // without sending (onKeyDown), so no plain Stop button is needed.
-              // Gated on hasDraft (not canSend) so the pair stays visible — just
-              // disabled — while a send is in flight, instead of collapsing to Stop.
+              // Running WITH a draft + an interrupt-capable host: offer Queue
+              // (buffer for the rest boundary), Interrupt & send (abort the live
+              // turn, drive the message now), and keep the plain Stop (abort
+              // WITHOUT sending — the draft is preserved). Gated on hasDraft (not
+              // canSend) so the trio stays visible — just disabled — while a send
+              // is in flight, instead of collapsing.
               <>
                 <button
                   type="button"
@@ -453,6 +453,20 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
                   <Square className="h-3 w-3 fill-current" /> {interruptLabel}
                   <kbd className="opacity-70">⌘⇧↵</kbd>
                 </button>
+                {onStop && (
+                  // Secondary (outline) Stop — abort without sending; distinct
+                  // from the filled Interrupt & send so the two don't read alike.
+                  <button
+                    type="button"
+                    onClick={onStop}
+                    data-testid="unified-composer-stop"
+                    title="Stop the agent without sending (esc)"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] hover:bg-surface-secondary"
+                    style={{ border: '1px solid var(--ink)', color: 'var(--ink)' }}
+                  >
+                    <Square className="h-3 w-3 fill-current" /> Stop <kbd className="opacity-70">esc</kbd>
+                  </button>
+                )}
               </>
             ) : onStop ? (
               <button

@@ -54,6 +54,16 @@ export interface QuickSessionComposerProps {
   handleStopSession?: () => void;
   handleCompactContext?: () => void;
   hasConversationHistory?: boolean;
+  /**
+   * Whether the agent is actively WORKING — the host's (ClaudePanel's) unified
+   * `sessionWorking` signal (status==='running' OR live generation OR an
+   * optimistic 'sending' row), NOT just `activeSession.status === 'running'`.
+   * Drives the composer's Stop-vs-Send affordance and the running→queue send
+   * routing, so a turn that is generating while its status still reads
+   * 'waiting'/'initializing' correctly shows Stop and queues follow-ups instead
+   * of destructively continuing. Falls back to the status check when omitted.
+   */
+  working?: boolean;
   /** panel id — used to read the session's (read-only) model for display. */
   panelId?: string;
   /** interactive (PTY) quick session: composer is ⌃G-revealed. */
@@ -106,12 +116,15 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     onModelFallback,
     onFastModeDeclined,
     activeQuestion = null,
+    working,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
   const agentProvider = activeSession.agentProvider
     ?? (activeSession.agentRuntime?.startsWith('codex-') ? 'codex' : 'claude');
-  const running = activeSession.status === 'running';
+  // Prefer the host's unified working signal; fall back to the status check when
+  // the host does not supply it (keeps standalone/test usage working).
+  const running = working ?? activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
 
   // Question-gate answer plumbing: direct-answer submits reuse the card's

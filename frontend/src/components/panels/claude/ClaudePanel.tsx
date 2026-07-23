@@ -392,6 +392,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             onModelFallback={setPermissionToast}
             onFastModeDeclined={setPermissionToast}
             activeQuestion={pendingQuestions[0] ?? null}
+            working={sessionWorking}
           />
         ))}
 

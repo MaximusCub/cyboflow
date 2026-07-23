@@ -72,15 +72,22 @@ describe('UnifiedComposer', () => {
   });
 
   describe('Interrupt & send (running + interrupt-capable host)', () => {
-    it('shows Queue + Interrupt & send (not Stop) while running WITH a draft', () => {
+    it('shows Queue + Interrupt & send + Stop while running WITH a draft', () => {
       render(
         <Harness ptyOpen running value="hi" onStop={vi.fn()} onInterruptSend={vi.fn()} />,
       );
       expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
       expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
-      // The plain Stop button is replaced by the pair when a draft exists.
-      expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+      // Stop stays visible alongside the pair (abort without sending).
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
       expect(screen.queryByTestId('unified-composer-send')).toBeNull();
+    });
+
+    it('omits the trailing Stop from the trio when no onStop is provided', () => {
+      render(<Harness ptyOpen running value="hi" onInterruptSend={vi.fn()} />);
+      expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
+      expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
+      expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
     });
 
     it('falls back to the plain Stop button while running with NO draft', () => {

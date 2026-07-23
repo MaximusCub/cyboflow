@@ -117,6 +117,7 @@ function Harness(props: {
   onModelFallback?: (message: string) => void;
   onFastModeDeclined?: (message: string) => void;
   activeQuestion?: Question | null;
+  working?: boolean;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -129,6 +130,7 @@ function Harness(props: {
       textareaRef={textareaRef}
       handleSendInput={props.handleSendInput ?? vi.fn()}
       handleContinueConversation={props.handleContinueConversation ?? vi.fn()}
+      handleStopSession={vi.fn()}
       panelId="panel-1"
       interactive={props.interactive}
       ptyOpen={ptyOpen}
@@ -137,6 +139,7 @@ function Harness(props: {
       onModelFallback={props.onModelFallback}
       onFastModeDeclined={props.onFastModeDeclined}
       activeQuestion={props.activeQuestion ?? null}
+      working={props.working}
     />
   );
 }
@@ -230,6 +233,31 @@ describe('QuickSessionComposer — SDK', () => {
     fireEvent.click(await screen.findByText('GPT-5.4'));
     expect(await screen.findByText('GPT-5.6 Sol')).toBeInTheDocument();
     expect(screen.queryByText(/Fable 5/)).toBeNull();
+  });
+});
+
+describe('QuickSessionComposer — working signal drives Stop', () => {
+  it('shows Stop while WORKING even when status is not running (empty input)', () => {
+    // The screenshot case: an optimistic send is in flight (host sessionWorking
+    // true) but activeSession.status is still 'waiting' — Stop must show, not Send.
+    render(<Harness session={makeSession({ status: 'waiting' })} interactive={false} working />);
+    expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+    expect(screen.queryByTestId('unified-composer-send')).toBeNull();
+  });
+
+  it('shows Send (idle) when NOT working, regardless of a waiting status', () => {
+    render(<Harness session={makeSession({ status: 'waiting' })} interactive={false} working={false} />);
+    expect(screen.getByTestId('unified-composer-send')).toBeTruthy();
+    expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+  });
+
+  it('working + draft: shows the Queue + Interrupt & send + Stop trio', () => {
+    render(<Harness session={makeSession({ status: 'waiting' })} interactive={false} working />);
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'do this' } });
+    expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
+    expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
+    expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
   });
 });
 
