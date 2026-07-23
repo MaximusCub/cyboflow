@@ -27,6 +27,7 @@ import { API } from '../utils/api';
 import { panelApi } from '../services/panelApi';
 import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import { usePanelStore } from '../stores/panelStore';
 import { dispatchQuickSessionInput } from './useClaudePanel';
 import type { Session } from '../types/session';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -201,6 +202,12 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
             title: 'Chat',
           });
           createdClaudePanelId = claudePanel.id;
+          // Register the panel in the frontend store IMMEDIATELY (addPanel dedups
+          // by id): nothing else pushes panels created here into panelStore — no
+          // panel:created store listener exists — so a consumer mounting right
+          // after onSuccess (the v0.5 DesignModeSurface) would otherwise see no
+          // Claude panel and mint a DUPLICATE via its ensure fallback.
+          usePanelStore.getState().addPanel(claudePanel);
           // Persist the launch model + fast-mode on the SDK panel so the first
           // (and every) sessions:input turn spawns with them — the request's
           // claudeConfig only reaches the interactive eager spawn, never this
@@ -219,6 +226,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
             await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
           }
         }
+        // NOTE: deliberately NOT store-added — addPanel stamps its panel as the
+        // session's active one, and the active tab must stay Chat.
         await panelApi.createPanel({
           sessionId,
           type: 'terminal',
@@ -245,7 +254,14 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
             jsonMessages: [],
             agentRuntime: agentRuntime ?? 'claude-sdk',
           };
-          dispatchQuickSessionInput(kickoffSession, createdClaudePanelId, kickoffPrompt, 'initial').catch(
+          // Mode MUST be 'continue', not 'initial': 'initial' routes through
+          // panels:send-input, which records the user message FIRST and then
+          // reaches continuePanel on the resume path — which throws ("Cannot
+          // resume: no Claude session_id stored") on a fresh session.
+          // panels:continue has the explicit first-message branch (!isRunning &&
+          // !hasClaudeSessionId → startPanel, a clean fresh spawn) — the same
+          // path the composer's first typed message takes.
+          dispatchQuickSessionInput(kickoffSession, createdClaudePanelId, kickoffPrompt, 'continue').catch(
             (err: unknown) => {
               console.error('[useQuickSession] Failed to send design kickoff turn:', err);
             },

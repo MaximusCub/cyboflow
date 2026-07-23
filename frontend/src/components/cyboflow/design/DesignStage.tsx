@@ -64,9 +64,14 @@ function WorkingState(): ReactElement {
 }
 
 function IntroState(): ReactElement {
+  // Carries the same pulse as the working state: a fresh design session sits
+  // here for the second or two before its kickoff turn flips the session to
+  // 'running', and a static panel in that window reads as "nothing is
+  // happening" (live-smoke feedback).
   return (
     <div data-testid="design-stage-intro" className="h-full w-full flex items-center justify-center">
-      <div className="max-w-md text-center px-8 py-10 border border-border-primary rounded-lg">
+      <div className="max-w-md flex flex-col items-center gap-4 text-center px-8 py-10 border border-border-primary rounded-lg">
+        <div className="h-10 w-10 rounded-full border border-border-primary animate-pulse" />
         <p className="text-sm text-text-muted">
           Design session starting — the designer will read the linked idea and check in here.
         </p>

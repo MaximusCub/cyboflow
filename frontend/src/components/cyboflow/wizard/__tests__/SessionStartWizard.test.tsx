@@ -151,10 +151,13 @@ vi.mock('../../../../utils/api', () => ({
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
       setEffort: vi.fn().mockResolvedValue({ success: true }),
     },
-    // panels.sendInput — the design kickoff's dispatch target
-    // (dispatchQuickSessionInput's non-codex-sdk 'initial' branch).
+    // panels.continue — the design kickoff's dispatch target
+    // (dispatchQuickSessionInput's non-codex-sdk 'continue' branch: the same
+    // panels:continue fresh-start path the composer's first typed message
+    // takes; 'initial'/panels:send-input dead-ends on the resume validation
+    // for a fresh session — live-smoke finding).
     panels: {
-      sendInput: vi.fn().mockResolvedValue({ success: true }),
+      continue: vi.fn().mockResolvedValue({ success: true }),
     },
     models: {
       getCodexCatalog: vi.fn().mockResolvedValue({
@@ -185,7 +188,7 @@ const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockEnsureSession = vi.mocked(ensureSessionForLaunch);
-const mockPanelsSendInput = vi.mocked(API.panels.sendInput);
+const mockPanelsContinue = vi.mocked(API.panels.continue);
 
 /** A non-gated custom workflow row (neither planner nor sprint → direct launch). */
 const CUSTOM_WORKFLOW_ROW: WorkflowRow = {
@@ -298,7 +301,7 @@ beforeEach(() => {
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
   mockEnsureSession.mockClear();
-  mockPanelsSendInput.mockClear();
+  mockPanelsContinue.mockClear();
   modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -1208,7 +1211,7 @@ describe('SessionStartWizard — Design idea gate + launch', () => {
   // Auto-start kickoff + fullscreen-surface entry (design-mode.md v0.5
   // "Auto-start"). useQuickSession is NOT mocked in this file — the real hook
   // runs, so the kickoff surfaces at its actual dispatch target
-  // (dispatchQuickSessionInput → API.panels.sendInput for the SDK 'initial'
+  // (dispatchQuickSessionInput → API.panels.continue for the SDK 'continue'
   // path, since createQuick's `prompt` field is ignored) rather than as a
   // spy on `startQuickSession` itself.
   it('sends DESIGN_KICKOFF_PROMPT as the first panel input after a design launch', async () => {
@@ -1222,7 +1225,7 @@ describe('SessionStartWizard — Design idea gate + launch', () => {
       fireEvent.click(screen.getByTestId('mock-idea-pick'));
     });
 
-    expect(mockPanelsSendInput).toHaveBeenCalledWith('panel-001', `${DESIGN_KICKOFF_PROMPT}\n`);
+    expect(mockPanelsContinue).toHaveBeenCalledWith('panel-001', DESIGN_KICKOFF_PROMPT, undefined, undefined, undefined);
   });
 
   it('enters the fullscreen design surface for the created session on a design launch', async () => {
@@ -1248,7 +1251,7 @@ describe('SessionStartWizard — Design idea gate + launch', () => {
     });
 
     expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockPanelsSendInput).not.toHaveBeenCalled();
+    expect(mockPanelsContinue).not.toHaveBeenCalled();
     expect(useDesignModeStore.getState().activeDesignSessionId).toBeNull();
   });
 });

@@ -6,8 +6,9 @@
  * whenever `useDesignModeStore.activeDesignSessionId` is non-null (a CONDITIONAL
  * SWAP, not a stacked overlay — so only ONE chat view and ONE canvas subscribe
  * per session, satisfying the spec's single-mount / single-subscribe invariant).
- * The fixed-inset-0 / z-modal root is belt-and-suspenders so the surface still
- * renders correctly if ever mounted as an overlay.
+ * The root renders in NORMAL FLOW below the TitleBar (flex-1 in App's column) —
+ * deliberately NOT `fixed inset-0`, which would cover the title bar and put the
+ * macOS traffic lights on top of the Exit button (live-smoke finding).
  *
  * Layout:
  *   - Top bar: Exit (top-left) · "DESIGN MODE" wordmark + session name · Approve
@@ -19,7 +20,7 @@
  * ui-prototype artifact is threaded to BOTH the top-bar Approve control and the
  * stage — the canvas is the single place v1 later swaps in the isolated frame.
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 import { useDesignModeStore } from '../../../stores/designModeStore';
 import { useSessionStore } from '../../../stores/sessionStore';
@@ -72,14 +73,21 @@ export function DesignModeSurface(): ReactElement | null {
   const { artifacts } = useSessionArtifactsList(activeDesignSessionId, projectId);
   const prototypeArtifact = useMemo(() => pickPrototype(artifacts), [artifacts]);
 
-  // Find-or-create the session's Claude panel: right after wizard creation the
-  // panel may not exist yet — ensure one so the rail can mount it. Find-only in
-  // render; the effect creates when missing and the placeholder covers the gap.
+  // Find-or-create the session's Claude panel — a FALLBACK only: the wizard
+  // path store-adds its created panel before onSuccess, so this normally finds
+  // it instantly. Guarded ONCE per session (ref) because the effect can re-fire
+  // before the store reflects an in-flight create (StrictMode double-invoke,
+  // dep-identity churn) — un-guarded, that minted DUPLICATE Claude panels on
+  // the very first live smoke.
   const ensureClaudePanel = useEnsureClaudePanel(session ?? null, {
     logTag: 'DesignModeSurface',
   });
+  const ensureAttemptedForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (session && !claudePanel) void ensureClaudePanel();
+    if (!session || claudePanel) return;
+    if (ensureAttemptedForRef.current === session.id) return;
+    ensureAttemptedForRef.current = session.id;
+    void ensureClaudePanel();
   }, [session, claudePanel, ensureClaudePanel]);
 
   // App gates mounting on activeDesignSessionId; this is belt-and-suspenders.
@@ -95,7 +103,7 @@ export function DesignModeSurface(): ReactElement | null {
   return (
     <div
       data-testid="design-mode-surface"
-      className="fixed inset-0 z-modal bg-bg-primary flex flex-col"
+      className="flex flex-1 min-h-0 flex-col overflow-hidden bg-bg-primary"
     >
       {/* Top bar */}
       <div className="h-10 shrink-0 border-b border-border-primary flex items-center gap-3 px-3">
