@@ -38,6 +38,28 @@ import type { Artifact } from '../../../../../shared/types/artifacts';
  * runs — so if several exist, prefer the most recently created (newest run),
  * tie-breaking on the higher enrich-in-place revision.
  */
+/**
+ * True when the prototype artifact actually has rendered bytes behind it — a
+ * canonical `{ fileName }` payload pointer. The backend creates a BYTES-LESS
+ * stub row at design-session creation (the re-entry door: its artifact tab +
+ * CTA must exist before the agent's first report), and the stage must treat
+ * that stub as "no prototype yet" (intro/working), not as an unreadable
+ * prototype.
+ */
+function prototypeHasBytes(artifact: Artifact | null): boolean {
+  if (artifact === null || artifact.payloadJson === null) return false;
+  try {
+    const parsed: unknown = JSON.parse(artifact.payloadJson);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as { fileName?: unknown }).fileName === 'string'
+    );
+  } catch {
+    return false;
+  }
+}
+
 function pickPrototype(artifacts: Artifact[]): Artifact | null {
   let best: Artifact | null = null;
   for (const a of artifacts) {
@@ -143,13 +165,16 @@ export function DesignModeSurface(): ReactElement | null {
           <div className="w-[400px] shrink-0 border-r border-border-primary flex flex-col overflow-hidden">
             <ClaudePanel panel={claudePanel} isActive />
           </div>
-          {/* Center stage: clarify → working → prototype precedence. */}
+          {/* Center stage: clarify → working → prototype precedence. The stage
+              only receives a BYTES-BACKED prototype — the creation-time stub
+              (no fileName payload) must read as "no prototype yet", not as an
+              unreadable one. */}
           <DesignStage
             sessionId={session.id}
             chatRunId={session.chatRunId ?? null}
             panelId={claudePanel?.id ?? null}
             sessionStatus={session.status ?? null}
-            prototypeArtifact={prototypeArtifact}
+            prototypeArtifact={prototypeHasBytes(prototypeArtifact) ? prototypeArtifact : null}
           />
         </div>
       ) : (

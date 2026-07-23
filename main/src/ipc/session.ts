@@ -34,6 +34,7 @@ import { createQuickSessionCore } from '../services/createQuickSessionCore';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
+import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
@@ -934,6 +935,34 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // createQuickSessionCore is the pattern this mirrors) — after the
         // resolved-substrate belt confirms 'sdk'.
         db.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(designIdeaId, session.id);
+
+        // v0.5 re-entry stub (design-mode.md "Entry (two doors)"): create the
+        // session's ui-prototype artifact row NOW, bytes-less, with the same
+        // server-side sourceRef/sessionId stamp handleReportArtifact applies —
+        // so the artifact tab and its "Enter design mode" CTA exist from the
+        // session's first second. The fullscreen surface flag is in-memory
+        // only, so a renderer reload before the agent's first report would
+        // otherwise strand the user with NO re-entry door. The agent's first
+        // real report enriches THIS row in place (one artifact per
+        // (runId, atype); the design report resolves to this same sentinel
+        // runId == sessions.chat_run_id), stamping the byte pointer and
+        // bumping the revision. Fail-soft: a stub failure must never fail
+        // session creation.
+        try {
+          await ArtifactRouter.getInstance().apply(targetProject.id, {
+            op: 'create',
+            runId,
+            atype: 'ui-prototype',
+            label: 'Prototype',
+            payloadJson: null,
+            sourceRef: designIdeaId,
+            sessionId: session.id,
+            isNew: true,
+            actor: 'orchestrator',
+          });
+        } catch (stubErr) {
+          console.error('[IPC] Design prototype stub creation failed (non-fatal):', stubErr);
+        }
       }
 
       // NOTE: the sentinel run's session_id is now stamped by createRun above (it

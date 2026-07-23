@@ -71,6 +71,14 @@ vi.mock('../../utils/claudeCredentials', () => ({
 vi.mock('../../utils/claudeCodeTest', () => ({
   detectClaudeBinary: vi.fn(async () => ({ found: true, path: '/usr/local/bin/claude', version: '1.0.0' })),
 }));
+// Design-mode v0.5 re-entry stub: the design branch mints a bytes-less
+// ui-prototype artifact through the real ArtifactRouter singleton — mock the
+// singleton so the create is assertable (and so the fail-soft catch is not
+// exercised by an uninitialized-singleton throw on every design test).
+const artifactApplyMock = vi.fn(async () => ({ artifactId: 'art-stub-1' }));
+vi.mock('../../orchestrator/artifactRouter', () => ({
+  ArtifactRouter: { getInstance: () => ({ apply: artifactApplyMock }) },
+}));
 
 import {
   generateQuickWorktreeBranchName,
@@ -1082,6 +1090,46 @@ describe('sessions:create-quick handler - Design Mode', () => {
     expect(stampCall?.args).toEqual([DESIGN_IDEA_ID, result.data?.sessionId]);
   });
 
+  it('mints the bytes-less ui-prototype re-entry stub at design-session creation (server-stamped sourceRef + sessionId)', async () => {
+    artifactApplyMock.mockClear();
+    const { services } = makeServices({ ideaRow: VALID_IDEA_ROW });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean; data?: { sessionId?: string; runId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(artifactApplyMock).toHaveBeenCalledTimes(1);
+    const [projectId, change] = artifactApplyMock.mock.calls[0] as unknown as [number, Record<string, unknown>];
+    expect(projectId).toBe(42);
+    expect(change).toMatchObject({
+      op: 'create',
+      runId: result.data?.runId,
+      atype: 'ui-prototype',
+      payloadJson: null,
+      sourceRef: DESIGN_IDEA_ID,
+      sessionId: result.data?.sessionId,
+    });
+  });
+
+  it('a stub-creation failure is fail-soft: session creation still succeeds', async () => {
+    artifactApplyMock.mockClear();
+    artifactApplyMock.mockRejectedValueOnce(new Error('router down'));
+    const { services } = makeServices({ ideaRow: VALID_IDEA_ROW });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      designIdeaId: DESIGN_IDEA_ID,
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+  });
+
   it('fails closed and does NOT stamp design_idea_id if a config race defeats requireSdkSubstrate (belt guard)', async () => {
     // forceResolvedSubstrate simulates WorkflowRegistry.createRun somehow
     // still resolving 'interactive' despite the requireSdkSubstrate request —
@@ -1108,6 +1156,7 @@ describe('sessions:create-quick handler - Design Mode', () => {
   });
 
   it('a non-design launch (no designIdeaId) is byte-identical: no idea validation, no Claude pre-flight', async () => {
+    artifactApplyMock.mockClear();
     const { services, fakeTaskQueue } = makeServices();
     const handlers = registerWith(services);
     vi.mocked(detectClaudeCredentials).mockClear();
@@ -1122,6 +1171,8 @@ describe('sessions:create-quick handler - Design Mode', () => {
     expect(fakeTaskQueue.createSession).toHaveBeenCalledTimes(1);
     expect(detectClaudeCredentials).not.toHaveBeenCalled();
     expect(detectClaudeBinary).not.toHaveBeenCalled();
+    // No prototype re-entry stub outside the design branch.
+    expect(artifactApplyMock).not.toHaveBeenCalled();
   });
 });
 

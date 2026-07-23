@@ -88,7 +88,7 @@ function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
     committed: false,
     sessionOnly: true,
     isNew: false,
-    payloadJson: null,
+    payloadJson: JSON.stringify({ fileName: 'prototype/index.html' }),
     sourceRef: 'IDEA-1',
     createdAt: '2026-07-23T00:00:00Z',
     committedAt: null,
@@ -183,5 +183,20 @@ describe('DesignModeSurface', () => {
     ];
     render(<DesignModeSurface />);
     expect(screen.getByTestId('design-stage-stub')).toHaveAttribute('data-proto-id', 'art-new');
+  });
+
+  it('(d3) a bytes-less creation stub reads as "no prototype yet" for the stage but still opens the Approve gate', () => {
+    // The backend mints this row at session creation purely as the re-entry
+    // door: sourceRef/sessionId stamped, payloadJson null (no fileName).
+    mockArtifacts = [makeArtifact({ id: 'art-stub', payloadJson: null })];
+    render(<DesignModeSurface />);
+    expect(screen.getByTestId('design-stage-stub')).toHaveAttribute('data-proto-id', 'none');
+    expect(screen.getByTestId('design-approve-stub')).toBeInTheDocument();
+  });
+
+  it('(d4) a malformed payload also reads as bytes-less rather than crashing', () => {
+    mockArtifacts = [makeArtifact({ id: 'art-bad', payloadJson: 'not json' })];
+    render(<DesignModeSurface />);
+    expect(screen.getByTestId('design-stage-stub')).toHaveAttribute('data-proto-id', 'none');
   });
 });
