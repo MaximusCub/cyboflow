@@ -1,22 +1,23 @@
 import { defineConfig } from 'vitest/config';
 import path from 'path';
 
-// Optional cap on the fork-pool worker count. Unset -> vitest's default (one
-// worker per CPU), so normal single-gate runs are unchanged. Set it to bound
-// the suite's process/fd footprint when several full gates run concurrently in
-// one shared worktree (sprint sibling lanes) — that concurrency, not any single
-// run, is what pushes the machine past kern.maxfiles (system-wide, ~122880) and
-// makes fs.watch-based watcher tests the EMFILE victim. e.g. CYBOFLOW_TEST_MAX_FORKS=4.
-const maxForksEnv = Number(process.env.CYBOFLOW_TEST_MAX_FORKS);
-const maxForks = Number.isInteger(maxForksEnv) && maxForksEnv > 0 ? maxForksEnv : undefined;
+import { forkPoolOptions } from '../vitestForkCap';
+
+// Cap on the fork-pool worker count. An explicit CYBOFLOW_TEST_MAX_FORKS wins;
+// otherwise, when cyboflow marks the process tree as agent-spawned, the cap is
+// an even share of the cores across the gates running right now. A gate run by
+// hand in a terminal (and CI) keeps vitest's default one-worker-per-CPU.
+//
+// That concurrency, not any single run, is what pushes the machine past
+// kern.maxfiles (system-wide, ~122880) and makes fs.watch-based watcher tests
+// the EMFILE victim — and what pins every core when sprint sibling lanes each
+// run the full gate in the shared worktree. See shared/types/testConcurrency.ts.
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    ...(maxForks !== undefined
-      ? { pool: 'forks' as const, poolOptions: { forks: { maxForks, minForks: 1 } } }
-      : {}),
+    ...forkPoolOptions(),
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

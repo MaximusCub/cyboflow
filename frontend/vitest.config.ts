@@ -1,11 +1,17 @@
 import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
+import { forkPoolOptions } from '../vitestForkCap';
+
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
     globals: true,
+    // Same fork-pool governor as main/vitest.config.ts — `pnpm test:unit` runs
+    // BOTH suites, so capping only main leaves half the oversubscription in
+    // place. See shared/types/testConcurrency.ts.
+    ...forkPoolOptions(),
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     // Flake quarantine — *.quarantine.test.ts is pulled out of the blocking
     // suite and run report-only by e2e.yml's flake-watch job, which sets

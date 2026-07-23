@@ -5,6 +5,7 @@ import { isValidEffortForProvider } from '../../../../../../shared/types/reasoni
 import { codexPermissionFlagsForMode } from '../codexPtyManager';
 import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
 import { getShellPath } from '../../../../utils/shellPath';
+import { managedTestConcurrencyEnv } from '../../../../../../shared/types/testConcurrency';
 import type {
   AppServerJsonValue,
   AppServerThreadResumeParams,
@@ -82,6 +83,10 @@ export function buildCodexAppServerEnvironment(
     [pathKey]: mergePathValue(resolveShellPath(), inheritedEnvironment[pathKey]),
     CYBOFLOW_RUN_ID: runId,
     CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
+    // The app-server — and every command the Codex agent shells out to,
+    // including the project gate — inherits this env, so marking it here is what
+    // makes a Codex lane's gate self-govern its vitest fork pool.
+    ...managedTestConcurrencyEnv(),
   };
 }
 

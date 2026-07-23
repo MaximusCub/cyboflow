@@ -63,6 +63,7 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
 import type { FastModeState, FastModeStateNotice, QueuedPanelInput } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
+import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 
 /**
  * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
@@ -3026,6 +3027,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return {
       ...process.env,
       CYBOFLOW_RUN_ARTIFACTS_DIR: runArtifactsDir,
+      // Mark the tree as agent-spawned so a project gate run by this agent
+      // self-governs its vitest fork pool (shared/types/testConcurrency.ts).
+      ...managedTestConcurrencyEnv(),
       ...(verbose ? { MCP_DEBUG: '1' } : {})
     };
   }

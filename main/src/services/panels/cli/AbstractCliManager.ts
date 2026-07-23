@@ -11,6 +11,7 @@ import { captureSeamError } from '../../telemetry';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 
 interface CliProcess {
   process: pty.IPty;
@@ -578,7 +579,11 @@ export abstract class AbstractCliManager extends EventEmitter {
 
     return {
       ...process.env,
-      PATH: pathWithNode
+      PATH: pathWithNode,
+      // Mark the tree as agent-spawned so a project gate run from inside this
+      // CLI self-governs its vitest fork pool instead of taking a full
+      // one-worker-per-CPU pool per concurrent sprint lane.
+      ...managedTestConcurrencyEnv()
     } as { [key: string]: string };
   }
 

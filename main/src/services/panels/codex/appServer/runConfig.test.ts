@@ -169,6 +169,9 @@ describe('Codex app-server run configuration', () => {
       PATH: '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin:/usr/local/bin',
       CYBOFLOW_RUN_ID: 'run-1',
       CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
+      // Marks the tree as agent-spawned so the project gate self-governs its
+      // vitest fork pool instead of taking the whole box per sprint lane.
+      CYBOFLOW_MANAGED_TEST_CONCURRENCY: '1',
     });
   });
 
