@@ -40,6 +40,9 @@ const MIGRATIONS = [
   '014_native_tasks.sql',
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
+  // 019 adds workflow_runs.session_id — the hop the list query LEFT-JOINs
+  // through to attribute each request to its origin session.
+  '019_workflow_run_session_id.sql',
   '055_visual_verification.sql',
   '056_visual_verify_budget.sql',
 ];
@@ -56,20 +59,40 @@ function buildDb(): Database.Database {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  // Minimal sessions table — migration 019 backfills workflow_runs.session_id
+  // from it, and the list query joins it for the session pill's display name.
+  db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, run_id TEXT);`);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('ProjA', '/tmp/p1');
   db.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('ProjB', '/tmp/p2');
   for (const f of MIGRATIONS) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
   return db;
 }
 
-function seedRun(db: Database.Database, runId: string, projectId: number): void {
+/**
+ * Seed a run, optionally attached to a session (`sessionName` also inserts the
+ * sessions row the join resolves). Omitting it leaves session_id NULL — the
+ * unattributed-run case the panel falls back to the run id for.
+ */
+function seedRun(
+  db: Database.Database,
+  runId: string,
+  projectId: number,
+  session?: { id: string; name: string },
+): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'sprint', '{}')`,
   ).run(`wf-${projectId}`, projectId);
+  if (session !== undefined) {
+    db.prepare('INSERT OR IGNORE INTO sessions (id, name, run_id) VALUES (?, ?, ?)').run(
+      session.id,
+      session.name,
+      runId,
+    );
+  }
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-     VALUES (?, ?, ?, 'running', 'default')`,
-  ).run(runId, `wf-${projectId}`, projectId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id)
+     VALUES (?, ?, ?, 'running', 'default', ?)`,
+  ).run(runId, `wf-${projectId}`, projectId, session?.id ?? null);
 }
 
 /** Insert one verification_requests row with explicit fields. */
@@ -243,9 +266,55 @@ describe('cyboflow.verificationRequests.list', () => {
       delivery_state: null,
       snapshot_sha: null,
       enqueue_key: null,
+      session_id: null,
+      session_name: null,
     });
     // chain_json is always a parseable VisualBackendId[] for the renderer.
     expect(() => JSON.parse(row.chain_json)).not.toThrow();
+  });
+
+  it('attributes each row to its origin session (run -> session join)', async () => {
+    const { caller, db } = buildCaller();
+    openDb = db;
+    seedRun(db, 'run-a', 1, { id: 'sess-a', name: 'twilight-leaf' });
+    seedRun(db, 'run-b', 1, { id: 'sess-b', name: 'curious-basin' });
+    seedRequest(db, { id: 'vr-1', runId: 'run-a', projectId: 1, status: 'queued', enqueuedAt: '2026-06-28T00:00:02.000Z' });
+    seedRequest(db, { id: 'vr-2', runId: 'run-b', projectId: 1, status: 'passed', enqueuedAt: '2026-06-28T00:00:01.000Z' });
+
+    const result = await caller.cyboflow.verificationRequests.list({ projectId: 1 });
+
+    expect(result.map((r) => [r.id, r.session_id, r.session_name])).toEqual([
+      ['vr-1', 'sess-a', 'twilight-leaf'],
+      ['vr-2', 'sess-b', 'curious-basin'],
+    ]);
+  });
+
+  it('reads back NULL session fields for a run with no session (LEFT JOIN, row still lists)', async () => {
+    const { caller, db } = buildCaller();
+    openDb = db;
+    seedRun(db, 'run-a', 1); // no session attached
+    seedRequest(db, { id: 'vr-1', runId: 'run-a', projectId: 1, status: 'queued', enqueuedAt: '2026-06-28T00:00:01.000Z' });
+
+    const [row] = await caller.cyboflow.verificationRequests.list({ projectId: 1 });
+
+    expect(row.id).toBe('vr-1');
+    expect(row.session_id).toBeNull();
+    expect(row.session_name).toBeNull();
+  });
+
+  it('filters on the REQUEST status/project, not the joined run\'s columns', async () => {
+    const { caller, db } = buildCaller();
+    openDb = db;
+    // The run is 'running' while its request is terminal — an unqualified
+    // `status = ?` predicate would silently filter on workflow_runs.status here.
+    seedRun(db, 'run-a', 1, { id: 'sess-a', name: 'twilight-leaf' });
+    seedRequest(db, { id: 'vr-1', runId: 'run-a', projectId: 1, status: 'passed', enqueuedAt: '2026-06-28T00:00:01.000Z' });
+
+    const passed = await caller.cyboflow.verificationRequests.list({ projectId: 1, status: 'passed' });
+    const running = await caller.cyboflow.verificationRequests.list({ projectId: 1, status: 'running' });
+
+    expect(passed.map((r) => r.id)).toEqual(['vr-1']);
+    expect(running).toEqual([]);
   });
 
   it('returns [] when the project has no requests', async () => {

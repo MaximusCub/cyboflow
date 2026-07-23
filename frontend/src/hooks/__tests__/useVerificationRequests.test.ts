@@ -55,6 +55,9 @@ function row(id: string): VerificationRequest {
     delivery_state: null,
     snapshot_sha: null,
     enqueue_key: null,
+    // Origin-session columns, LEFT-JOINed onto the row by the list query.
+    session_id: 'sess-1',
+    session_name: 'twilight-leaf',
   };
 }
 

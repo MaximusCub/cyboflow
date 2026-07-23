@@ -9,8 +9,10 @@
  * frontend by AppRouter inference ONLY (native tRPC serialization — NO IPCResponse
  * wrapper, no `{ success; data?; error? }` shape).
  *
- *   - list : query -> VerificationRequestRow[] (a project's verify requests,
- *            optionally narrowed by runId + status), newest-enqueued first.
+ *   - list : query -> VerificationRequestListRow[] (a project's verify requests,
+ *            optionally narrowed by runId + status), newest-enqueued first, each
+ *            enriched with its ORIGIN SESSION (run → session LEFT JOIN) for the
+ *            panel's per-card session pill.
  *
  * The panel performs NO mutations (Accept-as-baseline lives on the artifact
  * verdict banner, S6) — this router stays read-only over the existing schema, so
@@ -26,7 +28,7 @@ import type { DatabaseLike } from '../../types';
 import {
   REQUEST_STATUS,
   type RequestStatus,
-  type VerificationRequestRow,
+  type VerificationRequestListRow,
   type VerificationType,
   type VisualBackendId,
 } from '../../../../../shared/types/visualVerification';
@@ -71,6 +73,10 @@ interface VerificationRequestDbRow {
   delivery_state: string | null;
   snapshot_sha: string | null;
   enqueue_key: string | null;
+  // Origin-session columns, LEFT-JOINed from workflow_runs → sessions (see the
+  // list query). Both NULL when the run has no session row.
+  session_id: string | null;
+  session_name: string | null;
 }
 
 /**
@@ -80,7 +86,7 @@ interface VerificationRequestDbRow {
  * union types rather than re-validating. `chain_json` NULL → '[]' (see the row
  * doc) keeps the renderer's `JSON.parse(chain_json)` safe.
  */
-function shapeRow(r: VerificationRequestDbRow): VerificationRequestRow {
+function shapeRow(r: VerificationRequestDbRow): VerificationRequestListRow {
   return {
     id: r.id,
     run_id: r.run_id,
@@ -103,6 +109,10 @@ function shapeRow(r: VerificationRequestDbRow): VerificationRequestRow {
     delivery_state: r.delivery_state ?? null,
     snapshot_sha: r.snapshot_sha ?? null,
     enqueue_key: r.enqueue_key ?? null,
+    // LEFT-JOIN columns — `undefined` (no matching run/session row) shapes to the
+    // declared null so the renderer's pill fallback has one shape to test.
+    session_id: r.session_id ?? null,
+    session_name: r.session_name ?? null,
   };
 }
 
@@ -122,21 +132,32 @@ export const verificationRequestsRouter = router({
         status: z.enum(REQUEST_STATUS as readonly [RequestStatus, ...RequestStatus[]]).optional(),
       }),
     )
-    .query(async ({ input, ctx }): Promise<VerificationRequestRow[]> => {
+    .query(async ({ input, ctx }): Promise<VerificationRequestListRow[]> => {
       const db = requireDb(ctx.db, 'list');
-      const clauses = ['project_id = ?'];
+      // Every predicate is qualified with the `vr.` alias — workflow_runs carries
+      // its OWN project_id / status columns, so an unqualified clause would be
+      // ambiguous (or worse, silently filter on the RUN's status) once joined.
+      const clauses = ['vr.project_id = ?'];
       const params: unknown[] = [input.projectId];
       if (input.runId !== undefined) {
-        clauses.push('run_id = ?');
+        clauses.push('vr.run_id = ?');
         params.push(input.runId);
       }
       if (input.status !== undefined) {
-        clauses.push('status = ?');
+        clauses.push('vr.status = ?');
         params.push(input.status);
       }
+      // Two LEFT JOINs resolve the request's ORIGIN SESSION (run → session) for
+      // the panel's session pill. LEFT (not INNER) so a request whose run or
+      // session row is gone still lists — the pill degrades to the run id.
       const rows = db
         .prepare(
-          `SELECT * FROM verification_requests WHERE ${clauses.join(' AND ')} ORDER BY enqueued_at DESC, id DESC`,
+          `SELECT vr.*, wr.session_id AS session_id, s.name AS session_name
+             FROM verification_requests vr
+             LEFT JOIN workflow_runs wr ON wr.id = vr.run_id
+             LEFT JOIN sessions s ON s.id = wr.session_id
+            WHERE ${clauses.join(' AND ')}
+            ORDER BY vr.enqueued_at DESC, vr.id DESC`,
         )
         .all(...params) as VerificationRequestDbRow[];
       return rows.map(shapeRow);

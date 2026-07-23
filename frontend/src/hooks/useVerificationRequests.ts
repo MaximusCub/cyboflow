@@ -75,7 +75,11 @@ function rowEqual(a: VerificationRequest, b: VerificationRequest): boolean {
     // in-flight snapshot and never re-render (the stale-row bug §5.11 flags).
     a.task_json === b.task_json &&
     a.report_json === b.report_json &&
-    a.delivery_state === b.delivery_state
+    a.delivery_state === b.delivery_state &&
+    // Origin-session columns (LEFT-JOINed by the list query). Static for a given
+    // row in practice, but compared anyway so a renamed session repaints its pill.
+    a.session_id === b.session_id &&
+    a.session_name === b.session_name
   );
 }
 

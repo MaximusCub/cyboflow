@@ -1116,3 +1116,20 @@ export interface VerificationRequestRow {
   snapshot_sha: string | null;
   enqueue_key: string | null;
 }
+
+/**
+ * A {@link VerificationRequestRow} enriched with the ORIGIN SESSION, as returned
+ * by the `cyboflow.verificationRequests.list` query for the verify-queue panel.
+ *
+ * `verification_requests` only carries `run_id`; the session a request came from
+ * is one hop further (`workflow_runs.session_id` → `sessions.name`, migration
+ * 019). The panel shows a session pill per card, so the list query resolves that
+ * hop server-side with two LEFT JOINs rather than making the renderer fan out an
+ * N+1 lookup per row. BOTH fields are nullable: a pre-019 run, a run whose
+ * session row was deleted, or a run launched without a session all read back
+ * NULL — the pill then degrades to the run id, never blanks the card.
+ */
+export interface VerificationRequestListRow extends VerificationRequestRow {
+  session_id: string | null;
+  session_name: string | null;
+}
