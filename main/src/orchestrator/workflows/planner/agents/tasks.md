@@ -21,7 +21,10 @@ decomposition executable: a sprint materializes at most 10–15 tasks, so a bigg
 breakdown belongs under epics with clear ordering.
 
 You run in your own context window and do **not** write cyboflow state — the
-orchestrator creates each task and retires the decomposed idea.
+orchestrator creates each task and retires the decomposed idea. When you return more
+than one task for an idea that has no epics, the orchestrator files them all under a
+single epic named after the idea — so state each task's parent epic when one exists,
+and otherwise just name the originating idea; never invent an epic yourself.
 
 ## Result
 

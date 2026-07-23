@@ -139,12 +139,26 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
      idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
      architecture stay in agreement. Do **not** proceed to
      epics until the user answers Approve.
-8. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
-   returned epic and link it to the originating idea via `cyboflow_*`. A `small`
-   idea skips straight to tasks.
+8. **epics** → **INVARIANT: an idea that decomposes into more than one task ALWAYS
+   gets an epic** — never leave two or more of an idea's tasks parented straight to
+   the idea. Only a single-task idea is epic-free.
+   - **`large` idea** → delegate to `cyboflow-epics`; create each returned epic and
+     link it to the originating idea via `cyboflow_*`. That tree already satisfies
+     the invariant.
+   - **`small` idea** → do **not** delegate and create nothing yet — the task count
+     is unknown until step 9. Report the step, then apply the **fallback epic**
+     there: >1 task → ONE epic whose title is the idea's title (body: a one-line
+     pointer to the idea); exactly 1 task → no epic.
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
-   hints, parent epic/idea linkage). **Remember every task id and title you
+   hints, parent epic/idea linkage). **Fallback epic first:** for an idea with no
+   epic yet, count the returned tasks before creating any — **>1** → create the
+   step-8 fallback epic (`task_type='epic'`, title = the idea's title,
+   `originating_idea_id` = the idea) FIRST, then create every task with
+   `parent_epic_id` set to it; **exactly 1** → no epic, link the task to the idea.
+   If a Revise round grows a single-task idea past one task, mint the epic then and
+   re-parent the existing task via `cyboflow_update_task(parent_epic_id=…)`.
+   **Remember every task id and title you
    create** — you will present the full list at the next gate and pass the
    approved subset to materialize. The idea is NOT retired here; the backend
    removes it from the board (stamps `decomposed_at`) the moment the plan is approved

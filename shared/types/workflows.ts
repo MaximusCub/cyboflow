@@ -728,7 +728,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'epics',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Decompose the idea into epics with dependency edges.',
+            desc: 'Group the idea\'s work under epics — a full breakdown with dependency edges for a large idea; otherwise one epic named after the idea whenever it yields more than one task.',
           },
           {
             id: 'tasks',
@@ -1027,7 +1027,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'epics',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Decompose the idea into epics with dependency edges.',
+            desc: 'Group the idea\'s work under epics — a full breakdown with dependency edges for a large idea; otherwise one epic named after the idea whenever it yields more than one task.',
           },
           {
             id: 'tasks',

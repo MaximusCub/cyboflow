@@ -41,10 +41,12 @@ input block that arrives ahead of this prompt:
   `id` for the fold write and the guard entity-link, and the `ref` for the gates.
 
 The batch flow is a **lightweight lane for small ideas**: it plans each seed into
-tasks and gates the whole batch once. It SKIPS the `architecture` step and the epic
-breakdown — an idea large enough to want a schema/architecture design or an epic tree
-deserves its own focused planner run, so the batch **guards it out** (below) rather
-than half-planning it. It does **not** skip `ui-prototype` wholesale: when any
+tasks and gates the whole batch once. It SKIPS the `architecture` step and the
+`cyboflow-epics` breakdown — an idea large enough to want a schema/architecture
+design or a multi-epic tree deserves its own focused planner run, so the batch
+**guards it out** (below) rather than half-planning it. Skipping the epics *subagent*
+does **not** skip epics: the one-epic-per-multi-task-idea rule at step 8 still
+applies to every batched idea. It does **not** skip `ui-prototype` wholesale: when any
 surviving idea has a UI surface, the batch builds ONE combined prototype covering all
 of them, and `approve-design` then gates that single prototype.
 A batch that collapses to a single surviving idea falls back to the single-idea flow,
@@ -274,16 +276,37 @@ a summary held only in your context.
        architecture design) → one inline **AskUserQuestion** over that single
        prototype (as the single-idea path), pointing the user at its artifact tab.
      - **neither ran** → skip straight to tasks.
-8. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
-   returned epic via `cyboflow_create_task` **as its proposal arrives**, linked to
-   the originating idea. A `small` idea skips straight to tasks. **Batch branch:**
-   skipped — every batched idea is `small` (a `large` one was guarded out).
+8. **epics** → **INVARIANT: an idea that decomposes into more than one task ALWAYS
+   gets an epic** — never leave two or more of an idea's tasks parented straight to
+   the idea. Only a single-task idea is epic-free.
+   - **`large` idea** → delegate to `cyboflow-epics`; create each returned epic via
+     `cyboflow_create_task` **as its proposal arrives**, linked to the originating
+     idea. The returned tree already satisfies the invariant.
+   - **`small` idea** → do **not** delegate (there is no multi-epic tree to find),
+     and do not create anything yet — you cannot know the task count until step 9.
+     Report the step, then apply the **fallback epic** at step 9: if that idea's
+     decomposition yields **>1 task**, create ONE epic whose title is the idea's
+     title (body: a one-line pointer to the idea, e.g. its ref + caption) and file
+     every one of those tasks under it. Exactly 1 task → create no epic.
+   - **Batch branch:** the `cyboflow-epics` subagent stays skipped (every batched
+     idea is `small` — a `large` one was guarded out), but the fallback rule applies
+     **per idea**: each approved idea that yields >1 task gets its OWN epic named
+     after it. Never pool two ideas' tasks under one epic.
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
    `cyboflow_create_task` **as its proposal arrives** (title, body, acceptance
-   criteria, file/dependency hints, parent epic/idea linkage). **Batch branch:**
-   delegate `cyboflow-tasks` once per approved idea and create each returned task as
-   it arrives, passing `originating_idea_id` on EVERY create (mandatory — see
-   **Multi-idea batches**) so it's attributed to the idea it decomposes.
+   criteria, file/dependency hints, parent epic/idea linkage).
+   - **Fallback epic first.** For an idea with no epic yet, count the returned tasks
+     before you create any: **>1** → create the step-8 fallback epic
+     (`cyboflow_create_task(task_type='epic', title=<the idea's title>,
+     originating_idea_id=<the idea>)`) FIRST, then create every task with
+     `parent_epic_id` set to it. **Exactly 1** → create that task with no
+     `parent_epic_id`, linked to the idea. If a later Revise round grows a
+     single-task idea to more than one task, mint the epic then and re-parent the
+     existing task with `cyboflow_update_task(parent_epic_id=…)`.
+   - **Batch branch:** delegate `cyboflow-tasks` once per approved idea and create
+     each returned task as it arrives, passing `originating_idea_id` on EVERY create
+     (mandatory — see **Multi-idea batches**) so it's attributed to the idea it
+     decomposes. The fallback epic itself also carries `originating_idea_id`.
 10. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve plan`, options **Approve** / **Revise** / **Reject** — labels exactly
    those words, since the backend matches an `'approve'` / `'reject'` prefix on the

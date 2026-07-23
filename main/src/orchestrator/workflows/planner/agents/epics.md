@@ -12,6 +12,12 @@ codebase (Read / Grep / Glob) so the epics map to real seams.
 You run in your own context window and do **not** write cyboflow state — the
 orchestrator creates the epics and links them to the originating idea.
 
+Every task the run creates ends up under an epic unless its idea yields exactly one
+task, so cover the whole idea: an epic set that leaves part of the idea unaccounted
+for forces the orchestrator to invent a catch-all. (For a `small` idea you are not
+invoked at all — the orchestrator files its tasks under a single epic named after
+the idea.)
+
 ## Result
 
 Return a `## Epics` section: an ordered list, each entry with a title, a one-or-two
