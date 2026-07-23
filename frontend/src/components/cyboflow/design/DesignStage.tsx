@@ -2,22 +2,20 @@
  * DesignStage — the v0.5 fullscreen design surface's center-stage state
  * machine (design-mode.md "Fullscreen design surface (v0.5)").
  *
- * Renders by strict precedence, exactly one state at a time:
+ * Renders by strict precedence:
  *
  *   1. clarify  — pending AskUserQuestion gates for this session's chat run,
  *                 rendered center-stage as cards.
- *   2. working  — the agent is generating (session status 'running' OR a
- *                 live tail in flight) and there is no pending gate.
- *   3. prototype — a bound `ui-prototype` artifact exists and the agent is
- *                 not currently working.
- *   4. intro    — nothing above applies (idle, pre-kickoff, or idle with no
- *                 artifact yet).
- *
- * NOTE the deliberate precedence subtlety: prototype does NOT win over
- * working just because an (older) prototype already exists — while the agent
- * regenerates, the working animation shows even with a stale prototype
- * sitting behind it. Only when working goes false does the (possibly newer)
- * prototype take over.
+ *   2. prototype — a bound `ui-prototype` artifact exists. While the agent is
+ *                 generating (session status 'running' OR a live tail in
+ *                 flight), the working indicator renders as a translucent
+ *                 OVERLAY on top of the still-visible prototype — the
+ *                 prototype never disappears between turns (live-smoke
+ *                 feedback); it swaps under the overlay when the re-report
+ *                 lands.
+ *   3. working  — generating with no prototype yet (first pass): full-stage
+ *                 working animation.
+ *   4. intro    — nothing above applies (idle, pre-kickoff, no artifact yet).
  */
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { useQuestionStore } from '../../../stores/questionStore';
@@ -57,7 +55,9 @@ function StageSpinner(): ReactElement {
   );
 }
 
-function WorkingState(): ReactElement {
+/** Spinner + cycling status line — shared by the full working state and the
+ * over-prototype overlay. */
+function WorkingIndicator(): ReactElement {
   const [statusIndex, setStatusIndex] = useState(0);
 
   useEffect(() => {
@@ -68,13 +68,19 @@ function WorkingState(): ReactElement {
   }, []);
 
   return (
+    <div className="flex flex-col items-center gap-4">
+      <StageSpinner />
+      <span className="text-sm text-text-muted" data-testid="design-stage-working-status">
+        {WORKING_STATUS_LINES[statusIndex]}
+      </span>
+    </div>
+  );
+}
+
+function WorkingState(): ReactElement {
+  return (
     <div data-testid="design-stage-working" className="h-full w-full flex items-center justify-center">
-      <div className="flex flex-col items-center gap-4">
-        <StageSpinner />
-        <span className="text-sm text-text-muted" data-testid="design-stage-working-status">
-          {WORKING_STATUS_LINES[statusIndex]}
-        </span>
-      </div>
+      <WorkingIndicator />
     </div>
   );
 }
@@ -133,16 +139,27 @@ export function DesignStage({
     );
   }
 
-  if (working) {
-    return <WorkingState />;
-  }
-
   if (prototypeArtifact !== null) {
     return (
-      <div data-testid="design-stage-prototype" className="h-full w-full">
+      <div data-testid="design-stage-prototype" className="relative h-full w-full">
         <DesignStageCanvas artifact={prototypeArtifact} />
+        {working && (
+          <div
+            data-testid="design-stage-working-overlay"
+            className="absolute inset-0 flex items-center justify-center backdrop-blur-[2px]"
+            style={{
+              backgroundColor: 'color-mix(in srgb, var(--color-bg-primary) 65%, transparent)',
+            }}
+          >
+            <WorkingIndicator />
+          </div>
+        )}
       </div>
     );
+  }
+
+  if (working) {
+    return <WorkingState />;
   }
 
   return <IntroState />;

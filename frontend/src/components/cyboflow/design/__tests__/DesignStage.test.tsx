@@ -1,8 +1,9 @@
 /**
  * DesignStage — the v0.5 fullscreen design surface's center-stage state
  * machine. Covers render precedence: clarify gate wins over everything;
- * working wins over prototype; prototype wins over intro; a gate for a
- * DIFFERENT chat run is ignored.
+ * a live prototype stays visible with the working indicator as an OVERLAY
+ * while the agent regenerates; full-stage working only pre-first-prototype;
+ * prototype wins over intro; a gate for a DIFFERENT chat run is ignored.
  *
  * Mocks questionStore and panelLiveEventsStore the way
  * RunPendingInputStrip.test.tsx does (module-level mutable state driving the
@@ -144,13 +145,17 @@ describe('DesignStage', () => {
     expect(screen.getByTestId('design-stage-prototype')).toBeInTheDocument();
     expect(screen.getByTestId('design-stage-canvas-stub')).toHaveAttribute('data-artifact-id', 'art-42');
     expect(screen.queryByTestId('design-stage-working')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('design-stage-working-overlay')).not.toBeInTheDocument();
   });
 
-  it('working wins over an existing (stale) prototype while the agent regenerates', () => {
+  it('regenerating with a live prototype keeps it visible and overlays the working indicator', () => {
     render(<DesignStage {...BASE_PROPS} sessionStatus="running" prototypeArtifact={makeArtifact()} />);
 
-    expect(screen.getByTestId('design-stage-working')).toBeInTheDocument();
-    expect(screen.queryByTestId('design-stage-prototype')).not.toBeInTheDocument();
+    expect(screen.getByTestId('design-stage-prototype')).toBeInTheDocument();
+    expect(screen.getByTestId('design-stage-canvas-stub')).toBeInTheDocument();
+    expect(screen.getByTestId('design-stage-working-overlay')).toBeInTheDocument();
+    // NOT the full-stage working state — the prototype must not disappear.
+    expect(screen.queryByTestId('design-stage-working')).not.toBeInTheDocument();
   });
 
   it('(d) nothing -> intro', () => {
