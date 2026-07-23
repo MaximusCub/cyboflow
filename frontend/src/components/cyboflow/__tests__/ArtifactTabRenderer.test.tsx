@@ -143,6 +143,30 @@ function setQuestions(queue: Question[]): void {
   mockQuestionQueue = queue;
 }
 
+// "Enter design mode" CTA — reads useCyboflowStore.getState().selectedSessionId
+// and calls setActiveQuickSession, then useDesignModeStore.getState().enterDesignMode.
+// Mocked the same getState-only way (the component never subscribes to either
+// store — it reads/calls at click time), per pinned contract #1 in the brief.
+let mockSelectedSessionId: string | null = null;
+const mockSetActiveQuickSession = vi.fn();
+vi.mock('../../../stores/cyboflowStore', () => ({
+  useCyboflowStore: {
+    getState: () => ({
+      selectedSessionId: mockSelectedSessionId,
+      setActiveQuickSession: mockSetActiveQuickSession,
+    }),
+  },
+}));
+
+const mockEnterDesignMode = vi.fn();
+vi.mock('../../../stores/designModeStore', () => ({
+  useDesignModeStore: {
+    getState: () => ({
+      enterDesignMode: mockEnterDesignMode,
+    }),
+  },
+}));
+
 // --- fixtures --------------------------------------------------------------
 
 function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
@@ -229,6 +253,9 @@ describe('ArtifactTabRenderer', () => {
     designDraftStatusQuery.mockReset();
     designDraftStatusQuery.mockImplementation(() => new Promise(() => {})); // never resolves by default
     designApproveMutate.mockReset();
+    mockSelectedSessionId = null;
+    mockSetActiveQuickSession.mockClear();
+    mockEnterDesignMode.mockClear();
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -1129,6 +1156,63 @@ describe('ArtifactTabRenderer', () => {
 
     expect(await screen.findByTestId('design-approve-no-draft')).toHaveTextContent('No design-spec draft yet');
     expect(designDraftStatusQuery).toHaveBeenCalledWith({ sessionId: 'sess-1' });
+  });
+
+  // --- ui-prototype: "Enter design mode" CTA (v0.5 fullscreen design surface,
+  // second entry door) --- same gate as designControl (sourceRef + sessionId
+  // present), rendered leftmost of the header actions.
+
+  it('renders the "Enter design mode" CTA for a design-session ui-prototype (sourceRef + sessionId present)', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.getByTestId('design-mode-enter-cta')).toHaveTextContent('Design mode');
+  });
+
+  it('does NOT render the "Enter design mode" CTA for a sourceRef-less ui-prototype', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null })} {...PROPS} />,
+    );
+    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
+  });
+
+  it('does NOT render the "Enter design mode" CTA for a sessionId-less ui-prototype', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sessionId: null })} {...PROPS} />,
+    );
+    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
+  });
+
+  it('clicking the CTA calls enterDesignMode with the artifact\'s sessionId and activates the session', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sessionId: 'sess-design-1' })}
+        {...PROPS}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('design-mode-enter-cta'));
+
+    expect(mockEnterDesignMode).toHaveBeenCalledWith('sess-design-1');
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-design-1');
+  });
+
+  it('does not re-activate the session when it is already the selected session', () => {
+    mockSelectedSessionId = 'sess-design-1';
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sessionId: 'sess-design-1' })}
+        {...PROPS}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('design-mode-enter-cta'));
+
+    expect(mockEnterDesignMode).toHaveBeenCalledWith('sess-design-1');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
   });
 
   // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---

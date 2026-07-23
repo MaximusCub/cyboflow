@@ -42,6 +42,8 @@ import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
+import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useDesignModeStore } from '../../stores/designModeStore';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type {
   Artifact,
@@ -1607,12 +1609,47 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   // canvas from an ordinary ui-prototype/generic live canvas. Non-design
   // canvas tabs (sourceRef null, or sessionId null) get NO Approve control —
   // `actions` stays exactly `openInBrowser`, unchanged from before.
-  const designControl: ReactNode =
-    artifact.atype === 'ui-prototype' && artifact.sourceRef !== null && artifact.sessionId !== null ? (
-      <DesignApproveControl sessionId={artifact.sessionId} artifactRevision={artifact.revision} />
-    ) : null;
+  // "Enter design mode" CTA (v0.5 fullscreen design surface, second entry
+  // door) — same render gate as designControl, rendered leftmost of the two.
+  const isDesignCanvas =
+    artifact.atype === 'ui-prototype' && artifact.sourceRef !== null && artifact.sessionId !== null;
+  const enterDesignModeCta: ReactNode = isDesignCanvas ? (
+    <button
+      type="button"
+      data-testid="design-mode-enter-cta"
+      onClick={() => {
+        const sessionId = artifact.sessionId as string; // narrowed by isDesignCanvas
+        // The fullscreen surface's chat rail derives from the global active
+        // session, so entering design mode for this artifact's session must
+        // also make that session the selected session — only when it isn't
+        // already, to avoid an unnecessary subscription teardown/restart.
+        if (useCyboflowStore.getState().selectedSessionId !== sessionId) {
+          useCyboflowStore.getState().setActiveQuickSession(sessionId);
+        }
+        useDesignModeStore.getState().enterDesignMode(sessionId);
+      }}
+      style={{
+        fontSize: '10px',
+        fontWeight: 700,
+        letterSpacing: '.02em',
+        color: INK,
+        background: PAGE,
+        border: `1px solid ${HAIRLINE}`,
+        borderRadius: 3,
+        padding: '3px 10px',
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+      }}
+    >
+      Design mode
+    </button>
+  ) : null;
+  const designControl: ReactNode = isDesignCanvas ? (
+    <DesignApproveControl sessionId={artifact.sessionId as string} artifactRevision={artifact.revision} />
+  ) : null;
   const actions: ReactNode = designControl ? (
     <>
+      {enterDesignModeCta}
       {designControl}
       {openInBrowser}
     </>
