@@ -84,6 +84,16 @@ function buildDb(): Database.Database {
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
   // every write, so it must exist even though these tests don't assert on it.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // artifacts.revision (migration 078) — the enrich-in-place revision bump; the
+  // idempotent-re-report tests trigger it. Added directly since this DB
+  // hand-picks a migration subset predating 078.
+  db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  // A minimal Crystal-legacy `sessions` table (with the migration-078
+  // design_idea_id column) so handleReportArtifact's server-side source_ref
+  // stamp (resolveSessionDesignIdeaId: workflow_runs LEFT JOIN sessions) has a
+  // table to join. No design session is seeded here, so the LEFT JOIN yields
+  // NULL and no source_ref is stamped — non-design behavior stays unchanged.
+  db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, design_idea_id TEXT)');
   return db;
 }
 

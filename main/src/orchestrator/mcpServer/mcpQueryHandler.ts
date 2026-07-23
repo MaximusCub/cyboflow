@@ -59,6 +59,7 @@
  */
 import * as net from 'net';
 import * as path from 'path';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
 import type { Dirent, Stats } from 'fs';
 import {
@@ -388,6 +389,27 @@ export type McpQueryMessage =
       runId: string;
       artifactId: string;
       payloadJson?: string;
+    }
+  | {
+      /**
+       * Design Mode v0 (design-mode.md) — return the design session's linked
+       * idea (ref/title/body/version). No args beyond the run; the idea is
+       * resolved from the session's design_idea_id and re-validated every call.
+       */
+      type: 'mcp-design-get-idea';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      /**
+       * Design Mode v0 — persist the current design-spec draft for the session
+       * with a monotonic draft_revision bound to the CURRENT ui-prototype
+       * artifact revision. Replies { draftRevision, boundArtifactRevision }.
+       */
+      type: 'mcp-design-update-draft';
+      requestId: string;
+      runId: string;
+      specMarkdown: string;
     }
   | {
       /**
@@ -1339,6 +1361,15 @@ export class McpQueryHandler {
           break;
         case 'mcp-commit-artifact':
           await this.handleCommitArtifact(msg, client);
+          break;
+        case 'mcp-design-get-idea':
+          // Design Mode v0: read-only; re-validates the session's idea link.
+          this.handleDesignGetIdea(msg, client);
+          break;
+        case 'mcp-design-update-draft':
+          // Design Mode v0: persists a monotonic design-spec draft bound to the
+          // current ui-prototype revision (the CAS material Approve consumes).
+          this.handleDesignUpdateDraft(msg, client);
           break;
         case 'mcp-request-verification':
           // FIRE-AND-CONTINUE: resolves posture + enqueues synchronously, replies
@@ -3232,6 +3263,12 @@ export class McpQueryHandler {
       return;
     }
     const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    // Design Mode v0 (design-mode.md "Idea-bound artifact + read path"): stamp
+    // source_ref SERVER-SIDE from the session's validated design_idea_id (NEVER
+    // from the agent payload) so a design prototype is discoverable by its idea
+    // downstream (planner/sprint). A non-design session (or a run without a
+    // session) resolves null → no source_ref is set and behavior is unchanged.
+    const designIdeaId = this.resolveSessionDesignIdeaId(msg.runId);
     try {
       // Content-blesser (IDEA-039 / Approach C). This handler is the SOLE
       // authority on ui-prototype/generic payload content:
@@ -3263,6 +3300,7 @@ export class McpQueryHandler {
         atype: msg.atype,
         label: msg.label,
         payloadJson,
+        sourceRef: designIdeaId,
         isNew: true,
         actor,
       });
@@ -3376,6 +3414,214 @@ export class McpQueryHandler {
     } catch (err) {
       this.writeArtifactError(client, msg.requestId, err);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Design Mode v0 (docs/ideas/design-mode.md) — the design-scoped MCP ops.
+  //
+  // Both start from resolveDesignRunContext, which re-validates the session's
+  // idea link on EVERY call (integrity is chokepoint-enforced, not FK-enforced;
+  // migration 078). source_ref stamping for the design prototype rides the
+  // shared handleReportArtifact path (resolveSessionDesignIdeaId), not here.
+  // --------------------------------------------------------------------------
+
+  /**
+   * The run's session design_idea_id, or null for a non-design session (or a run
+   * without a session). Read via the SAME `workflow_runs LEFT JOIN sessions`
+   * shape as resolveRunPermissionMode. Used ONLY to stamp an artifact's
+   * source_ref SERVER-SIDE (never from the agent payload) so a design prototype
+   * is discoverable by its idea downstream (design-mode.md "Idea-bound artifact
+   * + read path"). A join miss / NULL column yields null → no source_ref, so the
+   * report path for a non-design session stays byte-identical.
+   */
+  private resolveSessionDesignIdeaId(runId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT s.design_idea_id AS designIdeaId
+           FROM workflow_runs r LEFT JOIN sessions s ON s.id = r.session_id
+          WHERE r.id = ?`,
+      )
+      .get(runId) as { designIdeaId?: unknown } | undefined;
+    const v = row?.designIdeaId;
+    return typeof v === 'string' && v.length > 0 ? v : null;
+  }
+
+  /**
+   * Resolve + re-validate the design-session context for a design-scoped MCP op
+   * (design-mode.md "Idea link — integrity contract"): EVERY design-scoped op
+   * re-runs this so a cross-project id, a deleted/decomposed/archived idea, or a
+   * non-design session is rejected at the write chokepoint. Steps:
+   *   - the 'orchestrator' sentinel has no run row → design_requires_real_run;
+   *   - a missing run row → run_not_found;
+   *   - the run's session carries no design_idea_id → not_a_design_session;
+   *   - the linked idea is missing / decomposed / archived → the user-visible
+   *     'idea_link_broken: idea link broken — relink or end the design session'
+   *     soft state (contract (c)); a cross-project idea id → wrong_project
+   *     (contract (b)).
+   * On success returns the project + session ids and the validated idea identity.
+   */
+  private resolveDesignRunContext(
+    runId: string,
+  ):
+    | {
+        ok: true;
+        projectId: number;
+        sessionId: string;
+        ideaId: string;
+        idea: { id: string; ref: string; title: string; body: string | null; version: number };
+      }
+    | { ok: false; error: string } {
+    if (runId === 'orchestrator') {
+      return { ok: false, error: 'design_requires_real_run' };
+    }
+
+    const runRow = this.db
+      .prepare(
+        `SELECT r.project_id AS projectId, r.session_id AS sessionId, s.design_idea_id AS designIdeaId
+           FROM workflow_runs r LEFT JOIN sessions s ON s.id = r.session_id
+          WHERE r.id = ?`,
+      )
+      .get(runId) as { projectId?: unknown; sessionId?: unknown; designIdeaId?: unknown } | undefined;
+    if (!runRow) {
+      return { ok: false, error: 'run_not_found' };
+    }
+
+    const designIdeaId =
+      typeof runRow.designIdeaId === 'string' && runRow.designIdeaId.length > 0 ? runRow.designIdeaId : null;
+    if (designIdeaId === null) {
+      return { ok: false, error: 'not_a_design_session' };
+    }
+    const projectId = typeof runRow.projectId === 'number' ? runRow.projectId : Number(runRow.projectId);
+    const sessionId = typeof runRow.sessionId === 'string' ? runRow.sessionId : '';
+
+    const ideaRow = this.db
+      .prepare(
+        `SELECT id, project_id AS projectId, ref, title, body, version,
+                decomposed_at AS decomposedAt, archived_at AS archivedAt
+           FROM ideas WHERE id = ?`,
+      )
+      .get(designIdeaId) as
+      | {
+          id?: unknown;
+          projectId?: unknown;
+          ref?: unknown;
+          title?: unknown;
+          body?: unknown;
+          version?: unknown;
+          decomposedAt?: unknown;
+          archivedAt?: unknown;
+        }
+      | undefined;
+    // The idea was deleted / decomposed / archived mid-session, or was never a
+    // real idea — the same user-visible broken-link state either way.
+    if (!ideaRow) {
+      return { ok: false, error: 'idea_link_broken: idea link broken — relink or end the design session' };
+    }
+    const ideaProjectId = typeof ideaRow.projectId === 'number' ? ideaRow.projectId : Number(ideaRow.projectId);
+    if (ideaProjectId !== projectId) {
+      // Cross-project id — contract (b). Distinct from the soft broken-link state.
+      return { ok: false, error: 'wrong_project' };
+    }
+    if (ideaRow.decomposedAt !== null && ideaRow.decomposedAt !== undefined) {
+      return { ok: false, error: 'idea_link_broken: idea link broken — relink or end the design session' };
+    }
+    if (ideaRow.archivedAt !== null && ideaRow.archivedAt !== undefined) {
+      return { ok: false, error: 'idea_link_broken: idea link broken — relink or end the design session' };
+    }
+
+    return {
+      ok: true,
+      projectId,
+      sessionId,
+      ideaId: designIdeaId,
+      idea: {
+        id: designIdeaId,
+        ref: typeof ideaRow.ref === 'string' ? ideaRow.ref : '',
+        title: typeof ideaRow.title === 'string' ? ideaRow.title : '',
+        body: typeof ideaRow.body === 'string' ? ideaRow.body : null,
+        version: typeof ideaRow.version === 'number' ? ideaRow.version : Number(ideaRow.version),
+      },
+    };
+  }
+
+  /**
+   * Return the design session's linked idea (ref/title/body/version). Re-runs
+   * the full integrity re-validation via resolveDesignRunContext, so a broken
+   * link surfaces here too (the agent's contract is to stop writing on it).
+   */
+  private handleDesignGetIdea(
+    msg: Extract<McpQueryMessage, { type: 'mcp-design-get-idea' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveDesignRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        ref: ctx.idea.ref,
+        title: ctx.idea.title,
+        body: ctx.idea.body,
+        version: ctx.idea.version,
+      },
+    });
+  }
+
+  /**
+   * Persist the session's current design-spec draft with a per-session monotonic
+   * draft_revision (COALESCE(MAX(draft_revision),0)+1), bound to the session's
+   * CURRENT ui-prototype artifact (its id + `artifacts.revision`) so Approve can
+   * CAS-reject a draft written against an older prototype (design-mode.md
+   * "Design-spec draft"). The binding is NULL when no prototype exists yet (the
+   * draft is not yet approvable). Replies { draftRevision, boundArtifactRevision }.
+   */
+  private handleDesignUpdateDraft(
+    msg: Extract<McpQueryMessage, { type: 'mcp-design-update-draft' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveDesignRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // The session's single current prototype (one ui-prototype per session,
+    // reported against this run). NULLs when none exists yet.
+    const proto = this.db
+      .prepare(`SELECT id, revision FROM artifacts WHERE run_id = ? AND atype = 'ui-prototype'`)
+      .get(msg.runId) as { id?: unknown; revision?: unknown } | undefined;
+    const boundArtifactId = typeof proto?.id === 'string' ? proto.id : null;
+    const boundArtifactRevision = typeof proto?.revision === 'number' ? proto.revision : null;
+
+    const draftId = `dsd_${randomBytes(12).toString('hex')}`;
+    let draftRevision = 0;
+    // MAX + INSERT in one transaction so draft_revision stays monotonic under the
+    // UNIQUE(session_id, draft_revision) constraint even if two writes race.
+    const txn = this.db.transaction(() => {
+      const maxRow = this.db
+        .prepare('SELECT COALESCE(MAX(draft_revision), 0) AS maxRev FROM design_spec_drafts WHERE session_id = ?')
+        .get(ctx.sessionId) as { maxRev: number };
+      draftRevision = (maxRow.maxRev ?? 0) + 1;
+      this.db
+        .prepare(
+          `INSERT INTO design_spec_drafts
+             (id, session_id, idea_id, draft_revision, spec_markdown, bound_artifact_id, bound_artifact_revision)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(draftId, ctx.sessionId, ctx.ideaId, draftRevision, msg.specMarkdown, boundArtifactId, boundArtifactRevision);
+    });
+    (txn as () => void)();
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { draftRevision, boundArtifactRevision },
+    });
   }
 
   // --------------------------------------------------------------------------

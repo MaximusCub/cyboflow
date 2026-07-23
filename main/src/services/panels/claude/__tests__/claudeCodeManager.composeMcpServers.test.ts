@@ -101,11 +101,19 @@ function createLoggerSpy(): { warn: MockInstance; info: MockInstance; error: Moc
  * lifecycle (which would need a running SDK query, etc.).
  */
 class TestableClaudeCodeManager extends ClaudeCodeManager {
-  async publicComposeMcpServers(sessionId: string, runId?: string): Promise<Record<string, McpServerConfig>> {
+  async publicComposeMcpServers(
+    sessionId: string,
+    runId?: string,
+    mcpScope?: 'global-agent' | 'design',
+  ): Promise<Record<string, McpServerConfig>> {
     // composeMcpServers is private on the parent; cast via index signature
     return (this as unknown as {
-      composeMcpServers(opts: { sessionId: string; runId?: string }): Promise<Record<string, McpServerConfig>>;
-    }).composeMcpServers({ sessionId, runId } as Parameters<ClaudeCodeManager['composeMcpServers' & keyof ClaudeCodeManager]>[0]);
+      composeMcpServers(opts: {
+        sessionId: string;
+        runId?: string;
+        mcpScope?: 'global-agent' | 'design';
+      }): Promise<Record<string, McpServerConfig>>;
+    }).composeMcpServers({ sessionId, runId, mcpScope } as Parameters<ClaudeCodeManager['composeMcpServers' & keyof ClaudeCodeManager]>[0]);
   }
 }
 
@@ -239,6 +247,32 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
     const cyboflow = result['cyboflow'] as { env: Record<string, string> };
     // No runId supplied → legacy fallback to the session id.
     expect(cyboflow.env.CYBOFLOW_RUN_ID).toBe('sess-uuid');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 7: mcpScope stamps CYBOFLOW_MCP_SCOPE into the cyboflow entry env
+  // (Design Mode v0 — the 'design' scope; parity with 'global-agent').
+  // ---------------------------------------------------------------------------
+  it("stamps CYBOFLOW_MCP_SCOPE='design' into the cyboflow env when mcpScope is 'design'", async () => {
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-design', undefined, 'design');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { env: Record<string, string> };
+    expect(cyboflow.env.CYBOFLOW_MCP_SCOPE).toBe('design');
+  });
+
+  it('omits CYBOFLOW_MCP_SCOPE from the cyboflow env when mcpScope is unset (run-scoped)', async () => {
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-plain');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { env: Record<string, string> };
+    expect(cyboflow.env.CYBOFLOW_MCP_SCOPE).toBeUndefined();
   });
 });
 

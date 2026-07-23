@@ -38,6 +38,21 @@ if (!runId || !socketPath) {
 const IS_GLOBAL_AGENT_SCOPE = process.env.CYBOFLOW_MCP_SCOPE === 'global-agent';
 
 // ---------------------------------------------------------------------------
+// Design scope (Design Mode v0 / docs/ideas/design-mode.md)
+//
+// CYBOFLOW_MCP_SCOPE=design restricts this subprocess to the minimal
+// design-session tool family (DESIGN_TOOLS below): get the linked idea, update
+// the design-spec draft, and report the ui-prototype artifact — none of the
+// run-scoped tools (board/backlog/sprint/etc.) are listed OR callable, and a
+// direct CallTool for one throws 'Unknown tool' (design-mode.md: scope is
+// enforced by direct-invocation rejection, not merely by ListTools omission).
+// Set only by an SDK design-session spawn's MCP entry (claudeCodeManager's
+// mcpScope:'design'); a run-scoped session never sets it. Single-scope-bound
+// for the subprocess lifetime, so one module-init branch suffices.
+// ---------------------------------------------------------------------------
+const IS_DESIGN_SCOPE = process.env.CYBOFLOW_MCP_SCOPE === 'design';
+
+// ---------------------------------------------------------------------------
 // Crash-isolation handlers (install early so they cover all subsequent code)
 // ---------------------------------------------------------------------------
 
@@ -324,7 +339,67 @@ const GLOBAL_AGENT_TOOLS = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// Design-session tool family (Design Mode v0) — the ONLY tools advertised when
+// IS_DESIGN_SCOPE is true. Deliberately minimal (design-mode.md "Session
+// plumbing"): read the linked idea, persist the design-spec draft, and report
+// the ui-prototype. report_artifact is the SAME tool as run scope but with its
+// atype narrowed to 'ui-prototype' only.
+// ---------------------------------------------------------------------------
+const DESIGN_TOOLS = [
+  {
+    name: 'cyboflow_design_get_idea',
+    description:
+      "READ-ONLY: return THIS design session's linked idea — its ref, title, full markdown body, and version. No arguments (the idea is resolved from the session's design_idea_id, re-validated every call). Read it first, every session, before grounding a design. If the idea link is broken (the idea was deleted or decomposed mid-session) this errors with 'idea_link_broken' — tell the user and stop writing.",
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'cyboflow_design_update_draft',
+    description:
+      "Persist the current design-spec draft for THIS session (standalone markdown, '### '-level subsections; the host owns the wrapping '## Design spec' H2). Each call mints a new monotonic draft_revision bound to the session's CURRENT ui-prototype artifact revision, so Approve can CAS-reject a draft written against an older prototype. Returns { draftRevision, boundArtifactRevision } (boundArtifactRevision is null when no prototype exists yet). Refresh the draft right after every prototype re-report so the pair stays in lockstep.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        spec_markdown: {
+          type: 'string',
+          description:
+            "The full current design-spec markdown (required). Begin at '### ' subsection level (e.g. '### Baseline', '### Design', '### Implementation notes') — do NOT emit the wrapping '## Design spec' H2 yourself.",
+        },
+      },
+      required: ['spec_markdown'],
+    },
+  },
+  {
+    name: 'cyboflow_report_artifact',
+    description:
+      'Create or update THIS design session\'s single UI-prototype mockup. **`ui-prototype` only** in a design session — no other artifact type is reportable here. Write a self-contained static index.html (inline CSS only, no <script>/JS, no dev server) to $CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html and pass payload_json {"fileName":"prototype/index.html"} — an inline "html" key is rejected. There is ONE prototype per session: re-reporting ENRICHES it in place (and advances its revision). Returns { artifactId }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        atype: {
+          type: 'string',
+          // Narrowed to the single design-session artifact type. A design
+          // session iterates ONE static ui-prototype — every other atype is
+          // rejected in handleDesignScopeCallTool before it can be forwarded.
+          enum: ['ui-prototype'],
+          description: "Artifact type (required) — must be 'ui-prototype' in a design session.",
+        },
+        label: { type: 'string', description: 'Short tab/card label for the prototype (required)' },
+        payload_json: {
+          type: 'string',
+          description:
+            'Optional JSON payload: {"fileName":"prototype/index.html"} pointing at the static HTML+CSS mockup you already wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR (a top-level "html" key is rejected — write the file, don\'t inline it).',
+        },
+      },
+      required: ['atype', 'label'],
+    },
+  },
+];
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+  if (IS_DESIGN_SCOPE) {
+    return { tools: DESIGN_TOOLS };
+  }
   if (IS_GLOBAL_AGENT_SCOPE) {
     return { tools: GLOBAL_AGENT_TOOLS };
   }
@@ -1166,7 +1241,64 @@ async function handleGlobalAgentCallTool(request: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Design-scope CallTool dispatch (Design Mode v0) — the ONLY tools reachable
+// when IS_DESIGN_SCOPE is true. A run-scoped OR global-agent tool name falls
+// through to the default 'Unknown tool' throw (design-mode.md: rejected on
+// direct invocation, not merely unlisted). report_artifact is the same
+// mcp-report-artifact path as run scope, but its atype is validated to be
+// EXACTLY 'ui-prototype' here BEFORE forwarding.
+// ---------------------------------------------------------------------------
+async function handleDesignScopeCallTool(request: {
+  params: { name: string; arguments?: Record<string, unknown> };
+}): Promise<CallToolResult> {
+  switch (request.params.name) {
+    case 'cyboflow_design_get_idea': {
+      // No arguments — the idea is resolved server-side from the session link.
+      return executeMcpQuery('mcp-design-get-idea', {});
+    }
+
+    case 'cyboflow_design_update_draft': {
+      const args = (request.params.arguments ?? {}) as { spec_markdown?: unknown };
+      const { spec_markdown } = args;
+      if (typeof spec_markdown !== 'string' || spec_markdown.length === 0) {
+        return invalidArgs('spec_markdown: string');
+      }
+      return executeMcpQuery('mcp-design-update-draft', { specMarkdown: spec_markdown });
+    }
+
+    case 'cyboflow_report_artifact': {
+      const args = (request.params.arguments ?? {}) as {
+        atype?: unknown;
+        label?: unknown;
+        payload_json?: unknown;
+      };
+      const { atype, label, payload_json } = args;
+      // Design scope is ui-prototype ONLY — reject any other atype BEFORE
+      // forwarding to the shared mcp-report-artifact path.
+      if (atype !== 'ui-prototype') {
+        return invalidArgs("atype: ui-prototype (design sessions report only the ui-prototype)");
+      }
+      if (typeof label !== 'string' || label.length === 0) {
+        return invalidArgs('label: string');
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return invalidArgs('payload_json: string (optional)');
+      }
+      const queryParams: Record<string, unknown> = { atype, label };
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-report-artifact', queryParams);
+    }
+
+    default:
+      throw new Error(`Unknown tool: ${request.params.name}`);
+  }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (IS_DESIGN_SCOPE) {
+    return handleDesignScopeCallTool(request);
+  }
   if (IS_GLOBAL_AGENT_SCOPE) {
     return handleGlobalAgentCallTool(request);
   }

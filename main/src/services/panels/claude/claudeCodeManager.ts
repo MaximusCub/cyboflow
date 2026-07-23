@@ -553,6 +553,29 @@ function firstChangedFingerprintField(prev: OptionsFingerprint, next: OptionsFin
   return 'combined';
 }
 
+/** Cache for the Design Mode v0 first-turn prompt (read once per process). */
+let cachedDesignSessionPrompt: string | null = null;
+
+/**
+ * The Design Mode v0 first-turn prompt (design-mode.md), loaded from the sibling
+ * workflow-prompt bundle the SAME way the built-in flow prompts resolve — a
+ * `join(__dirname, …)` against the compiled bundle. `copy-workflow-assets.js`
+ * ships `main/src/orchestrator/workflows/design.md` to
+ * `dist/main/src/orchestrator/workflows/design.md`, so this relative resolve
+ * works in both dev (source tree) and packaged builds, exactly like
+ * `buildBuiltInWorkflows`. Unlike a flow `.md`, design.md carries NO frontmatter
+ * (it is a pure prompt body), so we read + trim it verbatim rather than routing
+ * through the frontmatter parser. Cached module-wide — the file never changes at
+ * runtime; a read failure is surfaced (never a silent empty append that would
+ * strip the whole grounding contract from a design session).
+ */
+function readDesignSessionPrompt(): string {
+  if (cachedDesignSessionPrompt !== null) return cachedDesignSessionPrompt;
+  const promptPath = path.join(__dirname, '..', '..', '..', 'orchestrator', 'workflows', 'design.md');
+  cachedDesignSessionPrompt = fs.readFileSync(promptPath, 'utf-8').trim();
+  return cachedDesignSessionPrompt;
+}
+
 /**
  * The minimal contract an injected per-spawn events sink must satisfy (S0.2(c)).
  *
@@ -697,14 +720,19 @@ export interface ClaudeSpawnOptions {
    */
   eventsSink?: SpawnEventsSink;
   /**
-   * S0.2(d) — MCP scope tag. When 'global-agent', composeMcpServers stamps
-   * `CYBOFLOW_MCP_SCOPE='global-agent'` into the 'cyboflow' MCP entry's env so
-   * the server advertises the global-agent tool family (and gates out the
-   * run-scoped tools). CYBOFLOW_RUN_ID stays `runId || sessionId` — the synthetic
-   * `agent:<threadId>` identity arrives as sessionId. Absent ⇒ no scope env,
-   * byte-identical to before.
+   * S0.2(d) — MCP scope tag. When set, composeMcpServers stamps
+   * `CYBOFLOW_MCP_SCOPE=<value>` into the 'cyboflow' MCP entry's env so the
+   * server advertises the matching scoped tool family (and gates out the
+   * run-scoped tools):
+   *   - 'global-agent' — the cross-project global-agent read + propose family.
+   *     CYBOFLOW_RUN_ID stays `runId || sessionId` — the synthetic
+   *     `agent:<threadId>` identity arrives as sessionId.
+   *   - 'design' — the Design Mode v0 minimal toolset (get the linked idea,
+   *     update the design-spec draft, report the ui-prototype). Set by
+   *     spawnClaudeCode for a session with a `design_idea_id` (design-mode.md).
+   * Absent ⇒ no scope env, byte-identical to a run-scoped spawn.
    */
-  mcpScope?: 'global-agent';
+  mcpScope?: 'global-agent' | 'design';
   /**
    * Per-spawn SDK tool DENY list (verification-agent redesign, live-smoke fix
    * 2026-07-22). Merged additively into `sdkOptions.disallowedTools` alongside
@@ -2991,10 +3019,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // agent's synthetic `agent:<threadId>` identity arrives as sessionId.
             CYBOFLOW_RUN_ID: (options.runId && options.runId.length > 0) ? options.runId : options.sessionId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
-            // S0.2(d): tag the server's advertised tool scope. 'global-agent'
-            // makes cyboflowMcpServer surface the global-agent tool family (and
-            // gate out the run-scoped tools). Absent ⇒ no scope env, run-scoped.
-            ...(options.mcpScope === 'global-agent' ? { CYBOFLOW_MCP_SCOPE: 'global-agent' } : {}),
+            // S0.2(d) / Design Mode v0: tag the server's advertised tool scope so
+            // cyboflowMcpServer surfaces the matching scoped family (and gates out
+            // the run-scoped tools): 'global-agent' → the global-agent read/propose
+            // family; 'design' → the minimal design toolset. Absent ⇒ no scope env,
+            // run-scoped and byte-identical to before.
+            ...(options.mcpScope ? { CYBOFLOW_MCP_SCOPE: options.mcpScope } : {}),
           },
           // SDK 0.3.142 made MCP startup non-blocking by default; block startup
           // until the injected socket server is connected so turn-1 cyboflow_*
@@ -4077,6 +4107,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
     fastMode?: boolean,
     reasoningEffort?: ReasoningEffort
   ): Promise<void> {
+    // Design Mode v0 (design-mode.md): a quick session linked to an idea via
+    // sessions.design_idea_id (migration 078) spawns with the minimal 'design'
+    // MCP scope AND the design-session first-turn prompt appended. Read
+    // restart-safe from the DB row (like resolveSessionAgentPermissionMode /
+    // resolveSessionDisabledMcps) so every continuation turn re-derives the same
+    // scope + append — both constant per session, so the warm-session options
+    // fingerprint (mcpServers env + systemPrompt) stays stable across turns and
+    // warm reuse is unaffected.
+    const designIdeaId = this.sessionManager.getDbSession(sessionId)?.design_idea_id;
+    const isDesignSession = typeof designIdeaId === 'string' && designIdeaId.length > 0;
     const options: ClaudeSpawnOptions = {
       panelId,
       sessionId,
@@ -4087,6 +4127,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
       permissionMode,
       fastMode,
       reasoningEffort,
+      ...(isDesignSession
+        ? { mcpScope: 'design' as const, systemPromptAppend: readDesignSessionPrompt() }
+        : {}),
       // Quick/legacy SDK sessions resolve their 4-mode agent permission from the
       // per-session override (sessions.agent_permission_mode, migration 021) when
       // set, else the GLOBAL default — so both the Settings control AND the
