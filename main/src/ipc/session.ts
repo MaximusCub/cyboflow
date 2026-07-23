@@ -2489,6 +2489,23 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Session not found' };
       }
 
+      // Settle any pending human gates on the session's gate run FIRST (Stop is
+      // a user cancel — the gate dies with the turn, preserveGates=false). A
+      // turn parked inside the AskUserQuestion PreToolUse hook is blocked on
+      // the QuestionRouter promise; resolving it here unparks the hook so the
+      // abort below can never hang on it, and guarantees the gate cannot
+      // outlive the stop even if teardown stalls. Idempotent with the SDK
+      // query's own finally-block clear (guarded UPDATEs, no-op when empty).
+      const gateRunId = dbSession.chat_run_id ?? dbSession.run_id;
+      if (gateRunId) {
+        try {
+          QuestionRouter.getInstance().clearPendingForRun(gateRunId);
+          ApprovalRouter.getInstance().clearPendingForRun(gateRunId);
+        } catch (gateErr) {
+          console.warn('[IPC] sessions:stop gate settlement failed (fail-soft):', gateErr);
+        }
+      }
+
       // Agent panels retain the legacy `claude` panel type. Dispatch by the
       // session runtime so Stop reaches the process that actually owns them.
       const stopPanels = panelManager.getPanelsForSession(sessionId);
