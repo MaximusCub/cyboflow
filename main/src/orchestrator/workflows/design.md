@@ -33,14 +33,26 @@ what this mode exists to replace.
 Ground every design in the real repo on two axes — **brand fidelity** and **baseline
 fidelity**. Climb these rungs.
 
-1. **Style kit — brand fidelity.** At session start, check `.cyboflow/design/` in the
-   project repo for a runnable **style kit**: extracted design-token CSS (custom
-   properties, font stack, light + dark palettes, spacing scale) plus a component
-   sample sheet with **real markup and class recipes lifted from actual components**.
-   If it is **missing, or stale** versus the token source files it was built from,
-   generate or refresh it now as part of grounding. Prototypes **inline the kit CSS
-   verbatim** — executable CSS, never a prose description of it: an agent copying the
-   working stylesheet matches the app; an agent paraphrasing it drifts.
+1. **Style kit — brand fidelity, CONSENT-GATED creation.** At session start, check
+   `.cyboflow/design/` in the project repo for a runnable **style kit**: extracted
+   design-token CSS (custom properties, font stack, light + dark palettes, spacing
+   scale) plus a component sample sheet with **real markup and class recipes lifted
+   from actual components**. If a kit **exists**, use it (refresh it first if it is
+   stale versus the token source files it was built from). If it is **missing, do NOT
+   generate one unprompted** — ask the user first, as part of your first-turn
+   clarifying round (`AskUserQuestion`), with three options:
+   - **Create it, tracked** — write `.cyboflow/design/` and let it be committed with
+     the repo (the default recommendation: it versions with the project and every
+     later design session reuses it).
+   - **Create it, untracked** — write `.cyboflow/design/` but add it to `.gitignore`
+     so it stays local tooling data, never part of repo history.
+   - **Skip** — no style kit at all. You still work: ground each prototype's styling
+     ad hoc by reading the real token/component sources directly and inlining what
+     you extract into that prototype. Note in the spec draft that no persistent kit
+     exists.
+   Whatever exists or gets created, prototypes **inline the kit CSS verbatim** —
+   executable CSS, never a prose description of it: an agent copying the working
+   stylesheet matches the app; an agent paraphrasing it drifts.
 2. **Baseline grounding — design-as-diff, MANDATORY for existing surfaces.** When the
    design changes an **existing** surface, you MUST locate and read the components
    that implement it (Grep/Glob/Read) and reproduce it before you modify it. Your spec
@@ -100,8 +112,11 @@ H2 yourself. Always include:
   scope, what the user actually wants to see first). If it does, ask the user **one
   round** of clarifying questions via the `AskUserQuestion` tool (at most 4 questions,
   concrete options where possible) and **wait for the answers** before designing —
-  do not start grounding or produce anything yet. If the idea is already
-  well-specified, skip straight to grounding. Either way, once you have enough input,
+  do not start grounding or produce anything yet. **The style-kit consent question
+  (grounding rung 1) joins this same round when `.cyboflow/design/` is missing** —
+  one gate, not two; if the idea itself is clear, that may be the round's only
+  question. If the idea is well-specified AND the kit already exists, skip straight
+  to grounding. Either way, once you have enough input,
   do the full **grounding pass** — build or refresh the style kit, and for an existing
   surface read its implementing components for the `### Baseline` — then produce the
   **first prototype** (report the `ui-prototype` artifact) **and** the first spec
