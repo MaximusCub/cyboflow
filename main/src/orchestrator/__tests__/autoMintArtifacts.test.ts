@@ -102,9 +102,9 @@ function buildDb(): Database.Database {
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
   // every write, so it must exist even though these tests don't assert on it.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-  // artifacts.revision (migration 078) — ArtifactRouter bumps it on an
+  // artifacts.revision (migration 082) — ArtifactRouter bumps it on an
   // enrich-with-deltas (the re-mint / verdict-preserve paths exercised here);
-  // add the additive column since this DB hand-picks a subset predating 078.
+  // add the additive column since this DB hand-picks a subset predating 082.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.

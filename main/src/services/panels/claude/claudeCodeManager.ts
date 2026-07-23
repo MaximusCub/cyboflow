@@ -4108,7 +4108,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     // Design Mode v0 (design-mode.md): a quick session linked to an idea via
-    // sessions.design_idea_id (migration 078) spawns with the minimal 'design'
+    // sessions.design_idea_id (migration 082) spawns with the minimal 'design'
     // MCP scope AND the design-session first-turn prompt appended. Read
     // restart-safe from the DB row (like resolveSessionAgentPermissionMode /
     // resolveSessionDisabledMcps) so every continuation turn re-derives the same

@@ -69,7 +69,7 @@ const SCHEMA = `
     error_message TEXT, ended_at TEXT, started_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
-  -- Additive column per migration 078 (design-mode.md "Idea link — integrity
+  -- Additive column per migration 082 (design-mode.md "Idea link — integrity
   -- contract"): nullable, no FK (sessions is a legacy table; integrity is
   -- chokepoint-enforced, not database-enforced).
   CREATE TABLE sessions (

@@ -488,7 +488,7 @@ export interface Artifact {
   createdAt: string;
   committedAt: string | null;
   /**
-   * Monotonic content-revision counter (migration 078). Starts at 1 on create
+   * Monotonic content-revision counter (migration 082). Starts at 1 on create
    * and bumps by 1 on every enrich-in-place update that changes a field (a
    * no-op re-report does NOT bump). This is the CAS material the Design Mode
    * design-spec draft binds against — Approve rejects a draft whose bound

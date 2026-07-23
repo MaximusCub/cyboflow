@@ -8,7 +8,7 @@
  *
  * Harness mirrors mcpArtifactHandlers.test.ts (socket double + McpQueryHandler +
  * dbAdapter); the DB layers a minimal Crystal-legacy `sessions` table plus
- * migration 078 (design_idea_id, artifacts.revision, design_spec_drafts) onto
+ * migration 082 (design_idea_id, artifacts.revision, design_spec_drafts) onto
  * the entity-model subset.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -36,7 +36,7 @@ function parseLastWrite(writes: string[]): McpQueryResponse {
 }
 
 /**
- * Entity-model subset + a minimal `sessions` table + migration 078. FKs OFF so
+ * Entity-model subset + a minimal `sessions` table + migration 082. FKs OFF so
  * an idea can be inserted without seeding real boards/stages (resolveDesign-
  * RunContext reads by raw SELECT — no FK enforcement matters).
  */
@@ -69,10 +69,10 @@ function buildDb(): Database.Database {
   // reads both; add the additive columns directly (this DB hand-picks a subset).
   db.exec('ALTER TABLE ideas ADD COLUMN archived_at TEXT');
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT');
-  // Crystal-legacy `sessions` table (created outside migrations); migration 078
+  // Crystal-legacy `sessions` table (created outside migrations); migration 082
   // then layers design_idea_id + artifacts.revision + the design tables onto it.
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id INTEGER)');
-  db.exec(readFileSync(join(migDir, '078_design_mode_v0.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '082_design_mode_v0.sql'), 'utf-8'));
   // OFF *after* the migrations (some set PRAGMA foreign_keys=ON) so an idea can
   // be inserted with placeholder board_id/stage_id — the design handlers read
   // ideas by raw SELECT, where FK enforcement is irrelevant.

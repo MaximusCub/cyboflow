@@ -65,8 +65,8 @@ function buildDb(): Database.Database {
   // session_id, backfilled by 041) — layer the additive column onto this
   // pre-020 chain so the emit-path SELECT resolves.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-  // artifacts.revision (migration 078) — ArtifactRouter bumps it on the verdict
-  // enrich-with-deltas; add the additive column onto this pre-078 chain.
+  // artifacts.revision (migration 082) — ArtifactRouter bumps it on the verdict
+  // enrich-with-deltas; add the additive column onto this pre-082 chain.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;
 }

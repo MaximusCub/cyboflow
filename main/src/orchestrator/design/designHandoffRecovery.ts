@@ -54,7 +54,7 @@ export async function recoverDesignHandoffs(
       )
       .all() as Array<{ id: string }>;
   } catch (err) {
-    // A pre-migration-078 DB (no design_handoffs table) — nothing to recover.
+    // A pre-migration-082 DB (no design_handoffs table) — nothing to recover.
     logger?.debug('[designHandoff] recovery scan skipped (table absent?)', {
       error: err instanceof Error ? err.message : String(err),
     });

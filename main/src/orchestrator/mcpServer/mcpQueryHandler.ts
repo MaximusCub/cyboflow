@@ -19,7 +19,7 @@
  *                                  ideas:load-attachments, IDEA-006. Epics/tasks
  *                                  get no `attachments` key at all. An idea with
  *                                  a current approved_designs row (Design Mode
- *                                  v0, migration 078) also gets an
+ *                                  v0, migration 082) also gets an
  *                                  `approved_design` block with a RESOLVED
  *                                  absolute path to the approved prototype
  *                                  snapshot — the zero-export handoff read path.)
@@ -3452,7 +3452,7 @@ export class McpQueryHandler {
   //
   // Both start from resolveDesignRunContext, which re-validates the session's
   // idea link on EVERY call (integrity is chokepoint-enforced, not FK-enforced;
-  // migration 078). source_ref/session_id stamping for the design prototype
+  // migration 082). source_ref/session_id stamping for the design prototype
   // rides the shared handleReportArtifact path (resolveSessionDesignStamp).
   // --------------------------------------------------------------------------
 

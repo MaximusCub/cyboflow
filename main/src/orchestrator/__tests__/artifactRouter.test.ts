@@ -90,10 +90,10 @@ function buildDb(): Database.Database {
   // resolution (`SELECT session_id FROM workflow_runs WHERE id = ?`) has
   // something to select.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-  // artifacts.revision (migration 078) — the monotonic content-revision counter
+  // artifacts.revision (migration 082) — the monotonic content-revision counter
   // ArtifactRouter bumps on an enrich-with-deltas. Added directly (like the
   // session_id column above) since this entity test DB hand-picks a migration
-  // subset that predates 078; without it the enrich UPDATE's `revision =
+  // subset that predates 082; without it the enrich UPDATE's `revision =
   // revision + 1` would hit a missing column.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;

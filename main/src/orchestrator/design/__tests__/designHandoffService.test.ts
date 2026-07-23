@@ -2,7 +2,7 @@
  * Unit tests for the Design Mode v0 Approve state machine (LANE G,
  * docs/ideas/design-mode.md "Approve — intent-first recoverable state machine").
  *
- * Driven against a REAL temp DB carrying the full migration chain (through 078)
+ * Driven against a REAL temp DB carrying the full migration chain (through 082)
  * via DatabaseService.initialize(), so ideas/entity_events/board_stages/artifacts/
  * sessions/design_* all behave exactly as in production. The idea under design is
  * created through the TaskChangeRouter chokepoint (real version + stage + created
