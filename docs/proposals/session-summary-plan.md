@@ -1,7 +1,11 @@
 # Implementation plan: idle-gated quick-session summaries (rolling summary + append-only history)
 
-Status: PROPOSAL — under adversarial review, not yet implemented.
-Scope: quick sessions only (v1). Author session: curious-stream-20260723, 2026-07-23.
+Status: PROPOSAL v2 — revised per Codex adversarial review (2026-07-23), not yet implemented.
+Scope: Claude-runtime quick sessions only (v1). Author session: curious-stream-20260723.
+
+Review log:
+- v1 → Codex adversarial review: needs-attention, 7 findings (5 high). All folded
+  into v2; per-finding dispositions in §11.
 
 ## 1. Problem and UX
 
@@ -16,114 +20,210 @@ derived text, updated by a cheap Haiku call:
   activity ending in an idle lull), rendered as an expandable card below the
   SESSION node.
 
-A **sitting** is defined by the trigger: a 5-minute lull after the last
-completed turn. Each sitting produces at most one Haiku call, which returns
-both outputs at once.
+A **sitting** is a maximal run of conversation activity with no internal gap
+longer than the idle threshold (5 min). Normally the idle trigger fires once
+per sitting; when sittings are missed (app quit, failures, feature disabled),
+catch-up re-derives their boundaries from message timestamps (§2.4) so history
+granularity survives.
 
 ## 2. Design invariants (the gating stack)
 
 The over-call protection is layered; the content watermark — not the timer —
-is the load-bearing gate:
+is the load-bearing gate.
 
-1. **Edge-triggered arm.** A per-session `setTimeout` (5 min,
-   `SESSION_SUMMARY_IDLE_MS = 5 * 60_000`) is armed only by a turn-end event.
-   Never scan-on-boot, never poll. Substrate seams (both carry `sessionId`):
-   - SDK: `claudeCodeManager` per-logical-turn `'exit'` emission inside
-     `finishTurn()` (`main/src/services/panels/claude/claudeCodeManager.ts:2165`).
-   - PTY: the Stop-hook chain's `'turn-end'` re-emitted on
-     `SubstrateDispatchFacade` (`main/src/services/substrateDispatchFacade.ts:226-238`).
-2. **Debounce reset.** The next turn-start clears the pending timer — SDK
-   `'spawned'` (`emitTurnStart`, `claudeCodeManager.ts:1545-1563`); for PTY,
-   arm/clear both key off the facade events available at the `main/src/index.ts`
-   wiring seam. Note: on the SDK substrate `'exit'` means "turn ended", NOT
-   "went idle" — the debounce is the idle discriminator.
-3. **Content watermark.** `session_summaries.last_turn_id` stores the highest
-   `conversation_messages.id` already summarized. At fire time read
-   `WHERE session_id = ? AND id > ? ORDER BY id ASC` (the
-   `getSessionTokenUsage` lastId pattern, `main/src/database/database.ts:3632-3664`
-   — AUTOINCREMENT `id`, never `timestamp`, is the monotonic key). Empty
-   delta → silent no-op, watermark unchanged. This makes boot restores,
-   re-derived idles, and timer refires structurally free.
-4. **Materiality floor.** The delta must contain ≥1 `assistant` message
-   (skips abandoned user-only prompts). Immaterial → no-op, watermark unchanged.
-5. **Serialization.** In-memory `inFlight: Set<sessionId>` + a global
-   concurrency cap of 1 (simple promise-chain queue). Refires during an
-   in-flight call no-op.
-6. **Race guard.** `sessions.updated_at` is the activity clock (bumped only by
-   the same spawn/exit writes; presentation writes must not bump it — see
-   `main/src/database/database.ts:3055-3056` and
-   `main/src/database/__tests__/sessionUpdatedAtSemantics.test.ts`). At fire
-   time, if `updated_at` moved after the arm timestamp, re-arm instead of firing.
-7. **Failure policy.** On error/timeout: watermark unchanged, no hot retry —
-   the next idle edge (or lazy catch-up) retries naturally. Per-session
-   in-memory `consecutiveFailures`; ≥3 → suspended until app restart.
-8. **Lazy catch-up.** The `sessions:get-summary` IPC read, when it observes
-   `MAX(conversation_messages.id) > last_turn_id` and the session is not
-   currently running a turn, kicks a fire-and-forget summarize that bypasses
-   the 5-min timer but respects every other gate. This plugs the
-   "quit the app within 5 minutes of the last turn" hole: the summary
-   refreshes the moment the session is next looked at.
-9. **Eligibility gates** (checked at fire time, so toggling settings takes
-   effect on pending timers): env kill switch `CYBOFLOW_DISABLE_SESSION_SUMMARY=1`
-   (mirror of `CYBOFLOW_DISABLE_WARM_SDK`); config toggle
-   `sessionSummaryEnabled` (§6); session exists, not archived, and is a quick
-   session per the sentinel predicate `chat_run_id IS NOT NULL`
-   (`main/src/orchestrator/quickSessionListing.ts:40-51` — NOT the dead
-   `is_quick` column, which has been `0` for every session since migration 012).
+### 2.1 Edge-triggered arm
+
+A per-session `setTimeout` (5 min, `SESSION_SUMMARY_IDLE_MS = 5 * 60_000`) is
+armed only by a turn-end event. Never scan-on-boot, never poll. Substrate
+seams (both carry `sessionId`):
+
+- SDK: `claudeCodeManager` per-logical-turn `'exit'` emission inside
+  `finishTurn()` (`main/src/services/panels/claude/claudeCodeManager.ts:2165`).
+- PTY: the Stop-hook chain's `'turn-end'` re-emitted on
+  `SubstrateDispatchFacade` (`main/src/services/substrateDispatchFacade.ts:226-238`).
+
+### 2.2 Debounce reset — including the PTY relay seam
+
+The pending timer is cleared at every logical turn START:
+
+- SDK: `'spawned'` (`emitTurnStart`, `claudeCodeManager.ts:1545-1563`) fires
+  per logical turn, warm or cold.
+- PTY: **`'spawned'` fires only at REPL creation; subsequent composer turns go
+  through `relayUserTurn` and emit no start event** (Codex finding #1). The
+  clear therefore also hooks the input seam: the panel-send path in
+  `main/src/ipc/session.ts` (`sessions:input` handler and the
+  continue/relay path into `interactiveClaudeManager`) calls
+  `scheduler.noteTurnStart(sessionId)` before dispatching the user turn. This
+  covers both substrates' user-initiated turns uniformly; the SDK `'spawned'`
+  clear is then belt-and-braces.
+
+Note: on the SDK substrate `'exit'` means "turn ended", NOT "went idle" — the
+debounce is the idle discriminator.
+
+### 2.3 Fire-time state gates (mid-turn and blocked-gate protection)
+
+Because a stale timer can survive wiring gaps and the PTY Stop hook fires
+`turn-end` even while an AskUserQuestion gate is open, firing re-checks live
+state via closures injected at wiring time (§5):
+
+- **Turn in flight** → drop the timer without summarizing (the in-flight
+  turn's own turn-end re-arms). Probe: the substrate managers' turn-in-flight
+  state (the `isPanelTurnInFlight`-style check, which is distinct from
+  warm-idle `isPanelRunning`).
+- **Pending question/approval gate for the session** → drop the timer (a
+  blocked gate is not a completed sitting; answering resumes the turn, whose
+  turn-end re-arms). Probe sources: the same blocked-set inputs the
+  `sessions:list-quick` seam already assembles (`QuestionRouter`,
+  `ApprovalRouter`, `interactiveCliManager.getAwaitingInputRunIds()` —
+  `main/src/ipc/session.ts:2478-2495`).
+- **Race guard**: `sessions.updated_at` is the activity clock (bumped only by
+  spawn/exit-class writes; presentation writes must not bump it —
+  `main/src/database/database.ts:3055-3056`,
+  `main/src/database/__tests__/sessionUpdatedAtSemantics.test.ts`). If it
+  moved after the arm timestamp, re-arm instead of firing.
+
+### 2.4 Content watermark + sitting segmentation
+
+`session_summaries.last_turn_id` stores the highest `conversation_messages.id`
+already summarized. At fire time read
+`WHERE session_id = ? AND id > ? ORDER BY id ASC` (the `getSessionTokenUsage`
+lastId pattern, `main/src/database/database.ts:3632-3664` — AUTOINCREMENT
+`id`, never `timestamp`, is the monotonic key). Empty delta → silent no-op.
+
+The delta is then segmented into **sittings** by a pure function
+`segmentIntoSittings(messages, gapMs = SESSION_SUMMARY_IDLE_MS)`: a new
+segment starts wherever consecutive messages are separated by more than
+`gapMs`. This re-derives missed sitting boundaries with **no extra
+persistence** (Codex finding #3):
+
+- One history sentence is requested per segment that contains ≥1 assistant
+  message, **capped at 3 sentences per call** (older segments beyond the cap
+  are merged into the first sentence, and the merge is noted in that
+  sentence).
+- **Watermark advance stops at the end of the last segment containing an
+  assistant message.** A trailing user-only segment (abandoned or not-yet-
+  answered prompt) stays above the watermark and is summarized in the next
+  delta together with its eventual response — it is neither dropped nor
+  misreported as completed work.
+- Materiality floor: if no segment contains an assistant message, no-op,
+  watermark unchanged.
+
+### 2.5 Serialization
+
+In-memory `inFlight: Set<sessionId>` + a global concurrency cap of 1 (simple
+promise-chain queue). Refires during an in-flight call no-op.
+
+### 2.6 Failure policy + retry cooldown
+
+On error/timeout/malformed output: watermark unchanged, and the attempt is
+recorded in-memory as `{ attemptedWatermark, lastAttemptAt }`. **Any trigger
+(idle or lazy) targeting the same watermark within
+`SESSION_SUMMARY_RETRY_COOLDOWN_MS = 10 * 60_000` is skipped** — this is what
+prevents the renderer's 30s summary poll from becoming a hot retry loop via
+lazy catch-up (Codex finding #2). A new turn edge (which changes the target
+watermark) bypasses the cooldown. Per-session `consecutiveFailures ≥ 3` →
+suspended until app restart.
+
+### 2.7 Lazy catch-up
+
+The `sessions:get-summary` IPC read, when it observes
+`MAX(conversation_messages.id) > last_turn_id`, kicks a fire-and-forget
+`maybeSummarizeNow(sessionId, 'lazy-catchup')` that bypasses the 5-min timer
+but respects EVERY other gate (§2.3 state gates, §2.4 watermark/materiality,
+§2.5 serialization, §2.6 cooldown, §2.8 eligibility). Reads never block on it
+and never mutate state themselves; repeated stale reads cannot re-trigger
+within the cooldown. This plugs the "quit the app within 5 minutes of the
+last turn" hole: the summary refreshes the moment the session is next viewed.
+
+### 2.8 Eligibility (checked at fire time, so settings changes take effect on
+pending timers)
+
+- Env kill switch `CYBOFLOW_DISABLE_SESSION_SUMMARY=1` (mirror of
+  `CYBOFLOW_DISABLE_WARM_SDK`).
+- Config toggle `sessionSummaryEnabled` (§6).
+- Session exists, not archived, quick per the sentinel predicate
+  `chat_run_id IS NOT NULL` (`main/src/orchestrator/quickSessionListing.ts:40-51`
+  — NOT the dead `is_quick` column, `0` for every session since migration 012).
+- **Claude-runtime sessions only (v1)**: the quick-session sentinel also
+  matches Codex-runtime quick sessions, whose turn lifecycle the scheduler
+  does not observe — without this gate, lazy catch-up would fire a
+  cross-provider Haiku call over a Codex transcript (Codex finding #4).
+  Gate on the session's agent provider/runtime columns
+  (`sessions.agent_provider` / `agent_runtime`, migrations 059-061; NULL ⇒
+  Claude default ⇒ eligible). Extending to Codex sessions is a flagged
+  product/privacy decision (§10), not an accidental default.
 
 Rejected alternatives (for the record): summarize-per-turn (calls scale with
 turns; history becomes per-turn noise); periodic all-session scan (the retired
 `IdleSessionDetector` shape — boot storms; see
-`main/src/orchestrator/Orchestrator.ts:67-78`); lazy-only (stale flash on open;
-collapses multiple sittings into one history sentence).
+`main/src/orchestrator/Orchestrator.ts:67-78`); lazy-only (stale flash on
+open; weaker history granularity); persisted per-sitting boundary rows
+(equivalent outcome to §2.4's derived segmentation, at the cost of a second
+write path — derivation from timestamps needs no new state and is
+restart-safe by construction).
 
 ## 3. The model call
 
-One call produces both outputs. New file
+One call produces the rolling summary plus 1–3 history sentences. New file
 `main/src/orchestrator/sessionSummary/sessionSummaryQuery.ts`, cloning the
-one-shot `loadSdkQuery()` pattern of `main/src/orchestrator/eval/evalJudgeQuery.ts`
-/ `main/src/orchestrator/programmatic/monitorQuery.ts`:
+one-shot pattern of `main/src/orchestrator/eval/evalJudgeQuery.ts` /
+`main/src/orchestrator/programmatic/monitorQuery.ts`:
 
-- `loadSdkQuery()` from `main/src/utils/lazyAgentSdk.ts`; single string prompt;
-  **no tools, no cwd**; `maxTurns: 1`;
-  `pathToClaudeCodeExecutable: resolveClaudeExecutablePath()`.
-- `model: 'haiku'` — resolves to `claude-haiku-4-5` via the existing
-  `MODEL_ALIAS_TO_ID` (`main/src/services/panels/claude/modelContext.ts:46-53`).
-  No new alias plumbing.
+- **All environment-coupled inputs are injected** (Codex finding #5): the
+  module exports `makeSessionSummarizer(deps: { sdkQueryLoader, modelId,
+  claudeExecutablePath })` and contains NO imports from `services/*`
+  (orchestrator layering rule). At the `index.ts` wiring site (services layer,
+  where cross-layer glue lives):
+  `modelId: resolveModelAlias('haiku')` → pins the concrete
+  `claude-haiku-4-5` (`MODEL_ALIAS_TO_ID`,
+  `main/src/services/panels/claude/modelContext.ts:46-53` — the alias table is
+  applied only when the resolver is called; a bare `'haiku'` string passed to
+  the SDK would NOT resolve through it), and
+  `claudeExecutablePath: resolveClaudeExecutablePath()`.
+  A unit test asserts the exact model id reaching the SDK options.
+- `sdkQueryLoader` = `loadSdkQuery` from `main/src/utils/lazyAgentSdk.ts`;
+  single string prompt; **no tools, no cwd**; `maxTurns: 1`.
 - Hard deadline 60s via the `makeDeadline()` AbortController pattern
-  (`evalJudgeQuery.ts:78-103`). Single attempt per fire.
-- Input: previous rolling summary + the delta transcript formatted as
-  `USER:` / `ASSISTANT:` blocks, clipped by a pure `clipDeltaForPrompt()`:
-  cap ~48,000 chars total; user messages kept (each capped 2,000 chars);
-  assistant messages head 1,500 + tail 500 chars; when still over, drop oldest
-  assistant bodies first, keeping the final assistant message.
+  (`evalJudgeQuery.ts:78-103`). Single attempt per fire (§2.6 owns retry).
+- Input: previous rolling summary + the delta transcript with explicit
+  sitting-segment markers (§2.4), formatted as `USER:` / `ASSISTANT:` blocks,
+  clipped by a pure `clipDeltaForPrompt()`: cap ~48,000 chars total; user
+  messages kept (each capped 2,000 chars); assistant messages head 1,500 +
+  tail 500 chars; when still over, drop oldest assistant bodies first,
+  keeping the final assistant message.
 - Output contract: a single JSON object
   `{"summary": "<1-2 sentences, present-tense state of the session>",
-    "history_sentence": "<one past-tense sentence for this sitting>"}`.
-  Parse: strip optional code fences → `JSON.parse` → validate both fields are
-  non-empty strings. Malformed → treated as a failure (no watermark advance).
+    "history_sentences": ["<one past-tense sentence per sitting segment,
+    oldest first, 1..3 items>"]}`.
+  Parse: strip optional code fences → `JSON.parse` → validate shape.
+  Malformed → failure (no watermark advance, §2.6 cooldown applies).
 - **Cost surfacing** (closes an existing observability gap — none of the
   one-shot query paths record cost today): read `total_cost_usd` from the SDK
-  `result` message and accumulate into `session_summaries.cost_usd_total`,
-  increment `calls_count`.
+  `result` message → accumulate `session_summaries.cost_usd_total`, increment
+  `calls_count`.
 
 Explicit non-choices: do NOT route through `AgentThreadService` /
-`ClaudeCodeManager.spawnCliProcess` (that is a real session turn on the warm
-machinery and would bump the activity clock); do NOT use raw
-`@anthropic-ai/sdk` (declared but unused in `main/src`; new auth path).
-The summarizer never touches the session's warm SDK process.
+`ClaudeCodeManager.spawnCliProcess` (a real session turn on the warm
+machinery; would bump the activity clock); do NOT use raw `@anthropic-ai/sdk`
+(declared but unused in `main/src`; new auth path). The summarizer never
+touches the session's warm SDK process.
 
 Implementer verification step: confirm the shape of
 `conversation_messages.content` for `assistant` rows (plain text vs
 JSON-encoded) at the write sites (`main/src/services/sessionManager.ts:609-928`)
-and normalize in the transcript formatter accordingly.
+and normalize in the transcript formatter; also confirm the assistant row is
+committed BEFORE the turn-end event fires on both substrates (composition
+test, §8).
 
 ## 4. Persistence (migration 081)
 
 Separate tables, not `sessions` columns — summary writes must never bump
 `sessions.updated_at` (activity clock), and cascade-delete stays clean.
 `081` is the next free number on this branch (`080_agent_thread_last_turn.sql`
-is the current ceiling); renumber-on-land applies if another branch lands first.
+is the ceiling); renumber-on-land applies if another branch lands first.
+Runtime FK enforcement was verified during review, so `ON DELETE CASCADE` is
+live (migration-file rule regardless: FK pragma toggles stay outside the
+per-file transaction, `docs/CODE-PATTERNS.md`).
 
 `main/src/database/migrations/081_session_summaries.sql`:
 
@@ -157,21 +257,17 @@ New `main/src/database/database.ts` methods (+ row types in
 `main/src/database/models.ts`):
 `getSessionSummary(sessionId)`, `upsertSessionSummary({sessionId, summary,
 lastTurnId, costUsdDelta})` (single UPSERT that also bumps `calls_count`/
-`cost_usd_total`/`updated_at`), `appendSessionSummaryEntry(sessionId, entry)`,
+`cost_usd_total`/`updated_at`), `appendSessionSummaryEntries(sessionId,
+entries[])` (multi-row, one transaction with the upsert),
 `listSessionSummaryEntries(sessionId)`,
 `getConversationMessagesAfter(sessionId, afterId)`.
-
-Implementer verification step: confirm whether `PRAGMA foreign_keys` is ON at
-runtime for the app DB. If not, `ON DELETE CASCADE` is inert — add explicit
-`DELETE FROM session_summaries / session_summary_entries` to the session
-delete path instead. (Migration-file rule regardless: FK pragma toggles stay
-outside the per-file transaction, `docs/CODE-PATTERNS.md`.)
 
 ## 5. Scheduler
 
 New file `main/src/orchestrator/sessionSummary/sessionSummaryScheduler.ts` —
-**pure module with injected deps** (db handle, `isEnabled()` closure, summarize
-function, clock), respecting the orchestrator layering rule (no `services/*`
+**pure module with injected deps** (db handle, `isEnabled()` closure,
+summarize function, `isTurnInFlight(sessionId)` probe, `hasOpenGate(sessionId)`
+probe, clock), respecting the orchestrator layering rule (no `services/*`
 imports — same discipline as `quickSessionListing.ts:13-16`). Shape imitates
 `main/src/orchestrator/terminalEvalSubscriber.ts` (event-driven, idempotence
 via DB check, fire-and-forget) plus a `Map<string, NodeJS.Timeout>` debounce
@@ -181,8 +277,8 @@ Public surface:
 - `noteTurnEnd(sessionId)` — arm/re-arm the 5-min timer; record arm timestamp.
 - `noteTurnStart(sessionId)` — clear pending timer.
 - `maybeSummarizeNow(sessionId, reason: 'idle' | 'lazy-catchup')` — run the
-  gate stack (§2) and, if it survives, the call + persist. Reasons only affect
-  logging.
+  full gate stack (§2) and, if it survives, the call + persist. Reason only
+  affects logging.
 - `dispose()` — clear all timers (app shutdown).
 
 Wiring in `main/src/index.ts` (where cross-layer glue already lives, e.g. the
@@ -190,30 +286,41 @@ Wiring in `main/src/index.ts` (where cross-layer glue already lives, e.g. the
 `terminalEvalSubscriber` hookup at `index.ts:1761-1785`):
 - `claudeCodeManager.on('exit', ({sessionId}) => scheduler.noteTurnEnd(sessionId))`
 - `claudeCodeManager.on('spawned', ({sessionId}) => scheduler.noteTurnStart(sessionId))`
-- facade `'turn-end'` → `noteTurnEnd`; the PTY turn-start equivalent at the same
-  seam → `noteTurnStart`.
+- facade `'turn-end'` → `noteTurnEnd`.
+- The PTY/relay input seam (§2.2) → `noteTurnStart` — threaded to the
+  `sessions:input` / continue path in `main/src/ipc/session.ts`.
+- Probes: turn-in-flight from the substrate managers; open-gate from
+  `QuestionRouter`/`ApprovalRouter`/`interactiveCliManager` pending state
+  (the `sessions:list-quick` blocked-set sources).
+- Summarizer deps per §3 (resolved model id, executable path, sdk loader).
 
 No file under `main/src/services/panels/claude/` is modified (external
 subscription only), so the Tier-3 `pnpm test:integration` gate is not mandated
-by the AC rule — `pnpm test:unit` is the gate.
+by the AC rule — `pnpm test:unit` is the gate. (If implementation ends up
+touching that directory after all, the itest suite becomes mandatory.)
 
 Persist step on success (single transaction): `upsertSessionSummary` with
-`lastTurnId = max(id) of the delta actually sent` + `appendSessionSummaryEntry`.
+`lastTurnId` per §2.4 + `appendSessionSummaryEntries`. The persist re-checks
+session existence inside the transaction.
 
 ## 6. Settings toggle (Assistant tab)
 
 Config plumbing mirrors `assistantEnabled` end-to-end (absent ⇒ **enabled**;
-the toggle is the kill switch, checked at fire time):
+the toggle is the kill switch, checked at fire time). Parity surfaces on BOTH
+sides (Codex finding #6):
 
 1. `main/src/types/config.ts` — `sessionSummaryEnabled?: boolean` on
    `AppConfig` (near the assistant block, ~line 48-75) AND on
    `UpdateConfigRequest` (~line 207-216), with the standard mirrored comments.
-2. `main/src/services/configManager.ts` — getter next to
+2. **`frontend/src/types/config.ts`** — the renderer's own `AppConfig` mirror
+   gains the same field (this file is what `Settings.tsx` reads; omitting it
+   is the silent-drop class CLAUDE.md warns about).
+3. `main/src/services/configManager.ts` — getter next to
    `isAssistantEnabled()` (~line 280):
    `isSessionSummaryEnabled(): boolean { return this.config.sessionSummaryEnabled !== false; }`
    — NOT seeded into constructor defaults (same convention as the other
    assistant globals, so existing users default on).
-3. `frontend/src/components/Settings.tsx` — Assistant tab
+4. `frontend/src/components/Settings.tsx` — Assistant tab
    (`activeTab === 'assistant'`, line 1055): new `SettingsSection` titled
    "Session summaries" inside the existing `CollapsibleCard` (after the
    Context Retention section, ~line 1154+):
@@ -221,13 +328,13 @@ the toggle is the kill switch, checked at fire time):
      state `sessionSummaryEnabled` (default `true`), loaded via
      `data.sessionSummaryEnabled !== false` in the config-load effect
      (~line 184-188) and included in the save payload (~line 247-259).
-   - Helper copy: "After a quick session sits idle for 5 minutes, a small
-     Haiku call updates its summary and history on the session canvas.
-     Fractions of a cent per sitting; off means no calls and the canvas
-     hides the summary."
-   - This section is NOT wrapped in the `!assistantEnabled` disable-overlay —
-     it is independent of the assistant rail; it merely lives on this tab.
-4. Server-side enforcement: the scheduler and the lazy catch-up both consult
+   - Helper copy: "After a Claude quick session sits idle for 5 minutes, a
+     small Haiku call updates its summary and history on the session canvas.
+     Fractions of a cent per sitting; off means no calls and the canvas hides
+     the summary."
+   - NOT wrapped in the `!assistantEnabled` disable-overlay — independent of
+     the assistant rail; it merely lives on this tab.
+5. Server-side enforcement: scheduler + lazy catch-up consult
    `configManager.isSessionSummaryEnabled()`; the `sessions:get-summary`
    response carries `enabled` so the frontend hides the UI without a separate
    config fetch.
@@ -249,13 +356,20 @@ Not required for this feature.
   the frontend (never a local mirror; `IPCResponse<SessionSummaryPayload>`
   with explicit `T`).
 - `main/src/ipc/session.ts`: `ipcMain.handle('sessions:get-summary', ...)` —
-  reads summary + entries, and performs the lazy catch-up kick (§2.8).
-- `main/src/preload.ts` (~line 234-236 block): `getSummary(sessionId)` binding.
+  validates its input with the file's `validateInput` convention, reads
+  summary + entries, and performs the lazy catch-up kick (§2.7).
+- `main/src/preload.ts` (~line 234-236 block): `getSummary(sessionId)`
+  binding, typed as `Promise<IPCResponse<SessionSummaryPayload>>` — not the
+  preload's generic untyped response shape.
+- **`frontend/src/types/electron.d.ts`**: the `window.electronAPI.sessions`
+  declaration gains `getSummary` with the same explicit payload type
+  (Codex finding #6 — this file is a live mirror surface).
 - `frontend/src/utils/api.ts` (~line 116-128 block): typed wrapper.
 - `frontend/src/hooks/useSessionSummary.ts`: fetch on mount + 30s poll while
   visible, paused on `document.hidden` — mirror of
   `frontend/src/hooks/useSessionMetrics.ts:207-235`'s visibility handling.
-  (The data only changes when the session idles; 30s is plenty.)
+  (Reads are pure; §2.6's cooldown makes stale-read-triggered catch-up
+  bounded regardless of poll cadence.)
 - `frontend/src/components/cyboflow/QuickSessionCanvas.tsx`:
   - Summary block inside the SESSION node (`data-testid="quick-session-node"`,
     lines 557-719), inserted after the cost row (~line 717): top-border
@@ -274,26 +388,43 @@ Not required for this feature.
 
 ## 8. Tests (AC gate: `pnpm test:unit`)
 
+Unit:
 - `main/src/database/__tests__/sessionSummaries.test.ts` — CRUD + UPSERT
-  accumulation semantics + cascade (or explicit-delete) behavior +
-  `getConversationMessagesAfter` ordering by `id`.
-- `main/src/orchestrator/sessionSummary/__tests__/sessionSummaryScheduler.test.ts`
-  (fake timers, fake db, fake summarize fn): arm→fire at 5 min; clear on
-  turn-start; empty-delta no-op (no call, watermark unchanged); user-only
-  delta no-op; inFlight dedupe; global cap 1; 3-failure suspension; race-guard
-  re-arm on `updated_at` movement; disabled-config no-op with pending timer;
-  non-quick / archived session no-op; watermark advances only on success;
-  cost/calls accumulation; lazy catch-up bypasses timer but not gates, and
-  skips a running session.
+  accumulation + cascade behavior + `getConversationMessagesAfter` ordering
+  by `id`.
+- `segmentIntoSittings` — gap splitting, single segment, cap-and-merge at 3,
+  trailing user-only segment identification, watermark-stop computation.
+- `clipDeltaForPrompt` — caps, final-assistant-message retention, determinism.
 - `.../__tests__/sessionSummaryQuery.test.ts` (vi.mock of lazyAgentSdk):
   happy-path JSON; fenced JSON; malformed → error; deadline abort; cost
-  extraction from the result message.
-- `clipDeltaForPrompt` unit tests: caps, final-assistant-message retention,
-  determinism.
-- Settings round-trip: extend the existing config get/set coverage with
-  `sessionSummaryEnabled`. (Note: Settings.tsx frontend tests have known
-  pre-existing failures on main — verify against that baseline, don't chase
-  them.)
+  extraction; **exact resolved model id (`claude-haiku-4-5`) asserted on the
+  SDK options**.
+- Scheduler unit tests (fake timers, fake db, fake summarize fn): arm→fire at
+  5 min; clear on turn-start; empty-delta no-op; user-only-delta no-op with
+  unchanged watermark; inFlight dedupe; global cap 1; retry cooldown skips
+  same-watermark triggers; new-turn edge bypasses cooldown; 3-failure
+  suspension; race-guard re-arm; disabled-config no-op with pending timer;
+  non-quick / archived / Codex-runtime session no-op; watermark advances only
+  past the last assistant-bearing segment; cost/calls accumulation.
+
+Composition-level (Codex finding #7 — real EventEmitters + real wiring, fake
+SDK/db underneath; scheduler methods are NOT called by hand):
+- PTY relay turn: input-seam clear prevents a stale timer from firing during
+  a long turn started via `relayUserTurn` (no `'spawned'`).
+- Stop-hook `turn-end` with an open AskUserQuestion gate → armed timer fires →
+  open-gate probe skips; answering the gate → turn resumes → real turn-end →
+  re-arm → summarize once.
+- SDK ordering: `'exit'` observed only after the assistant
+  `conversation_messages` row is committed (or the test documents and covers
+  the actual ordering if it differs).
+- Process death without a clean result → no summarize call mid-teardown.
+- Repeated `sessions:get-summary` reads after one failed attempt → exactly
+  one call per cooldown window.
+- Restart with multiple missed sittings → one catch-up call, multiple history
+  sentences (capped), correct watermark.
+- Settings round-trip: `sessionSummaryEnabled` through config get/set → both
+  `AppConfig` mirrors. (Note: Settings.tsx frontend tests have known
+  pre-existing failures on main — verify against that baseline.)
 - `QuickSessionCanvas` frontend tests: summary block renders with data;
   hidden when `enabled: false` or no summary; history toggle expands and
   lists entries.
@@ -303,34 +434,57 @@ Not required for this feature.
 1. `feat: migration 081 session summaries + db CRUD` (migration, models.ts,
    database.ts, db tests)
 2. `feat: one-shot haiku session summary query` (sessionSummaryQuery.ts,
-   clipDeltaForPrompt, tests)
-3. `feat: idle-debounced session summary scheduler` (scheduler, index.ts
-   wiring, tests)
+   segmentIntoSittings, clipDeltaForPrompt, tests)
+3. `feat: idle-debounced session summary scheduler` (scheduler, index.ts +
+   input-seam wiring, unit + composition tests)
 4. `feat: sessions:get-summary IPC + lazy catch-up` (shared type, ipc,
-   preload, api.ts)
-5. `feat: session-summary toggle in Assistant settings` (config.ts,
-   configManager.ts, Settings.tsx, round-trip test)
+   preload, electron.d.ts, api.ts)
+5. `feat: session-summary toggle in Assistant settings` (main + frontend
+   config types, configManager.ts, Settings.tsx, round-trip test)
 6. `feat: summary card + expandable history on quick-session canvas`
    (QuickSessionCanvas.tsx, useSessionSummary.ts, frontend tests)
 
 ## 10. Edge cases and open decisions
 
-- **Sessions deleted mid-flight**: persist step re-checks session existence
-  inside the transaction; orphan rows are prevented by cascade/explicit delete.
+- **Codex-runtime quick sessions**: excluded in v1 (§2.8). Extending means
+  (a) wiring `codexSdkManager`/codex-PTY turn lifecycle into the scheduler and
+  (b) an explicit decision that sending a Codex transcript to a Claude
+  summarizer is acceptable — flagged, not inherited.
 - **Dynamic-workflow takeover turns**: verify whether Workflow-tool turns land
   in `conversation_messages` for the chat panel; if not, those sittings
-  produce no delta and are correctly skipped (the workflow strip has its own
-  completion blurbs).
+  produce no delta and are correctly skipped.
 - **Multi-panel sessions**: summarize session-scoped (all panels'
-  `conversation_messages`), which is the v1-correct behavior for quick
-  sessions (single chat panel in practice).
+  `conversation_messages`) — v1-correct for quick sessions (single chat panel
+  in practice).
+- **History granularity under catch-up**: bounded folding — up to 3 sentences
+  per call; more than 3 missed sittings merge the oldest. Documented behavior,
+  not a silent collapse.
 - **History growth**: unbounded but tiny (one row per sitting). No cap in v1.
-- **Default ON** (absent ⇒ enabled) — chosen deliberately; flipping the
-  default is a one-line change in the getter. Flag for review.
+- **Default ON** (absent ⇒ enabled) — deliberate; flipping the default is a
+  one-line getter change. Flag for review.
 - **Quick-only scope** — flow runs have workflow structure, step reports, and
-  run summaries already; extending to non-quick sessions later only requires
-  relaxing the eligibility predicate (§2.9).
-- **No re-summarize button, no push subscription, no backfill of pre-feature
-  sessions** in v1 (a pre-feature session summarizes from watermark 0 — i.e.
-  its full clipped transcript — on its first post-upgrade sitting or lazy
-  catch-up; that is the intended cold-start behavior).
+  run summaries already; extending later = relaxing §2.8.
+- **No re-summarize button, no push subscription, no backfill** in v1 (a
+  pre-feature session summarizes from watermark 0 — its full clipped,
+  segmented transcript — on its first post-upgrade trigger; intended
+  cold-start behavior).
+
+## 11. Codex review dispositions (v1 → v2)
+
+1. **PTY relay turns lack a start event / question-gate turn-ends** (high) →
+   §2.2 input-seam clear + §2.3 fire-time turn-in-flight and open-gate probes.
+2. **30s poll → hot retry loop** (high) → §2.6 attempted-watermark cooldown;
+   reads never mutate; composition test pins one call per cooldown window.
+3. **Watermark folds missed sittings / leaks abandoned prompts** (high) →
+   §2.4 timestamp-gap segmentation (no new persistence), per-segment history
+   sentences (cap 3), watermark stops at last assistant-bearing segment.
+4. **Eligibility includes unobserved Codex runtimes** (high) → §2.8
+   Claude-runtime gate; Codex extension is a flagged decision (§10).
+5. **Haiku alias not auto-resolved + layering violation** (high) → §3 deps
+   injection from `index.ts`; concrete model id pinned via
+   `resolveModelAlias('haiku')` at the wiring site; test asserts it.
+6. **Config/IPC parity surfaces missing** (medium) → §6/§7 add
+   `frontend/src/types/config.ts`, `frontend/src/types/electron.d.ts`, typed
+   preload, `validateInput`.
+7. **Fake-scheduler tests can't catch lifecycle bugs** (medium) → §8
+   composition-level suite over real event wiring.
