@@ -29,6 +29,8 @@ import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
 import { StatusBar } from './components/StatusBar';
+import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
+import { useDesignModeStore } from './stores/designModeStore';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useAgentThreadStore } from './stores/agentThreadStore';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
@@ -94,7 +96,12 @@ function App() {
   // post-save refetch flips this without an app restart. Absent ⇒ enabled.
   const assistantEnabled = useConfigStore((state) => state.config?.assistantEnabled !== false);
   const { activeProjectId } = useNavigationStore();
-  
+  // v0.5 fullscreen design surface: when a session's design mode is active, the
+  // whole shell row + StatusBar are SWAPPED for the takeover (a conditional swap,
+  // not a stacked overlay — guarantees only ONE chat view / canvas subscribes per
+  // session, per design-mode.md's single-mount invariant). Never persisted.
+  const activeDesignSessionId = useDesignModeStore((s) => s.activeDesignSessionId);
+
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
   useEffect(() => {
     migrateLocalStorageKey('crystal-sidebar-width', 'cyboflow-sidebar-width');
@@ -257,6 +264,13 @@ function App() {
           onSearchChange={setGlobalSearch}
           onPromptHistoryClick={handlePromptHistoryClick}
         />
+        {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
+            the fullscreen surface. TitleBar (native drag region) and the dialog
+            siblings below stay mounted. */}
+        {activeDesignSessionId !== null ? (
+          <DesignModeSurface />
+        ) : (
+        <>
         {/* Shell geometry: [agent rail | center]. Human review folds into the
             rail as a primary item that swaps the center to a full-width review
             pane (see docs/SHELL-LAYOUT.md). */}
@@ -383,6 +397,8 @@ function App() {
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />
+        </>
+        )}
         <OnboardingGate />
         <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
         <ErrorDialog
