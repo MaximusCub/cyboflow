@@ -14,9 +14,12 @@ one of three actionable buckets:
 
 - **quick** — an immediate fix small enough for a single agent to apply in-place
   in the worktree right now.
-- **doc** — a CLAUDE.md / CODE-PATTERNS.md edit. Once approved at the
-  approve-learnings gate it is applied in-place at write-back like any other edit —
-  it is NOT filed as its own per-edit `decision`.
+- **doc** — an instruction-file edit, in one of two rungs: **`doc:claude-md`** (a
+  CLAUDE.md edit — the strictest bar in this flow, capped at ONE per run, expected
+  outcome zero) or **`doc:reference`** (a `docs/*.md` edit, incl. CODE-PATTERNS.md /
+  ARCHITECTURE.md — a lower bar, but still above "useful color"). Once approved at
+  the approve-learnings gate either is applied in-place at write-back like any other
+  edit — it is NOT filed as its own per-edit `decision`.
 - **task** — a follow-up backlog task (`cyboflow_create_task`) that queues for a
   future Sprint run.
 
@@ -108,7 +111,11 @@ from plugin state files:
 >    - **`quick`** (target `fix`) → apply the fix in-place in the worktree, then
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"fixed")`.
 >    - **`doc`** (target `docs`, incl. legacy `prompt`) → apply the docs /
->      CLAUDE.md / CODE-PATTERNS.md edit in-place (the human already triaged it), then
+>      CLAUDE.md / CODE-PATTERNS.md edit in-place (the human already triaged it, so
+>      the admission bar is settled — but you still author the WORDING: an imperative
+>      rule with its consequence, amending existing text where it can, carrying no
+>      migration number, run id, version stamp, date, commit SHA, or "we used to"
+>      history, and kept to the fewest lines that state the rule), then
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"triaged")`.
 >      Do NOT emit a per-edit `decision` — the human-review merge gate below reviews
 >      every applied change at once.
@@ -145,16 +152,23 @@ from plugin state files:
    three actionable buckets — **never a finding**:
    - **quick** — an immediate fix small enough for a single agent to apply
      in-place in the worktree right now.
-   - **doc** — a proposed CLAUDE.md / CODE-PATTERNS.md edit (landed as a gated
-     `decision`, never a direct file write).
+   - **doc** — a proposed instruction-file edit, sub-labelled `doc:claude-md` (a
+     CLAUDE.md edit) or `doc:reference` (a `docs/*.md` edit). Both clear a bar well
+     above the durability bar; CLAUDE.md edits clear the strictest one and are
+     capped at ONE per run. Reject any that carries a migration number, run id,
+     version stamp, date, or "we used to" history — those are the incident, not the
+     rule; send them back as a `quick` fix, a `task`, or a discard. If the
+     compounder returns a `doc` entry without a rung sub-label, or more than one
+     `doc:claude-md`, treat the extras as discarded rather than guessing.
    - **task** — a follow-up backlog task (a fix too large for `quick`, a missing
      test, a refactor). A regression traced to already-merged work is a `quick`
      fix when trivial, otherwise a `task` — it is an improvement to *make*, not a
      finding to re-file.
 3. **draft the recommendations doc** → compose ONE summary-of-recommendations
    markdown with two top-level sections: **`## Act on`** (the drafted learnings,
-   grouped `### Quick fixes` / `### Doc edits` / `### Tasks`; each entry with its
-   rule, evidence, computed impact, and proposed change) and **`## Discarded`**
+   grouped `### Quick fixes` / `### CLAUDE.md edits` / `### Doc edits` / `### Tasks`;
+   each entry with its rule, evidence, computed impact, and proposed change) and
+   **`## Discarded`**
    (the compounder's discarded list, one line each with its reason). Call
    `cyboflow_report_artifact` with `atype: 'compound-recommendations'`, a short
    `label`, and `payload_json` `{"markdown": "<the doc>"}`. This single doc is the
@@ -173,14 +187,20 @@ from plugin state files:
    them — you do not re-ask approval per edit:
    - **quick** → apply the fix in-place in the worktree (you hold Edit/Write as
      the orchestrator). Keep it small and scoped; run the local check it warrants.
-   - **doc** → apply the approved CLAUDE.md / CODE-PATTERNS.md edit **in-place too**
-     (it was approved at the gate — do NOT defer it to the human and do NOT file a
-     per-edit `decision` re-asking approval).
+   - **doc** (`doc:claude-md` or `doc:reference`) → apply the approved edit
+     **in-place too** (it was approved at the gate — do NOT defer it to the human and
+     do NOT file a per-edit `decision` re-asking approval). Write the wording the
+     gate approved: an imperative rule with its consequence, amending existing text
+     wherever it can, and carrying no migration number, run id, version stamp, date,
+     commit SHA, session name, or "we used to" history. Keep a CLAUDE.md edit to the
+     fewest lines that state the rule; if it wants a paragraph of context, that
+     context belongs in `docs/*.md` behind the existing load-on-demand pointer.
    - **task** → `cyboflow_create_task` (title, body, acceptance criteria,
      file / dependency hints) so they queue for a future Sprint run.
 
    Commit the applied changes atomically, then post a concise summary of what you
-   applied — grouped **Quick fixes / Doc edits / Tasks** (each with its file(s)).
+   applied — grouped **Quick fixes / CLAUDE.md edits / Doc edits / Tasks** (each with
+   its file(s)).
    Do **NOT** call `cyboflow_report_finding` — write-back emits no review-queue
    items at all. The final approval happens at the next step.
 6. **human-review** → **human gate, inline.** This is the terminal **"merge in
@@ -203,7 +223,17 @@ summary of what Compound proposes. Compose it as markdown and report it via
 ENRICHES it, so you can refine the doc as you go.
 
 - Always include an **`## Act on`** section — grouped `### Quick fixes` /
-  `### Doc edits` / `### Tasks`, in that order, one entry per learning.
+  `### CLAUDE.md edits` / `### Doc edits` / `### Tasks`, in that order, one entry
+  per learning.
+- **`### CLAUDE.md edits` is its own section and is never folded into
+  `### Doc edits`.** CLAUDE.md is loaded into every session of every flow, so its
+  edits get the human's undivided attention: list each one with the exact file +
+  section, the verbatim wording, what text it replaces, and its answers to the five
+  admission questions (see the compounder's "Instruction-file edits carry their own,
+  much higher bar"). At most ONE per run. When there are none — the expected outcome
+  — keep the heading and write `None.` so the human can see the bar was applied
+  rather than skipped. `### Doc edits` holds the `docs/*.md` (incl.
+  CODE-PATTERNS.md / ARCHITECTURE.md) edits only.
 - On the **unseeded** path, ALSO include a **`## Discarded`** section — the
   candidates the compounder considered and set aside, one line each with its
   reason. It is the "here's what I discarded" half of the single review; it lives

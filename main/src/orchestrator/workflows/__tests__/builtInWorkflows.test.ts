@@ -131,10 +131,20 @@ describe('buildBuiltInWorkflows', () => {
     // Write-back APPLIES approved doc edits in-place (not per-edit decisions) and
     // emits NO review items — the terminal human-review step is the merge gate.
     expect(body, 'write-back applies approved doc edits in-place').toMatch(
-      /apply the approved CLAUDE\.md \/ CODE-PATTERNS\.md edit \*\*in-place/,
+      /apply the approved edit\s+\*\*in-place/,
     );
     // Whitespace-normalized so multi-word phrases match regardless of line wrapping.
     const flat = body.replace(/\s+/g, ' ');
+
+    // CLAUDE.md edits get their own section of the recommendations doc so the
+    // human can weigh them apart from the (lower-bar) reference-doc edits.
+    expect(flat, 'the recommendations doc separates CLAUDE.md edits from doc edits').toMatch(
+      /`### Quick fixes` \/ `### CLAUDE\.md edits` \/ `### Doc edits` \/ `### Tasks`/,
+    );
+    expect(flat, 'CLAUDE.md edits are never folded into the doc-edits section').toMatch(
+      /is its own section and is never folded into `### Doc edits`/,
+    );
+    expect(flat, 'CLAUDE.md edits are capped at one per run').toMatch(/At most ONE per run/);
     expect(flat, 'the final gate is the terminal human-review "merge in changes" step').toMatch(
       /merge in changes/i,
     );
@@ -157,9 +167,26 @@ describe('buildBuiltInWorkflows', () => {
     // Collapse wrapped-prose whitespace so multi-word phrases match regardless of
     // where markdown line-wrapping falls.
     const body = readFileSync(compounderPath, 'utf-8').replace(/\s+/g, ' ');
-    expect(body, 'compounder tags are quick / task / doc').toContain('quick / task / doc');
+    expect(body, 'compounder tags are quick / task / doc (two rungs)').toContain(
+      'quick / task / `doc:claude-md` / `doc:reference`',
+    );
     expect(body, 'compounder does not use "decision" as a bucket tag').toContain(
       'do not use the word "decision" as a tag',
+    );
+
+    // Instruction-file edits clear a bar ABOVE the durability bar, with CLAUDE.md
+    // strictest — that skepticism is the point of the two rungs.
+    expect(body, 'CLAUDE.md edits require all five admission questions').toContain(
+      'Propose a CLAUDE.md edit ONLY when ALL FIVE hold',
+    );
+    expect(body, 'CLAUDE.md edits are capped at one per run, zero expected').toContain(
+      'At most ONE CLAUDE.md edit per run, and zero is the expected outcome',
+    );
+    expect(body, 'reference docs clear a lower but real bar').toContain(
+      'A lower bar than CLAUDE.md, but still a real one',
+    );
+    expect(body, 'incident detail is an automatic discard').toContain(
+      'carrying a migration number, version stamp, date, commit SHA, session name, or run id as part of the rule',
     );
     expect(body, 'compounder load phase returns ONLY Merged work').toContain(
       'Load phase',
