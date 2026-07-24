@@ -1696,22 +1696,35 @@ export class TaskChangeRouter {
         deltas.push({ field: 'originating_idea_id', from: current.originating_idea_id, to: change.originatingIdeaId });
       }
 
-      // IDEA-NEEDS-EPIC: only when THIS update touches lineage (re-parent or
-      // originating-idea move) — an unrelated field edit on a pre-existing direct
-      // task must stay idempotent, never retroactively rejected. Compute the
-      // effective post-update lineage and reject if the task would sit epic-less
-      // under an idea that already has another dangling task.
+      // IDEA-NEEDS-EPIC: fire when THIS update could newly realize the forbidden
+      // shape — a lineage touch (re-parent / originating-idea move) OR an unarchive
+      // that pulls a direct task back into the LIVE decomposition. The unarchive
+      // trigger closes the bypass "create direct A → archive A → create direct B →
+      // unarchive A": the guard's sibling count excludes archived tasks, so without
+      // it that final unarchive silently re-creates two live epic-less tasks. An
+      // unrelated field edit (or a no-op archived flag) on a pre-existing direct
+      // task stays idempotent — never retroactively rejected. Only a task that will
+      // be LIVE and epic-less under an idea post-update is checked.
+      const isUnarchiveTransition = change.archived === false && current.archived_at !== null;
       if (
         type === 'task' &&
-        (change.parentEpicId !== undefined || change.originatingIdeaId !== undefined)
+        (change.parentEpicId !== undefined ||
+          change.originatingIdeaId !== undefined ||
+          isUnarchiveTransition)
       ) {
+        const effectiveArchived =
+          change.archived !== undefined ? change.archived : current.archived_at !== null;
         const effectiveParentEpicId =
           change.parentEpicId !== undefined ? change.parentEpicId : current.parent_epic_id;
         const effectiveOriginatingIdeaId =
           change.originatingIdeaId !== undefined
             ? change.originatingIdeaId
             : current.originating_idea_id;
-        if (effectiveParentEpicId === null && effectiveOriginatingIdeaId !== null) {
+        if (
+          !effectiveArchived &&
+          effectiveParentEpicId === null &&
+          effectiveOriginatingIdeaId !== null
+        ) {
           this.assertIdeaEpicInvariant(effectiveOriginatingIdeaId, taskId);
         }
       }

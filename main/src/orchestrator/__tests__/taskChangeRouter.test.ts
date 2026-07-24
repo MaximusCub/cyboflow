@@ -908,6 +908,47 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         }),
       ).resolves.toBeDefined();
     });
+
+    it('rejects UNARCHIVING a direct task when a live direct sibling exists (bypass closed)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      // create direct A -> archive A -> create direct B (all individually legal).
+      const a = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'A',
+        originatingIdeaId: idea.taskId,
+      });
+      await router.applyChange(1, { actor: 'user', taskId: a.taskId, archived: true });
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'B',
+        originatingIdeaId: idea.taskId,
+      });
+      // Unarchiving A would resurrect a second live epic-less task → rejected.
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId: a.taskId, archived: false }),
+      ).rejects.toMatchObject({ code: 'idea_needs_epic' });
+    });
+
+    it('allows unarchiving a direct task when it is the idea\'s only live task', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      const a = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'A',
+        originatingIdeaId: idea.taskId,
+      });
+      await router.applyChange(1, { actor: 'user', taskId: a.taskId, archived: true });
+      // No live sibling → unarchiving A is fine.
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId: a.taskId, archived: false }),
+      ).resolves.toBeDefined();
+    });
   });
 
   // -------------------------------------------------------------------------
