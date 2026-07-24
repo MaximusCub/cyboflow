@@ -656,6 +656,24 @@ describe('WorkflowController', () => {
       expect(host.reports.some((rp) => rp.id === 'b' && rp.status === 'done')).toBe(false);
     });
 
+    it('marks an operator skip DELIBERATE so it is not reported as a step failure', async () => {
+      // The skip carries an `error` string as its human-readable reason, which
+      // would otherwise trip the programmatic-step-failed seam (CYBOFLOW-APP-H).
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const directives = createRunDirectives();
+      directives.userSkippedStepIds.add('b');
+
+      const result = await new WorkflowController(makeRunner(), makeHost()).run(
+        'r', d, undefined, undefined, undefined, directives,
+      );
+
+      expect(result.steps.find((s) => s.stepId === 'b')).toMatchObject({
+        outcome: 'skipped',
+        error: 'skipped by operator',
+        deliberate: true,
+      });
+    });
+
     it('runs a step normally when it was un-skipped before the walk reached it', async () => {
       const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
       const runner = makeRunner();
@@ -1682,6 +1700,15 @@ describe('WorkflowController', () => {
       expect(byId['sprint-verify']).toBe('skipped');
       expect(byId['sprint-review']).toBe('skipped');
       expect(byId['human-review']).toBe('done');
+
+      // Both closing-stage skips are DELIBERATE control flow, not defects — the
+      // flag keeps them off the programmatic-step-failed seam even though they
+      // carry a reason string (CYBOFLOW-APP-H).
+      expect(result.steps.find((s) => s.stepId === 'sprint-verify')).toMatchObject({ deliberate: true });
+      expect(result.steps.find((s) => s.stepId === 'sprint-review')).toMatchObject({ deliberate: true });
+      // The lane failure that CAUSED the gating is a real failure and must not
+      // be marked deliberate.
+      expect(result.steps.find((s) => s.outcome === 'failed')?.deliberate).toBeUndefined();
     });
 
     it('runs the closing stages normally when every fan-out lane integrates', async () => {

@@ -285,6 +285,7 @@ export class WorkflowController {
             outcome: 'skipped',
             attempts: 0,
             error: 'skipped by operator',
+            deliberate: true,
           });
           this.host.log?.('warn', `step '${step.id}' skipped by operator request`);
           this.host.reportStep(step.id, 'skipped');
@@ -320,6 +321,7 @@ export class WorkflowController {
               outcome: 'skipped',
               attempts: 1,
               error: 'sprint has incomplete or blocked tasks — closing stage skipped',
+              deliberate: true,
             });
             this.host.reportStep(step.id, 'skipped');
             this.host.log?.(

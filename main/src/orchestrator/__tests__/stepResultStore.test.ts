@@ -151,6 +151,64 @@ describe('StepResultStore seam-error telemetry (seam G)', () => {
     expect(calls.filter((c) => c.seam === 'programmatic-step-failed')).toHaveLength(0);
   });
 
+  it('does NOT report a DELIBERATE skip, even though it carries an error', () => {
+    // Two skip paths set `error` as a human-readable REASON rather than a
+    // fault: an operator skip, and the closing-stage gate. Both are the system
+    // working as designed. Reporting them produced CYBOFLOW-APP-H — and because
+    // neither reason string matches a classifier pattern, they arrived as
+    // errorClass 'other', making a reporting bug look like a classifier gap.
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({
+      runId: 'r',
+      stepId: 'code-review',
+      outcome: 'skipped',
+      attempts: 0,
+      error: 'skipped by operator',
+      deliberate: true,
+    });
+    store.record({
+      runId: 'r',
+      stepId: 'sprint-review',
+      outcome: 'skipped',
+      attempts: 1,
+      error: 'sprint has incomplete or blocked tasks — closing stage skipped',
+      deliberate: true,
+    });
+
+    expect(calls.filter((c) => c.seam === 'programmatic-step-failed')).toHaveLength(0);
+  });
+
+  it('still reports a skip that was SUFFERED (retries exhausted), not chosen', () => {
+    // Guard against the filter being too broad: an optional step that exhausted
+    // its retries is also 'skipped' with an error, but is a genuine problem.
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'ui-prototype', outcome: 'skipped', attempts: 3, error: 'Stream closed' });
+
+    expect(calls.filter((c) => c.seam === 'programmatic-step-failed')).toHaveLength(1);
+  });
+
+  it('persists a deliberate skip normally — the flag is telemetry-only', () => {
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({
+      runId: 'r',
+      stepId: 'code-review',
+      outcome: 'skipped',
+      attempts: 0,
+      error: 'skipped by operator',
+      deliberate: true,
+    });
+
+    // The reason must survive into step results for the UI; only the Sentry
+    // report is suppressed.
+    expect(store.listForRun('r')[0]).toMatchObject({
+      outcome: 'skipped',
+      error: 'skipped by operator',
+    });
+    expect(store.completedStepIds('r')).toEqual(['code-review']);
+  });
+
   it('keeps the raw step error and stepId OUT of the Sentry message (privacy — Codex [high])', () => {
     const calls = withSink();
     const store = new StepResultStore(dbAdapter(buildDb()));

@@ -32,6 +32,12 @@ export interface StepResultRecord {
   attempts: number;
   summary?: string;
   error?: string;
+  /**
+   * This outcome was chosen, not suffered (operator skip, closing-stage gate).
+   * Telemetry-only — deliberately NOT persisted by record(), which writes an
+   * explicit column list.
+   */
+  deliberate?: boolean;
 }
 
 /** Outcomes that count as "this step does not need to re-run on resume". */
@@ -46,8 +52,19 @@ const COMPLETED_OUTCOMES = new Set<StepResultRow['outcome']>(['done', 'skipped']
  * outcomes are never reported. The step id + error ride in the (bounded,
  * scrub-redacted) message; tags stay low-cardinality. No-op until the seam sink
  * is registered at boot.
+ *
+ * DELIBERATE outcomes are excluded even though they carry an error. Two skip
+ * paths set `error` as a human-readable REASON rather than a fault — an operator
+ * skip, and the closing-stage gate skipping automated steps when a sprint has
+ * blocked tasks. Both are the system working as designed, and because neither
+ * reason string matches any classifier pattern they were landing as
+ * `errorClass: 'other'` (CYBOFLOW-APP-H) — noise that also made the 'other'
+ * bucket look like an unsolved classification problem rather than a reporting
+ * one. The fix is to not report them; adding patterns would only have relabeled
+ * the noise.
  */
 function reportStepIssue(r: StepResultRecord): void {
+  if (r.deliberate) return;
   const isFailure = r.outcome === 'failed';
   const isSkippedWithError = r.outcome === 'skipped' && !!r.error;
   if (!isFailure && !isSkippedWithError) return;

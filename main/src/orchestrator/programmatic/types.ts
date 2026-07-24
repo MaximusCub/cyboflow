@@ -481,6 +481,14 @@ export interface StepReport {
   /** Total agent invocations / gate presentations for this step. */
   attempts: number;
   error?: string;
+  /**
+   * This outcome was CHOSEN, not suffered — an operator skip, or a designed
+   * control-flow skip such as the closing-stage gate. Such skips still carry an
+   * `error` string because it is the human-readable reason shown in step
+   * results, but they are not defects and must not be reported as failures.
+   * Telemetry-only: never persisted (see StepResultStore.record).
+   */
+  deliberate?: boolean;
 }
 
 /**

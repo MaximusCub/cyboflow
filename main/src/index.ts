@@ -2443,6 +2443,7 @@ async function initializeServices() {
         outcome: report.outcome,
         attempts: report.attempts,
         ...(report.error !== undefined ? { error: report.error } : {}),
+        ...(report.deliberate !== undefined ? { deliberate: report.deliberate } : {}),
       }),
     logger: cyboflowLogger,
   });
