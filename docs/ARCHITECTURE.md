@@ -172,20 +172,34 @@ Core business logic services. Key components:
   lifecycle via the **Agent SDK** (`@anthropic-ai/claude-agent-sdk` `query()` in-process).
   No `claude` CLI binary is spawned and no PTY is used on this path. `ClaudeCodeManager`
   extends `AbstractCliManager` and overrides its spawn surface so the SDK's async-iterator
-  drives session output directly (see `claudeCodeManager.ts:4`, header docstring lines 79–84).
+  drives session output directly (see the header docstring above the `ClaudeCodeManager`
+  class declaration in `claudeCodeManager.ts`).
   Approval routing flows through SDK **PreToolUse hooks**, not the deprecated
   `--permission-prompt-tool` CLI flag — see `permissionModeMapper.ts` (`buildPreToolUseHook`)
   and `preToolUseHookHelper.ts` (`routePreToolUseThroughApprovalRouter`).
 - **`panels/cli/AbstractCliManager.ts`** — Intentional extension surface (per
-  `cyboflow_system_design.md:64`). Still owns the PTY spawn path (`spawnPtyProcess`); kept
-  in place even though `ClaudeCodeManager` no longer routes through it, so future CLI tools
-  can be added as additional subclasses.
+  `cyboflow_system_design.md` §3, "What the fork provides directly usable"). Still owns the
+  PTY spawn path (`spawnPtyProcess`); several
+  live concrete subclasses extend it today: `ClaudeCodeManager` (SDK substrate),
+  `InteractiveClaudeManager`, `CodexPtyManager` and `CodexSdkManager`
+  (`panels/codex/`), and `DemoCliManager`. Contrast with `AbstractAIPanelManager`
+  (`panels/ai/AbstractAIPanelManager.ts`) and `BaseAIPanelHandler`
+  (`main/src/ipc/baseAIPanelHandler.ts`), which ARE collapse candidates — Crystal-era
+  Claude+Codex UI scaffolding.
 - **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
   Claude substrate (IDEA-013), a sibling of the SDK `ClaudeCodeManager`. It drives a REAL
   interactive `claude` REPL over the inherited `AbstractCliManager` PTY machinery (no headless
   `-p` flag, no stream-json output flag) and recovers structured panel fidelity out of band via
   a `TranscriptTailSource`. `workflow_runs.substrate` ('sdk' | 'interactive') is stamped at
   launch and dispatched by the `SubstrateDispatchFacade`.
+- **`panels/codex/codexPtyManager.ts` / `panels/codex/codexSdkManager.ts`** — Codex is a
+  second **agent provider**, not just a CLI tool: `AgentProvider = 'claude' | 'codex'`
+  (`shared/types/agentRuntime.ts`). `CodexPtyManager` runs Codex as an interactive PTY
+  quick-session runtime; `CodexSdkManager` runs it through Codex's embedded SDK workflow
+  runtime (its App Server protocol). Both extend `AbstractCliManager` and are registered/routed
+  via `cliManagerFactory.ts`. Per-agent workflow runtime pins come from a workflow
+  definition's `agentConfigs` overlay (`WorkflowAgentConfig.runtime === 'codex-sdk'` +
+  `codexModel`, `shared/types/workflows.ts`).
 
 #### Interactive-substrate workflow step tracking
 
@@ -204,7 +218,7 @@ Two substrate-specific seams make this work and are the only interactive-side ad
   per-run step-reporting instruction (`buildStepReportingAppend`, built from the run's EFFECTIVE
   `resolveWorkflowDefinition(name, spec_json)` — the dynamic, user-editable step-id model) is
   concatenated to the HEAD of the prompt written to PTY stdin. This is the interactive analogue
-  of the SDK manager's `composeSystemPromptAppend` (`claudeCodeManager.ts:478`). Fail-soft: a
+  of the SDK manager's `composeSystemPromptAppend` (`claudeCodeManager.ts`). Fail-soft: a
   non-SoloFlow / broken-spec run resolves to a `null` definition and prepends nothing.
 
 **v1 limit — main-session-only step reporting.** Only the MAIN orchestrating session can call
@@ -266,6 +280,12 @@ unaffected (warm state is in-memory and dies with the app; first post-restart tu
 cold-spawns with `--resume`). Fan-out lanes and programmatic DAG steps stay single-shot.
 Per-turn `[Timing] sdk turn …` log lines record cold/warm path + submit→first-event latency.
 
+**Testing note.** Any change under `main/src/services/panels/claude/` MUST run
+`pnpm test:integration` (the Tier-3 mocked-SDK `*.itest.ts` suite, a blocking CI job) in
+addition to `pnpm test:unit` — the `.itest.ts` files are structurally excluded from
+`test:unit`'s vitest include pattern (`main/vitest.config.ts` collects only `*.test.ts` /
+`*.spec.ts`), so `test:unit` alone never runs them.
+
 **Structured-panel preservation (Q3).** The structured Claude panel renders interactive runs
 with **zero frontend change**. The interactive substrate produces a `claude` transcript JSONL
 whose per-line schema diverges from the SDK wire shape; `TranscriptSource` /
@@ -325,9 +345,12 @@ data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 - **`sessionManager.ts`** — Coordinates session state across services.
 
 In-repo workflow prompt bodies live in `main/src/orchestrator/workflows/` (`planner.md`,
-`sprint.md`, `builtInWorkflows.ts`). `buildBuiltInWorkflows()` returns one
-`WorkflowDescriptor` per `CYBOFLOW_WORKFLOW_NAMES` entry, with `workflow_path` resolved relative
-to the compiled bundle (`join(__dirname, '<name>.md')`). `copy:assets` (in `main/package.json`)
+`sprint.md`, `compound.md`, `ship.md`, plus `builtInWorkflows.ts`). `buildBuiltInWorkflows()`
+returns one
+`WorkflowDescriptor` per `CYBOFLOW_WORKFLOW_NAMES` entry (typed `CyboflowWorkflowName`, guarded
+by `isCyboflowWorkflowName` — both exported from `shared/types/workflows.ts`), with
+`workflow_path` resolved relative to the compiled bundle (`join(__dirname, '<name>.md')`).
+`copy:assets` (in `main/package.json`)
 places these `.md` files at `dist/main/src/orchestrator/workflows/*.md` so the path resolves in
 both dev and packaged builds. This is what severs the old runtime dependency on the SoloFlow
 plugin cache.
@@ -488,12 +511,20 @@ cross-package concern.
   for native module rebuilds against Electron's Node ABI.
 - **React 19 + Vite 6** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
 - **Zustand 5** — Renderer state. One slice per domain; no Redux.
-- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. Database lives at `~/.cyboflow/`
-  (`main/src/utils/cyboflowDirectory.ts:60`). The legacy `~/.crystal/` path has already
-  been removed.
-- **@anthropic-ai/claude-agent-sdk 0.2.141** — In-process Claude Code invocation via `query()`
+- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. The data dir resolves per kind in
+  `getCyboflowDirectory()` (`main/src/utils/cyboflowDirectory.ts`): packaged Stable →
+  `~/.cyboflow`, packaged Dev DMG → `~/.cyboflow_dev_dmg`, `pnpm dev` → `~/.cyboflow_dev`.
+  The legacy `~/.crystal/` path has already been removed.
+- **@anthropic-ai/claude-agent-sdk 0.3.201** — In-process Claude Code invocation via `query()`
   and `PreToolUse` hooks for approval routing. This is the live path; no `claude` CLI binary
   is spawned.
+- **@openai/codex 0.144.3** — Direct dependency (both root and `main/package.json`) that
+  bundles per-platform native `codex` CLI executables (resolved by
+  `panels/codex/codexExecutablePath.ts`), not merely a thin API client. `CodexPtyManager` /
+  `CodexSdkManager` (`panels/codex/`) spawn it as an external process — the second agent
+  provider alongside Claude (see **Services**). It is asar-unpacked
+  (`node_modules/@openai/codex*/**` in `package.json` `build.asarUnpack`) so the packaged app can
+  execute the bundled binary outside the archive.
 - **@homebridge/node-pty-prebuilt-multiarch 0.12.0** — PTY sessions. Pre-built binaries;
   rebuilt for Electron ABI by `electron-builder install-app-deps` postinstall. Used today
   only by `terminalSessionManager`, `terminalPanelManager`, and `runCommandManager` —
@@ -627,7 +658,8 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
 #### Review queue — the unified human-attention inbox (migration 016)
 
 - **`review_items`** — one project-scoped inbox aggregating everything that needs human
-  attention. `kind IN ('finding','permission','decision','human_task')`; `status IN
+  attention. `kind IN ('finding','permission','decision','human_task','notification')` (the
+  fifth kind added by migration 046); `status IN
   ('pending','resolved','dismissed')`; a per-item `blocking` boolean. The entity link is a
   **SOFT polymorphic** `(entity_type, entity_id)` pair — both nullable, `entity_type`
   CHECK-constrained to `(idea|epic|task)`, validated in code (the `ReviewItemRouter`), with NO
@@ -641,6 +673,8 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
     ALL of its blocking `review_items` resolve).
   - **human_task** — manual to-do; `blocking` per item. Triage can resolve / dismiss / promote
     a finding to a real task (minted through `TaskChangeRouter`).
+  - **notification** — non-blocking FYI rows (migration 046; e.g. dynamic-workflow
+    notifications formerly filed as `human_task`).
 
 #### Run artifacts (migration 029)
 
@@ -767,30 +801,19 @@ UI: rotation rows in Insights 04, a rotation mode of `ExperimentComparisonView`
 confirm-before-supersede modal in `VariantManagerSection` gating membership-changing
 config writes while a rotation runs.
 
-#### Migration file list
+#### Migration files
 
-Migration files present today under `main/src/database/migrations/`: `003_add_tool_panels.sql`,
-`004_claude_panels.sql`, `005_unified_panel_settings.sql`, `006_cyboflow_schema.sql`,
-`007_add_stuck_reason.sql`, `008_permission_mode_approve_default.sql`, `009_sessions_run_id.sql`,
-`010_questions.sql`, `011_workflow_step_tracking.sql`, `012_quick_workflow_sentinel.sql`,
-`013_workflow_run_substrate.sql`, `014_native_tasks.sql` (board + the unified-`tasks` model +
-satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_events` + the
-12th `Decomposed` stage), `016_review_items.sql` (the unified inbox),
-`017_run_seed_idea.sql`, `018_run_claude_session.sql`, `019_workflow_run_session_id.sql`,
-`020_workflow_run_paused_status.sql`, `021_session_agent_permission_mode.sql`,
-`022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`),
-`023_sprint_lane_step.sql` (lane `current_step_id`), continuing through `024`–`035`,
-`042_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
-`ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
-via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024),
-`043`–`045`, and the A/B-testing trio `048_workflow_variants.sql` /
-`049_experiments.sql` / `050_experiment_comparisons.sql`, `051_experiment_seed_tasks.sql`,
-`052_experiment_promoted_variant.sql`, `053_experiment_arm_entities.sql`,
-`054_baseline_rotation.sql`, `055_visual_verification.sql`, `056_visual_verify_budget.sql`,
-`057_entity_sort_order.sql` (manual board rank), `058_rotation_experiments.sql` (see the
-sections above). 015
-and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
-in 015 is intentional and safe.
+Migrations are numbered `NNN_*.sql` files directly under `main/src/database/migrations/`,
+applied in numeric order by `runFileBasedMigrations()` (see "Phase 2" above). The `legacy/`
+subdirectory holds quarantined pre-fork Crystal migrations kept for reference only — the
+runner's non-recursive numeric scan never reads it and `copy:assets` never ships it. The directory
+listing is the source of truth for which migrations exist — it is intentionally NOT enumerated
+here, since a hand-maintained file list rots the moment a new migration lands. A few are
+structurally load-bearing enough to be worth naming: `015_entity_model_rebuild.sql` (the 3-table
+entity model + `entity_events`), `016_review_items.sql` (the unified review inbox), and
+`042_collapse_board.sql` (narrows the board to its 4 kept stages — see "Entity model" and
+"Off-board buckets" above for the full detail on each). 015 and 016 are forward-only with no
+backfill (no prod data existed); the destructive DROP+recreate in 015 is intentional and safe.
 
 `copy:assets` (in `main/package.json`) copies BOTH `*.sql` migrations and the workflow `*.md`
 prompt bodies into the build output, so new migrations and prompt files ship in packaged builds.
@@ -798,12 +821,57 @@ prompt bodies into the build output, so new migrations and prompt files ship in 
 ## Build & Run
 
 ```
-pnpm dev                  # Start Electron dev (frontend Vite dev server + Electron)
-pnpm build:mac:arm64      # Full macOS arm64 build → packaged app
+pnpm dev                  # Electron dev (Vite renderer + Electron main)
+pnpm build:main           # Compile the main process — run at least once before `pnpm dev`
 pnpm typecheck            # Type-check all workspaces
 pnpm lint                 # ESLint across all workspaces
-pnpm test:e2e             # Playwright E2E (requires a built app)
+pnpm test:unit            # THE headless code-change AC gate (see below)
+pnpm test:integration     # Tier-3 mocked-SDK itest suite; required for panels/claude changes
+pnpm test:e2e             # Playwright against the BUILT Electron bundle (needs a display)
+pnpm electron:rebuild     # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron ABI drift
+pnpm test:gate            # Day-gate integration test; manual/unscheduled
 ```
+
+**`pnpm test:unit`** is the headless code-change AC gate: `pnpm --filter main test` +
+`pnpm --filter frontend test` (vitest, both one-shot) + schema-parity checks + build-script
+tests, chained by the root `test:unit` script. Use this to verify any code change.
+
+**`pnpm test:integration`** runs the Tier-3 mocked-SDK `*.itest.ts` suite
+(`vitest.config.integration.ts`, `main/src/**/*.itest.ts`) — a blocking CI job, and structurally
+excluded from `test:unit`'s vitest include pattern (`main/vitest.config.ts` only collects
+`*.test.ts` / `*.spec.ts`). REQUIRED, in addition to `test:unit`, for any change under
+`main/src/services/panels/claude/` (see the "Testing note" under Dual-substrate above).
+
+**`pnpm test:e2e`** drives the BUILT Electron bundle via Playwright's `_electron.launch()`
+(fixture `tests/helpers/electronApp.ts`): it launches `main/dist/main/src/index.js` under
+`NODE_ENV=production` against a throwaway `--cyboflow-dir` tmp data dir and attaches to the real
+Electron window on screen — no Vite dev server, no `http://localhost:4521`, no Playwright
+`webServer`. The `pretest:e2e` hook (`e2e:prereqs`) builds the prerequisites (`build:main` +
+`build:frontend` + `electron:rebuild`) so the launched app has `better-sqlite3` on the
+**Electron** ABI; AFTER an e2e run you MUST run `pnpm rebuild better-sqlite3` to restore the
+host-Node ABI before running vitest again. Two config tiers: `playwright.config.ts` (full,
+`workers: 1`, all specs — the app is launched per-test by the fixture) and
+`playwright.ci.minimal.config.ts` (smoke: health-check + smoke + permissions specs only). The
+seeded specs (`cyboflow-picker.spec.ts`, `standalone-terminal-panels.spec.ts`) boot the app once
+to create the DB, then `seedProject()` inserts a project row directly via the `/usr/bin/sqlite3`
+CLI (present on every macOS runner; better-sqlite3 can't be imported host-side post-rebuild).
+`test:e2e` is **NOT** the headless code-change AC gate — it needs a real display. Run it locally
+on macOS, or via the report-only nightly `.github/workflows/e2e.yml` (macOS runner), which flips
+to blocking once green two consecutive runs.
+
+**`pnpm electron:rebuild`** fixes `better-sqlite3` `NODE_MODULE_VERSION` errors after a
+Node/Electron upgrade — the root `postinstall` (`electron-builder install-app-deps`, run by
+`pnpm install`) and the `e2e:prereqs` / `build:mac:*` scripts rebuild the module for the
+Electron ABI, so
+switching back to running vitest directly (`pnpm --filter main test`) needs
+`pnpm rebuild better-sqlite3` first to restore the host-Node ABI (the two ABIs ping-pong across
+`pnpm dev` / e2e runs vs. unit-test runs).
+
+**`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
+API access and is manual/unscheduled — not part of `test:unit` or CI.
+
+Packaging/releases follow `docs/RELEASE-RUNBOOK.md` — per-arch DMGs; `build:mac:universal`
+currently fails on the bundled `claude` / `codex` binaries.
 
 ### asarUnpack contract
 
@@ -860,7 +928,9 @@ exists yet; the invariant is preventive.
 ## Decisions & Trade-offs
 
 See `docs/cyboflow_system_design.md` §2 (stack), §3 (fork rationale, cuts), §4 (principles).
-Key standing decisions: macOS-only v1; no Redis; no Codex/OpenAI; deterministic worktree names;
+Key standing decisions: macOS-only v1; no Redis; deterministic worktree names;
 orchestrator self-contained inside Electron main (extractable to Node service for team tier).
+The original v1 "no Codex" cut was later reversed — Codex now ships as a second agent
+provider alongside Claude (see **Services**).
 Telemetry is opt-out + anonymized: errors (Sentry) only from packaged builds, usage (Aptabase)
 only from releases, all error payloads scrubbed of code/paths/prompts (see **Telemetry**).
