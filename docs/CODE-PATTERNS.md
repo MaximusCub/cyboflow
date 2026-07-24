@@ -13,11 +13,14 @@ to a canonical example — read those for the actual implementation.
 - **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
   `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
   examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and `rawEvents.ts`).
-- **Barrels:** No barrel `index.ts` re-exports used; import paths are explicit.
+- **Barrels:** No barrel `index.ts` re-exports as a rule; import paths are explicit. Known
+  exceptions: `main/src/services/panels/codex/appServer/index.ts` (a pure `export *` barrel),
+  plus the named-re-export barrels `main/src/services/streamParser/index.ts` and
+  `main/src/orchestrator/dynamicWorkflows/index.ts` — not license to add more.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
-  (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`.
-- **Backup files:** Upstream codebase contains `.backup` files (e.g. `ClaudePanel.tsx.backup`).
-  Delete these when touching the surrounding file.
+  (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`. The `any` type is
+  forbidden repo-wide — `@typescript-eslint/no-explicit-any` is `'error'` in both configs and CI
+  enforces it. Use `unknown` (with type guards) or a narrowed generic instead.
 
 ## Shared Utilities
 
@@ -164,17 +167,21 @@ type definitions across packages.
 - `shared/types/panels.ts` — panel configuration and state types
 - `shared/types/cliPanels.ts` — CLI-specific panel types
 
-**Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent`,
-`StuckReason`, and the forward-looking `StuckEventsClient` structural cast shim used
-until TASK-254 ships a typed `trpc.cyboflow.events.onStuckDetected` subscription. Rules:
+**Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent` and
+`StuckReason`. Since TASK-695, `reviewQueueSlice`'s `subscribeToStuckEvents()` action
+(called from an App-level `useEffect`) subscribes directly on the typed
+tRPC proxy (`trpc.cyboflow.events.onStuckDetected.subscribe(...)`, `onData: (event:
+StuckDetectedEvent) => …`) — the earlier `StuckEventsClient` cast-through-`unknown` shim is no
+longer used anywhere in `frontend/src`. Rules:
 
-- Import all stuck-event types from `shared/types/stuckDetection.ts`. Do NOT re-declare
-  `StuckEventsClient` or `StuckDetectedEvent` locally — SPRINT-023 had two sites do this
+- Import stuck-event types from `shared/types/stuckDetection.ts`. Do NOT re-declare
+  `StuckDetectedEvent` or `StuckReason` locally — SPRINT-023 had two sites do this
   independently, producing a verbatim duplicate interface and a doubled IPC subscription.
-- Exactly one App-level mount should cast `trpc.cyboflow.events as unknown as
-  StuckEventsClient` and open the subscription. Other consumers read from the Zustand
-  `reviewQueueSlice` (`runStatusMap`) instead of opening their own tRPC subscription.
-- Audit: `grep -rn 'StuckEventsClient' frontend/src` must return exactly one cast site.
+- Exactly one App-level mount (`reviewQueueSlice`'s `subscribeToStuckEvents()`) should open
+  the `onStuckDetected` subscription. Other consumers read from the Zustand `reviewQueueSlice`
+  (`runStatusMap`) instead of opening their own tRPC subscription.
+- Audit: `grep -rn 'StuckDetectedEvent\|StuckReason' frontend/src` should show only imports,
+  never a local `interface`/`type` re-declaration.
 
 **Label maps for shared-type discriminants** belong next to the type (same file
 or a companion `*Labels.ts` in `shared/types/`), keyed by `Record<Union['kind'], string>`
@@ -190,7 +197,8 @@ truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and t
 - Import block types directly from `shared/types/claudeStream.ts`. Do NOT re-declare local
   `interface ToolResult`/`TextBlock`/`ToolUseBlock` shadow types — a shadow that pins
   `ToolResultBlock.content` back to `string` hides the array branch from TypeScript at every
-  downstream callsite (FIND-SPRINT-020-9 — both `toolFormatter.ts` files).
+  downstream callsite (FIND-SPRINT-020-9 — `main/src/utils/toolFormatter.ts`, the only
+  surviving copy).
 - `ToolResultBlock.content` is `string | Array<{type: 'text'; text: string}>`. Always guard:
   `typeof content === 'string' ? content : content.map(b => b.text).join('')`. Never call
   `JSON.parse`, `.includes(...)`, or template-string interpolation on raw `content`.
@@ -208,15 +216,18 @@ bootstrap `run_started` row with no SDK payload), model it as its own union memb
 (`{ type: 'run_started'; payload?: undefined }`) so `switch (event.type)` stays
 exhaustively auto-narrowed. A bare `payload: unknown` on a typed envelope is the
 tripwire — grep for it before merging.
-Canonical drift: FIND-SPRINT-026-20 — five surviving casts at `RunView.tsx:38,98,138,167,186`.
+Canonical (resolved) example: the FIND-SPRINT-026-20 casts are gone — `RunView.tsx`'s
+per-type row components (`SystemEventRow`, `AssistantEventRow`, `UserEventRow`, …) each take
+`Extract<StreamEvent, { type: '<discriminant>' }>` instead of casting.
 
-**StreamEvent must be a derived alias, not a re-declaration.** Express the
-renderer type as `StreamEvent = StreamEnvelope & { runId: string }` in
-`frontend/src/utils/cyboflowApi.ts` — never re-declare the
+**`StreamEvent` is a derived alias, not a re-declaration.** `frontend/src/utils/cyboflowApi.ts`
+declares `export type StreamEvent = StreamEnvelope;` — never re-declare the
 `StreamEnvelopePayload` arms locally. A parallel union forces synchronised
 edits across `StreamEventType`, `StreamEnvelopePayload`, and the renderer
 type; omission silently routes new variants to `UnknownEventRow` instead of
-failing typecheck. Canonical drift: FIND-SPRINT-031-4 — resolved as A4 in
+failing typecheck. The envelope carries no top-level `runId` field — the run is
+already discriminated by the `cyboflow:stream:<runId>` IPC channel (FIND-SPRINT-016-3),
+so do not add one back. Canonical drift: FIND-SPRINT-031-4 — resolved as A4 in
 the SPRINT-031 compound.
 
 ### Zustand store structure (renderer)
@@ -286,8 +297,8 @@ Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards
 
 These rules all guard the same failure mode: a type declaration that drifts from the runtime
 shape on the other side of an IPC/tRPC boundary, so a field is silently dropped instead of
-caught by the compiler. `CLAUDE.md` states the rules tersely; the case studies and audit greps
-live here.
+caught by the compiler. `CLAUDE.md` points here before any IPC touch; the rules, case studies,
+and audit greps live here.
 
 - **`IPCResponse<T>` callers must pass an explicit `T`** — never rely on the default. The
   wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults
@@ -371,6 +382,8 @@ directly. Each `applyChange`:
 2. In ONE transaction: mutates the correct entity table AND appends a per-field delta row to
    `entity_events`, minting the per-`(entity_type, entity_id)` UNIQUE `seq` **inside** that same
    transaction (never pre-read the max and write outside — the read/write must be atomic).
+   `entity_events` is polymorphic across `(entity_type, entity_id)` — it replaced the earlier
+   task-scoped `task_events` table, dropped in the same migration 015 rebuild.
 3. Emits a `TaskChangedEvent` on `taskChangeEvents` AFTER commit.
 
 It is **entity-aware**: table identity is the type discriminator (no `type` column). The change
@@ -469,12 +482,15 @@ app source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `co
 `~/.claude/plugins/cache/soloflow/...`.
 Rules when touching workflows:
 
-- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`) in
-  `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over it, so adding/removing a flow
-  there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
-  (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*` names — NOT the historical
-  `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` / `SOLOFLOW_WORKFLOW_NAMES` /
-  `isSoloFlowWorkflowName` / `resolveSoloFlowPluginRoot` / `buildDefaultSoloFlowWorkflows`).
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`), its
+  type `CyboflowWorkflowName`, and the type guard `isCyboflowWorkflowName` — all exported from
+  `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over the name array, so
+  adding/removing a flow there is a compile-time tripwire on the descriptor map and on
+  `WORKFLOW_DEFINITIONS` (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*`
+  names — NOT the historical `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` /
+  `SOLOFLOW_WORKFLOW_NAMES` / `isSoloFlowWorkflowName` / `resolveSoloFlowPluginRoot` /
+  `buildDefaultSoloFlowWorkflows`). `compound` was rebuilt natively from its preserved
+  prose and `ship` was built natively from scratch.
 - `workflow_path` resolves relative to the compiled bundle (`join(__dirname, '<name>.md')`).
   Any new prompt `.md` MUST be copied to `dist/...` by `copy:assets` (in `main/package.json`) —
   the glob already covers `src/orchestrator/workflows/*.md` and `src/database/migrations/*.sql`;
@@ -688,6 +704,17 @@ the workspace. When adding a new `vitest.config.ts` in either workspace, mirror 
 existing files; before planning a test-wiring task, grep both `@testing-library/jest-dom`
 and `test/setup.ts` — do not rely on a `.test.*` glob.
 
+### Workspace `test` scripts must stay one-shot (`vitest run`, never bare `vitest`)
+
+Any workspace `"test"` script that participates in a root multi-tier chain (e.g. `pnpm run
+test:unit`, which chains `pnpm --filter main test && pnpm --filter frontend test && …`) MUST
+invoke `vitest run`, never bare `vitest`. Bare `vitest` defaults to watch mode in a TTY and
+hangs the chain locally — CI only escapes this because its stdout is not a TTY. Put watch mode
+on a separate `"test:watch"` key instead of overloading `"test"`.
+
+- **Canonical example:** `main/package.json` and `frontend/package.json`, both
+  `"test": "vitest run"`.
+
 ## Database Schema
 
 ### Canonical DDL Source
@@ -699,12 +726,17 @@ The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`
 - `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
 
 **canonical DDL source for those tables: migration 006.** Treat it as the authoritative
-declaration; mirror any column add/drop into `schema.sql` in the same commit. Migrations 007..016
-extend the schema additively (the entity model rebuild in 015 being the one destructive,
-forward-only, no-prod-data exception).
+declaration; mirror any column add/drop into `schema.sql` in the same commit. Migrations from 007
+onward extend the schema additively (the entity model rebuild in 015 being the one destructive,
+forward-only, no-prod-data exception) — the migrations directory
+(`main/src/database/migrations/`) is the source of truth for how far that goes; it currently
+runs past 080.
 
-**The 3-table entity model + the review inbox have their own row-shape source of truth.**
-`ideas` / `epics` / `tasks` / `entity_events` (migration 015) and `review_items` (migration 016)
+**The 3-table entity model + the review inbox have their own row-shape source of truth.** Each
+of `ideas` / `epics` / `tasks` carries its own typed columns plus a single shared markdown
+`body` column — the sole long-form markdown field on the row (`title` and `summary` are short
+text columns) — introduced by the 015 entity-model
+rebuild migration. `ideas` / `epics` / `tasks` / `entity_events` (migration 015) and `review_items` (migration 016)
 are pinned field-for-field against the TypeScript row interfaces in `main/src/database/models.ts`
 (`IdeaRow` / `EpicRow` / `TaskRow` / `EntityEventRow` / `ReviewItemRow`) and the shared types in
 `shared/types/tasks.ts` + `shared/types/reviews.ts` by
