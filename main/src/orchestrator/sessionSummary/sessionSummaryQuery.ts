@@ -61,7 +61,7 @@ export interface SessionSummarizerInput {
 
 /** Output of a single summarize() call. */
 export interface SessionSummarizerResult {
-  /** 1-2 sentences, present tense: the current state of the session. */
+  /** 1-2 sentences, present tense. First sentence = the session's objective; optional second = current state. */
   summary: string;
   /** One past-tense sentence per billed sitting segment, oldest first (1..3 items). */
   historySentences: string[];
@@ -238,8 +238,12 @@ function buildPrompt(previousSummary: string, rawSegments: readonly SummaryInput
     '',
     'Respond with EXACTLY ONE JSON object and nothing else — no prose outside the object (a ```json fence',
     'around the whole object is fine, but no extra text before or after it):',
-    '{"summary": "<1-2 sentences, present tense, the current state of the session>",',
+    '{"summary": "<1-2 sentences, present tense>",',
     ' "history_sentences": ["<one past-tense sentence per sitting segment above, oldest first>"]}',
+    'The FIRST sentence of "summary" MUST state the session\'s objective — what the user is trying to',
+    'build or achieve overall (e.g. "Working on a prototype of a dynamic background."), carrying the',
+    'objective forward from the previous rolling summary unless the delta shows it changed. The optional',
+    'second sentence gives the current state of that work.',
     `Return EXACTLY ${clippedSegments.length} item(s) in "history_sentences", one per sitting segment shown` +
       ` above in the same order. NEVER return more than ${HISTORY_SENTENCE_CAP} items.`,
   ].join('\n');
