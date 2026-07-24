@@ -127,7 +127,8 @@ function createInsightsDb(): Database.Database {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       resolved_by TEXT,
-      resolution TEXT
+      resolution TEXT,
+      audience TEXT NOT NULL DEFAULT 'human'
     );
     CREATE TABLE workflow_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,6 +380,7 @@ interface SeedReviewOpts {
   payload?: unknown;
   resolution?: string | null;
   createdAt?: string;
+  audience?: 'human' | 'machine';
 }
 
 function seedReview(db: Database.Database, opts: SeedReviewOpts): void {
@@ -390,8 +392,8 @@ function seedReview(db: Database.Database, opts: SeedReviewOpts): void {
         : JSON.stringify(opts.payload);
   db.prepare(
     `INSERT INTO review_items
-       (id, project_id, run_id, kind, status, title, severity, source, payload_json, resolution, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+       (id, project_id, run_id, kind, status, title, severity, source, payload_json, resolution, created_at, audience)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?)`,
   ).run(
     opts.id,
     opts.projectId ?? 1,
@@ -404,6 +406,7 @@ function seedReview(db: Database.Database, opts: SeedReviewOpts): void {
     payloadJson,
     opts.resolution ?? null,
     opts.createdAt ?? null,
+    opts.audience ?? 'human',
   );
 }
 
@@ -1430,6 +1433,19 @@ describe('selectReviewItemSummary', () => {
     expect(summary.total).toBe(1);
     expect(summary.pending).toBe(1);
   });
+
+  it('excludes audience=machine rows from every human counter (migration 085)', () => {
+    seedReview(db, { id: 'h1', kind: 'finding', status: 'pending', audience: 'human' });
+    // A machine-mailbox finding must not inflate total / pending / pendingByKind.
+    seedReview(db, { id: 'm1', kind: 'finding', status: 'pending', audience: 'machine' });
+    seedReview(db, { id: 'm2', kind: 'finding', status: 'resolved', audience: 'machine' });
+
+    const summary = selectReviewItemSummary(dbAdapter(db), null);
+    expect(summary.total).toBe(1);
+    expect(summary.pending).toBe(1);
+    expect(summary.resolved).toBe(0);
+    expect(summary.pendingByKind.finding).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1516,6 +1532,15 @@ describe('selectQualityFindings', () => {
 
     const limited = selectQualityFindings(dbAdapter(db), null, 2);
     expect(limited.map((f) => f.id)).toEqual(['new', 'mid']);
+  });
+
+  it('excludes audience=machine findings from the human Insights list (migration 085)', () => {
+    seedReview(db, { id: 'human', kind: 'finding', audience: 'human' });
+    // A machine mailbox finding must never render in CodeQualitySection.
+    seedReview(db, { id: 'machine', kind: 'finding', audience: 'machine' });
+
+    const all = selectQualityFindings(dbAdapter(db), null);
+    expect(all.map((f) => f.id)).toEqual(['human']);
   });
 
   it('handles malformed payload_json by falling back to null category / [] locations', () => {

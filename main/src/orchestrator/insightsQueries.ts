@@ -1009,17 +1009,21 @@ export function selectReviewItemSummary(
   db: DatabaseLike,
   projectId: number | null,
 ): ReviewItemSummary {
+  // `audience = 'machine'` rows are a machine-to-machine mailbox (migration 085) —
+  // excluded from every human-facing counter so they never inflate the inbox header.
   const statusRows = (
     projectId === null
       ? db
           .prepare(
-            `SELECT status, COUNT(*) AS count FROM review_items GROUP BY status`,
+            `SELECT status, COUNT(*) AS count FROM review_items
+             WHERE (audience IS NULL OR audience != 'machine') GROUP BY status`,
           )
           .all()
       : db
           .prepare(
             `SELECT status, COUNT(*) AS count
-             FROM review_items WHERE project_id = ? GROUP BY status`,
+             FROM review_items WHERE project_id = ?
+               AND (audience IS NULL OR audience != 'machine') GROUP BY status`,
           )
           .all(projectId)
   ) as StatusCountRow[];
@@ -1044,13 +1048,15 @@ export function selectReviewItemSummary(
       ? db
           .prepare(
             `SELECT kind, COUNT(*) AS count
-             FROM review_items WHERE status = 'pending' GROUP BY kind`,
+             FROM review_items WHERE status = 'pending'
+               AND (audience IS NULL OR audience != 'machine') GROUP BY kind`,
           )
           .all()
       : db
           .prepare(
             `SELECT kind, COUNT(*) AS count
-             FROM review_items WHERE status = 'pending' AND project_id = ? GROUP BY kind`,
+             FROM review_items WHERE status = 'pending' AND project_id = ?
+               AND (audience IS NULL OR audience != 'machine') GROUP BY kind`,
           )
           .all(projectId)
   ) as KindCountRow[];
@@ -1168,6 +1174,7 @@ export function selectQualityFindings(
     LEFT JOIN workflow_runs r ON r.id = ri.run_id
     LEFT JOIN workflows w     ON w.id = r.workflow_id
     WHERE ri.kind = 'finding'
+      AND (ri.audience IS NULL OR ri.audience != 'machine')
       ${projectId === null ? '' : 'AND ri.project_id = ?'}
     ORDER BY ri.created_at DESC
     LIMIT ?
@@ -1226,6 +1233,7 @@ export function selectRunFindings(db: DatabaseLike, runId: string): QualityFindi
        LEFT JOIN workflow_runs r ON r.id = ri.run_id
        LEFT JOIN workflows w     ON w.id = r.workflow_id
        WHERE ri.kind = 'finding' AND ri.run_id = ?
+         AND (ri.audience IS NULL OR ri.audience != 'machine')
        ORDER BY ri.created_at DESC`,
     )
     .all(runId) as QualityFindingRow[];
@@ -1820,6 +1828,7 @@ export function selectVariantStats(
          AND r.variant_id IS NOT NULL
          AND r.experiment_id IS NULL
          AND ri.kind = 'finding'
+         AND (ri.audience IS NULL OR ri.audience != 'machine')
          ${scope}
        GROUP BY r.variant_id`,
     )
@@ -2061,6 +2070,7 @@ export function selectRotationArmStats(db: DatabaseLike, experimentId: string): 
        JOIN workflow_runs r ON r.id = ri.run_id
        WHERE r.rotation_experiment_id = ?
          AND ri.kind = 'finding'
+         AND (ri.audience IS NULL OR ri.audience != 'machine')
        GROUP BY armVariantId`,
     )
     .all(BASELINE_VARIANT_SENTINEL, experimentId) as Array<{ armVariantId: string; findingsCount: number }>;

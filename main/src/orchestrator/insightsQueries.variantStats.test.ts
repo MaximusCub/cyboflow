@@ -20,7 +20,7 @@ function buildDb(): Database.Database {
     CREATE TABLE workflow_variants (id TEXT PRIMARY KEY, status TEXT, weight INTEGER);
     CREATE TABLE run_usage (run_id TEXT PRIMARY KEY, total_tokens INTEGER, cost_usd REAL);
     CREATE TABLE run_evals (run_id TEXT, eval_status TEXT, overall_score INTEGER);
-    CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT);
+    CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, audience TEXT NOT NULL DEFAULT 'human');
     CREATE TABLE ideas (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
     CREATE TABLE epics (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
     CREATE TABLE tasks (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
@@ -154,9 +154,9 @@ describe('selectVariantStats', () => {
   it('counts findings + post-merge bugs via caused_by_run_id across ideas/epics/tasks', () => {
     const raw = buildDb();
     seedRun(raw, { id: 'r1', variantId: 'v1' });
-    raw.prepare("INSERT INTO review_items VALUES ('ri1','r1','finding')").run();
-    raw.prepare("INSERT INTO review_items VALUES ('ri2','r1','finding')").run();
-    raw.prepare("INSERT INTO review_items VALUES ('ri3','r1','decision')").run(); // not a finding
+    raw.prepare("INSERT INTO review_items VALUES ('ri1','r1','finding','human')").run();
+    raw.prepare("INSERT INTO review_items VALUES ('ri2','r1','finding','human')").run();
+    raw.prepare("INSERT INTO review_items VALUES ('ri3','r1','decision','human')").run(); // not a finding
     raw.prepare("INSERT INTO ideas VALUES ('i1','r1')").run();
     raw.prepare("INSERT INTO epics VALUES ('e1','r1')").run();
     raw.prepare("INSERT INTO tasks VALUES ('t1','r1')").run();

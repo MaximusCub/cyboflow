@@ -36,7 +36,7 @@ function buildDb(): Database.Database {
     );
     CREATE TABLE run_usage (run_id TEXT PRIMARY KEY, total_tokens INTEGER, cost_usd REAL);
     CREATE TABLE run_evals (run_id TEXT, eval_status TEXT, overall_score INTEGER);
-    CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT);
+    CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, audience TEXT NOT NULL DEFAULT 'human');
     CREATE TABLE ideas (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
     CREATE TABLE epics (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
     CREATE TABLE tasks (id TEXT PRIMARY KEY, caused_by_run_id TEXT);
