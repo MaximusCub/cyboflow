@@ -260,6 +260,48 @@ describe('resolveVerifyCodexModel', () => {
     };
     expect(resolveVerifyCodexModel(r)).toBeUndefined();
   });
+
+  it("treats the picker's 'auto' sentinel as unset (any case), falling through to the run model", () => {
+    const onCodexRun: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: 'auto' }),
+      runProvider: 'codex',
+      runModel: 'gpt-5.4-run',
+    };
+    expect(resolveVerifyCodexModel(onCodexRun)).toBe('gpt-5.4-run');
+    const onClaudeRun: ResolvedVerifyAgent = {
+      agent: makeAgent({ codexModel: 'AUTO' }),
+      runProvider: 'claude',
+      runModel: 'claude-run',
+    };
+    expect(resolveVerifyCodexModel(onClaudeRun)).toBeUndefined();
+  });
+
+  it("treats 'default' and a cross-family Claude id as unset (spawn-seam parity)", () => {
+    expect(
+      resolveVerifyCodexModel({
+        agent: makeAgent({ codexModel: 'default' }),
+        runProvider: 'claude',
+        runModel: null,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveVerifyCodexModel({
+        agent: makeAgent({ codexModel: 'claude-opus-4-8' }),
+        runProvider: 'claude',
+        runModel: null,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("an inherited run model of 'auto' on a Codex run resolves to the account default (undefined)", () => {
+    expect(
+      resolveVerifyCodexModel({
+        agent: makeAgent({ codexModel: undefined }),
+        runProvider: 'codex',
+        runModel: 'auto',
+      }),
+    ).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -595,6 +637,36 @@ describe('VerificationAgentRunner.run', () => {
       'transcript-vr-transcript-2.md',
       'partial transcript up to the failure',
     );
+  });
+
+  it('a query error flagged timedOut maps to the terminal timeout status (not skipped), transcript still written', async () => {
+    const { runner, writeTranscript } = makeRunner({
+      query: async () => {
+        throw new VerificationAgentQueryError(
+          'verification agent query timed out after 900000ms',
+          'partial transcript up to the deadline',
+          true,
+        );
+      },
+    });
+    const req = makeReq({ requestId: 'vr-timeout-1', artifactsDir: '/artifacts' });
+    const result = await runner.run(req);
+    expect(result.status).toBe('timeout');
+    expect(result.errorMessage).toContain('timed out after 900000ms');
+    expect(writeTranscript).toHaveBeenCalledWith(
+      '/artifacts',
+      'transcript-vr-timeout-1.md',
+      'partial transcript up to the deadline',
+    );
+  });
+
+  it("threads the request's timeoutMs into the query args (and omits it when absent)", async () => {
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ timeoutMs: 900_000 }));
+    expect(query.mock.calls[0][0].timeoutMs).toBe(900_000);
+    query.mockClear();
+    await runner.run(makeReq());
+    expect('timeoutMs' in query.mock.calls[0][0]).toBe(false);
   });
 
   it('a rejecting writeTranscript is fail-soft — the verdict path is unchanged', async () => {

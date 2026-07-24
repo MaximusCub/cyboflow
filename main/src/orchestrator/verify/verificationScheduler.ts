@@ -1812,6 +1812,10 @@ export class VerificationScheduler {
         artifactsDir: this.artifactsDirResolver(row.run_id),
         verifyPort: servesPort ? leasedPort : null,
         verifyDriverPort: leasedPort + 1,
+        // Thread the effective deadline into the query boundary so its internal
+        // deadline matches this method's abort timer — a task-supplied timeoutMs
+        // above the query default is honored instead of silently cut to 10 min.
+        timeoutMs: this.agentDeadlineMs(task),
         signal: controller.signal,
       };
 

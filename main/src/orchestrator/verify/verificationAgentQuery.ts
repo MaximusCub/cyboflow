@@ -22,7 +22,12 @@ import { resolveClaudeExecutablePath } from '../../services/panels/claude/claude
 import type { LoggerLike } from '../types';
 import { VerificationAgentQueryError, type VerificationAgentQueryFn } from './verificationAgentRunner';
 
-/** Default per-deployment deadline (10 min, §5.4 step 6). The scheduler's per-request deadline is the outer bound. */
+/**
+ * Default per-deployment deadline (10 min, §5.4 step 6), used only when the request
+ * carries no `timeoutMs`. The scheduler threads its effective per-request deadline
+ * (task.timeoutMs capped by its ceiling) through `VerificationAgentQueryArgs.timeoutMs`,
+ * so an extended task deadline is honored here instead of being cut to this default.
+ */
 export const VERIFICATION_AGENT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
@@ -289,8 +294,11 @@ export function makeVerificationAgentQuery(
   logger?: LoggerLike,
   timeoutMs: number = VERIFICATION_AGENT_TIMEOUT_MS,
 ): VerificationAgentQueryFn {
-  return async ({ prompt, systemPrompt, cwd, model, allowedTools, env, signal }) => {
-    const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
+  return async ({ prompt, systemPrompt, cwd, model, allowedTools, env, timeoutMs: requestTimeoutMs, signal }) => {
+    // The scheduler's effective per-request deadline wins over the module default
+    // (adversarial-review fix) — else a task deadline above 10 min is silently cut.
+    const effectiveTimeoutMs = requestTimeoutMs ?? timeoutMs;
+    const { controller, didTimeOut, cleanup } = makeDeadline(effectiveTimeoutMs, signal);
     const acc = createTranscriptAccumulator();
     try {
       const query = await loadSdkQuery();
@@ -323,16 +331,16 @@ export function makeVerificationAgentQuery(
           structured = msg.structured_output ?? null;
         }
       }
-      if (didTimeOut()) throw new Error(`verification agent query timed out after ${timeoutMs}ms`);
+      if (didTimeOut()) throw new Error(`verification agent query timed out after ${effectiveTimeoutMs}ms`);
       return { structured, transcript: acc.text() };
     } catch (err) {
       const message = didTimeOut()
-        ? `verification agent query timed out after ${timeoutMs}ms`
+        ? `verification agent query timed out after ${effectiveTimeoutMs}ms`
         : err instanceof Error
           ? err.message
           : String(err);
       logger?.warn('[verificationAgentQuery] structured query failed', { error: message });
-      throw new VerificationAgentQueryError(message, acc.text());
+      throw new VerificationAgentQueryError(message, acc.text(), didTimeOut());
     } finally {
       cleanup();
     }

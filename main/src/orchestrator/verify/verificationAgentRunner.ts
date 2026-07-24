@@ -44,6 +44,7 @@ import {
 import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
 import { providerForRuntime, type AgentProvider } from '../../../../shared/types/agentRuntime';
+import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
 import type { EffectiveAgent } from '../agents/effectiveAgents';
 import {
   provisionSnapshot,
@@ -81,6 +82,13 @@ export interface VerificationAgentQueryArgs {
   allowedTools: string[];
   /** The VERIFY_* env the agent's Bash needs (merged onto process.env by the production impl). */
   env: Record<string, string>;
+  /**
+   * The scheduler's effective per-request deadline (adversarial-review fix). When
+   * present the query uses THIS for its internal deadline instead of its own
+   * default — so a task-supplied `timeoutMs` above the query default is honored
+   * rather than silently cut to 10 minutes.
+   */
+  timeoutMs?: number;
   /** Deadline/cancel signal. */
   signal?: AbortSignal;
 }
@@ -115,10 +123,19 @@ export interface VerificationAgentQueryFn {
  */
 export class VerificationAgentQueryError extends Error {
   readonly transcript: string | null;
-  constructor(message: string, transcript: string | null) {
+  /**
+   * True when the query's INTERNAL deadline fired (adversarial-review fix): the
+   * runner maps a timed-out deploy to the terminal `timeout` status instead of the
+   * fail-open `skipped` bucket, so a deadline expiry is not misreported as an
+   * infra skip. A caller-signal abort is classified by the runner's own
+   * `controller.signal.aborted` check, not this flag.
+   */
+  readonly timedOut: boolean;
+  constructor(message: string, transcript: string | null, timedOut = false) {
     super(message);
     this.name = 'VerificationAgentQueryError';
     this.transcript = transcript;
+    this.timedOut = timedOut;
   }
 }
 
@@ -158,6 +175,13 @@ export interface VerificationAgentRequest {
   verifyPort: number | null;
   /** The CDP port for the bundled driver (VERIFY_DRIVER_PORT) — always present. */
   verifyDriverPort: number;
+  /**
+   * The scheduler's effective per-request deadline in ms (`agentDeadlineMs`:
+   * task.timeoutMs capped by the ceiling, else the default). Threaded into the
+   * query so its internal deadline matches — absent (older callers/fakes) the
+   * query falls back to its own default.
+   */
+  timeoutMs?: number;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -370,19 +394,31 @@ export function resolveVerifyProvider(resolved: ResolvedVerifyAgent): AgentProvi
 }
 
 /**
+ * Normalize one Codex model selection exactly like the standard spawn seam
+ * (`resolveAgentModelAlias('codex', …)` in agentModelContext — adversarial-review
+ * fix): the persisted picker sentinel `'auto'` (any case), `'default'`, blanks, and
+ * a cross-family Claude id all mean "no explicit model" — forwarding `'auto'`
+ * verbatim to `turn/start` breaks the deployment.
+ */
+function normalizeCodexModelSelection(value: string | null | undefined): string | undefined {
+  const normalized = normalizeAgentModelSelection('codex', value);
+  if (!normalized || normalized.toLowerCase() === 'auto') return undefined;
+  return normalized;
+}
+
+/**
  * The CODEX branch model (§5.4 step 1), reached when {@link resolveVerifyProvider}
  * returns `codex`. A pinned `agent.codexModel` wins; else the run model when the run
- * itself is Codex and the model is a non-empty trimmed string; else `undefined` — the
- * Codex query then resolves the account's default model.
+ * itself is Codex; else `undefined` — the Codex query then resolves the account's
+ * default model. Both sources pass through {@link normalizeCodexModelSelection}, so
+ * an `'auto'`/`'default'` sentinel (or a cross-family id) falls through rather than
+ * reaching the query verbatim.
  */
 export function resolveVerifyCodexModel(resolved: ResolvedVerifyAgent): string | undefined {
   const { agent, runProvider, runModel } = resolved;
-  if (typeof agent.codexModel === 'string' && agent.codexModel.trim().length > 0) {
-    return agent.codexModel;
-  }
-  if (runProvider === 'codex' && typeof runModel === 'string' && runModel.trim().length > 0) {
-    return runModel;
-  }
+  const pinned = normalizeCodexModelSelection(agent.codexModel);
+  if (pinned) return pinned;
+  if (runProvider === 'codex') return normalizeCodexModelSelection(runModel);
   return undefined;
 }
 
@@ -703,6 +739,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           model,
           allowedTools: [...VERIFY_AGENT_ALLOWED_TOOLS],
           env,
+          ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
           signal: controller.signal,
         });
         // Write the transcript BEFORE report validation, so an invalid-report or
@@ -716,6 +753,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
         if (controller.signal.aborted) {
           return { status: 'timeout', errorMessage: 'deadline exceeded during deploy', fileNames: [] };
+        }
+        // A query-INTERNAL deadline expiry is a real timeout, not an infra skip
+        // (adversarial-review fix): report it as the terminal `timeout` status.
+        if (err instanceof VerificationAgentQueryError && err.timedOut) {
+          return { status: 'timeout', errorMessage: err.message, fileNames: [] };
         }
         const message = err instanceof Error ? err.message : String(err);
         logger?.warn('[VerificationAgentRunner] agent query failed', { runId: req.runId, error: message });

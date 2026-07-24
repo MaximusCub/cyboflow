@@ -179,6 +179,9 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
         summary: 'verify the widget',
         behaviors: [{ id: 'b1', description: 'renders', expected: 'visible' }],
         serve: { cmd: 'pnpm dev --port ${PORT}' },
+        // Above the 10-min query default, below the 20-min ceiling — proves the
+        // extended deadline threads through to the runner request.
+        timeoutMs: 900_000,
       },
       snapshotSha: 'sha-1',
     });
@@ -194,6 +197,9 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     expect(req.snapshotSha).toBe('sha-1');
     expect(req.verifyPort).not.toBeNull();
     expect(req.verifyDriverPort).toBe((req.verifyPort as number) + 1);
+    // The scheduler's effective deadline (task.timeoutMs capped by the ceiling)
+    // rides on the request so the query boundary uses the SAME bound.
+    expect(req.timeoutMs).toBe(900_000);
 
     // Terminal status + report_json persisted in the SAME row.
     const row = db

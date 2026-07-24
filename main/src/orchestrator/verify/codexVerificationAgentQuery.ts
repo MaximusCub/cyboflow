@@ -234,6 +234,34 @@ function toJsonValue(value: unknown): AppServerJsonValue {
   throw new Error('Codex verification output schema is not JSON-serializable');
 }
 
+/**
+ * Undo the strict-schema nullability promotion on the parsed report
+ * (adversarial-review fix): `toStrictOutputSchema` makes every OPTIONAL
+ * VerificationReportV1 property required-but-nullable, so a schema-compliant
+ * Codex report carries `buildLogExcerpt: null` (on any non-build outcome) and
+ * `issues[].fileName: null` — which `normalizeVerificationReportV1` rejects
+ * ("expected string"), collapsing every valid Codex report into the fail-open
+ * `skipped` bucket. Strip exactly those nulls back to ABSENT here so the shared
+ * normalizer stays strict for both runtimes. COUPLING: the optional properties of
+ * VERIFICATION_REPORT_JSON_SCHEMA are `buildLogExcerpt` and `issues[].fileName`;
+ * anyone adding an optional field to the schema must extend this stripper (the
+ * boundary round-trip test guards the current pair). Exported for unit tests.
+ */
+export function stripStrictSchemaNulls(structured: unknown): unknown {
+  if (!isRecord(structured)) return structured;
+  const out: Record<string, unknown> = { ...structured };
+  if (out.buildLogExcerpt === null) delete out.buildLogExcerpt;
+  if (Array.isArray(out.issues)) {
+    out.issues = out.issues.map((issue) => {
+      if (!isRecord(issue) || issue.fileName !== null) return issue;
+      const rest: Record<string, unknown> = { ...issue };
+      delete rest.fileName;
+      return rest;
+    });
+  }
+  return out;
+}
+
 function parseModels(value: unknown): AppServerModel[] {
   if (!isRecord(value) || !Array.isArray(value.data)) return [];
   const models: AppServerModel[] = [];
@@ -349,6 +377,10 @@ export function makeCodexVerificationAgentQuery(
       );
     }
 
+    // The scheduler's effective per-request deadline wins over the module default
+    // (adversarial-review fix) — else a task deadline above 10 min is silently cut.
+    const effectiveTimeoutMs = args.timeoutMs ?? timeoutMs;
+
     const acc = createCodexVerifyTranscriptAccumulator();
     const terminal = createDeferred<string>();
     void terminal.promise.catch(() => undefined);
@@ -394,7 +426,7 @@ export function makeCodexVerificationAgentQuery(
       }
     };
     turnSession = new CodexAppServerTurnSession(client, { onEvent: handleTurnEvent });
-    const deadline = makeDeadline(timeoutMs, args.signal);
+    const deadline = makeDeadline(effectiveTimeoutMs, args.signal);
 
     try {
       client.start();
@@ -476,7 +508,7 @@ export function makeCodexVerificationAgentQuery(
           acc.text(),
         );
       }
-      return { structured, transcript: acc.text() };
+      return { structured: stripStrictSchemaNulls(structured), transcript: acc.text() };
     } catch (error) {
       if ((deadline.didTimeOut() || deadline.didAbort()) && turnSession.activeTurnId) {
         try {
@@ -490,7 +522,9 @@ export function makeCodexVerificationAgentQuery(
       if (error instanceof VerificationAgentQueryError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       logger?.warn('[codexVerificationAgentQuery] structured query failed', { error: message });
-      throw new VerificationAgentQueryError(message, acc.text());
+      // Flag a deadline expiry so the runner classifies it as `timeout`, not an
+      // infra `skipped` (adversarial-review fix).
+      throw new VerificationAgentQueryError(message, acc.text(), deadline.didTimeOut());
     } finally {
       deadline.cleanup();
       await client.stop();

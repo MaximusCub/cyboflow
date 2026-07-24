@@ -13,10 +13,12 @@ import type {
 } from '../../../services/panels/codex/appServer/client';
 import type { AppServerInitializeParams } from '../../../services/panels/codex/appServer/protocol';
 import type { TurnSessionEvent } from '../../../services/panels/codex/appServer/turnSession';
+import { normalizeVerificationReportV1 } from '../../../../../shared/types/visualVerification';
 import { VerificationAgentQueryError } from '../verificationAgentRunner';
 import {
   makeCodexVerificationAgentQuery,
   createCodexVerifyTranscriptAccumulator,
+  stripStrictSchemaNulls,
   type CodexVerifyAppServerClient,
 } from '../codexVerificationAgentQuery';
 
@@ -201,6 +203,45 @@ describe('makeCodexVerificationAgentQuery', () => {
     expect(buildLog.type).toContain('null');
   });
 
+  it('strips strict-schema nulls so a schema-compliant Codex pass survives report normalization', async () => {
+    // A STRICT-schema-compliant report: the model is FORCED to emit the
+    // optional-made-nullable keys, so a normal pass carries these nulls.
+    const strictReport = {
+      ...(validReport() as Record<string, unknown>),
+      buildLogExcerpt: null,
+      issues: [
+        { severity: 'low', description: 'nit', fileName: null },
+        { severity: 'high', description: 'real', fileName: 's.png' },
+      ],
+    };
+    const factory = (options: CodexAppServerClientOptions): FakeClient =>
+      new FakeClient(options, (method, _params, current) => {
+        if (method === 'account/read') return accountResponse();
+        if (method === 'model/list') return modelResponse();
+        if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+        if (method === 'turn/start') {
+          emitSuccessTurn(current, JSON.stringify(strictReport));
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`unexpected method ${method}`);
+      });
+    const query = makeCodexVerificationAgentQuery(undefined, undefined, {
+      clientFactory: factory,
+      resolveExecutable: executable,
+    });
+
+    const outcome = await query(baseArgs);
+    const structured = asRecord(outcome.structured);
+    expect('buildLogExcerpt' in structured).toBe(false);
+    const issues = structured.issues as Array<Record<string, unknown>>;
+    expect('fileName' in issues[0]!).toBe(false);
+    expect(issues[1]!.fileName).toBe('s.png');
+    // The boundary-to-runner round trip: the stripped report passes the SAME
+    // strict normalizer the runner applies (this was the fail-open-skip bug).
+    const normalized = normalizeVerificationReportV1(outcome.structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+  });
+
   it('merges the VERIFY_* env from args and prepends the codex PATH dir', async () => {
     const clients: FakeClient[] = [];
     const factory = (options: CodexAppServerClientOptions): FakeClient => {
@@ -338,11 +379,36 @@ describe('makeCodexVerificationAgentQuery', () => {
     const error = await query(baseArgs).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(VerificationAgentQueryError);
     expect((error as VerificationAgentQueryError).message).toMatch(/timed out/i);
+    // Classified as a real deadline expiry so the runner reports `timeout`, not `skipped`.
+    expect((error as VerificationAgentQueryError).timedOut).toBe(true);
     expect((error as VerificationAgentQueryError).transcript).toContain('npm run build');
     const client = clients[0];
     if (!client) throw new Error('fake client was not created');
     expect(client.requests.some((r) => r.method === 'turn/interrupt')).toBe(true);
     expect(client.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors args.timeoutMs over the constructor default for the internal deadline", async () => {
+    const factory = (options: CodexAppServerClientOptions): FakeClient =>
+      new FakeClient(options, (method) => {
+        if (method === 'account/read') return accountResponse();
+        if (method === 'model/list') return modelResponse();
+        if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+        // turn/start returns but the turn NEVER completes — only the deadline ends it.
+        if (method === 'turn/start') return { turn: { id: 'turn-1' } };
+        if (method === 'turn/interrupt') return {};
+        throw new Error(`unexpected method ${method}`);
+      });
+    // Constructor default is a minute; the request's 5ms deadline must win.
+    const query = makeCodexVerificationAgentQuery(undefined, 60_000, {
+      clientFactory: factory,
+      resolveExecutable: executable,
+    });
+
+    const error = await query({ ...baseArgs, timeoutMs: 5 }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(VerificationAgentQueryError);
+    expect((error as VerificationAgentQueryError).message).toContain('timed out after 5ms');
+    expect((error as VerificationAgentQueryError).timedOut).toBe(true);
   });
 
   it('throws VerificationAgentQueryError on a malformed terminal agent message', async () => {
@@ -392,6 +458,22 @@ describe('makeCodexVerificationAgentQuery', () => {
     const error = await query(baseArgs).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(VerificationAgentQueryError);
     expect((error as VerificationAgentQueryError).message).toContain('Codex ChatGPT account is logged out');
+  });
+});
+
+describe('stripStrictSchemaNulls', () => {
+  it('preserves a real buildLogExcerpt string and non-null fileNames', () => {
+    const report = {
+      outcome: 'build_failed',
+      buildLogExcerpt: 'tsc exploded',
+      issues: [{ severity: 'high', description: 'broken', fileName: 'log.png' }],
+    };
+    expect(stripStrictSchemaNulls(report)).toEqual(report);
+  });
+
+  it('passes a non-record value through untouched', () => {
+    expect(stripStrictSchemaNulls(null)).toBeNull();
+    expect(stripStrictSchemaNulls('not a report')).toBe('not a report');
   });
 });
 
