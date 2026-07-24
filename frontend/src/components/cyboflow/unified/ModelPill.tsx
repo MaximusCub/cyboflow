@@ -6,6 +6,7 @@ import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
+import { useClaudeModelCatalog } from '../../../stores/claudeModelCatalogStore';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 
 /**
@@ -87,15 +88,24 @@ export function ModelPill({
   const [open, setOpen] = useState(false);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const { options: codexCatalogOptions } = useCodexModelCatalog(agentProvider === 'codex');
+  // Dynamic Claude catalog: the "Other models" the login can select, appended
+  // below the four pinned families. Only fetched for a Claude picker.
+  const { options: claudeCatalogOptions } = useClaudeModelCatalog(agentProvider !== 'codex');
   const active = currentModel ?? 'auto';
   const codexOptions: ReadonlyArray<ModelOption> = codexCatalogOptions.map((option) => ({
     ...option,
     context: null,
   }));
   const options = agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
+  // A dynamic (non-pinned) Claude id displays its SDK label; a pinned alias falls
+  // through to modelDisplayLabel (which knows the curated "Opus 5 · 1M" form).
+  const claudeDynamicLabel =
+    agentProvider !== 'codex'
+      ? claudeCatalogOptions.find((option) => option.id === active)?.label
+      : undefined;
   const label = agentProvider === 'codex'
     ? (codexOptions.find((option) => option.id === active)?.label ?? modelDisplayLabel(active, agentProvider))
-    : modelDisplayLabel(active, agentProvider);
+    : (claudeDynamicLabel ?? modelDisplayLabel(active, agentProvider));
 
   const handleSelect = async (model: string): Promise<void> => {
     setOpen(false);
@@ -129,6 +139,29 @@ export function ModelPill({
       variant: 'default',
     };
   });
+
+  // "Other models" — the dynamic Claude catalog below the pinned four. A disabled,
+  // non-clickable header row acts as the section divider (Dropdown has no separator).
+  if (agentProvider !== 'codex' && claudeCatalogOptions.length > 0) {
+    items.push({
+      id: '__claude_other_models_header',
+      label: 'Other models',
+      description: 'Also available to your Claude Code login',
+      disabled: true,
+      variant: 'default',
+    });
+    for (const option of claudeCatalogOptions) {
+      items.push({
+        id: option.id,
+        label: option.label,
+        description: option.description || option.id,
+        icon: Cpu,
+        iconColor: 'text-text-secondary',
+        onClick: () => void handleSelect(option.id),
+        variant: 'default',
+      });
+    }
+  }
 
   const trigger = (
     <Pill

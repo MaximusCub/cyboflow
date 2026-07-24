@@ -2,10 +2,14 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { ModelAvailabilityService } from '../services/modelAvailabilityService';
 import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
-import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
 
 type ModelCatalogResponse =
   | { success: true; data: CodexModelCatalog }
+  | { success: false; error: string };
+
+type ClaudeModelCatalogResponse =
+  | { success: true; data: ClaudeModelCatalog }
   | { success: false; error: string };
 
 /**
@@ -31,6 +35,25 @@ export function registerModelHandlers(ipcMain: IpcMain, services: AppServices): 
         return {
           success: true,
           data: await services.codexSdkManager.getCodexModelCatalog(),
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+  // Dynamic Claude catalog — the "Other models" section below the pinned four.
+  // getCatalog() never throws (a failed probe resolves to an empty list), but the
+  // envelope is kept for parity with the Codex handler and belt-and-suspenders.
+  ipcMain.handle(
+    'models:get-claude-catalog',
+    async (): Promise<ClaudeModelCatalogResponse> => {
+      try {
+        return {
+          success: true,
+          data: await services.claudeModelCatalogService.getCatalog(),
         };
       } catch (error) {
         return {

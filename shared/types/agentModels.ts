@@ -24,6 +24,29 @@ export interface CodexModelCatalog {
   defaultModel: string | null;
 }
 
+/**
+ * Renderer-safe projection of one Agent-SDK `ModelInfo` row — the DYNAMIC Claude
+ * catalog fetched via the bundled SDK's `supportedModels()` control request
+ * (authenticated by the user's own Claude Code login, no API key). These populate
+ * the "Other models" section BELOW the four curated/pinned families in the picker.
+ */
+export interface ClaudeModelOption {
+  /** Model id to persist/spawn (`ModelInfo.value`). */
+  id: string;
+  /** Canonical wire id this row resolves to (`ModelInfo.resolvedModel`) — used to
+   * de-dupe a dynamic row against the pinned families (e.g. `claude-opus-5`). */
+  resolvedModel?: string;
+  /** Human-readable label (`ModelInfo.displayName`). */
+  label: string;
+  /** Capability tagline (`ModelInfo.description`). */
+  description: string;
+}
+
+export interface ClaudeModelCatalog {
+  models: ClaudeModelOption[];
+  defaultModel: string | null;
+}
+
 const CLAUDE_MODEL_ALIAS_SET = new Set<string>(CLAUDE_MODEL_ALIASES);
 
 export function isClaudeModelFamily(model: string): boolean {

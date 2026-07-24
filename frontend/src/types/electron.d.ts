@@ -13,7 +13,7 @@ import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../../shared/types/artifacts';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
-import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
@@ -406,6 +406,7 @@ interface ElectronAPI {
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
     getCodexCatalog: () => Promise<IPCResponse<CodexModelCatalog>>;
+    getClaudeCatalog: () => Promise<IPCResponse<ClaudeModelCatalog>>;
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
     onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => () => void;
   };

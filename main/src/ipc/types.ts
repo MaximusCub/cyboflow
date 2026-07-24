@@ -11,6 +11,7 @@ import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
 import type { CodexSdkManager } from '../services/panels/codex/codexSdkManager';
+import type { ClaudeModelCatalogService } from '../services/claudeModelCatalogService';
 import type { CodexPtyManager } from '../services/panels/codex/codexPtyManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
@@ -39,6 +40,8 @@ export interface AppServices {
   codexSdkManager: CodexSdkManager;
   /** Interactive Codex PTY runtime for quick sessions only. */
   codexPtyManager: CodexPtyManager;
+  /** Dynamic Claude model catalog (SDK `supportedModels()`), for the picker's "Other models" section. */
+  claudeModelCatalogService: ClaudeModelCatalogService;
   /**
    * Live-session close-out seams for QUICK sessions (mirrors the RelayDeps
    * closures wired in index.ts). Both take the session's sentinel `__quick__`

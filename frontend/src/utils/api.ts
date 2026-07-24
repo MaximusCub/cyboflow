@@ -6,7 +6,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
-import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
@@ -637,6 +637,14 @@ export class API {
         throw new Error('Electron API not available');
       }
       return window.electronAPI.models.getCodexCatalog();
+    },
+    /** Extra Claude models the signed-in login can select, below the pinned four.
+     * Fetched via the SDK's supportedModels() — empty off Electron / older bridge. */
+    async getClaudeCatalog(): Promise<IPCResponse<ClaudeModelCatalog>> {
+      if (!isElectron() || !window.electronAPI.models?.getClaudeCatalog) {
+        return { success: true, data: { models: [], defaultModel: null } };
+      }
+      return window.electronAPI.models.getClaudeCatalog();
     },
     /** Subscribe to live availability flips; returns an unsubscribe fn. No-op off Electron. */
     onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {

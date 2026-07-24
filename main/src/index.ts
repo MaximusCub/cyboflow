@@ -32,6 +32,7 @@ import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlay
 import { bareModelId } from './services/panels/claude/modelContext';
 import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
 import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
+import { ClaudeModelCatalogService } from './services/claudeModelCatalogService';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
@@ -2732,6 +2733,7 @@ async function initializeServices() {
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
     codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
+    claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
     // so a quick session's persistent process is never orphaned — interactive

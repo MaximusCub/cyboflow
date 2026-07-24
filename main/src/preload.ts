@@ -7,7 +7,7 @@ import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
-import type { CodexModelCatalog } from '../../shared/types/agentModels';
+import type { CodexModelCatalog, ClaudeModelCatalog } from '../../shared/types/agentModels';
 import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import {
@@ -453,6 +453,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('models:get-availability'),
     getCodexCatalog: (): Promise<IPCResponse<CodexModelCatalog>> =>
       ipcRenderer.invoke('models:get-codex-catalog'),
+    getClaudeCatalog: (): Promise<IPCResponse<ClaudeModelCatalog>> =>
+      ipcRenderer.invoke('models:get-claude-catalog'),
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => {
       const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
       ipcRenderer.on('model-availability-changed', subscription);

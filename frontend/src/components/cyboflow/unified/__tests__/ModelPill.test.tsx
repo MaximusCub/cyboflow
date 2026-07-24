@@ -2,20 +2,29 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ModelPill, MODEL_OPTIONS } from '../ModelPill';
+import { _resetClaudeModelCatalogForTesting } from '../../../../stores/claudeModelCatalogStore';
 
 const mockSetModel = vi.fn();
 const mockGetCodexCatalog = vi.fn();
+const mockGetClaudeCatalog = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     claudePanels: { setModel: (...args: unknown[]) => mockSetModel(...args) },
-    models: { getCodexCatalog: (...args: unknown[]) => mockGetCodexCatalog(...args) },
+    models: {
+      getCodexCatalog: (...args: unknown[]) => mockGetCodexCatalog(...args),
+      getClaudeCatalog: (...args: unknown[]) => mockGetClaudeCatalog(...args),
+    },
   },
 }));
 
 describe('ModelPill', () => {
   beforeEach(() => {
+    _resetClaudeModelCatalogForTesting();
     mockSetModel.mockReset();
     mockSetModel.mockResolvedValue({ success: true });
+    // Default: no dynamic Claude models — pinned-only picker (existing tests).
+    mockGetClaudeCatalog.mockReset();
+    mockGetClaudeCatalog.mockResolvedValue({ success: true, data: { models: [], defaultModel: null } });
     mockGetCodexCatalog.mockResolvedValue({
       success: true,
       data: {
@@ -88,5 +97,38 @@ describe('ModelPill', () => {
       'haiku',
       'auto',
     ]);
+  });
+
+  it('appends the dynamic "Other models" section below the pinned four and persists the concrete id', async () => {
+    mockGetClaudeCatalog.mockResolvedValue({
+      success: true,
+      data: {
+        models: [
+          {
+            id: 'claude-opus-4-7',
+            resolvedModel: 'claude-opus-4-7',
+            label: 'Opus 4.7',
+            description: 'Previous-gen Opus',
+          },
+        ],
+        defaultModel: null,
+      },
+    });
+    const onChange = vi.fn();
+    render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={onChange} />);
+    fireEvent.click(screen.getByText('Sonnet 5 · 1M')); // open the dropdown
+    // The section header + the fetched row appear once the catalog resolves.
+    expect(await screen.findByText('Other models')).toBeInTheDocument();
+    fireEvent.click(await screen.findByText('Opus 4.7'));
+    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'claude-opus-4-7'));
+    expect(onChange).toHaveBeenCalledWith('claude-opus-4-7');
+  });
+
+  it('shows only the pinned four when the dynamic catalog is empty', async () => {
+    render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={vi.fn()} />);
+    fireEvent.click(screen.getByText('Sonnet 5 · 1M'));
+    // Let the (empty) catalog resolve, then assert no "Other models" divider.
+    await waitFor(() => expect(mockGetClaudeCatalog).toHaveBeenCalled());
+    expect(screen.queryByText('Other models')).toBeNull();
   });
 });
