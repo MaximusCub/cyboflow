@@ -102,6 +102,15 @@ export interface SessionSummarySchedulerDeps {
   isTurnInFlight: (sessionId: string) => boolean;
   /** True while an AskUserQuestion / permission gate is open for the session (plan §2.3): drop. */
   hasOpenGate: (sessionId: string) => boolean;
+  /**
+   * OPTIONAL pre-read backfill hook (PTY follow-up). When present it runs inside
+   * the queued async section, AFTER the sync gates and BEFORE the watermark read,
+   * to ingest an interactive session's Claude-CLI JSONL transcript into
+   * `conversation_messages` (SDK sessions get an immediately-resolving no-op). A
+   * rejected promise is logged and swallowed — an ingest outage must never kill
+   * summaries for SDK sessions or previously-ingested content.
+   */
+  ingestTranscript?: (sessionId: string) => Promise<void>;
   /** Injectable clock (defaults to `Date.now`) so fake-timer tests control "now". */
   now?: () => number;
   logger?: LoggerLike;
@@ -193,9 +202,16 @@ export function makeSessionSummaryScheduler(
   }
 
   /**
-   * Run the full gating stack (§2) synchronously; if it survives, enqueue the
-   * async summarize+persist behind the global cap-1 queue. `armedAt` is set
-   * only for the idle-timer path (enables the race guard).
+   * Run the SYNCHRONOUS gates (§2.8 eligibility, §2.3 state + race guard, §2.6
+   * suspension, §2.5 per-session dedupe); if they survive, mark the session
+   * in-flight and enqueue the async body behind the global cap-1 queue. `armedAt`
+   * is set only for the idle-timer path (enables the race guard).
+   *
+   * The watermark read + sitting segmentation + retry cooldown live in `runFire`
+   * (the async body), NOT here, so an optional transcript-ingest pre-read (the
+   * PTY follow-up) can backfill `conversation_messages` BEFORE the delta is
+   * computed. The in-flight dedupe stays synchronous and BEFORE the enqueue so
+   * two triggers can never double-queue the same session.
    */
   function fire(sessionId: string, reason: SessionSummaryTrigger, armedAt: number | undefined): void {
     if (disposed) return;
@@ -230,45 +246,78 @@ export function makeSessionSummaryScheduler(
 
     // §2.6 suspension — a session with too many consecutive failures is parked
     // until app restart (the in-memory record is gone on the next boot).
-    const failure = failures.get(sessionId);
-    if (failure?.suspended) return;
+    if (failures.get(sessionId)?.suspended) return;
 
-    // §2.4 content watermark + sitting segmentation.
-    const previous = deps.db.getSessionSummary(sessionId);
-    const watermark = previous?.last_turn_id ?? 0;
-    const previousSummary = previous?.summary ?? '';
-    const rows = deps.db.getConversationMessagesAfter(sessionId, watermark);
-    if (rows.length === 0) return; // empty delta → silent no-op
-
-    const messages: SummaryInputMessage[] = rows.map((row) => ({
-      id: row.id,
-      role: row.message_type,
-      content: row.content,
-      timestamp: row.timestamp,
-    }));
-    const segments = segmentIntoSittings(messages, SESSION_SUMMARY_IDLE_MS);
-    const { newWatermark, billableSegments } = computeWatermarkStop(segments);
-    // Materiality floor: no assistant-bearing segment → nothing to bill, watermark unchanged.
-    if (billableSegments.length === 0) return;
-
-    // §2.6 retry cooldown — keyed by the target watermark. A new turn edge moves
-    // `newWatermark` and so bypasses the cooldown automatically.
-    if (
-      failure &&
-      failure.attemptedWatermark === newWatermark &&
-      now() - failure.lastAttemptAt < SESSION_SUMMARY_RETRY_COOLDOWN_MS
-    ) {
-      return;
-    }
-
-    // §2.5 per-session dedupe (a refire while a call is in flight no-ops).
+    // §2.5 per-session dedupe (a refire while a call is in flight no-ops) — kept
+    // synchronous and BEFORE the enqueue so ingest+watermark-read can move async
+    // without ever double-queuing the session.
     if (inFlight.has(sessionId)) return;
     inFlight.add(sessionId);
 
-    // §2.5 global cap of 1 — chain the async work; the sync gates above already ran.
-    queue = queue.then(() =>
-      runSummarize(sessionId, reason, previousSummary, billableSegments, newWatermark),
-    );
+    // §2.5 global cap of 1 — chain the async body; the sync gates above already ran.
+    queue = queue.then(() => runFire(sessionId, reason));
+  }
+
+  /**
+   * The async body behind the cap-1 queue: optional transcript-ingest pre-read →
+   * §2.4 watermark read + sitting segmentation → §2.6 retry cooldown → the Haiku
+   * call + persist. Owns the in-flight release for EVERY exit path (empty delta,
+   * materiality floor, cooldown skip, success, error).
+   */
+  async function runFire(sessionId: string, reason: SessionSummaryTrigger): Promise<void> {
+    try {
+      if (disposed) return;
+
+      // PTY follow-up: backfill the interactive session's transcript into
+      // conversation_messages before the watermark read. A rejected promise is
+      // logged and swallowed — continue on whatever rows are already in the DB
+      // (an SDK session's ingest hook is an immediately-resolving no-op).
+      if (deps.ingestTranscript) {
+        try {
+          await deps.ingestTranscript(sessionId);
+        } catch (err) {
+          deps.logger?.warn('[sessionSummaryScheduler] transcript ingest failed', {
+            sessionId,
+            reason,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (disposed) return;
+      }
+
+      // §2.4 content watermark + sitting segmentation.
+      const previous = deps.db.getSessionSummary(sessionId);
+      const watermark = previous?.last_turn_id ?? 0;
+      const previousSummary = previous?.summary ?? '';
+      const rows = deps.db.getConversationMessagesAfter(sessionId, watermark);
+      if (rows.length === 0) return; // empty delta → silent no-op
+
+      const messages: SummaryInputMessage[] = rows.map((row) => ({
+        id: row.id,
+        role: row.message_type,
+        content: row.content,
+        timestamp: row.timestamp,
+      }));
+      const segments = segmentIntoSittings(messages, SESSION_SUMMARY_IDLE_MS);
+      const { newWatermark, billableSegments } = computeWatermarkStop(segments);
+      // Materiality floor: no assistant-bearing segment → nothing to bill, watermark unchanged.
+      if (billableSegments.length === 0) return;
+
+      // §2.6 retry cooldown — keyed by the post-ingest target watermark. A new
+      // turn edge moves `newWatermark` and so bypasses the cooldown automatically.
+      const failure = failures.get(sessionId);
+      if (
+        failure &&
+        failure.attemptedWatermark === newWatermark &&
+        now() - failure.lastAttemptAt < SESSION_SUMMARY_RETRY_COOLDOWN_MS
+      ) {
+        return;
+      }
+
+      await runSummarize(sessionId, reason, previousSummary, billableSegments, newWatermark);
+    } finally {
+      inFlight.delete(sessionId);
+    }
   }
 
   async function runSummarize(
@@ -310,9 +359,9 @@ export function makeSessionSummaryScheduler(
         consecutiveFailures,
         error: err instanceof Error ? err.message : String(err),
       });
-    } finally {
-      inFlight.delete(sessionId);
     }
+    // NOTE: the in-flight release lives in `runFire`'s finally (it owns every
+    // exit path), so this function must NOT touch `inFlight`.
   }
 
   function dispose(): void {

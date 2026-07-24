@@ -456,4 +456,82 @@ describe('sessionSummaryScheduler', () => {
     await flush();
     expect(summarize).not.toHaveBeenCalled();
   });
+
+  describe('ingestTranscript pre-read hook (PTY follow-up)', () => {
+    it('runs ingestTranscript before the watermark read, so backfilled rows are summarized', async () => {
+      // The db starts with an EMPTY delta; ingest backfills the rows the watermark
+      // read then picks up. This proves ingest runs before the read.
+      const messages: SchedulerConversationMessage[] = [];
+      const { db, persistCalls } = makeFakeDb({ session: eligibleSession(), messages });
+      const summarize = makeSummarize();
+      const ingestTranscript = vi.fn(async () => {
+        messages.push(convMsg(1, 'user', 0), convMsg(2, 'assistant', 1000));
+      });
+      const scheduler = makeSessionSummaryScheduler(makeDeps({ summarize, ingestTranscript }, db));
+
+      scheduler.maybeSummarizeNow(SID, 'lazy-catchup');
+      await flush();
+      await flush();
+
+      expect(ingestTranscript).toHaveBeenCalledTimes(1);
+      expect(summarize).toHaveBeenCalledTimes(1);
+      expect(persistCalls).toHaveLength(1);
+      expect(persistCalls[0].lastTurnId).toBe(2);
+
+      // Ordering: ingest was invoked before the delta read.
+      const ingestOrder = ingestTranscript.mock.invocationCallOrder[0];
+      const readOrder = vi.mocked(db.getConversationMessagesAfter).mock.invocationCallOrder[0];
+      expect(ingestOrder).toBeLessThan(readOrder);
+    });
+
+    it('continues to summarize existing rows when ingestTranscript rejects', async () => {
+      const { db, persistCalls } = makeFakeDb({
+        session: eligibleSession(),
+        messages: [convMsg(1, 'user', 0), convMsg(2, 'assistant', 1000)],
+      });
+      const summarize = makeSummarize();
+      const ingestTranscript = vi.fn(async () => {
+        throw new Error('ingest outage');
+      });
+      const scheduler = makeSessionSummaryScheduler(makeDeps({ summarize, ingestTranscript }, db));
+
+      scheduler.maybeSummarizeNow(SID, 'lazy-catchup');
+      await flush();
+      await flush();
+
+      expect(ingestTranscript).toHaveBeenCalledTimes(1);
+      expect(summarize).toHaveBeenCalledTimes(1);
+      expect(persistCalls[0].lastTurnId).toBe(2);
+    });
+
+    it('does not run ingestTranscript when a synchronous gate rejects (disabled)', async () => {
+      const { db } = makeFakeDb({ session: eligibleSession(), messages: [convMsg(2, 'assistant', 0)] });
+      const ingestTranscript = vi.fn(async () => {});
+      const scheduler = makeSessionSummaryScheduler(
+        makeDeps({ isEnabled: () => false, ingestTranscript }, db),
+      );
+
+      scheduler.maybeSummarizeNow(SID, 'lazy-catchup');
+      await flush();
+
+      expect(ingestTranscript).not.toHaveBeenCalled();
+    });
+
+    it('no-ops (no summarize) when ingest backfills nothing and the delta stays empty', async () => {
+      const { db, persistCalls } = makeFakeDb({ session: eligibleSession(), messages: [] });
+      const summarize = makeSummarize();
+      const ingestTranscript = vi.fn(async () => {
+        /* nothing appended */
+      });
+      const scheduler = makeSessionSummaryScheduler(makeDeps({ summarize, ingestTranscript }, db));
+
+      scheduler.maybeSummarizeNow(SID, 'lazy-catchup');
+      await flush();
+      await flush();
+
+      expect(ingestTranscript).toHaveBeenCalledTimes(1);
+      expect(summarize).not.toHaveBeenCalled();
+      expect(persistCalls).toHaveLength(0);
+    });
+  });
 });

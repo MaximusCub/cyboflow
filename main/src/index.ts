@@ -12,6 +12,7 @@ import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
 import { startPerfTracer } from './services/perfTracer';
+import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
@@ -2755,15 +2756,25 @@ async function initializeServices() {
     db: databaseService,
     isEnabled: () => configManager.isSessionSummaryEnabled(),
     summarize: sessionSummarizer,
-    // Turn-in-flight probe: the session's live DB status. 'running'/'pending'
-    // means a turn is active (the same mapping quickSessionListing uses for
-    // 'running'); a warm-idle SDK session rests at a completed/stopped status.
-    // (The manager-level per-panel turn-in-flight state has no public accessor
-    // and lives under services/panels/claude/, which this feature must not touch
-    // — the DB status is the equivalent session-scoped signal.)
+    // Turn-in-flight probe: the session's DB status GATED BY process liveness.
+    // 'running'/'pending' means a turn is nominally active, but that status can go
+    // STALE — a PTY REPL that died without a clean turn-end leaves the session
+    // stuck at 'running' forever, which (with a bare status check) would block
+    // summarization permanently. So when the status says running/pending we
+    // additionally confirm a LIVE process actually backs one of the session's
+    // panels before treating it as in-flight: a genuine mid-turn (either
+    // substrate) still has its panel in the manager's process map and is
+    // correctly blocked; a stale 'running' with nothing alive falls through and
+    // is allowed to summarize. isPanelRunning is a public read-only accessor on
+    // AbstractCliManager (both substrate managers extend it), so this needs no
+    // change under services/panels/claude/.
     isTurnInFlight: (sessionId: string): boolean => {
       const status = databaseService.getSession(sessionId)?.status;
-      return status === 'running' || status === 'pending';
+      if (status !== 'running' && status !== 'pending') return false;
+      const panels = databaseService.getPanelsForSession(sessionId);
+      return panels.some(
+        (p) => interactiveCliManager.isPanelRunning(p.id) || defaultCliManager.isPanelRunning(p.id),
+      );
     },
     // Open-gate probe: the session's chat run has a pending AskUserQuestion /
     // permission gate — assembled from the SAME blocked-set sources as
@@ -2774,6 +2785,16 @@ async function initializeServices() {
       if (QuestionRouter.getInstance().getPending().some((q) => q.runId === runId)) return true;
       if (ApprovalRouter.getInstance().getPending().some((a) => a.runId === runId)) return true;
       return interactiveCliManager.getAwaitingInputRunIds().has(runId);
+    },
+    // PTY pre-read backfill (§ transcript ingest): an interactive session writes
+    // NO conversation_messages of its own — its content lives only as ANSI stdout
+    // in session_outputs — so without this the watermark read always sees an empty
+    // delta for it. For an interactive session, mirror its Claude-CLI JSONL
+    // transcript into conversation_messages before the delta is computed; an SDK
+    // session already streams its rows inline, so this resolves immediately.
+    ingestTranscript: async (sessionId: string): Promise<void> => {
+      if (databaseService.getSession(sessionId)?.substrate !== 'interactive') return;
+      await ingestPtyTranscript({ db: databaseService, logger: cyboflowLogger }, sessionId);
     },
     logger: cyboflowLogger,
   });
