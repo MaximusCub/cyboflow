@@ -99,7 +99,8 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
         `${head} delegate to \`${agent}\` with the task + diff summary (including the files ` +
         `touched). If its \`## Tests\` outcome reports a failing test, loop back to ` +
         `\`${loopbackAgent(targetId, ctx.innerById)}\` (per the loopback + attempt protocol below) ` +
-        `to fix the cause before continuing. Read its final \`TESTS:\` line — on ` +
+        `to fix the cause before continuing — do NOT also record the failing test as a finding; ` +
+        `the loopback IS the response. Read its final \`TESTS:\` line — on ` +
         `\`TESTS: skipped(<reason>)\`, record a **non-blocking finding** via ` +
         `\`cyboflow_report_finding\` (category \`test-infra\` when the reason is missing ` +
         `infrastructure, else \`test-gap\`; name the task ref and the reason), then continue the ` +
@@ -111,9 +112,14 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
         `list, plus any test files write-tests added) so it reviews this task's diff and not other ` +
         `lanes' in-flight work. For each entry in its \`## Findings\`, record a **non-blocking ` +
         `finding** via \`cyboflow_report_finding\` — always passing \`category\` and code ` +
-        `\`locations\` (each \`{ path, line }\`). If it returns a \`## Blocking\` defect, loop back ` +
-        `to \`${loopbackAgent(targetId, ctx.innerById)}\` (per the loopback + attempt protocol ` +
-        `below) to fix it before proceeding.`
+        `\`locations\` (each \`{ path, line }\`). If it returns a \`## Blocking\` defect (or a final ` +
+        `\`REVIEW: BLOCKING\` line), loop back to \`${loopbackAgent(targetId, ctx.innerById)}\` ` +
+        `(per the loopback + attempt protocol below) to fix it before proceeding. Do NOT record a ` +
+        `\`## Blocking\` defect as a finding — blocking or otherwise: the loopback IS the response, ` +
+        `and a finding here would park the run and hand a human a defect the chain is about to fix ` +
+        `itself. (A defect the loopback will NOT fix — a hazard in shared state that must stop the ` +
+        `run now, e.g. a deleted migration or a committed secret about to be swept into a sibling ` +
+        `commit — is the rare exception that IS a blocking finding.)`
       );
     case 'task-verify':
       return (
@@ -121,7 +127,8 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
         `it touched** (same list, so it judges this task's changes only). Read its \`VERDICT\`. On ` +
         `\`FAIL\`, re-delegate \`${loopbackAgent(targetId, ctx.innerById)}\` with its ` +
         `\`## Fix guidance\` and re-verify — up to **3×** (see the attempt protocol below) before ` +
-        `marking the lane \`failed\` and **continuing the other lanes**. On \`PASS\`, ALSO enforce ` +
+        `marking the lane \`failed\` and **continuing the other lanes**. A \`FAIL\` is handled by ` +
+        `this loopback — do NOT also record it as a finding; the loopback IS the response. On \`PASS\`, ALSO enforce ` +
         `its **visual-verification output contract**: the result must carry exactly ONE of a ` +
         `\`## Visual verification task\` section (a single json fence holding the composed ` +
         `verification task) or the bare line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\`. ` +
@@ -170,7 +177,8 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
       return (
         `${head} delegate to \`${agent}\` with the task body, its acceptance criteria, and the ` +
         `running files-touched list (so it scopes to THIS task's diff in the shared worktree). ` +
-        `${loopbackClause}`
+        `${loopbackClause} A failing/blocking result is handled by that loopback — do NOT also ` +
+        `record it as a finding; the loopback IS the response.`
       );
     }
   }

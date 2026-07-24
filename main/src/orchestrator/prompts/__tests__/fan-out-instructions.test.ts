@@ -146,6 +146,18 @@ describe('buildFanOutAppend — canonical chain, default cap', () => {
     expect(block).toContain('Stuck subagents');
     expect(block).toContain('On task success');
   });
+
+  it('guards against filing a loopback-eligible defect as a finding (Item 1)', () => {
+    // The prohibition renders once per loopback-bearing canonical entry (write-tests,
+    // code-review, task-verify). It never appears on the re-entry target (implement)
+    // or the agentless visual-verify step.
+    const occurrences = block.split('the loopback IS the response').length - 1;
+    expect(occurrences).toBeGreaterThanOrEqual(3);
+    // Code-review keys on BOTH the `## Blocking` section and the new REVIEW: BLOCKING
+    // verdict line (Item 0), and names the shared-state hazard exception.
+    expect(block).toContain('REVIEW: BLOCKING');
+    expect(block).toContain('Do NOT record a `## Blocking` defect as a finding');
+  });
 });
 
 describe('buildFanOutAppend — explicit maxConcurrency', () => {
@@ -185,6 +197,10 @@ describe('buildFanOutAppend — custom chain (generic fallback)', () => {
     expect(block).toContain('id `alpha`');
     // The protocol paragraph also documents the first-inner default.
     expect(block).toContain('THE FIRST');
+  });
+
+  it('carries the finding-vs-loopback guardrail into the generic fallback (Item 1)', () => {
+    expect(block).toContain('the loopback IS the response');
   });
 });
 
