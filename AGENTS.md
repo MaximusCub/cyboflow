@@ -8,10 +8,10 @@
 ## Build, Test, and Development Commands
 - Dev app: `pnpm dev` (spawns frontend + Electron).
 - Build all: `pnpm build` (frontend, main, then electron package).
-- Package (examples): `pnpm build:mac`, `pnpm build:mac:arm64` (macOS-only; no Linux/Windows targets).
+- Package (examples): `pnpm build:mac:arm64`, `pnpm build:mac:x64` (macOS-only; per-arch — the universal `build:mac` currently fails on the bundled agent binaries, see `docs/RELEASE-RUNBOOK.md`).
 - Lint: `pnpm lint`; Type-check: `pnpm typecheck` (runs per package).
 - **Code-change gate: `pnpm test:unit`** (main + frontend vitest + schema parity + build scripts). Use this to verify changes.
-- E2E (`pnpm test:e2e`, `pnpm test:ui`): currently non-functional headless (renderer needs the Electron preload) — treat failures as environmental, not a gate. See `CLAUDE.md`.
+- E2E (`pnpm test:e2e`, `pnpm test:ui`): drives the built Electron bundle via Playwright `_electron.launch()`; needs a real display, so it is NOT the headless gate. See `docs/ARCHITECTURE.md` "Build & Run".
 - Main unit tests (if added): `pnpm --filter main test`, coverage: `pnpm --filter main run test:coverage`.
 
 ## Coding Style & Naming Conventions
@@ -23,7 +23,7 @@
 ## Testing Guidelines
 - Run `pnpm test:unit` as the verifier gate for any code change (see `CLAUDE.md` for why E2E is not the gate).
 - For backend logic in `main/`, use Vitest colocated under `main/src/**/__tests__` or `*.spec.ts`; frontend likewise.
-- E2E tests live in `tests/*.spec.ts` (Playwright) but the suite hangs headless until the config is reworked to `_electron.launch()`.
+- E2E tests live in `tests/*.spec.ts` (Playwright); they drive the built Electron bundle via `_electron.launch()` and need a real display (after a run, `pnpm rebuild better-sqlite3` restores the host-Node ABI).
 
 ## Commit & Pull Request Guidelines
 - Commits: present tense, focused, reference issues (e.g., "Fix session diff flicker, closes #123").
