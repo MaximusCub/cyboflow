@@ -20,6 +20,35 @@ interface CliProcess {
   worktreePath: string;
 }
 
+/**
+ * Signals that mean "someone asked this to stop" rather than "this crashed":
+ * SIGHUP (1), SIGINT (2), SIGTERM (15). A shell reports a signal-terminated
+ * child as exit code 128+N, and node-pty surfaces either form depending on how
+ * the process died, so both are checked.
+ *
+ * SIGKILL (9 / 137) is deliberately NOT here: we escalate to it in
+ * killProcessTree, but it is also what the OOM killer uses, and an
+ * out-of-memory kill is a real defect worth reporting.
+ */
+const DELIBERATE_TERMINATION_SIGNALS: ReadonlySet<number> = new Set([1, 2, 15]);
+const DELIBERATE_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([129, 130, 143]);
+
+/**
+ * Whether a non-zero exit is a deliberate termination rather than a failure.
+ *
+ * WHY: stopping a session, interrupting a turn, or quitting the app all
+ * SIGTERM the CLI, which exits 143. Reporting those to Sentry produced a
+ * permanently-recurring "process exited (code 143)" issue with no defect behind
+ * it (CYBOFLOW-APP-G) — pure noise that also drowns out genuine non-zero exits.
+ */
+export function isDeliberateTermination(
+  exitCode: number | null,
+  signal: number | undefined,
+): boolean {
+  if (signal !== undefined && DELIBERATE_TERMINATION_SIGNALS.has(signal)) return true;
+  return exitCode !== null && DELIBERATE_TERMINATION_EXIT_CODES.has(exitCode);
+}
+
 interface AvailabilityCache {
   result: { available: boolean; error?: string; version?: string; path?: string };
   timestamp: number;
@@ -74,6 +103,14 @@ const LINE_BUFFER_CAP_BYTES = 1024 * 1024;
  */
 export abstract class AbstractCliManager extends EventEmitter {
   protected processes: Map<string, CliProcess> = new Map(); // Keyed by panelId
+  /**
+   * Panels this manager deliberately killed (see killProcess). Consulted by the
+   * exit handler to suppress the failure seam for app-initiated stops, which is
+   * more precise than inferring intent from the exit code alone — the flag holds
+   * even when the CLI exits some other way while being torn down. Entries are
+   * cleared by the exit handler, or by killProcess itself if no exit follows.
+   */
+  private readonly deliberatelyKilledPanels = new Set<string>();
   protected availabilityCache: AvailabilityCache | null = null;
   protected readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
   protected readonly execAsync = promisify(exec);
@@ -257,6 +294,13 @@ export abstract class AbstractCliManager extends EventEmitter {
 
     const { sessionId } = cliProcess;
     const pid = cliProcess.process.pid;
+
+    // Mark BEFORE any kill so the exit handler (which may fire synchronously
+    // from within killProcessTree) sees the intent and suppresses the failure
+    // seam. The exit handler clears it; setupProcessHandlers also clears it when
+    // a new process takes over this panel id, so a kill that never produces an
+    // exit event cannot leave a stale flag that silences a future real failure.
+    this.deliberatelyKilledPanels.add(panelId);
 
     // Get all child processes before killing
     let killedProcesses: { pid: number; name?: string }[] = [];
@@ -716,6 +760,11 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Set up event handlers for a PTY process
    */
   protected setupProcessHandlers(ptyProcess: pty.IPty, panelId: string, sessionId: string): void {
+    // A fresh process owns this panel id now, so any deliberate-kill flag left
+    // by a predecessor that never emitted an exit is stale — drop it rather than
+    // let it suppress a genuine failure from THIS process.
+    this.deliberatelyKilledPanels.delete(panelId);
+
     let hasReceivedOutput = false;
     let lastOutput = '';
     let buffer = '';
@@ -782,6 +831,10 @@ export abstract class AbstractCliManager extends EventEmitter {
         }
       }
 
+      // Was this teardown asked for? Read (and clear) before the branch below so
+      // the flag never outlives the process it described.
+      const wasDeliberatelyKilled = this.deliberatelyKilledPanels.delete(panelId);
+
       if (exitCode !== 0) {
         this.logger?.error(`${this.getCliToolName()} process failed for session ${sessionId}. Exit code: ${exitCode}, Signal: ${signal}`);
 
@@ -792,17 +845,26 @@ export abstract class AbstractCliManager extends EventEmitter {
         // redacts home paths (not arbitrary content). Instead classifyErrorPattern
         // distills lastOutput into a bounded, non-PII `errorClass` bucket, and
         // exitCode + phase (never-started vs runtime crash) carry the rest.
-        captureSeamError(
-          'interactive-process-exit-failed',
-          new Error(`${this.getCliToolName()} process exited (code ${exitCode})`),
-          {
-            substrate: 'interactive',
-            cliTool: this.getCliToolName(),
-            exitCode: String(exitCode),
-            phase: hasReceivedOutput ? 'runtime' : 'startup',
-            errorClass: classifyErrorPattern(lastOutput),
-          },
-        );
+        //
+        // Skipped for deliberate terminations — an app-initiated kill, or a
+        // SIGHUP/SIGINT/SIGTERM from anywhere (app quit, OS shutdown). Those are
+        // not defects, and capturing them produced a permanently-recurring
+        // "process exited (code 143)" Sentry issue that buried the real
+        // non-zero exits. The UI failure handling below is intentionally
+        // unchanged: only the telemetry is suppressed.
+        if (!wasDeliberatelyKilled && !isDeliberateTermination(exitCode, signal)) {
+          captureSeamError(
+            'interactive-process-exit-failed',
+            new Error(`${this.getCliToolName()} process exited (code ${exitCode})`),
+            {
+              substrate: 'interactive',
+              cliTool: this.getCliToolName(),
+              exitCode: String(exitCode),
+              phase: hasReceivedOutput ? 'runtime' : 'startup',
+              errorClass: classifyErrorPattern(lastOutput),
+            },
+          );
+        }
 
         if (!hasReceivedOutput) {
           await this.handleProcessStartupFailure(exitCode, signal, panelId, sessionId, lastOutput);
