@@ -1012,6 +1012,9 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
         actor: 'user',
         entityType: 'task',
         title: `Task ${i}`,
+        // Parent under the epic — the idea-needs-epic invariant forbids ≥2 tasks
+        // dangling straight off the idea, and a real decomposition groups them here.
+        parentEpicId: epic.taskId,
         originatingIdeaId: idea.taskId,
         runId,
       });
@@ -1527,7 +1530,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
 
   function markCreatedByRun(
     db: Database.Database,
-    entityType: 'idea' | 'task',
+    entityType: 'idea' | 'epic' | 'task',
     entityId: string,
     runId: string,
   ): void {
@@ -1557,12 +1560,26 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
   ): Promise<{ ideaId: string; taskIds: string[] }> {
     const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Ship idea' });
     await taskRouter._queueForProject(1).onIdle();
+    // Multi-task ideas group their tasks under an epic (idea-needs-epic invariant);
+    // a single task stays epic-free (a lone direct task is allowed).
+    let epicId: string | null = null;
+    if (taskCount > 1) {
+      const epic = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'Ship epic',
+        originatingIdeaId: idea.taskId,
+      });
+      epicId = epic.taskId;
+      markCreatedByRun(db, 'epic', epicId, runId);
+    }
     const taskIds: string[] = [];
     for (let i = 0; i < taskCount; i++) {
       const t = await taskRouter.applyChange(1, {
         actor: 'user',
         entityType: 'task',
         title: `Ship task ${i}`,
+        ...(epicId ? { parentEpicId: epicId } : {}),
         originatingIdeaId: idea.taskId,
       });
       taskIds.push(t.taskId);
@@ -1765,7 +1782,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
    */
   function markCreatedByRun(
     db: Database.Database,
-    entityType: 'idea' | 'task',
+    entityType: 'idea' | 'epic' | 'task',
     entityId: string,
     runId: string,
   ): void {

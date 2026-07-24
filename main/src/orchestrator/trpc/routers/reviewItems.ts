@@ -228,6 +228,7 @@ function rethrowAsTRPCError(err: unknown): never {
       concurrency: 'CONFLICT',
       invalid_dependency: 'BAD_REQUEST',
       dependency_cycle: 'CONFLICT',
+      idea_needs_epic: 'CONFLICT',
       experiment_sandboxed: 'CONFLICT',
       experiment_sweep_failed: 'INTERNAL_SERVER_ERROR',
     };

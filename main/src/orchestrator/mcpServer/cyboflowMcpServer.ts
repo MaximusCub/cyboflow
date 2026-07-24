@@ -515,7 +515,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_create_task',
         description:
-          'Create a backlog idea/epic/task for THIS run\'s project. The task is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single write chokepoint, and appears on the board.',
+          'Create a backlog idea/epic/task for THIS run\'s project. The task is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single write chokepoint, and appears on the board. A task may sit directly under an idea (originating_idea_id, no parent_epic_id) ONLY when it is that idea\'s single task; creating a SECOND task-less-of-an-epic under the same idea is rejected with error idea_needs_epic — mint an epic (named after the idea) and pass parent_epic_id on every task.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -542,7 +542,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_task',
         description:
-          'Update editable fields of an existing task. Re-parenting via parent_epic_id is only valid for type=\'task\' (otherwise rejected with error invalid_parent); a stale expected_version is rejected with error concurrency.',
+          'Update editable fields of an existing task. Re-parenting via parent_epic_id is only valid for type=\'task\' (otherwise rejected with error invalid_parent); a stale expected_version is rejected with error concurrency. Re-parenting a task OFF its epic (parent_epic_id=null) or onto an idea that already has another epic-less task is rejected with error idea_needs_epic — a multi-task idea must keep its tasks under an epic.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -674,7 +674,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       originatingIdeaId: ideaId,
       runId: ownerRunId,
     });
-    await router.applyChange(1, {
+    const { taskId: epicB } = await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'epic',
       title: 'Epic B',
@@ -688,6 +688,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       parentEpicId: epicA,
       runId: ownerRunId,
     });
+    // A directly-linked task (idea-needs-epic allows ONE epic-less task per idea).
     const t2 = await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
@@ -699,7 +700,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       actor: 'orchestrator',
       entityType: 'task',
       title: 'Task 3',
-      originatingIdeaId: ideaId,
+      parentEpicId: epicB,
       runId: ownerRunId,
     });
     return { ideaId, taskIds: [t1.taskId, t2.taskId, t3.taskId] };
@@ -1122,7 +1123,7 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
       summary: 'spec B',
       runId: 'run-batch2',
     });
-    // Idea A: one epic with one task under it (1 epic, 1 task).
+    // Idea A: one epic with two tasks under it (1 epic, 2 tasks).
     const { taskId: epicA } = await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'epic',
@@ -1133,22 +1134,23 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
     await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
-      title: 'Task under Epic A',
+      title: 'Task under Epic A (1)',
       parentEpicId: epicA,
       runId: 'run-batch2',
     });
-    // Idea B: two direct tasks, no epic (0 epics, 2 tasks).
     await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
-      title: 'Direct task 1',
-      originatingIdeaId: ideaB,
+      title: 'Task under Epic A (2)',
+      parentEpicId: epicA,
       runId: 'run-batch2',
     });
+    // Idea B: a single-task idea keeps its one task directly off the idea
+    // (idea-needs-epic allows exactly one epic-less task) — 0 epics, 1 task.
     await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
-      title: 'Direct task 2',
+      title: 'Direct task',
       originatingIdeaId: ideaB,
       runId: 'run-batch2',
     });
@@ -1159,7 +1161,7 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
 
     // ONE decomposed-stories artifact for the run (identity unchanged), sourceRef
     // = the FIRST owned idea, label = the COMBINED count across both ideas
-    // (1 epic + 0 epics = 1 epic; 1 task + 2 tasks = 3 tasks), plus the
+    // (1 epic + 0 epics = 1 epic; 2 tasks + 1 task = 3 tasks), plus the
     // multi-idea suffix.
     const stories = readArtifact(db, 'run-batch2', 'decomposed-stories');
     expect(stories).toBeDefined();
@@ -1313,28 +1315,37 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
       runId: 'run-ew-refresh',
     });
 
+    // A multi-task idea groups its tasks under an epic (idea-needs-epic invariant),
+    // so the count grows epic + task-under-epic as the decomposition fills in.
+    const { taskId: epicId } = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      title: 'Epic',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew-refresh',
+    });
     await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
       title: 'T1',
-      originatingIdeaId: ideaId,
+      parentEpicId: epicId,
       runId: 'run-ew-refresh',
     });
     await handleEntityWrite(adapter, 'run-ew-refresh', 'task');
-    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('0 epics, 1 task');
+    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('1 epic, 1 task');
 
     await router.applyChange(1, {
       actor: 'orchestrator',
       entityType: 'task',
       title: 'T2',
-      originatingIdeaId: ideaId,
+      parentEpicId: epicId,
       runId: 'run-ew-refresh',
     });
     await handleEntityWrite(adapter, 'run-ew-refresh', 'task');
 
     // Still ONE row (UPSERT), but the label now reflects the live count.
     expect(artifactCount(db, 'run-ew-refresh')).toBe(1);
-    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('0 epics, 2 tasks');
+    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('1 epic, 2 tasks');
   });
 
   it('does NOT mint for a SPRINT run (only planner/ship are content-driven)', async () => {
@@ -1444,9 +1455,25 @@ describe('decomposed task lineage (FIX D)', () => {
     });
     setSeedIdea(db, 'run-d2', ideaId);
 
-    // Two tasks created with no lineage — both stamped with the seed idea.
-    await router.applyChange(1, { actor: 'agent:cyboflow-decompose', entityType: 'task', title: 'T1', runId: 'run-d2' });
-    await router.applyChange(1, { actor: 'agent:cyboflow-decompose', entityType: 'task', title: 'T2', runId: 'run-d2' });
+    // First task created with no lineage — auto-stamped with the seed idea (the
+    // legal single epic-less task). Its board/stage seed the raw sibling below.
+    const { taskId: t1 } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-decompose',
+      entityType: 'task',
+      title: 'T1',
+      runId: 'run-d2',
+    });
+    const t1row = db
+      .prepare('SELECT board_id AS b, stage_id AS s FROM tasks WHERE id = ?')
+      .get(t1) as { b: string; s: string };
+    // The idea-needs-epic invariant now REJECTS a second epic-less task through the
+    // chokepoint. Legacy DBs (and any pre-invariant decomposition) may still hold
+    // that shape, so insert the sibling RAW to prove the read-side count still
+    // surfaces BOTH directly-linked tasks.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+       VALUES ('tsk_direct2', 1, 'TASK-9002', 'T2', 'b', ?, ?, NULL, ?, '2026-01-02T00:00:02.000Z')`,
+    ).run(t1row.b, t1row.s, ideaId);
 
     await handleStepCompletion(adapter, 'run-d2', 'tasks');
 

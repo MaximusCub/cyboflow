@@ -127,6 +127,11 @@ export type TaskChangeErrorCode =
   | 'concurrency'
   | 'invalid_dependency'
   | 'dependency_cycle'
+  // IDEA-NEEDS-EPIC invariant: a write would leave an idea with two-or-more tasks
+  // parented straight to it (no epic). A multi-task idea must group its tasks under
+  // an epic — the caller mints the fallback epic (named after the idea) and parents
+  // the tasks under it. Surfaced to the agent as a tool-error so the flow recovers.
+  | 'idea_needs_epic'
   // A/B experiments (migration 049): a write crossed an experiment sandbox
   // boundary — an experiment-tagged run tried to mutate an entity outside its
   // experiment, OR an untagged actor (user / other run) tried to mutate a
@@ -1064,6 +1069,12 @@ export class TaskChangeRouter {
       if (originatingIdeaId !== null) {
         this.validateOriginatingIdea(projectId, type, originatingIdeaId);
       }
+      // IDEA-NEEDS-EPIC: a NEW task landing epic-less directly under an idea is the
+      // idea's second-or-later dangling task -> forbidden. `taskId` is freshly
+      // minted (not yet inserted) so it never self-counts; pass it as the exclude.
+      if (type === 'task' && parentEpicId === null && originatingIdeaId !== null) {
+        this.assertIdeaEpicInvariant(originatingIdeaId, taskId);
+      }
 
       // Mint the ref: UPDATE ... RETURNING. INSERT OR IGNORE seeds the counter row first.
       const ref = this.mintRef(projectId, type);
@@ -1683,6 +1694,26 @@ export class TaskChangeRouter {
         sets.push('originating_idea_id = ?');
         params.push(change.originatingIdeaId);
         deltas.push({ field: 'originating_idea_id', from: current.originating_idea_id, to: change.originatingIdeaId });
+      }
+
+      // IDEA-NEEDS-EPIC: only when THIS update touches lineage (re-parent or
+      // originating-idea move) — an unrelated field edit on a pre-existing direct
+      // task must stay idempotent, never retroactively rejected. Compute the
+      // effective post-update lineage and reject if the task would sit epic-less
+      // under an idea that already has another dangling task.
+      if (
+        type === 'task' &&
+        (change.parentEpicId !== undefined || change.originatingIdeaId !== undefined)
+      ) {
+        const effectiveParentEpicId =
+          change.parentEpicId !== undefined ? change.parentEpicId : current.parent_epic_id;
+        const effectiveOriginatingIdeaId =
+          change.originatingIdeaId !== undefined
+            ? change.originatingIdeaId
+            : current.originating_idea_id;
+        if (effectiveParentEpicId === null && effectiveOriginatingIdeaId !== null) {
+          this.assertIdeaEpicInvariant(effectiveOriginatingIdeaId, taskId);
+        }
       }
 
       // ----- scalar fields -----
@@ -2887,6 +2918,42 @@ export class TaskChangeRouter {
     }
     if (idea.project_id !== projectId) {
       throw new TaskChangeError('invalid_lineage', `originating idea ${ideaId} belongs to a different project`);
+    }
+  }
+
+  /**
+   * IDEA-NEEDS-EPIC invariant (planner/ship decomposition rule): an idea that
+   * decomposes into MORE THAN ONE task must group them under an epic — never leave
+   * two-or-more tasks parented straight to the idea. A single-task idea stays
+   * epic-free. Enforced here as the direct-count guard: a task may sit directly
+   * under an idea (`parent_epic_id IS NULL`) only when it is that idea's SOLE task,
+   * so any create/re-parent that would leave the idea with ≥2 epic-less tasks is
+   * rejected. The caller then mints the fallback epic (named after the idea) and
+   * parents both tasks under it.
+   *
+   * Only invoked for a `type='task'` write that lands epic-less under a non-null
+   * idea. Counting BY `originating_idea_id` is naturally experiment-arm-correct —
+   * each arm clones the idea to a distinct id, so an arm's tasks never collide with
+   * the main board's or a sibling arm's. Archived tasks (`archived_at` set) are
+   * excluded — they are not part of the live decomposition. `excludeTaskId` drops
+   * the task being updated from its own sibling count, so re-writing an
+   * already-direct task's other fields never trips the guard.
+   */
+  private assertIdeaEpicInvariant(ideaId: string, excludeTaskId: string | null): void {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM tasks
+          WHERE originating_idea_id = ?
+            AND parent_epic_id IS NULL
+            AND archived_at IS NULL
+            AND id != ?`,
+      )
+      .get(ideaId, excludeTaskId ?? '') as { n: number };
+    if (row.n >= 1) {
+      throw new TaskChangeError(
+        'idea_needs_epic',
+        `idea ${ideaId} already has a task attached directly; a second task requires an epic — create an epic (e.g. named after the idea) and parent both tasks under it`,
+      );
     }
   }
 

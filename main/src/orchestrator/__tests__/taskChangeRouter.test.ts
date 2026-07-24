@@ -726,6 +726,191 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // IDEA-NEEDS-EPIC invariant: a multi-task idea must group its tasks under an
+  // epic — never leave ≥2 tasks parented straight to the idea.
+  // -------------------------------------------------------------------------
+
+  describe('idea-needs-epic invariant', () => {
+    it('allows a SINGLE task directly under an idea (single-task idea is epic-free)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+
+      const task = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Sole task',
+        originatingIdeaId: idea.taskId,
+      });
+      const row = db
+        .prepare('SELECT originating_idea_id, parent_epic_id FROM tasks WHERE id = ?')
+        .get(task.taskId) as { originating_idea_id: string; parent_epic_id: string | null };
+      expect(row.originating_idea_id).toBe(idea.taskId);
+      expect(row.parent_epic_id).toBeNull();
+    });
+
+    it('rejects creating a SECOND epic-less task under the same idea', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Task 1',
+        originatingIdeaId: idea.taskId,
+      });
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title: 'Task 2',
+          originatingIdeaId: idea.taskId,
+        }),
+      ).rejects.toMatchObject({ code: 'idea_needs_epic' });
+    });
+
+    it('allows many tasks under one idea when each is parented to an epic', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'I',
+        originatingIdeaId: idea.taskId,
+      });
+
+      for (const title of ['T1', 'T2', 'T3']) {
+        await router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title,
+          parentEpicId: epic.taskId,
+          originatingIdeaId: idea.taskId,
+        });
+      }
+      const n = db
+        .prepare('SELECT COUNT(*) AS n FROM tasks WHERE originating_idea_id = ?')
+        .get(idea.taskId) as { n: number };
+      expect(n.n).toBe(3);
+    });
+
+    it('rejects re-parenting a task OFF its epic when a sibling still dangles under the idea', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'I',
+        originatingIdeaId: idea.taskId,
+      });
+      // One direct task (the idea's sole epic-less task) + one under the epic.
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Direct',
+        originatingIdeaId: idea.taskId,
+      });
+      const underEpic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Under epic',
+        parentEpicId: epic.taskId,
+        originatingIdeaId: idea.taskId,
+      });
+
+      // Pulling the under-epic task off its epic would make TWO epic-less tasks.
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId: underEpic.taskId, parentEpicId: null }),
+      ).rejects.toMatchObject({ code: 'idea_needs_epic' });
+    });
+
+    it('allows re-parenting the LAST epic-less task onto an epic (the fallback-epic heal path)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      // The idea's sole task, created epic-less (allowed).
+      const t1 = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T1',
+        originatingIdeaId: idea.taskId,
+      });
+      // Revise round grows it: mint the fallback epic, re-parent T1 under it,
+      // then a second task lands under the epic — no rejection.
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'I',
+        originatingIdeaId: idea.taskId,
+      });
+      await router.applyChange(1, { actor: 'user', taskId: t1.taskId, parentEpicId: epic.taskId });
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T2',
+        parentEpicId: epic.taskId,
+        originatingIdeaId: idea.taskId,
+      });
+      const dangling = db
+        .prepare(
+          'SELECT COUNT(*) AS n FROM tasks WHERE originating_idea_id = ? AND parent_epic_id IS NULL',
+        )
+        .get(idea.taskId) as { n: number };
+      expect(dangling.n).toBe(0);
+    });
+
+    it('does NOT trip on an unrelated field edit of a pre-existing direct task (idempotent)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      // Two legacy direct tasks inserted RAW (bypassing the guard, as pre-enforcement data).
+      db.prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+         VALUES ('tsk_legacy1', 1, 'TASK-901', 'L1', 'b', 'board-1-default', ?, NULL, ?, '2026-01-02T00:00:01.000Z')`,
+      ).run(stageId(5), idea.taskId);
+      db.prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+         VALUES ('tsk_legacy2', 1, 'TASK-902', 'L2', 'b', 'board-1-default', ?, NULL, ?, '2026-01-02T00:00:02.000Z')`,
+      ).run(stageId(5), idea.taskId);
+
+      // A title-only edit touches no lineage → allowed even though the shape is illegal.
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          taskId: 'tsk_legacy1',
+          fields: { title: 'Renamed' },
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('archived direct tasks do not count toward the invariant', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      const t1 = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T1',
+        originatingIdeaId: idea.taskId,
+      });
+      // Archive the first — it leaves the live decomposition.
+      await router.applyChange(1, { actor: 'user', taskId: t1.taskId, archived: true });
+      // A fresh direct task is now the idea's SOLE live task → allowed.
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title: 'T2',
+          originatingIdeaId: idea.taskId,
+        }),
+      ).resolves.toBeDefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // DECOMP-LINKAGE auto-stamp + multi-seed fail-closed guard (TASK-029)
   // -------------------------------------------------------------------------
 
