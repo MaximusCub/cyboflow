@@ -114,10 +114,11 @@ function findingRows(
   entity_id: string | null;
   source: string | null;
   title: string;
+  audience: string;
 }> {
   return db
     .prepare(
-      `SELECT id, kind, severity, blocking, entity_type, entity_id, source, title
+      `SELECT id, kind, severity, blocking, entity_type, entity_id, source, title, audience
          FROM review_items WHERE run_id = ?`,
     )
     .all(runId) as Array<{
@@ -129,6 +130,7 @@ function findingRows(
     entity_id: string | null;
     source: string | null;
     title: string;
+    audience: string;
   }>;
 }
 
@@ -691,20 +693,30 @@ function buildSprintDb(): Database.Database {
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
   for (const f of SPRINT_MIGRATIONS) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
-  // Same session_id + artifacts.revision layering as buildDb — see the comments there.
+  // Same session_id + artifacts.revision layering as buildDb — see the comments
+  // there. The dual-substrate execution_model column (migration not in
+  // SPRINT_MIGRATIONS) is layered the same way so seedSprintRun can stamp the
+  // run's plane for the plane-aware audience test.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT');
   return db;
 }
 
-function seedSprintRun(db: Database.Database, runId: string, batchId: string, taskId: string): void {
+function seedSprintRun(
+  db: Database.Database,
+  runId: string,
+  batchId: string,
+  taskId: string,
+  executionModel: 'programmatic' | 'orchestrated' = 'programmatic',
+): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
   ).run();
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, batch_id)
-     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
-  ).run(runId, taskId, batchId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, batch_id, execution_model)
+     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?, ?)`,
+  ).run(runId, taskId, batchId, executionModel);
 }
 
 describe('verdictDelivery (P8b — merge-gate)', () => {
@@ -755,10 +767,45 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
       .get(batchId, 'tsk_a') as { status: string; step: string; attempts: number };
     expect(lane).toEqual({ status: 'running', step: 'implement', attempts: 2 });
 
-    // The finding is BLOCKING (merge-gate holds the lane's integration).
+    // The finding is BLOCKING (merge-gate holds the lane's integration) and, on
+    // the PROGRAMMATIC plane, a 'machine' mailbox — the controller re-drives the
+    // lane and consumes it as audit, so it never bothers a human.
     const findings = findingRows(db, 'run-s1');
     expect(findings).toHaveLength(1);
     expect(findings[0].blocking).toBe(1);
+    expect(findings[0].audience).toBe('machine');
+  });
+
+  it('under-cap FAIL on an ORCHESTRATED lane raises a HUMAN finding (no wired auto-consumer)', async () => {
+    // Plane-aware audience (Codex review hardening): on the orchestrated plane the
+    // controller does NOT re-drive the lane, so the under-cap loopback finding must
+    // stay 'human' (visible + counted) rather than a hidden machine mailbox no
+    // consumer will act on — otherwise the looped-back lane strands silently.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_o', 1, 'TASK-009', 'O', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const store = SprintLaneStore.getInstance();
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_o']);
+    seedSprintRun(db, 'run-so', batchId, 'tsk_o', 'orchestrated');
+    store.updateLane({ runId: 'run-so', batchId, taskId: 'tsk_o', status: 'running', currentStepId: 'awaiting-verify' });
+
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
+    await deliver({
+      requestId: 'vr_so',
+      runId: 'run-so',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['home.png'],
+      input: { intent: 'shows the submit button', taskRef: 'TASK-009' },
+    });
+
+    const findings = findingRows(db, 'run-so');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].blocking).toBe(1);
+    expect(findings[0].audience).toBe('human');
   });
 
   it('verdict-LESS FAIL on a sprint lane STILL loops it back to implement AND raises a BLOCKING finding (no silent wedge)', async () => {

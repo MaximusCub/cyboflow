@@ -456,6 +456,29 @@ function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike):
   }
 }
 
+/**
+ * Resolve whether the run executes on the PROGRAMMATIC plane — the only plane on
+ * which the under-cap `loopback-implement` finding is a genuine machine-to-machine
+ * mailbox (the controller re-drives the lane off `awaiting-verify` and consumes the
+ * finding as pure audit). Returns false on read failure or a missing/unknown value
+ * so the audience defaults to the SAFE 'human' side (visible + counted), never
+ * hiding a finding no consumer will act on. See the audience decision below.
+ */
+function runIsProgrammatic(db: DatabaseLike, runId: string, logger?: LoggerLike): boolean {
+  try {
+    const row = db
+      .prepare('SELECT execution_model FROM workflow_runs WHERE id = ?')
+      .get(runId) as { execution_model: string | null } | undefined;
+    return row?.execution_model === 'programmatic';
+  } catch (err) {
+    logger?.warn('[verdictDelivery] could not resolve run execution model (fail-soft)', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 /** A prior visual-verify finding row, as the supersession/dedup scan reads it. */
 interface PriorVisualFinding {
   id: string;
@@ -668,16 +691,26 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         // finding at a higher attempt, and makes creation idempotent by requestId.
         visualVerify: { runId, taskRef, attempt, requestId },
       };
-      // Audience (migration 085, Item 3): the UNDER-CAP `loopback-implement`
-      // finding is a machine-to-machine mailbox — it carries the verification
-      // report the orchestrator re-delegates from, and it gates the LANE
-      // (awaiting-verify → loopback), NOT the run. Mark it 'machine' so it never
-      // renders in the human queue and never counts toward the run-park blocking
-      // gate — which is what prevents a crash between its creation and the
-      // superseding verdict from wedging the run on a card no human can see. The
-      // AT-CAP `mark-failed` finding is the real human escalation and stays
-      // 'human' (default). low_confidence / non-blocking findings are 'human' too.
-      const audience: ReviewItemAudience = gateAction.kind === 'loopback-implement' ? 'machine' : 'human';
+      // Audience (migration 085, Item 3) — PLANE-AWARE (Codex review hardening):
+      // the UNDER-CAP `loopback-implement` finding is a machine-to-machine mailbox
+      // ONLY on the PROGRAMMATIC plane, where the controller itself re-drives the
+      // lane off `awaiting-verify` and consumes this finding as pure audit. There,
+      // marking it 'machine' keeps it out of the human queue and off the run-park
+      // blocking gate, so a crash between its creation and the superseding verdict
+      // can't wedge the run on a card no human can see.
+      //
+      // On the ORCHESTRATED plane the auto-reaction is NOT wired (see
+      // mergeGateLaneAdvance ACTUATION CAVEAT): the human/agent-visible finding IS
+      // the reaction path. Hiding+uncounting it there would strand the looped-back
+      // lane silently, so keep it 'human' — a visible blocking finding is the safe
+      // escalation until a run-scoped machine-mailbox consumer exists (deferred
+      // follow-up). The AT-CAP `mark-failed` finding is the real human escalation
+      // and stays 'human' on both planes; low_confidence / non-blocking findings
+      // are 'human' too.
+      const audience: ReviewItemAudience =
+        gateAction.kind === 'loopback-implement' && runIsProgrammatic(db, runId, logger)
+          ? 'machine'
+          : 'human';
       await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
         op: 'create',
         actor: 'orchestrator',
