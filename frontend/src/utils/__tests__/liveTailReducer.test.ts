@@ -6,7 +6,7 @@
  * fixtures fake the minimal shape and cast.
  */
 import { describe, it, expect } from 'vitest';
-import { reduceLiveTail } from '../liveTailReducer';
+import { reduceLiveTail, hasVisibleTailContent } from '../liveTailReducer';
 import type { StreamEvent } from '../cyboflowApi';
 
 function streamEvent(event: Record<string, unknown>): StreamEvent {
@@ -152,5 +152,28 @@ describe('reduceLiveTail', () => {
   it('isGenerating is false when the log has no stream_event since the last result', () => {
     const events = [result()];
     expect(reduceLiveTail(events)).toEqual({ activeBlocks: [], isGenerating: false });
+  });
+});
+
+describe('hasVisibleTailContent', () => {
+  it('is false for no blocks and for blocks that opened but have no printable text yet', () => {
+    // content_block_start opens a block with text: '' — hosts gating LiveTail
+    // on block EXISTENCE render a bare "Claude" header and suppress the
+    // animated fallback (the blank-bubble bug). Empty/whitespace = not visible.
+    expect(hasVisibleTailContent([])).toBe(false);
+    const opened = reduceLiveTail([messageStart(), blockStart(0, 'thinking')]);
+    expect(opened.activeBlocks).toHaveLength(1);
+    expect(hasVisibleTailContent(opened.activeBlocks)).toBe(false);
+    expect(hasVisibleTailContent([{ index: 0, kind: 'text', text: '  \n ' }])).toBe(false);
+  });
+
+  it('is true once any block carries printable text', () => {
+    const state = reduceLiveTail([
+      messageStart(),
+      blockStart(0, 'thinking'),
+      blockStart(1, 'text'),
+      thinkingDelta(0, 'hmm'),
+    ]);
+    expect(hasVisibleTailContent(state.activeBlocks)).toBe(true);
   });
 });

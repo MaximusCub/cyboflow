@@ -20,7 +20,7 @@ import { useQuestionStore } from '../../../stores/questionStore';
 import { AskUserQuestionCard } from '../../AskUserQuestion/AskUserQuestionCard';
 import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
 import { LiveTail } from '../../chat/LiveTail';
-import { reduceLiveTail } from '../../../utils/liveTailReducer';
+import { reduceLiveTail, hasVisibleTailContent } from '../../../utils/liveTailReducer';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -248,10 +248,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     () => (isInteractive ? { activeBlocks: [], isGenerating: false } : reduceLiveTail(panelLiveEvents ?? [])),
     [isInteractive, panelLiveEvents],
   );
-  const liveTail =
-    liveTailState.activeBlocks.length > 0 ? (
-      <LiveTail blocks={liveTailState.activeBlocks} agentName={agentName} />
-    ) : undefined;
+  // Gate on VISIBLE content, not block existence: a block opens empty at
+  // content_block_start and an all-empty tail would render a bare "Claude"
+  // header while suppressing the animated fallback (blank-bubble bug).
+  const liveTail = hasVisibleTailContent(liveTailState.activeBlocks) ? (
+    <LiveTail blocks={liveTailState.activeBlocks} agentName={agentName} />
+  ) : undefined;
 
   // -------------------------------------------------------------------------
   // Pending AskUserQuestion gates for this quick session. Chat turns gate on

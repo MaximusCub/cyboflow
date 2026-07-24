@@ -28,7 +28,7 @@ import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
 import { formatContextUsage } from './unified/runContextUsage';
 import { LiveTail } from '../chat/LiveTail';
-import { reduceLiveTail } from '../../utils/liveTailReducer';
+import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
 import { trpc } from '../../trpc/client';
 import { useUnifiedRunMessages } from './unified/useUnifiedRunMessages';
 import { usePendingSendStore } from '../../stores/pendingSendStore';
@@ -138,10 +138,12 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     () => (isInteractive ? { activeBlocks: [], isGenerating: false } : reduceLiveTail(streamEvents)),
     [isInteractive, streamEvents],
   );
-  const liveTail =
-    liveTailState.activeBlocks.length > 0 ? (
-      <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
-    ) : undefined;
+  // Gate on VISIBLE content, not block existence: a block opens empty at
+  // content_block_start and an all-empty tail would render a bare "Claude"
+  // header while suppressing the animated fallback (blank-bubble bug).
+  const liveTail = hasVisibleTailContent(liveTailState.activeBlocks) ? (
+    <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+  ) : undefined;
 
   // Pending-send (optimistic echo) — keyed by runId (the flow host key + railId).
   // Reconcile against the run transcript so a 'sending'/'queued' row is dropped

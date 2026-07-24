@@ -123,3 +123,16 @@ export function reduceLiveTail(events: readonly StreamEvent[]): LiveTailState {
   const activeBlocks = Array.from(blocks.values()).sort((a, b) => a.index - b.index);
   return { activeBlocks, isGenerating };
 }
+
+/**
+ * True when the tail has something the user can actually SEE. A block opens
+ * with `text: ''` at `content_block_start` and MessageSegment renders null for
+ * empty/whitespace content — so a host that mounts <LiveTail> on
+ * `activeBlocks.length > 0` alone renders a BARE assistant header (blank
+ * "Claude" bubble) AND suppresses ChatTranscript's animated fallback
+ * (`liveTail ?? placeholder`). Hosts must gate the LiveTail node on THIS so
+ * the working animation shows until real content streams in.
+ */
+export function hasVisibleTailContent(blocks: readonly LiveTailBlock[]): boolean {
+  return blocks.some((b) => b.text.trim().length > 0);
+}
