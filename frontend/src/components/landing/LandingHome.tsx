@@ -13,11 +13,19 @@
  *   - `empty`      → {@link EmptyState} (self-centering).
  *   - `reviews`    → scroll column: {@link SubHeader} (reviews) +
  *                    {@link TypeGroupedQueue} + {@link ActiveAgents} + {@link EndCta}.
- *   - `caught-up`  → centered {@link CaughtUpHero}.
+ *   - `caught-up`  → centered {@link CaughtUpHero} (scroll column with the board
+ *                    beneath it when any quick session exists).
  *   - `some-idle`  → {@link SubHeader} (none, not-all-active) + {@link ActiveAgents}
- *                    + {@link IdleStartList} + {@link EndCta}.
+ *                    + {@link QuickSessionsTable} + {@link IdleStartList} + {@link EndCta}.
  *   - `all-active` → {@link SubHeader} (none, all-active) + {@link ActiveAgents}
- *                    + {@link EndCta}.
+ *                    + {@link QuickSessionsTable} + {@link EndCta}.
+ *
+ * The live {@link QuickSessionsTable} board renders in EVERY non-empty state
+ * (inside {@link TypeGroupedQueue} for `reviews`, standalone otherwise), so it
+ * never disappears just because nothing needs attention. Opening an idle session
+ * marks it viewed, which can drop `waitingCount` to 0 and flip the home out of
+ * `reviews` — mounting the board in the other layouts keeps it visible across
+ * that transition. It self-returns null when there are no quick sessions.
  */
 import { useEffect, useMemo, useRef } from 'react';
 import {
@@ -34,6 +42,7 @@ import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import { EmptyState } from './EmptyState';
 import { SubHeader } from './SubHeader';
 import { TypeGroupedQueue } from './TypeGroupedQueue';
+import { QuickSessionsTable } from './QuickSessionsTable';
 import { ActiveAgents } from './ActiveAgents';
 import { IdleStartList } from './IdleStartList';
 import { CaughtUpHero } from './CaughtUpHero';
@@ -163,6 +172,22 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   }
 
   if (state === 'caught-up') {
+    // With quick sessions present, use the standard scroll column so the live
+    // board stays visible beneath the hero — otherwise opening the last
+    // attention item (which marks it viewed) would flip us here with the board
+    // gone. With zero quick sessions, keep the centered "all caught up" hero.
+    if (quickRows.length > 0) {
+      return (
+        <div className="h-full w-full overflow-y-auto" style={GRAPH_PAPER_STYLE}>
+          <div className="mx-auto w-full max-w-[860px] px-7 py-10 font-mono">
+            <CaughtUpHero />
+            <div className="mt-8">
+              <QuickSessionsTable />
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div
         className="flex h-full w-full items-center justify-center overflow-y-auto px-7 py-10 font-mono"
@@ -209,6 +234,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           allActive={allActive}
         />
         <ActiveAgents />
+        <QuickSessionsTable />
         {!allActive && <IdleStartList />}
         <EndCta />
       </div>
