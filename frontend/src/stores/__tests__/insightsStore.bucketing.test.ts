@@ -62,6 +62,7 @@ function tf(o: TriageOverrides): TriageFinding {
     kind: 'finding',
     status: 'pending',
     blocking: false,
+    audience: 'human',
     title: `finding ${o.id}`,
     body: null,
     severity: null,

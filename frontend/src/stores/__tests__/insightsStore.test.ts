@@ -186,6 +186,7 @@ function makeReviewItem(
     kind,
     status,
     blocking: overrides.blocking ?? false,
+    audience: 'human',
     title: overrides.title ?? `item ${overrides.id}`,
     body: overrides.body ?? null,
     severity: overrides.severity ?? null,

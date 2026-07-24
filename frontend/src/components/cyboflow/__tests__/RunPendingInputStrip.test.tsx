@@ -76,6 +76,7 @@ function makeReviewItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
     kind: 'finding',
     status: 'pending',
     blocking: false,
+    audience: 'human',
     title: 'Some finding',
     body: null,
     severity: null,

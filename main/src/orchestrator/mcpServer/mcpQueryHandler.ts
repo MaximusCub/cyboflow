@@ -19,7 +19,7 @@
  *                                  ideas:load-attachments, IDEA-006. Epics/tasks
  *                                  get no `attachments` key at all. An idea with
  *                                  a current approved_designs row (Design Mode
- *                                  v0, migration 082) also gets an
+ *                                  v0, migration 085) also gets an
  *                                  `approved_design` block with a RESOLVED
  *                                  absolute path to the approved prototype
  *                                  snapshot — the zero-export handoff read path.)
@@ -3452,7 +3452,7 @@ export class McpQueryHandler {
   //
   // Both start from resolveDesignRunContext, which re-validates the session's
   // idea link on EVERY call (integrity is chokepoint-enforced, not FK-enforced;
-  // migration 082). source_ref/session_id stamping for the design prototype
+  // migration 085). source_ref/session_id stamping for the design prototype
   // rides the shared handleReportArtifact path (resolveSessionDesignStamp).
   // --------------------------------------------------------------------------
 
@@ -4893,7 +4893,13 @@ export class McpQueryHandler {
 
     const blockedRows = this.db
       .prepare(
-        `SELECT project_id, COUNT(*) AS n FROM review_items WHERE blocking = 1 AND status = 'pending' GROUP BY project_id`,
+        // audience='machine' items (migration 085) are the orchestrator's durable
+        // mailbox — never human-actionable, so they must not inflate this
+        // human-facing per-project blocked badge. NULL counts as human (pre-085 /
+        // defensive; the NOT NULL default makes NULL impossible post-migration).
+        `SELECT project_id, COUNT(*) AS n FROM review_items
+          WHERE blocking = 1 AND status = 'pending' AND (audience IS NULL OR audience != 'machine')
+          GROUP BY project_id`,
       )
       .all() as Array<{ project_id: number; n: number }>;
     const blockedByProject = new Map(blockedRows.map((r) => [r.project_id, r.n]));

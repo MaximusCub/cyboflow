@@ -65,6 +65,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   FindingPayload,
+  ReviewItemAudience,
   ReviewItemSeverity,
 } from '../../../../shared/types/reviews';
 
@@ -667,6 +668,16 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         // finding at a higher attempt, and makes creation idempotent by requestId.
         visualVerify: { runId, taskRef, attempt, requestId },
       };
+      // Audience (migration 085, Item 3): the UNDER-CAP `loopback-implement`
+      // finding is a machine-to-machine mailbox — it carries the verification
+      // report the orchestrator re-delegates from, and it gates the LANE
+      // (awaiting-verify → loopback), NOT the run. Mark it 'machine' so it never
+      // renders in the human queue and never counts toward the run-park blocking
+      // gate — which is what prevents a crash between its creation and the
+      // superseding verdict from wedging the run on a card no human can see. The
+      // AT-CAP `mark-failed` finding is the real human escalation and stays
+      // 'human' (default). low_confidence / non-blocking findings are 'human' too.
+      const audience: ReviewItemAudience = gateAction.kind === 'loopback-implement' ? 'machine' : 'human';
       await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
         op: 'create',
         actor: 'orchestrator',
@@ -674,6 +685,7 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         title,
         body,
         blocking: isMergeGateBlocking(gateAction),
+        audience,
         severity,
         source: 'visual-verify',
         entityType: taskId ? 'task' : null,

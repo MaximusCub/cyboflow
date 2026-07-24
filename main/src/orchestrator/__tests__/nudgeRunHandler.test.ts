@@ -56,6 +56,8 @@ function seedBlockingReviewItem(db: Database.Database, runId: string): void {
   const path = require('node:path') as typeof import('path'); // eslint-disable-line @typescript-eslint/no-require-imports
   const sql = fs.readFileSync(path.resolve(__dirname, '../../database/migrations/016_review_items.sql'), 'utf8');
   db.exec(sql);
+  const sql085 = fs.readFileSync(path.resolve(__dirname, '../../database/migrations/085_review_item_audience.sql'), 'utf8');
+  db.exec(sql085);
   db.prepare(
     `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title)
      VALUES (?, 1, ?, 'decision', 'pending', 1, 'gate')`,

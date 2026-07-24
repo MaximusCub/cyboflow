@@ -82,6 +82,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
   // Migration 042 replaces the position-12 'Decomposed' stage with the
   // ideas.decomposed_at retire stamp AND adds the plan-gate approval stamps
   // (epics/tasks.approved_at + workflow_runs.plan_approved_at). The board

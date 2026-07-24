@@ -83,6 +83,7 @@ function buildDb(): Database.Database {
   apply('028_idea_attachments.sql');
   apply('034_findings_triage.sql');
   apply('042_collapse_board.sql');
+  apply('085_review_item_audience.sql');
   // Migration 049/053 (A/B sandbox tag): selectProjectBacklog's UNION projects
   // experiment_id/experiment_arm unconditionally — same manual ALTER the
   // existing 'read-only backlog listing' fixture applies (mcpQueryHandler.test.ts).

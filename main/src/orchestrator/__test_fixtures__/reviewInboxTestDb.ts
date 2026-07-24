@@ -26,6 +26,9 @@ const MIGRATIONS = [
   // selectFindingForSeed projects; its ALTERs only touch review_items +
   // workflow_runs (both already present after 016), so it layers cleanly.
   '034_findings_triage.sql',
+  // 085 adds review_items.audience (human/machine) — the router INSERT names it
+  // and the blocking-count query filters on it, so every inbox fixture needs it.
+  '085_review_item_audience.sql',
 ] as const;
 
 /** Build a fresh migration-backed DB with the review_items inbox present. */

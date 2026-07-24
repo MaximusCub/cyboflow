@@ -87,6 +87,7 @@ function makeReviewItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
     kind: 'decision',
     status: 'pending',
     blocking: true,
+    audience: 'human',
     title: 'Approve workflow output',
     body: null,
     severity: null,

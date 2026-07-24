@@ -69,6 +69,7 @@ function makeReviewItem(kind: ReviewItemKind, overrides: Partial<ReviewItem> = {
     kind,
     status: overrides.status ?? 'pending',
     blocking: overrides.blocking ?? false,
+    audience: 'human',
     title: overrides.title ?? `${kind} title`,
     body: overrides.body ?? null,
     severity: null,

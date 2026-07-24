@@ -61,6 +61,7 @@ function makeGateItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
     kind: 'decision',
     status: 'pending',
     blocking: true,
+    audience: 'human',
     title: 'Approve ideas',
     body: null,
     severity: null,

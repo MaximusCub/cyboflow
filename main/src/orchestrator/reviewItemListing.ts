@@ -443,19 +443,27 @@ export function countPendingBlockingReviewItems(
   const excludeIds = (
     typeof excludeReviewItemId === 'string' ? [excludeReviewItemId] : (excludeReviewItemId ?? [])
   ).filter((id) => id.length > 0);
+  // audience='machine' items (migration 085) are the orchestrator's durable
+  // mailbox — they NEVER gate run resume, so a hidden machine finding can never
+  // wedge the run at the aggregate-unblock boundary. Only human-audience blocking
+  // items count. The `IS NULL OR != 'machine'` form counts any NULL as human (the
+  // safe direction — never hide a blocking item from a human); the NOT NULL column
+  // default makes NULL impossible post-migration, but SQL three-valued logic would
+  // otherwise drop a NULL row from a bare `!= 'machine'` predicate.
+  const audienceClause = `(audience IS NULL OR audience != 'machine')`;
   const row =
     excludeIds.length > 0
       ? (db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_items
-              WHERE run_id = ? AND blocking = 1 AND status = 'pending'
+              WHERE run_id = ? AND blocking = 1 AND status = 'pending' AND ${audienceClause}
                 AND id NOT IN (${excludeIds.map(() => '?').join(', ')})`,
           )
           .get(runId, ...excludeIds) as { n: number })
       : (db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_items
-              WHERE run_id = ? AND blocking = 1 AND status = 'pending'`,
+              WHERE run_id = ? AND blocking = 1 AND status = 'pending' AND ${audienceClause}`,
           )
           .get(runId) as { n: number });
   return row.n;

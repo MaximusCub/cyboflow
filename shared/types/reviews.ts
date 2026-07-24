@@ -39,6 +39,16 @@ export type ReviewItemKind = 'finding' | 'permission' | 'decision' | 'human_task
 /** Lifecycle status (DB CHECK on review_items.status). */
 export type ReviewItemStatus = 'pending' | 'resolved' | 'dismissed';
 
+/**
+ * Who must act on a review item (migration 085) — an axis INDEPENDENT of
+ * `blocking`. 'human' (default) renders in the review queue and, when blocking,
+ * parks the run. 'machine' is a durable record the orchestrator consumes (e.g. the
+ * visual merge-gate's under-cap loopback finding): never queued, never counted by
+ * the aggregate-unblock gate. Splitting this off `blocking` is what prevents a
+ * machine-mailbox blocking item from wedging the run on a card no human can see.
+ */
+export type ReviewItemAudience = 'human' | 'machine';
+
 /** Severity — only meaningful for findings (DB CHECK on review_items.severity). */
 export type ReviewItemSeverity = 'info' | 'warning' | 'error';
 
@@ -298,6 +308,12 @@ export interface ReviewItem {
   status: ReviewItemStatus;
   /** Whether this item gates run resume (aggregate-unblock, P4). */
   blocking: boolean;
+  /**
+   * Who must act on this item (migration 085) — independent of `blocking`.
+   * 'machine' items are the orchestrator's durable mailbox: excluded from the
+   * queue and from the run-park blocking count. Defaults to 'human'.
+   */
+  audience: ReviewItemAudience;
   title: string;
   body: string | null;
   /** Only meaningful for findings; null otherwise. */

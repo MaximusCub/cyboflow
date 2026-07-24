@@ -780,6 +780,7 @@ describe('QuestionRouter boot recovery mints durable recovery gates', () => {
     );
     db.exec('ALTER TABLE workflow_runs ADD COLUMN model TEXT');
     db.exec(readFileSync(join(migDir, '065_agent_invocations.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
     return db;
   }
 
@@ -920,6 +921,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
@@ -1466,6 +1468,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
       '014_native_tasks.sql',
       '015_entity_model_rebuild.sql',
       '016_review_items.sql',
+      '085_review_item_audience.sql',
       '017_run_seed_idea.sql',
       '024_archive_in_place.sql',
       '028_idea_attachments.sql',
@@ -1706,6 +1709,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
@@ -2016,6 +2020,7 @@ describe('QuestionRouter self-heals a dead/stale gate (supersede-and-reopen)', (
       '014_native_tasks.sql',
       '015_entity_model_rebuild.sql',
       '016_review_items.sql',
+      '085_review_item_audience.sql',
       '017_run_seed_idea.sql',
     ]) {
       db.exec(readFileSync(join(migDir, f), 'utf-8'));

@@ -44,6 +44,7 @@ function buildDb(): Database.Database {
   for (const f of [
     '006_cyboflow_schema.sql', '011_workflow_step_tracking.sql', '014_native_tasks.sql',
     '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '028_idea_attachments.sql',
+    '085_review_item_audience.sql',
   ]) db.exec(readFileSync(join(migDir, f), 'utf-8'));
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');

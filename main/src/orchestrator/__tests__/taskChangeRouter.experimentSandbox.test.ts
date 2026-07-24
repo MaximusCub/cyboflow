@@ -29,6 +29,7 @@ function buildDb(): Database.Database {
     '016_review_items.sql',
     '024_archive_in_place.sql',
     '028_idea_attachments.sql',
+    '085_review_item_audience.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

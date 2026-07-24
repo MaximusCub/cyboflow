@@ -60,6 +60,7 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '034_findings_triage.sql',
+    '085_review_item_audience.sql',
   ]) {
     db.exec(readFileSync(join(migDir, file), 'utf-8'));
   }

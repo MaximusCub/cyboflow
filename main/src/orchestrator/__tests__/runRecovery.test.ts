@@ -709,6 +709,7 @@ describe('archived-session review-item sweeps', () => {
       '019_workflow_run_session_id.sql',
       '034_findings_triage.sql',
       '046_notification_kind.sql',
+      '085_review_item_audience.sql',
     ]) {
       db.exec(readFileSync(join(migrations, file), 'utf8'));
     }

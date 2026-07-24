@@ -33,6 +33,7 @@ import {
   reviewItemProjectChannel,
 } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { countPendingBlockingReviewItems } from '../reviewItemListing';
 import type { DatabaseLike } from '../types';
 import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
 
@@ -66,6 +67,8 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   // 046 widens the kind CHECK to accept the 'notification' kind.
   db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
+  // 085 adds the `audience` column (human/machine).
+  db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
   return db;
 }
 
@@ -884,6 +887,100 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     expect(events[0].reviewItemId).toBe(reviewItemId);
     expect(events[1].item.status).toBe('resolved');
     expect(events[1].item.resolution).toBe('approved');
+  });
+
+  // -------------------------------------------------------------------------
+  // audience (migration 085, Item 3): human vs machine
+  // -------------------------------------------------------------------------
+
+  describe('audience (human/machine)', () => {
+    it('defaults to human and persists + surfaces it on the shaped item', async () => {
+      const db = buildDb();
+      const router = ReviewItemRouter.initialize(dbAdapter(db));
+      const events: ReviewItemChangedEvent[] = [];
+      reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+      const { reviewItemId } = await router.applyReviewItem(1, {
+        op: 'create',
+        actor: 'agent:executor',
+        kind: 'finding',
+        title: 'default audience',
+      });
+
+      const row = db.prepare('SELECT audience FROM review_items WHERE id = ?').get(reviewItemId) as { audience: string };
+      expect(row.audience).toBe('human');
+      expect(events[0].item.audience).toBe('human');
+    });
+
+    it('persists audience:machine and round-trips it through shapeRow', async () => {
+      const db = buildDb();
+      const router = ReviewItemRouter.initialize(dbAdapter(db));
+      const events: ReviewItemChangedEvent[] = [];
+      reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+      const { reviewItemId } = await router.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: 'machine mailbox',
+        blocking: true,
+        audience: 'machine',
+      });
+
+      const row = db.prepare('SELECT audience, blocking FROM review_items WHERE id = ?').get(reviewItemId) as {
+        audience: string;
+        blocking: number;
+      };
+      expect(row.audience).toBe('machine');
+      expect(row.blocking).toBe(1);
+      expect(events[0].item.audience).toBe('machine');
+    });
+
+    it('a blocking machine item is EXCLUDED from the run-park blocking count; a blocking human item counts', async () => {
+      const db = buildDb();
+      seedRun(db, 'run-1');
+      const router = ReviewItemRouter.initialize(dbAdapter(db));
+
+      // A blocking MACHINE finding bound to run-1 — the durable mailbox that must
+      // never park the run.
+      await router.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: 'under-cap loopback mailbox',
+        blocking: true,
+        audience: 'machine',
+        runId: 'run-1',
+      });
+      // With ONLY the machine item pending, the run is NOT blocked.
+      expect(countPendingBlockingReviewItems(dbAdapter(db), 'run-1')).toBe(0);
+
+      // Add a blocking HUMAN finding on the same run — now the count is 1.
+      await router.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: 'at-cap escalation',
+        blocking: true,
+        audience: 'human',
+        runId: 'run-1',
+      });
+      expect(countPendingBlockingReviewItems(dbAdapter(db), 'run-1')).toBe(1);
+    });
+
+    it('rejects an out-of-domain audience value at the DB CHECK', async () => {
+      const db = buildDb();
+      // The column CHECK guards against a bad audience slipping in via a raw write
+      // (the router only ever passes 'human'|'machine', but the invariant is the DB's).
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO review_items (id, project_id, kind, status, blocking, audience, title, created_at, updated_at)
+             VALUES ('rvw_bad', 1, 'finding', 'pending', 0, 'nobody', 'x', '', '')`,
+          )
+          .run(),
+      ).toThrow();
+    });
   });
 });
 

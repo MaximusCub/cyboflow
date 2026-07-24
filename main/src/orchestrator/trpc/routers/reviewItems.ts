@@ -628,6 +628,14 @@ export const reviewItemsRouter = router({
       const db = requireDb(ctx.db, 'list');
       const clauses: string[] = ['ri.project_id = ?'];
       const params: unknown[] = [input.projectId];
+      // audience='machine' items (migration 085) are the orchestrator's durable
+      // mailbox — never rendered to a human. Excluded from the queue AND (since
+      // ReviewQueueView derives blockingCount from this same query) from the
+      // human-facing blocking count, kept consistent-by-construction with the
+      // run-park gate's own machine exclusion in reviewItemListing. NULL counts as
+      // human (the NOT NULL default makes NULL impossible post-migration; the
+      // IS NULL guard keeps a bare `!=` from dropping a NULL row under SQL 3VL).
+      clauses.push(`(ri.audience IS NULL OR ri.audience != 'machine')`);
       if (input.status !== undefined) {
         clauses.push('ri.status = ?');
         params.push(input.status);

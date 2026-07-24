@@ -103,6 +103,7 @@ function makeRI(kind: ReviewItemKind, id: string, blocking: boolean): ReviewItem
     kind,
     status: 'pending',
     blocking,
+    audience: 'human',
     title: `${kind} ${id}`,
     body: null,
     severity: null,

@@ -56,6 +56,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
   // Built-in planner workflow row (spec_json '{}' → resolves to the built-in DAG).
   db.prepare(
     `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-planner', 1, 'planner', '{}')`,

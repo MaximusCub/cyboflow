@@ -61,6 +61,7 @@ function buildDb(): Database.Database {
     '024_archive_in_place.sql',
     '028_idea_attachments.sql',
     '034_findings_triage.sql',
+    '085_review_item_audience.sql',
   ]) {
     db.exec(readFileSync(join(migDir, file), 'utf-8'));
   }

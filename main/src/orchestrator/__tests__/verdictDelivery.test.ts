@@ -45,6 +45,7 @@ const MIGRATIONS = [
   '035_artifacts.sql',
   '055_visual_verification.sql',
   '078_verification_agent_requests.sql',
+  '085_review_item_audience.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -65,8 +66,8 @@ function buildDb(): Database.Database {
   // session_id, backfilled by 041) — layer the additive column onto this
   // pre-020 chain so the emit-path SELECT resolves.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-  // artifacts.revision (migration 082) — ArtifactRouter bumps it on the verdict
-  // enrich-with-deltas; add the additive column onto this pre-082 chain.
+  // artifacts.revision (migration 085) — ArtifactRouter bumps it on the verdict
+  // enrich-with-deltas; add the additive column onto this pre-085 chain.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
   return db;
 }
@@ -673,6 +674,7 @@ const SPRINT_MIGRATIONS = [
   '035_artifacts.sql',
   '055_visual_verification.sql',
   '078_verification_agent_requests.sql',
+  '085_review_item_audience.sql',
 ];
 
 function buildSprintDb(): Database.Database {

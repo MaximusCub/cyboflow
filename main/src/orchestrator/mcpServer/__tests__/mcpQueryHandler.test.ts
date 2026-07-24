@@ -1882,11 +1882,11 @@ describe('McpQueryHandler', () => {
       // Migration 059: category (feature|bug|chore) — an unconditional column in
       // insertEntity/readEntity now (mirrors priority), so every create needs it.
       db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
-      // Migration 082 (Design Mode v0): handleGetTask now unconditionally reads
+      // Migration 085 (Design Mode v0): handleGetTask now unconditionally reads
       // approved_designs for every idea — the table must exist even for tests
       // that never touch design sessions. The fixture's minimal schema has no
       // `sessions`/`artifacts` tables (006 doesn't create them), so this seeds
-      // ONLY the approved_designs table verbatim from migration 082 (its other
+      // ONLY the approved_designs table verbatim from migration 085 (its other
       // statements ALTER those two tables and would fail against this fixture).
       db.exec(`
         CREATE TABLE approved_designs (
@@ -2373,7 +2373,7 @@ describe('McpQueryHandler', () => {
     describe('mcp-get-task approved_design (Design Mode v0)', () => {
       let designCounter = 0;
 
-      /** Insert a raw approved_designs row (migration 082) with sane defaults. */
+      /** Insert a raw approved_designs row (migration 085) with sane defaults. */
       function seedApprovedDesign(
         ideaId: string,
         projectId: number,
@@ -2532,6 +2532,7 @@ describe('McpQueryHandler', () => {
       reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
       return reviewDb;
     }
 

@@ -271,6 +271,7 @@ function finding(overrides: Partial<TriageFinding> = {}): TriageFinding {
     kind: 'finding',
     status: 'pending',
     blocking: false,
+    audience: 'human',
     title: overrides.title ?? `Finding ${idCounter}`,
     body: null,
     severity: 'warning',

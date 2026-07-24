@@ -3603,6 +3603,7 @@ function buildReviewDb(): Database.Database {
   db.exec(readFileSync(joinPath(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(joinPath(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(joinPath(migDir, '034_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '085_review_item_audience.sql'), 'utf-8'));
   return db;
 }
 

@@ -73,6 +73,7 @@ function createDb(): Database.Database {
       kind TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       blocking INTEGER NOT NULL DEFAULT 0,
+      audience TEXT NOT NULL DEFAULT 'human',
       title TEXT NOT NULL,
       body TEXT,
       severity TEXT,

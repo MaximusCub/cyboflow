@@ -81,6 +81,9 @@ function buildDb(): Database.Database {
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // Migration 085: review_items.audience (human/machine) — the list query filters
+  // out audience='machine' items, so the column must exist.
+  db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
   return db;
 }
 

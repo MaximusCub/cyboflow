@@ -30,6 +30,7 @@ import type {
   FindingPriority,
   FindingProposedTarget,
   ReviewItem,
+  ReviewItemAudience,
   ReviewItemChangeAction,
   ReviewItemChangedEvent,
   ReviewItemEntityType,
@@ -118,6 +119,13 @@ export interface ReviewItemCreate {
   body?: string | null;
   /** Defaults to false. Permissions/decisions are typically blocking=true. */
   blocking?: boolean;
+  /**
+   * Who must act on this item (migration 085). 'human' (default) renders in the
+   * review queue and, when blocking, parks the run. 'machine' is a durable record
+   * the orchestrator consumes — never queued, never counted by the aggregate-
+   * unblock gate (so it can neither wedge the run nor demand human attention).
+   */
+  audience?: ReviewItemAudience;
   /** Only meaningful for findings; ignored otherwise (stored as given). */
   severity?: ReviewItemSeverity | null;
   source?: string | null;
@@ -209,6 +217,7 @@ interface ReviewItemDbRow {
   kind: ReviewItemKind;
   status: ReviewItemStatus;
   blocking: number; // 0 | 1
+  audience: ReviewItemAudience; // 'human' | 'machine' (migration 085; default 'human')
   title: string;
   body: string | null;
   severity: ReviewItemSeverity | null;
@@ -388,6 +397,7 @@ export class ReviewItemRouter {
     }
 
     const blocking = change.blocking ? 1 : 0;
+    const audience: ReviewItemAudience = change.audience ?? 'human';
     const severity = change.severity ?? null;
     const source = change.source ?? null;
     const body = change.body ?? null;
@@ -401,9 +411,9 @@ export class ReviewItemRouter {
       this.db
         .prepare(
           `INSERT INTO review_items
-             (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+             (id, project_id, run_id, entity_type, entity_id, kind, status, blocking, audience,
               title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
         )
         .run(
           reviewItemId,
@@ -413,6 +423,7 @@ export class ReviewItemRouter {
           entityId,
           change.kind,
           blocking,
+          audience,
           change.title,
           body,
           severity,
@@ -430,6 +441,7 @@ export class ReviewItemRouter {
       ];
       if (entityType !== null) deltas.push({ field: 'entity_type', from: null, to: entityType });
       if (entityId !== null) deltas.push({ field: 'entity_id', from: null, to: entityId });
+      if (audience !== 'human') deltas.push({ field: 'audience', from: null, to: audience });
 
       const ev = this.insertEvent(reviewItemId, 'created', change.actor, runId, deltas, now);
       eventId = ev.id;
@@ -819,6 +831,9 @@ export class ReviewItemRouter {
       kind: row.kind,
       status: row.status,
       blocking: row.blocking === 1,
+      // Fail-soft for pre-085 rows read before the column exists / an unexpected
+      // value: default to 'human' so an item is never silently hidden from a human.
+      audience: row.audience === 'machine' ? 'machine' : 'human',
       title: row.title,
       body: row.body,
       severity: row.severity,
