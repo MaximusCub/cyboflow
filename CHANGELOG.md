@@ -6,6 +6,20 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.31] — 2026-07-24
+
+### Added
+
+- **Interrupt & send** for a running quick session: a button beside Queue that aborts the in-flight turn and sends immediately. `panels:continue` accepts an interrupt flag (abort in-flight turn, send now) and otherwise queues mid-turn sends instead of mutex-starving.
+- Quick-session chat renders `AskUserQuestion` gates and lets the composer answer them.
+
+### Fixed
+
+- Interrupt/stop correctness: interrupt aborts the in-flight turn before taking the continue lock; `sessions:stop` settles pending gates before killing panels; the composer Stop button follows the authoritative running status (not the working spinner), shows during SDK generation, and stays visible beside the interrupt trio.
+- Codex quick-session parity: queue + interrupt parity (dropped the hard-reject), and a queued Codex message is delivered at the rest boundary rather than dropped.
+- Question-answer sends save and forward their attachments (no silent drop); the client pending-id is threaded through the `panels:continue` queue fallback.
+- Panel status follows the live store instead of a frozen `SessionContext` snapshot, and a main-repo session reads its live status from `activeMainRepoSession`.
+
 ## [0.1.30] — 2026-07-23
 
 ### Added
