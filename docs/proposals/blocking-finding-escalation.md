@@ -1,234 +1,330 @@
-# Blocking-finding escalation: fix the inverted ladder
+# Blocking-finding escalation: fix the real gaps
 
-**Status:** proposal (unreviewed)
-**Date:** 2026-07-23
-**Origin:** a sprint run parked on a blocking finding whose body was a code-review
-`## Blocking` defect for TASK-107. The finding offered `Resolve & resume` /
-`Dismiss` / `Promote to task` — none of which fix the defect, and none of which
-were the decision the situation actually called for.
+**Status:** proposal — rev 2 (rewritten after adversarial review by Codex + Fable)
+**Date:** 2026-07-24
+**Origin:** an ORCHESTRATED sprint run parked on a blocking finding whose body was
+a code-review `## Blocking` defect for TASK-107. The finding offered `Resolve &
+resume` / `Dismiss` / `Promote to task` — none of which fix the defect, and none
+of which were the decision the situation called for.
+
+> **Revision note.** Rev 1 claimed attempt-cap exhaustion was *silent* and built
+> a lane-parking escalation gate on top of that premise. Both reviewers showed the
+> premise is false — exhaustion already escalates (see §2). Rev 1 also proposed
+> hiding a still-blocking finding from the queue, which both reviewers traced to a
+> permanent run-wedge. This revision drops the parking machinery, keeps the
+> escalation gate as a *surfacing* improvement to the gate that already exists, and
+> replaces read-time suppression with a mint-time audience flag. A new **Item 0**
+> covers the highest-value finding the review surfaced: the code-review → loopback
+> channel does not exist on the default execution plane.
 
 ---
 
-## 1. The problem
+## 1. The observed symptom
 
-`review_items.blocking` means exactly one thing: **park the run**. It does not
-mean "a human must decide something". Because those are the same bit, anything
-that parks a run necessarily renders in the human inbox with human CTAs.
+`review_items.blocking` means exactly one thing: **park the run** until triaged.
+It does not mean "a human must decide something". Because those are the same bit,
+anything that parks a run renders in the human inbox with human CTAs.
 
-That collision produces an **inverted escalation ladder** in the sprint lane
-chain:
+In the TASK-107 incident, an ORCHESTRATED sprint's driving agent took a
+code-review `## Blocking` defect and filed it as
+`cyboflow_report_finding(blocking: true)` — parking the run and handing a human a
+defect the chain was supposed to fix itself. The generated instructions
+(`main/src/orchestrator/prompts/fan-out-instructions.ts`, `case 'code-review'`,
+verified at :108-117) say to loop back to `implement`, not to file a finding — but
+nothing *forbids* filing one, and the `cyboflow_report_finding` tool description
+(`cyboflowMcpServer.ts:569`) actively invites it: *"set `blocking:true` only for
+items that should gate run resume"* describes a must-fix defect perfectly.
 
-| Lane event | Should be | Is today |
-|---|---|---|
-| `code-review` returns `## Blocking`, attempt 1–2 | silent loopback to `implement` | **loud human interrupt with three inapplicable CTAs** |
-| Lane exhausts `FAN_OUT_LANE_ATTEMPT_CAP` (3) | loud human escalation | **silent `status: 'failed'` + a log line** |
+## 2. Corrected baseline — what actually happens at exhaustion
 
-Both halves are wrong, and they are wrong in opposite directions. The cheap,
-auto-fixable case interrupts a human; the expensive, genuinely-stuck case is
-invisible and lets the sprint report success with a dead lane in it.
+Rev 1's central claim ("silent `status:'failed'` + a log line; no gate, no
+notification; the sprint reports success with a dead lane in it") is **false**.
+Verified on both planes:
 
-### 1.1 Evidence — the escalation is designed, and the agent deviated
+- **Programmatic.** A lane returning `'failed'` increments `incompleteCount`
+  (`workflowController.ts:1156-1159`); a non-zero count sets `skipToHumanGate`
+  (`:374-380`); the step loop (`:313-332`) then skips every automated closing step
+  (sprint-verify, sprint-review) and stops at the sprint's terminal pure human
+  gate `human-review` (`shared/types/workflows.ts:851-859`).
+- **Orchestrated.** The same rule in prose: *"the failure is surfaced at the human
+  gate"* (`sprint.md:90-91`) and the closing-stage gate + *"partial-sprint
+  summary"* (`sprint.md:138-146`).
 
-`main/src/orchestrator/prompts/fan-out-instructions.ts`, `case 'code-review'`,
-already specifies the correct behaviour:
+So a sprint **cannot** seal with an unreviewed dead lane. The real defect is
+narrower and still worth fixing: the escalation is **deferred** (to sprint end,
+after all lanes settle) and **lossy** — the gate that fires is a generic
+approve/reject decision whose body is the bare string *"Workflow step
+'human-review' requires a human decision before the run can advance"*
+(`humanStepManager.ts:157-158`, `payload: null`). It carries no per-lane attempt
+history, no failure text, no CTAs beyond approve/reject. The human is told "a
+sprint finished with problems" and must go spelunking in the swimlane to learn
+what and why.
 
-> For each entry in its `## Findings`, record a **non-blocking finding** via
-> `cyboflow_report_finding` … If it returns a `## Blocking` defect, **loop back
-> to `cyboflow-implement`** (per the loopback + attempt protocol below) to fix
-> it before proceeding.
+The deferred aggregate gate is the right shape (interrupt once, with the whole
+picture, not N times mid-sprint). **This proposal improves what that gate shows;
+it does not replace it with per-lane parking.**
 
-The `code-review` inner step carries `loopback: 'implement'`
-(`shared/types/workflows.ts:816`). A code-review blocker is never supposed to
-become a blocking review item.
+## 3. Reference implementation already in the tree
 
-Nothing, however, *forbids* it. The `cyboflow_report_finding` tool description
-(`main/src/orchestrator/mcpServer/cyboflowMcpServer.ts:569`) reads:
-
-> set `blocking:true` only for items that should gate run resume
-
-which describes a must-fix code-review defect perfectly. The orchestrating agent
-took the invitation.
-
-### 1.2 Evidence — exhaustion is silent
-
-`main/src/orchestrator/programmatic/workflowController.ts:864` (and the identical
-`task-verify` VERDICT:FAIL path at `:917`):
-
-```js
-driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-this.host.log?.('warn', `... lane failed (attempt cap reached)`);
-return 'failed';
-```
-
-A lane-status write and a log line. No review item, no gate, no park, no
-notification. The orchestrated plane says the same in prose: *"mark the lane
-`failed` and continue the other lanes — a failed lane never stops the fan-out."*
-
-No consumer escalates a failed lane. `rewindRunHandler.resetFailedLanes` can
-re-queue one, but only when a human already went looking at the swimlane.
-
-### 1.3 The visual merge-gate already got this right
-
-`isMergeGateBlocking` (`main/src/orchestrator/verify/mergeGateLaneAdvance.ts:433`)
-implements the intended ladder for the *visual* path:
+The visual merge-gate implements the intended ladder for the *visual* path.
+`isMergeGateBlocking` (`mergeGateLaneAdvance.ts:433-435`):
 
 | Verdict | Action | Finding |
 |---|---|---|
-| FAIL under cap | `loopback-implement` | blocking (carries fix guidance) |
-| FAIL at/over cap | `mark-failed` | blocking (the real escalation) |
+| FAIL under `MERGE_GATE_ATTEMPT_CAP` (`mergeGateLaneAdvance.ts:82`) | `loopback-implement` | blocking (fix guidance) |
+| FAIL at/over cap | `mark-failed` | blocking (escalation) |
 | low confidence | proceed | non-blocking (advisory) |
 
-It also supersedes stale lower-attempt findings on every terminal verdict
-(`verdictDelivery.ts:615-640`), so a recovered lane leaves no orphan blocking
-item.
-
-This is the reference implementation. Two gaps remain:
-
+Two structural problems it demonstrates, which motivate Items 0 and 3:
 - its **under-cap** `loopback-implement` finding is a machine-to-machine mailbox
-  (the orchestrator is instructed to read it and re-delegate) yet it renders in
-  the human queue with human CTAs;
-- the **non-visual** lane failure paths (`code-review`, `write-tests`,
-  `task-verify`) have none of this — no escalation finding at exhaustion at all.
+  (the orchestrator reads it and re-delegates) that renders in the human queue
+  with human CTAs — Item 3;
+- it exists only because the *visual* path has a real verdict channel. The
+  *code-review* path has none on the programmatic plane — Item 0.
 
 ---
 
-## 2. Proposal
+## Item 0 — Give the programmatic plane a code-review verdict channel
 
-Three changes, ordered by dependency and by how much bleeding each stops.
+**This is the highest-value item.** It is the actual reason the TASK-107 class of
+defect has no clean home.
 
-### Item 1 — Prompt guardrail: a loopback-eligible defect never mints a blocking finding
+**Problem.** On the PROGRAMMATIC plane (the sprint default), the controller parses
+**no** `## Blocking` section from a code-review turn. It parses only
+`parseTaskVerifyVerdict` from `task-verify`'s text (`workflowController.ts:60-67`,
+consumed at `:901`). A clean (`status:'ok'`) code-review subagent turn that
+contains `## Blocking` defects is treated as success and the lane advances —
+`code-review`'s `loopback: 'implement'` (`shared/types/workflows.ts:816`) only ever
+fires on a *failed* step result, which a review turn that "successfully found
+problems" is not. The loopback the agent doc calls *"the channel that makes review
+change code"* (`.claude/agents/cyboflow-code-review.md:27`) is a **no-op on the
+default plane**. It works only on the orchestrated plane, as prose the driving
+agent may or may not honor — which is exactly how the TASK-107 finding got
+mis-filed.
+
+**Change.** Mirror the `task-verify` verdict channel for `code-review`:
+
+1. `.claude/agents/cyboflow-code-review.md` — require the subagent to emit a
+   machine-readable last line, e.g. `REVIEW: BLOCKING` when it populated a
+   `## Blocking` section, else `REVIEW: CLEAN`. (task-verify's `VERDICT: PASS|FAIL`
+   is the established pattern.)
+2. `workflowController.ts` — add a `SPRINT_CODE_REVIEW_STEP` handler beside the
+   `SPRINT_TASK_VERIFY_STEP` block (`:883-935`): on `REVIEW: BLOCKING`, route into
+   the **same** non-systemic loopback path task-verify's FAIL uses (`:905-914`) —
+   declared `loopback` → `laneAttempt` bump → 3× cap → `failed`. Thread the
+   `## Blocking` text into the re-driven `implement` step as loopback feedback (the
+   same one-shot section mechanism task-verify uses to pass `## Fix guidance`).
+3. `shared/types/sprintBatch.ts` — add `SPRINT_CODE_REVIEW_STEP = 'code-review'`
+   named const (`code-review` already exists as a lane step id at :139; promote it
+   to a named const so controller/parser/tests share one source, as the other
+   step ids already do).
+
+**Interaction with Item 1.** With Item 0 in place, a programmatic code-review
+blocker loops back *structurally* — it never reaches the human queue, so Item 1's
+prompt guardrail is a belt-and-suspenders backstop for the orchestrated plane
+rather than the sole defense. Item 0 fixes the plane where sprints actually run;
+Item 1 fixes the plane where the incident happened.
+
+**Acceptance.** A programmatic sprint whose code-review returns `## Blocking`
+re-drives `implement` with the blocking text as feedback, up to 3×, then fails the
+lane (feeding the existing exhaustion gate — §2). No blocking finding is minted for
+an under-cap code-review defect. `pnpm test:unit` green; new controller unit test
+covering `REVIEW: BLOCKING` → loopback → cap → fail, mirroring the task-verify
+verdict tests.
+
+**Note.** Changes under `main/src/services/panels/claude/` are NOT touched here, so
+the Tier-3 itest gate is not triggered; controller changes are covered by
+`test:unit`.
+
+---
+
+## Item 1 — Prompt guardrail (rescoped)
 
 **Problem.** The instruction to loop back is stated positively with no guardrail,
-and the MCP tool description actively invites the wrong choice.
+and the MCP tool description invites the wrong choice. Rev 1's fix over-reached: a
+blanket *"an agent driving a fan-out lane must never set `blocking:true`"* both
+contradicts Item 0/§2's own exhaustion escalation AND breaks the built-in planner,
+which legitimately mints blocking gates through this same tool (`planner.md:78-79,
+155-156, 264`), as do host writers (`evalWorker.ts:671-684`,
+`pairwiseJudgeWorker.ts:643-657`).
 
-**Change.**
+**Change.** Scope the guardrail to the one thing that is actually wrong — filing a
+finding for a defect the loopback is about to fix — and leave every legitimate
+blocking path alone.
 
-1. `main/src/orchestrator/prompts/fan-out-instructions.ts` — in the `code-review`
-   chain entry, add an explicit prohibition after the existing loopback clause:
+1. `fan-out-instructions.ts` — in the `code-review`, `write-tests`, and
+   `task-verify` chain entries (and the generic `default:` fallback at :161-175),
+   add: *"A `## Blocking` / failing / FAIL result here is handled by the loopback
+   below — do NOT also record it as a finding. The loopback IS the response."*
+2. `cyboflowMcpServer.ts:569` — replace the permissive sentence with one that
+   distinguishes the axis WITHOUT forbidding legitimate gates:
 
-   > Do **NOT** record a `## Blocking` defect as a finding — blocking or
-   > otherwise. The loopback IS the response. A finding here would park the run
-   > and hand a human a defect the chain is about to fix itself.
+   > For `kind: 'finding'`: set `blocking: true` only for a defect that no retry or
+   > loopback in the current step chain will fix (e.g. a lane that has exhausted its
+   > attempt budget, or a hazard in shared state that must stop the run now). If the
+   > step you are on has a loopback that will address the issue, the loopback is the
+   > response — do not also file a finding. Blocking `kind: 'decision'` gates
+   > (planner/ship guards, eval verdicts) are unaffected by this guidance.
 
-   Add the same prohibition to the `write-tests` entry (failing test → loop back)
-   and the `task-verify` entry (VERDICT: FAIL → re-delegate).
+**Honest scope.** `buildFanOutAppend` renders only into the MAIN orchestrating
+session (`workflowPromptReaderAdapter.ts:54`, `interactiveClaudeManager.ts:1305`).
+On the programmatic plane the inner agents read their own `.claude/agents/*.md`
+prompts, so Item 1's prompt edit is **inert there** — Item 0 is what fixes the
+programmatic plane. Item 1's value is: (a) the tool-description change, which every
+plane's agents see, and (b) hardening the orchestrated plane where the incident
+occurred.
 
-2. Extend the generic fallback in `renderChainEntry`'s `default:` branch with the
-   same sentence, so a custom/renamed inner step inherits the rule.
+**Preserved escape hatch (from review).** The guardrail deliberately does NOT say
+"never block mid-chain". A code-review discovery that a lane's uncommitted diff is
+destructive in the SHARED worktree (a deleted migration, a committed secret about
+to be swept into a sibling's per-task commit) is a legitimate stop-everything-now
+that an async 3-turn loopback does not provide, as is a `post-merge-bug` finding
+targeting already-merged code. The rule is "not for defects the loopback will
+fix", not "never".
 
-3. `cyboflowMcpServer.ts:569` — replace the permissive sentence with a
-   restrictive one:
-
-   > `blocking: true` is reserved for the run's own escalation seams (a lane that
-   > has exhausted its attempt budget; a gate the host opened). If a retry or a
-   > loopback could still fix the issue, the finding is NON-blocking — file it and
-   > continue. An agent driving a fan-out lane must never set `blocking: true`.
-
-**Why first.** Self-contained, no schema change, and it stops the observed
-symptom. Items 2 and 3 are structural and can land later without blocking this.
-
-**Risk.** Prompt-only, so it is a compliance improvement, not a guarantee. Item 2
-is what makes the invariant hold structurally.
-
-**Acceptance.** `pnpm test:unit` green; the fan-out-instructions snapshot tests
-(`main/src/orchestrator/prompts/__tests__/fan-out-instructions.test.ts`) updated
-to assert the prohibition renders for each canonical inner id and for the generic
-fallback.
-
----
-
-### Item 2 — Escalation gate at attempt-cap exhaustion
-
-**Problem.** The only genuine human decision point in the lane chain is silent.
-
-**Change.** At every site that today marks a lane `failed` after exhausting
-`FAN_OUT_LANE_ATTEMPT_CAP`, mint a **blocking** finding first, then park.
-
-Sites (programmatic plane):
-- `workflowController.ts:864` — required inner step failed, loopback budget spent
-- `workflowController.ts:917` — `task-verify` VERDICT: FAIL at cap
-- `workflowController.ts:~780` — visual merge-gate already does this via
-  `verdictDelivery`; leave it, but route it through the same finding shape
-
-Orchestrated plane: add the corresponding instruction to the *Loopback + attempt
-protocol* block in `fan-out-instructions.ts` — on exhaustion, call
-`cyboflow_report_finding` with `blocking: true` and the accumulated attempt
-history, then leave the lane parked rather than marking it `failed`.
-
-**Finding shape.** New `category: 'lane-exhausted'`, carrying:
-- the task ref and the lane's inner-step id that kept failing
-- all three attempts' failure text (the controller already threads
-  `pendingLoopbackFeedback` / `lastError` per attempt)
-- the files the lane touched
-
-**Human CTAs.** The decision at exhaustion is *not* "address vs dismiss" — three
-implement attempts have already failed, so a blind fourth is the weakest option
-available. The decision is about the task's relationship to the sprint:
-
-| CTA | Effect |
-|---|---|
-| **Drop from sprint** | resolve the finding, lane stays `failed`, task returns to backlog, remaining lanes merge clean. Today's implicit behaviour — made explicit and chosen. |
-| **Retry with guidance** | human supplies the context the blind attempts lacked; resolve the finding, `resetFailedLanes` the lane, re-drive `implement` with the guidance threaded in as `pendingLoopbackFeedback`. The only CTA where a human adds *information* rather than permission. |
-| **Take it myself** | resolve the finding, park the lane, human fixes in the worktree, then resumes. |
-
-**Reuse.** `rewindRunHandler.resetFailedLanes` re-queues a failed lane;
-`workflowController.ts:833` already threads a one-shot `pendingLoopbackFeedback`
-prompt section into a re-driven step. "Retry with guidance" is the composition of
-the two — a surfacing problem far more than a machinery problem.
-
-**Acceptance.** A programmatic sprint whose lane fails three times parks with a
-`lane-exhausted` blocking finding instead of silently completing; each of the
-three CTAs drives the lane to its stated end state; `pnpm test:unit` green.
+**Acceptance.** `pnpm test:unit` green; `fan-out-instructions.test.ts` snapshots
+updated to assert the guardrail renders for each canonical inner id and the generic
+fallback; a check that the new MCP description does not contain the words the
+planner's gate-minting would trip on.
 
 ---
 
-### Item 3 — Suppress the machine-mailbox finding from the human queue
+## Item 2 — Enrich the existing exhaustion gate (surfacing only, no new lane state)
 
-**Problem.** The visual merge-gate's **under-cap** `loopback-implement` finding
-exists so the orchestrator can read the verification report and re-delegate. It
-is addressed to a machine. It renders in the human queue anyway, with CTAs whose
-effect on the lane is undefined.
+**Decision (user, rev 2):** the deferred aggregate gate is good enough. Do **not**
+add a parked lane state or per-lane escalation machinery. Improve what the gate
+that already fires (§2) shows.
 
-**Change.** Do **not** add a general `requires_human` schema axis — with Item 1
-and Item 2 in place, a blocking finding is human-actionable by construction and
-the axis would be dead weight. This is a single-carrier suppression:
+**Problem.** When a sprint reaches `human-review` with failed lanes, the
+programmatic gate body is the generic string *"Workflow step 'human-review'
+requires a human decision…"* (`humanStepManager.ts:157-158`) with `payload: null`.
+The human has to open the swimlane to learn which lanes failed and why.
 
-- Keep `isMergeGateBlocking` as-is (both branches still gate lane integration).
-- In `reviewItemListing` / the queue's visibility predicate, exclude findings with
-  `source = 'visual-verify'` whose payload `visualVerify.attempt <
-  FAN_OUT_LANE_ATTEMPT_CAP` **and** whose gate action was `loopback-implement`.
-  The distinguishing datum must be persisted — today `isMergeGateBlocking`
-  collapses `mark-failed` and `loopback-implement` to the same `blocking: true`
-  with nothing downstream able to tell them apart. Add the gate action to the
-  `visualVerify` correlation payload (`verdictDelivery.ts:665`).
+**Change.** When the terminal `human-review` gate opens for a sprint run that has
+`incompleteCount > 0`, compose a **partial-sprint summary** as the decision item's
+body/payload:
 
-**Open question for review.** An alternative is to stop making the under-cap
-loopback finding blocking at all, and instead thread the report through the same
-in-memory `pendingLoopbackFeedback` channel the non-visual loopbacks use. That
-removes the mailbox from the DB entirely rather than hiding it. It is cleaner but
-touches the async merge-gate's crash-recovery story: the finding is currently the
-*durable* record that survives an app restart mid-verification. **Reviewers should
-weigh these two.**
+- per failed lane: task ref + title, the inner step that kept failing, the
+  `laneAttempt` reached, and the captured failure text from each attempt;
+- the files each failed lane touched.
 
-**Acceptance.** An under-cap visual FAIL still loops the lane back and still
-blocks integration, but does not appear in the review queue; an at-cap visual FAIL
-does appear, with Item 2's CTAs; supersession behaviour unchanged.
+Sites:
+- **Programmatic.** `humanStepManager.openHumanGate` currently hard-codes the body.
+  Give it (or a sprint-aware caller) access to the batch's failed-lane summary so
+  the `human-review` decision item carries it. This requires the controller to
+  RETAIN per-attempt failure text, which today it does **not** — the only capture
+  is `lastSystemicError` (systemic-only) and the visual-only
+  `pendingLoopbackFeedback` closure local. Add a per-lane failure-text accumulator
+  in `driveItem` and surface it on the lane row (or a batch-scoped side table) that
+  the gate builder reads. This is the one piece of genuinely new machinery in
+  Item 2, and it is additive read-model plumbing — no new lane STATUS, no change to
+  settlement, resume, or close-out.
+- **Orchestrated.** `sprint.md:138-146` already tells the agent to present a
+  "partial-sprint summary". Tighten that prose to enumerate the per-lane attempt
+  history above, so both planes present the same content.
+
+**CTAs.** The gate stays a single approve/reject decision (its existing shape). The
+enrichment is informational: the human reads the failure history and decides
+approve (seal the partial sprint; failed lanes' tasks revert to backlog via the
+existing close-out recompute, `git.ts:200-207`) or reject (end the run). Per-lane
+"retry with guidance" / "drop" / "take it myself" CTAs are **out of scope** —
+review showed they would need per-lane reset (today's `resetFailedLanes` is
+batch-wide, `sprintLaneStore.ts:1151-1176`), a park-across-resolution protocol that
+does not fight aggregate-unblock auto-resume (`resolveReviewItemHandler.ts:553-578`),
+and shared-worktree rollback ownership that does not exist. The existing
+`retryRunHandler` rewind path remains the way to re-drive failed lanes.
+
+**Acceptance.** A programmatic sprint with ≥1 failed lane opens `human-review` with
+a body enumerating each failed lane's ref, failing step, attempts, and failure
+text; a clean sprint's gate body is unchanged. `pnpm test:unit` green; unit test
+on the summary builder.
 
 ---
 
-## 3. Sequencing
+## Item 3 — Machine-mailbox findings: mint-time audience flag (not read-time hiding)
 
-1. **Item 1** — independent, lands immediately, stops the observed symptom.
-2. **Item 2** — depends on nothing; makes Item 1's invariant structural.
-3. **Item 3** — depends on Item 2 (its CTAs are what an at-cap visual finding
-   should render), and on the open question above being settled.
+**Problem.** The visual merge-gate's under-cap `loopback-implement` finding is
+addressed to a machine (the orchestrator reads it and re-delegates) but renders in
+the human queue with human CTAs. Rev 1 proposed hiding it via a read-time predicate
+on the queue list. **Both reviewers traced that to a permanent run-wedge**, and I
+verified the mechanism:
 
-## 4. Explicitly out of scope
+The run-park gate counts **raw** pending blocking rows —
+`hasPendingBlockingItems` → the aggregate SQL in `reviewItemListing.ts:451-458`,
+consumed by `blockingItemsGate.awaitClear`, which resumes only when that count
+reaches zero (`blockingItemsGate.ts:102-115`). Read-time queue hiding
+(`trpc/routers/reviewItems.ts`, the list query — NOT `reviewItemListing.ts`, which
+Rev 1 miscited) leaves the row `blocking=1 pending`, so the gate still counts it.
+Concrete wedge: visual FAIL at attempt 2 → hidden blocking loopback finding → lane
+loops back → re-run `task-verify` returns NOT-APPLICABLE (the fix removed the
+visual surface) → no later verdict ever fires → supersession
+(`verdictDelivery.ts:618-641`, which only runs on a LATER terminal verdict for the
+same taskRef) never resolves it → fan-out settles → the next outer-boundary
+blocking gate (`workflowController.ts:301`) parks the run on a pending blocking item
+**the queue does not display**. Wedged `awaiting_review` forever, and it violates
+the code's own documented invariant that *"BLOCKING FINDINGS must reach the Review
+Queue"* (`trpc/routers/reviewItems.ts:694-697`).
 
-- A general `requires_human` / `audience` axis on `review_items`. Considered and
-  rejected above as over-scoped.
-- Changing `FAN_OUT_LANE_ATTEMPT_CAP` (3) or `MAX_STEP_LOOPBACKS` (5).
-- The separate, already-known defect that `Resolve & resume` on a finding
-  permanently disqualifies it from Compound (staging is guarded to
-  `status='pending' AND staged_at IS NULL`). Worth its own item; not addressed
-  here.
+**Change.** Introduce the audience distinction as a **first-class, mint-time**
+datum at the single `ReviewItemRouter` chokepoint — the axis Rev 1 wrongly rejected
+as over-scoped. Two viable forms; **reviewers/impl to choose**:
+
+- **(3a) Audience flag.** Add `audience: 'human' | 'machine'` (default `'human'`)
+  to the review-item create path, written once at mint. A `'machine'` finding is
+  excluded from BOTH the human queue AND the blocking-count gate — i.e. it never
+  parks the run and never shows a card; it is purely the durable, crash-safe record
+  the orchestrator reads to re-delegate. The gate's "run is blocked" semantics and
+  the queue's visibility then derive from ONE column, so they cannot desynchronize
+  (the desync is exactly what produced the wedge).
+- **(3b) Non-blocking + auto-resolve.** Make the under-cap loopback finding
+  `blocking: false` and auto-resolve it when the loopback is consumed (the
+  re-driven attempt starts). Simpler schema, but the finding stops being the
+  durable crash-recovery record — the report must survive an app restart
+  mid-verification some other way (the reason it is blocking+durable today).
+
+**Recommendation:** 3a. It names the axis the system already has *de facto* (eval
+catastrophic = human; systemic-pause = human; visual under-cap = machine; planner
+gates = human) and keeps the three consuming surfaces (queue list, blocking count,
+gate) consistent by construction. 3b trades a schema column for a new durability
+problem.
+
+**Keep `isMergeGateBlocking`'s LANE gating.** Under either form, an under-cap
+visual FAIL must still hold THIS lane's integration until re-verified. That is lane
+state (`awaiting-verify` park), not run-level blocking — do not conflate them.
+
+**Acceptance.** An under-cap visual FAIL still loops the lane back and still holds
+lane integration, but never parks the run and never appears in the human queue; an
+at-cap visual FAIL is `audience:'human'`, appears in the queue, and (with Item 2)
+lands in the enriched exhaustion picture; the wedge trace above cannot occur (no
+hidden row is ever counted by the gate). `pnpm test:unit` green; a regression test
+asserting a `'machine'` finding is absent from both the queue list and
+`hasPendingBlockingItems`.
+
+---
+
+## 4. Sequencing
+
+1. **Item 0** — the real correctness fix; independent; highest value. Land first.
+2. **Item 1** — independent; small; hardens the plane where the incident occurred.
+   Word it so it cannot contradict Item 0/§2 or the planner (see Item 1).
+3. **Item 3** — schema/chokepoint change; unblocks safe machine-mailbox findings.
+   Independent of 0/1.
+4. **Item 2** — depends on the per-lane failure-text accumulator; benefits from
+   Item 3 (so at-cap findings are the only human-audience ones in the picture).
+   Land last.
+
+## 5. Explicitly out of scope
+
+- Per-lane retry/drop/take-over CTAs and any parked lane STATUS
+  (`SprintBatchTaskStatus` has none: `shared/types/sprintBatch.ts:38-44`; crash
+  resume re-dispatches any non-`integrated`/`failed` lane at attempt 1:
+  `index.ts:~2343`). The existing `retryRunHandler` rewind is the re-drive path.
+- Changing `FAN_OUT_LANE_ATTEMPT_CAP` (3), `MERGE_GATE_ATTEMPT_CAP` (3), or
+  `MAX_STEP_LOOPBACKS` (5).
+- The separate known defect that resolving a finding disqualifies it from Compound
+  (staging is guarded to `status='pending' AND staged_at IS NULL`,
+  `reviewItemRouter.ts:148-167`). Note the interaction: an Item-2 exhaustion picture
+  is the richest failure telemetry the system produces, yet resolving the gate
+  would exclude it from Compound. Worth its own item; not addressed here.
+- Migrations: Item 3a needs one (new column); Items 0/1/2 need none (free-text
+  category, JSON payload, prompt text). Stated so it is not left open.
