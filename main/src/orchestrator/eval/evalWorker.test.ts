@@ -6,7 +6,7 @@
  * the shutdown pause.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EvalWorker, type JurySlot } from './evalWorker';
+import { EvalWorker, JUDGE_RETRY_BACKOFF_MS, type JurySlot } from './evalWorker';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
@@ -203,6 +203,52 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       model: 'gpt-5.4',
       status: 'failed',
     });
+  });
+
+  it('backs off once before the transient retry, but never for a deterministic failure', async () => {
+    // Transient (non-deterministic) codex failure: one back-off before the single
+    // retry. Two Claude slots pass without failing, so the ONLY sleep is the codex
+    // slot's pre-retry back-off — asserting the count pins it to the retry path.
+    const transientDb = noExistingFindings();
+    const claude = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
+    const codex = new FakeJudge(async () => {
+      throw new Error('protocol crash');
+    }, 'gpt-5.4');
+    const transientSleep = vi.fn(async () => {});
+    const transientWorker = EvalWorker.initialize(transientDb, undefined, {
+      gitDiff: vi.fn(),
+      jury: [
+        ...makeClaudeJury(claude, 2),
+        { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', judge: codex },
+      ],
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: transientSleep,
+    });
+    transientWorker.enqueue('run-1', '1.1');
+    await transientWorker._queue().onIdle();
+    expect(codex.calls).toBe(2); // initial try + one retry
+    expect(transientSleep).toHaveBeenCalledTimes(1);
+    expect(transientSleep).toHaveBeenCalledWith(JUDGE_RETRY_BACKOFF_MS);
+
+    // Deterministic timeout: bails on the first try, no retry -> no back-off sleep.
+    const timeoutDb = noExistingFindings();
+    const timedOut = new FakeJudge(async () => {
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+    });
+    const timeoutSleep = vi.fn(async () => {});
+    const timeoutWorker = EvalWorker.initialize(timeoutDb, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(timedOut),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: timeoutSleep,
+    });
+    timeoutWorker.enqueue('run-1', '1.1');
+    await timeoutWorker._queue().onIdle();
+    expect(timeoutSleep).not.toHaveBeenCalled();
   });
 
   it('retries a malformed sample once then drops it; >=1 valid still scores', async () => {

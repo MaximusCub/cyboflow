@@ -47,6 +47,14 @@ export const DEFAULT_SAMPLE_COUNT = 3;
 export const DEFAULT_MAX_RETRIES = 2;
 /** Cap on net-new findings written per eval (rubric "~10"). */
 export const MAX_FINDINGS_PER_EVAL = 10;
+/**
+ * Back-off before a jury slot's single retry. Kept deliberately SMALL: the retry
+ * only fires on a NON-deterministic failure (a transient turn error — deterministic
+ * timeout/max-turns slots bail without retrying), and an immediate identical retry
+ * tends to hit the same upstream blip. A brief pause lets a transient condition
+ * clear without materially lengthening the failure path.
+ */
+export const JUDGE_RETRY_BACKOFF_MS = 250;
 
 export interface JurySlot {
   slot: string;
@@ -457,6 +465,10 @@ export class EvalWorker {
             errorCode: err instanceof EvalJudgeMaxTurnsError ? 'max-turns' : 'timeout',
           };
         }
+        // Small back-off before the single retry: this failure was transient
+        // (non-deterministic), and retrying instantly tends to hit the same
+        // upstream blip. Only pause when another attempt actually follows.
+        if (tries === 0) await this.sleep(JUDGE_RETRY_BACKOFF_MS);
       }
     }
     return { status: 'failed', retryable: true };
