@@ -875,15 +875,35 @@ currently fails on the bundled `claude` / `codex` binaries.
 
 ### asarUnpack contract
 
-`cyboflowMcpServer.js` is spawned as an external `node` subprocess (the
-per-session Cyboflow MCP server). Node cannot execute files from inside an ASAR
-archive, so the script must be placed **outside** the archive at package time.
+Anything executed as a real file — a spawned subprocess script, a native binary,
+a `dlopen`ed addon — cannot live inside the ASAR archive and must be listed in
+`package.json` `build.asarUnpack`. The six current entries and why each exists:
 
-`package.json` `build.asarUnpack` covers it with the glob:
+- `node_modules/**/*.node` — native addons (`better-sqlite3`, `node-pty`
+  prebuilds) must be real files for `dlopen`.
+- `node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**` — the Agent SDK's
+  per-arch bundled `claude` executable, spawned as an external process both by
+  the SDK's `query()` runtime and by the interactive substrate's PTY.
+- `node_modules/@openai/codex*/**` — the bundled per-platform `codex` CLI
+  binaries (resolved through `app.asar.unpacked` by
+  `panels/codex/codexExecutablePath.ts`).
+- `main/dist/main/src/orchestrator/mcpServer/**/*.js` — `cyboflowMcpServer.js`,
+  spawned as an external `node` subprocess (the per-session Cyboflow MCP
+  server; the worked example below).
+- `main/dist/main/src/orchestrator/shellHooks/**/*.js` — the PTY hook scripts
+  (Stop / PreToolUse / question hooks) that the interactive `claude` CLI
+  executes as external commands; resolved via `process.resourcesPath` in
+  `interactiveSettingsWriter.ts`.
+- `main/dist/main/src/orchestrator/verify/driver/**/*.js` — the visual-verify
+  driver CLI, run as a subprocess by `verificationAgentRunner.ts`.
 
-```
-"main/dist/main/src/orchestrator/mcpServer/**/*.js"
-```
+Post-sign, `build/afterSign.js` sweeps the unpacked tree as a tripwire and
+warns if any `*.jar` lands in it (unsigned native code inside JARs can fail
+notarization — see `docs/signing/APPLE_DEVELOPER_SETUP.md`).
+
+**The worked example** — `cyboflowMcpServer.js` is spawned as an external
+`node` subprocess. Node cannot execute files from inside an ASAR archive, so
+the script must be placed **outside** the archive at package time.
 
 In a packaged build, electron-builder places the script at:
 
