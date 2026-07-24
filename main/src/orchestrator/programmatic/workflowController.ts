@@ -932,7 +932,23 @@ export class WorkflowController {
           const resultText = result.resultText;
           if (resultText !== null && resultText !== undefined) {
             const verdict = parseCodeReviewVerdict(resultText);
-            if (verdict === 'blocking') {
+            // Fail SAFE on a trailer-less turn (Codex review, Item 0 hardening):
+            // the agent md REQUIRES a `REVIEW:` last line, but a truncated /
+            // forgetful SDK turn can populate a `## Blocking` section yet DROP the
+            // trailer — parseCodeReviewVerdict yields null there. Treat a NON-EMPTY
+            // `## Blocking` section as blocking anyway, so a real must-fix defect
+            // can't ship just because the machine trailer was lost. An EXPLICIT
+            // `REVIEW: CLEAN` (verdict 'clean', not null) is trusted as-is, so a
+            // clean review whose template prints an empty "## Blocking" heading
+            // never false-loops — only the AMBIGUOUS no-trailer case falls back.
+            const blocking =
+              verdict === 'blocking' ||
+              (verdict === null && extractBlockingSection(resultText) !== null);
+            if (blocking) {
+              // Log-only label: distinguish the explicit trailer from the
+              // trailer-less `## Blocking` fail-safe so a debug trace shows which
+              // channel drove the loopback.
+              const signal = verdict === 'blocking' ? 'REVIEW: BLOCKING' : '## Blocking (no trailer)';
               const targetIndex = loopbackIndex(innerStep);
               if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
                 laneAttempt += 1;
@@ -940,7 +956,7 @@ export class WorkflowController {
                 pendingLoopbackFeedback = extractBlockingSection(resultText) ?? resultText;
                 this.host.log?.(
                   'info',
-                  `fan-out item '${itemId}': code-review REVIEW: BLOCKING; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                  `fan-out item '${itemId}': code-review ${signal}; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
                 );
                 k = targetIndex - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -948,7 +964,7 @@ export class WorkflowController {
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
               this.host.log?.(
                 'warn',
-                `fan-out item '${itemId}': code-review REVIEW: BLOCKING; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
+                `fan-out item '${itemId}': code-review ${signal}; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
               );
               return 'failed';
             }

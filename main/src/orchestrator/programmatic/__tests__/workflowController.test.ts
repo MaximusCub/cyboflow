@@ -1740,6 +1740,48 @@ describe('WorkflowController', () => {
         expect(runnerNoLine.calls.filter((c) => c.id === 'implement').length).toBe(1);
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
+
+      it('## Blocking section with NO REVIEW trailer (dropped trailer) → fail-safe loopback', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const capture: Array<{ id: string; attempt: number; loopbackFeedback?: string }> = [];
+        // A truncated / forgetful SDK turn: real `## Blocking` defects, but the
+        // required machine `REVIEW:` last line is MISSING. The fail-safe must still
+        // loop back so the defect can't ship just because the trailer was lost.
+        const runner = reviewRunner(
+          [
+            '## Findings\nNo findings.\n\n## Blocking\n- src/foo.ts:12 — off-by-one\n',
+            '## Findings\nNo findings.\n\nREVIEW: CLEAN\n',
+          ],
+          capture,
+        );
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2]);
+        // The section (sans trailer) is threaded into the re-driven implement.
+        const reImplement = capture.filter((c) => c.id === 'implement' && c.attempt === 2)[0];
+        expect(reImplement?.loopbackFeedback).toBe('- src/foo.ts:12 — off-by-one');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('REVIEW: CLEAN with an empty "## Blocking" heading (template) → trusts the verdict, no loopback', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // An EXPLICIT CLEAN trailer wins even if the template prints an empty
+        // "## Blocking" heading — the fail-safe covers only the AMBIGUOUS no-trailer
+        // case, never an explicit clean verdict.
+        const runner = reviewRunner(['## Findings\nNo findings.\n\n## Blocking\n\nREVIEW: CLEAN\n']);
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(runner.calls.filter((c) => c.id === 'implement').length).toBe(1);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
     });
 
     // ── A fanOut OUTER step that ALSO carries a trailing human checkpoint
