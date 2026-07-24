@@ -1,6 +1,6 @@
 # Idea: Design Mode — in-app iterative design sessions
 
-**Scope hint:** large (decomposes into epics). **Status:** rev 6 — **v0 IMPLEMENTED + live-smoked** on `zesty-owl-20260722` (spec rev 4 + Codex rounds 1–3 folded; see "v0 implementation notes" at the end for the three deliberate deviations). Rev 6 adds the **v0.5 fullscreen design surface** (post-testing direction: ship the fullscreen shell against the static prototype first; the interactive backend swaps in behind the same entry seam when v1 lands). v1 (interactive tier) not started.
+**Scope hint:** large (decomposes into epics). **Status:** rev 7 — **v0 + v0.5 IMPLEMENTED + live-smoked** on `zesty-owl-20260722` (merged to main; see "v0 implementation notes" at the end for the three deliberate deviations). Rev 7 records the **v1 isolation-spike verdict** (see "Isolation spike results") — the loopback-origin OOPIF design is confirmed and v1 implementation proceeds on it; the `WebContentsView` fallback is not needed.
 
 ## Problem
 
@@ -158,7 +158,7 @@ The detached `revisionWorker` generalization stays out of scope until the planne
 
 - **Migration contention:** the design-mode migration landed as **082** after a rebase renumber (main took 078–081); any sibling branch minting 082 renumbers. The artifacts-CHECK test DBs must seed any new atype.
 - **Security:** the v1 canvas executes agent-generated JS. Containment = minimal sandbox + egress-blocking CSP + scripted-frame navigation block (no external open) + single-writer comment frame (nonce CSP) + **process isolation with watchdog termination** — each with an explicit test, and the whole set reviewed as a unit before ship.
-- **Isolation-mechanism spike:** loopback-origin OOPIF vs dedicated `WebContentsView` must be decided by a time-boxed spike (busy-loop kill test) before v1 implementation; if OOPIF process control proves insufficient, the `WebContentsView` fallback changes the embed plumbing.
+- **Isolation-mechanism spike:** ~~loopback-origin OOPIF vs dedicated `WebContentsView` must be decided by a time-boxed spike (busy-loop kill test) before v1 implementation~~ **RESOLVED (rev 7): OOPIF confirmed — see "Isolation spike results" below.**
 - **Substrate pin as product constraint:** design sessions are Claude-SDK-only; users who prefer interactive/Codex sessions don't get design mode until a cross-substrate scope contract exists. Deliberate trade (security boundary first).
 - **Quick-session policy inheritance:** design sessions ride `is_quick=1`, so they inherit quick-session behaviors — notably boot-resume excludes `__quick__` from `--resume` revival, meaning a design session does not auto-resume after app restart. Acceptable for v0 (same as quick sessions today; the outbox recovery covers v1 in-flight feedback); revisit if design sessions become long-lived.
 - **Anchor rot:** without `data-design-id` discipline the element anchors orphan on every regeneration; the prompt contract plus ancestor-stack relocation is the mitigation, and the write-tests lane should cover relocation.
@@ -170,6 +170,48 @@ The detached `revisionWorker` generalization stays out of scope until the planne
 - One prototype per session (aligned with one-artifact-per-atype-per-run) vs multiple named prototypes — v0 assumes one, iterated in place.
 - Stub-idea auto-mint defaults: which stage/priority does the stub land in, and should it be flagged as design-originated for later planner pickup?
 - Whether the approved-design read model lives on the artifacts table (`source_ref` + status column) or a small dedicated table — decide at implementation with the registry design. *(Resolved in v0: dedicated `approved_designs` table — see implementation notes.)*
+
+## Isolation spike results (rev 7, 2026-07-24)
+
+Time-boxed spike run against Electron **37.6.0** with cyboflow's exact production
+`webPreferences` (`contextIsolation: true`, `nodeIntegration: false`,
+`sandbox: false`): a host page on one loopback port embedding an
+`<iframe sandbox="allow-scripts">` pointed at a second loopback port, whose
+document runs a 60s hard busy loop. Findings:
+
+1. **OOPIF confirmed.** The cross-origin loopback frame gets its **own renderer
+   OS process** (distinct `osProcessId` from the host frame), even with the
+   opaque-origin `sandbox="allow-scripts"` attribute and the window-level
+   `sandbox: false`. No extra Chromium switches needed.
+2. **Availability holds.** The host page stayed fully responsive during the
+   frame's busy loop — `executeJavaScript` heartbeats answered in 0–1ms and the
+   host's rAF counter kept advancing throughout.
+3. **Kill is clean.** `process.kill(framePid, 'SIGKILL')` from the main process
+   terminates the frame without any effect on the host window; heartbeats and
+   rAF continue. Re-setting the iframe `src` afterwards respawns a **fresh
+   process** (new pid) — the "regenerate or reload" affordance is exactly one
+   src reassignment.
+4. **CPU detection works, with two caveats the watchdog must encode.**
+   `app.getAppMetrics()` per-process `percentCPUUsage` is **delta-based** — the
+   first sample always reads 0, so the watchdog primes once and acts only on
+   subsequent samples; and the value is machine-normalized (a pegged core read
+   ~10% on the 10-core spike host), so the threshold is "sustained ≈ one core"
+   relative to `os.cpus().length`, not a fixed percentage. Memory runaway rides
+   the same channel (`memory.workingSetSize`).
+5. **No crash event fires for an OOPIF process death.** Neither
+   `webContents 'render-process-gone'` nor `app 'child-process-gone'` was
+   emitted when the frame's process was SIGKILLed (verified over multi-second
+   windows). Death detection is therefore **poll-based**: the pid disappears
+   from `getAppMetrics()` and the frame's `WebFrameMain` throws
+   ("Render frame was disposed") on property access — watchdog code must wrap
+   every `framesInSubtree` access in a disposal guard. Since the watchdog is
+   the killer in the designed flow, it always knows its own kills; polling
+   covers spontaneous deaths (e.g. OS OOM kills).
+
+**Verdict: primary design stands** — token-gated loopback static server (spun on
+design-mode entry, reaped on exit) + cross-origin iframe → dedicated OOPIF
+renderer + main-process metrics-polling watchdog with SIGKILL termination. The
+`WebContentsView` fallback is dropped from scope.
 
 ## v0 implementation notes (rev 5)
 
