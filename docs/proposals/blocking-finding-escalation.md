@@ -1,7 +1,16 @@
 # Blocking-finding escalation: fix the real gaps
 
-**Status:** proposal — rev 2 (rewritten after adversarial review by Codex + Fable)
+**Status:** IMPLEMENTED (rev 2) — all four items landed on `green-maple-20260723`
 **Date:** 2026-07-24
+
+> **Implementation note.** Items 0, 1, 3, 2 shipped as four commits
+> (`1116431f`, `234b1be7`, `886ba06d`, `322511b8`). Full gate green (main 6784 +
+> frontend 3234 unit tests, schema-parity, lint). Deferred follow-ups, each noted
+> in its commit: (a) Item 2's per-attempt failure-TEXT accumulator (the controller
+> retains none today, so the gate summary surfaces ref/step/attempts but not the
+> error text); (b) Item 3's choice landed on 3a (mint-time `audience` column,
+> migration 082); (c) ship.md's orchestrated closing-stage prose was left as-is
+> (its default programmatic path is covered by the composer).
 **Origin:** an ORCHESTRATED sprint run parked on a blocking finding whose body was
 a code-review `## Blocking` defect for TASK-107. The finding offered `Resolve &
 resume` / `Dismiss` / `Promote to task` — none of which fix the defect, and none
