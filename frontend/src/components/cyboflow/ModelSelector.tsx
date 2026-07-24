@@ -14,9 +14,10 @@
  * from the bundled runtime's `model/list` response through the shared renderer
  * catalog store, so launch and in-session pickers stay aligned.
  */
-import { MODEL_OPTIONS } from './unified/ModelPill';
+import { MODEL_OPTIONS, formatDynamicClaudeLabel } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
+import { useClaudeModelCatalog } from '../../stores/claudeModelCatalogStore';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The quick-session default model — Opus, per product direction. */
@@ -72,8 +73,11 @@ export function ModelSelector({
 }: ModelSelectorProps): React.JSX.Element {
   const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
   const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
+  // Dynamic "Other models" the login can select, below the pinned four (Claude only).
+  const { options: claudeCatalogOptions } = useClaudeModelCatalog(!isCodexRuntime);
   const codexActive = codexOptions.find((o) => o.id === value);
   const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
+  const claudeDynamicActive = claudeCatalogOptions.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const activeReason = value ? unavailableReason(value) : undefined;
 
@@ -109,6 +113,16 @@ export function ModelSelector({
                 </option>
               );
             })}
+            {claudeCatalogOptions.length > 0 && (
+              <optgroup label="Other models">
+                {claudeCatalogOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {formatDynamicClaudeLabel(o)}
+                    {o.description ? ` — ${o.description}` : ''}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </>
         )}
       </select>
@@ -116,7 +130,7 @@ export function ModelSelector({
         <p className="text-xs text-text-tertiary">
           {codexActive?.description ?? 'Choose a Codex model for this runtime.'}
         </p>
-      ) : claudeActive !== undefined && (
+      ) : claudeActive !== undefined ? (
         <p className="text-xs text-text-tertiary">
           {activeReason
             ? `${claudeActive.label} is currently unavailable — runs will use Opus.`
@@ -124,7 +138,11 @@ export function ModelSelector({
               ? `${claudeActive.description} · ${claudeActive.context} context`
               : claudeActive.description}
         </p>
-      )}
+      ) : claudeDynamicActive !== undefined ? (
+        <p className="text-xs text-text-tertiary">
+          {claudeDynamicActive.description || formatDynamicClaudeLabel(claudeDynamicActive)}
+        </p>
+      ) : null}
     </div>
   );
 }
