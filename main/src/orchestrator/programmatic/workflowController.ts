@@ -28,6 +28,7 @@ import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
 import {
   AWAITING_VERIFY_STEP,
+  SPRINT_CODE_REVIEW_STEP,
   SPRINT_IMPLEMENT_STEP,
   SPRINT_TASK_VERIFY_STEP,
   SPRINT_VISUAL_VERIFY_STEP,
@@ -65,6 +66,48 @@ function parseTaskVerifyVerdict(text: string): 'pass' | 'fail' | null {
     if (m) verdict = m[1] === 'PASS' ? 'pass' : 'fail';
   }
   return verdict;
+}
+
+/**
+ * Parse the code-review verdict line off a subagent's captured result text — the
+ * programmatic-plane analogue of `parseTaskVerifyVerdict`. The code-review agent
+ * emits `REVIEW: BLOCKING` when it populated a `## Blocking` section, else
+ * `REVIEW: CLEAN`. LAST-match wins (same rule as the verdict parser), tolerating
+ * an incidental earlier mention. Returns null when no such line exists; the caller
+ * treats null as CLEAN for flow purposes (a subagent that never emitted the line —
+ * e.g. a substrate that cannot capture final text — must not wedge the lane).
+ */
+function parseCodeReviewVerdict(text: string): 'blocking' | 'clean' | null {
+  const re = /^REVIEW:\s*(BLOCKING|CLEAN)\b/;
+  let verdict: 'blocking' | 'clean' | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const m = re.exec(line);
+    if (m) verdict = m[1] === 'BLOCKING' ? 'blocking' : 'clean';
+  }
+  return verdict;
+}
+
+/**
+ * Extract the `## Blocking` section body from a code-review result so it can be
+ * threaded into the re-driven `implement` step as loopback feedback (the same
+ * one-shot channel task-verify's `## Fix guidance` uses). Returns the text between
+ * the `## Blocking` heading and the next `## ` heading (or EOF), trimmed; null when
+ * no such section exists. Fail-soft: a BLOCKING verdict with no parseable section
+ * still loops back (the implementer gets the whole result text as context via the
+ * lane), so this only enriches the feedback, never gates it.
+ */
+function extractBlockingSection(text: string): string | null {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^##\s+Blocking\b/i.test(l));
+  if (start < 0) return null;
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) break; // next section heading ends the block
+    if (/^REVIEW:\s*(BLOCKING|CLEAN)\b/.test(lines[i])) break; // machine verdict trailer — not defect text
+    body.push(lines[i]);
+  }
+  const joined = body.join('\n').trim();
+  return joined.length > 0 ? joined : null;
 }
 
 /**
@@ -870,6 +913,46 @@ export class WorkflowController {
             `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
           );
           return 'failed';
+        }
+
+        // Code-review typed output (Item 0): on a CLEAN (status:'ok') code-review
+        // turn, parse its captured result text for the `REVIEW:` verdict line. A
+        // review that "successfully found problems" returns status 'ok' — so
+        // without this the `## Blocking` defects it lists would be treated as
+        // success and the lane would advance, and code-review's declared
+        // `loopback: 'implement'` (which only fires on a FAILED step result) would
+        // never trigger. Route `REVIEW: BLOCKING` into the SAME non-systemic
+        // loopback path a failed step / a task-verify FAIL takes (declared loopback
+        // → laneAttempt bump → 3× cap → fail), threading the `## Blocking` section
+        // into the re-driven `implement` step as one-shot loopback feedback. A
+        // substrate that cannot capture final text (codex / interactive) yields no
+        // verdict line → treated as CLEAN (channel unavailable), exactly as the
+        // task-verify FAIL channel degrades there.
+        if (innerStep.id === SPRINT_CODE_REVIEW_STEP) {
+          const resultText = result.resultText;
+          if (resultText !== null && resultText !== undefined) {
+            const verdict = parseCodeReviewVerdict(resultText);
+            if (verdict === 'blocking') {
+              const targetIndex = loopbackIndex(innerStep);
+              if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                laneAttempt += 1;
+                loopbackAttemptStepIndex = targetIndex;
+                pendingLoopbackFeedback = extractBlockingSection(resultText) ?? resultText;
+                this.host.log?.(
+                  'info',
+                  `fan-out item '${itemId}': code-review REVIEW: BLOCKING; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                );
+                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                continue;
+              }
+              driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': code-review REVIEW: BLOCKING; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
+              );
+              return 'failed';
+            }
+          }
         }
 
         // Task-verify typed output (verification-agent redesign §5.3): on a clean

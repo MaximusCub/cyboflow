@@ -46,3 +46,13 @@ one line on why it matters (for an out-of-scope item, note that it's out of scop
 — or the single line `No findings.` If the diff has one or more in-scope must-fix
 defects, add a `## Blocking` section listing each, described precisely enough for
 the implementer to fix without re-reviewing.
+
+End your result with a single machine-readable verdict line, as the LAST line:
+
+- `REVIEW: BLOCKING` — you populated a `## Blocking` section (one or more in-scope
+  must-fix defects). The orchestrator loops the implementer back to fix them.
+- `REVIEW: CLEAN` — no `## Blocking` section (findings-only or no findings).
+
+Emit exactly one such line. It is the channel that drives the loopback on the
+programmatic execution plane — a `## Blocking` section with no `REVIEW: BLOCKING`
+line will NOT loop back there, so the defects you found would ship unfixed.

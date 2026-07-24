@@ -159,6 +159,17 @@ export const AWAITING_VERIFY_STEP: SprintLaneStepId = 'awaiting-verify';
 export const SPRINT_IMPLEMENT_STEP: SprintLaneStepId = 'implement';
 
 /**
+ * The lane step whose typed output carries a code-review verdict. On the
+ * programmatic plane the controller parses a `REVIEW: BLOCKING | CLEAN` line off
+ * this step's captured result text (mirroring task-verify's `VERDICT:` channel):
+ * `BLOCKING` routes the lane back to its declared loopback target (`implement`)
+ * with a bumped attempt, up to the 3× cap; `CLEAN` (or no line) advances. Named
+ * const (not a bare literal) so the controller, the parser, and the tests share
+ * one source of truth.
+ */
+export const SPRINT_CODE_REVIEW_STEP: SprintLaneStepId = 'code-review';
+
+/**
  * The lane step that FIRES the fire-and-continue verification request. After it
  * runs, the lane parks at AWAITING_VERIFY_STEP until the async verdict lands. The
  * programmatic controller keys its merge-gate park/await on this inner-step id.

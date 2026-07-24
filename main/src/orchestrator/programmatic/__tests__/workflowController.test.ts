@@ -1626,6 +1626,122 @@ describe('WorkflowController', () => {
       });
     });
 
+    // ── Code-review verdict channel (Item 0): a CLEAN (status:'ok') code-review
+    //    turn that lists `## Blocking` defects must loop the lane back to implement
+    //    on the programmatic plane — WITHOUT this the defects ship unfixed. Mirrors
+    //    the task-verify VERDICT channel. ──────────────────────────────────────
+    describe('code-review verdict channel (Item 0)', () => {
+      // implement → code-review (loopback: implement). A review runner scripts the
+      // code-review result text; implement + any other step returns bare ok.
+      const reviewChain = (): WorkflowStep =>
+        step({
+          id: 'execute',
+          agent: 'orchestrate',
+          fanOut: {
+            over: 'tasks',
+            inner: [
+              { id: 'implement', agent: 'implement' },
+              { id: 'code-review', agent: 'code-review', loopback: 'implement' },
+            ],
+          },
+        });
+
+      /** A runner where code-review returns scripted resultText per call; others ok. */
+      function reviewRunner(
+        texts: Array<string | null>,
+        capture?: Array<{ id: string; attempt: number; loopbackFeedback?: string }>,
+      ): StepRunner & { calls: Array<{ id: string; attempt: number }> } {
+        const calls: Array<{ id: string; attempt: number }> = [];
+        let cr = 0;
+        return {
+          calls,
+          async runStep(s, ctx) {
+            calls.push({ id: s.id, attempt: ctx.attempt });
+            capture?.push({
+              id: s.id,
+              attempt: ctx.attempt,
+              ...(ctx.loopbackFeedback !== undefined ? { loopbackFeedback: ctx.loopbackFeedback } : {}),
+            });
+            if (s.id === 'code-review') {
+              const t = texts[Math.min(cr, texts.length - 1)];
+              cr += 1;
+              return { status: 'ok', resultText: t };
+            }
+            return { status: 'ok' };
+          },
+        };
+      }
+
+      it('REVIEW: BLOCKING → loopback to implement @2 threading the ## Blocking section, then CLEAN integrates', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const capture: Array<{ id: string; attempt: number; loopbackFeedback?: string }> = [];
+        const runner = reviewRunner(
+          [
+            '## Findings\nNo findings.\n\n## Blocking\n- src/foo.ts:12 — off-by-one in the loop bound\n\nREVIEW: BLOCKING\n',
+            '## Findings\nNo findings.\n\nREVIEW: CLEAN\n',
+          ],
+          capture,
+        );
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // implement re-ran at attempt 2 (the BLOCKING loopback bumped the lane attempt).
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2]);
+        // The re-driven implement carried the extracted ## Blocking section as feedback.
+        const reImplement = capture.filter((c) => c.id === 'implement' && c.attempt === 2)[0];
+        expect(reImplement?.loopbackFeedback).toBe('- src/foo.ts:12 — off-by-one in the loop bound');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('persistent REVIEW: BLOCKING exhausts the attempt cap and fails the lane', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const runner = reviewRunner(['## Blocking\n- still broken\n\nREVIEW: BLOCKING\n']);
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        // A failed lane never fails the run (fan-out partial-success semantics).
+        expect(result.outcome).toBe('completed');
+        // Loopback re-ran implement until the attempt cap, then the lane failed.
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2, 3]);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('failed');
+      });
+
+      it('REVIEW: CLEAN → no loopback, lane integrates', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const runner = reviewRunner(['## Findings\nNo findings.\n\nREVIEW: CLEAN\n']);
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(runner.calls.filter((c) => c.id === 'implement').length).toBe(1);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('no REVIEW line / null result text (channel unavailable) → treated CLEAN, lane integrates', async () => {
+        const d = def([phase('p1', [reviewChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // A substrate that captured no final text, and one that emitted findings but
+        // no verdict line — both must advance, never wedge.
+        const runnerNull = reviewRunner([null]);
+        const resultNull = await new WorkflowController(runnerNull, makeFanHost(makeFanOutDriver(['t1']))).run('r1', d);
+        expect(resultNull.outcome).toBe('completed');
+
+        const runnerNoLine = reviewRunner(['## Findings\n- minor nit at foo.ts:1 (out of scope)\n']);
+        const result = await new WorkflowController(runnerNoLine, host).run('r2', d);
+        expect(result.outcome).toBe('completed');
+        expect(runnerNoLine.calls.filter((c) => c.id === 'implement').length).toBe(1);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+    });
+
     // ── A fanOut OUTER step that ALSO carries a trailing human checkpoint
     //    (human: true) / outer loopback must route through the SAME gate logic
     //    the normal agent path uses — it must NOT silently drop the gate. ──────
