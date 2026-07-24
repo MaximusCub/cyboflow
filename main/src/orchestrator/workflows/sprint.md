@@ -144,6 +144,14 @@ blocked/failed tasks is wasteful and misleading — the human decides what to do
 the partial sprint first. To skip them, report each of the two steps done via
 `cyboflow_report_step` (so the timeline advances) **without** delegating its subagent
 or doing its work, then present the human gate below with the partial-sprint summary.
+
+**The partial-sprint summary must enumerate each failed lane**, not just say "some
+lanes failed": for every `failed` lane give its task ref + title, the lane step it
+died on (`current_step`), and the attempt it reached (e.g. "`TASK-107` — Add chat
+panel — failed at `code-review` after 3 attempts"). That is the picture the human
+needs to decide approve (seal the partial sprint; failed tasks return to the backlog)
+vs reject — so surface it in the gate question, don't make them open the swimlane.
+
 Run sprint-verify and sprint-review normally ONLY when every lane is `integrated`.
 
 1. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite

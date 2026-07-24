@@ -37,6 +37,7 @@ import {
   hasReviewItemsTable,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
+import { composePartialSprintGateBody } from './partialSprintGateSummary';
 import { runStatusEvents } from './trpc/routers/events';
 
 /** Provenance source stamped on a human-gate decision review_item. */
@@ -152,10 +153,18 @@ export class HumanStepManager {
         }
         gateOpened = true;
 
+        // Item 2: a sprint/ship run that reaches its terminal human gate with
+        // failed lanes gets a per-lane partial-sprint summary in the gate body
+        // (ref/title + failing step + attempts) instead of the generic prompt.
+        // Fail-soft — a null summary (non-sprint run, clean sprint, or read error)
+        // falls back to the generic body, so the gate always opens.
+        const enrichedBody = composePartialSprintGateBody(this.db, runId, stepName);
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
           title: `Human gate: ${stepName}`,
-          body: `Workflow step '${stepId}' requires a human decision before the run can advance.`,
+          body:
+            enrichedBody ??
+            `Workflow step '${stepId}' requires a human decision before the run can advance.`,
           source: this.sourceForStep(stepId),
           payload: null,
           now,
