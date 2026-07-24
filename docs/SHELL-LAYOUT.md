@@ -18,37 +18,47 @@ state). The review queue store is initialised at the App-shell level
 (`useReviewQueueStore.getState().init()` in `App.tsx`) so the rail badge and the
 macOS dock badge stay live even when the pane is unmounted.
 
+The center surface has since grown further rail-driven overlay panes not captured in
+the table above — Insights, Workflows, Verify Queue, Experiment Comparison, and the
+task Backlog — so treat the table as illustrative, not exhaustive; the branch chain under
+the "Center-surface state machine" comment in `App.tsx` is the current list (the comment
+itself enumerates only the main branches).
+
 ## Assumption order
 
 1. The agent rail (Sidebar) is leftmost; the title bar (38px) spans above the row.
 2. The center takes the remaining horizontal space via `flex-1` and hosts either
    the run surface or the full-width human-review pane.
 
-## Deferred decisions (resolved by downstream tasks in this epic)
+## Deferred decisions (epic history)
 
-- **Sidebar info model — TASK-687.** Default: project > workflow runs (newest first).
-- **CyboflowRoot disposition — TASK-688.** Default: survives as RunView mount point; `WorkflowPicker` relocates.
-- **Legacy `useLegacyCrystalView` toggle and `SessionView` branch — TASK-690.** Default: retire.
-- **Crystal-era session descendants — TASK-691.** Default: delete after toggle is retired.
-- **Legacy Crystal DB tables — TASK-692.** Default: drop via reconcile migration (option C — Crystal-session subgraph only).
+- **Sidebar info model — TASK-687.** Done: sidebar remodeled to project > workflow runs (newest first).
+- **CyboflowRoot disposition — TASK-688.** Done: CyboflowRoot survives as the run-surface mount point; `WorkflowPicker` relocated into a modal.
+- **Legacy `useLegacyCrystalView` toggle and `SessionView` branch — TASK-690.** Done: toggle and render branch retired.
+- **Crystal-era session descendants — TASK-691.** Done: `SessionView` and Crystal-era session descendants deleted.
+- **Legacy Crystal DB tables — TASK-692.** Still open, status **blocked** (panelmanager-vs-tool-panels escalation: dropping the Crystal-session subgraph risks panel-co-tenant rows written by `addPanelOutput`/`addPanelConversationMessage`/`addPanelPromptMarker`).
 
 ## Cross-references
 
 - Product framing: `docs/cyboflow_system_design.md` §5.7.
-- Current mount site: `frontend/src/App.tsx` lines 317-375.
+- Current mount site: the "Center-surface state machine" comment block in
+  `frontend/src/App.tsx`.
 
 ## Navigation store contract
 
-`CyboflowRoot` is mounted **only when `activeProjectId !== null`** (App.tsx gate at the
-`<div className="flex flex-1 overflow-hidden">` block).
+`CyboflowRoot` is mounted **only when `navigationStore.view === 'session'`** — the first
+branch of the center-surface state machine (see Cross-references above). All other
+`view` values (`'wizard'`, `'home'`) render the wizard or one of the rail-driven overlays
+instead.
 
-`navigateToSessions()` (`frontend/src/stores/navigationStore.ts`) is a **multi-field reset**:
-it sets `{ activeView: 'sessions', activeProjectId: null }`. Calling it while activating
-a run un-mounts `CyboflowRoot` immediately (REG-SPRINT-028-1). Rules:
+`navigateToSessions()` (`frontend/src/stores/navigationStore.ts`) is a **wide reset, not a
+narrow one**: it sets `view: 'home'`, `activeView: 'sessions'`, `activeProjectId: null`,
+and clears every overlay flag (`humanReviewOpen`, `backlogOpen`, `insightsOpen`,
+`workflowsOpen`, `experimentComparisonId`, `verifyQueueOpen`) — nine fields in total.
+Calling it while activating a run un-mounts `CyboflowRoot` immediately (REG-SPRINT-028-1),
+and it also drops out of whatever overlay pane the user was in. Rules:
 
 - Do NOT call `navigateToSessions()` in a click handler that also calls `setActiveRun()`.
   Use `setActiveProjectId(run.project_id)` or a dedicated `selectRun(runId, projectId)`
   action instead.
-- Other `navigateToSessions` call sites (`DraggableProjectTreeView`, `SessionListItem`,
-  `ProjectDashboard`) should be audited before TASK-690 retires `useLegacyCrystalView`.
 - When adding a new App-level mount condition, document it in this section.
