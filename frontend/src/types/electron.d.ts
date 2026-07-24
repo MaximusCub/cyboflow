@@ -17,6 +17,13 @@ import type {
   OpenArtifactHtmlExternalRequest,
   OpenArtifactHtmlExternalResult,
 } from '../../../shared/types/artifacts';
+import type {
+  EnsurePrototypeServerRequest,
+  EnsurePrototypeServerResult,
+  StopPrototypeServerRequest,
+  StopPrototypeServerResult,
+  PrototypeServerEvent,
+} from '../../../shared/types/designPrototypeServer';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
@@ -240,6 +247,21 @@ interface ElectronAPI {
     loadText: (
       req: { runId: string; fileName: string },
     ) => Promise<IPCResponse<{ text: string }>>;
+  };
+
+  // Design-mode v1 interactive prototype server — surface-scoped lifecycle
+  // (ensure on entry/respawn, stop on exit) + watchdog/server event stream.
+  // Shared contract types with main/src/preload.ts — see
+  // shared/types/designPrototypeServer.ts.
+  designPrototypeServer: {
+    ensure: (
+      req: EnsurePrototypeServerRequest,
+    ) => Promise<IPCResponse<EnsurePrototypeServerResult>>;
+    stop: (
+      req: StopPrototypeServerRequest,
+    ) => Promise<IPCResponse<StopPrototypeServerResult>>;
+    /** Subscribe to watchdog terminations + out-of-band server stops; returns unsubscribe. */
+    onEvent: (callback: (event: PrototypeServerEvent) => void) => () => void;
   };
 
   // Project management

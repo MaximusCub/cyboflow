@@ -17,6 +17,16 @@ import type {
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import {
+  DESIGN_PROTO_SERVER_ENSURE_CHANNEL,
+  DESIGN_PROTO_SERVER_STOP_CHANNEL,
+  DESIGN_PROTO_SERVER_EVENT_CHANNEL,
+  type EnsurePrototypeServerRequest,
+  type EnsurePrototypeServerResult,
+  type StopPrototypeServerRequest,
+  type StopPrototypeServerResult,
+  type PrototypeServerEvent,
+} from '../../shared/types/designPrototypeServer';
+import {
   CLAUDE_DETECT_CHANNEL,
   CODEX_DETECT_CHANNEL,
   type ClaudeDetectionResult,
@@ -352,6 +362,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
       req: { runId: string; fileName: string },
     ): Promise<IPCResponse<{ text: string }>> =>
       ipcRenderer.invoke('artifacts:load-text', req),
+  },
+
+  // Design-mode v1 interactive prototype server (design-mode.md "Process
+  // isolation" + "Server lifecycle"). Surface-scoped lifecycle: the design
+  // surface `ensure`s on entry/respawn and `stop`s on exit; onEvent streams
+  // watchdog terminations + out-of-band server stops. Shared contract types —
+  // see shared/types/designPrototypeServer.ts.
+  designPrototypeServer: {
+    ensure: (
+      req: EnsurePrototypeServerRequest,
+    ): Promise<IPCResponse<EnsurePrototypeServerResult>> =>
+      ipcRenderer.invoke(DESIGN_PROTO_SERVER_ENSURE_CHANNEL, req),
+    stop: (
+      req: StopPrototypeServerRequest,
+    ): Promise<IPCResponse<StopPrototypeServerResult>> =>
+      ipcRenderer.invoke(DESIGN_PROTO_SERVER_STOP_CHANNEL, req),
+    onEvent: (callback: (event: PrototypeServerEvent) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, payload: PrototypeServerEvent) =>
+        callback(payload);
+      ipcRenderer.on(DESIGN_PROTO_SERVER_EVENT_CHANNEL, wrappedCallback);
+      return () => ipcRenderer.removeListener(DESIGN_PROTO_SERVER_EVENT_CHANNEL, wrappedCallback);
+    },
   },
 
   // Project management
