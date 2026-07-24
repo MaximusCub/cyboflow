@@ -35,11 +35,17 @@ vi.mock('../DesignStage', () => ({
 }));
 
 vi.mock('../../DesignApproveControl', () => ({
-  DesignApproveControl: (props: { sessionId: string; artifactRevision?: number }) => (
+  DesignApproveControl: (props: {
+    sessionId: string;
+    artifactRevision?: number;
+    onApproved?: (info: { ideaId: string | null; ideaTitle: string | null }) => void;
+  }) => (
     <div
       data-testid="design-approve-stub"
       data-session-id={props.sessionId}
       data-revision={String(props.artifactRevision)}
+      // Surface the callback so tests can simulate an approve success.
+      onClick={() => props.onApproved?.({ ideaId: 'idea-1', ideaTitle: 'Nice Idea' })}
     />
   ),
 }));
@@ -105,7 +111,7 @@ function seed(session: Session | null, panel: ToolPanel | null): void {
 describe('DesignModeSurface', () => {
   beforeEach(() => {
     mockArtifacts = [];
-    useDesignModeStore.setState({ activeDesignSessionId: 'sess-1' });
+    useDesignModeStore.setState({ activeDesignSessionId: 'sess-1', plannerPrompt: null });
     seed(makeSession(), makeClaudePanel());
   });
 
@@ -220,5 +226,19 @@ describe('DesignModeSurface', () => {
     mockArtifacts = [makeArtifact({ id: 'art-stub', payloadJson: null })];
     render(<DesignModeSurface />);
     expect(screen.queryByTestId('design-mode-open-in-browser')).not.toBeInTheDocument();
+  });
+
+  it('(f) approve success exits design mode and arms the planner prompt', () => {
+    mockArtifacts = [makeArtifact({ sourceRef: 'IDEA-1', sessionId: 'sess-1' })];
+    render(<DesignModeSurface />);
+    // The stub forwards a click as onApproved({ ideaId: 'idea-1', ... }).
+    fireEvent.click(screen.getByTestId('design-approve-stub'));
+    const state = useDesignModeStore.getState();
+    expect(state.activeDesignSessionId).toBeNull();
+    expect(state.plannerPrompt).toEqual({
+      projectId: 1,
+      ideaId: 'idea-1',
+      ideaTitle: 'Nice Idea',
+    });
   });
 });

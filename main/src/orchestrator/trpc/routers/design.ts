@@ -53,6 +53,8 @@ export interface DesignDraftStatus {
   ideaVersion: number | null;
   /** The linked idea's title, null when the link is broken. */
   ideaTitle: string | null;
+  /** The linked idea's id, null when the link is broken (post-approve planner seed). */
+  ideaId: string | null;
   /** True when the idea is missing / decomposed / cross-project (fail-soft relink state). */
   linkBroken: boolean;
 }
@@ -139,6 +141,7 @@ export const designRouter = router({
 
       let ideaVersion: number | null = null;
       let ideaTitle: string | null = null;
+      let ideaId: string | null = null;
       let linkBroken = true;
       if (session.design_idea_id) {
         const idea = db
@@ -151,6 +154,7 @@ export const designRouter = router({
         ) {
           ideaVersion = idea.version;
           ideaTitle = idea.title;
+          ideaId = session.design_idea_id;
           linkBroken = false;
         }
       }
@@ -162,6 +166,7 @@ export const designRouter = router({
         prototypeArtifactId: prototype?.id ?? null,
         ideaVersion,
         ideaTitle,
+        ideaId,
         linkBroken,
       };
     }),

@@ -20,7 +20,7 @@
  * ui-prototype artifact is threaded to BOTH the top-bar Approve control and the
  * stage — the canvas is the single place v1 later swaps in the isolated frame.
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 import { useDesignModeStore } from '../../../stores/designModeStore';
 import { useSessionStore } from '../../../stores/sessionStore';
@@ -112,6 +112,20 @@ export function DesignModeSurface(): ReactElement | null {
     void ensureClaudePanel();
   }, [session, claudePanel, ensureClaudePanel]);
 
+  // Approve success ends the design loop: leave the fullscreen surface and —
+  // when the approved idea is resolvable — arm the App-level "start the
+  // planner?" prompt (it must outlive this surface's unmount, hence the store).
+  const handleApproved = useCallback(
+    (info: { ideaId: string | null; ideaTitle: string | null }) => {
+      const store = useDesignModeStore.getState();
+      if (info.ideaId !== null && projectId !== null) {
+        store.showPlannerPrompt({ projectId, ideaId: info.ideaId, ideaTitle: info.ideaTitle });
+      }
+      store.exitDesignMode();
+    },
+    [projectId],
+  );
+
   // App gates mounting on activeDesignSessionId; this is belt-and-suspenders.
   if (activeDesignSessionId === null) return null;
 
@@ -162,6 +176,7 @@ export function DesignModeSurface(): ReactElement | null {
             <DesignApproveControl
               sessionId={session.id}
               artifactRevision={prototypeArtifact?.revision}
+              onApproved={handleApproved}
             />
           )}
         </div>

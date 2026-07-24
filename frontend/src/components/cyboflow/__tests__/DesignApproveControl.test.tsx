@@ -33,6 +33,7 @@ function makeStatus(overrides: Record<string, unknown> = {}): Record<string, unk
     prototypeArtifactId: 'art-9',
     ideaVersion: 7,
     ideaTitle: 'Nice Idea',
+    ideaId: 'idea-1',
     linkBroken: false,
     ...overrides,
   };
@@ -102,6 +103,34 @@ describe('DesignApproveControl', () => {
     );
     // Refetched after the approve attempt.
     await waitFor(() => expect(draftStatusQuery).toHaveBeenCalledTimes(2));
+  });
+
+  it('(c2) fires onApproved with the snapshot idea on { ok: true }', async () => {
+    draftStatusQuery.mockResolvedValue(makeStatus());
+    approveMutate.mockResolvedValue({ ok: true, handoffId: 'handoff-1' });
+    const onApproved = vi.fn();
+    render(<DesignApproveControl sessionId="sess-1" onApproved={onApproved} />);
+
+    fireEvent.click(await screen.findByTestId('design-approve-button'));
+    fireEvent.click(screen.getByTestId('design-approve-confirm-yes'));
+
+    await waitFor(() =>
+      expect(onApproved).toHaveBeenCalledWith({ ideaId: 'idea-1', ideaTitle: 'Nice Idea' }),
+    );
+    expect(onApproved).toHaveBeenCalledTimes(1);
+  });
+
+  it('(c3) does NOT fire onApproved on { ok: false }', async () => {
+    draftStatusQuery.mockResolvedValue(makeStatus());
+    approveMutate.mockResolvedValue({ ok: false, code: 'stale-draft', message: 'stale' });
+    const onApproved = vi.fn();
+    render(<DesignApproveControl sessionId="sess-1" onApproved={onApproved} />);
+
+    fireEvent.click(await screen.findByTestId('design-approve-button'));
+    fireEvent.click(screen.getByTestId('design-approve-confirm-yes'));
+
+    await screen.findByTestId('design-approve-result');
+    expect(onApproved).not.toHaveBeenCalled();
   });
 
   it('cancel backs out of the confirm step without calling approve', async () => {

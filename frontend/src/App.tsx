@@ -30,6 +30,7 @@ import { ExperimentComparisonView } from './components/cyboflow/ExperimentCompar
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
 import { StatusBar } from './components/StatusBar';
 import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
+import { DesignPlannerPrompt } from './components/cyboflow/design/DesignPlannerPrompt';
 import { useDesignModeStore } from './stores/designModeStore';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useAgentThreadStore } from './stores/agentThreadStore';
@@ -267,6 +268,9 @@ function App() {
         {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
             the fullscreen surface. TitleBar (native drag region) and the dialog
             siblings below stay mounted. */}
+        {/* Post-approve planner handoff — mounted OUTSIDE the swap so the
+            prompt survives the design surface's unmount on exit. */}
+        <DesignPlannerPrompt />
         {activeDesignSessionId !== null ? (
           <DesignModeSurface />
         ) : (

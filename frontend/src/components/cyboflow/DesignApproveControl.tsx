@@ -59,6 +59,13 @@ interface DesignApproveControlProps {
   sessionId: string;
   /** The canvas's current prototype artifact revision — a refetch key. */
   artifactRevision?: number;
+  /**
+   * Fired once when an approve mutation resolves `{ ok: true }`, with the
+   * linked idea as of the approve. The design surface uses it to exit design
+   * mode and arm the "start the planner?" prompt; the artifact-header host
+   * omits it (no behavior change there).
+   */
+  onApproved?: (info: { ideaId: string | null; ideaTitle: string | null }) => void;
 }
 
 /** Freshness copy for a non-null, link-ok draft status. */
@@ -89,7 +96,7 @@ const approveButtonStyle = {
   whiteSpace: 'nowrap' as const,
 };
 
-export function DesignApproveControl({ sessionId, artifactRevision }: DesignApproveControlProps): ReactElement {
+export function DesignApproveControl({ sessionId, artifactRevision, onApproved }: DesignApproveControlProps): ReactElement {
   const [status, setStatus] = useState<DesignDraftStatus>(null);
   const [loading, setLoading] = useState(true);
   const [phase, setPhase] = useState<ApprovePhase>('idle');
@@ -163,6 +170,10 @@ export function DesignApproveControl({ sessionId, artifactRevision }: DesignAppr
 
   const handleConfirm = (): void => {
     if (!status || status.ideaVersion === null) return;
+    // Snapshot the idea as of the confirm — the post-approve refetch could
+    // flip linkBroken (idea folded/decomposed) before the callback consumer
+    // reads it.
+    const approvedIdea = { ideaId: status.ideaId, ideaTitle: status.ideaTitle };
     setPhase('pending');
     trpc.cyboflow.design.approve
       .mutate({
@@ -176,6 +187,7 @@ export function DesignApproveControl({ sessionId, artifactRevision }: DesignAppr
           if (result.ok) {
             setPhase('success');
             setResultMessage(null);
+            onApproved?.(approvedIdea);
           } else {
             setPhase('idle');
             setResultMessage(result.message);
