@@ -10,8 +10,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Hybrid Claude model picker**: the pinned four models plus a dynamic "Other models" group surfaced from the SDK, with labels disambiguated by the concrete id. Available in the launch picker as well. Opus 5 replaces Opus 4.8 as the default in the picker.
+- **Verification queue upgrade**: the queue shows in-flight work first, adds session pills and a per-item detail dialog, and verification requests are attributed to their origin session.
 - **Interrupt & send** for a running quick session: a button beside Queue that aborts the in-flight turn and sends immediately. `panels:continue` accepts an interrupt flag (abort in-flight turn, send now) and otherwise queues mid-turn sends instead of mutex-starving.
 - Quick-session chat renders `AskUserQuestion` gates and lets the composer answer them.
+- Boot-time warning when the app is running as an emulated wrong-arch build (x64 under Rosetta on Apple Silicon).
+
+### Changed
+
+- Vitest fork pools are governed for agent-spawned gate runs, preventing CPU oversubscription when tests run under an orchestrating agent.
+- The dead afterSign JAR-strip step is retired and converted to a post-sign JAR tripwire.
 
 ### Fixed
 
@@ -19,6 +27,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - Codex quick-session parity: queue + interrupt parity (dropped the hard-reject), and a queued Codex message is delivered at the rest boundary rather than dropped.
 - Question-answer sends save and forward their attachments (no silent drop); the client pending-id is threaded through the `panels:continue` queue fallback.
 - Panel status follows the live store instead of a frozen `SessionContext` snapshot, and a main-repo session reads its live status from `activeMainRepoSession`.
+- Deliberate step skips and CLI terminations are no longer reported as programmatic step / exit failures.
+- The quick-session board stays mounted after opening an idle session.
 
 ## [0.1.30] — 2026-07-23
 
