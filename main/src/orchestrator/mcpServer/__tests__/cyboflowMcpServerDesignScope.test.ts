@@ -1,8 +1,8 @@
 /**
  * Scope-gate tests for cyboflowMcpServer.ts's CYBOFLOW_MCP_SCOPE=design branch
  * (Design Mode v0 / docs/ideas/design-mode.md). The design scope surfaces ONLY
- * the three-tool design family and rejects every run-scoped / global-agent tool
- * on DIRECT invocation — the design-mode.md acceptance is "out-of-scope MCP
+ * the four-tool design family (incl. the narrowed follow-up cyboflow_create_task)
+ * and rejects every run-scoped / global-agent tool on DIRECT invocation — the design-mode.md acceptance is "out-of-scope MCP
  * tools are rejected on direct invocation, not merely unlisted".
  *
  * A SEPARATE file is required (not an extra describe block in the existing
@@ -107,12 +107,27 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=design)', () => {
-  it('advertises EXACTLY the three design tools — no run-scoped or global-agent tool leaks in', async () => {
+  it('advertises EXACTLY the four design tools — no run-scoped or global-agent tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
-      ['cyboflow_design_get_idea', 'cyboflow_design_update_draft', 'cyboflow_report_artifact'].sort(),
+      [
+        'cyboflow_design_get_idea',
+        'cyboflow_design_update_draft',
+        'cyboflow_report_artifact',
+        'cyboflow_create_task',
+      ].sort(),
     );
+  });
+
+  it("cyboflow_create_task's design-scope schema is the narrowed arg set (title/body/priority only)", async () => {
+    const tools = await listTools();
+    const createTask = tools.find((t) => t.name === 'cyboflow_create_task');
+    expect(createTask).toBeDefined();
+    expect(Object.keys(createTask!.inputSchema.properties).sort()).toEqual(['body', 'priority', 'title']);
+    expect(createTask!.inputSchema.required).toEqual(['title']);
+    // task_type is NOT an argument — the scope pins it server-side.
+    expect(createTask!.inputSchema.properties['task_type']).toBeUndefined();
   });
 
   it('cyboflow_design_get_idea takes no arguments', async () => {
@@ -188,6 +203,22 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=design)', () => {
       atype: 'ui-prototype',
       label: 'mockup',
       payload_json: JSON.stringify({ fileName: 'prototype/index.html' }),
+    });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_create_task rejects a missing title and a bad priority without dispatching', async () => {
+    expect(await callTool('cyboflow_create_task', {})).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_create_task', { title: 'Create design style kit', priority: 'P9' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('cyboflow_create_task dispatches a valid call (narrowed args reach the query layer)', async () => {
+    const valid = await callTool('cyboflow_create_task', {
+      title: 'Create design style kit',
+      body: 'Tokens + component sheet under docs/design-system/.',
+      priority: 'P2',
     });
     expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });

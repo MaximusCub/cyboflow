@@ -342,9 +342,11 @@ const GLOBAL_AGENT_TOOLS = [
 // ---------------------------------------------------------------------------
 // Design-session tool family (Design Mode v0) — the ONLY tools advertised when
 // IS_DESIGN_SCOPE is true. Deliberately minimal (design-mode.md "Session
-// plumbing"): read the linked idea, persist the design-spec draft, and report
-// the ui-prototype. report_artifact is the SAME tool as run scope but with its
-// atype narrowed to 'ui-prototype' only.
+// plumbing"): read the linked idea, persist the design-spec draft, report the
+// ui-prototype, and mint a single follow-up backlog TASK (the style-kit
+// consent gate's "Add a task to the backlog" option). report_artifact is the
+// SAME tool as run scope but with its atype narrowed to 'ui-prototype' only;
+// create_task is likewise narrowed to task_type='task' with a minimal arg set.
 // ---------------------------------------------------------------------------
 const DESIGN_TOOLS = [
   {
@@ -392,6 +394,28 @@ const DESIGN_TOOLS = [
         },
       },
       required: ['atype', 'label'],
+    },
+  },
+  {
+    name: 'cyboflow_create_task',
+    description:
+      "Create ONE backlog TASK for follow-up work surfaced during this design session — canonically the style-kit consent gate's \"Add a task to the backlog\" option (a task to create the project's design system later). NARROWED in design scope: always creates a task_type='task' entity (category 'chore'); ideas, epics, and every other backlog write are unavailable here. Returns { task_id, ref }.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Task title (required)' },
+        body: {
+          type: 'string',
+          description:
+            'Optional markdown body — what to build and any decisions already made (e.g. the intended style-kit location).',
+        },
+        priority: {
+          type: 'string',
+          enum: ['P0', 'P1', 'P2'],
+          description: "Optional priority; defaults to 'P2'.",
+        },
+      },
+      required: ['title'],
     },
   },
 ];
@@ -1288,6 +1312,30 @@ async function handleDesignScopeCallTool(request: {
       const queryParams: Record<string, unknown> = { atype, label };
       if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
       return executeMcpQuery('mcp-report-artifact', queryParams);
+    }
+
+    case 'cyboflow_create_task': {
+      const args = (request.params.arguments ?? {}) as {
+        title?: unknown;
+        body?: unknown;
+        priority?: unknown;
+      };
+      const { title, body, priority } = args;
+      if (typeof title !== 'string' || title.length === 0) {
+        return invalidArgs('title: string');
+      }
+      if (body !== undefined && typeof body !== 'string') {
+        return invalidArgs('body: string (optional)');
+      }
+      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
+        return invalidArgs("priority: 'P0' | 'P1' | 'P2' (optional)");
+      }
+      // Design scope mints follow-up TASKS only — taskType/category are pinned
+      // server-side here, never taken from the caller.
+      const queryParams: Record<string, unknown> = { title, taskType: 'task', category: 'chore' };
+      if (body !== undefined) queryParams['body'] = body;
+      if (priority !== undefined) queryParams['priority'] = priority;
+      return executeMcpQuery('mcp-create-task', queryParams);
     }
 
     default:
