@@ -111,7 +111,7 @@ import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
-import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES } from '../../../../shared/types/artifacts';
+import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } from '../../../../shared/types/artifacts';
 import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
 import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../agentThread/specHash';
@@ -3300,18 +3300,29 @@ export class McpQueryHandler {
     // field is set and behavior is unchanged.
     const designStamp = this.resolveSessionDesignStamp(msg.runId);
     try {
-      // Content-blesser (IDEA-039 / Approach C). This handler is the SOLE
-      // authority on ui-prototype/generic payload content:
-      //   - both atypes REJECT any inline top-level `html` key (a static mockup is
-      //     an on-disk file, never inline bytes on the artifact row);
-      //   - `ui-prototype` additionally validates the on-disk static document and
-      //     MINTS the canonical `{ fileName: 'prototype/index.html' }` pointer,
-      //     discarding whatever path/payload the producing agent claimed.
-      // `generic` keeps its `{ url }` passthrough (html-reject only). The run
+      // Content-blesser (IDEA-039 / Approach C), driven by the atype's
+      // `blessing` policy in the artifact registry — the SOLE authority on
+      // prototype/canvas payload content:
+      //   - 'prototype-file' (ui-prototype AND interactive-prototype): REJECT any
+      //     inline top-level `html` key (a mockup is an on-disk file, never inline
+      //     bytes), validate the on-disk static document, and MINT the canonical
+      //     `{ fileName: 'prototype/index.html' }` pointer — discarding whatever
+      //     path/payload the producing agent claimed;
+      //   - 'html-reject-only' (generic): reject inline `html`, otherwise pass the
+      //     `{ url }` payload through unchanged;
+      //   - 'none': no blessing (every templated atype).
+      // An atype MISSING from the registry fails LOUDLY here (design-mode.md
+      // acceptance) rather than slipping past to a byte-free commit. The run
       // artifacts dir is derived from the TRUSTED runId — CYBOFLOW_RUN_ARTIFACTS_DIR
       // is never read here.
+      const policy = ARTIFACT_POLICIES[msg.atype as ArtifactType] as
+        | (typeof ARTIFACT_POLICIES)[ArtifactType]
+        | undefined;
+      if (policy === undefined) {
+        throw new ArtifactError('invalid_atype', `unknown artifact atype '${msg.atype}' (no policy in the artifact registry)`);
+      }
       let payloadJson: string | null = msg.payloadJson ?? null;
-      if (msg.atype === 'ui-prototype' || msg.atype === 'generic') {
+      if (policy.blessing !== 'none') {
         const parsed = this.parseArtifactPayload(msg.payloadJson);
         if (parsed !== null && Object.prototype.hasOwnProperty.call(parsed, 'html')) {
           throw new ArtifactError(
@@ -3319,7 +3330,7 @@ export class McpQueryHandler {
             `inline 'html' is not accepted for atype '${msg.atype}' — write a self-contained static document to ${PROTOTYPE_HTML_RELPATH} and report a fileName pointer`,
           );
         }
-        if (msg.atype === 'ui-prototype') {
+        if (policy.blessing === 'prototype-file') {
           this.validatePrototypeFile(msg.runId);
           payloadJson = JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH });
         }

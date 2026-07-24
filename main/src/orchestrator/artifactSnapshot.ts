@@ -36,6 +36,7 @@ import {
   MAX_PROTOTYPE_HTML_BYTES,
   MAX_SCREENSHOT_BYTES,
   PROTOTYPE_HTML_RELPATH,
+  ARTIFACT_POLICIES,
   isPerEntityArtifact,
   type Artifact,
   type ArtifactType,
@@ -220,12 +221,16 @@ export function snapshotManifestToArtifact(m: ArtifactSnapshotManifest): Artifac
 export function requiredBytePaths(row: ArtifactDbRow): string[] {
   const payload = parsePayload(row.payload_json);
   const asObj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
-  if (row.atype === 'ui-prototype') {
-    // A static ui-prototype ALWAYS carries its canonical HTML document — required
-    // regardless of payload. Keying the requirement off the payload would let a
-    // payload edit strip `fileName` and drop the requirement, so the row could be
-    // committed + deleted with nothing captured. The report handler mints the
-    // canonical fileName anyway, so this only hardens against later edits.
+  const policy = ARTIFACT_POLICIES[row.atype as ArtifactType] as
+    | (typeof ARTIFACT_POLICIES)[ArtifactType]
+    | undefined;
+  if (policy?.requiresPrototypeBytes) {
+    // ui-prototype AND interactive-prototype ALWAYS carry their canonical HTML
+    // document — required regardless of payload. Keying the requirement off the
+    // payload would let a payload edit strip `fileName` and drop the requirement,
+    // so the row could be committed + deleted with nothing captured. The report
+    // handler mints the canonical fileName anyway, so this only hardens against
+    // later edits.
     const fileName = asObj && typeof asObj.fileName === 'string' ? asObj.fileName : PROTOTYPE_HTML_RELPATH;
     return [fileName];
   }

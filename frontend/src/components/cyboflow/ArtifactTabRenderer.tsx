@@ -14,9 +14,11 @@
  *                             a 2-col grid (indigo accent #5a4ad6).
  *   - 'screenshots'        -> a 2-col gallery; no disk image source yet, so a
  *                             graceful empty state (green accent #2d8a5b).
- *   - 'ui-prototype'/'generic' -> a LIVE CANVAS placeholder: header + hatched
- *                             backdrop + "Open in browser" / commit affordances
- *                             (rust accent #c96442). The iframe embed lands later.
+ *   - 'ui-prototype'/'generic'/'interactive-prototype' -> a LIVE CANVAS: header +
+ *                             hatched backdrop + "Open in browser" / commit
+ *                             affordances (rust accent). interactive-prototype
+ *                             adds a Stage-A note bar and previews statically
+ *                             until the Stage-C OOPIF embed lands.
  *
  * Templated CONTENT is re-derived from the live entity model (useArtifactData),
  * never trusted from a stale payload snapshot. Markdown is rendered via the app's
@@ -49,6 +51,7 @@ import type {
   Artifact,
   ApproveIdeasArtifactPayload,
   ApproveDesignsArtifactPayload,
+  LoadArtifactHtmlAtype,
   TaskVerificationReportEntry,
 } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
@@ -1553,9 +1556,17 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
 //     explicit empty state — NEVER a blank iframe.
 // ---------------------------------------------------------------------------
 function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
-  // CanvasBody only renders for the two canvas atypes (the dispatcher's default
-  // fallback coerces anything else to 'generic'); narrow to the load-html req union.
-  const canvasAtype: 'ui-prototype' | 'generic' = artifact.atype === 'generic' ? 'generic' : 'ui-prototype';
+  // CanvasBody renders for the three canvas atypes (the dispatcher's default
+  // fallback coerces anything else to 'generic'); narrow to the load-html req
+  // union so an interactive-prototype loads its HTML with the INTERACTIVE CSP
+  // (the main handler selects the CSP from the registry by this atype).
+  const canvasAtype: LoadArtifactHtmlAtype =
+    artifact.atype === 'generic'
+      ? 'generic'
+      : artifact.atype === 'interactive-prototype'
+        ? 'interactive-prototype'
+        : 'ui-prototype';
+  const isInteractive = artifact.atype === 'interactive-prototype';
   const accent = ARTIFACT_COLORS[canvasAtype];
   const { data } = useArtifactData(artifact, projectId);
   // `fileName`/`url` come verbatim from agent-supplied payload_json (laundered
@@ -1563,7 +1574,7 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   const payload = data?.kind === 'canvas' ? data.payload : undefined;
   const fileName = typeof payload?.fileName === 'string' ? payload.fileName : undefined;
   const url = typeof payload?.url === 'string' ? payload.url : undefined;
-  const label = artifact.atype === 'generic' ? 'generic' : 'ui prototype';
+  const label = artifact.atype === 'generic' ? 'generic' : isInteractive ? 'interactive prototype' : 'ui prototype';
 
   // Render selection keys off the PAYLOAD SHAPE, not the committed flag: a
   // `fileName` pointer (or a committed canvas with no url — its snapshot may hold
@@ -1728,6 +1739,28 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
         meta={<span style={{ fontStyle: 'italic' }}>no template — embedded live</span>}
         actions={actions}
       />
+      {/* Stage A note bar for the JS-enabled canvas. Stage C replaces the static
+          srcDoc preview below with the real process-isolated OOPIF embed; until
+          then the interactive prototype previews statically like a ui-prototype,
+          so the bar sets the expectation that JS runs in the design surface. */}
+      {isInteractive && (
+        <div
+          data-testid="artifact-interactive-note"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 20px',
+            fontSize: '10.5px',
+            color: MUTED,
+            background: 'var(--color-bg-secondary)',
+            borderBottom: `1px solid ${HAIRLINE}`,
+          }}
+        >
+          <span style={{ color: accent }}>◱</span>
+          Interactive prototype — JS runs in design mode
+        </div>
+      )}
       {body}
     </Shell>
   );
@@ -2635,6 +2668,7 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <ScreenshotsBody artifact={artifact} projectId={projectId} />;
     case 'ui-prototype':
     case 'generic':
+    case 'interactive-prototype':
       return <CanvasBody artifact={artifact} projectId={projectId} />;
     case 'approve-ideas':
       return <ApproveIdeasBody artifact={artifact} projectId={projectId} />;

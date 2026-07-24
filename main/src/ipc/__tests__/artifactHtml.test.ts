@@ -26,6 +26,7 @@ import Database from 'better-sqlite3';
 import type { AppServices } from '../types';
 import {
   ARTIFACT_PROTOTYPE_CSP,
+  ARTIFACT_INTERACTIVE_CSP,
   MAX_PROTOTYPE_HTML_BYTES,
 } from '../../../../shared/types/artifacts';
 
@@ -270,6 +271,50 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
       const res = await invoke(handlers, 'artifacts:load-html', { runId: RUN_ID, atype: 'ui-prototype' });
       expect(res.success).toBe(true);
       expect(res.data?.html).toContain('<body>fallback</body>');
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('serves an interactive-prototype from the run subtree with the INTERACTIVE CSP (scripts allowed, egress blocked)', async () => {
+    await writeRunProto(RUN_ID, '<html><head></head><body><script>1</script></body></html>');
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactHtmlHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
+      emptyServices(),
+    );
+    const res = await invoke(handlers, 'artifacts:load-html', { runId: RUN_ID, atype: 'interactive-prototype' });
+    expect(res.success).toBe(true);
+    expect(res.data?.html).toContain('<script>1</script>');
+    // The registry selects the interactive CSP for this atype — NOT the static one.
+    expect(res.data?.html).toContain(`content="${ARTIFACT_INTERACTIVE_CSP}"`);
+    expect(res.data?.html).not.toContain(`content="${ARTIFACT_PROTOTYPE_CSP}"`);
+    expect(res.data?.html?.startsWith('<meta http-equiv="Content-Security-Policy"')).toBe(true);
+  });
+
+  it('serves an interactive-prototype from the committed store with the INTERACTIVE CSP (subtree absent)', async () => {
+    const storeDir = mkdtempSync(path.join(os.tmpdir(), 'cyboflow-artifact-store-'));
+    try {
+      const filesProto = path.join(storeDir, safeRunId(RUN_ID), 'interactive-prototype', 'files', 'prototype');
+      await fs.mkdir(filesProto, { recursive: true });
+      await fs.writeFile(
+        path.join(filesProto, 'index.html'),
+        '<html><head></head><body>committed-interactive</body></html>',
+        'utf-8',
+      );
+      const { ipcMain, handlers } = makeHandlerCapture();
+      registerArtifactHtmlHandlers(
+        ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
+        makeCommittedServices(RUN_ID, 7, storeDir),
+      );
+      const res = await invoke(handlers, 'artifacts:load-html', {
+        runId: RUN_ID,
+        atype: 'interactive-prototype',
+        committed: true,
+      });
+      expect(res.success).toBe(true);
+      expect(res.data?.html).toContain('committed-interactive');
+      expect(res.data?.html).toContain(`content="${ARTIFACT_INTERACTIVE_CSP}"`);
     } finally {
       rmSync(storeDir, { recursive: true, force: true });
     }

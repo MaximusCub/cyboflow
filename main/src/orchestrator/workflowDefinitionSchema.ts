@@ -25,6 +25,8 @@ import type {
   WorkflowPhase,
   WorkflowStep,
 } from '../../../shared/types/workflows';
+import { ARTIFACT_POLICIES } from '../../../shared/types/artifacts';
+import type { ArtifactType } from '../../../shared/types/artifacts';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
 import { WORKFLOW_AGENT_RUNTIMES } from '../../../shared/types/agentRuntime';
 import { ALL_EFFORT_LEVELS } from '../../../shared/types/reasoningEffort';
@@ -90,7 +92,10 @@ export const workflowStepSchema = z.object({
   // "creates ⟨artifact⟩" chip). Kept in the schema so the field survives parse.
   outputArtifact: z
     .object({
-      atype: z.enum(['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'arch-design', 'compound-recommendations', 'approve-ideas', 'approve-designs']),
+      // Derived from the artifact-policy registry so a new atype (e.g.
+      // interactive-prototype) is accepted by the workflow schema the moment it
+      // exists in the union — no parallel hand-maintained enum to forget.
+      atype: z.enum(Object.keys(ARTIFACT_POLICIES) as [ArtifactType, ...ArtifactType[]]),
       label: z.string().min(1, 'outputArtifact.label is required'),
     })
     .optional(),

@@ -176,6 +176,37 @@ describe('snapshotCommittedArtifact — byte copy + layout', () => {
     expect(await readFile(copied, 'utf-8')).toContain('<body>hi</body>');
   });
 
+  it('copies the interactive-prototype pointer into files/ (requiresPrototypeBytes, same as ui-prototype)', async () => {
+    // An interactive-prototype carries the SAME canonical HTML byte as a
+    // ui-prototype (registry requiresPrototypeBytes:true), so its snapshot must
+    // capture prototype/index.html — otherwise a committed interactive artifact
+    // could lose its only copy when the DB row is deleted.
+    await seedPrototype(runRoot, '<html><head></head><body><script>1</script></body></html>');
+    const row = makeRow({ id: 'art_ip', atype: 'interactive-prototype' });
+    const manifestPath = await snapshotCommittedArtifact(store, runRoot, row);
+    expect(manifestPath).toBe(manifestPathFor(store, 'run-1', 'interactive-prototype'));
+    const m = JSON.parse(await readFile(manifestPath as string, 'utf-8')) as ArtifactSnapshotManifest;
+    expect(m.files).toEqual(['prototype/index.html']);
+    const copied = path.join(
+      snapshotDirFor(store, 'run-1', 'interactive-prototype'),
+      'files',
+      'prototype',
+      'index.html',
+    );
+    expect(existsSync(copied)).toBe(true);
+  });
+
+  it('ABANDONS the interactive-prototype snapshot (null) when runArtifactsRoot is null (byte-bearing)', async () => {
+    // Byte-bearing atype with no root → the durability gate must NOT finalize an
+    // empty snapshot the caller would treat as durable + then delete the row.
+    const manifestPath = await snapshotCommittedArtifact(
+      store,
+      null,
+      makeRow({ atype: 'interactive-prototype' }),
+    );
+    expect(manifestPath).toBeNull();
+  });
+
   it('copies screenshots fileNames (basename) into files/', async () => {
     await writeFile(path.join(runRoot, 'home.png'), 'PNGDATA', 'utf-8');
     await writeFile(path.join(runRoot, 'detail.png'), 'PNGDATA2', 'utf-8');
@@ -326,6 +357,26 @@ describe('read-back — listCommittedSnapshots / loadCommittedSnapshot / loadCom
     expect(html).toContain('<body>loaded</body>');
     // Absent snapshot → null.
     expect(await loadCommittedHtml(store, 'run-999', 'ui-prototype')).toBeNull();
+  });
+
+  it('DURABILITY: an interactive-prototype survives commit → DB-row delete → reload (bytes intact)', async () => {
+    // The report→commit→row-delete→reload durability acceptance (design-mode.md
+    // v1). snapshotCommittedArtifact IS the durable store; once it succeeds, the
+    // committed bytes outlive the DB row (the DB row is deleted by the router on
+    // commit). Reloading from the store must return the exact bytes — the
+    // load-html handler then injects the interactive CSP (see artifactHtml.test).
+    await seedPrototype(runRoot, '<html><head></head><body><button onclick="go()">go</button></body></html>');
+    const row = makeRow({ id: 'art_ip', atype: 'interactive-prototype' });
+    expect(await snapshotCommittedArtifact(store, runRoot, row)).not.toBeNull();
+    // Simulate the DB row being gone (commit deletes it) AND the run subtree
+    // reaped — only the durable committed store remains.
+    await rm(runRoot, { recursive: true, force: true });
+    const reloaded = await loadCommittedHtml(store, 'run-1', 'interactive-prototype');
+    expect(reloaded).toContain('<button onclick="go()">go</button>');
+    // And the manifest re-shapes back to a committed Artifact of the right atype.
+    const m = await loadCommittedSnapshot(store, 'run-1', 'interactive-prototype');
+    expect(m).not.toBeNull();
+    expect(snapshotManifestToArtifact(m as ArtifactSnapshotManifest).atype).toBe('interactive-prototype');
   });
 
   it('PER-ENTITY: two committed idea-specs in one run COEXIST (no cross-overwrite)', async () => {

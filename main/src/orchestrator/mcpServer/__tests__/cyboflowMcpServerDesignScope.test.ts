@@ -142,11 +142,11 @@ describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=design)', () => {
     ]);
   });
 
-  it("cyboflow_report_artifact's atype enum is narrowed to ui-prototype only", async () => {
+  it("cyboflow_report_artifact's atype enum is narrowed to the two prototype atypes", async () => {
     const tools = await listTools();
     const report = tools.find((t) => t.name === 'cyboflow_report_artifact');
     expect(report).toBeDefined();
-    expect(report!.inputSchema.properties['atype'].enum).toEqual(['ui-prototype']);
+    expect(report!.inputSchema.properties['atype'].enum).toEqual(['ui-prototype', 'interactive-prototype']);
     expect(report!.inputSchema.required).toEqual(['atype', 'label']);
   });
 });
@@ -204,6 +204,16 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=design)', () => {
       label: 'mockup',
       payload_json: JSON.stringify({ fileName: 'prototype/index.html' }),
     });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_report_artifact accepts atype "interactive-prototype" in design scope (dispatches to the query layer)', async () => {
+    const valid = await callTool('cyboflow_report_artifact', {
+      atype: 'interactive-prototype',
+      label: 'interactive mockup',
+      payload_json: JSON.stringify({ fileName: 'prototype/index.html' }),
+    });
+    // Reaches the shared mcp-report-artifact path (not rejected as invalid_arguments).
     expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 

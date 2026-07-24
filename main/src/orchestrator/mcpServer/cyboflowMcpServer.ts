@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as net from 'net';
 import type { QuestionPayload } from '../../../../shared/types/questions';
+import { REPORTABLE_ARTIFACT_ATYPES } from '../../../../shared/types/artifacts';
 import { ASSISTANT_REFERENCE } from '../agentThread/assistantReference';
 
 // ---------------------------------------------------------------------------
@@ -343,10 +344,11 @@ const GLOBAL_AGENT_TOOLS = [
 // Design-session tool family (Design Mode v0) — the ONLY tools advertised when
 // IS_DESIGN_SCOPE is true. Deliberately minimal (design-mode.md "Session
 // plumbing"): read the linked idea, persist the design-spec draft, report the
-// ui-prototype, and mint a single follow-up backlog TASK (the style-kit
-// consent gate's "Add a task to the backlog" option). report_artifact is the
-// SAME tool as run scope but with its atype narrowed to 'ui-prototype' only;
-// create_task is likewise narrowed to task_type='task' with a minimal arg set.
+// prototype (ui-prototype or interactive-prototype), and mint a single follow-up
+// backlog TASK (the style-kit consent gate's "Add a task to the backlog"
+// option). report_artifact is the SAME tool as run scope but with its atype
+// narrowed to the two prototype atypes only; create_task is likewise narrowed to
+// task_type='task' with a minimal arg set.
 // ---------------------------------------------------------------------------
 const DESIGN_TOOLS = [
   {
@@ -374,17 +376,17 @@ const DESIGN_TOOLS = [
   {
     name: 'cyboflow_report_artifact',
     description:
-      'Create or update THIS design session\'s single UI-prototype mockup. **`ui-prototype` only** in a design session — no other artifact type is reportable here. Write a self-contained static index.html (inline CSS only, no <script>/JS, no dev server) to $CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html and pass payload_json {"fileName":"prototype/index.html"} — an inline "html" key is rejected. There is ONE prototype per session: re-reporting ENRICHES it in place (and advances its revision). Returns { artifactId }.',
+      'Create or update THIS design session\'s single prototype mockup. Only **`ui-prototype`** (static HTML+CSS, no JS) or **`interactive-prototype`** (JS-enabled canvas) are reportable in a design session — no other artifact type. Write a self-contained index.html to $CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html and pass payload_json {"fileName":"prototype/index.html"} — an inline "html" key is rejected. There is ONE prototype per session: re-reporting ENRICHES it in place (and advances its revision). Returns { artifactId }.',
     inputSchema: {
       type: 'object',
       properties: {
         atype: {
           type: 'string',
-          // Narrowed to the single design-session artifact type. A design
-          // session iterates ONE static ui-prototype — every other atype is
+          // Narrowed to the design-session artifact types. A design session
+          // iterates ONE prototype (static or interactive) — every other atype is
           // rejected in handleDesignScopeCallTool before it can be forwarded.
-          enum: ['ui-prototype'],
-          description: "Artifact type (required) — must be 'ui-prototype' in a design session.",
+          enum: ['ui-prototype', 'interactive-prototype'],
+          description: "Artifact type (required) — 'ui-prototype' or 'interactive-prototype' in a design session.",
         },
         label: { type: 'string', description: 'Short tab/card label for the prototype (required)' },
         payload_json: {
@@ -740,10 +742,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             atype: {
               type: 'string',
-              // 'arch-design' is deliberately absent: auto-mint-only (see the
-              // validAtypes comment in the CallTool handler below).
-              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations', 'approve-ideas'],
-              description: 'Artifact type (required). ui-prototype renders a static HTML+CSS mockup in a sandboxed frame from a file you already wrote (no dev server, no JS; inline html is rejected); generic renders an embedded live canvas from a {url}; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); approve-ideas / approve-designs are the per-idea Approve/Deny gate surfaces (auto-created — open the gate via cyboflow_report_finding); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
+              // DERIVED from the artifact-policy registry (reportable atypes) —
+              // 'arch-design'/'approve-designs' are absent because they are
+              // auto-mint-only (reportable:false). See the validAtypes comment in
+              // the CallTool handler below.
+              enum: REPORTABLE_ARTIFACT_ATYPES,
+              description: 'Artifact type (required). ui-prototype renders a static HTML+CSS mockup in a sandboxed frame from a file you already wrote (no dev server, no JS; inline html is rejected); interactive-prototype is the JS-enabled design-mode canvas (same on-disk file contract; scripts run, network egress still blocked); generic renders an embedded live canvas from a {url}; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); approve-ideas / approve-designs are the per-idea Approve/Deny gate surfaces (auto-created — open the gate via cyboflow_report_finding); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
@@ -1298,10 +1302,13 @@ async function handleDesignScopeCallTool(request: {
         payload_json?: unknown;
       };
       const { atype, label, payload_json } = args;
-      // Design scope is ui-prototype ONLY — reject any other atype BEFORE
+      // Design scope reports a prototype ONLY — ui-prototype (static) or
+      // interactive-prototype (JS canvas). Reject any other atype BEFORE
       // forwarding to the shared mcp-report-artifact path.
-      if (atype !== 'ui-prototype') {
-        return invalidArgs("atype: ui-prototype (design sessions report only the ui-prototype)");
+      if (atype !== 'ui-prototype' && atype !== 'interactive-prototype') {
+        return invalidArgs(
+          "atype: ui-prototype | interactive-prototype (design sessions report only a prototype)",
+        );
       }
       if (typeof label !== 'string' || label.length === 0) {
         return invalidArgs('label: string');
@@ -2176,14 +2183,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         payload_json?: unknown;
       };
       const { atype, label, payload_json } = args;
-      // DELIBERATELY narrower than the shared ArtifactType union: 'arch-design'
-      // is auto-mint-only (derived from the idea body's '## Architecture design'
-      // section by autoMintArtifacts) — an agent-reported arch-design would lack
-      // source_ref and render a broken tab, so it is excluded here and from the
-      // ListTools enum above. 'compound-recommendations' IS agent-reportable: it
-      // is payload-backed (payload_json.markdown), so it renders correctly with
+      // DERIVED from the artifact-policy registry (reportable:true), the SAME
+      // list the ListTools enum above advertises — so the two can never drift.
+      // 'arch-design'/'approve-designs' are excluded (reportable:false,
+      // auto-mint-only): an agent-reported arch-design would lack source_ref and
+      // render a broken tab. 'compound-recommendations' IS reportable — it is
+      // payload-backed (payload_json.markdown), so it renders correctly with
       // source_ref NULL, unlike the entity-backed templated atypes.
-      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations', 'approve-ideas'];
+      const validAtypes: string[] = REPORTABLE_ARTIFACT_ATYPES;
       if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
         return {
           content: [

@@ -7,8 +7,10 @@ import type { AppServices } from './types';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import {
   ARTIFACT_PROTOTYPE_CSP,
+  ARTIFACT_POLICIES,
   PROTOTYPE_HTML_RELPATH,
   MAX_PROTOTYPE_HTML_BYTES,
+  isHtmlLoadableAtype,
   type LoadArtifactHtmlAtype,
   type LoadArtifactHtmlRequest,
   type LoadArtifactHtmlResult,
@@ -73,11 +75,16 @@ import { safeRunId, resolveArtifactCommitDir, loadCommittedHtml } from '../orche
  * document. This document is only ever rendered via an iframe `srcDoc` (see
  * LiveCanvasEmbed) — a srcdoc document defaults to no-quirks parse mode even
  * without a leading `<!doctype>`, so prepending ahead of any original doctype
- * does NOT regress rendering fidelity. Single source of truth for the policy
- * string is `ARTIFACT_PROTOTYPE_CSP` (shared).
+ * does NOT regress rendering fidelity.
+ *
+ * The policy string is atype-driven (the artifact registry's per-atype `csp`):
+ * static ui-prototype/generic get the scripts-off `ARTIFACT_PROTOTYPE_CSP`
+ * (the default, so existing callers/tests need no change), interactive-prototype
+ * gets the scripts-on, egress-off `ARTIFACT_INTERACTIVE_CSP`. The load-html
+ * handler selects the policy from the registry by atype and passes it here.
  */
-export function injectPrototypeCsp(html: string): string {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PROTOTYPE_CSP}">`;
+export function injectPrototypeCsp(html: string, csp: string = ARTIFACT_PROTOTYPE_CSP): string {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
   return `${meta}${html}`;
 }
 
@@ -146,9 +153,18 @@ async function loadCommittedStoreHtml(
   }
 }
 
-/** Narrow an untrusted `atype` to a recognized canvas atype, else null. */
+/** Narrow an untrusted `atype` to an HTML-loadable canvas atype, else null.
+ *  Consults the artifact registry (`htmlLoadable`) — the single authority on
+ *  which atypes the loader may source bytes for (ui-prototype / generic /
+ *  interactive-prototype). */
 function coerceAtype(atype: unknown): LoadArtifactHtmlAtype | null {
-  return atype === 'ui-prototype' || atype === 'generic' ? atype : null;
+  return typeof atype === 'string' && isHtmlLoadableAtype(atype) ? atype : null;
+}
+
+/** The CSP to inject when serving a given HTML-loadable atype's document —
+ *  from the registry, falling back to the static prototype CSP. */
+function cspForAtype(atype: LoadArtifactHtmlAtype): string {
+  return ARTIFACT_POLICIES[atype].csp ?? ARTIFACT_PROTOTYPE_CSP;
 }
 
 /**
@@ -193,7 +209,7 @@ export function registerArtifactHtmlHandlers(ipcMain: IpcMain, services: AppServ
           raw = await loadCommittedStoreHtml(services, runId, atype);
         }
 
-        const html = raw === null ? null : injectPrototypeCsp(raw);
+        const html = raw === null ? null : injectPrototypeCsp(raw, cspForAtype(atype));
         return { success: true, data: { html } };
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Failed to load artifact HTML.' };

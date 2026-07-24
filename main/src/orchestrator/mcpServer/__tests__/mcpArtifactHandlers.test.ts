@@ -94,6 +94,10 @@ function buildDb(): Database.Database {
   // table to join. No design session is seeded here, so the LEFT JOIN yields
   // NULL and no source_ref is stamped — non-design behavior stays unchanged.
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, design_idea_id TEXT)');
+  // Migration 084 widens the artifacts.atype CHECK to add 'interactive-prototype'
+  // (rebuild recipe; preserves the revision column added just above). Applied
+  // here so the interactive-prototype report tests can insert that atype.
+  db.exec(readFileSync(join(migDir, '084_interactive_prototype.sql'), 'utf-8'));
   return db;
 }
 
@@ -274,7 +278,7 @@ describe('McpQueryHandler artifact handlers', () => {
     /** Report a ui-prototype/generic artifact and return the parsed response. */
     async function report(
       runId: string,
-      atype: 'ui-prototype' | 'generic',
+      atype: 'ui-prototype' | 'generic' | 'interactive-prototype',
       payloadJson?: string,
     ): Promise<McpQueryResponse> {
       const { socket, writes } = makeSocketDouble();
@@ -293,6 +297,39 @@ describe('McpQueryHandler artifact handlers', () => {
       const { artifactId } = res.data as { artifactId: string };
       const row = artifactRow(db, artifactId)!;
       expect(row.payload_json).toBe(JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }));
+    });
+
+    it('valid interactive-prototype: same blessing as ui-prototype (mints the canonical {fileName})', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', '<html><head></head><body><script>1</script></body></html>');
+      const res = await report(
+        'run-1',
+        'interactive-prototype',
+        JSON.stringify({ fileName: 'agent-claimed.html' }),
+      );
+      expect(res.ok).toBe(true);
+      const { artifactId } = res.data as { artifactId: string };
+      const row = artifactRow(db, artifactId)!;
+      expect(row.atype).toBe('interactive-prototype');
+      expect(row.payload_json).toBe(JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }));
+    });
+
+    it('rejects an interactive-prototype payload carrying inline html (invalid_payload)', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', '<html><head></head><body>mock</body></html>');
+      const res = await report('run-1', 'interactive-prototype', JSON.stringify({ html: '<h1>x</h1>' }));
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: /);
+      expect(res.error).toContain("inline 'html'");
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+    });
+
+    it('interactive-prototype with a missing file: rejects (prototype_missing)', async () => {
+      seedRun(db, 'run-1');
+      const res = await report('run-1', 'interactive-prototype');
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: prototype_missing/);
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
     });
 
     it('rejects a ui-prototype payload carrying inline html (invalid_payload)', async () => {

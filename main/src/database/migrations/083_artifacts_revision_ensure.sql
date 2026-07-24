@@ -1,0 +1,28 @@
+-- Migration 083: ensure artifacts.revision exists before 084's table recreate.
+--
+-- WHY THIS FILE EXISTS (re-run convergence guard): the migration chain must be
+-- re-runnable end-to-end without errors (the runner's self-heal property — a
+-- ledger-wiped DB, e.g. the existing-install integration test, replays every
+-- file against the final schema). On that replay, 073's artifacts recreate
+-- re-runs and DROPS the `revision` column (073 predates it, and a recreate can
+-- only copy the columns it names), and 082 — the migration that added
+-- `revision` — short-circuits via the runner's duplicate-column idempotency
+-- (its FIRST statement, `ALTER TABLE sessions ADD COLUMN design_idea_id`, hits
+-- "duplicate column name", which rolls back and ledger-marks the WHOLE file).
+-- Net: `revision` is gone, and 084's INSERT..SELECT of it would fail with
+-- "no such column: revision".
+--
+-- This file restores convergence by containing EXACTLY ONE statement, the shape
+-- the runner's duplicate-column idempotency is designed for:
+--   * normal path (082 applied, column present): the ALTER throws "duplicate
+--     column name: revision" → the runner ledger-marks this file as idempotent-
+--     ok (warn, not error) and moves on;
+--   * replay path (073 re-ran and dropped it): the ALTER succeeds, re-adding
+--     the column so 084's copy always has it.
+-- Either way, artifacts carries `revision` when 084 runs.
+--
+-- PATTERN NOTE for future artifacts recreates: any post-recreate ALTER-added
+-- column suffers this same replay hazard. Precede a recreate that copies such a
+-- column with a single-ALTER "ensure" migration like this one.
+
+ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;

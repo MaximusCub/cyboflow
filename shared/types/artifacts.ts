@@ -17,9 +17,10 @@
 import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVerification';
 
 /**
- * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
- * that renders in the live canvas. Keep in sync with the `artifacts.atype`
- * CHECK constraint (currently widened by migration 073).
+ * Artifact kinds. The bespoke (templated) types plus the two live-canvas types
+ * (`ui-prototype`/`generic` — static srcdoc — and `interactive-prototype` — the
+ * JS-enabled OOPIF canvas). Keep in sync with the `artifacts.atype` CHECK
+ * constraint (currently widened by migration 084).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -27,6 +28,7 @@ export type ArtifactType =
   | 'screenshots'
   | 'ui-prototype'
   | 'generic'
+  | 'interactive-prototype'
   | 'arch-design'
   | 'compound-recommendations'
   | 'approve-ideas'
@@ -36,58 +38,274 @@ export type ArtifactType =
 export type ArtifactRenderMode = 'template' | 'canvas';
 
 /**
- * Render mode per atype. Templated types get bespoke views; `ui-prototype` and
- * `generic` are live canvases (dashed tab chip + `◳` glyph + iframe body).
+ * Restrictive CSP injected into every static `ui-prototype`/`generic` mockup
+ * document before it is embedded via `srcDoc` (bare `sandbox=""` iframe, no
+ * `allow-scripts`/`allow-same-origin`). The main-process `artifacts:load-html`
+ * handler PREPENDS it as the document's first token (see injectPrototypeCsp);
+ * with scripts disabled by the bare sandbox this `<meta>` is the sole
+ * subresource-egress control, so it must survive adversarial markup. (Note: the
+ * HTML `csp` iframe attribute was never shipped in Chromium/Electron and is NOT
+ * used — this meta is the real enforcement.)
+ *
+ * Declared HERE (ahead of {@link ARTIFACT_POLICIES}) rather than lower in the
+ * file because the policy registry references it as `ui-prototype`/`generic`'s
+ * `csp` — a `const` referenced before its declaration in the registry object
+ * literal would throw a temporal-dead-zone ReferenceError at module load.
  */
-export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = {
-  'idea-spec': 'template',
-  'decomposed-stories': 'template',
-  screenshots: 'template',
-  'ui-prototype': 'canvas',
-  generic: 'canvas',
-  'arch-design': 'template',
-  'compound-recommendations': 'template',
-  'approve-ideas': 'template',
-  'approve-designs': 'template',
-};
+export const ARTIFACT_PROTOTYPE_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
 
 /**
- * Accent ("edge") color per atype — drives the active tab's top border, the tab
- * label, and the artifact chip. Raw hex from the design handoff; the M7 polish
- * pass migrates these to `var(--cf-*)` tokens once the tokens are added.
+ * CSP injected into an `interactive-prototype` document (Design Mode v1). Unlike
+ * {@link ARTIFACT_PROTOTYPE_CSP} it ALLOWS inline script execution
+ * (`script-src 'unsafe-inline'`) — the interactive canvas exists to run the
+ * agent-generated prototype's JS — while keeping `default-src 'none'` so ALL
+ * network egress (fetch/XHR/WebSocket/subresource GETs beyond inline data:) is
+ * still blocked, plus `base-uri 'none'`/`form-action 'none'`. Capability
+ * containment for this frame is CSP + a minimal `allow-scripts` sandbox + the
+ * scripted-frame navigation guard + process isolation (see design-mode.md
+ * "Canvas v1"); this constant is the egress half.
  */
-export const ARTIFACT_COLORS: Record<ArtifactType, string> = {
-  'idea-spec': '#3b6dd6',
-  'decomposed-stories': '#5a4ad6',
-  screenshots: '#2d8a5b',
-  'ui-prototype': '#c96442',
-  generic: '#c96442',
-  'arch-design': '#2d7a8a',
-  // Compound's phase color (#8b5cf6, the violet used in the run rail) so the
-  // recommendations tab reads as part of the Compound flow.
-  'compound-recommendations': '#8b5cf6',
-  'approve-ideas': '#b8860b',
-  // The design-approval sibling of approve-ideas: an approval gold tilted toward
-  // arch-design's teal (#2d7a8a) so the joint design gate reads as "approve the
-  // architecture designs".
-  'approve-designs': '#8a7326',
-};
+export const ARTIFACT_INTERACTIVE_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
 
 /**
- * Glyph per atype. Live canvases (`mode: 'canvas'`) always render the `◳` glyph
- * regardless of this map; these are the templated glyphs.
+ * Per-atype POLICY — the canonical, single-source-of-truth table every
+ * atype-special-casing seam derives from (Design Mode v1, design-mode.md
+ * "Canvas v1 — artifact-policy registry"). Generalizes the lesson that made the
+ * router's `VALID_ATYPES` derived rather than hand-maintained: report
+ * validation, the reportable-tool enum, payload blessing, the IPC HTML loader,
+ * CSP selection, snapshot byte-durability, per-entity identity, and the tab
+ * renderer all read this ONE table, so a newly added atype cannot silently miss
+ * a guard (the interactive-prototype canvas that motivated the registry would
+ * otherwise have been able to bypass canonical-file validation, fail to load,
+ * or "commit" with zero HTML bytes and then lose its only copy on row delete).
  */
-export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
-  'idea-spec': '▤',
-  'decomposed-stories': '☰',
-  screenshots: '▦',
-  'ui-prototype': '◳',
-  generic: '◳',
-  'arch-design': '▣',
-  'compound-recommendations': '▧',
-  'approve-ideas': '☑',
-  'approve-designs': '⊡',
+export interface ArtifactPolicy {
+  /** Template body vs. embedded live canvas. */
+  renderMode: ArtifactRenderMode;
+  /**
+   * For a canvas atype, WHICH canvas mechanism: `static-srcdoc` = bare-sandbox
+   * `srcDoc` iframe (ui-prototype/generic), `interactive-oopif` = the
+   * process-isolated JS-enabled loopback-origin frame (interactive-prototype).
+   * `null` for a template atype (no canvas).
+   */
+  canvasKind: 'static-srcdoc' | 'interactive-oopif' | null;
+  /** May the `artifacts:load-html` / `artifacts:open-in-browser` IPC source HTML for it. */
+  htmlLoadable: boolean;
+  /** The CSP injected when this atype's HTML is served/embedded (null for non-HTML atypes). */
+  csp: string | null;
+  /**
+   * How the report-handler content-blesser treats this atype's payload:
+   *   - `prototype-file` — reject an inline `html` key AND validate the on-disk
+   *     `prototype/index.html`, minting the canonical `{ fileName }` (ui-prototype
+   *     AND interactive-prototype);
+   *   - `html-reject-only` — reject an inline `html` key, pass the rest through
+   *     (`generic`, whose `{ url }` is a legacy live-canvas pointer);
+   *   - `none` — no content blessing (every templated atype).
+   */
+  blessing: 'prototype-file' | 'html-reject-only' | 'none';
+  /**
+   * True when the durability snapshot MUST capture the canonical static-mockup
+   * HTML (`prototype/index.html`) for this atype regardless of payload — drives
+   * `requiredBytePaths`. True for ui-prototype AND interactive-prototype;
+   * `generic`'s declared-fileName and `screenshots`' fileNames are handled
+   * separately (they are not the always-canonical prototype byte).
+   */
+  requiresPrototypeBytes: boolean;
+  /**
+   * True when an agent may report this atype via `cyboflow_report_artifact`.
+   * False for the auto-mint-only templated surfaces (`arch-design`,
+   * `approve-designs`) that the orchestrator derives — an agent report would
+   * lack the source_ref/gate context they need and render broken.
+   */
+  reportable: boolean;
+  /** Accent ("edge") color — drives the tab top border, label, and chip. */
+  color: string;
+  /** Glyph for the tab chip (canvas atypes render `◳` in the tab regardless). */
+  glyph: string;
+  /**
+   * True when a run may hold MULTIPLE of this atype, one per source entity
+   * (identity keyed by `(run_id, atype, source_ref)` instead of `(run_id,
+   * atype)`) — the multi-idea planner batch mints one `idea-spec` AND one
+   * `arch-design` per owned idea.
+   */
+  perEntity: boolean;
+}
+
+/**
+ * THE registry. Insertion order defines {@link REPORTABLE_ARTIFACT_ATYPES}'s
+ * order (and thus the report-tool enum's), so keep the reportable atypes in the
+ * order the MCP tool has historically advertised them.
+ */
+export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
+  'idea-spec': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    color: '#3b6dd6',
+    glyph: '▤',
+    perEntity: true,
+  },
+  'decomposed-stories': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    color: '#5a4ad6',
+    glyph: '☰',
+    perEntity: false,
+  },
+  screenshots: {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    // screenshots DO carry bytes, but via the fileNames path in
+    // requiredBytePaths — not the always-canonical prototype/index.html byte.
+    requiresPrototypeBytes: false,
+    reportable: true,
+    color: '#2d8a5b',
+    glyph: '▦',
+    perEntity: false,
+  },
+  'ui-prototype': {
+    renderMode: 'canvas',
+    canvasKind: 'static-srcdoc',
+    htmlLoadable: true,
+    csp: ARTIFACT_PROTOTYPE_CSP,
+    blessing: 'prototype-file',
+    requiresPrototypeBytes: true,
+    reportable: true,
+    color: '#c96442',
+    glyph: '◳',
+    perEntity: false,
+  },
+  generic: {
+    renderMode: 'canvas',
+    canvasKind: 'static-srcdoc',
+    htmlLoadable: true,
+    csp: ARTIFACT_PROTOTYPE_CSP,
+    blessing: 'html-reject-only',
+    // A url-only generic declares (and wants) no bytes; a fileName-bearing
+    // generic's byte is picked up by requiredBytePaths' generic branch, not this
+    // always-canonical flag.
+    requiresPrototypeBytes: false,
+    reportable: true,
+    color: '#c96442',
+    glyph: '◳',
+    perEntity: false,
+  },
+  'interactive-prototype': {
+    renderMode: 'canvas',
+    canvasKind: 'interactive-oopif',
+    htmlLoadable: true,
+    csp: ARTIFACT_INTERACTIVE_CSP,
+    // Same blessing as ui-prototype: reject inline html + validate + mint the
+    // canonical prototype/index.html pointer.
+    blessing: 'prototype-file',
+    requiresPrototypeBytes: true,
+    reportable: true,
+    // A rust in the ui-prototype family (#c96442) but distinct so the JS-enabled
+    // canvas reads as its own kind of surface.
+    color: '#b5502e',
+    glyph: '◱',
+    perEntity: false,
+  },
+  'arch-design': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    // Auto-mint-only (derived from the idea body's '## Architecture design').
+    reportable: false,
+    color: '#2d7a8a',
+    glyph: '▣',
+    perEntity: true,
+  },
+  'compound-recommendations': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    // Compound's phase color (the violet used in the run rail) so the
+    // recommendations tab reads as part of the Compound flow.
+    color: '#8b5cf6',
+    glyph: '▧',
+    perEntity: false,
+  },
+  'approve-ideas': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    color: '#b8860b',
+    glyph: '☑',
+    perEntity: false,
+  },
+  'approve-designs': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    // Auto-created gate surface (the design-approval sibling of approve-ideas).
+    reportable: false,
+    // An approval gold tilted toward arch-design's teal (#2d7a8a) so the joint
+    // design gate reads as "approve the architecture designs".
+    color: '#8a7326',
+    glyph: '⊡',
+    perEntity: false,
+  },
 };
+
+/** Registry entries as a typed array — the derivation source for the legacy maps. */
+const ARTIFACT_POLICY_ENTRIES = Object.entries(ARTIFACT_POLICIES) as [ArtifactType, ArtifactPolicy][];
+
+/**
+ * Render mode per atype — DERIVED from {@link ARTIFACT_POLICIES}. Kept as its
+ * own exported `Record<ArtifactType, ArtifactRenderMode>` (same name/shape as
+ * before the registry) so the router's `VALID_ATYPES` derivation and every other
+ * consumer compile unchanged.
+ */
+export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = Object.fromEntries(
+  ARTIFACT_POLICY_ENTRIES.map(([atype, p]) => [atype, p.renderMode]),
+) as Record<ArtifactType, ArtifactRenderMode>;
+
+/**
+ * Accent ("edge") color per atype — DERIVED from {@link ARTIFACT_POLICIES}.
+ * Drives the active tab's top border, the tab label, and the artifact chip. The
+ * M7 polish pass migrates these to `var(--cf-*)` tokens once the tokens exist.
+ */
+export const ARTIFACT_COLORS: Record<ArtifactType, string> = Object.fromEntries(
+  ARTIFACT_POLICY_ENTRIES.map(([atype, p]) => [atype, p.color]),
+) as Record<ArtifactType, string>;
+
+/**
+ * Glyph per atype — DERIVED from {@link ARTIFACT_POLICIES}. Live canvases
+ * (`mode: 'canvas'`) render the `◳` glyph in the tab regardless of this map;
+ * these are the templated/chip glyphs.
+ */
+export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = Object.fromEntries(
+  ARTIFACT_POLICY_ENTRIES.map(([atype, p]) => [atype, p.glyph]),
+) as Record<ArtifactType, string>;
 
 /** True when the artifact renders in an embedded live canvas (not a template). */
 export function isCanvasArtifact(atype: ArtifactType): boolean {
@@ -96,25 +314,37 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
 
 /**
  * Atypes that are NOT one-per-(run, atype): a single run may hold MULTIPLE
- * artifacts of this kind, one per source entity (source_ref). The multi-idea
- * planner batch mints one 'idea-spec' AND one 'arch-design' per seeded/owned
- * idea, so both have identity (run_id, atype, source_ref) — see migrations 063
- * (idea-spec) and 070 (arch-design). Every OTHER atype keeps the strict
- * one-per-(run, atype) rule.
+ * artifacts of this kind, one per source entity (source_ref) — DERIVED from the
+ * `perEntity` flag in {@link ARTIFACT_POLICIES}. The multi-idea planner batch
+ * mints one 'idea-spec' AND one 'arch-design' per seeded/owned idea, so both
+ * have identity (run_id, atype, source_ref) — see migrations 063 (idea-spec) and
+ * 073 (arch-design). Every OTHER atype keeps the strict one-per-(run, atype) rule.
  *
- * This is the SINGLE HOME for the "per-entity" decision — the ArtifactRouter
- * create-identity (main-side) and the center-pane tab id (frontend) both key off
- * it, so the split rule can never disagree across the two layers.
+ * The registry is the SINGLE HOME for the "per-entity" decision — the
+ * ArtifactRouter create-identity (main-side) and the center-pane tab id
+ * (frontend) both key off this set, so the split rule can never disagree across
+ * the two layers.
  */
-export const PER_ENTITY_ARTIFACT_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>([
-  'idea-spec',
-  'arch-design',
-]);
+export const PER_ENTITY_ARTIFACT_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>(
+  ARTIFACT_POLICY_ENTRIES.filter(([, p]) => p.perEntity).map(([atype]) => atype),
+);
 
 /** True when a run may hold several of this atype (identity keyed by source_ref). */
 export function isPerEntityArtifact(atype: ArtifactType): boolean {
   return PER_ENTITY_ARTIFACT_ATYPES.has(atype);
 }
+
+/**
+ * The atypes an agent may report via `cyboflow_report_artifact` — DERIVED from
+ * the `reportable` flag, in registry insertion order. The MCP tool's schema enum
+ * and its CallTool `validAtypes` guard both read this ONE list, so a new
+ * reportable atype (interactive-prototype) is accepted the moment its policy
+ * says so — no parallel hand-maintained enum to forget (the omission that once
+ * made `compound-recommendations` render a broken empty canvas).
+ */
+export const REPORTABLE_ARTIFACT_ATYPES: ArtifactType[] = ARTIFACT_POLICY_ENTRIES.filter(
+  ([, p]) => p.reportable,
+).map(([atype]) => atype);
 
 // ===========================================================================
 // arch-design — the templated architecture-design section extractor.
@@ -392,19 +622,6 @@ export function replaceDesignSpecSection(body: string | null | undefined, newSec
 export const DEFAULT_ARTIFACT_COMMIT_DIR = '.cyboflow/artifacts';
 
 /**
- * Restrictive CSP injected into every static `ui-prototype`/`generic` mockup
- * document before it is embedded via `srcDoc` (bare `sandbox=""` iframe, no
- * `allow-scripts`/`allow-same-origin`). The main-process `artifacts:load-html`
- * handler PREPENDS it as the document's first token (see injectPrototypeCsp);
- * with scripts disabled by the bare sandbox this `<meta>` is the sole
- * subresource-egress control, so it must survive adversarial markup. (Note: the
- * HTML `csp` iframe attribute was never shipped in Chromium/Electron and is NOT
- * used — this meta is the real enforcement.)
- */
-export const ARTIFACT_PROTOTYPE_CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
-
-/**
  * Canonical on-disk relative path (inside a run's artifacts dir, or a
  * committed snapshot's `files/` dir) for a static `ui-prototype` mockup's
  * single self-contained HTML document. The report-handler content-blesser
@@ -429,8 +646,28 @@ export const MAX_PROTOTYPE_HTML_BYTES = 5 * 1024 * 1024;
  */
 export const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 
-/** The canvas atypes the `artifacts:load-html` IPC channel can source HTML for. */
-export type LoadArtifactHtmlAtype = 'ui-prototype' | 'generic';
+/**
+ * The canvas atypes the `artifacts:load-html` / `artifacts:open-in-browser` IPC
+ * channels can source HTML for. This literal union is the compile-time mirror of
+ * the registry's `htmlLoadable: true` policies (ui-prototype, generic,
+ * interactive-prototype); {@link isHtmlLoadableAtype} is the runtime narrowing
+ * that consults {@link ARTIFACT_POLICIES}, so the two can never disagree.
+ */
+export type LoadArtifactHtmlAtype = 'ui-prototype' | 'generic' | 'interactive-prototype';
+
+/**
+ * Narrow an untrusted atype string to a {@link LoadArtifactHtmlAtype} by
+ * consulting the registry's `htmlLoadable` flag — the SINGLE runtime authority
+ * on "may the HTML loader source bytes for this atype". Used by the
+ * `artifacts:load-html` / `artifacts:open-in-browser` handlers instead of a
+ * hand-written atype allowlist.
+ */
+export function isHtmlLoadableAtype(atype: string): atype is LoadArtifactHtmlAtype {
+  return (
+    Object.prototype.hasOwnProperty.call(ARTIFACT_POLICIES, atype) &&
+    ARTIFACT_POLICIES[atype as ArtifactType].htmlLoadable
+  );
+}
 
 /**
  * Request/response shapes for the `artifacts:load-html` IPC channel. SHARED so

@@ -96,6 +96,11 @@ function buildDb(): Database.Database {
   // subset that predates 082; without it the enrich UPDATE's `revision =
   // revision + 1` would hit a missing column.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  // Migration 084 widens the artifacts.atype CHECK to add 'interactive-prototype'
+  // (rebuild recipe; preserves the revision column added just above). Applied so
+  // the "accepts every atype in the union" loop can write interactive-prototype,
+  // now that VALID_ATYPES derives from the exhaustive registry.
+  db.exec(readFileSync(join(migDir, '084_interactive_prototype.sql'), 'utf-8'));
   return db;
 }
 
