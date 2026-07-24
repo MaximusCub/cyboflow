@@ -8,6 +8,7 @@ import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../../stores/claudeModelCatalogStore';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import type { ClaudeModelOption } from '../../../../../shared/types/agentModels';
 
 /**
  * ModelPill — interactive model selector for a quick SDK session's composer.
@@ -69,6 +70,30 @@ export function isOpusModel(id: string | null | undefined): boolean {
   return typeof id === 'string' && id.toLowerCase().includes('opus');
 }
 
+/**
+ * Friendly display label for a DYNAMIC ("Other models") Claude row, derived from
+ * its concrete wire id so it disambiguates from the pinned families. The SDK's
+ * bare `displayName` for a non-default snapshot is just the family (e.g. "Opus"),
+ * which would collide with the pinned "Opus 5 · 1M" row — so we parse the version
+ * (and 1M context) out of the resolved id instead: `claude-opus-4-8[1m]` →
+ * "Opus 4.8 · 1M". Falls back to the SDK label / raw id if the id doesn't parse.
+ */
+export function formatDynamicClaudeLabel(option: ClaudeModelOption): string {
+  const concrete = option.resolvedModel ?? option.id;
+  const has1m = /\[1m\]$/i.test(concrete);
+  const base = concrete.replace(/\[1m\]$/i, '').replace(/^claude-/i, '');
+  const tokens = base.split('-').filter(Boolean);
+  const family = tokens.shift();
+  // Keep short numeric version segments (4, 8); drop date-like tokens (20251001).
+  const version = tokens.filter((t) => /^\d{1,2}$/.test(t)).join('.');
+  // Only trust the "Family Version" parse when a version was actually recovered —
+  // otherwise the id is shaped unexpectedly and parsing would drop tokens, so we
+  // fall back to the SDK's displayName / raw id instead.
+  const parsed = family && version ? `${family.charAt(0).toUpperCase()}${family.slice(1)} ${version}` : '';
+  const name = parsed || option.label || option.id;
+  return has1m ? `${name} · 1M` : name;
+}
+
 interface ModelPillProps {
   panelId: string;
   /** Provider owning the panel settings; controls the visible model family. */
@@ -97,12 +122,15 @@ export function ModelPill({
     context: null,
   }));
   const options = agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
-  // A dynamic (non-pinned) Claude id displays its SDK label; a pinned alias falls
-  // through to modelDisplayLabel (which knows the curated "Opus 5 · 1M" form).
-  const claudeDynamicLabel =
+  // A dynamic (non-pinned) Claude id displays its friendly parsed label; a pinned
+  // alias falls through to modelDisplayLabel (which knows the curated "Opus 5 · 1M").
+  const claudeDynamicActive =
     agentProvider !== 'codex'
-      ? claudeCatalogOptions.find((option) => option.id === active)?.label
+      ? claudeCatalogOptions.find((option) => option.id === active)
       : undefined;
+  const claudeDynamicLabel = claudeDynamicActive
+    ? formatDynamicClaudeLabel(claudeDynamicActive)
+    : undefined;
   const label = agentProvider === 'codex'
     ? (codexOptions.find((option) => option.id === active)?.label ?? modelDisplayLabel(active, agentProvider))
     : (claudeDynamicLabel ?? modelDisplayLabel(active, agentProvider));
@@ -153,7 +181,7 @@ export function ModelPill({
     for (const option of claudeCatalogOptions) {
       items.push({
         id: option.id,
-        label: option.label,
+        label: formatDynamicClaudeLabel(option),
         description: option.description || option.id,
         icon: Cpu,
         iconColor: 'text-text-secondary',
