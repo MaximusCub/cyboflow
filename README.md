@@ -47,11 +47,11 @@ Download Cyboflow from https://www.cyboflow.com/download/ and then drag the Cybo
 - macOS 13 Ventura or later
 - [Claude Code](https://claude.ai/code) installed and authenticated
 
-The Planner, Sprint, and Compound flows are built into the app — no external workflow runner needs to be installed in your project.
+The Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
 
 ## Provenance
 
-Cyboflow is a fork of [stravu/crystal](https://github.com/stravu/crystal) pinned at commit `7a5ee427b0f3595db69e237eda1718c87215ad97`. Crystal provides six of Cyboflow's eight required primitives — PTY management, git worktrees, SQLite persistence, macOS packaging, the permission bridge, and zombie-process detection — in production-tested form. Cyboflow adds the cross-workflow review queue, the typed stream parser, and the CyboflowMcpServer outbound bridge.
+Cyboflow is a fork of [stravu/crystal](https://github.com/stravu/crystal) pinned at commit `1e18e0bc981225f75b5226f82a300fa741970c6f`. Crystal provides six of Cyboflow's eight required primitives — PTY management, git worktrees, SQLite persistence, macOS packaging, the permission bridge, and zombie-process detection — in production-tested form. Cyboflow adds the cross-workflow review queue, the typed stream parser, and the CyboflowMcpServer outbound bridge.
 
 The fork was taken from Crystal `0.3.5` (Crystal's final public tag) before the Crystal project was renamed to Nimbalyst and put on a different product footing.
 

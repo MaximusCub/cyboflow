@@ -21,10 +21,8 @@ This is a **separate concern** from the rest of this document below, which
 covers verifying **cyboflow's own** renderer while an agent works ON this
 codebase (dogfooding) via the Playwright-MCP CDP attach and the `visual_macos`
 Peekaboo fallback — that guidance is engine-independent and remains fully
-current regardless of the section above. The exception is "Deliverable
-`htmlPath` capture" further down: it documents the now-LEGACY-ONLY
-`.cyboflow/verify.json` static-serve mechanics for cyboflow's built-in feature,
-not the dogfooding path.
+current regardless of the section above. Exception: "Deliverable `htmlPath`
+capture" further down is LEGACY-ENGINE-ONLY, not the dogfooding path.
 
 This project is an Electron app. The Vite renderer at `http://localhost:4521`
 depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone,
@@ -128,16 +126,11 @@ cyboflow is desktop-only. `verification.visual_mobile=false`.
 
 ## Deliverable `htmlPath` capture (product feature, for cyboflow's users) — LEGACY ENGINE ONLY
 
-**This section describes the LEGACY visual-verification engine** (see "Agent
-engine (current)" above) — live only for a pre-upgrade run's legacy
-`verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch.
-The default v1 engine's verification agent drives a built html deliverable
-directly via the bundled driver CLI and does not use `StaticServerManager` or
-`.cyboflow/verify.json` as a prerequisite (only as an optional hint during task
-composition).
+See "Agent engine (current)" above for the default agent-engine behavior and
+retirement scope. `.cyboflow/verify.json` is only an optional hint during task
+composition for the current default engine, never a prerequisite.
 
-The sections above cover verifying **cyboflow's own** renderer while working ON
-this codebase. Separately, cyboflow's *built-in* layered visual verification
+cyboflow's *built-in* layered visual verification
 (`cyboflow_request_verification`, see `docs/proposals/visual-verification-design.md`) lets a
 lane agent point at a plain built html file via `htmlPath` — e.g. a static site
 export with no dev server. That capture is now served over an ephemeral loopback
@@ -160,9 +153,22 @@ What to know if you're declaring a deliverable in `.cyboflow/verify.json`:
 
 ## Manual Playwright E2E (independent of MCP)
 
-`pnpm test:e2e` runs Playwright against `http://localhost:4521`. As noted in
-`CLAUDE.md`, that renderer cannot bootstrap without the Electron `preload`-injected
-`electronTRPC`, so the headless E2E path currently hangs and is **not** a usable
-verification gate (the config has not yet been reworked to use `_electron.launch()`).
-For headless code-change validation use `pnpm test:unit`; for visual verification use
-`visual_macos` via Peekaboo against a running `pnpm dev` (see above).
+`pnpm test:e2e` drives the **built Electron bundle** via Playwright's
+`_electron.launch()` (fixture: `tests/helpers/electronApp.ts`) — it launches
+the compiled app directly and attaches Playwright to the real Electron window.
+There is no `webServer`, `baseURL`, or `http://localhost:4521` dev server
+involved. Two config tiers exist: `playwright.config.ts` (full suite,
+`workers: 1`, all specs) and `playwright.ci.minimal.config.ts` (smoke:
+health-check + smoke + permissions).
+
+It is still **not** the headless code-change AC gate — Electron windows need a
+real display to appear on screen. For headless code-change validation use
+`pnpm test:unit`; for visual verification use `visual_macos` via Peekaboo
+against a running `pnpm dev` (see above).
+
+After a `pnpm test:e2e` run, run `pnpm rebuild better-sqlite3` to restore the
+host-Node ABI — the `pretest:e2e` hook rebuilds `better-sqlite3` for the
+Electron ABI so the launched app can load it, which leaves the module on the
+wrong ABI for host-side `vitest` runs until you rebuild it back.
+
+See `docs/ARCHITECTURE.md` "Build & Run" for the full e2e contract.

@@ -3,7 +3,8 @@
 ## Fork
 
 - **Upstream:** https://github.com/stravu/crystal
-- **Fork commit:** `7a5ee427b0f3595db69e237eda1718c87215ad97`
+- **Upstream commit (tag `0.3.5`):** `1e18e0bc981225f75b5226f82a300fa741970c6f`
+- **Local baseline commit:** `e611db8afc1bdaccf031c038a89bae8c18908056`
 - **Fork date:** 2026-05-11
 - **Fork commit message:** `chore: fork stravu/crystal at HEAD as cyboflow baseline`
 - **Crystal tag at fork:** `0.3.5` (Crystal's final public tag before the project was renamed to Nimbalyst)
@@ -11,7 +12,7 @@
 To verify the fork point independently:
 
 ```bash
-git log 7a5ee427b0f3595db69e237eda1718c87215ad97 --pretty=fuller
+git log e611db8afc1bdaccf031c038a89bae8c18908056 --pretty=fuller
 ```
 
 ## License
