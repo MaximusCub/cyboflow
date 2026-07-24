@@ -153,6 +153,14 @@ export interface ConversationMessage {
   message_type: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  /**
+   * The source transcript entry's own `uuid` (migration 083), set only for rows
+   * ingested from a PTY session's Claude-CLI JSONL transcript
+   * (main/src/services/ptyTranscriptIngest.ts). NULL for SDK-written rows. The
+   * dedupe key behind idempotent re-ingestion (partial unique index on
+   * (session_id, source_uuid)).
+   */
+  source_uuid?: string | null;
 }
 
 export interface CreateSessionData {

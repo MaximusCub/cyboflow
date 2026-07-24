@@ -2653,10 +2653,42 @@ export class DatabaseService {
 
   getConversationMessages(sessionId: string): ConversationMessage[] {
     return this.db.prepare(`
-      SELECT * FROM conversation_messages 
-      WHERE session_id = ? 
+      SELECT * FROM conversation_messages
+      WHERE session_id = ?
       ORDER BY timestamp ASC
     `).all(sessionId) as ConversationMessage[];
+  }
+
+  // Idempotent ingest of ONE PTY-transcript turn into conversation_messages
+  // (migration 083, session-summary-plan.md PTY follow-up). Unlike
+  // addConversationMessage, this writes an EXPLICIT timestamp (the JSONL entry's
+  // own ISO time — sitting segmentation depends on real times, never
+  // CURRENT_TIMESTAMP) and a `source_uuid` (the transcript entry's uuid) so
+  // re-ingestion dedupes via the partial unique index (INSERT OR IGNORE).
+  // Returns true iff a NEW row was inserted (changes === 1); a duplicate
+  // source_uuid yields changes === 0 → false. Never bumps sessions.updated_at
+  // (the activity-clock contract — sessionUpdatedAtSemantics.test.ts).
+  insertTranscriptConversationMessage(params: {
+    sessionId: string;
+    panelId?: string | null;
+    messageType: 'user' | 'assistant';
+    content: string;
+    timestamp: string;
+    sourceUuid: string;
+  }): boolean {
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO conversation_messages
+        (session_id, panel_id, message_type, content, timestamp, source_uuid)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      params.sessionId,
+      params.panelId ?? null,
+      params.messageType,
+      params.content,
+      params.timestamp,
+      params.sourceUuid,
+    );
+    return result.changes === 1;
   }
 
   clearConversationMessages(sessionId: string): void {

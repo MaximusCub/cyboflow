@@ -151,6 +151,109 @@ describe('getConversationMessagesAfter', () => {
   });
 });
 
+describe('insertTranscriptConversationMessage (migration 083 PTY ingest)', () => {
+  it('inserts with an EXPLICIT timestamp and source_uuid, returning true', () => {
+    createSession('s1');
+    const ts = '2026-03-04T12:00:00.000Z';
+    const inserted = db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'assistant',
+      content: 'hello from the transcript',
+      timestamp: ts,
+      sourceUuid: 'uuid-a',
+    });
+    expect(inserted).toBe(true);
+
+    const row = db
+      .getDb()
+      .prepare('SELECT message_type, content, timestamp, source_uuid FROM conversation_messages WHERE session_id = ?')
+      .get('s1') as { message_type: string; content: string; timestamp: string; source_uuid: string };
+    expect(row.message_type).toBe('assistant');
+    expect(row.content).toBe('hello from the transcript');
+    expect(row.timestamp).toBe(ts); // explicit, NOT CURRENT_TIMESTAMP
+    expect(row.source_uuid).toBe('uuid-a');
+  });
+
+  it('dedupes on (session_id, source_uuid) — a re-inserted uuid returns false and adds no row', () => {
+    createSession('s1');
+    const first = db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'user',
+      content: 'first',
+      timestamp: '2026-03-04T12:00:00.000Z',
+      sourceUuid: 'dupe',
+    });
+    const second = db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'user',
+      content: 'first again (ignored)',
+      timestamp: '2026-03-04T12:05:00.000Z',
+      sourceUuid: 'dupe',
+    });
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    expect(db.getConversationMessageCount('s1')).toBe(1);
+  });
+
+  it('scopes the dedupe per-session — the same uuid in another session still inserts', () => {
+    createSession('s1');
+    createSession('s2');
+    expect(
+      db.insertTranscriptConversationMessage({
+        sessionId: 's1',
+        messageType: 'user',
+        content: 'in s1',
+        timestamp: '2026-03-04T12:00:00.000Z',
+        sourceUuid: 'shared-uuid',
+      }),
+    ).toBe(true);
+    expect(
+      db.insertTranscriptConversationMessage({
+        sessionId: 's2',
+        messageType: 'user',
+        content: 'in s2',
+        timestamp: '2026-03-04T12:00:00.000Z',
+        sourceUuid: 'shared-uuid',
+      }),
+    ).toBe(true);
+    expect(db.getConversationMessageCount('s1')).toBe(1);
+    expect(db.getConversationMessageCount('s2')).toBe(1);
+  });
+
+  it('does not bump sessions.updated_at (activity-clock contract)', () => {
+    createSession('s1');
+    expect(sessionUpdatedAt('s1')).toBe(SEEDED_UPDATED_AT);
+    db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'assistant',
+      content: 'x',
+      timestamp: '2026-03-04T12:00:00.000Z',
+      sourceUuid: 'u',
+    });
+    expect(sessionUpdatedAt('s1')).toBe(SEEDED_UPDATED_AT);
+  });
+
+  it('ingested rows participate in the getConversationMessagesAfter watermark read', () => {
+    createSession('s1');
+    db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'user',
+      content: 'u1',
+      timestamp: '2026-03-04T12:00:00.000Z',
+      sourceUuid: 'u1',
+    });
+    db.insertTranscriptConversationMessage({
+      sessionId: 's1',
+      messageType: 'assistant',
+      content: 'a1',
+      timestamp: '2026-03-04T12:00:01.000Z',
+      sourceUuid: 'a1',
+    });
+    const delta = db.getConversationMessagesAfter('s1', 0);
+    expect(delta.map((m) => m.content)).toEqual(['u1', 'a1']);
+  });
+});
+
 describe('persistSessionSummaryResult transactionality', () => {
   it('writes the upsert + entries atomically and returns true when the session exists', () => {
     createSession('s1');
