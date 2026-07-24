@@ -399,8 +399,13 @@ the env vars in your shell.
 > **Shipped:** TASK-051..056 have all landed. `package.json` sets `build.mac.hardenedRuntime`
 > and `build.mac.notarize: true`; `build/entitlements.mac.plist` exists. Note that
 > `build/afterSign.js` does **not** submit to `notarytool` itself — notarization is delegated to
-> electron-builder's built-in hook (driven by `build.mac.notarize`); `afterSign.js` only strips
-> JAR files from the bundled `@anthropic-ai/claude-code/vendor/` so Gatekeeper isn't blocked.
+> electron-builder's built-in hook (driven by `build.mac.notarize`). `afterSign.js` is a
+> post-sign **JAR tripwire**: it scans `app.asar.unpacked` and warns loudly if any `*.jar`
+> appears (JARs can carry unsigned native code that fails notarization/Gatekeeper), but never
+> deletes — the app is already signed, and removing sealed resources invalidates the signature.
+> If it fires, exclude the JAR from packaging via `build.files` before signing instead. (The
+> Crystal-era version stripped JARs from `@anthropic-ai/claude-code/vendor/`; that package is
+> no longer shipped.)
 
 ---
 
