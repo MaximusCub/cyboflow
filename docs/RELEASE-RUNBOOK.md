@@ -16,11 +16,16 @@ mirror the app never reads.**
 ## Prerequisites
 
 - Clean `main`, all release-worthy commits merged.
-- Signing **and** R2 credentials in `./.envrc.local` (gitignored) — 8 vars total:
-  Apple (`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`,
-  `CSC_KEY_PASSWORD`) + R2 (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-  `R2_SECRET_ACCESS_KEY`). R2 is the **in-app auto-update channel** — see
-  `docs/UPDATES.md`. Source with `set -a; . ./.envrc.local; set +a`.
+- Signing **and** R2 credentials live in **`~/Developer/cyboflow/.envrc.local`**
+  (gitignored, and present only in the primary repo checkout — a worktree has
+  no copy of its own) — 8 vars total: Apple (`APPLE_ID`, `APPLE_TEAM_ID`,
+  `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`, `CSC_KEY_PASSWORD`) + R2
+  (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`). R2 is the
+  **in-app auto-update channel** — see `docs/UPDATES.md`. **Env vars are
+  shell-scoped, not worktree-scoped**: once sourced, the same shell can build
+  from the primary checkout or any worktree — see `docs/UPDATES.md`
+  ("One-time setup"). Source with
+  `set -a; . ~/Developer/cyboflow/.envrc.local; set +a`.
 - Both darwin agent binaries present for **both** arches (a plain install/rebuild
   prunes to host arch). Verify all four exist; if any are missing run the
   cross-arch install **with `--force`** (see
@@ -74,13 +79,13 @@ committing** and **tag this commit** (§5) so the tag matches the artifacts.
 
 ## 3. Four signed builds
 
-Source signing creds into each build subprocess (`set -a; . ./.envrc.local; set +a`).
+Source signing creds into each build subprocess (`set -a; . ~/Developer/cyboflow/.envrc.local; set +a`).
 Each build recompiles `better-sqlite3` for the Electron ABI — order doesn't
 matter, but **restore the host-Node ABI afterward** (§4) so tests/`pnpm dev`
 work.
 
 ```bash
-set -a; . ./.envrc.local; set +a
+set -a; . ~/Developer/cyboflow/.envrc.local; set +a
 pnpm run build:mac:arm64       # Cyboflow.app        → Cyboflow-<v>-macOS-arm64.dmg
 pnpm run build:mac:x64         # Cyboflow.app        → Cyboflow-<v>-macOS-x64.dmg
 pnpm run build:mac:dev:arm64   # Cyboflow Dev.app    → Cyboflow-Dev-<v>-macOS-arm64.dmg
@@ -139,7 +144,7 @@ then upload with an explicit `PUBLISH_ONLY` allowlist so the mixed `dist-electro
 doesn't cross-contaminate feeds. Dry-run first.
 
 ```bash
-set -a; . ./.envrc.local; set +a   # needs the 3 R2 vars
+set -a; . ~/Developer/cyboflow/.envrc.local; set +a   # needs the 3 R2 vars
 
 # --- stable feed ---
 node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
@@ -183,12 +188,19 @@ zip/blockmap/yml assets; those live only on R2).
 git tag v0.1.25 <release-commit>          # the "chore: release 0.1.25" commit
 git push origin main
 git push origin v0.1.25
+
+# Notes = this version's CHANGELOG slice + an install/update footer (throwaway file):
+{
+  awk '/^## \[0\.1\.25\]/{f=1; next} /^## \[/{if(f)f=0} f' CHANGELOG.md
+  printf '\n---\n\n### Install\n\n- **New install:** download the DMG for your Mac below.\n- **Existing install:** auto-updates via `updates.cyboflow.com/stable` (*Settings → Updates*).\n- **Dev channel:** the `Cyboflow-Dev-*` DMGs install side-by-side and track `updates.cyboflow.com/dev`.\n\nAll builds are signed (Developer ID), notarized, and stapled.\n'
+} > /tmp/notes-0.1.25.md
+
 gh release create v0.1.25 \
   dist-electron/Cyboflow-0.1.25-macOS-arm64.dmg \
   dist-electron/Cyboflow-0.1.25-macOS-x64.dmg \
   dist-electron/Cyboflow-Dev-0.1.25-macOS-arm64.dmg \
   dist-electron/Cyboflow-Dev-0.1.25-macOS-x64.dmg \
-  --title "v0.1.25" --notes-file <changelog-slice>
+  --title "v0.1.25" --notes-file /tmp/notes-0.1.25.md
 ```
 
 The repo is **public** — release DMG URLs are anonymously downloadable (a usable

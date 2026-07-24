@@ -79,155 +79,38 @@ The full file should then export **8 vars**: 5 Apple
 > *unsigned* build. Don't release from a shell you haven't sourced — use the
 > guarded wrapper.
 
+A small guarded wrapper avoids ever building unsigned by accident — add to
+`~/.zshrc`:
+
+```bash
+cyborelease() {
+  source ~/Developer/cyboflow/.envrc.local
+  : "${CSC_LINK:?missing Apple signing vars}" "${R2_ACCESS_KEY_ID:?missing R2 vars}"
+}
+```
+
+Run `cyborelease` at the start of a release shell instead of a bare `source`.
+
 ---
 
 ## Cutting a release
 
-macOS ships as **lean per-arch builds** — `arm64` and `x64` are built in
-*separate* electron-builder invocations so each DMG can exclude the other arch's
-native Claude and Codex packages (see `scripts/configure-build.js`). The build
-also excludes both agents' Linux and Windows packages if a forced install has
-materialized them. A universal build is **not** used: `@electron/universal`
-chokes on identical per-arch CLI Mach-Os. The trade-off is that the release is
-a few explicit steps rather than one `release:mac` command.
+The full end-to-end release procedure — test gate, version bump + changelog,
+four signed per-arch builds (stable + dev, arm64 + x64), R2 publish, and the
+GitHub release — lives in **[`docs/RELEASE-RUNBOOK.md`](RELEASE-RUNBOOK.md)**,
+including why a universal build isn't used. Follow it for every release; this
+doc covers only the R2/update-feed architecture and the one-time setup above
+that the runbook's env-var sourcing step depends on.
 
-1. **Prepare the release metadata** (both before building):
-   - Bump `version` in `package.json` — and the `frontend` / `main` / `shared`
-     workspace `package.json`s — to match (e.g. `0.1.2` → `0.1.3`). The updater
-     compares this baked-in version against the manifest, so this is what gates the
-     prompt. For dev, a `-dev.N` suffix is conventional (e.g. `0.1.3-dev.1`).
-   - Update **`CHANGELOG.md`**: add a dated `## [<version>] — <YYYY-MM-DD>` section
-     and move the relevant `[Unreleased]` notes under it (Added / Changed / Fixed).
-     This is what ships in the release notes — don't skip it, since the build below
-     bakes in whatever is on disk now.
-2. Load the release secrets, **aborting loudly if any are missing** (a missing var
-   silently ships an *unsigned* build). Add this guarded wrapper to `~/.zshrc`:
-   ```bash
-   cybosecrets() {
-     source ~/Developer/cyboflow/.envrc.local
-     : "${CSC_LINK:?missing Apple signing vars}" "${R2_ACCESS_KEY_ID:?missing R2 vars}"
-   }
-   ```
-3. Build, sign + notarize each arch (separate runs). Dev example:
-   ```bash
-   cybosecrets
-   pnpm build:mac:dev:arm64   # → dist-electron/Cyboflow-Dev-<v>-macOS-arm64.{dmg,zip,blockmap}
-   pnpm build:mac:dev:x64     # → dist-electron/Cyboflow-Dev-<v>-macOS-x64.{dmg,zip,blockmap}
-   ```
-   Stable is the same with `build:mac:arm64` / `build:mac:x64`. Every `build:mac:*`
-   script runs `pnpm electron:rebuild` first, so native deps are always on the
-   Electron ABI even right after the unit gate (see the ABI gotcha below).
-4. **Generate the combined `latest-mac.yml`.** Each per-arch build writes its own
-   manifest and the next run overwrites it, so no single file lists both arches —
-   without a merge, the updater can't resolve the arch-matching artifact. The
-   generator computes each file's `size` + `base64(sha512)` (the exact format
-   electron-builder emits) and writes one manifest naming every arch's zip + dmg.
-   Pass the **arm64 zip first** (it becomes the legacy `path` fallback):
-   ```bash
-   node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
-     Cyboflow-Dev-<v>-macOS-arm64.zip Cyboflow-Dev-<v>-macOS-arm64.dmg \
-     Cyboflow-Dev-<v>-macOS-x64.zip  Cyboflow-Dev-<v>-macOS-x64.dmg
-   ```
-   electron-updater's `MacUpdater.filterFilesForArch` selects purely on whether the
-   filename contains `arm64` (arm64 Macs incl. Rosetta → the arm64 file; x64 Macs →
-   the non-arm64 file), so one manifest serves both.
-5. **Publish only this release's files.** `dist-electron` accumulates a mix of
-   variants/arches plus stale artifacts, so pass an explicit allowlist (`PUBLISH_ONLY`,
-   comma-separated basenames) — never the bare glob, which would cross-contaminate
-   the feeds. Dry-run first:
-   ```bash
-   FILES="Cyboflow-Dev-<v>-macOS-arm64.dmg,Cyboflow-Dev-<v>-macOS-arm64.dmg.blockmap,\
-   Cyboflow-Dev-<v>-macOS-arm64.zip,Cyboflow-Dev-<v>-macOS-arm64.zip.blockmap,\
-   Cyboflow-Dev-<v>-macOS-x64.dmg,Cyboflow-Dev-<v>-macOS-x64.dmg.blockmap,\
-   Cyboflow-Dev-<v>-macOS-x64.zip,Cyboflow-Dev-<v>-macOS-x64.zip.blockmap,latest-mac.yml"
-   BUILD_VARIANT=dev PUBLISH_ONLY="$FILES" UPDATE_DRY_RUN=true pnpm publish:r2
-   BUILD_VARIANT=dev PUBLISH_ONLY="$FILES" pnpm publish:r2        # real upload → dev/
-   ```
-   (Stable: drop `BUILD_VARIANT=dev`, use the non-`Dev` filenames → `stable/`.)
-
-`publish:r2` uploads each allowlisted `*.yml`/`*.zip`/`*.dmg`/`*.blockmap` to the
-bucket under the variant prefix (`stable/` or `dev/`, from `BUILD_VARIANT`). The
-`.yml` manifest is uploaded `no-cache` (it changes every release); the binaries are
-uploaded `immutable` (their version is in the filename).
-
-The website's "Download" buttons point at the per-arch DMGs for first installs —
-auto-update only upgrades an already-installed app:
-- `https://updates.cyboflow.com/stable/Cyboflow-<version>-macOS-arm64.dmg`
-- `https://updates.cyboflow.com/dev/Cyboflow-Dev-<version>-macOS-arm64.dmg` (and the `-x64.dmg` for Intel)
-
-### Typical flow
-
-```
-bump version + changelog → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (dev/)
-            → test the Dev app → fix → repeat
-            → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
-            → push main → tag vX.Y.Z + GitHub release (installers + notes)
-```
-
-Dev installs side-by-side with Stable (distinct `appId`/name), but **both read the
-same local production database** (`~/.cyboflow`) — Dev is a separate update channel,
-not a separate dataset. Bump the version for each Dev you want existing Dev installs
-to auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`).
-
----
-
-## Cut the GitHub release (tag + notes + installers)
-
-This is **separate from and independent of** the R2 auto-update path above — the
-in-app updater never touches GitHub. The GitHub release is the human-facing,
-archival record of a version: an annotated `vX.Y.Z` tag pinning the exact release
-commit, the changelog notes, and the signed installers mirrored as assets. Do it
-**after** the stable feed is published and `main` is pushed, so the tag points at
-a commit that is actually on `origin`.
-
-Prereqs: `gh` authenticated (`gh auth status`) and the release commit already on
-`origin/main`.
-
-1. **Tag the release commit** (annotated, at the exact `chore: release X.Y.Z`
-   commit — not necessarily `HEAD`, since sibling sessions may have advanced
-   `main`), then push the tag:
-   ```bash
-   git tag -a vX.Y.Z <release-commit> -m "Cyboflow X.Y.Z"
-   git push origin vX.Y.Z
-   ```
-2. **Build the notes** from the changelog section for this version, with an
-   install/update footer (throwaway file, not committed):
-   ```bash
-   {
-     awk '/^## \[X\.Y\.Z\]/{f=1; next} /^## \[/{if(f)f=0} f' CHANGELOG.md
-     printf '\n---\n\n### Install\n\n- **New install:** download the DMG for your Mac below.\n- **Existing install:** auto-updates via `updates.cyboflow.com/stable` (*Settings → Updates*).\n- **Dev channel:** the `Cyboflow-Dev-*` DMGs install side-by-side and track `updates.cyboflow.com/dev`.\n\nAll builds are signed (Developer ID), notarized, and stapled.\n'
-   } > /tmp/notes-X.Y.Z.md
-   ```
-3. **Create the release** with the four DMG installers (stable + dev, both arches)
-   attached, marked latest:
-   ```bash
-   gh release create vX.Y.Z \
-     --title "Cyboflow X.Y.Z" \
-     --notes-file /tmp/notes-X.Y.Z.md \
-     --latest \
-     dist-electron/Cyboflow-X.Y.Z-macOS-arm64.dmg \
-     dist-electron/Cyboflow-X.Y.Z-macOS-x64.dmg \
-     dist-electron/Cyboflow-Dev-X.Y.Z-macOS-arm64.dmg \
-     dist-electron/Cyboflow-Dev-X.Y.Z-macOS-x64.dmg
-   ```
-4. **Verify** the tag, assets, and latest flag:
-   ```bash
-   gh release view vX.Y.Z --json name,tagName,isDraft,assets \
-     --jq '{name,tagName,isDraft,assets:[.assets[].name]}'
-   gh api repos/kesteva/cyboflow/releases/latest --jq '.tag_name'   # → vX.Y.Z
-   ```
-
-> **Why DMGs, not zips.** The `.zip` + `.blockmap` are the auto-updater's delta
-> format and live only on R2; the GitHub release carries the `.dmg` **installers**
-> (the first-install artifact) for both variants.
->
-> **Public but not the primary download path.** The repo is public, so the release
-> page and its DMG asset URLs are anonymously downloadable — a usable public mirror.
-> We still route the two production paths through R2 by design: the website's
-> Download buttons point at `updates.cyboflow.com/…dmg` and auto-update polls the R2
-> `latest-mac.yml` feed (zero egress fees, a stable on-brand URL, and delta updates
-> the GitHub assets can't provide). Treat the GitHub release as the durable archival
-> record + a fallback mirror, not the channel the app or website depends on.
+One update-feed detail worth calling out here: the website's "Download" buttons
+don't link the versioned DMGs directly. `publish:r2` also maintains a
+version-less `-latest-` alias key per variant/arch — a server-side copy of the
+just-published DMG (see `latestAliasName()` in
+[`scripts/publish-update.mjs`](../scripts/publish-update.mjs)) — and the site
+links *those*, so a version bump never requires a site edit. The versioned
+files still exist alongside them in the bucket.
+- `https://updates.cyboflow.com/stable/Cyboflow-latest-macOS-arm64.dmg` (and `-x64.dmg` for Intel)
+- `https://updates.cyboflow.com/dev/Cyboflow-Dev-latest-macOS-arm64.dmg` (and `-x64.dmg` for Intel)
 
 ---
 
@@ -270,25 +153,32 @@ that differs is fixed at build time by `build:mac:dev`:
 |---|---|---|
 | App name (`productName`) | Cyboflow | Cyboflow Dev |
 | Bundle id (`appId`) | `com.cyboflow.app` | `com.cyboflow.app.dev` |
-| Data dir | `~/.cyboflow` | `~/.cyboflow` (shared) |
+| Data dir | `~/.cyboflow` | `~/.cyboflow_dev_dmg` (isolated) |
 | Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/dev` |
 | Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Dev-<v>-…` |
 
 **Why separate apps (not a channel setting):** distinct `appId`/name lets Dev install
 side-by-side with Stable, the way VS Code Insiders does, and each app only ever updates
-within its own feed. **Both packaged variants intentionally share the production data
-dir `~/.cyboflow`** so the Dev build operates on the real local data — Dev is a separate
-*update channel*, not a separate dataset.
+within its own feed. **Each packaged variant gets its own data dir** — `~/.cyboflow`
+for Stable, `~/.cyboflow_dev_dmg` for Dev — so the two apps can run side by side
+without sharing a `sessions.db` / `orch.sock` (the two-instance orch-socket clobber);
+each dir is held to one running instance by the data-dir single-instance lock.
+Bump the version for each Dev build you want
+existing Dev installs to auto-update to — a `-dev.N` prerelease suffix is conventional
+(e.g. `0.1.3-dev.1`).
 
 The data-dir resolution lives in `getCyboflowDirectory()`
-(`main/src/utils/cyboflowDirectory.ts`): any packaged build → `~/.cyboflow`; the
-non-packaged Electron dev server (`pnpm dev`) → `~/.cyboflow_dev` so local development
-never mutates or forward-migrates the installed apps' database.
+(`main/src/utils/cyboflowDirectory.ts`): packaged Stable → `~/.cyboflow`; packaged
+Dev DMG → `~/.cyboflow_dev_dmg`; the non-packaged Electron dev server (`pnpm dev`) →
+`~/.cyboflow_dev` — three parallel-safe kinds, so local development never mutates or
+forward-migrates either installed app's database.
 
 ### Schema-version gate (newer DB → warn, don't corrupt)
 
-Because the SQLite DB is **forward-only** migrated, running a Dev build whose
-migrations are ahead of Stable advances the shared `~/.cyboflow` DB. To stop an
+Because each SQLite DB is **forward-only** migrated, any newer build that opens a
+data dir advances its DB past what older binaries understand (e.g. rolling back to
+an older Stable after a newer one has run, or pointing `CYBOFLOW_DIR` at a newer
+dir). To stop an
 older binary from then silently running against a schema it doesn't understand (a
 real corruption risk — several migrations rebuild/drop tables), `initialize()`
 stamps `PRAGMA user_version` with the highest migration the build ships and, on the
@@ -308,9 +198,10 @@ The gate lives in `DatabaseService.getSchemaVersionStatus()` +
 at boot in `main/src/index.ts`.
 
 > ⚠️ The gate prevents a silent crash/corruption, but it can't *merge* schemas. If
-> you advance `~/.cyboflow` with a Dev build, the matching Stable still needs those
-> migrations to use the data normally. Back up `~/.cyboflow` before testing a Dev
-> build that carries new migrations if you want a clean path back to the older Stable.
+> a newer build advances a data dir, an older binary opening that same dir still
+> needs those migrations to use the data normally. Back up the data dir before
+> opening it with a build that carries new migrations if you want a clean path back
+> to an older version.
 
 Users get the dev by **downloading the separate Cyboflow Dev app** from the
 website (Settings → Updates points them there) — there is no in-app opt-in.

@@ -293,9 +293,10 @@ The five variables are:
 
 > These five live alongside the three R2 publish vars in the single gitignored
 > file **`~/Developer/cyboflow/.envrc.local`**, sourced manually before a release
-> (no `direnv`). Use the `cyborelease` wrapper to source + guard + build in one
-> step — see the release runbook in [`../UPDATES.md`](../UPDATES.md) ("Cutting a
-> release"), which is the canonical end-to-end process.
+> (no `direnv`). Use the `cyborelease` wrapper — defined in
+> [`../UPDATES.md`](../UPDATES.md) ("One-time setup") — to source + guard
+> credentials before building. [`../RELEASE-RUNBOOK.md`](../RELEASE-RUNBOOK.md)
+> is the canonical end-to-end release process.
 
 | Variable                       | Source                                                     |
 | ------------------------------ | ---------------------------------------------------------- |
@@ -327,6 +328,11 @@ export CSC_KEY_PASSWORD="<passphrase>"
 
 ### Minimal signed build invocation
 
+> **Per-arch, not universal.** `build:mac:universal` currently fails to merge
+> the bundled `claude`/`codex` binaries — see
+> [`../RELEASE-RUNBOOK.md`](../RELEASE-RUNBOOK.md) ("Why per-arch, not
+> universal"). Build each arch separately; a release needs both.
+
 ```bash
 export APPLE_ID="<APPLE_ID>"
 export APPLE_TEAM_ID="<TEAM_ID>"
@@ -334,7 +340,7 @@ export APPLE_APP_SPECIFIC_PASSWORD="<APPLE_APP_SPECIFIC_PASSWORD>"
 export CSC_LINK="/path/to/cyboflow-developer-id.p12"
 export CSC_KEY_PASSWORD="<passphrase>"
 
-pnpm run build:mac:universal
+pnpm run build:mac:arm64   # or build:mac:x64
 ```
 
 ### Signed but not notarized
@@ -345,11 +351,11 @@ cert vars and withhold the notarization trio. The cleanest way is to source the
 full `.envrc.local` and unset the three notarization vars:
 
 ```bash
-source ./.envrc.local
+source ~/Developer/cyboflow/.envrc.local
 unset APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_APP_PASSWORD
 
-pnpm run build:mac:arm64     # or build:mac:universal
-pnpm run build:mac:dev      # dev variant (universal) → "Cyboflow-Dev-<version>-macOS-universal.dmg"
+pnpm run build:mac:arm64        # or build:mac:x64
+pnpm run build:mac:dev:arm64    # dev variant (or build:mac:dev:x64) → "Cyboflow-Dev-<version>-macOS-arm64.dmg"
 ```
 
 `configure-build.js` then reports `Can Sign: ✓ / Can Notarize: ✗` and writes a
@@ -384,10 +390,11 @@ The posture is chosen entirely by the env vars present at build time (see the
 table under "Build-Time Environment Variables"); `package.json` is the pristine
 source and is never rewritten.
 
-**Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:universal`
-(or another `build:mac:*` / `release:mac` script). Skipping the npm script skips
-`configure-build.js`, leaving the signed/unsigned posture determined by whatever
-is committed in `package.json` rather than by the env vars in your shell.
+**Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:arm64`
+/ `pnpm run build:mac:x64` (or another per-arch `build:mac:*` script — the universal `build:mac` / `release:mac` variants currently fail).
+Skipping the npm script skips `configure-build.js`, leaving the signed/unsigned
+posture determined by whatever is committed in `package.json` rather than by
+the env vars in your shell.
 
 > **Shipped:** TASK-051..056 have all landed. `package.json` sets `build.mac.hardenedRuntime`
 > and `build.mac.notarize: true`; `build/entitlements.mac.plist` exists. Note that
@@ -512,8 +519,9 @@ the notarytool submission continues on Apple's side.
 4. Submit and staple the DMG separately (see Pitfall 2).
 
 **Prevention:** Ensure the terminal session is persistent (e.g. use `tmux` or
-`screen`) or increase the timeout before invoking `pnpm run build:mac:universal`.
-Apple notarization for a first submission can take ~1 hour.
+`screen`) or increase the timeout before invoking `pnpm run build:mac:arm64` /
+`pnpm run build:mac:x64`. Apple notarization for a first submission can take
+~1 hour.
 
 ### Pitfall 2: DMG notarization is a separate round-trip from app notarization
 
@@ -539,9 +547,10 @@ in `package.json` is a post-run artifact, not a default; the `APPLE_*` env vars
 present at build time are what actually drive the credentials and notarization
 posture. A contributor invoking `electron-builder` directly (bypassing the npm
 `build:mac:*` scripts) will not get configure-build.js's rewrite and may get
-unexpected behavior. Always use `pnpm run build:mac:universal` (or another
-`build:mac:*` / `release:mac` script). See the "configure-build.js contract"
-subsection under Build-Time Environment Variables for the full field list.
+unexpected behavior. Always use `pnpm run build:mac:arm64` / `pnpm run
+build:mac:x64` (or another per-arch `build:mac:*` script — the universal `build:mac` / `release:mac` variants currently fail). See the
+"configure-build.js contract" subsection under Build-Time Environment
+Variables for the full field list.
 
 ### Pitfall 5: Stapling rewrites the DMG — always record the post-staple SHA256
 
