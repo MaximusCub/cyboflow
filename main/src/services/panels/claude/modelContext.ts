@@ -17,15 +17,14 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * The bundled Claude Agent SDK (0.2.x) resolves a bare alias like `'opus'` to a
  * PREVIOUS-generation snapshot, so a user who picks "Opus" silently runs an
  * older Opus. Pinning the alias to the current concrete id at the spawn seam
- * takes the resolution out of the SDK's hands: Opus 4.8 and Sonnet 5 are both
+ * takes the resolution out of the SDK's hands: Opus 5 and Sonnet 5 are both
  * 1M-context at standard pricing.
  *
  * The families reach their 1M window differently:
- *   - Opus carries cyboflow's `[1m]` model-id suffix; the runtime reports a
- *     1,000,000 window for `claude-opus-4-8[1m]`, so the suffixed id IS the 1M
- *     model and the seam keeps it (no beta). The bare `claude-opus-4-8` is the
- *     default-window variant; the legacy `opus-250k` alias maps to it for
- *     back-compat (a stored picker value never strands) but is no longer
+ *   - Opus 5 is 1M by DEFAULT — the bare `claude-opus-5` id already reports a
+ *     1M window, so it carries NO `[1m]` suffix and needs NO beta. The legacy
+ *     `opus-250k` alias still maps to the older default-window `claude-opus-4-8`
+ *     for back-compat (a stored picker value never strands) but is no longer
  *     offered in the picker (removed from picker, IDEA-017).
  *   - Sonnet 5 is 1M by DEFAULT — the bare `claude-sonnet-5` id already reports a
  *     1M window, so it carries NO `[1m]` suffix and needs NO beta. Sonnet 5 has
@@ -45,7 +44,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
   fable: 'claude-fable-5',
-  opus: 'claude-opus-4-8[1m]',
+  opus: 'claude-opus-5',
   'opus-250k': 'claude-opus-4-8',
   sonnet: 'claude-sonnet-5',
   'sonnet-250k': 'claude-sonnet-5',
@@ -78,7 +77,7 @@ export function resolveModelAlias(model?: string | null): string | undefined {
  * singleton), so this stays a pure, unit-testable transform with no service
  * dependency. When a guarded model is unavailable, its fallback alias is resolved
  * back through {@link resolveModelAlias} so the return value is a real spawn-seam id
- * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-4-8[1m]'`, which
+ * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-5'`, which
  * {@link sdkModelAndBetas} / {@link interactiveModelArg} then translate normally.
  */
 export function applyModelAvailabilityFallback(
@@ -124,8 +123,8 @@ export function resolveUnavailableDefaultModelFallback(
  *
  * The beta is a Sonnet 4.x ONLY mechanism, so we gate strictly on explicit
  * `claude-sonnet-4-*` ids. Everything else returns false — including
- * `claude-sonnet-5`, whose 1M window is NATIVE (no beta), and Opus (whose 1M is
- * the `[1m]` id suffix, never the beta). `'auto'`/undefined also return false:
+ * `claude-sonnet-5` and `claude-opus-5`, whose 1M windows are NATIVE (no beta).
+ * `'auto'`/undefined also return false:
  * the resolved model is unknown, so requesting the Sonnet-only beta could land
  * on a non-Sonnet model and be rejected.
  *
@@ -157,10 +156,12 @@ function stripContext1MSuffix(id: string): string {
 
 /**
  * Translate a resolved model id into the SDK `model` + `betas` for its requested
- * context window. Opus's 1M IS the suffixed id (kept as-is, no beta); Sonnet's 1M
- * is the bare id + {@link CONTEXT_1M_BETA} (the SDK doesn't take a `[1m]` Sonnet
- * id, so the marker is stripped and turned into the beta). No marker → bare id,
- * no beta (the default/250k window). `auto`/undefined pass straight through.
+ * context window. The only `[1m]`-suffixed id still reaching this seam is a
+ * directly-pinned Sonnet 4.x id, whose 1M is the bare id + {@link CONTEXT_1M_BETA}
+ * (the SDK doesn't take a `[1m]` Sonnet id, so the marker is stripped and turned
+ * into the beta). No marker → bare id, no beta — this is the path for the 1M-native
+ * families (Opus 5, Sonnet 5, Fable 5) and the default/250k window. `auto`/undefined
+ * pass straight through.
  */
 export function sdkModelAndBetas(
   resolvedId?: string | null,
@@ -175,8 +176,9 @@ export function sdkModelAndBetas(
 /**
  * The `--model` arg for the interactive CLI. The CLI has no 1M-beta path, so a
  * `[1m]` Sonnet id would be an unknown model — strip the marker (Sonnet stays at
- * the default window interactively, as it always has). Opus's `[1m]` id is a real
- * model the CLI accepts, so it is kept. `auto`/undefined pass through.
+ * the default window interactively, as it always has). The 1M-native families
+ * (Opus 5, Sonnet 5, Fable 5) carry no marker and pass through as-is.
+ * `auto`/undefined pass through.
  */
 export function interactiveModelArg(resolvedId?: string | null): string | undefined {
   if (!resolvedId) return resolvedId ?? undefined;
@@ -192,7 +194,7 @@ export function interactiveModelArg(resolvedId?: string | null): string | undefi
  *
  * A subagent `.md` is read by the bundled CLI but its `model:` field cannot carry
  * a context-window beta, and the `[1m]` marker is a cyboflow-internal id form, so
- * we emit the plain default-window snapshot (`opus` → `claude-opus-4-8`,
+ * we emit the plain snapshot (`opus` → `claude-opus-5`,
  * `sonnet` → `claude-sonnet-5`, `haiku` → `claude-haiku-4-5`). The agent editor
  * offers only bare families (no per-window choice), so "Opus" means the current
  * Opus at its default window — exactly this. `auto`/undefined pass through.

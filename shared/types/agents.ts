@@ -60,7 +60,7 @@ export function isAgentModelAlias(value: unknown): value is AgentModelAlias {
 /** Human labels for each pinnable model, kept in sync with the picker snapshots. */
 export const AGENT_MODEL_LABELS: Record<AgentModelAlias, string> = {
   fable: 'Fable 5',
-  opus: 'Opus 4.8',
+  opus: 'Opus 5',
   sonnet: 'Sonnet 5',
   haiku: 'Haiku 4.5',
 };

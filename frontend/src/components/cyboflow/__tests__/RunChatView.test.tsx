@@ -563,7 +563,7 @@ describe('RunChatView — model fallback toast', () => {
     });
 
     expect(await screen.findByTestId('session-action-toast')).toHaveTextContent(
-      'Fable 5 is unavailable — switched to Opus 4.8 for this run.',
+      'Fable 5 is unavailable — switched to Opus 5 for this run.',
     );
   });
 

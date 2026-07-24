@@ -176,7 +176,7 @@ describe('ClaudeJudge', () => {
   it('resolves the default Opus model id', () => {
     const judge = new ClaudeJudge({ structuredQuery: vi.fn() });
     expect(DEFAULT_JUDGE_MODEL_ALIAS).toBe('opus');
-    expect(judge.resolvedModel).toBe('claude-opus-4-8[1m]');
+    expect(judge.resolvedModel).toBe('claude-opus-5');
   });
 
   it('calls the injected query fn with the schema + cwd + model, returns the parsed sample', async () => {
@@ -190,7 +190,7 @@ describe('ClaudeJudge', () => {
       expect.objectContaining({
         schema: JUDGE_OUTPUT_SCHEMA,
         cwd: '/wt',
-        model: 'claude-opus-4-8[1m]',
+        model: 'claude-opus-5',
       }),
     );
   });

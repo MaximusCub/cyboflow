@@ -485,7 +485,7 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
     // …and raised a human toast naming the swap.
     expect(onModelFallback).toHaveBeenCalledTimes(1);
     expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5 is unavailable');
-    expect(onModelFallback.mock.calls[0][0]).toContain('Opus 4.8');
+    expect(onModelFallback.mock.calls[0][0]).toContain('Opus 5');
   });
 
   it('ignores a fallback notice addressed to a DIFFERENT panel', async () => {

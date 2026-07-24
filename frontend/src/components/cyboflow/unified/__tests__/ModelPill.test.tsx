@@ -42,7 +42,7 @@ describe('ModelPill', () => {
     const onChange = vi.fn();
     render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={onChange} />);
     fireEvent.click(screen.getByText('Sonnet 5 · 1M')); // open the dropdown
-    fireEvent.click(await screen.findByText('Opus 4.8 · 1M'));
+    fireEvent.click(await screen.findByText('Opus 5 · 1M'));
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'opus'));
     expect(onChange).toHaveBeenCalledWith('opus');
   });
@@ -61,7 +61,7 @@ describe('ModelPill', () => {
     fireEvent.click(await screen.findByText('GPT-5.6 Sol'));
     expect(await screen.findByText('GPT-5.6 Terra')).toBeInTheDocument();
     expect(screen.queryByText(/Fable 5/)).toBeNull();
-    expect(screen.queryByText(/Opus 4\.8/)).toBeNull();
+    expect(screen.queryByText(/Opus 5/)).toBeNull();
 
     fireEvent.click(screen.getByText('GPT-5.6 Terra'));
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'gpt-5.6-terra'));
