@@ -361,6 +361,8 @@ export type RunEvalJurySlot = {
   model: string | null;
   status: 'ok' | 'unavailable' | 'failed';
   errorCode?: string;
+  /** Truncated failure message for post-hoc diagnosis (non-ok slots only). */
+  error?: string;
   sampleIndex?: number;
 };
 

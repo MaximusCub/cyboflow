@@ -1135,8 +1135,12 @@ function Provenance({ runEval }: { runEval: RunEval }): React.JSX.Element {
         .map(([label, count]) => `${label}${count > 1 ? ` ×${count}` : ''}`)
         .join(' + ')
     : null;
-  const codexUnavailable = hasJury
-    && jury.some((slot) => slot.provider === 'codex' && slot.status !== 'ok');
+  const degradedCodex = hasJury
+    ? jury.find((slot) => slot.provider === 'codex' && slot.status !== 'ok')
+    : undefined;
+  // Prefer the persisted failure message; fall back to the coarse code (timeout /
+  // max-turns / logged-out) when no message was captured.
+  const codexReason = degradedCodex?.error ?? degradedCodex?.errorCode ?? null;
 
   return (
     <div className="mt-3 space-y-0.5 text-[11px] leading-relaxed text-text-tertiary" data-testid="run-summary-eval-provenance">
@@ -1146,9 +1150,21 @@ function Provenance({ runEval }: { runEval: RunEval }): React.JSX.Element {
             graded by <span className="font-medium text-text-secondary">{composition}</span>
           </div>
           <div>heterogeneous jury · {jury.length} slots · {runEval.sampleCount ?? 0} scored</div>
-          {codexUnavailable && (
-            <div className="text-status-warning" data-testid="run-summary-eval-codex-unavailable">
-              ⚠ Codex juror unavailable — scored on Claude only
+          {degradedCodex && (
+            <div
+              className="text-status-warning"
+              data-testid="run-summary-eval-codex-unavailable"
+              {...(codexReason ? { title: codexReason } : {})}
+            >
+              ⚠ Codex juror {degradedCodex.status === 'unavailable' ? 'unavailable' : 'failed'} — scored on Claude only
+              {codexReason && (
+                <span
+                  className="mt-0.5 block truncate font-normal text-text-tertiary"
+                  data-testid="run-summary-eval-codex-reason"
+                >
+                  {codexReason}
+                </span>
+              )}
             </div>
           )}
         </>

@@ -2292,7 +2292,9 @@ describe('getRunEval', () => {
       runId: 'r1',
       juryJson: JSON.stringify([
         { slot: 'claude-1', provider: 'claude', model: 'opus', status: 'ok', sampleIndex: 0 },
-        { slot: 'codex-1', provider: 'codex', model: null, status: 'unavailable', errorCode: 'logged-out' },
+        // A transient failure persists its message (no errorCode); the defensive
+        // parser must carry `error` through instead of silently dropping it.
+        { slot: 'codex-1', provider: 'codex', model: null, status: 'failed', error: 'protocol crash' },
       ]),
     });
     seedRunEval(db, { runId: 'r2' });
@@ -2300,7 +2302,7 @@ describe('getRunEval', () => {
 
     expect(getRunEval(dbAdapter(db), 'r1')?.jury).toEqual([
       { slot: 'claude-1', provider: 'claude', model: 'opus', status: 'ok', sampleIndex: 0 },
-      { slot: 'codex-1', provider: 'codex', model: null, status: 'unavailable', errorCode: 'logged-out' },
+      { slot: 'codex-1', provider: 'codex', model: null, status: 'failed', error: 'protocol crash' },
     ]);
     expect(getRunEval(dbAdapter(db), 'r2')?.jury).toBeNull();
     expect(getRunEval(dbAdapter(db), 'r3')?.jury).toBeNull();

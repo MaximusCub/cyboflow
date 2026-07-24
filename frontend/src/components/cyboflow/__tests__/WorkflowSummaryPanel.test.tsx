@@ -625,7 +625,27 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.getByTestId('run-summary-eval-codex-unavailable')).toHaveTextContent(
       'Codex juror unavailable — scored on Claude only',
     );
+    // The coarse code is surfaced as the reason for an 'unavailable' slot.
+    expect(screen.getByTestId('run-summary-eval-codex-reason')).toHaveTextContent('logged-out');
     expect(screen.queryByText(/single-family v1/)).not.toBeInTheDocument();
+  });
+
+  it('surfaces the persisted failure message for a transiently-failed Codex slot', async () => {
+    runEvalQuery.mockResolvedValue(makeEval({
+      sampleCount: 2,
+      jury: [
+        { slot: 'claude-1', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 0 },
+        { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 1 },
+        { slot: 'codex-1', provider: 'codex', model: 'gpt-5.6-sol', status: 'failed', error: 'protocol crash' },
+      ],
+    }));
+    renderPanel();
+
+    // A transient failure reads as "failed" (not "unavailable") and shows why.
+    const warning = await screen.findByTestId('run-summary-eval-codex-unavailable');
+    expect(warning).toHaveTextContent('Codex juror failed — scored on Claude only');
+    expect(warning).toHaveAttribute('title', 'protocol crash');
+    expect(screen.getByTestId('run-summary-eval-codex-reason')).toHaveTextContent('protocol crash');
   });
 
   it('shows a PASSED deterministic-gate sentinel chip for a non-gated eval', async () => {

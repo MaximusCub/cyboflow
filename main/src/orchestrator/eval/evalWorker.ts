@@ -56,6 +56,22 @@ export const MAX_FINDINGS_PER_EVAL = 10;
  */
 export const JUDGE_RETRY_BACKOFF_MS = 250;
 
+/**
+ * Cap on the per-slot failure message persisted into jury_json. A generic thrown
+ * juror error (turn.failed message, malformed JSON, app-server exit, strict-schema
+ * 400) is otherwise written ONLY to the per-launch-truncated backend log, leaving
+ * a dropped slot undiagnosable after the fact — so the reason is stored on the
+ * slot provenance, truncated to keep the row bounded.
+ */
+export const MAX_SLOT_ERROR_CHARS = 500;
+
+/** Truncate a juror failure message for durable slot provenance. */
+export function truncateSlotError(message: string): string {
+  return message.length <= MAX_SLOT_ERROR_CHARS
+    ? message
+    : `${message.slice(0, MAX_SLOT_ERROR_CHARS)}…`;
+}
+
 export interface JurySlot {
   slot: string;
   provider: 'claude' | 'codex';
@@ -69,6 +85,8 @@ export interface JurySlotProvenance {
   model: string | null;
   status: 'ok' | 'unavailable' | 'failed';
   errorCode?: string;
+  /** Truncated failure message for post-hoc diagnosis (non-ok slots only). */
+  error?: string;
   sampleIndex?: number;
 }
 
@@ -408,6 +426,7 @@ export class EvalWorker {
           model: this.resolveSlotModel(jurySlot),
           status: outcome.status,
           ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+          ...(outcome.error ? { error: outcome.error } : {}),
         });
       }
     });
@@ -422,9 +441,10 @@ export class EvalWorker {
     lane: JudgeLane;
   }): Promise<
     | { status: 'ok'; sample: JudgeSample }
-    | { status: 'unavailable'; errorCode?: string }
-    | { status: 'failed'; errorCode?: string; retryable: boolean }
+    | { status: 'unavailable'; errorCode?: string; error?: string }
+    | { status: 'failed'; errorCode?: string; error?: string; retryable: boolean }
   > {
+    let lastError: string | undefined;
     for (let tries = 0; tries < 2; tries++) {
       try {
         // Gate the judge subprocess spawn behind the run's lane ceiling so an A/B
@@ -440,13 +460,14 @@ export class EvalWorker {
         );
         return { status: 'ok', sample };
       } catch (err) {
+        lastError = truncateSlotError(err instanceof Error ? err.message : String(err));
         if (err instanceof CodexJurorUnavailableError) {
           this.logger?.warn('[eval] jury slot unavailable', {
             slot: jurySlot.slot,
             provider: jurySlot.provider,
             errorCode: err.code,
           });
-          return { status: 'unavailable', errorCode: err.code };
+          return { status: 'unavailable', errorCode: err.code, error: lastError };
         }
         this.logger?.warn('[eval] jury sample failed', {
           slot: jurySlot.slot,
@@ -463,6 +484,7 @@ export class EvalWorker {
             status: 'failed',
             retryable: false,
             errorCode: err instanceof EvalJudgeMaxTurnsError ? 'max-turns' : 'timeout',
+            error: lastError,
           };
         }
         // Small back-off before the single retry: this failure was transient
@@ -471,7 +493,7 @@ export class EvalWorker {
         if (tries === 0) await this.sleep(JUDGE_RETRY_BACKOFF_MS);
       }
     }
-    return { status: 'failed', retryable: true };
+    return { status: 'failed', retryable: true, ...(lastError ? { error: lastError } : {}) };
   }
 
   // -------------------------------------------------------------------------

@@ -6,7 +6,13 @@
  * the shutdown pause.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EvalWorker, JUDGE_RETRY_BACKOFF_MS, type JurySlot } from './evalWorker';
+import {
+  EvalWorker,
+  JUDGE_RETRY_BACKOFF_MS,
+  MAX_SLOT_ERROR_CHARS,
+  truncateSlotError,
+  type JurySlot,
+} from './evalWorker';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
@@ -170,7 +176,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(JSON.parse(complete?.params[10] as string)).toEqual([
       { slot: 'claude-1', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 0 },
       { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 1 },
-      { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', status: 'unavailable', errorCode: 'logged-out' },
+      { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', status: 'unavailable', errorCode: 'logged-out', error: 'logged out' },
     ]);
   });
 
@@ -202,6 +208,9 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       provider: 'codex',
       model: 'gpt-5.4',
       status: 'failed',
+      // The failure reason is persisted for post-hoc diagnosis (previously the
+      // message survived only in the per-launch-truncated backend log).
+      error: 'protocol crash',
     });
   });
 
@@ -661,5 +670,19 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     await worker.stop();
     expect(worker._queue().isPaused).toBe(true);
+  });
+});
+
+describe('truncateSlotError', () => {
+  it('passes through a short message unchanged', () => {
+    expect(truncateSlotError('protocol crash')).toBe('protocol crash');
+  });
+
+  it('truncates an over-long message and marks the elision', () => {
+    const long = 'x'.repeat(MAX_SLOT_ERROR_CHARS + 50);
+    const out = truncateSlotError(long);
+    expect(out).toHaveLength(MAX_SLOT_ERROR_CHARS + 1); // cap + the ellipsis
+    expect(out.endsWith('…')).toBe(true);
+    expect(out.startsWith('x'.repeat(MAX_SLOT_ERROR_CHARS))).toBe(true);
   });
 });

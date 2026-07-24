@@ -2625,6 +2625,7 @@ function parseJury(text: string | null): RunEvalJurySlot[] | null {
       model: entry.model,
       status: entry.status,
       ...(typeof entry.errorCode === 'string' ? { errorCode: entry.errorCode } : {}),
+      ...(typeof entry.error === 'string' ? { error: entry.error } : {}),
       ...(typeof entry.sampleIndex === 'number' && Number.isSafeInteger(entry.sampleIndex)
         ? { sampleIndex: entry.sampleIndex }
         : {}),
