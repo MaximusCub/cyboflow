@@ -15,6 +15,7 @@ import { startPerfTracer } from './services/perfTracer';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
+import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
@@ -2858,6 +2859,33 @@ app.whenReady().then(async () => {
       pendingOpenUpdateSettings = true;
     }
     logger.info(`[Main] Continuing boot past schema-version gate (choice=${choice})`);
+  }
+
+  // Architecture gate: an x64 bundle running under Rosetta/WOW on ARM hardware
+  // boots fine but emulates the bundled Claude sidecar, which then blows past
+  // the SDK first-event watchdog. Warn (never block — the app IS usable) so the
+  // resulting "claude subprocess may have failed to start" failures are
+  // attributable to the installed build instead of looking like an app bug.
+  const archMismatch = detectArchMismatch({
+    runningUnderARM64Translation: app.runningUnderARM64Translation,
+    processArch: process.arch,
+    platform: process.platform,
+  });
+  if (archMismatch) {
+    logger.warn(formatArchMismatchLog(archMismatch));
+    captureSeamError(
+      'boot-arch-mismatch',
+      new Error(`running ${archMismatch.bundleArch} build under ARM64 translation on ${archMismatch.nativeArch}`),
+      { bundleArch: archMismatch.bundleArch, nativeArch: archMismatch.nativeArch },
+    );
+    dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['Continue'],
+      defaultId: 0,
+      noLink: true,
+      title: 'Cyboflow',
+      ...formatArchMismatchDialog(archMismatch, process.platform),
+    });
   }
 
   // One-shot pull (race-free vs a push): the renderer asks on mount whether the
