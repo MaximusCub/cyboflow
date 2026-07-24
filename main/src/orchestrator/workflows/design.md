@@ -103,6 +103,11 @@ H2 yourself. Always include:
   comments to these ids, so a renamed or dropped id orphans its comment.
 - **Support light and dark** via the style kit's palettes wherever the kit provides
   them.
+- **Never open the prototype in a browser or launch any visible browser window
+  yourself** — no `open`, no headed Playwright/Chrome. The user views the prototype
+  in-app (the design surface has its own "Open in browser" control). If you
+  self-verify with screenshots, do it **headless**, and **kill any helper server
+  you start in the same turn** — never leave one listening between turns.
 
 ## Session flow
 

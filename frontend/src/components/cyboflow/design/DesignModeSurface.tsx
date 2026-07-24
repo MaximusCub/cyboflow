@@ -143,7 +143,21 @@ export function DesignModeSurface(): ReactElement | null {
         {session && (
           <span className="text-xs text-text-secondary truncate">{session.name}</span>
         )}
-        <div className="ml-auto flex items-center">
+        <div className="ml-auto flex items-center gap-3">
+          {prototypeArtifact !== null && prototypeHasBytes(prototypeArtifact) && (
+            <button
+              type="button"
+              data-testid="design-mode-open-in-browser"
+              onClick={() => {
+                void window.electronAPI?.artifacts
+                  .openHtmlExternal({ runId: prototypeArtifact.runId, atype: 'ui-prototype' })
+                  .catch(console.error);
+              }}
+              className="text-xs text-text-secondary hover:text-text-primary whitespace-nowrap"
+            >
+              Open in browser ↗
+            </button>
+          )}
           {session && approveGateOpen && (
             <DesignApproveControl
               sessionId={session.id}

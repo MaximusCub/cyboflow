@@ -8,7 +8,12 @@ import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../sha
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { CodexModelCatalog, ClaudeModelCatalog } from '../../shared/types/agentModels';
-import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../shared/types/artifacts';
+import type {
+  LoadArtifactHtmlRequest,
+  LoadArtifactHtmlResult,
+  OpenArtifactHtmlExternalRequest,
+  OpenArtifactHtmlExternalResult,
+} from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import {
   CLAUDE_DETECT_CHANNEL,
@@ -332,6 +337,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       req: LoadArtifactHtmlRequest,
     ): Promise<IPCResponse<LoadArtifactHtmlResult>> =>
       ipcRenderer.invoke('artifacts:load-html', req),
+    // Open the canonical prototype HTML in the user's default browser (raw
+    // temp-file copy via shell.openExternal — see artifacts:open-in-browser).
+    openHtmlExternal: (
+      req: OpenArtifactHtmlExternalRequest,
+    ): Promise<IPCResponse<OpenArtifactHtmlExternalResult>> =>
+      ipcRenderer.invoke('artifacts:open-in-browser', req),
     // Verifier-transcript text loader (verifier-transcript capture) — reads an
     // on-disk .md/.txt/.log file back verbatim from the run's artifacts root
     // (same containment guard as loadImages).

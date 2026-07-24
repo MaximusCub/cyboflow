@@ -1,7 +1,8 @@
-import { IpcMain } from 'electron';
+import { IpcMain, app, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { constants as fsConstants } from 'fs';
+import { pathToFileURL } from 'url';
 import type { AppServices } from './types';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import {
@@ -11,6 +12,8 @@ import {
   type LoadArtifactHtmlAtype,
   type LoadArtifactHtmlRequest,
   type LoadArtifactHtmlResult,
+  type OpenArtifactHtmlExternalRequest,
+  type OpenArtifactHtmlExternalResult,
 } from '../../../shared/types/artifacts';
 import { safeRunId, resolveArtifactCommitDir, loadCommittedHtml } from '../orchestrator/artifactSnapshot';
 
@@ -194,6 +197,46 @@ export function registerArtifactHtmlHandlers(ipcMain: IpcMain, services: AppServ
         return { success: true, data: { html } };
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Failed to load artifact HTML.' };
+      }
+    },
+  );
+
+  // Open the canonical prototype HTML in the user's default browser. The RAW
+  // document (no CSP meta) is written to a temp copy and opened via
+  // shell.openExternal — the user is deliberately opening their own local file
+  // outside the sandboxed in-app iframe, so the in-app egress policy does not
+  // apply. Sourced through the SAME hardened dual-source loader as load-html,
+  // so no new path-resolution surface is introduced.
+  ipcMain.handle(
+    'artifacts:open-in-browser',
+    async (
+      _event,
+      req: OpenArtifactHtmlExternalRequest,
+    ): Promise<{ success: boolean; data?: OpenArtifactHtmlExternalResult; error?: string }> => {
+      try {
+        const runId = typeof req?.runId === 'string' ? req.runId : '';
+        const atype = coerceAtype(req?.atype);
+        if (runId.length === 0 || atype === null) {
+          return { success: false, error: 'Invalid open-in-browser request.' };
+        }
+
+        const raw = await loadCanonicalPrototypeHtml(services, runId, atype);
+        if (raw === null) {
+          return { success: false, error: 'Prototype HTML is not readable.' };
+        }
+
+        const dir = path.join(app.getPath('temp'), 'cyboflow-prototypes');
+        await fs.mkdir(dir, { recursive: true });
+        // safeRunId keeps the temp filename traversal-free.
+        const target = path.join(dir, `${safeRunId(runId)}-${atype}.html`);
+        await fs.writeFile(target, raw, 'utf-8');
+        await shell.openExternal(pathToFileURL(target).toString());
+        return { success: true, data: { opened: true } };
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to open prototype in browser.',
+        };
       }
     },
   );

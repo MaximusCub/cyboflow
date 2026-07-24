@@ -34,6 +34,15 @@ vi.mock('../../utils/cyboflowDirectory', () => ({
   getCyboflowSubdirectory: (...sub: string[]) => path.join(tmpRoot, ...sub),
 }));
 
+// File-level electron mock (overrides the global setup mock): the
+// open-in-browser handler needs app.getPath('temp') to land inside the test
+// tmp root and a spyable shell.openExternal.
+const mockOpenExternal = vi.fn(async (..._args: unknown[]) => {});
+vi.mock('electron', () => ({
+  app: { getPath: () => path.join(tmpRoot, 'electron-temp') },
+  shell: { openExternal: (...args: unknown[]) => mockOpenExternal(...args) },
+}));
+
 import { registerArtifactHtmlHandlers, injectPrototypeCsp } from '../artifactHtml';
 import { safeRunId } from '../../orchestrator/artifactSnapshot';
 
@@ -307,5 +316,82 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
     const res = await invoke(handlers, 'artifacts:load-html', { runId: '', atype: 'ui-prototype' });
     expect(res.success).toBe(true);
     expect(res.data?.html).toBeNull();
+  });
+});
+
+interface OpenInBrowserResult {
+  success: boolean;
+  data?: { opened: boolean };
+  error?: string;
+}
+
+describe('registerArtifactHtmlHandlers — artifacts:open-in-browser', () => {
+  beforeEach(() => {
+    mockOpenExternal.mockClear();
+  });
+
+  function register() {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactHtmlHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
+      emptyServices(),
+    );
+    return handlers;
+  }
+
+  it('registers the channel', () => {
+    const handlers = register();
+    expect(handlers.has('artifacts:open-in-browser')).toBe(true);
+  });
+
+  it('writes a RAW temp copy (no CSP meta) and opens it via shell.openExternal', async () => {
+    const doc = '<html><head></head><body>external</body></html>';
+    await writeRunProto(RUN_ID, doc);
+    const handlers = register();
+    const res = (await invoke(
+      handlers,
+      'artifacts:open-in-browser',
+      { runId: RUN_ID, atype: 'ui-prototype' },
+    )) as unknown as OpenInBrowserResult;
+
+    expect(res.success).toBe(true);
+    expect(res.data?.opened).toBe(true);
+    expect(mockOpenExternal).toHaveBeenCalledTimes(1);
+    const url = mockOpenExternal.mock.calls[0]?.[0] as unknown as string;
+    expect(url.startsWith('file://')).toBe(true);
+    // The temp copy carries the RAW document — the CSP meta is an in-app iframe
+    // egress control and must NOT be baked into the user's external copy.
+    const written = await fs.readFile(new URL(url), 'utf-8');
+    expect(written).toBe(doc);
+    expect(written).not.toContain('Content-Security-Policy');
+  });
+
+  it('fails (no browser launch) when the prototype is absent', async () => {
+    const handlers = register();
+    const res = (await invoke(
+      handlers,
+      'artifacts:open-in-browser',
+      { runId: RUN_ID, atype: 'ui-prototype' },
+    )) as unknown as OpenInBrowserResult;
+    expect(res.success).toBe(false);
+    expect(mockOpenExternal).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unrecognized atype and an empty runId', async () => {
+    await writeRunProto(RUN_ID, '<html><body>x</body></html>');
+    const handlers = register();
+    const bad = (await invoke(
+      handlers,
+      'artifacts:open-in-browser',
+      { runId: RUN_ID, atype: 'screenshots' },
+    )) as unknown as OpenInBrowserResult;
+    expect(bad.success).toBe(false);
+    const empty = (await invoke(
+      handlers,
+      'artifacts:open-in-browser',
+      { runId: '', atype: 'ui-prototype' },
+    )) as unknown as OpenInBrowserResult;
+    expect(empty.success).toBe(false);
+    expect(mockOpenExternal).not.toHaveBeenCalled();
   });
 });

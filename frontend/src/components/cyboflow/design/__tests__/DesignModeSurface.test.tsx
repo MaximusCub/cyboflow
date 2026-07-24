@@ -199,4 +199,26 @@ describe('DesignModeSurface', () => {
     render(<DesignModeSurface />);
     expect(screen.getByTestId('design-stage-stub')).toHaveAttribute('data-proto-id', 'none');
   });
+
+  it('(e) "Open in browser" shows only for a bytes-backed prototype and calls the IPC bridge', () => {
+    const openHtmlExternal = vi.fn().mockResolvedValue({ success: true, data: { opened: true } });
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+      artifacts: { openHtmlExternal },
+    };
+    try {
+      mockArtifacts = [makeArtifact({ runId: 'run-7' })];
+      render(<DesignModeSurface />);
+      const btn = screen.getByTestId('design-mode-open-in-browser');
+      fireEvent.click(btn);
+      expect(openHtmlExternal).toHaveBeenCalledWith({ runId: 'run-7', atype: 'ui-prototype' });
+    } finally {
+      delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+    }
+  });
+
+  it('(e2) "Open in browser" is hidden for the bytes-less creation stub', () => {
+    mockArtifacts = [makeArtifact({ id: 'art-stub', payloadJson: null })];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-mode-open-in-browser')).not.toBeInTheDocument();
+  });
 });

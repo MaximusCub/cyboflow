@@ -450,6 +450,22 @@ export interface LoadArtifactHtmlResult {
 }
 
 /**
+ * Request/response shapes for the `artifacts:open-in-browser` IPC channel —
+ * opens the canonical prototype HTML in the user's default browser (a temp-file
+ * copy of the RAW document, no CSP meta: outside the sandboxed in-app iframe
+ * the user is deliberately opening their own local file). SHARED for the same
+ * anti-drift reason as the load-html shapes above.
+ */
+export interface OpenArtifactHtmlExternalRequest {
+  runId: string;
+  atype: LoadArtifactHtmlAtype;
+}
+
+export interface OpenArtifactHtmlExternalResult {
+  opened: boolean;
+}
+
+/**
  * Schema version stamped onto every on-disk committed-artifact manifest
  * (`ArtifactSnapshotManifest.schemaVersion`). Bumped to 2 for the per-
  * `(runId,atype)` directory layout (`S/<runId>/<atype>/{manifest.json,
