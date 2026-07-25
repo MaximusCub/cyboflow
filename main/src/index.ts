@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
+import * as os from 'os';
 import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
 import { ConfigManager, readTelemetryConfigSync } from './services/configManager';
@@ -22,7 +23,18 @@ import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
-import { shouldBlockArtifactFrameNavigation, isExternallyOpenable } from './ipc/artifactFrameGuard';
+import {
+  shouldBlockArtifactFrameNavigation,
+  isExternallyOpenable,
+  shouldBlockScriptedFrameNavigationFromRegistry,
+} from './ipc/artifactFrameGuard';
+import { registerDesignPrototypeServerHandlers } from './ipc/designPrototypeServer';
+import { DesignPrototypeServerManager } from './services/designPrototypeServer';
+import {
+  DesignFrameWatchdog,
+  DESIGN_PROTO_SERVER_EVENT_CHANNEL,
+  type FrameLike,
+} from './services/designFrameWatchdog';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -387,6 +399,13 @@ let runShellManager: RunShellManager | null = null;
 // all share ONE instance. Stateless (ps + process.kill) — safe to construct at
 // module load; the logger is optional, so no whenReady wiring is required.
 const prototypeServerReaper = new PrototypeServerReaper();
+
+// Design Mode v1 interactive prototype server + frame watchdog (design-mode.md
+// "Process isolation"). Module-level so the initializeServices construction, the
+// main-window 'closed' handler, and the before-quit teardown all share ONE
+// instance. Constructed in initializeServices (its HTML loader needs `services`),
+// so it is null until boot finishes wiring.
+let designPrototypeServerManager: DesignPrototypeServerManager | null = null;
 
 // Reaper for the detached `openai-codex` plugin broker daemons a Codex-using
 // session leaks into a worktree (see CodexBrokerReaper). Stateless (ps +
@@ -791,7 +810,16 @@ async function createWindow() {
   // browser instead). The app's main frame and the legacy localhost dev-server
   // prototype iframe are left untouched. See main/src/ipc/artifactFrameGuard.ts.
   mainWindow.webContents.on('will-frame-navigate', (details) => {
-    if (shouldBlockArtifactFrameNavigation(details.frame?.url ?? '', details.url, details.isMainFrame)) {
+    const frameUrl = details.frame?.url ?? '';
+    // Design Mode v1: a SCRIPT-enabled loopback-origin prototype frame gets its own
+    // guard FIRST — all programmatic navigation off its origin is blocked outright
+    // with NO external open (offering http(s) to the OS browser would let a scripted
+    // frame exfiltrate via window.location). See artifactFrameGuard.ts.
+    if (shouldBlockScriptedFrameNavigationFromRegistry(frameUrl, details.url, details.isMainFrame)) {
+      details.preventDefault();
+      return;
+    }
+    if (shouldBlockArtifactFrameNavigation(frameUrl, details.url, details.isMainFrame)) {
       details.preventDefault();
       if (isExternallyOpenable(details.url)) {
         void shell.openExternal(details.url);
@@ -800,6 +828,10 @@ async function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    // Reap any live design-prototype servers bound to this window (their canvas is
+    // gone). Fail-soft and out-of-band, so it fires server-stopped for any still
+    // alive; the renderer is already down, so those notifies are no-ops.
+    void designPrototypeServerManager?.stopAll();
     mainWindow = null;
   });
 
@@ -2908,6 +2940,53 @@ async function initializeServices() {
   // prototype/index.html for a ui-prototype/generic artifact (run subtree, else
   // the committed snapshot store) with a restrictive CSP <meta> injected.
   registerArtifactHtmlHandlers(ipcMain, services);
+  // Design Mode v1 (design-mode.md "Process isolation" + "Server lifecycle") —
+  // the token-gated loopback prototype server + its runaway-frame watchdog. The
+  // watchdog reads the main window's frame subtree, per-process metrics, and cpu
+  // count via Electron-backed seams (the service modules stay Electron-free); the
+  // manager loads the canonical interactive-prototype bytes fresh per request. The
+  // two reference each other (watchdog reads the manager's live targets; the
+  // manager start/stops the watchdog), so the watchdog closes over the
+  // module-level manager var, which is assigned on the next line.
+  const designFrameWatchdog = new DesignFrameWatchdog({
+    getTargets: () => designPrototypeServerManager?.getTargets() ?? [],
+    getFrames: () => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return [];
+      try {
+        // A killed OOPIF's WebFrameMain throws on property access — the watchdog
+        // guards each read; enumerating the subtree itself is guarded here.
+        return win.webContents.mainFrame.framesInSubtree as unknown as FrameLike[];
+      } catch {
+        return [];
+      }
+    },
+    getMetrics: () =>
+      app.getAppMetrics().map((m) => ({
+        pid: m.pid,
+        percentCPUUsage: m.cpu?.percentCPUUsage ?? 0,
+        workingSetSizeKB: m.memory?.workingSetSize ?? 0,
+      })),
+    killPid: (pid: number) => process.kill(pid, 'SIGKILL'),
+    sendToRenderer: (event) => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return;
+      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, event);
+    },
+    cpuCount: os.cpus().length,
+    logger: cyboflowLogger,
+  });
+  designPrototypeServerManager = new DesignPrototypeServerManager({
+    loadHtml: (runId: string) => loadCanonicalPrototypeHtml(services, runId, 'interactive-prototype'),
+    watchdog: designFrameWatchdog,
+    onServerStopped: (runId: string) => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return;
+      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, { runId, kind: 'server-stopped' });
+    },
+    logger: cyboflowLogger,
+  });
+  registerDesignPrototypeServerHandlers(ipcMain, designPrototypeServerManager);
   // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
   // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
   // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
@@ -2916,7 +2995,7 @@ async function initializeServices() {
   // bytes (live subtree, else committed store); the render path injects the CSP.
   DesignHandoffService.initialize({
     db: cyboflowDb,
-    loadPrototypeHtml: (runId: string) => loadCanonicalPrototypeHtml(services, runId, 'ui-prototype'),
+    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
     snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
     logger: cyboflowLogger,
   });
@@ -4655,6 +4734,15 @@ app.on('before-quit', async (event) => {
   console.log('[Main] Sweeping leaked ui-prototype servers...');
   await prototypeServerReaper.sweepOrphans(getCyboflowSubdirectory('artifacts', 'runs'));
   console.log('[Main] Prototype-server sweep complete');
+
+  // Design Mode v1: tear down every in-process interactive prototype server (and
+  // stop its watchdog). In-process node servers, so this fully releases their
+  // ports on quit. Internally fail-soft; awaited so ports free before exit.
+  if (designPrototypeServerManager) {
+    console.log('[Main] Stopping design prototype servers...');
+    await designPrototypeServerManager.stopAll();
+    console.log('[Main] Design prototype servers stopped');
+  }
 
   // Close task queue
   if (taskQueue) {

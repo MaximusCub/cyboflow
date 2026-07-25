@@ -74,9 +74,12 @@ export interface DesignHandoffDeps {
   /**
    * Read the CURRENT canonical prototype HTML bytes for a run (the live
    * per-run artifacts subtree, then the committed store) — null when absent.
+   * `atype` is the bound artifact's prototype-family atype: the live-subtree
+   * path ignores it, but the committed-store fallback is keyed per atype, so
+   * an interactive-prototype handoff must not read ui-prototype's directory.
    * Injected so this module never imports the electron-backed path resolvers.
    */
-  loadPrototypeHtml: (runId: string) => Promise<string | null>;
+  loadPrototypeHtml: (runId: string, atype: string) => Promise<string | null>;
   /**
    * Base dir the design snapshots publish under: `<base>/<ideaId>/<handoffId>.html`.
    * Injected (electron-backed getCyboflowSubdirectory) to keep this module
@@ -110,6 +113,10 @@ interface ArtifactRow {
   id: string;
   run_id: string;
   session_id: string | null;
+  /** Prototype-family atype ('ui-prototype' | 'interactive-prototype') — threaded
+   *  into loadPrototypeHtml so the committed-store fallback reads the RIGHT
+   *  per-atype snapshot directory (the live run-subtree path is atype-agnostic). */
+  atype: string;
   revision: number;
   payload_json: string | null;
 }
@@ -138,7 +145,7 @@ function loadDraft(
 
 function loadArtifact(db: DatabaseLike, artifactId: string): ArtifactRow | undefined {
   return db
-    .prepare('SELECT id, run_id, session_id, revision, payload_json FROM artifacts WHERE id = ?')
+    .prepare('SELECT id, run_id, session_id, atype, revision, payload_json FROM artifacts WHERE id = ?')
     .get(artifactId) as ArtifactRow | undefined;
 }
 
@@ -280,7 +287,7 @@ export async function runSnapshotStep(deps: DesignHandoffDeps, handoff: DesignHa
 
   let snapshotPath: string;
   try {
-    const html = await deps.loadPrototypeHtml(artifact.run_id);
+    const html = await deps.loadPrototypeHtml(artifact.run_id, artifact.atype);
     if (html === null) {
       // Transient: leave 'intent' so a later drive retries.
       return { kind: 'done', result: { ok: false, code: 'no-prototype', message: 'the prototype HTML could not be read — regenerate the prototype and retry', handoffId: handoff.id } };

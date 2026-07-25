@@ -44,3 +44,125 @@ export function shouldBlockArtifactFrameNavigation(
 export function isExternallyOpenable(targetUrl: string): boolean {
   return /^https?:\/\//i.test(targetUrl);
 }
+
+// ===========================================================================
+// Scripted-frame navigation guard (Design Mode v1 — design-mode.md "Frame
+// navigation — no external open for scripted frames").
+//
+// The interactive prototype canvas serves the blessed document from a
+// token-gated loopback origin and runs its JS in a script-enabled OOPIF frame.
+// The srcdoc guard above is wrong for this frame class in TWO ways:
+//   1. it keys on `about:srcdoc` — a loopback-origin frame is `http://127.0.0.1:…`;
+//   2. it offers blocked `http(s)` targets to `shell.openExternal` — for a
+//      SCRIPT-enabled frame that turns `window.location = 'https://…/?<secrets>'`
+//      into OS-browser egress (URL-encoded exfiltration, browser spam) even
+//      though the frame itself stays confined.
+// So scripted frames get their OWN guard keyed to an explicit artifact-frame
+// identity: the set of live loopback ORIGINS the prototype server registers.
+// The rule is "stay on your own origin, and NOTHING leaves via the OS browser".
+//
+// The origin registry is process-global (mirroring how the loopback servers are
+// process-global) — DesignPrototypeServerManager registers each server's origin
+// on spawn and unregisters on stop. The decision function is kept PURE (origins
+// passed in) so it unit-tests without touching the registry; a thin
+// `…FromRegistry` wrapper reads the live set for the `will-frame-navigate` seam.
+// ===========================================================================
+
+/**
+ * Live loopback origins (`http://127.0.0.1:<port>`) of the currently-running
+ * interactive prototype servers. A frame whose CURRENT url is within one of
+ * these is a scripted artifact frame and is confined by
+ * {@link shouldBlockScriptedFrameNavigation}.
+ */
+const scriptedFrameOrigins = new Set<string>();
+
+/** Register a live prototype-server origin as a scripted artifact-frame identity. */
+export function registerScriptedFrameOrigin(origin: string): void {
+  scriptedFrameOrigins.add(origin);
+}
+
+/** Drop a prototype-server origin when its server stops. Idempotent. */
+export function unregisterScriptedFrameOrigin(origin: string): void {
+  scriptedFrameOrigins.delete(origin);
+}
+
+/** Test/introspection helper — a snapshot of the currently registered origins. */
+export function scriptedFrameOriginsSnapshot(): string[] {
+  return [...scriptedFrameOrigins];
+}
+
+/**
+ * The registered origin that CONTAINS `url` (exact origin, or origin + '/…'),
+ * else null. The `+ '/'` boundary is deliberate: it prevents a sibling-port
+ * prefix confusion (`http://127.0.0.1:8080` must NOT match a target at
+ * `http://127.0.0.1:80801`) — a bare-origin target still matches via the
+ * exact-equality arm (reload/respawn navigates to the origin itself).
+ */
+function containingOrigin(url: string, origins: ReadonlySet<string>): string | null {
+  for (const origin of origins) {
+    if (url === origin || url.startsWith(origin + '/')) return origin;
+  }
+  return null;
+}
+
+/**
+ * Whether a `will-frame-navigate` of a SCRIPTED artifact frame should be
+ * BLOCKED. Pure so it unit-tests without Electron (origins passed explicitly).
+ *
+ * Rule (design-mode.md "Frame navigation"):
+ *   - never confine the app's own top frame;
+ *   - a frame whose CURRENT url is within a registered origin may navigate ONLY
+ *     to a target within that SAME origin (covers reload / respawn / same-origin
+ *     hops — the server only ever serves the one blessed doc anyway); EVERYTHING
+ *     else is blocked, including `about:`, `data:`, `file:`, and cross-origin
+ *     `http(s)`;
+ *   - the INITIAL load — an `about:blank`/empty frame navigating TO a registered
+ *     origin — is allowed (the iframe's first navigation to its src);
+ *   - a frame that is not a registered-origin frame (and not that initial load)
+ *     is NOT ours — returns false so the srcdoc guard / default handling applies.
+ *
+ * There is NO external-open branch: unlike {@link shouldBlockArtifactFrameNavigation},
+ * a blocked scripted-frame target is NEVER offered to `shell.openExternal`.
+ *
+ * @param frameUrl          the frame's current url (`details.frame?.url`)
+ * @param targetUrl         the url it wants to navigate to (`details.url`)
+ * @param isMainFrame       whether the navigating frame is the top frame
+ * @param registeredOrigins the live scripted-frame origins to judge against
+ */
+export function shouldBlockScriptedFrameNavigation(
+  frameUrl: string,
+  targetUrl: string,
+  isMainFrame: boolean,
+  registeredOrigins: ReadonlySet<string>,
+): boolean {
+  // Never confine the app's own top frame.
+  if (isMainFrame) return false;
+
+  const currentOrigin = containingOrigin(frameUrl, registeredOrigins);
+  if (currentOrigin !== null) {
+    // Confined frame: allow only same-origin targets, block everything else.
+    return containingOrigin(targetUrl, new Set([currentOrigin])) === null;
+  }
+
+  // Initial iframe load: about:blank/empty → a registered origin is allowed so
+  // the frame can reach its src (and its post-kill respawn, which re-navigates
+  // from a fresh about:blank).
+  if ((frameUrl === '' || frameUrl === 'about:blank') && containingOrigin(targetUrl, registeredOrigins) !== null) {
+    return false;
+  }
+
+  // Not a scripted artifact frame — leave to the srcdoc guard / default handling.
+  return false;
+}
+
+/**
+ * Convenience wrapper over {@link shouldBlockScriptedFrameNavigation} that reads
+ * the live module registry — the form the `will-frame-navigate` handler calls.
+ */
+export function shouldBlockScriptedFrameNavigationFromRegistry(
+  frameUrl: string,
+  targetUrl: string,
+  isMainFrame: boolean,
+): boolean {
+  return shouldBlockScriptedFrameNavigation(frameUrl, targetUrl, isMainFrame, scriptedFrameOrigins);
+}
