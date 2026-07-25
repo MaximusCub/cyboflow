@@ -60,12 +60,32 @@ function prototypeHasBytes(artifact: Artifact | null): boolean {
   }
 }
 
+/** The v0.5 static atype and the v1 process-isolated atype are both "the
+ * session's prototype" for picking purposes — a session's canvas may be
+ * either depending on when it was created / which tier it runs. */
+function isPrototypeAtype(atype: Artifact['atype']): boolean {
+  return atype === 'ui-prototype' || atype === 'interactive-prototype';
+}
+
 function pickPrototype(artifacts: Artifact[]): Artifact | null {
   let best: Artifact | null = null;
   for (const a of artifacts) {
-    if (a.atype !== 'ui-prototype') continue;
+    if (!isPrototypeAtype(a.atype)) continue;
     if (best === null) {
       best = a;
+      continue;
+    }
+    // Payload-bearing beats the bytes-less re-entry stub FIRST — the SAME
+    // selection rule the backend uses for draft binding + draftStatus
+    // (mcpQueryHandler / design router: payload_json IS NOT NULL DESC,
+    // revision DESC), so the surface and the Approve CAS can never disagree
+    // about WHICH artifact is "the session's prototype". createdAt is only a
+    // same-bytes-class tie-break (created_at is second-granular in SQLite —
+    // a stub and a real report can share a timestamp in tests).
+    const aBytes = prototypeHasBytes(a);
+    const bestBytes = prototypeHasBytes(best);
+    if (aBytes !== bestBytes) {
+      if (aBytes) best = a;
       continue;
     }
     if (a.createdAt > best.createdAt) {
@@ -94,6 +114,33 @@ export function DesignModeSurface(): ReactElement | null {
   // session's prototype can come from any of its runs).
   const { artifacts } = useSessionArtifactsList(activeDesignSessionId, projectId);
   const prototypeArtifact = useMemo(() => pickPrototype(artifacts), [artifacts]);
+
+  // v1 interactive-prototype server lifecycle: SURFACE-owned, not the canvas's
+  // (design-mode.md "Server lifecycle — bound to design-mode entry/exit (v1)")
+  // — the canvas can unmount on ordinary stage-state flips (e.g. a clarify gate
+  // popping up) while the server should stay warm across those. Keyed on the
+  // interactive run id so the cleanup fires stop() both on this surface's own
+  // unmount (App.tsx conditionally swaps DesignModeSurface out of the tree the
+  // instant `exitDesignMode()` clears `activeDesignSessionId`, so the explicit
+  // Exit button path is already covered by this same unmount cleanup — no
+  // separate stop() call is wired to the Exit button) AND when the resolved
+  // prototype moves to a different run (e.g. the session's next run reports a
+  // fresh prototype) or stops being an interactive-prototype at all.
+  const interactiveRunId =
+    prototypeArtifact !== null && prototypeArtifact.atype === 'interactive-prototype'
+      ? prototypeArtifact.runId
+      : null;
+  useEffect(() => {
+    return () => {
+      if (interactiveRunId !== null) {
+        // Fail-soft: exit must never hang/throw on a server that's already
+        // gone (e.g. it self-reaped, or a watchdog kill already tore it down).
+        window.electronAPI?.designPrototypeServer
+          .stop({ runId: interactiveRunId })
+          .catch(() => {});
+      }
+    };
+  }, [interactiveRunId]);
 
   // Find-or-create the session's Claude panel — a FALLBACK only: the wizard
   // path store-adds its created panel before onSuccess, so this normally finds
@@ -163,8 +210,15 @@ export function DesignModeSurface(): ReactElement | null {
               type="button"
               data-testid="design-mode-open-in-browser"
               onClick={() => {
+                // atype from the resolved artifact, not hardcoded — this fires
+                // for either the static `ui-prototype` or the v1
+                // `interactive-prototype` canvas (see isPrototypeAtype above).
+                // `pickPrototype` only ever returns one of those two atypes,
+                // but that invariant doesn't survive the `Artifact['atype']`
+                // widen, so narrow it explicitly rather than casting.
+                const openAtype = prototypeArtifact.atype === 'interactive-prototype' ? 'interactive-prototype' : 'ui-prototype';
                 void window.electronAPI?.artifacts
-                  .openHtmlExternal({ runId: prototypeArtifact.runId, atype: 'ui-prototype' })
+                  .openHtmlExternal({ runId: prototypeArtifact.runId, atype: openAtype })
                   .catch(console.error);
               }}
               className="text-xs text-text-secondary hover:text-text-primary whitespace-nowrap"

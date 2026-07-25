@@ -1,9 +1,11 @@
 /**
- * DesignStageCanvas — the v0.5 stage's prototype render (the v1 swap seam).
- * Covers the three states (loading / unreadable / rendered) and the layout
- * regression from the live smoke: LiveCanvasEmbed sizes itself `flex: 1`, so
- * the canvas wrapper MUST be a flex column or the embedded iframe collapses
- * to the ~150px default height (prototype rendered as a thin strip).
+ * DesignStageCanvas — the v0.5/v1 stage's prototype render (the v1 dispatch
+ * point). Covers the static-atype three states (loading / unreadable /
+ * rendered) and the layout regression from the live smoke: LiveCanvasEmbed
+ * sizes itself `flex: 1`, so the canvas wrapper MUST be a flex column or the
+ * embedded iframe collapses to the ~150px default height (prototype rendered
+ * as a thin strip) — plus the atype dispatch to `InteractivePrototypeEmbed`
+ * for the v1 `interactive-prototype` atype.
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -21,6 +23,12 @@ vi.mock('../../../../hooks/useArtifactHtml', () => ({
 vi.mock('../../LiveCanvasEmbed', () => ({
   LiveCanvasEmbed: ({ html }: { html: string }) => (
     <div data-testid="live-canvas-embed-stub" data-html-length={html.length} />
+  ),
+}));
+
+vi.mock('../InteractivePrototypeEmbed', () => ({
+  InteractivePrototypeEmbed: ({ runId }: { runId: string }) => (
+    <div data-testid="interactive-embed-stub" data-run-id={runId} />
   ),
 }));
 
@@ -82,5 +90,21 @@ describe('DesignStageCanvas', () => {
     expect(wrapper.className).toContain('flex-col');
     expect(wrapper.className).toContain('h-full');
     expect(screen.getByTestId('live-canvas-embed-stub')).toBeInTheDocument();
+  });
+
+  it('dispatches interactive-prototype artifacts to InteractivePrototypeEmbed, not the static pipeline', () => {
+    render(<DesignStageCanvas artifact={makeArtifact({ atype: 'interactive-prototype', runId: 'run-42' })} />);
+    expect(screen.getByTestId('interactive-embed-stub')).toHaveAttribute('data-run-id', 'run-42');
+    // Static-only pipeline must not engage for the interactive atype.
+    expect(mockUseArtifactHtml).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('live-canvas-embed-stub')).not.toBeInTheDocument();
+  });
+
+  it('keeps the flex-column wrapper for the interactive-prototype dispatch too', () => {
+    render(<DesignStageCanvas artifact={makeArtifact({ atype: 'interactive-prototype' })} />);
+    const wrapper = screen.getByTestId('design-stage-canvas');
+    expect(wrapper.className).toContain('flex');
+    expect(wrapper.className).toContain('flex-col');
+    expect(wrapper.className).toContain('h-full');
   });
 });

@@ -228,6 +228,37 @@ describe('DesignModeSurface', () => {
     expect(screen.queryByTestId('design-mode-open-in-browser')).not.toBeInTheDocument();
   });
 
+  it('(g) unmounting with an interactive-prototype artifact stops its server, keyed on runId', () => {
+    const stop = vi.fn().mockResolvedValue({ success: true, data: { stopped: true } });
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+      designPrototypeServer: { stop, ensure: vi.fn(), onEvent: vi.fn() },
+    };
+    try {
+      mockArtifacts = [makeArtifact({ atype: 'interactive-prototype', runId: 'run-live' })];
+      const { unmount } = render(<DesignModeSurface />);
+      expect(stop).not.toHaveBeenCalled();
+      unmount();
+      expect(stop).toHaveBeenCalledWith({ runId: 'run-live' });
+    } finally {
+      delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+    }
+  });
+
+  it('(g2) unmounting with a static ui-prototype artifact does NOT call stop', () => {
+    const stop = vi.fn().mockResolvedValue({ success: true, data: { stopped: true } });
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+      designPrototypeServer: { stop, ensure: vi.fn(), onEvent: vi.fn() },
+    };
+    try {
+      mockArtifacts = [makeArtifact({ atype: 'ui-prototype', runId: 'run-static' })];
+      const { unmount } = render(<DesignModeSurface />);
+      unmount();
+      expect(stop).not.toHaveBeenCalled();
+    } finally {
+      delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+    }
+  });
+
   it('(f) approve success exits design mode and arms the planner prompt', () => {
     mockArtifacts = [makeArtifact({ sourceRef: 'IDEA-1', sessionId: 'sess-1' })];
     render(<DesignModeSurface />);
