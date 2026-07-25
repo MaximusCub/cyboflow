@@ -282,14 +282,20 @@ export function usePanelSurface(
         }
         // Explicit panel close is a REAL end-of-life: the backend kills the PTY
         // (panels:delete → stopPanel + unregisterPanel). Evict the keep-alive
-        // xterm cache for this session's interactive run id so the cached
-        // terminal does not leak or stale-restore a dead run (ISSUE B). The
-        // cache key is the run id; resolve it from the closing panel's session.
+        // xterm cache so the cached terminal does not leak or stale-restore a
+        // dead run (ISSUE B). InteractiveTerminalView's cache key is panel.id
+        // for a Claude 'interactive' substrate panel (own-identity, TASK-103
+        // Add-chat — see ClaudePanel.tsx's interactiveRunId) and the session's
+        // chatRunId for a codex-pty panel (unchanged, still session-scoped:
+        // Add-chat only creates Claude panels). Try both — disposeInteractiveTerminal
+        // is a no-op for a key with no live cache entry, so this is safe
+        // regardless of which substrate this panel actually ran on.
         if (panel.type === 'claude') {
+          disposeInteractiveTerminal(panel.id);
           const closedSession = useSessionStore
             .getState()
             .sessions.find((s) => s.id === panel.sessionId);
-          if (closedSession?.runId) disposeInteractiveTerminal(closedSession.runId);
+          if (closedSession?.chatRunId) disposeInteractiveTerminal(closedSession.chatRunId);
         }
         await panelApi.deletePanel(panel.id);
       };

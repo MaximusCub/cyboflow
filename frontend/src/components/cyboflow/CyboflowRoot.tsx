@@ -30,6 +30,7 @@ import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { usePanelStore } from '../../stores/panelStore';
 import { useLandingStore } from '../../stores/landingStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -250,13 +251,22 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     const store = useCyboflowStore.getState();
     if (store.selectedSessionId) {
       // Quick session retired by merge/PR/dismiss — its worktree + PTY are gone,
-      // so evict the keep-alive xterm cache for the session's interactive run id
-      // (resolved from the session store). Without this the cached terminal would
-      // leak past close-out. The backend PTY kill is owned by the close-out route.
+      // so evict every keep-alive xterm cache entry the session's panels hold.
+      // Without this the cached terminal(s) would leak past close-out. The
+      // backend PTY kill is owned by the close-out route. The whole SESSION is
+      // retiring here (not one panel, see usePanelSurface's handlePanelClose),
+      // so — unlike that single-panel close — this must sweep every Claude
+      // panel of the session (TASK-103 Add-chat: there can be more than one),
+      // each disposed by its own panel.id (the cache key for a Claude
+      // 'interactive' substrate panel), plus the session's chatRunId (the
+      // cache key for a codex-pty panel, unchanged/session-scoped).
       const closedSession = useSessionStore
         .getState()
         .sessions.find((s) => s.id === store.selectedSessionId);
-      if (closedSession?.runId) disposeInteractiveTerminal(closedSession.runId);
+      for (const panel of usePanelStore.getState().getSessionPanels(store.selectedSessionId)) {
+        if (panel.type === 'claude') disposeInteractiveTerminal(panel.id);
+      }
+      if (closedSession?.chatRunId) disposeInteractiveTerminal(closedSession.chatRunId);
       store.clearActiveQuickSession();
     } else if (store.activeRunId) {
       // Workflow run retired — evict its keep-alive xterm cache (the worktree is

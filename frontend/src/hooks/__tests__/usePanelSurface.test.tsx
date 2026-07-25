@@ -13,12 +13,19 @@
  *   (c) autoCreatePermanentPanels: true  — short-circuits handlePanelClose for a dashboard panel.
  *   (d) autoCreatePermanentPanels: false — allows handlePanelClose to delete any panel.
  *   (e) onPanelCreated event with matching sessionId → addPanel called; non-matching → ignored.
+ *   (f) handlePanelClose on a claude panel evicts the keep-alive xterm cache by
+ *       BOTH the closing panel's own id (the cache key for a Claude 'interactive'
+ *       substrate panel, TASK-103 Add-chat) and the session's chatRunId (the
+ *       cache key for a codex-pty panel) — not the session's flow runId, which
+ *       was never the cache key for either (a pre-existing bug this locks in
+ *       the fix for).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 import { usePanelSurface } from '../usePanelSurface';
 import type { ToolPanel } from '../../../../shared/types/panels';
+import type { Session } from '../../types/session';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -39,23 +46,37 @@ const {
   mockGetOrCreateMainRepoSession,
   mockSetActiveSessionStore,
   mockSessionStoreSubscribe,
-} = vi.hoisted(() => ({
-  mockAddPanel: vi.fn(),
-  mockSetActivePanelInStore: vi.fn(),
-  mockRemovePanel: vi.fn(),
-  mockSetPanels: vi.fn(),
-  mockGetState: vi.fn(),
-  mockCreatePanel: vi.fn(),
-  mockSetActivePanel: vi.fn(),
-  mockLoadPanelsForSession: vi.fn(),
-  mockGetActivePanel: vi.fn(),
-  mockDeletePanel: vi.fn(),
-  mockGetOrCreateMainRepoSession: vi.fn(),
-  mockSetActiveSessionStore: vi.fn(),
-  // Mutable subscribe spy — tests that need to capture the subscriber can
-  // configure this via mockSessionStoreSubscribe.mockImplementation(...).
-  mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined),
-}));
+  mockDisposeInteractiveTerminal,
+  mockSessionStoreGetState,
+} = vi.hoisted(() => {
+  const setActiveSessionStore = vi.fn();
+  return {
+    mockAddPanel: vi.fn(),
+    mockSetActivePanelInStore: vi.fn(),
+    mockRemovePanel: vi.fn(),
+    mockSetPanels: vi.fn(),
+    mockGetState: vi.fn(),
+    mockCreatePanel: vi.fn(),
+    mockSetActivePanel: vi.fn(),
+    mockLoadPanelsForSession: vi.fn(),
+    mockGetActivePanel: vi.fn(),
+    mockDeletePanel: vi.fn(),
+    mockGetOrCreateMainRepoSession: vi.fn(),
+    mockSetActiveSessionStore: setActiveSessionStore,
+    mockDisposeInteractiveTerminal: vi.fn(),
+    // Mutable subscribe spy — tests that need to capture the subscriber can
+    // configure this via mockSessionStoreSubscribe.mockImplementation(...).
+    mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined),
+    // A hoisted spy (not a fixed closure) so a single test can override the
+    // returned `sessions` array via mockReturnValueOnce — usePanelSurface.ts is
+    // imported statically at this file's top, so a later vi.doMock() of this
+    // module does NOT re-link that already-loaded module's binding (verified:
+    // it silently no-ops, unlike vi.doMock('../../stores/panelStore', ...)
+    // elsewhere in this file, which only "works" because its overridden
+    // closures happen to funnel through the SAME vi.hoisted() spies either way).
+    mockSessionStoreGetState: vi.fn(() => ({ setActiveSession: setActiveSessionStore, sessions: [] as Session[] })),
+  };
+});
 
 // Mock usePanelStore — needs both hook form and .getState static on the export.
 vi.mock('../../stores/panelStore', () => ({
@@ -90,12 +111,13 @@ vi.mock('../../utils/api', () => ({
   },
 }));
 
+vi.mock('../../components/cyboflow/InteractiveTerminalView', () => ({
+  disposeInteractiveTerminal: mockDisposeInteractiveTerminal,
+}));
+
 vi.mock('../../stores/sessionStore', () => ({
   useSessionStore: {
-    getState: () => ({
-      setActiveSession: mockSetActiveSessionStore,
-      sessions: [],
-    }),
+    getState: mockSessionStoreGetState,
     subscribe: mockSessionStoreSubscribe,
   },
 }));
@@ -146,6 +168,15 @@ const TERMINAL_PANEL: ToolPanel = {
   sessionId: MOCK_SESSION_ID,
   type: 'terminal',
   title: 'Terminal',
+  state: { isActive: false },
+  metadata: { ...MOCK_METADATA },
+};
+
+const CLAUDE_PANEL: ToolPanel = {
+  id: 'panel-claude-added',
+  sessionId: MOCK_SESSION_ID,
+  type: 'claude',
+  title: 'Chat 2',
   state: { isActive: false },
   metadata: { ...MOCK_METADATA },
 };
@@ -392,6 +423,95 @@ describe('usePanelSurface — handlePanelClose — no permanence guard', () => {
     // No guard in false mode — deletePanel MUST be called.
     expect(mockDeletePanel).toHaveBeenCalledWith(DASHBOARD_PANEL.id);
     expect(mockRemovePanel).toHaveBeenCalledWith(MOCK_SESSION_ID, DASHBOARD_PANEL.id);
+
+    vi.doUnmock('../../stores/panelStore');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) handlePanelClose — claude panel evicts the keep-alive xterm cache
+// ---------------------------------------------------------------------------
+
+describe('usePanelSurface — handlePanelClose — claude panel xterm cache eviction', () => {
+  const panelsMap = { [MOCK_SESSION_ID]: [CLAUDE_PANEL] };
+  const activePanelsMap = { [MOCK_SESSION_ID]: CLAUDE_PANEL.id };
+  const SESSION_WITH_CHAT_RUN_ID = { ...MOCK_SESSION, runId: 'flow-run-xyz', chatRunId: 'chat-run-abc' };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetOrCreateMainRepoSession.mockResolvedValue({
+      success: true,
+      data: MOCK_SESSION,
+    });
+    mockSetActiveSessionStore.mockResolvedValue(undefined);
+    mockLoadPanelsForSession.mockResolvedValue([CLAUDE_PANEL]);
+    mockSetPanels.mockReturnValue(undefined);
+    mockDeletePanel.mockResolvedValue(undefined);
+    mockRemovePanel.mockReturnValue(undefined);
+    mockSetActivePanel.mockResolvedValue(undefined);
+    mockSetActivePanelInStore.mockReturnValue(undefined);
+  });
+
+  it("(f) disposes by the panel's OWN id and the session's chatRunId — NEVER the session's (distinct) flow runId", async () => {
+    vi.doMock('../../stores/panelStore', () => ({
+      usePanelStore: Object.assign(
+        () => ({
+          panels: panelsMap,
+          activePanels: activePanelsMap,
+          setPanels: mockSetPanels,
+          setActivePanel: mockSetActivePanelInStore,
+          addPanel: mockAddPanel,
+          removePanel: mockRemovePanel,
+        }),
+        { getState: mockGetState },
+      ),
+    }));
+    // usePanelSurface.ts is statically imported at this file's top, so this
+    // module's sessionStore binding is already linked — override the SPY's
+    // return value (persists across every getState() call in this test)
+    // rather than vi.doMock()'ing the module, which does not re-link an
+    // already-loaded module (see the mockSessionStoreGetState hoisted comment).
+    mockSessionStoreGetState.mockReturnValue({
+      setActiveSession: mockSetActiveSessionStore,
+      sessions: [SESSION_WITH_CHAT_RUN_ID],
+    });
+
+    const { usePanelSurface: surf } = await import('../usePanelSurface');
+    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: false }));
+    await flushAsync();
+
+    await act(async () => { await result.current.handlePanelClose(CLAUDE_PANEL); });
+
+    expect(mockDisposeInteractiveTerminal).toHaveBeenCalledWith(CLAUDE_PANEL.id);
+    expect(mockDisposeInteractiveTerminal).toHaveBeenCalledWith(SESSION_WITH_CHAT_RUN_ID.chatRunId);
+    expect(mockDisposeInteractiveTerminal).not.toHaveBeenCalledWith(SESSION_WITH_CHAT_RUN_ID.runId);
+
+    vi.doUnmock('../../stores/panelStore');
+  });
+
+  it('(f) does not dispose anything for a non-claude panel close', async () => {
+    const terminalPanelsMap = { [MOCK_SESSION_ID]: [TERMINAL_PANEL] };
+    vi.doMock('../../stores/panelStore', () => ({
+      usePanelStore: Object.assign(
+        () => ({
+          panels: terminalPanelsMap,
+          activePanels: { [MOCK_SESSION_ID]: TERMINAL_PANEL.id },
+          setPanels: mockSetPanels,
+          setActivePanel: mockSetActivePanelInStore,
+          addPanel: mockAddPanel,
+          removePanel: mockRemovePanel,
+        }),
+        { getState: mockGetState },
+      ),
+    }));
+
+    const { usePanelSurface: surf } = await import('../usePanelSurface');
+    const { result } = renderHook(() => surf(1, { autoCreatePermanentPanels: false }));
+    await flushAsync();
+
+    await act(async () => { await result.current.handlePanelClose(TERMINAL_PANEL); });
+
+    expect(mockDisposeInteractiveTerminal).not.toHaveBeenCalled();
 
     vi.doUnmock('../../stores/panelStore');
   });
