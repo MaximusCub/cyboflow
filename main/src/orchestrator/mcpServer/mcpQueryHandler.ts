@@ -3639,10 +3639,20 @@ export class McpQueryHandler {
       return;
     }
 
-    // The session's single current prototype (one ui-prototype per session,
-    // reported against this run). NULLs when none exists yet.
+    // The session's single current prototype — one PROTOTYPE-FAMILY artifact
+    // per session (static 'ui-prototype' or v1's 'interactive-prototype'),
+    // reported against this run. When both exist (the re-entry stub is minted
+    // as a bytes-less ui-prototype, and an interactive session's first real
+    // report lands as interactive-prototype), the REAL one wins: prefer the
+    // row with a payload (the stub's payload_json is NULL), then the higher
+    // revision. NULLs when none exists yet.
     const proto = this.db
-      .prepare(`SELECT id, revision FROM artifacts WHERE run_id = ? AND atype = 'ui-prototype'`)
+      .prepare(
+        `SELECT id, revision FROM artifacts
+         WHERE run_id = ? AND atype IN ('ui-prototype', 'interactive-prototype')
+         ORDER BY (payload_json IS NOT NULL) DESC, revision DESC
+         LIMIT 1`,
+      )
       .get(msg.runId) as { id?: unknown; revision?: unknown } | undefined;
     const boundArtifactId = typeof proto?.id === 'string' ? proto.id : null;
     const boundArtifactRevision = typeof proto?.revision === 'number' ? proto.revision : null;

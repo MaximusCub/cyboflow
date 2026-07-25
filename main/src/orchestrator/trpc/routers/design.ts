@@ -107,7 +107,11 @@ export const designRouter = router({
   /**
    * Draft-vs-prototype freshness for the Approve button. Null when the session has
    * no draft yet. Resolves the current prototype via the session's chat_run_id +
-   * atype 'ui-prototype'; `linkBroken` mirrors the idea-link integrity contract.
+   * the prototype family ('ui-prototype' | 'interactive-prototype'), preferring
+   * a payload-bearing row over the bytes-less re-entry stub — the SAME selection
+   * rule the draft-binding write uses (mcpQueryHandler.handleDesignUpdateDraft),
+   * so freshness and binding can never disagree about WHICH prototype is current.
+   * `linkBroken` mirrors the idea-link integrity contract.
    */
   draftStatus: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1) }))
@@ -133,8 +137,8 @@ export const designRouter = router({
         prototype = db
           .prepare(
             `SELECT id, revision FROM artifacts
-              WHERE run_id = ? AND atype = 'ui-prototype'
-              ORDER BY revision DESC, created_at DESC LIMIT 1`,
+              WHERE run_id = ? AND atype IN ('ui-prototype', 'interactive-prototype')
+              ORDER BY (payload_json IS NOT NULL) DESC, revision DESC, created_at DESC LIMIT 1`,
           )
           .get(session.chat_run_id) as PrototypeStatusRow | undefined;
       }

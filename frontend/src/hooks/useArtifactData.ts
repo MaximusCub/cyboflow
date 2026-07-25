@@ -47,6 +47,7 @@
  */
 import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
+import { isCanvasArtifact } from '../../../shared/types/artifacts';
 import type {
   Artifact,
   RecommendationsArtifactPayload,
@@ -128,8 +129,11 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
 
   useEffect(() => {
     // Canvas + screenshots resolve synchronously from the payload — no fetch,
-    // no subscription.
-    if (atype === 'ui-prototype' || atype === 'generic') {
+    // no subscription. Canvas membership comes from the artifact-policy
+    // registry (ui-prototype / generic / interactive-prototype), not a literal
+    // list — a new canvas atype must not silently fall through to the
+    // entity-fetch branches below.
+    if (isCanvasArtifact(atype)) {
       setState({ loading: false, error: null, data: { kind: 'canvas', payload: parsePayload(payloadJson) } });
       return;
     }

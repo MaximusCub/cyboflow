@@ -18,11 +18,13 @@ deliberately minimal set — no board, backlog, or sprint tools exist here:
 - `cyboflow_design_update_draft` (`spec_markdown`) — persists the current
   design-spec draft; returns the new `draft_revision` and the prototype artifact
   revision it was bound to.
-- `cyboflow_report_artifact` — **`ui-prototype` only.** Write the prototype to
-  `$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, then report it with
-  `payload_json` `{"fileName": "prototype/index.html"}`. There is **one prototype
-  per session**; re-reporting the same atype enriches it in place — you iterate that
-  single artifact, never create a second.
+- `cyboflow_report_artifact` — **`ui-prototype` or `interactive-prototype` only.**
+  Write the prototype to `$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, then
+  report it with `payload_json` `{"fileName": "prototype/index.html"}`. There is
+  **one prototype per session**; re-reporting the same atype enriches it in place —
+  you iterate that single artifact, never create a second. **Pick the tier once**
+  (see "Prototype contract") and keep re-reporting that same atype — switching
+  atypes mid-session creates a second artifact and is not supported yet.
 - `cyboflow_create_task` (`title`, optional `body`/`priority`) — mint ONE
   follow-up backlog **task**. Narrowed here to the style-kit consent gate's
   "Add a task to the backlog" option; do not use it for anything else.
@@ -108,9 +110,20 @@ H2 yourself. Always include:
 
 ## Prototype contract
 
-- **One self-contained `index.html`.** Inline CSS only. **No JavaScript.** No external
-  network references of any kind — no CDN scripts, no remote fonts, no remote images.
-  The kit's CSS is inlined; assets are inlined as data URIs or omitted.
+- **Two tiers — default to static.** `ui-prototype` (static, **no JavaScript**) is
+  the default and right for almost every design conversation. Produce an
+  `interactive-prototype` (inline JS allowed) ONLY when the user explicitly asks
+  for an interactive / hi-fi / clickable prototype — never promote the tier on
+  your own judgment. The interactive tier runs in a process-isolated frame with
+  **all network egress blocked** (CSP): inline `<script>` is fine, but fetch/XHR/
+  WebSockets, CDN scripts, and any remote reference will fail — everything must
+  still be self-contained. A script that busy-loops or leaks memory gets its
+  frame killed by a watchdog, so keep prototype JS light (state toggles,
+  tab/panel switching, small animations — not simulation loops).
+- **One self-contained `index.html`.** Inline CSS only (plus inline JS on the
+  interactive tier only). No external network references of any kind — no CDN
+  scripts, no remote fonts, no remote images. The kit's CSS is inlined; assets
+  are inlined as data URIs or omitted.
 - **Stamp stable `data-design-id` attributes** on every significant element, and keep
   each id **stable across regenerations** — a later version anchors element-level
   comments to these ids, so a renamed or dropped id orphans its comment.

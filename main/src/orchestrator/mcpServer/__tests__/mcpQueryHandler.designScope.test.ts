@@ -73,6 +73,11 @@ function buildDb(): Database.Database {
   // then layers design_idea_id + artifacts.revision + the design tables onto it.
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id INTEGER)');
   db.exec(readFileSync(join(migDir, '082_design_mode_v0.sql'), 'utf-8'));
+  // 084 recreates artifacts with the interactive-prototype CHECK (the family
+  // selection tests insert that atype). 083 (revision-ensure) is SKIPPED: 082
+  // already added `revision`, and a raw exec of its ALTER would throw the
+  // duplicate-column error the ledger runner tolerates but db.exec does not.
+  db.exec(readFileSync(join(migDir, '084_interactive_prototype.sql'), 'utf-8'));
   // OFF *after* the migrations (some set PRAGMA foreign_keys=ON) so an idea can
   // be inserted with placeholder board_id/stage_id — the design handlers read
   // ideas by raw SELECT, where FK enforcement is irrelevant.
@@ -301,6 +306,29 @@ describe('McpQueryHandler design-scope handlers', () => {
         .prepare('SELECT bound_artifact_id AS id, bound_artifact_revision AS rev FROM design_spec_drafts WHERE session_id = ?')
         .get('sess-b') as { id: string; rev: number };
       expect(row).toEqual({ id: 'art_proto', rev: 3 });
+    });
+
+    it('prototype-family selection: a payload-bearing interactive-prototype beats the bytes-less ui-prototype re-entry stub', async () => {
+      seedDesignSession(db, { runId: 'run-fam', sessionId: 'sess-fam', ideaId: 'ide_fam' });
+      // The re-entry stub: bytes-less ui-prototype (payload_json NULL), minted at
+      // session creation. The agent's real report landed as interactive-prototype.
+      db.prepare(
+        `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json, created_at)
+         VALUES ('art_stub', 'run-fam', 'ui-prototype', 'Prototype', 'canvas', 1, NULL, '2026-07-22T00:00:00.000Z')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json, created_at)
+         VALUES ('art_live', 'run-fam', 'interactive-prototype', 'mockup', 'canvas', 2,
+                 '{"fileName":"prototype/index.html"}', '2026-07-22T01:00:00.000Z')`,
+      ).run();
+
+      const res = await updateDraft('run-fam', '### Design\n\nbound to the interactive prototype');
+      expect(res.ok).toBe(true);
+      expect(res.data).toEqual({ draftRevision: 1, boundArtifactRevision: 2 });
+      const row = db
+        .prepare('SELECT bound_artifact_id AS id, bound_artifact_revision AS rev FROM design_spec_drafts WHERE session_id = ?')
+        .get('sess-fam') as { id: string; rev: number };
+      expect(row).toEqual({ id: 'art_live', rev: 2 });
     });
 
     it('propagates a broken idea link and writes NO draft row', async () => {
