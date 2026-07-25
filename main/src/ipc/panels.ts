@@ -4,6 +4,7 @@ import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService } from '../services/database';
 import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
 import type { AppServices } from './types';
+import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 
 /**
  * Resolve the working directory for a terminal panel in priority order:
@@ -21,7 +22,7 @@ function resolveTerminalCwd(panel: ToolPanel, optionsCwd?: string): string {
   return process.cwd();
 }
 
-export function registerPanelHandlers(ipcMain: IpcMain, _services: AppServices) {
+export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
   // Panel CRUD operations
   ipcMain.handle('panels:create', async (_, request: CreatePanelRequest) => {
     try {
@@ -39,6 +40,20 @@ export function registerPanelHandlers(ipcMain: IpcMain, _services: AppServices) 
         } catch (err) {
           console.error('[Panels IPC] Failed to register Claude panel with ClaudePanelManager:', err);
         }
+
+        // EAGER PTY SPAWN for an ADDED PTY-backed chat panel ("Add chat" whose
+        // effective substrate resolves to interactive Claude or Codex PTY). This
+        // IPC path fires only for FRONTEND-created panels — a quick session's
+        // PRIMARY panel is created server-side by sessions:create-quick and is
+        // never routed here — so it is exactly the added-panel case. Without it an
+        // added PTY panel would have NO live REPL of its own: direct xterm
+        // keystrokes (relayInput, panelId-keyed) would no-op and the composer
+        // would misroute to the session's first panel. Mirrors the create-quick
+        // eager spawn, keyed by THIS panel's own id. Fire-and-forget + fail-soft;
+        // a no-op (returns false) for SDK/demo panels.
+        void relayOrSpawnPtyPanel(services, panel, null).catch((err: unknown) => {
+          console.error('[Panels IPC] Eager PTY spawn for added panel failed:', err);
+        });
       }
 
       return { success: true, data: panel };

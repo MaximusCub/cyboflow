@@ -6,7 +6,6 @@ import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './Mode
 import { FastModePill } from './FastModePill';
 import { EffortPill } from './EffortPill';
 import { PermissionModePill } from './PermissionModePill';
-import { PanelSubstratePill } from './PanelSubstratePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
@@ -297,8 +296,16 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       // SDK path there is no transcript echo, so restoring can't double-render.
       if (interactive) {
         setInput('');
-        void API.sessions
-          .sendInput(activeSession.id, text)
+        // PANEL-SCOPED relay: a session can host multiple PTY chat panels (Add
+        // chat), so the composed turn must reach THIS panel's own live REPL — the
+        // session-scoped path resolves the session's FIRST panel, misrouting an
+        // added panel's ⌃G turn. panels:send-input relays a PTY panel through
+        // relayOrSpawnPtyPanel, keyed by panelId. The session-scoped fallback
+        // covers the (theoretical) caller with no panelId.
+        const relay = panelId
+          ? API.panels.sendInput(panelId, text)
+          : API.sessions.sendInput(activeSession.id, text);
+        void relay
           .then((result) => {
             if (!result.success) setInput(text);
           })
@@ -528,9 +535,9 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     />
   );
 
-  const substrateSlot = agentProvider === 'claude' && panelId && panelId !== activeSession.id ? (
-    <PanelSubstratePill panelId={panelId} sessionSubstrate={activeSession.substrate} />
-  ) : undefined;
+  // Per-panel substrate override (added chats only, TASK-104) is now chosen at
+  // "Add chat" creation time via the PanelTabBar picker, not edited after the
+  // fact here — see PanelTabBar's Add-chat dropdown.
 
   // MCP / plugin selection is a SESSION-START decision now (the launch wizard's
   // Advanced section), not a mid-conversation toggle — a quick SDK session
@@ -579,7 +586,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       modelLabel={modelLabel}
       modelSlot={modelSlot}
       permissionSlot={permissionSlot}
-      substrateSlot={substrateSlot}
       effortLabel={effortLabel}
       fastSlot={fastModeSlot}
       effortSlot={effortSlot}

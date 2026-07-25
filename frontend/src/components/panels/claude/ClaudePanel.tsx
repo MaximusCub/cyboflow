@@ -75,8 +75,33 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
   const isCodexPtySession = substrateSession?.agentRuntime === 'codex-pty';
-  const isPtyBackedSession = isCodexPtySession || substrateSession?.substrate === 'interactive';
-  const interactiveRunId = isPtyBackedSession ? substrateSession.chatRunId ?? null : null;
+  // Effective substrate for THIS panel: a per-panel override (TASK-104 —
+  // panel.substrate, set at "Add chat" creation time via the picker, or later
+  // via claude-panels:set-substrate) wins over the session's substrate,
+  // mirroring the backend's resolveSubstrate precedence (ClaudePanelManager.
+  // getCliManager). Reading only substrateSession.substrate here (as before)
+  // meant an added chat with a PTY override on an otherwise-SDK session still
+  // rendered the SDK transcript/composer — which then waits forever for SDK
+  // stream events that never arrive, since the backend actually spawned a PTY
+  // for that panel. isCodexPtySession stays session-only: per-panel
+  // agentRuntime override is explicitly out of scope for TASK-104.
+  const effectiveSubstrate = panel.substrate ?? substrateSession?.substrate;
+  const isPtyBackedSession = isCodexPtySession || effectiveSubstrate === 'interactive';
+  // PTY-backed panels (interactive Claude AND Codex PTY) key their live terminal
+  // by their OWN panelId, NOT the session's shared chatSentinelProvider
+  // chat_run_id sentinel (every panel of a session resolves the SAME chat_run_id
+  // — it is a session-level approval-gate vehicle, not a per-panel identity).
+  // Using the shared sentinel would collapse two concurrent PTY chat panels
+  // (Add-chat) onto the same `cyboflow:pty:<runId>` channel / xterm cache / relay
+  // target, merging their output and misrouting keystrokes — the "second codex
+  // chat shares a stream" bug. SubstrateDispatchFacade resolves relayInput/
+  // relayResize/getPtyBacklog by panelId for exactly this reason (registerPtyPanel
+  // / recordInteractivePanelMapping's panelId-identity registration), the backend
+  // eager-spawns each added panel its own REPL keyed by panelId (ipc/panels.ts →
+  // relayOrSpawnPtyPanel), and index.ts broadcasts pty bytes on BOTH the legacy
+  // chat_run_id channel and the panelId channel — panelId is simply the more
+  // specific, always-unique key that both the primary and added panels resolve.
+  const interactiveRunId = isPtyBackedSession ? panel.id : null;
   // Demo mode: an interactive quick session is stamped 'interactive' so this
   // panel swaps in a terminal surface, but the real PTY is never spawned
   // (ipc/session.ts). Render the canned DemoTerminalView instead of the live

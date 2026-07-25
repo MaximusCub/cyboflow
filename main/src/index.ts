@@ -2536,9 +2536,19 @@ async function initializeServices() {
   // `unknown` on the facade EventEmitter, so narrow it through a typed local
   // shape (NO `any`). This deliberately bypasses runEventBridge — the bytes are
   // ephemeral live-view only and are never persisted to raw_events.
+  //
+  // Broadcast on BOTH `runId` (the gate-vehicle id: workflow-run panels' own id,
+  // or a chat session's shared chatSentinelProvider sentinel — the PRIMARY chat
+  // panel's InteractiveTerminalView still subscribes by this id) and `panelId`
+  // (every panel's own id — an added, non-primary chat panel, TASK-103, has no
+  // shared-sentinel subscriber of its own and always subscribes by its panelId).
+  // For workflow-run panels these are the same channel (orchestrator invariant),
+  // so this is one harmless duplicate send there. Electron drops any
+  // webContents.send with no listener, so broadcasting the unused key is inert.
   substrateFacade.on('pty-output', (payload) => {
-    const evt = payload as { runId: string; data: string };
+    const evt = payload as { runId: string; panelId: string; data: string };
     ptyPublisher(evt.runId, evt.data);
+    if (evt.panelId !== evt.runId) ptyPublisher(evt.panelId, evt.data);
   });
 
   // Turn-end status rest for PTY QUICK sessions (IDEA-030 follow-on). The facade

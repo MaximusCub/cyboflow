@@ -1173,6 +1173,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // the inherited handler. The raw bytes ride 'pty-output' ONLY — they never
     // touch the 'output'/type:'json' channel and never reach runEventBridge
     // (Q3 panel-preservation; additive-isolation by construction).
+    //
+    // `runId` here is the gate-vehicle id (chatSentinelProvider, shared by every
+    // chat panel of a session) — kept UNCHANGED because main/src/index.ts's
+    // 'turn-end' listener matches on it to rest a quick session's DB status.
+    // SubstrateDispatchFacade separately keys its PTY-relay identity off the
+    // `panelId` also carried here (see registerPtyPanel/recordInteractivePanelMapping)
+    // so multiple concurrent chat panels — which all share this same gate runId —
+    // still resolve to distinct live PTYs (TASK-103 Add-chat duplication fix).
     ptyProcess.onData((data: string) =>
       this.emit('pty-output', { panelId, sessionId, runId, type: 'pty', data, timestamp: new Date() }),
     );

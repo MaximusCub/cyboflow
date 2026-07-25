@@ -42,6 +42,12 @@ import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } fr
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
+import {
+  QUICK_PTY_BRIEFING,
+  QUICK_CODEX_PTY_BRIEFING,
+  QUICK_CODEX_SDK_BRIEFING,
+} from './quickSessionBriefings';
+import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
@@ -230,30 +236,6 @@ export function generateQuickWorktreeBranchName(
  * keyword is reserved for the USER to type (it is what the passive
  * dynamic-workflow detection at the EventRouter seam keys off).
  */
-const QUICK_PTY_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
-
-Session context:
-- This is a user-driven quick session: no predefined workflow, no step ceremony — just you and the user.
-- Your working directory is a dedicated git worktree for this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
-- A "cyboflow" MCP server is connected; its tools write to cyboflow's project database (tasks/backlog). Use them only when the user asks you to interact with the cyboflow backlog.
-
-Acknowledge briefly and wait for the user's instructions.`;
-
-const QUICK_CODEX_PTY_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
-
-Session context:
-- This is a user-driven quick session: no predefined workflow, no step ceremony — just you and the user.
-- Your working directory is a dedicated git worktree for this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
-
-Acknowledge briefly and wait for the user's instructions.`;
-
-const QUICK_CODEX_SDK_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
-
-Session context:
-- This is a user-driven quick session: no predefined workflow and no step ceremony.
-- Your working directory is dedicated to this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
-- A "cyboflow" MCP server may be connected; its tools write to cyboflow's project database. Use those tools only when the user asks you to interact with the cyboflow backlog.`;
-
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
     sessionManager,
@@ -2354,6 +2336,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       switch (panel.type) {
         case 'claude':
           try {
+            // PTY-backed panels (interactive Claude / Codex PTY) relay a PANEL-
+            // SCOPED turn into THIS panel's own live REPL (or spawn a fresh one on
+            // a dead REPL), keyed by the panel's own id. This is the composer's
+            // per-panel path (⌃G) for a second/added PTY chat — the session-scoped
+            // sessions:input always resolves the session's FIRST panel, which would
+            // misroute an added panel's turn. relayOrSpawnPtyPanel returns false for
+            // SDK / demo panels, which fall through to the structured SDK path.
+            const relayed = await relayOrSpawnPtyPanel(services, panel, input);
+            if (relayed) return { success: true };
             // Save the user input as a conversation message for panel history
             if (input) {
               sessionManager.addPanelConversationMessage(panelId, 'user', input);

@@ -798,6 +798,83 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
 });
 
 // ---------------------------------------------------------------------------
+// Multi-panel isolation (Add-chat) — two concurrent PTY chat panels of ONE
+// session share the gate chat_run_id sentinel but must each drive their OWN
+// live PTY. The frontend keys each panel's terminal by its panelId; the facade
+// resolves relayInput / getPtyBacklog by panelId via the panelId-IDENTITY
+// registration the added-panel eager spawn seeds (registerInteractivePanel/
+// registerPtyPanel with panelId === runId). Guards the "second PTY chat doesn't
+// work" / "second codex chat shares a stream" regressions.
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — concurrent PTY chat panels isolate by panelId', () => {
+  const ptyChunk = (panelId: string, runId: string, data: string) => ({
+    panelId,
+    sessionId: panelId,
+    runId,
+    type: 'pty',
+    data,
+    timestamp: new Date(),
+  });
+
+  it('identity registration routes relayInput to each panel own PTY (shared gate runId)', () => {
+    // Both panels resolve interactive; the registry lookup is keyed by the panel
+    // id (workflow-shaped identity), so a run row per panel id is enough.
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn((id: string) => makeWorkflowRunRow({ id, substrate: 'interactive' })),
+      getById: vi.fn().mockReturnValue(makeWorkflowRow()),
+    };
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // The added-panel eager spawn seeds an IDENTITY entry per panel (panelId ===
+    // runId), so a relay racing the first PTY byte resolves to that panel.
+    facade.registerInteractivePanel('panel-A', 'panel-A');
+    facade.registerInteractivePanel('panel-B', 'panel-B');
+
+    facade.relayInput('panel-A', 'to A');
+    facade.relayInput('panel-B', 'to B');
+
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-A', 'to A');
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-B', 'to B');
+    // Neither panel received the other's keystrokes.
+    expect(interactive.sendInput).not.toHaveBeenCalledWith('panel-A', 'to B');
+    expect(interactive.sendInput).not.toHaveBeenCalledWith('panel-B', 'to A');
+  });
+
+  it('getPtyBacklog is isolated per panelId even when both panels emit under the shared chat_run_id', () => {
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn((id: string) => makeWorkflowRunRow({ id, substrate: 'interactive' })),
+      getById: vi.fn().mockReturnValue(makeWorkflowRow()),
+    };
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(makeSpyManager()),
+      asManager(interactive),
+      registry,
+      makeSpyLogger(),
+    );
+
+    // Both panels of the session carry the SAME gate runId 'chat-run' on their
+    // pty-output (resolveGateRunId → the shared chat_run_id sentinel), but a
+    // distinct panelId. The per-panel backlog must not interleave.
+    interactive.emit('pty-output', ptyChunk('panel-A', 'chat-run', 'AAA'));
+    interactive.emit('pty-output', ptyChunk('panel-B', 'chat-run', 'BBB'));
+
+    expect(facade.getPtyBacklog('panel-A')).toBe('AAA');
+    expect(facade.getPtyBacklog('panel-B')).toBe('BBB');
+
+    // Event-fed mapping also routes relayInput to each panel (no explicit
+    // registration needed once a byte has flowed).
+    facade.relayInput('panel-A', 'x');
+    expect(interactive.sendInput).toHaveBeenLastCalledWith('panel-A', 'x');
+    facade.relayInput('panel-B', 'y');
+    expect(interactive.sendInput).toHaveBeenLastCalledWith('panel-B', 'y');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // fan-in re-emit
 // ---------------------------------------------------------------------------
 

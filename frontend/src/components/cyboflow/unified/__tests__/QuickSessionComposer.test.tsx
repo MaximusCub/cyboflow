@@ -17,6 +17,7 @@ const mockOnModelFallback = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockGetFastModeState = vi.fn();
 const mockOnFastModeState = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockQueueInput = vi.fn();
+const mockPanelSendInput = vi.fn();
 const mockGetCodexCatalog = vi.fn();
 const mockGetEffort = vi.fn();
 const mockSetEffort = vi.fn();
@@ -30,6 +31,7 @@ vi.mock('../../../../utils/api', () => ({
     },
     panels: {
       queueInput: (panelId: string, id: string, text: string) => mockQueueInput(panelId, id, text),
+      sendInput: (panelId: string, text: string) => mockPanelSendInput(panelId, text),
     },
     claudePanels: {
       getModel: (id: string) => mockGetModel(id),
@@ -182,6 +184,7 @@ beforeEach(() => {
   mockSetModel.mockReset().mockResolvedValue({ success: true });
   mockOnModelFallback.mockReset().mockReturnValue(() => {});
   mockQueueInput.mockReset().mockResolvedValue({ success: true, data: { queued: true } });
+  mockPanelSendInput.mockReset().mockResolvedValue({ success: true });
   mockGetEffort.mockReset().mockResolvedValue({ success: true, data: null });
   mockSetEffort.mockReset().mockResolvedValue({ success: true });
   mockAnswerQuestion.mockReset().mockResolvedValue(undefined);
@@ -601,7 +604,7 @@ describe('QuickSessionComposer — no MCP / plugin pills (moved to session start
 });
 
 describe('QuickSessionComposer — interactive (PTY)', () => {
-  it('is hidden behind ⌃G, then relays via API.sessions.sendInput on ⌘↵', async () => {
+  it('is hidden behind ⌃G, then relays PANEL-SCOPED via API.panels.sendInput on ⌘↵', async () => {
     render(<Harness session={makeSession({ status: 'running' })} interactive />);
 
     // Hidden by default; reveal it.
@@ -614,7 +617,10 @@ describe('QuickSessionComposer — interactive (PTY)', () => {
     fireEvent.change(textarea, { target: { value: 'run the tests' } });
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
 
-    await waitFor(() => expect(mockSendInput).toHaveBeenCalledWith('s1', 'run the tests'));
+    // Panel-scoped (panelId 'panel-1'), NOT session-scoped — a session can host
+    // multiple PTY chat panels, so the turn must reach THIS panel's REPL.
+    await waitFor(() => expect(mockPanelSendInput).toHaveBeenCalledWith('panel-1', 'run the tests'));
+    expect(mockSendInput).not.toHaveBeenCalled();
   });
 
   it('does not call the panel-model fetch in interactive mode', () => {

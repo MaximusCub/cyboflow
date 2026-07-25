@@ -277,11 +277,12 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 /** Render inside the SessionProvider, the way CyboflowRoot wraps the quick pane. */
-function renderWithProvider(session: Session) {
+function renderWithProvider(session: Session, panelOverrides: Partial<ToolPanel> = {}) {
   mocks.holder.activeSession = session;
+  const panel = { ...PANEL, ...panelOverrides };
   return render(
     <SessionProvider session={session} projectName="tester-mctest">
-      <ClaudePanel panel={PANEL} isActive />
+      <ClaudePanel panel={panel} isActive />
     </SessionProvider>,
   );
 }
@@ -332,11 +333,16 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('ClaudePanel — interactive-PTY render swap', () => {
-  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView, drops the SDK surface, mounts the interactive composer, keeps approvals", () => {
+  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView (keyed by the panel's OWN id, not the session's shared chat_run_id — see interactiveRunId), drops the SDK surface, mounts the interactive composer, keeps approvals", () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
 
     const terminal = screen.getByTestId('interactive-terminal-view');
-    expect(terminal).toHaveTextContent('InteractiveTerminalView:run-q1');
+    // Keyed by panel.id (PANEL.id === 'panel-1'), not chatRunId ('run-q1') — a
+    // second concurrent interactive chat panel in the same session would share
+    // 'run-q1' but must NOT share this terminal's channel/cache (TASK-103
+    // Add-chat duplication fix). approvalRunId (below) is unaffected — the
+    // approval gate deliberately stays session-scoped.
+    expect(terminal).toHaveTextContent('InteractiveTerminalView:panel-1');
     // Quick sessions are user-driven: the first-interaction guardrail is off.
     expect(terminal).toHaveTextContent('guard=false');
     expect(screen.getByTestId('claude-panel-interactive-terminal')).toBeInTheDocument();
@@ -364,7 +370,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(get()).toHaveAttribute('data-pty-open', 'false');
   });
 
-  it('agentRuntime codex-pty renders the terminal and skips Claude resume probing', () => {
+  it("agentRuntime codex-pty renders the terminal keyed by the panel's OWN id (not the shared chat_run_id — so two codex chats don't share one stream) and skips Claude resume probing", () => {
     renderWithProvider(
       makeSession({
         substrate: 'interactive',
@@ -374,8 +380,11 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       }),
     );
 
+    // Keyed by panel.id ('panel-1'), NOT chatRunId ('run-codex'). A second codex
+    // chat panel of the same session resolves the SAME chat_run_id sentinel, so
+    // keying by it collapsed both onto one `cyboflow:pty:<runId>` stream.
     expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
-      'InteractiveTerminalView:run-codex',
+      'InteractiveTerminalView:panel-1',
     );
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
     expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
@@ -424,11 +433,39 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'false');
   });
 
-  it("substrate 'interactive' + null runId: falls through to the SDK surface (no crash)", () => {
+  it("substrate 'interactive' + null chatRunId: still renders the terminal, keyed by panel.id (no dependency on the gate sentinel having minted yet)", () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: null }));
+
+    // interactiveRunId no longer derives from chatRunId (a session-level,
+    // mint-on-read sentinel that can lag a frontend re-fetch) — it's panel.id,
+    // synchronously available from the panel prop, so a null chatRunId no
+    // longer blocks the terminal from rendering.
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
+    expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent('InteractiveTerminalView:panel-1');
+  });
+
+  it("TASK-104 per-panel override: an SDK session's panel with substrate 'interactive' renders the terminal, not the SDK surface", () => {
+    // A session-level substrate of 'sdk' with a PANEL-level override to
+    // 'interactive' — the "Add chat" picker's PTY option on an otherwise-SDK
+    // session. Reading only substrateSession.substrate (pre-fix) left this
+    // panel on the SDK transport, which then waits forever for SDK stream
+    // events that never arrive since the backend actually spawned a PTY —
+    // the reported "stuck generating" symptom.
+    renderWithProvider(makeSession({ substrate: 'sdk', runId: 'run-q1' }), { substrate: 'interactive' });
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
+    expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent('InteractiveTerminalView:panel-1');
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
+  });
+
+  it("TASK-104 per-panel override: an interactive session's panel with substrate 'sdk' renders the SDK surface, not the terminal", () => {
+    // The inverse override — an SDK chat panel added inside an otherwise-PTY
+    // session.
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }), { substrate: 'sdk' });
 
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
     expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'false');
   });
 
   it('no SessionProvider: resolves the session from the store by the panel sessionId and still swaps', () => {
@@ -439,7 +476,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     render(<ClaudePanel panel={PANEL} isActive />);
 
     expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
-      'InteractiveTerminalView:run-q2',
+      'InteractiveTerminalView:panel-1',
     );
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
   });

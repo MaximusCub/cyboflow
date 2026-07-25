@@ -582,27 +582,39 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     return this.ptyBacklog.get(runId) ?? '';
   }
 
-  /** Append a 'pty-output' chunk to the run's bounded backlog (last N bytes kept). */
+  /**
+   * Append a 'pty-output' chunk to the run's bounded backlog (last N bytes
+   * kept). Accumulated under BOTH the event's gate `runId` (legacy — a
+   * session's PRIMARY chat panel still addresses its PTY by the shared
+   * chatSentinelProvider sentinel) and its `panelId` (every chat panel's own
+   * id, including added ones — TASK-103 Add-chat panels have no shared-sentinel
+   * consumer and always address their PTY by panelId). For workflow-run panels
+   * these are the same key (orchestrator invariant), so this is a harmless
+   * single write there.
+   */
   private recordPtyBacklog(payload: unknown): void {
-    const evt = payload as { runId?: unknown; data?: unknown };
-    if (typeof evt.runId !== 'string' || typeof evt.data !== 'string') return;
-    const next = (this.ptyBacklog.get(evt.runId) ?? '') + evt.data;
-    this.ptyBacklog.set(
-      evt.runId,
-      next.length > PTY_BACKLOG_CAP_BYTES ? next.slice(-PTY_BACKLOG_CAP_BYTES) : next,
-    );
+    const evt = payload as { panelId?: unknown; runId?: unknown; data?: unknown };
+    if (typeof evt.data !== 'string') return;
+    const append = (key: string): void => {
+      const next = (this.ptyBacklog.get(key) ?? '') + (evt.data as string);
+      this.ptyBacklog.set(key, next.length > PTY_BACKLOG_CAP_BYTES ? next.slice(-PTY_BACKLOG_CAP_BYTES) : next);
+    };
+    if (typeof evt.runId === 'string') append(evt.runId);
+    if (typeof evt.panelId === 'string' && evt.panelId !== evt.runId) append(evt.panelId);
   }
 
   /**
-   * Drop a run's backlog on REPL exit. CliExitEvent carries panelId only; the
-   * backlog is keyed by runId, so resolve through the panel→run mapping (PTY
-   * quick sessions: panelId ≠ runId) with a panelId fallback (workflow runs:
-   * panelId === runId — identical behavior).
+   * Drop a run's backlog on REPL exit. CliExitEvent carries panelId only.
+   * Deletes both the panelId-keyed entry directly and, when a reverse mapping
+   * exists (PTY quick sessions: panelId ≠ the shared gate runId), the gate
+   * runId-keyed entry too — see recordPtyBacklog for why both keys exist.
    */
   private clearPtyBacklog(payload: unknown): void {
     const evt = payload as { panelId?: unknown };
     if (typeof evt.panelId !== 'string') return;
-    this.ptyBacklog.delete(this.interactivePanelToRun.get(evt.panelId) ?? evt.panelId);
+    this.ptyBacklog.delete(evt.panelId);
+    const runId = this.interactivePanelToRun.get(evt.panelId);
+    if (runId !== undefined) this.ptyBacklog.delete(runId);
   }
 
   /**
@@ -637,17 +649,32 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * runtime. Claude interactive remains the workflow-capable owner; Codex PTY
    * uses this session-scoped path so xterm input/backlog can share the existing
    * `cyboflow:pty:<runId>` channel without widening the legacy substrate enum.
+   *
+   * Also seeds an IDENTITY entry keyed by `panelId` itself (when it differs
+   * from `runId`) — an added (non-primary) chat panel (TASK-103) has no shared
+   * gate-runId consumer of its own and always addresses its live PTY by its own
+   * panelId, so it needs `toLivePanelId(panelId)`/`livePtyOwners.get(panelId)`
+   * to resolve directly, independent of whichever OTHER panel the session's
+   * shared gate runId currently happens to be registered against.
    */
   registerPtyPanel(runId: string, panelId: string, manager: AbstractCliManager): void {
     this.interactiveRunToPanel.set(runId, panelId);
     this.interactivePanelToRun.set(panelId, runId);
     this.livePtyOwners.set(runId, manager);
+    if (panelId !== runId) {
+      this.interactiveRunToPanel.set(panelId, panelId);
+      this.livePtyOwners.set(panelId, manager);
+    }
   }
 
   /**
    * Record the runId↔panelId pair carried by an interactive event payload
    * ('pty-output' / 'turn-end' — both carry { panelId, runId }). Idempotent;
-   * silently skips payloads missing either id.
+   * silently skips payloads missing either id. Also seeds the panelId identity
+   * entry (see registerPtyPanel) so a panel whose event fires before any
+   * deterministic at-spawn registration ran (or that has none — added chat
+   * panels go through ClaudePanelManager, not the sessions:create-quick /
+   * sessions:input eager-spawn seams) still resolves by its own panelId.
    */
   private recordInteractivePanelMapping(payload: unknown, manager?: AbstractCliManager): void {
     const evt = payload as { panelId?: unknown; runId?: unknown };
@@ -655,11 +682,17 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveRunToPanel.set(evt.runId, evt.panelId);
     this.interactivePanelToRun.set(evt.panelId, evt.runId);
     if (manager) this.livePtyOwners.set(evt.runId, manager);
+    if (evt.panelId !== evt.runId) {
+      this.interactiveRunToPanel.set(evt.panelId, evt.panelId);
+      if (manager) this.livePtyOwners.set(evt.panelId, manager);
+    }
   }
 
   /**
    * Evict a panel's runId↔panelId mapping on REPL exit. CliExitEvent carries
-   * panelId only, so the forward entry is found via the reverse map.
+   * panelId only. Clears the panelId identity entry directly (registerPtyPanel/
+   * recordInteractivePanelMapping) AND, via the reverse map, whichever shared
+   * gate-runId entry pointed at this panel.
    */
   private clearInteractivePanelMapping(payload: unknown): void {
     const evt = payload as { panelId?: unknown };
@@ -669,6 +702,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       this.interactiveRunToPanel.delete(runId);
       this.livePtyOwners.delete(runId);
     }
+    this.interactiveRunToPanel.delete(evt.panelId);
+    this.livePtyOwners.delete(evt.panelId);
     this.interactivePanelToRun.delete(evt.panelId);
   }
 
