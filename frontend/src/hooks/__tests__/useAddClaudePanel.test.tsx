@@ -67,6 +67,19 @@ describe('useAddClaudePanel', () => {
     expect(mockCreatePanel.mock.calls[0][0]).not.toHaveProperty('substrate');
   });
 
+  it('threads an explicit substrate override into createPanel when the caller picks one', async () => {
+    const { result } = renderHook(() => useAddClaudePanel(MOCK_SESSION));
+
+    await act(async () => { await result.current('interactive'); });
+
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 's1',
+      type: 'claude',
+      initialState: { cwd: '/path/to/worktree' },
+      substrate: 'interactive',
+    });
+  });
+
   it('creates and explicitly activates every requested panel', async () => {
     mockCreatePanel
       .mockResolvedValueOnce(MOCK_PANEL)

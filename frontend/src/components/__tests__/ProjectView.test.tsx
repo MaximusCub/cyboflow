@@ -78,8 +78,12 @@ describe('ProjectView Add chat wiring', () => {
 
     expect(mockUseAddClaudePanel).toHaveBeenCalledWith(MAIN_REPO_SESSION, { logTag: 'ProjectView' });
 
+    // The trigger opens a substrate picker rather than invoking the hook
+    // directly; "Inherit session" reproduces the pre-picker no-override call.
     fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    fireEvent.click(screen.getByText('Inherit session'));
 
     expect(mockAddChat).toHaveBeenCalledTimes(1);
+    expect(mockAddChat).toHaveBeenCalledWith(undefined);
   });
 });

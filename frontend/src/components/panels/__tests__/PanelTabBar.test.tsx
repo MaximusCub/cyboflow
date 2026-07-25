@@ -59,7 +59,7 @@ describe('PanelTabBar chat labels', () => {
 });
 
 describe('PanelTabBar add chat action', () => {
-  it('renders Add chat next to Add terminal and invokes the chat callback', () => {
+  it('renders Add chat next to Add terminal as a substrate picker and invokes the chat callback with no override for "Inherit session"', () => {
     const onAddTerminal = vi.fn();
     const onAddChat = vi.fn();
 
@@ -76,10 +76,34 @@ describe('PanelTabBar add chat action', () => {
     expect(screen.getAllByRole('button').map((button) => button.getAttribute('aria-label')))
       .toEqual(['Add terminal panel', 'Add chat panel']);
 
+    // Clicking the trigger opens the picker rather than creating a chat directly.
     fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    expect(onAddChat).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('Inherit session'));
 
     expect(onAddChat).toHaveBeenCalledTimes(1);
+    expect(onAddChat).toHaveBeenCalledWith(undefined);
     expect(onAddTerminal).not.toHaveBeenCalled();
+  });
+
+  it('invokes the chat callback with the chosen substrate override', () => {
+    const onAddChat = vi.fn();
+
+    render(
+      <PanelTabBar
+        panels={[]}
+        onPanelSelect={vi.fn()}
+        onPanelClose={vi.fn()}
+        onAddChat={onAddChat}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    fireEvent.click(screen.getByText('PTY (interactive)'));
+
+    expect(onAddChat).toHaveBeenCalledTimes(1);
+    expect(onAddChat).toHaveBeenCalledWith('interactive');
   });
 
   it('logs rejected async add-chat callbacks instead of leaking an unhandled rejection', async () => {
@@ -97,6 +121,7 @@ describe('PanelTabBar add chat action', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    fireEvent.click(screen.getByText('Inherit session'));
 
     await waitFor(() => {
       expect(errorSpy).toHaveBeenCalledWith('[PanelTabBar] Failed to add chat:', error);

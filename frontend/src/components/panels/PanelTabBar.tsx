@@ -1,12 +1,20 @@
 import React, { useCallback, memo, useState, useRef, useEffect } from 'react';
-import { X, Terminal, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Edit2, Plus } from 'lucide-react';
+import { X, Terminal, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Edit2, Plus, ChevronDown } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { Button } from '../ui/Button';
-import { Dropdown } from '../ui/Dropdown';
+import { Dropdown, type DropdownItem } from '../ui/Dropdown';
 import { useSession } from '../../contexts/SessionContext';
 import { StatusDot } from '../ui/StatusDot';
+
+/** "Add chat" substrate picker options — undefined means "inherit the session". */
+const ADD_CHAT_SUBSTRATE_ITEMS: ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> = [
+  { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },
+  { id: 'sdk', label: 'SDK', description: 'Run this chat with the Claude SDK', substrate: 'sdk' },
+  { id: 'interactive', label: 'PTY (interactive)', description: 'Run this chat with the interactive terminal', substrate: 'interactive' },
+];
 
 function getPanelDisplayTitle(panel: ToolPanel): string {
   if (panel.type === 'diff') return 'Diff';
@@ -106,15 +114,22 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   }, [onAddTerminal]);
 
-  const handleAddChat = useCallback(() => {
+  const handleAddChat = useCallback((substrate?: CliSubstrate) => {
     if (!onAddChat) return;
-    const result = onAddChat();
+    const result = onAddChat(substrate);
     if (result instanceof Promise) {
       result.catch((err: unknown) => {
         console.error('[PanelTabBar] Failed to add chat:', err);
       });
     }
   }, [onAddChat]);
+
+  const addChatItems: DropdownItem[] = ADD_CHAT_SUBSTRATE_ITEMS.map((opt) => ({
+    id: opt.id,
+    label: opt.label,
+    description: opt.description,
+    onClick: () => handleAddChat(opt.substrate),
+  }));
 
   // Focus input when editing starts
   useEffect(() => {
@@ -292,17 +307,24 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
 
         {onAddChat && (
           <div className="flex items-center h-8">
-            <button
-              type="button"
-              onClick={handleAddChat}
-              aria-label="Add chat panel"
-              title="Add chat panel"
-              className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
-            >
-              <Plus className="w-4 h-4" />
-              <MessageSquare className="w-4 h-4" />
-              <span className="sr-only">Add chat panel</span>
-            </button>
+            <Dropdown
+              trigger={
+                <button
+                  type="button"
+                  aria-label="Add chat panel"
+                  title="Add chat panel"
+                  className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+                >
+                  <Plus className="w-4 h-4" />
+                  <MessageSquare className="w-4 h-4" />
+                  <ChevronDown className="w-3 h-3" />
+                  <span className="sr-only">Add chat panel</span>
+                </button>
+              }
+              items={addChatItems}
+              position="auto"
+              width="sm"
+            />
           </div>
         )}
 

@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { panelApi } from '../services/panelApi';
 import { usePanelStore } from '../stores/panelStore';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 /**
  * Minimal session shape the hook needs. Pass `null`/`undefined` to disable
@@ -22,15 +23,21 @@ export interface UseAddClaudePanelOptions {
  * Returns a memoized callback that always creates a new Claude panel for the
  * given session, registers it in the panel store, activates it, and fires the
  * optional onAfterActivate side-effect.
+ *
+ * Accepts an optional per-panel `substrate` override, applied AT CREATION
+ * (CreatePanelRequest.substrate — the same column `claude-panels:set-substrate`
+ * writes post-hoc) so the picker offered alongside "Add chat" launches the new
+ * panel directly in the chosen substrate instead of requiring a later change.
+ * Omitted/undefined inherits the session's substrate, unchanged.
  */
 export function useAddClaudePanel(
   session: UseAddClaudePanelSession | null | undefined,
   options: UseAddClaudePanelOptions = {},
-): () => Promise<void> {
+): (substrate?: CliSubstrate) => Promise<void> {
   const { addPanel, setActivePanel: setActivePanelInStore } = usePanelStore();
   const { onAfterActivate, logTag = 'useAddClaudePanel' } = options;
 
-  return useCallback(async () => {
+  return useCallback(async (substrate?: CliSubstrate) => {
     if (!session) {
       console.warn(`[${logTag}] Cannot add chat: missing session`);
       return;
@@ -40,6 +47,7 @@ export function useAddClaudePanel(
       sessionId: session.id,
       type: 'claude',
       initialState: { cwd: session.worktreePath },
+      ...(substrate ? { substrate } : {}),
     });
     addPanel(newPanel);
     setActivePanelInStore(session.id, newPanel.id);

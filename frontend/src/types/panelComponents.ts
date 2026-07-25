@@ -1,4 +1,5 @@
 import { ToolPanel } from '../../../shared/types/panels';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 export type PanelContext = 'project' | 'worktree';
 
@@ -9,7 +10,8 @@ export interface PanelTabBarProps {
   onPanelClose: (panel: ToolPanel) => void;
   context?: PanelContext;  // Optional context to filter available panels
   onAddTerminal?: () => void | Promise<void>;
-  onAddChat?: () => void | Promise<void>;
+  /** Optional substrate override for the new panel; omitted inherits the session. */
+  onAddChat?: (substrate?: CliSubstrate) => void | Promise<void>;
 }
 
 export interface PanelContainerProps {

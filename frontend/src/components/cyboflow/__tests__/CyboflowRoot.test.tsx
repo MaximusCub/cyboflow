@@ -478,7 +478,10 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
     const addChat = await screen.findByRole('button', { name: 'Add chat panel' });
     expect(screen.getByRole('button', { name: 'Add terminal panel' })).toBeInTheDocument();
 
+    // The trigger opens a substrate picker rather than creating the panel
+    // directly; "Inherit session" reproduces the pre-picker no-override behavior.
     fireEvent.click(addChat);
+    fireEvent.click(screen.getByText('Inherit session'));
 
     await waitFor(() => {
       expect(panelApi.createPanel).toHaveBeenCalledWith({
@@ -487,7 +490,7 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
         initialState: { cwd: mockMainRepoSession.worktreePath },
       });
     });
-    expect(panelApi.createPanel.mock.calls[0][0]).not.toHaveProperty('title');
+    expect(vi.mocked(panelApi.createPanel).mock.calls[0][0]).not.toHaveProperty('title');
     expect(panelApi.setActivePanel).toHaveBeenCalledWith(mockMainRepoSession.id, 'panel-qs-1');
   });
 
