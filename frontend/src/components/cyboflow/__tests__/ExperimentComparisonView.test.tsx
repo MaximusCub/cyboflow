@@ -32,6 +32,7 @@ const rerunComparisonMutate = vi.fn();
 const rerunMutate = vi.fn();
 const switchToRotationMutate = vi.fn();
 const promoteVariantMutate = vi.fn();
+const settleQuickArmMutate = vi.fn();
 const closeExperimentComparison = vi.fn();
 const setActiveProjectId = vi.fn();
 const goToSession = vi.fn();
@@ -51,6 +52,7 @@ vi.mock('../../../trpc/client', () => ({
         rerun: { mutate: (...a: unknown[]) => rerunMutate(...a) },
         switchToRotation: { mutate: (...a: unknown[]) => switchToRotationMutate(...a) },
         promoteVariant: { mutate: (...a: unknown[]) => promoteVariantMutate(...a) },
+        settleQuickArm: { mutate: (...a: unknown[]) => settleQuickArmMutate(...a) },
       },
       workflows: { get: { query: (...a: unknown[]) => getWorkflowQuery(...a) } },
       tasks: { get: { query: vi.fn().mockResolvedValue(null) } },
@@ -793,6 +795,86 @@ describe('ExperimentComparisonView', () => {
     fireEvent.click(screen.getByTestId('experiment-open-session-a'));
     await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
     await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-a', 'sess-a'));
+  });
+
+  // -------------------------------------------------------------------------
+  // Quick-arm "Done" affordance (settleQuickArm) — TASK-117
+  // -------------------------------------------------------------------------
+
+  it('renders "Done" for a live (unsettled) quick arm and calls settleQuickArm with the correct arm — the non-quick sibling arm has no such control', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'running' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    settleQuickArmMutate.mockResolvedValue({ experimentId: 'exp_1', arm: 'A', status: 'awaiting_review' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
+    expect(doneBtn).not.toBeDisabled();
+    // Arm B is a regular workflow arm, not the quick sentinel — no Done control.
+    expect(screen.queryByTestId('experiment-settle-quick-b')).not.toBeInTheDocument();
+
+    fireEvent.click(doneBtn);
+    await waitFor(() =>
+      expect(settleQuickArmMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'A' }),
+    );
+  });
+
+  it('renders NO "Done" control for an already-settled quick arm', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'awaiting_review' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    await screen.findByTestId('experiment-running-state');
+    expect(screen.queryByTestId('experiment-settle-quick-a')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('experiment-settle-quick-b')).not.toBeInTheDocument();
+  });
+
+  it('after "Done" settles the live quick arm, once both arms report settled statuses the decide CTAs enable', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery
+      .mockResolvedValueOnce(
+        makePayload({
+          comparisonStatus: 'absent',
+          verdict: null,
+          armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'running' }),
+          armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'awaiting_review' }),
+        }),
+      )
+      .mockResolvedValue(
+        makePayload({
+          armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'awaiting_review' }),
+          armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'awaiting_review' }),
+        }),
+      );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    settleQuickArmMutate.mockResolvedValue({ experimentId: 'exp_1', arm: 'A', status: 'awaiting_review' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    // Before Done: still in the running-state layout, no decide CTAs yet.
+    const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
+    expect(screen.queryByTestId('experiment-accept-a')).not.toBeInTheDocument();
+
+    fireEvent.click(doneBtn);
+    await waitFor(() =>
+      expect(settleQuickArmMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'A' }),
+    );
+    // Both arms now settled — the full verdict layout renders with enabled decide CTAs.
+    await waitFor(() => expect(screen.getByTestId('experiment-accept-a')).not.toBeDisabled());
   });
 
   it('renders the rotation body for a rotation-kind experiment without calling getComparison/getComparisonDiffs', async () => {

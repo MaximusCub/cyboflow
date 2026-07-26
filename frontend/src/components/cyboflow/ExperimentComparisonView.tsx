@@ -42,6 +42,7 @@ import {
   isExperimentArmSettled,
   isExperimentSettled,
   isBaselineArm,
+  isQuickArm,
   BASELINE_VARIANT_SENTINEL,
 } from '../../../../shared/types/experiments';
 import type {
@@ -506,6 +507,28 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     useNavigationStore.getState().goToSession();
   };
 
+  // A quick arm's underlying sentinel run has no SDK turn-end/Stop hook driving
+  // it out of 'running' — this is the explicit "Done" affordance the live
+  // running-state card offers for such an arm (see RunningArmCard). Busy state
+  // is keyed per-arm (settleQuickArmA / settleQuickArmB) so each arm's button
+  // can independently reflect its own in-flight mutation.
+  const handleSettleQuickArm = async (arm: ExperimentArm): Promise<void> => {
+    if (actionBusy !== null) return;
+    setActionBusy(arm === 'A' ? 'settleQuickArmA' : 'settleQuickArmB');
+    setActionError(null);
+    try {
+      await trpc.cyboflow.experiments.settleQuickArm.mutate({ experimentId, arm });
+      // Re-run the shared poll step so `payload`/`exp` refresh and the arm's
+      // status flips to 'awaiting_review' — the existing bothSettled/canDecide
+      // gating (derived from payload.armA/B.status) then reacts on its own.
+      tick();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to mark the quick session done');
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   const handlePromoteVariant = async (arm: ExperimentArm): Promise<void> => {
     if (exp === null || actionBusy !== null) return;
     setActionBusy('promoteVariant');
@@ -676,7 +699,13 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
         <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-6">
           {showRunningState ? (
             <>
-              <RunningStateView exp={exp} payload={payload} onOpenSession={handleOpenArmSession} />
+              <RunningStateView
+                exp={exp}
+                payload={payload}
+                onOpenSession={handleOpenArmSession}
+                onSettleQuickArm={handleSettleQuickArm}
+                actionBusy={actionBusy}
+              />
               {actionError !== null && (
                 <p className="text-sm text-status-error" role="alert">
                   {actionError}
@@ -1117,10 +1146,14 @@ function RunningStateView({
   exp,
   payload,
   onOpenSession,
+  onSettleQuickArm,
+  actionBusy,
 }: {
   exp: ExperimentRow;
   payload: ExperimentComparisonPayload;
   onOpenSession: (arm: ExperimentArm) => void;
+  onSettleQuickArm: (arm: ExperimentArm) => void;
+  actionBusy: string | null;
 }): React.JSX.Element {
   return (
     <div className="flex flex-col gap-4" data-testid="experiment-running-state">
@@ -1132,6 +1165,10 @@ function RunningStateView({
           usage={payload.armA.usage}
           canOpen={exp.session_a_id !== null}
           onOpen={() => onOpenSession('A')}
+          isQuick={isQuickArm(armVariantId(exp, 'A'))}
+          onSettle={() => onSettleQuickArm('A')}
+          settleBusy={actionBusy === 'settleQuickArmA'}
+          actionBusy={actionBusy !== null}
         />
         <RunningArmCard
           arm="B"
@@ -1140,6 +1177,10 @@ function RunningStateView({
           usage={payload.armB.usage}
           canOpen={exp.session_b_id !== null}
           onOpen={() => onOpenSession('B')}
+          isQuick={isQuickArm(armVariantId(exp, 'B'))}
+          onSettle={() => onSettleQuickArm('B')}
+          settleBusy={actionBusy === 'settleQuickArmB'}
+          actionBusy={actionBusy !== null}
         />
       </div>
       <p className="text-xs text-text-muted" data-testid="experiment-running-placeholder">
@@ -1149,7 +1190,16 @@ function RunningStateView({
   );
 }
 
-/** One live arm card in the running state: badge · label · status · usage · open-session link. */
+/**
+ * One live arm card in the running state: badge · label · status · usage ·
+ * open-session link · (for a live quick arm) a "Done" control.
+ *
+ * A quick arm's sentinel run never settles on its own — there is no SDK
+ * turn-end/Stop hook driving `'running'` to `'awaiting_review'` — so `isQuick`
+ * unsettled arms get an explicit "Done" button wired to `settleQuickArm`
+ * (`onSettle`). A settled quick arm (or any non-quick arm) shows no such
+ * control.
+ */
 function RunningArmCard({
   arm,
   label,
@@ -1157,6 +1207,10 @@ function RunningArmCard({
   usage,
   canOpen,
   onOpen,
+  isQuick,
+  onSettle,
+  settleBusy,
+  actionBusy,
 }: {
   arm: ExperimentArm;
   label: string;
@@ -1164,6 +1218,10 @@ function RunningArmCard({
   usage: RunUsageRollup | null;
   canOpen: boolean;
   onOpen: () => void;
+  isQuick: boolean;
+  onSettle: () => void;
+  settleBusy: boolean;
+  actionBusy: boolean;
 }): React.JSX.Element {
   return (
     <div
@@ -1197,15 +1255,28 @@ function RunningArmCard({
         )}
       </div>
 
-      <button
-        type="button"
-        data-testid={`experiment-open-session-${arm.toLowerCase()}`}
-        disabled={!canOpen}
-        onClick={onOpen}
-        className="inline-flex w-fit items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Open session <ArrowRight size={13} />
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid={`experiment-open-session-${arm.toLowerCase()}`}
+          disabled={!canOpen}
+          onClick={onOpen}
+          className="inline-flex w-fit items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Open session <ArrowRight size={13} />
+        </button>
+        {isQuick && !isExperimentArmSettled(status) && (
+          <button
+            type="button"
+            data-testid={`experiment-settle-quick-${arm.toLowerCase()}`}
+            disabled={settleBusy || actionBusy}
+            onClick={onSettle}
+            className="inline-flex w-fit items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {settleBusy ? 'Marking done…' : 'Done'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
