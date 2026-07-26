@@ -53,13 +53,18 @@ import {
   isExperimentSettled,
   isBaselineArm,
   BASELINE_VARIANT_SENTINEL,
+  isQuickArm,
+  QUICK_ARM_SENTINEL,
 } from '../../../../../shared/types/experiments';
+import type { RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
+import { ALL_EFFORT_LEVELS } from '../../../../../shared/types/reasoningEffort';
 import { displayRationaleForVerdict } from '../../eval/pairwiseScoring';
 import {
   insertExperiment,
   getExperiment,
   listExperimentsForProject,
   setExperimentRuns,
+  stampQuickArmRunExperimentTag,
   updateExperimentStatus,
   setExperimentPromotion,
   insertExperimentSeedTasks,
@@ -82,7 +87,7 @@ import {
   selectRotationExperimentRuns,
   selectRotationDashboardRows,
 } from '../../insightsQueries';
-import { experimentEvents, eventToAsyncIterable } from './events';
+import { experimentEvents, eventToAsyncIterable, runStatusEvents } from './events';
 
 // ---------------------------------------------------------------------------
 // Injected dependency bag (setExperimentsDeps, mirroring setStartRunDeps).
@@ -581,6 +586,13 @@ export interface StartInput {
   substrate?: CliSubstrate;
   permissionMode?: PermissionMode;
   rerunOfExperimentId?: string;
+  /**
+   * Optional per-arm quick-session config — present only when that arm is the
+   * `__quick__` sentinel (isQuickArm(variantAId) / isQuickArm(variantBId));
+   * ignored for a baseline/variant arm.
+   */
+  quickConfigA?: ExperimentArmQuickConfig;
+  quickConfigB?: ExperimentArmQuickConfig;
 }
 
 /** @internal exported for unit tests — the router calls it via requireDeps(). */
@@ -593,7 +605,13 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   //    and is NOT looked up in the variant registry — but BOTH cannot be baseline.
   const aIsBaseline = isBaselineArm(input.variantAId);
   const bIsBaseline = isBaselineArm(input.variantBId);
-  if (input.variantAId === input.variantBId) {
+  const aIsQuick = isQuickArm(input.variantAId);
+  const bIsQuick = isQuickArm(input.variantBId);
+  // Both arms are literally the '__quick__' sentinel for a quick-vs-quick pairing
+  // — each is its OWN independent quick session (createArmSession mints a fresh
+  // sentinel run per call), so the identical id does NOT collide the way two
+  // identical real variant ids (or two baselines) do.
+  if (input.variantAId === input.variantBId && !(aIsQuick && bIsQuick)) {
     throw new TRPCError({
       code: 'BAD_REQUEST',
       message: 'the two arms must differ — at least one arm must be a variant (both cannot be the baseline)',
@@ -607,10 +625,10 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   if (!workflow) {
     throw new TRPCError({ code: 'NOT_FOUND', message: `workflow ${input.workflowId} not found` });
   }
-  // Skip the registry existence check for a baseline arm (no variant row backs it).
-  const variantA = aIsBaseline ? null : deps.getVariant(input.variantAId);
-  const variantB = bIsBaseline ? null : deps.getVariant(input.variantBId);
-  if ((!aIsBaseline && !variantA) || (!bIsBaseline && !variantB)) {
+  // Skip the registry existence check for a baseline or quick arm (neither backs a variant row).
+  const variantA = aIsBaseline || aIsQuick ? null : deps.getVariant(input.variantAId);
+  const variantB = bIsBaseline || bIsQuick ? null : deps.getVariant(input.variantBId);
+  if ((!aIsBaseline && !aIsQuick && !variantA) || (!bIsBaseline && !bIsQuick && !variantB)) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'one or both variants not found' });
   }
   if (
@@ -696,13 +714,15 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     projectId: input.projectId,
     baseCommittish: baseSha,
     nameHint: armNameHint('A'),
+    quickConfig: aIsQuick ? input.quickConfigA : undefined,
   });
-  let sessionB: { sessionId: string; worktreePath: string };
+  let sessionB: { sessionId: string; worktreePath: string; runId: string };
   try {
     sessionB = await deps.createArmSession({
       projectId: input.projectId,
       baseCommittish: baseSha,
       nameHint: armNameHint('B'),
+      quickConfig: bIsQuick ? input.quickConfigB : undefined,
     });
   } catch (err) {
     await deps.dismissSession(sessionA.sessionId).catch(() => {});
@@ -815,58 +835,76 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     // 6. Launch arm A then B. Idea-seeded arms pass `ideaId = the arm's idea clone`;
     //    sprint task-seeded arms pass `seedTaskIds = the arm's task clone ids` (the
     //    9th positional, exactly as the normal sprint launch threads them). The two
-    //    seed modes are mutually exclusive.
-    const armA = await deps.runLauncher.launch(
-      input.workflowId,
-      projectPath,
-      input.substrate,
-      undefined,
-      createdIdeaCloneA ?? undefined,
-      sessionA.sessionId,
-      input.permissionMode,
-      undefined,
-      createdTaskClonesA.length > 0 ? createdTaskClonesA : undefined,
-      input.projectId,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      // A baseline arm launches as baseline (variant_id NULL): pass `baseline: true`
-      // so the launcher's VariantResolver returns null WITHOUT rotating. A real-variant
-      // arm pins its variant explicitly. Both carry the experiment/arm stamp.
-      aIsBaseline
-        ? { baseline: true, experiment: { experimentId: exp.id, arm: 'A' } }
-        : { requestedVariantId: input.variantAId, experiment: { experimentId: exp.id, arm: 'A' } },
-    );
-    setExperimentRuns(db, exp.id, { runAId: armA.runId });
+    //    seed modes are mutually exclusive. A quick arm has no launcher-created run —
+    //    createArmSession already minted its `__quick__` sentinel (sessionX.runId) via
+    //    createQuickSessionCore — so it skips runLauncher.launch entirely and instead
+    //    has that sentinel stamped with the experiment tag. The stamp MUST land BEFORE
+    //    setExperimentRuns records the run id (see stampQuickArmRunExperimentTag).
+    let runAId: string;
+    if (aIsQuick) {
+      stampQuickArmRunExperimentTag(db, sessionA.runId, exp.id, 'A');
+      runAId = sessionA.runId;
+    } else {
+      const armA = await deps.runLauncher.launch(
+        input.workflowId,
+        projectPath,
+        input.substrate,
+        undefined,
+        createdIdeaCloneA ?? undefined,
+        sessionA.sessionId,
+        input.permissionMode,
+        undefined,
+        createdTaskClonesA.length > 0 ? createdTaskClonesA : undefined,
+        input.projectId,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        // A baseline arm launches as baseline (variant_id NULL): pass `baseline: true`
+        // so the launcher's VariantResolver returns null WITHOUT rotating. A real-variant
+        // arm pins its variant explicitly. Both carry the experiment/arm stamp.
+        aIsBaseline
+          ? { baseline: true, experiment: { experimentId: exp.id, arm: 'A' } }
+          : { requestedVariantId: input.variantAId, experiment: { experimentId: exp.id, arm: 'A' } },
+      );
+      runAId = armA.runId;
+    }
+    setExperimentRuns(db, exp.id, { runAId });
 
-    const armB = await deps.runLauncher.launch(
-      input.workflowId,
-      projectPath,
-      input.substrate,
-      undefined,
-      createdIdeaCloneB ?? undefined,
-      sessionB.sessionId,
-      input.permissionMode,
-      undefined,
-      createdTaskClonesB.length > 0 ? createdTaskClonesB : undefined,
-      input.projectId,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      bIsBaseline
-        ? { baseline: true, experiment: { experimentId: exp.id, arm: 'B' } }
-        : { requestedVariantId: input.variantBId, experiment: { experimentId: exp.id, arm: 'B' } },
-    );
-    setExperimentRuns(db, exp.id, { runBId: armB.runId });
+    let runBId: string;
+    if (bIsQuick) {
+      stampQuickArmRunExperimentTag(db, sessionB.runId, exp.id, 'B');
+      runBId = sessionB.runId;
+    } else {
+      const armB = await deps.runLauncher.launch(
+        input.workflowId,
+        projectPath,
+        input.substrate,
+        undefined,
+        createdIdeaCloneB ?? undefined,
+        sessionB.sessionId,
+        input.permissionMode,
+        undefined,
+        createdTaskClonesB.length > 0 ? createdTaskClonesB : undefined,
+        input.projectId,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        bIsBaseline
+          ? { baseline: true, experiment: { experimentId: exp.id, arm: 'B' } }
+          : { requestedVariantId: input.variantBId, experiment: { experimentId: exp.id, arm: 'B' } },
+      );
+      runBId = armB.runId;
+    }
+    setExperimentRuns(db, exp.id, { runBId });
 
     return {
       experimentId: exp.id,
-      armA: { runId: armA.runId, sessionId: sessionA.sessionId },
-      armB: { runId: armB.runId, sessionId: sessionB.sessionId },
+      armA: { runId: runAId, sessionId: sessionA.sessionId },
+      armB: { runId: runBId, sessionId: sessionB.sessionId },
     };
   } catch (err) {
     return rollback(`side-by-side launch failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1495,6 +1533,18 @@ export function promoteVariant(
     return { experimentId, promotedVariantId: BASELINE_VARIANT_SENTINEL, promotedArm: arm };
   }
 
+  // Quick-session arm won: same posture as baseline — no variant row backs a
+  // '__quick__' arm, so record the verdict only (no spec adoption, no variant
+  // retirement) and return BEFORE the getVariant() NOT_FOUND lookup below.
+  if (isQuickArm(variantId)) {
+    setExperimentPromotion(db, experimentId, {
+      promotedVariantId: QUICK_ARM_SENTINEL,
+      promotedArm: arm,
+      promotedAt: now,
+    });
+    return { experimentId, promotedVariantId: QUICK_ARM_SENTINEL, promotedArm: arm };
+  }
+
   const variant = deps.getVariant(variantId);
   if (!variant) {
     throw new TRPCError({ code: 'NOT_FOUND', message: `variant ${variantId} not found` });
@@ -1532,6 +1582,77 @@ export function promoteVariant(
   return { experimentId, promotedVariantId: variantId, promotedArm: arm };
 }
 
+// ---------------------------------------------------------------------------
+// settleQuickArm — manually rest a quick-session arm's run so decide (which
+// requires BOTH arms settled) becomes reachable. A quick session's run has no
+// SDK turn-end / Stop hook driving the normal 'running' -> 'awaiting_review'
+// rest transition, so a '__quick__' arm can otherwise sit at 'running' forever.
+// ---------------------------------------------------------------------------
+
+/** @internal exported for unit tests. */
+export function settleQuickArm(
+  deps: ExperimentsDeps,
+  experimentId: string,
+  arm: ExperimentArm,
+): { experimentId: string; arm: ExperimentArm; runId: string; status: string; changed: boolean } {
+  const { db } = deps;
+  const exp = getExperiment(db, experimentId);
+  if (!exp) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${experimentId} not found` });
+  }
+  const { variantAId, variantBId } = requireSideBySideFields(exp);
+  const variantId = arm === 'A' ? variantAId : variantBId;
+  if (!isQuickArm(variantId)) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: `arm ${arm} of experiment ${experimentId} is not a quick-session arm (a workflow arm settles naturally)`,
+    });
+  }
+  const runId = arm === 'A' ? exp.run_a_id : exp.run_b_id;
+  if (!runId) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `quick arm ${arm} of experiment ${experimentId} has no run yet`,
+    });
+  }
+  const status = runStatus(db, runId);
+  if (status === null) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `run ${runId} not found` });
+  }
+  // Idempotent no-op: already settled — never throw, never re-emit.
+  if (isExperimentArmSettled(status)) {
+    return { experimentId, arm, runId, status, changed: false };
+  }
+  if (status === 'running') {
+    // Same guarded UPDATE shape as transitionRunningToAwaitingReview
+    // (main/src/services/cyboflow/transitions.ts), inlined here to keep this
+    // router import-light (no main/src/services/* imports).
+    const result = db
+      .prepare(
+        `UPDATE workflow_runs
+            SET status = 'awaiting_review', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'running'`,
+      )
+      .run(runId);
+    if (result.changes > 0) {
+      runStatusEvents.emit('changed', { runId, status: 'awaiting_review' } satisfies RunStatusChangedEvent);
+      return { experimentId, arm, runId, status: 'awaiting_review', changed: true };
+    }
+    // Lost a race (e.g. the SDK turn-end fired transitionRunningToAwaitingReview
+    // first, or a concurrent settleQuickArm call, or the run moved to
+    // awaiting_input) — report the fresh status rather than forcing the transition.
+    const fresh = runStatus(db, runId) ?? status;
+    return { experimentId, arm, runId, status: fresh, changed: false };
+  }
+  // Any other transient status (starting/awaiting_input/stuck/paused/queued) has
+  // no legal direct edge to awaiting_review per stateMachine.ts's
+  // ALLOWED_TRANSITIONS — guard + defer rather than forcing an illegal transition.
+  throw new TRPCError({
+    code: 'PRECONDITION_FAILED',
+    message: `quick arm ${arm} of experiment ${experimentId} is not settleable from status '${status}'`,
+  });
+}
+
 /**
  * "Switch to randomized": turn a settled head-to-head into an ongoing A/B rotation
  * between its two arms — WHICHEVER they are. A real-variant arm is activated
@@ -1555,6 +1676,16 @@ export function switchToRotationExperiment(
       message: `experiment ${experimentId} must be decided/abandoned before switching to rotation`,
     });
   }
+  const { variantAId, variantBId } = requireSideBySideFields(exp);
+  // A quick-session arm ('__quick__') is never a real variant nor the baseline
+  // sentinel, so it can never be a rotation arm (rotation arms are real
+  // variants or the baseline only) — reject before either activateArm call.
+  if (isQuickArm(variantAId) || isQuickArm(variantBId)) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: `experiment ${experimentId} has a quick-session arm and cannot switch to rotation`,
+    });
+  }
   const activateArm = (variantId: string, weight: number | undefined): void => {
     if (isBaselineArm(variantId)) {
       deps.setBaselineRotation(exp.workflow_id, {
@@ -1573,7 +1704,6 @@ export function switchToRotationExperiment(
     if (weight !== undefined) deps.setVariantWeight(variantId, weight);
     deps.setVariantStatus(variantId, 'active');
   };
-  const { variantAId, variantBId } = requireSideBySideFields(exp);
   activateArm(variantAId, weights?.a);
   activateArm(variantBId, weights?.b);
 
@@ -1864,6 +1994,7 @@ export function buildVerdict(row: ComparisonStatusRow | null): PairwiseVerdict |
  */
 function armVariantLabel(variantId: string, resolvedLabel: string | null): string {
   if (isBaselineArm(variantId)) return 'Baseline';
+  if (isQuickArm(variantId)) return 'Quick session';
   return resolvedLabel ?? variantId;
 }
 
@@ -2030,6 +2161,17 @@ export function listDashboardExperiments(deps: ExperimentsDeps, input: ListDashb
 // Router
 // ---------------------------------------------------------------------------
 
+/** Wire schema for one arm's optional quick-session config — mirrors {@link ExperimentArmQuickConfig}. */
+const experimentArmQuickConfigSchema = z.object({
+  substrate: z.enum(['sdk', 'interactive']).optional(),
+  agentProvider: z.enum(['claude', 'codex']).optional(),
+  agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
+  model: z.string().min(1).optional(),
+  fastMode: z.boolean().optional(),
+  reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
+  permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
+});
+
 export const experimentsRouter = router({
   startSideBySide: protectedProcedure
     .input(
@@ -2045,6 +2187,9 @@ export const experimentsRouter = router({
         seedTaskIds: z.array(z.string().min(1)).optional(),
         substrate: z.enum(['sdk', 'interactive']).optional(),
         permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
+        // Present only when the corresponding arm is the `__quick__` sentinel.
+        quickConfigA: experimentArmQuickConfigSchema.optional(),
+        quickConfigB: experimentArmQuickConfigSchema.optional(),
       }),
     )
     .mutation(async ({ input }): Promise<StartSideBySideResult> => {
@@ -2144,6 +2289,20 @@ export const experimentsRouter = router({
         return promoteVariant(deps, input.experimentId, input.arm);
       },
     ),
+
+  /**
+   * Manually rest a quick-session arm's run ('running' -> 'awaiting_review') so
+   * decide (which requires BOTH arms settled) becomes reachable — a quick session
+   * has no SDK turn-end / Stop hook driving that transition on its own.
+   * Idempotent when already settled; PRECONDITION_FAILED when the arm's run is in
+   * a transient state with no legal direct edge to awaiting_review.
+   */
+  settleQuickArm: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1), arm: z.enum(['A', 'B']) }))
+    .mutation(({ input }) => {
+      const deps = requireDeps();
+      return settleQuickArm(deps, input.experimentId, input.arm);
+    }),
 
   /** The OPEN rotation experiment summary for a workflow (null when none). */
   getRunningRotation: protectedProcedure

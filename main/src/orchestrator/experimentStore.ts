@@ -187,6 +187,30 @@ export function setExperimentRuns(db: DatabaseLike, experimentId: string, links:
   db.prepare(`UPDATE experiments SET ${sets.join(', ')} WHERE id = ?`).run(...params, experimentId);
 }
 
+/**
+ * Stamp a `__quick__` sentinel run's experiment tag (workflow_runs.experiment_id /
+ * experiment_arm) after the fact. A normal arm's run gets these columns AT
+ * INSERT (workflowRegistry.createRun's opts.experimentArm) because its run is
+ * only created after the experiments row exists; a quick arm's sentinel run is
+ * created the OPPOSITE way round — createQuickSessionCore mints it while
+ * building the arm session, BEFORE the experiments row exists — so it starts
+ * life untagged and this UPDATE fills the tag in. MUST be called before
+ * setExperimentRuns records the run id: the half-created recovery invariant
+ * treats a NULL run_a_id/run_b_id as "this arm never launched" (swept as
+ * abandoned on crash), so the run must already carry its experiment identity
+ * before it becomes visible as that arm's run.
+ */
+export function stampQuickArmRunExperimentTag(
+  db: DatabaseLike,
+  runId: string,
+  experimentId: string,
+  arm: ExperimentArm,
+): void {
+  db.prepare(
+    `UPDATE workflow_runs SET experiment_id = ?, experiment_arm = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+  ).run(experimentId, arm, runId);
+}
+
 /** Extra columns settable alongside a status transition (winner + decision stamps). */
 export interface ExperimentStatusExtras {
   winnerRunId?: string | null;
