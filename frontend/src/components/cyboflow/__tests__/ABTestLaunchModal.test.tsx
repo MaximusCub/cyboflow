@@ -21,9 +21,15 @@
  *      navigates to the session view, and closes.
  *   7. Mutation failure surfaces the typed backend error in role=alert and does
  *      NOT navigate/bootstrap.
+ *   8. Quick-arm option (TASK-118): the "Quick session" option appears in both
+ *      selects; picking it reveals that arm's config sub-form; quick-vs-quick is
+ *      submittable (no same-variant hint, submit enabled) while two identical
+ *      real variants still block submit + show the hint; the mutate payload
+ *      carries quickConfigA/quickConfigB only for the quick arm(s); navigation
+ *      targets the single quick arm, or arm A when both/neither arm is quick.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { WorkflowVariantRow } from '../../../stores/variantsStore';
 
@@ -101,7 +107,7 @@ vi.mock('../../../stores/navigationStore', () => ({
 }));
 
 import { ABTestLaunchModal } from '../ABTestLaunchModal';
-import { BASELINE_VARIANT_SENTINEL } from '../../../../../shared/types/experiments';
+import { BASELINE_VARIANT_SENTINEL, QUICK_ARM_SENTINEL } from '../../../../../shared/types/experiments';
 import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
 
 function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
@@ -307,6 +313,139 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
     render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.getByTestId('ab-test-add-seed-idea')).toBeInTheDocument();
     expect(screen.queryByTestId('ab-test-seed-tasks')).not.toBeInTheDocument();
+  });
+});
+
+describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
+  beforeEach(() => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [
+        makeVariant({ id: 'a', label: 'Variant A', status: 'active' }),
+        makeVariant({ id: 'b', label: 'Variant B', status: 'draft' }),
+      ],
+      loaded: true,
+      loading: false,
+      error: null,
+    });
+  });
+
+  it('the "Quick session" option is offered in both selects', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    expect(
+      within(screen.getByTestId('ab-test-variant-a')).getByRole('option', { name: 'Quick session' }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('ab-test-variant-b')).getByRole('option', { name: 'Quick session' }),
+    ).toBeInTheDocument();
+  });
+
+  it('selecting quick for arm A reveals ONLY arm A\'s config sub-form', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    expect(screen.queryByTestId('ab-test-quick-config-a')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    expect(screen.getByTestId('ab-test-quick-config-a')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-quick-config-b')).not.toBeInTheDocument();
+  });
+
+  it('quick-vs-quick is submittable: no same-variant hint, submit enabled', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    expect(screen.getByTestId('ab-test-quick-config-a')).toBeInTheDocument();
+    expect(screen.getByTestId('ab-test-quick-config-b')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-same-variant-hint')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ab-test-submit')).not.toBeDisabled();
+  });
+
+  it('two identical REAL variants still block submit and show the hint (unchanged non-quick behavior)', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: 'a' } });
+    expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
+    expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
+  });
+
+  it('submit sends quickConfigA (and not quickConfigB) when only arm A is quick', async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args).toEqual({
+      projectId: 1,
+      workflowId: 'wf-1',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'b',
+      quickConfigA: {
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        model: 'opus',
+        permissionMode: 'default',
+      },
+    });
+    expect('quickConfigB' in args).toBe(false);
+  });
+
+  it('submit sends BOTH quickConfigA and quickConfigB for quick-vs-quick', async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+
+    const args = mockStartSideBySide.mock.calls[0][0];
+    const expectedQuickConfig = {
+      substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      model: 'opus',
+      permissionMode: 'default',
+    };
+    expect(args.quickConfigA).toEqual(expectedQuickConfig);
+    expect(args.quickConfigB).toEqual(expectedQuickConfig);
+  });
+
+  it('navigation targets arm B (the quick arm) when only arm B is quick', async () => {
+    const onClose = vi.fn();
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-b');
+    expect(mockSetActiveRun).toHaveBeenCalledWith('run-b', 'sess-b');
+  });
+
+  it('navigation targets arm A when only arm A is quick', async () => {
+    const onClose = vi.fn();
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
+    expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
+  });
+
+  it('navigation targets arm A (the default) for quick-vs-quick', async () => {
+    const onClose = vi.fn();
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
+    expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
   });
 });
 

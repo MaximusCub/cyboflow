@@ -32,9 +32,11 @@ import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useWorkflowVariants } from '../../stores/variantsStore';
 import { pickableVariants } from './variantSelectorLogic';
-import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments';
+import { BASELINE_VARIANT_SENTINEL, QUICK_ARM_SENTINEL } from '../../../../shared/types/experiments';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
+import type { PermissionMode } from '../../../../shared/types/workflows';
+import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import type { EpicTaskGroup } from './taskGrouping';
 import { flattenGroups, groupTasksByEpic } from './taskGrouping';
 import { EpicGroupedTaskList } from './EpicGroupedTaskList';
@@ -42,6 +44,125 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { SubstrateSelector } from './SubstrateSelector';
+import { ModelSelector, DEFAULT_QUICK_MODEL } from './ModelSelector';
+import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
+import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+
+/**
+ * Per-arm quick-session config, local to the modal. Mirrors the subset of the
+ * backend's `ExperimentArmQuickConfig` wire shape a user can pin from this modal
+ * (substrate/agentProvider are DERIVED from `runtime`, not stored separately).
+ */
+interface ArmQuickConfig {
+  runtime: LaunchAgentRuntime;
+  model: string;
+  reasoningEffort: ReasoningEffort | null;
+  permissionMode: PermissionMode;
+}
+
+const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
+  runtime: 'claude-sdk',
+  model: DEFAULT_QUICK_MODEL,
+  reasoningEffort: null,
+  permissionMode: 'default',
+};
+
+/**
+ * The wire-schema `agentRuntime` enum for an experiment quick arm excludes
+ * `codex-pty` (session-only elsewhere, not for an A/B arm) — see
+ * `experimentArmQuickConfigSchema` in `experiments.ts`. `QuickArmConfigForm`'s
+ * `SubstrateSelector` already disables `codex-pty` via `runtimeScope="workflow"`
+ * (its `isRuntimeDisabled` disables exactly `codex-pty`, matching this
+ * restriction despite the "workflow" name), so this is unreachable through the
+ * UI; clamped here anyway as defense-in-depth + to satisfy the narrower type.
+ */
+function quickArmAgentRuntime(
+  runtime: LaunchAgentRuntime,
+): 'claude-sdk' | 'claude-interactive' | 'codex-sdk' {
+  return runtime === 'codex-pty' ? 'codex-sdk' : runtime;
+}
+
+function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive' | undefined {
+  if (runtime === 'claude-sdk') return 'sdk';
+  if (runtime === 'claude-interactive') return 'interactive';
+  return undefined;
+}
+
+/** One arm's quick-session config sub-form — reused for A and B. */
+function QuickArmConfigForm({
+  arm,
+  config,
+  onChange,
+}: {
+  arm: 'a' | 'b';
+  config: ArmQuickConfig;
+  onChange: (config: ArmQuickConfig) => void;
+}): React.JSX.Element {
+  const provider = providerForRuntime(config.runtime);
+  const testIdPrefix = `ab-test-quick-config-${arm}`;
+  return (
+    <div
+      data-testid={testIdPrefix}
+      className="flex flex-col gap-2 rounded-button border border-dashed border-border-primary p-2"
+    >
+      <span className="text-xs font-semibold text-text-primary">Quick session config</span>
+      <SubstrateSelector
+        value={config.runtime}
+        onChange={(runtime) => onChange({ ...config, runtime })}
+        id={`${testIdPrefix}-runtime`}
+        runtimeScope="workflow"
+      />
+      <ModelSelector
+        value={config.model}
+        onChange={(model) => onChange({ ...config, model })}
+        id={`${testIdPrefix}-model`}
+        agentProvider={provider}
+        agentRuntime={config.runtime}
+      />
+      {/* Reasoning-effort select — excluded for codex-pty (mirrors
+          SessionStartWizard), moot here since the runtime choice above already
+          disables codex-pty for a quick arm. */}
+      {config.runtime !== 'codex-pty' && (
+        <div className="flex flex-col gap-1">
+          <label
+            htmlFor={`${testIdPrefix}-effort`}
+            className="text-xs font-medium text-text-secondary"
+          >
+            Reasoning effort
+          </label>
+          <select
+            id={`${testIdPrefix}-effort`}
+            value={config.reasoningEffort ?? ''}
+            onChange={(e) =>
+              onChange({
+                ...config,
+                reasoningEffort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
+              })
+            }
+            className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-input-text"
+            aria-label={`Select reasoning effort for arm ${arm.toUpperCase()}`}
+            data-testid={`${testIdPrefix}-effort`}
+          >
+            <option value="">Default</option>
+            {effortLevelsForProvider(provider).map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      <AgentPermissionModeSelector
+        value={config.permissionMode}
+        onChange={(permissionMode) => onChange({ ...config, permissionMode })}
+        agentProvider={provider}
+        agentRuntime={config.runtime}
+        label="Permission mode"
+      />
+    </div>
+  );
+}
 
 export interface ABTestLaunchModalProps {
   isOpen: boolean;
@@ -94,6 +215,11 @@ export function ABTestLaunchModal({
 
   const [variantAId, setVariantAId] = useState<string>('');
   const [variantBId, setVariantBId] = useState<string>('');
+  // Per-arm quick-session config, only read/sent when that arm is the
+  // `__quick__` sentinel. Kept even when the arm switches away so a user's
+  // in-progress config isn't lost if they flip back.
+  const [quickConfigA, setQuickConfigA] = useState<ArmQuickConfig>(DEFAULT_QUICK_ARM_CONFIG);
+  const [quickConfigB, setQuickConfigB] = useState<ArmQuickConfig>(DEFAULT_QUICK_ARM_CONFIG);
   const [seedIdeaId, setSeedIdeaId] = useState<string | null>(null);
   const [seedIdeaLabel, setSeedIdeaLabel] = useState<string | null>(null);
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
@@ -289,13 +415,36 @@ export function ABTestLaunchModal({
   };
 
   // A sprint experiment additionally REQUIRES >=1 seed task (a task-less sprint arm
-  // has nothing to run); every other workflow's seed idea stays optional.
+  // has nothing to run); every other workflow's seed idea stays optional. A===B is
+  // blocked UNLESS the shared value is the quick sentinel — two independently
+  // configured quick sessions are a valid (quick-vs-quick) head-to-head.
+  const sameVariantChosen =
+    variantAId !== '' && variantAId === variantBId && variantAId !== QUICK_ARM_SENTINEL;
   const canSubmit =
     variantAId !== '' &&
     variantBId !== '' &&
-    variantAId !== variantBId &&
+    !sameVariantChosen &&
     !isStarting &&
     (!isSprint || selectedTaskIds.size > 0);
+
+  const buildQuickConfigPayload = (config: ArmQuickConfig): {
+    substrate?: 'sdk' | 'interactive';
+    agentProvider: 'claude' | 'codex';
+    agentRuntime: 'claude-sdk' | 'claude-interactive' | 'codex-sdk';
+    model: string;
+    reasoningEffort?: ReasoningEffort;
+    permissionMode: PermissionMode;
+  } => {
+    const substrate = substrateForQuickArm(config.runtime);
+    return {
+      ...(substrate ? { substrate } : {}),
+      agentProvider: providerForRuntime(config.runtime),
+      agentRuntime: quickArmAgentRuntime(config.runtime),
+      model: config.model,
+      ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+      permissionMode: config.permissionMode,
+    };
+  };
 
   const handleStart = async (): Promise<void> => {
     if (!canSubmit || startInFlightRef.current) return;
@@ -303,6 +452,8 @@ export function ABTestLaunchModal({
     setIsStarting(true);
     setError(null);
     try {
+      const aIsQuick = variantAId === QUICK_ARM_SENTINEL;
+      const bIsQuick = variantBId === QUICK_ARM_SENTINEL;
       const result = await trpc.cyboflow.experiments.startSideBySide.mutate({
         projectId: selectedProjectId,
         workflowId,
@@ -313,12 +464,18 @@ export function ABTestLaunchModal({
           : seedIdeaId !== null
             ? { seedIdeaId }
             : {}),
+        ...(aIsQuick ? { quickConfigA: buildQuickConfigPayload(quickConfigA) } : {}),
+        ...(bIsQuick ? { quickConfigB: buildQuickConfigPayload(quickConfigB) } : {}),
       });
 
-      // Bootstrap arm A's panels (server created the session headless), then
-      // navigate straight to it.
-      await bootstrapArmSessionPanels(result.armA.sessionId);
-      useCyboflowStore.getState().setActiveRun(result.armA.runId, result.armA.sessionId);
+      // Navigate to whichever arm is the quick one when exactly one is quick;
+      // arm A otherwise (quick-vs-quick and the non-quick default both land on A).
+      const targetArm = bIsQuick && !aIsQuick ? result.armB : result.armA;
+
+      // Bootstrap the target arm's panels (server created the session headless),
+      // then navigate straight to it.
+      await bootstrapArmSessionPanels(targetArm.sessionId);
+      useCyboflowStore.getState().setActiveRun(targetArm.runId, targetArm.sessionId);
       useNavigationStore.getState().setActiveProjectId(selectedProjectId);
       useNavigationStore.getState().goToSession();
 
@@ -333,7 +490,6 @@ export function ABTestLaunchModal({
   };
 
   const insufficientVariants = loaded && options.length < 1;
-  const sameVariantChosen = variantAId !== '' && variantAId === variantBId;
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} size="md">
@@ -387,8 +543,12 @@ export function ABTestLaunchModal({
                       {v.status === 'draft' ? `${v.label} (draft)` : v.label}
                     </option>
                   ))}
+                  <option value={QUICK_ARM_SENTINEL}>Quick session</option>
                 </select>
               </label>
+              {variantAId === QUICK_ARM_SENTINEL && (
+                <QuickArmConfigForm arm="a" config={quickConfigA} onChange={setQuickConfigA} />
+              )}
               <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
                 Variant B
                 <select
@@ -404,8 +564,12 @@ export function ABTestLaunchModal({
                       {v.status === 'draft' ? `${v.label} (draft)` : v.label}
                     </option>
                   ))}
+                  <option value={QUICK_ARM_SENTINEL}>Quick session</option>
                 </select>
               </label>
+              {variantBId === QUICK_ARM_SENTINEL && (
+                <QuickArmConfigForm arm="b" config={quickConfigB} onChange={setQuickConfigB} />
+              )}
               {sameVariantChosen && (
                 <p
                   className="text-xs text-status-error"
