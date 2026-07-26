@@ -16,6 +16,11 @@
  *   4. isAgentThreadSpawnId — the global-agent thread's synthetic
  *      `agent:<threadId>` spawn identity vs. a cyboflow workflow-run id, a
  *      Crystal session id, and the empty-remainder edge case.
+ *   5. isBaselineArm / isQuickArm — the two experiment-arm sentinel guards
+ *      (`'__baseline__'` / `'__quick__'`), pinned mutually exclusive so the
+ *      deliberate `QUICK_ARM_SENTINEL` / `QUICK_WORKFLOW_NAME` namespace
+ *      overload (see doc block above `BASELINE_VARIANT_SENTINEL`) never gets
+ *      conflated with the baseline sentinel or a real `wfv_…` variant id.
  */
 import { describe, it, expect } from 'vitest';
 import { isCliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
@@ -23,6 +28,12 @@ import { isFindingPriority, FINDING_PRIORITIES } from '../../../shared/types/rev
 import { extractToolResultText } from '../../../shared/utils/extractToolResultText';
 import type { ToolResultBlock } from '../../../shared/types/claudeStream';
 import { isAgentThreadSpawnId, AGENT_THREAD_SPAWN_PREFIX } from '../../../shared/types/agentThread';
+import {
+  BASELINE_VARIANT_SENTINEL,
+  isBaselineArm,
+  QUICK_ARM_SENTINEL,
+  isQuickArm,
+} from '../../../shared/types/experiments';
 
 describe('isCliSubstrate', () => {
   it.each([
@@ -172,5 +183,32 @@ describe('isAgentThreadSpawnId', () => {
   it('is case-sensitive — a wrong-case prefix does not match', () => {
     expect(isAgentThreadSpawnId('Agent:x')).toBe(false);
     expect(isAgentThreadSpawnId('AGENT:x')).toBe(false);
+  });
+});
+
+describe('experiment arm sentinels: isBaselineArm / isQuickArm', () => {
+  it('sentinels carry their exact literal values', () => {
+    // Pinned literals, not just "truthy" — the DB stores these strings verbatim
+    // in experiments.variant_a_id / variant_b_id.
+    expect(BASELINE_VARIANT_SENTINEL).toBe('__baseline__');
+    expect(QUICK_ARM_SENTINEL).toBe('__quick__');
+  });
+
+  it('isBaselineArm accepts only the baseline sentinel', () => {
+    expect(isBaselineArm(BASELINE_VARIANT_SENTINEL)).toBe(true);
+    expect(isBaselineArm('wfv_abc123')).toBe(false);
+  });
+
+  it('isQuickArm accepts only the quick-arm sentinel', () => {
+    expect(isQuickArm(QUICK_ARM_SENTINEL)).toBe(true);
+    expect(isQuickArm('wfv_abc123')).toBe(false);
+  });
+
+  it('the two sentinels are mutually exclusive — neither guard conflates them', () => {
+    // This is the invariant the doc comment calls out explicitly: QUICK_ARM_SENTINEL
+    // and QUICK_WORKFLOW_NAME are a deliberate literal overload, but the two
+    // experiment-arm guards themselves must never cross-match each other's sentinel.
+    expect(isBaselineArm(QUICK_ARM_SENTINEL)).toBe(false);
+    expect(isQuickArm(BASELINE_VARIANT_SENTINEL)).toBe(false);
   });
 });
