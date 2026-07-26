@@ -817,6 +817,8 @@ describe('ExperimentComparisonView', () => {
     render(<ExperimentComparisonView experimentId="exp_1" />);
     const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
     expect(doneBtn).not.toBeDisabled();
+    // The backend-supplied variantLabel ('Quick session') renders verbatim on the card.
+    expect(screen.getByText('Quick session')).toBeInTheDocument();
     // Arm B is a regular workflow arm, not the quick sentinel — no Done control.
     expect(screen.queryByTestId('experiment-settle-quick-b')).not.toBeInTheDocument();
 
@@ -824,6 +826,66 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() =>
       expect(settleQuickArmMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'A' }),
     );
+  });
+
+  it('renders "Done" for a live quick arm B (symmetric with arm A) and calls settleQuickArm with arm: "B" — arm A has no such control', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: 'wfv_a', variant_b_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'variant-a', status: 'running' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'Quick session', status: 'running' }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    settleQuickArmMutate.mockResolvedValue({ experimentId: 'exp_1', arm: 'B', status: 'awaiting_review' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const doneBtn = await screen.findByTestId('experiment-settle-quick-b');
+    expect(doneBtn).not.toBeDisabled();
+    // Arm A is a regular workflow arm here — no Done control.
+    expect(screen.queryByTestId('experiment-settle-quick-a')).not.toBeInTheDocument();
+
+    fireEvent.click(doneBtn);
+    await waitFor(() =>
+      expect(settleQuickArmMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'B' }),
+    );
+  });
+
+  it('shows a busy/disabled "Marking done…" state while settleQuickArm is in flight, and ignores a second click until it settles', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'running' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    let resolveMutate: (value: { experimentId: string; arm: string; status: string }) => void = () => {};
+    settleQuickArmMutate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveMutate = resolve;
+        }),
+    );
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
+
+    fireEvent.click(doneBtn);
+    await waitFor(() => expect(screen.getByTestId('experiment-settle-quick-a')).toHaveTextContent('Marking done…'));
+    expect(screen.getByTestId('experiment-settle-quick-a')).toBeDisabled();
+
+    // A second click while the mutation is still in flight must be a no-op.
+    fireEvent.click(screen.getByTestId('experiment-settle-quick-a'));
+    expect(settleQuickArmMutate).toHaveBeenCalledTimes(1);
+
+    resolveMutate({ experimentId: 'exp_1', arm: 'A', status: 'awaiting_review' });
+    await waitFor(() => expect(screen.getByTestId('experiment-settle-quick-a')).not.toBeDisabled());
+    expect(screen.getByTestId('experiment-settle-quick-a')).toHaveTextContent('Done');
   });
 
   it('renders NO "Done" control for an already-settled quick arm', async () => {
