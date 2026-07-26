@@ -144,12 +144,37 @@ export type ExperimentKind = 'side_by_side' | 'rotation';
  * The value coincides with variantSelectorLogic's `BASELINE_SENTINEL`, but this one
  * is the cross-boundary EXPERIMENT-ARM sentinel — importable by both the launch UI
  * and the main-process router (variantSelectorLogic is frontend-only).
+ *
+ * A side-by-side experiment arm id is therefore one of three things: the baseline
+ * sentinel below (`'__baseline__'`, the live workflow), a real variant id
+ * (`wfv_…`), or the quick-arm sentinel (`'__quick__'`, an ad hoc quick session
+ * used as one arm of the comparison).
+ *
+ * `QUICK_ARM_SENTINEL` and `QUICK_WORKFLOW_NAME`
+ * (`main/src/orchestrator/workflowRegistry.ts:125`) are DELIBERATELY the same
+ * literal string `'__quick__'` but represent different concepts: this one is an
+ * experiment-arm identity stored in `experiments.variant_a_id` /
+ * `variant_b_id`, while `QUICK_WORKFLOW_NAME` is a per-project sentinel
+ * *workflow* row excluded from the user-facing workflow picker. This is an
+ * intentional namespace overload, not a bug — callers must not confuse the two.
  */
 export const BASELINE_VARIANT_SENTINEL = '__baseline__';
 
 /** True when an experiment arm id is the baseline sentinel rather than a real variant. */
 export function isBaselineArm(variantId: string): boolean {
   return variantId === BASELINE_VARIANT_SENTINEL;
+}
+
+/**
+ * Sentinel variant id for the "quick session" arm of a side-by-side experiment.
+ * See the doc block above `BASELINE_VARIANT_SENTINEL` for the full three-way
+ * arm-id contract and the deliberate literal overload with `QUICK_WORKFLOW_NAME`.
+ */
+export const QUICK_ARM_SENTINEL = '__quick__';
+
+/** True when an experiment arm id is the quick-session sentinel rather than a real variant. */
+export function isQuickArm(variantId: string): boolean {
+  return variantId === QUICK_ARM_SENTINEL;
 }
 
 /**
