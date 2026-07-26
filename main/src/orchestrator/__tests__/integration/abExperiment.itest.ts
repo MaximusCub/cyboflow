@@ -241,7 +241,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .run(sessionId, `${nameHint} session`, 'arm run', nameHint, worktreePath, projectId);
-      return { sessionId, worktreePath };
+      return { sessionId, worktreePath, runId: `run-${randomUUID()}` };
     },
     taskChangeRouter: tcr,
     dismissSession: async (sid) => {

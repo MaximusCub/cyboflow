@@ -4635,22 +4635,33 @@ app.whenReady().then(async () => {
         getProjectMainBranch: (p) => worktreeManager.getProjectMainBranch(p),
         getHeadCommit: (p) => worktreeManager.getHeadCommit(p),
       },
-      createArmSession: async ({ projectId, baseCommittish, nameHint }) => {
-        const { session } = await createQuickSessionCore(
+      createArmSession: async ({ projectId, baseCommittish, nameHint, quickConfig }) => {
+        const { session, runId } = await createQuickSessionCore(
           {
             taskQueue: taskQueue!,
             sessionManager,
             workflowRegistry,
             getDb: () => databaseService.getDb(),
           },
-          // Pin 'sdk' explicitly: an A/B arm session is an INFRASTRUCTURE host
-          // (its worktree hosts the arm's workflow runs), not a user quick
-          // session, so its sentinel must never inherit the quick-session PTY
-          // default (quickSessionDefaultSubstrate). This keeps the arm sentinel
-          // 'sdk' exactly as before that default existed.
-          { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
+          quickConfig
+            ? {
+                projectId,
+                baseCommittish,
+                nameHint,
+                requestedSubstrate: quickConfig.substrate,
+                agentProvider: quickConfig.agentProvider,
+                agentRuntime: quickConfig.agentRuntime,
+                agentModel: quickConfig.model,
+                requestedAgentMode: quickConfig.permissionMode,
+              }
+            : // Pin 'sdk' explicitly: an A/B arm session is an INFRASTRUCTURE host
+              // (its worktree hosts the arm's workflow runs), not a user quick
+              // session, so its sentinel must never inherit the quick-session PTY
+              // default (quickSessionDefaultSubstrate). This keeps the arm sentinel
+              // 'sdk' exactly as before that default existed.
+              { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
         );
-        return { sessionId: session.id, worktreePath: session.worktreePath };
+        return { sessionId: session.id, worktreePath: session.worktreePath, runId };
       },
       taskChangeRouter: TaskChangeRouter.getInstance(),
       dismissSession: dismissSessionFully,

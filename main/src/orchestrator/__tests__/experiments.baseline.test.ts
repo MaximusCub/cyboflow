@@ -129,7 +129,11 @@ function makeHarness(): Harness {
       getProjectMainBranch: async () => 'main',
       getHeadCommit: async () => 'basesha0',
     },
-    createArmSession: async () => ({ sessionId: `sess_${randomUUID().slice(0, 8)}`, worktreePath: '/wt' }),
+    createArmSession: async () => ({
+      sessionId: `sess_${randomUUID().slice(0, 8)}`,
+      worktreePath: '/wt',
+      runId: `run_${randomUUID().slice(0, 8)}`,
+    }),
     taskChangeRouter: tcr,
     dismissSession: async () => {},
     cancelRun: async () => {},

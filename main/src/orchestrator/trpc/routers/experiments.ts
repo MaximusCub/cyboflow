@@ -21,6 +21,8 @@ import type { TaskChange } from '../../taskChangeRouter';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
+import type { AgentProvider, SessionAgentRuntime } from '../../../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type {
   ExperimentArm,
@@ -126,6 +128,22 @@ export interface ExperimentsTaskChangeLike {
   ): Promise<void>;
 }
 
+/**
+ * Optional per-arm quick-session config (the "quick session" arm type). Absent
+ * for the normal baseline/variant infra arm, which stays pinned to
+ * `requestedSubstrate: 'sdk'`. Field names mirror the subset of
+ * `CreateQuickSessionCoreOptions` (createQuickSessionCore.ts) an arm can pin.
+ */
+export interface ExperimentArmQuickConfig {
+  substrate?: CliSubstrate;
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  model?: string;
+  fastMode?: boolean;
+  reasoningEffort?: ReasoningEffort;
+  permissionMode?: PermissionMode;
+}
+
 export interface ExperimentsDeps {
   /** DatabaseLike for the experiments table (experimentStore) + entity/run reads. */
   db: DatabaseLike;
@@ -134,12 +152,19 @@ export interface ExperimentsDeps {
     getProjectMainBranch(projectPath: string): Promise<string>;
     getHeadCommit(projectPath: string): Promise<string>;
   };
-  /** SHA-pinned arm session via the shared createQuickSessionCore path. */
+  /**
+   * SHA-pinned arm session via the shared createQuickSessionCore path. When
+   * `quickConfig` is omitted the arm is the normal baseline/variant infra host
+   * (pinned `requestedSubstrate: 'sdk'`); when present the arm is a `__quick__`
+   * sentinel quick session configured from `quickConfig`. `runId` is always the
+   * sentinel `__quick__` run's id.
+   */
   createArmSession: (o: {
     projectId: number;
     baseCommittish: string;
     nameHint: string;
-  }) => Promise<{ sessionId: string; worktreePath: string }>;
+    quickConfig?: ExperimentArmQuickConfig;
+  }) => Promise<{ sessionId: string; worktreePath: string; runId: string }>;
   taskChangeRouter: ExperimentsTaskChangeLike;
   /** FULL session-delete path (cancels hosted runs + removes worktree). NEVER a bare worktree-remove. */
   dismissSession: (sessionId: string) => Promise<void>;
