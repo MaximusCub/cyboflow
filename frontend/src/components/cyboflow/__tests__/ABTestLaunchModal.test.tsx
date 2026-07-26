@@ -447,6 +447,82 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
     expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
     expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
   });
+
+  it("selecting quick for arm B reveals ONLY arm B's config sub-form", () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    expect(screen.queryByTestId('ab-test-quick-config-b')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    expect(screen.getByTestId('ab-test-quick-config-b')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-quick-config-a')).not.toBeInTheDocument();
+  });
+
+  it('switching arm A from quick back to a real variant hides the sub-form and omits quickConfigA from submit', async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+    expect(screen.getByTestId('ab-test-quick-config-a')).toBeInTheDocument();
+
+    // Flip arm A back to a real variant — the sub-form must disappear.
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: 'a' } });
+    expect(screen.queryByTestId('ab-test-quick-config-a')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args).toEqual({ projectId: 1, workflowId: 'wf-1', variantAId: 'a', variantBId: 'b' });
+    expect('quickConfigA' in args).toBe(false);
+  });
+
+  it("changing arm A's quick-config fields (runtime, model, reasoning effort, permission mode) updates the submitted quickConfigA", async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    const configA = screen.getByTestId('ab-test-quick-config-a');
+    fireEvent.change(within(configA).getByRole('combobox', { name: 'Select agent runtime' }), {
+      target: { value: 'claude-interactive' },
+    });
+    fireEvent.change(within(configA).getByRole('combobox', { name: 'Select Claude model' }), {
+      target: { value: 'sonnet' },
+    });
+    fireEvent.change(screen.getByTestId('ab-test-quick-config-a-effort'), { target: { value: 'high' } });
+    fireEvent.click(within(configA).getByRole('button', { name: 'Permission mode: Allow edits' }));
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args.quickConfigA).toEqual({
+      substrate: 'interactive',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-interactive',
+      model: 'sonnet',
+      reasoningEffort: 'high',
+      permissionMode: 'acceptEdits',
+    });
+  });
+
+  it("arm A and arm B quick configs are wired independently — changing each arm's model updates only that arm's payload", async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
+
+    const configA = screen.getByTestId('ab-test-quick-config-a');
+    const configB = screen.getByTestId('ab-test-quick-config-b');
+    fireEvent.change(within(configA).getByRole('combobox', { name: 'Select Claude model' }), {
+      target: { value: 'sonnet' },
+    });
+    fireEvent.change(within(configB).getByRole('combobox', { name: 'Select Claude model' }), {
+      target: { value: 'haiku' },
+    });
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args.quickConfigA.model).toBe('sonnet');
+    expect(args.quickConfigB.model).toBe('haiku');
+  });
 });
 
 describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
