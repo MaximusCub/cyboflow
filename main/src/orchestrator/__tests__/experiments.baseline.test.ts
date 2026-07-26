@@ -29,11 +29,13 @@ import {
   setExperimentsDeps,
   experimentsRouter,
   type ExperimentsDeps,
+  type ExperimentArmQuickConfig,
 } from '../trpc/routers/experiments';
 import { insertExperiment, updateExperimentStatus } from '../experimentStore';
 import { createContext } from '../trpc/context';
 import {
   BASELINE_VARIANT_SENTINEL,
+  QUICK_ARM_SENTINEL,
   type ExperimentArm,
   type WorkflowVariantRow,
 } from '../../../../shared/types/experiments';
@@ -66,6 +68,7 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT;');
   for (const t of ['ideas', 'epics', 'tasks']) {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
@@ -94,12 +97,20 @@ function variant(id: string): WorkflowVariantRow {
   };
 }
 
+/** Recorded createArmSession invocation (TASK-121 widening: quickConfig + sentinel runId). */
+interface RecordedArmSession {
+  nameHint: string;
+  quickConfig: ExperimentArmQuickConfig | undefined;
+  runId: string;
+}
+
 interface Harness {
   db: Database.Database;
   deps: ExperimentsDeps;
   launches: RecordedLaunch[];
   getVariantCalls: string[];
   activated: string[];
+  armSessionCalls: RecordedArmSession[];
 }
 
 function makeHarness(): Harness {
@@ -109,6 +120,7 @@ function makeHarness(): Harness {
   const launches: RecordedLaunch[] = [];
   const getVariantCalls: string[] = [];
   const activated: string[] = [];
+  const armSessionCalls: RecordedArmSession[] = [];
 
   const deps: ExperimentsDeps = {
     db,
@@ -129,11 +141,22 @@ function makeHarness(): Harness {
       getProjectMainBranch: async () => 'main',
       getHeadCommit: async () => 'basesha0',
     },
-    createArmSession: async () => ({
-      sessionId: `sess_${randomUUID().slice(0, 8)}`,
-      worktreePath: '/wt',
-      runId: `run_${randomUUID().slice(0, 8)}`,
-    }),
+    // Mirrors the real createArmSession (TASK-121): it ALWAYS mints a run via
+    // createQuickSessionCore, quick config or not — for a non-quick arm this run
+    // is the (unused-by-startExperiment) infra host sentinel, untagged; for a
+    // quick arm it's the `__quick__` sentinel that startExperiment stamps and
+    // records as that arm's run. Each call gets its own fresh id + row.
+    createArmSession: async ({ nameHint, quickConfig }) => {
+      const runId = `armsess_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+      raw
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, experiment_id, experiment_arm, seed_idea_id)
+           VALUES (?, 'wf', 1, 'awaiting_review', 'default', NULL, NULL, NULL)`,
+        )
+        .run(runId);
+      armSessionCalls.push({ nameHint, quickConfig, runId });
+      return { sessionId: `sess_${randomUUID().slice(0, 8)}`, worktreePath: '/wt', runId };
+    },
     taskChangeRouter: tcr,
     dismissSession: async () => {},
     cancelRun: async () => {},
@@ -152,11 +175,28 @@ function makeHarness(): Harness {
     setBaselineRotation: () => {},
     adoptWorkflowSpec: () => {},
   };
-  return { db: raw, deps, launches, getVariantCalls, activated };
+  return { db: raw, deps, launches, getVariantCalls, activated, armSessionCalls };
 }
 
 function armLaunch(h: Harness, arm: ExperimentArm): RecordedLaunch | undefined {
   return h.launches.find((l) => l.arm === arm);
+}
+
+/** Raw workflow_runs row read (for asserting the quick-arm stamp landed). */
+function runRow(
+  h: Harness,
+  id: string,
+): { id: string; experiment_id: string | null; experiment_arm: string | null } | undefined {
+  return h.db
+    .prepare('SELECT id, experiment_id, experiment_arm FROM workflow_runs WHERE id = ?')
+    .get(id) as { id: string; experiment_id: string | null; experiment_arm: string | null } | undefined;
+}
+
+/** Raw experiments row read (for asserting run_a_id/run_b_id got recorded). */
+function expRow(h: Harness, id: string): { run_a_id: string | null; run_b_id: string | null } | undefined {
+  return h.db.prepare('SELECT run_a_id, run_b_id FROM experiments WHERE id = ?').get(id) as
+    | { run_a_id: string | null; run_b_id: string | null }
+    | undefined;
 }
 
 describe('baseline-arm experiments', () => {
@@ -270,5 +310,142 @@ describe('baseline-arm experiments', () => {
     const out = await caller.switchToRotation({ experimentId: exp.id });
     expect(out.status).toBe('decided');
     expect(h.activated).toEqual(expect.arrayContaining(['vA', 'vB']));
+  });
+});
+
+/**
+ * Quick-arm launch (TASK-120) — an arm pinned to QUICK_ARM_SENTINEL skips both
+ * the variant registry lookup AND deps.runLauncher.launch entirely: its run is
+ * the `__quick__` sentinel createArmSession already minted (TASK-121), and
+ * startExperiment stamps that pre-existing run's experiment_id/experiment_arm
+ * (stampQuickArmRunExperimentTag) instead of launching a new one.
+ */
+describe('quick-arm launch (TASK-120)', () => {
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+  });
+
+  it('quick vs variant: skips the registry lookup + launcher for the quick arm, stamps its sentinel run, launches the variant arm normally', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+    });
+
+    // The quick arm was never looked up in the variant registry; the real variant was.
+    expect(h.getVariantCalls).not.toContain(QUICK_ARM_SENTINEL);
+    expect(h.getVariantCalls).toContain('vB');
+
+    // Arm A (quick) never went through the launcher; arm B (variant) did, pinned.
+    expect(armLaunch(h, 'A')).toBeUndefined();
+    const b = armLaunch(h, 'B');
+    expect(b?.opts?.requestedVariantId).toBe('vB');
+    expect(b?.opts?.baseline).toBeUndefined();
+
+    // The quick arm's sentinel run (createArmSession's first call) got stamped
+    // with the experiment id + arm 'A', and its id is what startExperiment returns.
+    expect(h.armSessionCalls).toHaveLength(2);
+    const sentinelRunId = h.armSessionCalls[0]!.runId;
+    expect(res.armA.runId).toBe(sentinelRunId);
+    const stamped = runRow(h, sentinelRunId);
+    expect(stamped?.experiment_id).toBe(res.experimentId);
+    expect(stamped?.experiment_arm).toBe('A');
+
+    // The experiment row's run_a_id points at that same sentinel run.
+    expect(expRow(h, res.experimentId)?.run_a_id).toBe(sentinelRunId);
+
+    // Arm B's run came from the launcher, not from createArmSession's (unused) sentinel.
+    expect(res.armB.runId).not.toBe(h.armSessionCalls[1]!.runId);
+    expect(res.armB.runId).toBeTruthy();
+  });
+
+  it('quick vs baseline: both skip-paths coexist (neither arm hits the registry or gets rejected by the identical-arms guard)', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: BASELINE_VARIANT_SENTINEL,
+    });
+
+    expect(h.getVariantCalls).not.toContain(QUICK_ARM_SENTINEL);
+    expect(h.getVariantCalls).not.toContain(BASELINE_VARIANT_SENTINEL);
+
+    // Arm A (quick) skipped the launcher; arm B (baseline) launched with baseline:true.
+    expect(armLaunch(h, 'A')).toBeUndefined();
+    expect(armLaunch(h, 'B')?.opts?.baseline).toBe(true);
+
+    const sentinelRunId = h.armSessionCalls[0]!.runId;
+    expect(res.armA.runId).toBe(sentinelRunId);
+    expect(runRow(h, sentinelRunId)?.experiment_arm).toBe('A');
+    expect(res.armB.runId).toBeTruthy();
+  });
+
+  it('quick vs quick: the identical-arms guard is relaxed — two independent sentinel runs are minted and tagged A/B', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: QUICK_ARM_SENTINEL,
+    });
+
+    // Neither arm hit the launcher.
+    expect(h.launches).toHaveLength(0);
+    // Two independent createArmSession calls, each minting its own sentinel run.
+    expect(h.armSessionCalls).toHaveLength(2);
+    const [runIdA, runIdB] = h.armSessionCalls.map((c) => c.runId);
+    expect(runIdA).not.toBe(runIdB);
+
+    expect(res.armA.runId).toBe(runIdA);
+    expect(res.armB.runId).toBe(runIdB);
+    expect(runRow(h, runIdA!)?.experiment_arm).toBe('A');
+    expect(runRow(h, runIdA!)?.experiment_id).toBe(res.experimentId);
+    expect(runRow(h, runIdB!)?.experiment_arm).toBe('B');
+    expect(runRow(h, runIdB!)?.experiment_id).toBe(res.experimentId);
+
+    const exp = expRow(h, res.experimentId);
+    expect(exp?.run_a_id).toBe(runIdA);
+    expect(exp?.run_b_id).toBe(runIdB);
+    expect(exp?.run_a_id).not.toBe(exp?.run_b_id);
+  });
+
+  it('two identical REAL variant ids are still rejected (the relaxed guard only exempts quick-vs-quick)', async () => {
+    const h = makeHarness();
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf',
+        variantAId: 'vA',
+        variantBId: 'vA',
+      }),
+    ).rejects.toThrow(/at least one arm must be a variant|both cannot be the baseline/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('threads quickConfigA/quickConfigB through createArmSession only for the quick arm; the non-quick arm gets quickConfig: undefined', async () => {
+    const h = makeHarness();
+    const quickConfigA: ExperimentArmQuickConfig = {
+      substrate: 'interactive',
+      agentProvider: 'codex',
+      model: 'gpt-5-codex',
+      fastMode: true,
+    };
+    await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA,
+      // quickConfigB deliberately omitted — vB is not a quick arm, so it should
+      // never be threaded through even if the caller had supplied it (it didn't).
+    });
+
+    expect(h.armSessionCalls).toHaveLength(2);
+    expect(h.armSessionCalls[0]!.quickConfig).toEqual(quickConfigA);
+    expect(h.armSessionCalls[1]!.quickConfig).toBeUndefined();
   });
 });
