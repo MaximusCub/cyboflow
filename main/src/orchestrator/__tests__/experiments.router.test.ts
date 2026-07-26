@@ -19,6 +19,7 @@ import {
   abandonExperiment,
   promoteVariant,
   switchToRotationExperiment,
+  settleQuickArm,
   listDashboardExperiments,
   decideRotationExperiment,
   abandonRotationExperiment,
@@ -41,7 +42,9 @@ import type {
   ExperimentStatusChangedEvent,
   ExperimentComparisonRow,
 } from '../../../../shared/types/experiments';
-import { experimentEvents } from '../trpc/routers/events';
+import { QUICK_ARM_SENTINEL } from '../../../../shared/types/experiments';
+import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
+import { experimentEvents, runStatusEvents } from '../trpc/routers/events';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -1940,6 +1943,128 @@ describe('experiments router orchestration (slice B)', () => {
       // The clone lane was DELETED (not remapped onto the conflicting original); no error.
       expect(laneTaskIds(h, batchA)).toEqual([t1]);
       expect(laneTaskIds(h, batchA)).not.toContain(cloneA);
+    });
+  });
+
+  // --- TASK-119: quick-arm sentinel handling (settleQuickArm + downstream) ---
+  //
+  // Deliberately decoupled from TASK-120's startExperiment quick-launch wiring
+  // (aIsQuick/quickConfig): a real two-variant experiment is started with the
+  // ordinary harness fakes (arm A's run lands 'running', exactly like a real
+  // launch), then arm A's variant_a_id is relabeled to QUICK_ARM_SENTINEL
+  // post-hoc — enough to exercise settle/promote/switchToRotation/label logic
+  // without depending on how a quick arm's run actually gets created.
+  describe('settleQuickArm + quick-arm sentinel handling', () => {
+    async function startQuickVsVariantExperiment(h: Harness): Promise<Awaited<ReturnType<typeof startExperiment>>> {
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB',
+      });
+      h.db.prepare('UPDATE experiments SET variant_a_id = ? WHERE id = ?').run(QUICK_ARM_SENTINEL, res.experimentId);
+      return res;
+    }
+
+    /** Start + settle (discard-both) a quick(A)-vs-variant(B) experiment. */
+    async function settledQuickExperiment(h: Harness): Promise<Awaited<ReturnType<typeof startExperiment>>> {
+      const res = await startQuickVsVariantExperiment(h);
+      setRunStatus(h.db, res.armA.runId, 'completed');
+      setRunStatus(h.db, res.armB.runId, 'completed');
+      await decideExperiment(h.deps, res.experimentId, null);
+      return res;
+    }
+
+    it('rejects a non-quick arm (BAD_REQUEST)', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB',
+      });
+      expect(() => settleQuickArm(h.deps, res.experimentId, 'A')).toThrow(/not a quick-session arm/);
+    });
+
+    it("rests a 'running' quick arm to 'awaiting_review' and emits runStatusEvents 'changed'", async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      const emitted: RunStatusChangedEvent[] = [];
+      const onChanged = (evt: RunStatusChangedEvent): void => {
+        emitted.push(evt);
+      };
+      runStatusEvents.on('changed', onChanged);
+      try {
+        const out = settleQuickArm(h.deps, res.experimentId, 'A');
+        expect(out).toEqual({
+          experimentId: res.experimentId,
+          arm: 'A',
+          runId: res.armA.runId,
+          status: 'awaiting_review',
+          changed: true,
+        });
+        expect(emitted).toEqual([{ runId: res.armA.runId, status: 'awaiting_review' }]);
+        expect(field(h.db, 'workflow_runs', res.armA.runId, 'status')).toBe('awaiting_review');
+      } finally {
+        runStatusEvents.off('changed', onChanged);
+      }
+    });
+
+    it('is idempotent on an already-settled arm (no throw, no event, changed:false)', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      setRunStatus(h.db, res.armA.runId, 'completed');
+      const emitted: RunStatusChangedEvent[] = [];
+      const onChanged = (evt: RunStatusChangedEvent): void => {
+        emitted.push(evt);
+      };
+      runStatusEvents.on('changed', onChanged);
+      try {
+        const out = settleQuickArm(h.deps, res.experimentId, 'A');
+        expect(out).toEqual({
+          experimentId: res.experimentId,
+          arm: 'A',
+          runId: res.armA.runId,
+          status: 'completed',
+          changed: false,
+        });
+        expect(emitted).toEqual([]);
+      } finally {
+        runStatusEvents.off('changed', onChanged);
+      }
+    });
+
+    it("guards + defers a transient (not-yet-settleable) status ('stuck' — PRECONDITION_FAILED)", async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      setRunStatus(h.db, res.armA.runId, 'stuck');
+      expect(() => settleQuickArm(h.deps, res.experimentId, 'A')).toThrow(/not settleable from status 'stuck'/);
+    });
+
+    it('promoteVariant short-circuits a quick arm to the __quick__ sentinel with NO NOT_FOUND / adoptWorkflowSpec', async () => {
+      const h = makeHarness();
+      const res = await settledQuickExperiment(h);
+      // getVariant explicitly returns null for the quick sentinel — proves the
+      // quick short-circuit returns BEFORE the getVariant() NOT_FOUND lookup.
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        getVariant: (id) => (id === QUICK_ARM_SENTINEL ? null : variant(id)),
+      };
+      const out = promoteVariant(deps, res.experimentId, 'A');
+      expect(out).toEqual({ experimentId: res.experimentId, promotedVariantId: QUICK_ARM_SENTINEL, promotedArm: 'A' });
+      expect(h.adoptedSpecs).toHaveLength(0);
+      const exp = getExperiment(dbAdapter(h.db), res.experimentId)!;
+      expect(exp.promoted_variant_id).toBe(QUICK_ARM_SENTINEL);
+      expect(exp.promoted_arm).toBe('A');
+    });
+
+    it('switchToRotation rejects an experiment with a quick-session arm (BAD_REQUEST)', async () => {
+      const h = makeHarness();
+      const res = await settledQuickExperiment(h);
+      expect(() => switchToRotationExperiment(h.deps, res.experimentId)).toThrow(/quick-session arm/);
+    });
+
+    it("labels a quick arm 'Quick session' in the dashboard listing", async () => {
+      const h = makeHarness();
+      const res = await settledQuickExperiment(h);
+      const rows = listDashboardExperiments(h.deps, { projectId: 1 });
+      const row = rows.find((r) => r.experimentId === res.experimentId)!;
+      expect(row.armALabel).toBe('Quick session');
+      expect(row.armBLabel).toBe('vB');
     });
   });
 });
