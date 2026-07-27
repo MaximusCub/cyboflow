@@ -101,14 +101,17 @@ export class API {
     },
 
     // Interactive (PTY) quick-session resume — see ResumeSessionPrompt / ClaudePanel.
-    async getInteractiveResumeState(sessionId: string) {
+    // `panelId` scopes the probe/respawn to ONE chat panel — a session can host
+    // several (Add chat) and the session-scoped form always hit the first.
+    // Omitted, it falls back to that first panel (legacy callers).
+    async getInteractiveResumeState(sessionId: string, panelId?: string) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getInteractiveResumeState(sessionId);
+      return window.electronAPI.sessions.getInteractiveResumeState(sessionId, panelId);
     },
 
-    async resumeInteractive(sessionId: string) {
+    async resumeInteractive(sessionId: string, panelId?: string) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.resumeInteractive(sessionId);
+      return window.electronAPI.sessions.resumeInteractive(sessionId, panelId);
     },
 
     async getOutput(sessionId: string, limit?: number) {

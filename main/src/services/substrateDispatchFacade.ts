@@ -115,6 +115,29 @@ function isSteeringCapable(mgr: AbstractCliManager): mgr is AbstractCliManager &
   return typeof m.listLiveSpawnKeys === 'function' && typeof m.injectSteering === 'function';
 }
 
+/**
+ * Resolve the owning manager for a CHAT PANEL id — the second, non-run identity
+ * this facade is addressed by.
+ *
+ * WHY. `resolveManager` reads `workflow_runs` via the registry, so it can only
+ * classify a RUN id; anything else floors to DEFAULT_SUBSTRATE ('sdk'). That was
+ * correct while every relay carried the run/gate id. Since chat panels address
+ * their own PTY by `panel.id` (TASK-103 Add-chat — a session's panels all share
+ * ONE chat_run_id, so the sentinel cannot identify a panel), a panel id reaching
+ * `resolveManager` is not a run, floors to 'sdk', and relayInput/relayResize
+ * silently NO-OP — swallowing every keystroke into a live PTY whose panel has no
+ * `livePtyOwners` entry (that map is seeded only at spawn / first PTY byte and
+ * cleared on exit, so it is EMPTY after an app restart). That is the reopened-PTY
+ * "hangs and never loads" symptom.
+ *
+ * This lookup closes the gap: given a panel id it returns the manager that panel's
+ * effective substrate (per-panel override → session substrate → floor) resolves
+ * to, or `undefined` when the id is not a panel at all (then the run-id floor
+ * still applies, byte-identical). Injected rather than reached for so this file
+ * keeps its no-database, no-services dependency shape.
+ */
+export type PanelOwnerLookup = (panelId: string) => AbstractCliManager | undefined;
+
 export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawnerLike {
   /**
    * Records which manager spawned each panel, keyed by panelId. abort() looks up
@@ -183,6 +206,21 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   private readonly interactivePanelToRun = new Map<string, string>();
   private readonly livePtyOwners = new Map<string, AbstractCliManager>();
 
+  /**
+   * Every manager that drives a real PTY: the interactive Claude manager plus any
+   * `additionalPtyManagers` (Codex PTY). The relay/close-out seams used to test
+   * `mgr !== this.interactiveManager` to mean "SDK — no PTY, no-op", which was
+   * true while the interactive manager was the only PTY owner. With Codex PTY
+   * wired as an additional manager that test wrongly classifies a live Codex PTY
+   * as SDK. Membership here is the real question those seams are asking.
+   */
+  private readonly ptyManagers = new Set<AbstractCliManager>();
+
+  /** Does this manager own a PTY (interactive Claude or an additional PTY manager)? */
+  private isPtyManager(mgr: AbstractCliManager): boolean {
+    return this.ptyManagers.has(mgr);
+  }
+
   constructor(
     private readonly sdkManager: AbstractCliManager,
     private readonly interactiveManager: AbstractCliManager,
@@ -190,6 +228,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     private readonly logger: LoggerLike,
     additionalPtyManagers: AbstractCliManager[] = [],
     private readonly codexSdkManager?: AbstractCliManager,
+    private readonly panelOwnerLookup?: PanelOwnerLookup,
   ) {
     super();
 
@@ -236,6 +275,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.on('exit', this.interactiveExitHandler);
     this.interactiveManager.on('pty-output', this.interactivePtyHandler);
     this.interactiveManager.on('turn-end', this.interactiveTurnEndHandler);
+    this.ptyManagers.add(this.interactiveManager);
 
     if (this.codexSdkManager) {
       this.codexSdkOutputHandler = (payload) => this.emit('output', payload);
@@ -263,6 +303,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       manager.on('pty-output', ptyHandler);
       manager.on('exit', exitHandler);
       this.additionalPtyHandlers.push({ manager, ptyHandler, exitHandler });
+      this.ptyManagers.add(manager);
     }
 
     this.logger.debug('[SubstrateDispatchFacade] subscribed to both substrate managers', {
@@ -274,6 +315,14 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * Resolve the manager for a run by reading run.substrate per-run. The
    * `?? DEFAULT_SUBSTRATE` floor makes every legacy/null row resolve to the SDK
    * manager (byte-identical SDK path).
+   *
+   * When the id matches NO run row it may still be a CHAT PANEL id (chat panels
+   * address their own PTY by panel.id — see PanelOwnerLookup for why). Consult
+   * the injected panel lookup BEFORE flooring, so a PTY panel with no live
+   * `livePtyOwners` registration (after an app restart, or before its first PTY
+   * byte) resolves to its real manager instead of silently degrading to the SDK
+   * no-op. An id that is neither a run nor a panel still floors to SDK exactly
+   * as before.
    */
   private resolveManager(runId: string): AbstractCliManager {
     const run = this.registry.getRunById(runId);
@@ -283,8 +332,16 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       }
       return this.codexSdkManager;
     }
-    const substrate: CliSubstrate = run?.substrate ?? DEFAULT_SUBSTRATE;
-    return substrate === 'interactive' ? this.interactiveManager : this.sdkManager;
+    if (run) {
+      const substrate: CliSubstrate = run.substrate ?? DEFAULT_SUBSTRATE;
+      return substrate === 'interactive' ? this.interactiveManager : this.sdkManager;
+    }
+    const byPanel = this.panelOwnerLookup?.(runId);
+    if (byPanel) {
+      this.logger.debug('[SubstrateDispatchFacade] resolved a non-run id as a chat panel', { panelId: runId });
+      return byPanel;
+    }
+    return this.sdkManager;
   }
 
   /**
@@ -387,7 +444,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     }
 
     const mgr = this.resolveManager(runId);
-    if (mgr !== this.interactiveManager) {
+    if (!this.isPtyManager(mgr)) {
       // SDK substrate has no PTY — relaying input is a no-op (Q3 byte-identical).
       this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { runId });
       return;
@@ -432,7 +489,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     }
 
     const mgr = this.resolveManager(runId);
-    if (mgr !== this.interactiveManager) {
+    if (!this.isPtyManager(mgr)) {
       this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { runId });
       return;
     }
@@ -463,8 +520,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   listLiveSpawnKeys(runId: string): string[] {
     const mgr = this.resolveManager(runId);
-    if (mgr === this.interactiveManager) {
-      // Interactive substrate has no per-turn SDK steering queue — nothing steerable.
+    if (this.isPtyManager(mgr)) {
+      // A PTY substrate has no per-turn SDK steering queue — nothing steerable.
       return [];
     }
     return isSteeringCapable(mgr) ? mgr.listLiveSpawnKeys(runId) : [];
@@ -486,8 +543,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   injectSteering(spawnKey: string, runId: string, text: string): boolean {
     const mgr = this.resolveManager(runId);
-    if (mgr === this.interactiveManager) {
-      // Interactive substrate has no SDK steering queue — never steerable.
+    if (this.isPtyManager(mgr)) {
+      // A PTY substrate has no SDK steering queue — never steerable.
       return false;
     }
     return isSteeringCapable(mgr) ? mgr.injectSteering(spawnKey, text) : false;
@@ -524,7 +581,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     }
 
     const mgr = this.resolveManager(runId);
-    if (mgr !== this.interactiveManager) {
+    if (!this.isPtyManager(mgr)) {
       this.logger.info('[SubstrateDispatchFacade] endSession dispatch kill for SDK substrate', { runId });
       await mgr.killProcess(runId);
       return;
@@ -564,7 +621,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     }
 
     const mgr = this.resolveManager(runId);
-    if (mgr !== this.interactiveManager) {
+    if (!this.isPtyManager(mgr)) {
       this.logger.info('[SubstrateDispatchFacade] killSession dispatch kill for SDK substrate', { runId });
       await mgr.killProcess(runId);
       return;

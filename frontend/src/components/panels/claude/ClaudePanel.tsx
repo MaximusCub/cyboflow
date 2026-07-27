@@ -125,6 +125,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const [resumePromptDismissed, setResumePromptDismissed] = useState(false);
   const [resumeArmed, setResumeArmed] = useState(false);
   const [canOfferResume, setCanOfferResume] = useState(false);
+  /** Server-reported reason a resume attempt failed; surfaced instead of leaving
+   *  a blank terminal with the prompt silently dismissed. */
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (interactiveRunId === null) {
@@ -163,8 +166,11 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     // re-offer until the REPL is live again (a new loss episode).
     if (declinedResumeSessions.has(sessionId)) return;
     let cancelled = false;
+    // Probe THIS panel, not the session's first one: a session can host several
+    // chat panels (Add chat), and the session-scoped probe reported the first
+    // panel's REPL state for all of them.
     void API.sessions
-      .getInteractiveResumeState(sessionId)
+      .getInteractiveResumeState(sessionId, panel.id)
       .then((res) => {
         if (cancelled) return;
         const data = res?.data;
@@ -176,7 +182,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     return () => {
       cancelled = true;
     };
-  }, [panel.sessionId, interactiveRunId, showDemoTerminal, isCodexPtySession]);
+  }, [panel.sessionId, panel.id, interactiveRunId, showDemoTerminal, isCodexPtySession]);
 
   // The "Resuming…" hint is a transient cue shown while claude reopens the prior
   // conversation. Auto-clear it so it never sticks forever.
@@ -194,7 +200,20 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const handleResumeSession = (): void => {
     setResumeArmed(true);
     setResumePromptDismissed(true);
-    void API.sessions.resumeInteractive(panel.sessionId).catch(() => undefined);
+    // Resume THIS panel. A failure used to be swallowed while the prompt stayed
+    // dismissed, so a rejected resume left a permanently blank terminal with no
+    // way back — surface it and re-offer the prompt instead.
+    void API.sessions
+      .resumeInteractive(panel.sessionId, panel.id)
+      .then((res) => {
+        if (res?.success) return;
+        setResumeArmed(false);
+        setResumeError(res?.error ?? 'Could not resume the previous conversation.');
+      })
+      .catch((err: unknown) => {
+        setResumeArmed(false);
+        setResumeError(err instanceof Error ? err.message : 'Could not resume the previous conversation.');
+      });
   };
 
   // "Start fresh" (or Escape) → decline: remember the choice and hide the prompt.
@@ -379,6 +398,26 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             data-testid="resume-restored-hint"
           >
             Resuming previous session — your conversation will reappear below.
+          </div>
+        )}
+        {/* A failed resume must not leave a blank terminal and no explanation. */}
+        {resumeError !== null && (
+          <div
+            className="absolute left-1/2 top-2 z-10 flex -translate-x-1/2 items-center gap-2 rounded border border-status-error/40 bg-surface-secondary px-3 py-1.5 text-[11px] text-status-error shadow-sm"
+            role="alert"
+            data-testid="resume-failed-notice"
+          >
+            <span>{resumeError}</span>
+            <button
+              type="button"
+              className="underline"
+              onClick={() => {
+                setResumeError(null);
+                setResumePromptDismissed(false);
+              }}
+            >
+              Try again
+            </button>
           </div>
         )}
       </div>

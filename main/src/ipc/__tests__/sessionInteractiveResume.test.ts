@@ -306,3 +306,101 @@ describe('sessions:input dead-REPL respawn is always FRESH (resume is eager, not
     expect(startPanel.mock.calls[1][8]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Panel-scoped resume (TASK-103 Add-chat: a session can host N chat panels)
+// ---------------------------------------------------------------------------
+
+import { panelManager } from '../../services/panelManager';
+
+/** Point the panelManager mock at an explicit panel list for one test. */
+function withPanels(panels: Array<{ id: string; type: string; substrate?: string }>): void {
+  vi.mocked(panelManager.getPanelsForSession).mockReturnValue(
+    panels as unknown as ReturnType<typeof panelManager.getPanelsForSession>,
+  );
+}
+
+describe('interactive resume — panel scoping', () => {
+  beforeEach(() => {
+    withPanels([{ id: 'panel-1', type: 'claude' }]);
+  });
+
+  it('does not offer resume to an ADDED chat panel (the transcript id is the primary panel’s)', async () => {
+    withPanels([
+      { id: 'panel-1', type: 'claude' },
+      { id: 'panel-2', type: 'claude' },
+    ]);
+    const { services } = makeServices({ replRunning: false });
+    const handlers = registerWith(services);
+
+    const primary = (await invoke(handlers, RESUME_STATE, SESSION_ID, 'panel-1')) as ResumeStateResult;
+    expect(primary.data?.claudeSessionId).toBe(CLAUDE_SESSION_ID);
+
+    // sessions.claude_session_id names ONE transcript. Handing it to the added
+    // panel would replay the primary panel's conversation in both.
+    const added = (await invoke(handlers, RESUME_STATE, SESSION_ID, 'panel-2')) as ResumeStateResult;
+    expect(added.data?.claudeSessionId).toBeNull();
+  });
+
+  it('refuses to resume an ADDED chat panel rather than hijacking the primary transcript', async () => {
+    withPanels([
+      { id: 'panel-1', type: 'claude' },
+      { id: 'panel-2', type: 'claude' },
+    ]);
+    const { services, startPanel } = makeServices({ replRunning: false });
+    const handlers = registerWith(services);
+
+    const res = (await invoke(handlers, RESUME, SESSION_ID, 'panel-2')) as { success: boolean };
+    expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
+  });
+
+  it('probes the REQUESTED panel’s liveness, not the session’s first panel', async () => {
+    withPanels([
+      { id: 'panel-1', type: 'claude' },
+      { id: 'panel-2', type: 'claude' },
+    ]);
+    const { services, fakeInteractive } = makeServices({ replRunning: false });
+    const handlers = registerWith(services);
+
+    await invoke(handlers, RESUME_STATE, SESSION_ID, 'panel-2');
+
+    expect(fakeInteractive.isPanelRunning).toHaveBeenCalledWith('panel-2');
+  });
+
+  it('resumes a panel whose interactive substrate is a PER-PANEL override on an SDK session', async () => {
+    // The old gate read sessions.substrate and rejected this outright, so a PTY
+    // chat added to an SDK session could never be resumed.
+    withPanels([{ id: 'panel-1', type: 'claude', substrate: 'interactive' }]);
+    const { services, startPanel } = makeServices({ substrate: 'sdk', replRunning: false });
+    const handlers = registerWith(services);
+
+    const res = (await invoke(handlers, RESUME, SESSION_ID, 'panel-1')) as { success: boolean };
+    expect(res.success).toBe(true);
+    expect(startPanel).toHaveBeenCalledOnce();
+    // 9th positional arg is resumeSessionId → `claude --resume <uuid>`.
+    expect(startPanel.mock.calls[0][8]).toBe(CLAUDE_SESSION_ID);
+  });
+
+  it('rejects a panel that resolves to the SDK substrate', async () => {
+    withPanels([{ id: 'panel-1', type: 'claude', substrate: 'sdk' }]);
+    const { services, startPanel } = makeServices({ substrate: 'interactive', replRunning: false });
+    const handlers = registerWith(services);
+
+    const res = (await invoke(handlers, RESUME, SESSION_ID, 'panel-1')) as { success: boolean };
+    expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
+  });
+
+  it('rejects a panelId that does not belong to the session', async () => {
+    withPanels([{ id: 'panel-1', type: 'claude' }]);
+    const { services, startPanel } = makeServices({ replRunning: false });
+    const handlers = registerWith(services);
+
+    const res = (await invoke(handlers, RESUME, SESSION_ID, 'panel-from-another-session')) as {
+      success: boolean;
+    };
+    expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
+  });
+});

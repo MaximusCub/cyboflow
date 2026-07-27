@@ -48,6 +48,8 @@ import {
   QUICK_CODEX_SDK_BRIEFING,
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
+import { resolveSubstrate } from '../orchestrator/substrateResolver';
+import type { ToolPanel } from '../../../shared/types/panels';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
@@ -260,6 +262,37 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
+
+  /**
+   * Resolve WHICH chat panel a resume request targets.
+   *
+   * A session can host several chat panels (TASK-103 Add-chat), so the resume
+   * seams can no longer assume "the session's first claude panel". Prefer the
+   * caller-supplied panelId — validated to exist, to be a claude panel, and to
+   * belong to THIS session so a stale/foreign id can never respawn someone else's
+   * REPL — and fall back to the first panel for legacy callers that pass none.
+   */
+  const resolveResumeTargetPanel = (
+    sessionId: string,
+    panelId: string | undefined,
+  ): ToolPanel | undefined => {
+    const panels = panelManager.getPanelsForSession(sessionId).filter((p) => p.type === 'claude');
+    if (panelId) return panels.find((p) => p.id === panelId);
+    return panels[0];
+  };
+
+  /**
+   * The panel's EFFECTIVE substrate: a per-panel override (Add-chat picker /
+   * claude-panels:set-substrate) wins over the session's, mirroring
+   * ClaudePanelManager.getCliManager and ptyPanelDispatch. `env: {}` — panel
+   * routing inherits only the session value, never the process environment.
+   */
+  const resolvePanelSubstrate = (panel: ToolPanel, dbSession: { substrate?: string | null } | undefined) =>
+    resolveSubstrate({
+      panelOverrideSubstrate: panel.substrate ?? undefined,
+      requestedSubstrate: dbSession?.substrate ?? undefined,
+      env: {},
+    });
 
   interface QueuedCodexPanelInput {
     id: string;
@@ -1681,21 +1714,29 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // resume handler EAGERLY re-spawns the REPL with `--resume <uuid>` (no fork, no
   // first message required) so the prior conversation reopens live the moment the
   // user clicks. Scope: interactive quick sessions only.
-  ipcMain.handle('sessions:get-interactive-resume-state', async (_event, sessionId: string) => {
+  ipcMain.handle('sessions:get-interactive-resume-state', async (_event, sessionId: string, panelId?: string) => {
     try {
       const dbSession = databaseService.getSession(sessionId);
       if (!dbSession) {
         return { success: false, error: 'Session not found' };
       }
-      const panelId = resolveClaudePanelId(sessionId);
-      const replRunning = panelId ? interactiveCliManager.isPanelRunning(panelId) : false;
+      const target = resolveResumeTargetPanel(sessionId, panelId);
+      const replRunning = target ? interactiveCliManager.isPanelRunning(target.id) : false;
       // Only surface a resumable id when claude's on-disk transcript still exists —
       // a missing transcript makes `claude --resume` fail and would lose the first
       // message to a dead spawn.
       const storedId = sessionManager.getClaudeSessionId(sessionId) ?? null;
-      const claudeSessionId = interactiveTranscriptExists(dbSession.worktree_path, storedId)
-        ? storedId
-        : null;
+      // sessions.claude_session_id is SESSION-scoped: it names ONE transcript, the
+      // one the session's PRIMARY chat panel wrote. An ADDED chat panel (TASK-103)
+      // has no transcript id of its own, so offering it that id would resume it
+      // into the primary panel's conversation — two panels replaying one thread.
+      // Report not-resumable for added panels instead; they start fresh, which is
+      // the honest answer until per-panel transcript ids exist.
+      const ownsSessionTranscript = target?.id === resolveClaudePanelId(sessionId);
+      const claudeSessionId =
+        ownsSessionTranscript && interactiveTranscriptExists(dbSession.worktree_path, storedId)
+          ? storedId
+          : null;
       const worktreeExists = !!dbSession.worktree_path && existsSync(dbSession.worktree_path);
       return { success: true, data: { replRunning, claudeSessionId, worktreeExists } };
     } catch (error) {
@@ -1704,23 +1745,33 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('sessions:resume-interactive', async (_event, sessionId: string) => {
+  ipcMain.handle('sessions:resume-interactive', async (_event, sessionId: string, panelId?: string) => {
     try {
       const dbSession = databaseService.getSession(sessionId);
       if (!dbSession) {
         return { success: false, error: 'Session not found' };
       }
-      if (dbSession.substrate !== 'interactive') {
-        return { success: false, error: 'Session is not an interactive session' };
+      const targetPanel = resolveResumeTargetPanel(sessionId, panelId);
+      if (!targetPanel) {
+        return { success: false, error: 'No Claude panel for this session' };
+      }
+      // Gate on the PANEL's effective substrate, not the session's: a per-panel
+      // interactive override on an otherwise-SDK session is a real PTY that must
+      // be resumable, and the old session-level check rejected it outright.
+      if (resolvePanelSubstrate(targetPanel, dbSession) !== 'interactive') {
+        return { success: false, error: 'Panel is not backed by an interactive REPL' };
       }
       const claudeSessionId = sessionManager.getClaudeSessionId(sessionId);
       if (!claudeSessionId || !interactiveTranscriptExists(dbSession.worktree_path, claudeSessionId)) {
         return { success: false, error: 'No prior Claude conversation to resume' };
       }
-      const claudePanelId = resolveClaudePanelId(sessionId);
-      if (!claudePanelId) {
-        return { success: false, error: 'No Claude panel for this session' };
+      // Only the panel that OWNS the session-scoped transcript may resume it —
+      // see the note in sessions:get-interactive-resume-state. An added panel
+      // resuming this id would replay the primary panel's conversation.
+      if (targetPanel.id !== resolveClaudePanelId(sessionId)) {
+        return { success: false, error: 'This chat has no prior conversation to resume' };
       }
+      const claudePanelId = targetPanel.id;
       // Already live (e.g. a double-click, or the REPL was never actually lost) —
       // nothing to do.
       if (interactiveCliManager.isPanelRunning(claudePanelId)) {
@@ -1739,9 +1790,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelReasoningEffort = isAnyEffortLevel(rawResumeEffort) ? rawResumeEffort : undefined;
       // Seed the facade's runId→panelId translation BEFORE the PTY spawn (mirrors
       // the create-quick eager spawn) so a relay/close-out racing the first PTY byte
-      // never falls back to the sentinel runId.
-      if (dbSession.run_id) {
-        registerLivePanel(dbSession.run_id, claudePanelId);
+      // never falls back to the sentinel runId. Register the CHAT sentinel — the
+      // gate vehicle the interactive spawn resolves and the id the manager stamps
+      // on its pty-output — matching the create-quick and sessions:input seams;
+      // run_id is only the legacy fallback (equal for quick sessions today).
+      const resumeGateRunId = dbSession.chat_run_id ?? dbSession.run_id;
+      if (resumeGateRunId) {
+        registerLivePanel(resumeGateRunId, claudePanelId);
       }
       // EAGER resume: spawn the REPL NOW with an EMPTY prompt so it reopens directly
       // into the prior conversation (`claude --resume <uuid>`, no fork, no turn).

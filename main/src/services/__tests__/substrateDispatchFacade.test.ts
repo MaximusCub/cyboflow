@@ -1378,3 +1378,122 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     expect(sdk.listLiveSpawnKeys).toHaveBeenCalledWith(run.id);
   });
 });
+
+// ---------------------------------------------------------------------------
+// panel-id resolution (the reopened-PTY "hangs" regression)
+// ---------------------------------------------------------------------------
+
+/**
+ * A registry that knows about NO runs — the state a chat panel id lands in.
+ * `resolveManager` used to floor such an id to DEFAULT_SUBSTRATE ('sdk'), so
+ * relayInput/relayResize silently no-opped for a PTY panel with no live
+ * `livePtyOwners` registration (empty after an app restart, and before the
+ * panel's first PTY byte). The injected PanelOwnerLookup is what closes it.
+ */
+function makeEmptyRegistry(): WorkflowRegistryLike {
+  return {
+    getRunById: vi.fn().mockReturnValue(undefined),
+    getById: vi.fn().mockReturnValue(undefined),
+  };
+}
+
+describe('SubstrateDispatchFacade — panel-id resolution', () => {
+  it('relays input to the PTY manager for a panel id that matches no run', () => {
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeEmptyRegistry(),
+      makeSpyLogger(),
+      [],
+      undefined,
+      (panelId) => (panelId === 'panel-pty' ? asManager(interactive) : undefined),
+    );
+
+    facade.relayInput('panel-pty', 'hello');
+
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-pty', 'hello');
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('relays a resize to the PTY manager for a panel id that matches no run', () => {
+    const sdk = makeSpyManager();
+    const interactive = new ResizeCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeEmptyRegistry(),
+      makeSpyLogger(),
+      [],
+      undefined,
+      () => asManager(interactive),
+    );
+
+    facade.relayResize('panel-pty', 120, 40);
+
+    expect(interactive.resizePanel).toHaveBeenCalledWith('panel-pty', 120, 40);
+  });
+
+  it('routes a Codex PTY panel to its own additional manager, not the SDK no-op', () => {
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexPty = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeEmptyRegistry(),
+      makeSpyLogger(),
+      [asManager(codexPty)],
+      undefined,
+      () => asManager(codexPty),
+    );
+
+    facade.relayInput('panel-codex-pty', 'ls\r');
+
+    // The old `mgr !== interactiveManager` test classified an additional PTY
+    // manager as "SDK" and dropped the keystroke.
+    expect(codexPty.sendInput).toHaveBeenCalledWith('panel-codex-pty', 'ls\r');
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('still floors to the SDK manager for an id that is neither a run nor a panel', () => {
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeEmptyRegistry(),
+      makeSpyLogger(),
+      [],
+      undefined,
+      () => undefined,
+    );
+
+    facade.relayInput('who-knows', 'x');
+
+    expect(interactive.sendInput).not.toHaveBeenCalled();
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('does not consult the panel lookup when the id IS a run (run row wins)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const lookup = vi.fn().mockReturnValue(asManager(interactive));
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeRegistry(run),
+      makeSpyLogger(),
+      [],
+      undefined,
+      lookup,
+    );
+
+    facade.relayInput(run.id, 'x');
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(interactive.sendInput).not.toHaveBeenCalled();
+  });
+});
