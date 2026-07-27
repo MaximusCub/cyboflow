@@ -108,10 +108,12 @@ describe('aggregatePairwise', () => {
   it('carries the samples verbatim on perSample', () => {
     const samples = [
       { ...sample('A', 0.7), judgeName: 'fake', judgeModel: 'fake-model' },
-      { ...sample('tie', 0.2), judgeName: 'fake', judgeModel: 'fake-model' },
+      { ...sample('tie', 0.2), judgeModel: null },
     ];
     const v = aggregatePairwise(samples);
     expect(v.perSample).toEqual(samples);
+    expect(v.perSample[0]).toMatchObject({ judgeName: 'fake', judgeModel: 'fake-model' });
+    expect(v.perSample[1]).toMatchObject({ judgeModel: null });
   });
 });
 

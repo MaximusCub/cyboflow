@@ -167,6 +167,11 @@ interface RecordedBaselineRotation {
   patch: { inRotation?: boolean; weight?: number };
 }
 
+const LEGACY_PER_SAMPLE = [
+  { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'a' },
+  { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.8, rationale: 'b' },
+];
+
 interface Harness {
   db: Database.Database;
   deps: ExperimentsDeps;
@@ -276,10 +281,7 @@ function comparisonRow(over: Partial<ExperimentComparisonRow> = {}): ExperimentC
     diff_b_stats_json: null,
     seed_context: null,
     sample_count: 2,
-    per_sample_json: JSON.stringify([
-      { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'a' },
-      { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.8, rationale: 'b' },
-    ]),
+    per_sample_json: JSON.stringify(LEGACY_PER_SAMPLE),
     preference: 'A',
     confidence: 0.85,
     rationale: 'A wins',
@@ -320,12 +322,9 @@ describe('experiments router orchestration (slice B)', () => {
 
     it('parses legacy six-field samples and keeps their counts', () => {
       const verdict = buildVerdict(comparisonRow({
-        per_sample_json: JSON.stringify([
-          { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'a' },
-          { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.8, rationale: 'b' },
-        ]),
+        per_sample_json: JSON.stringify(LEGACY_PER_SAMPLE),
       }));
-      expect(verdict?.perSample).toHaveLength(2);
+      expect(verdict?.perSample).toEqual(LEGACY_PER_SAMPLE);
       expect(verdict?.aCount).toBe(2);
       expect(verdict?.bCount).toBe(0);
       expect(verdict?.tieCount).toBe(0);
@@ -369,8 +368,10 @@ describe('experiments router orchestration (slice B)', () => {
 
     expect(payload?.verdict?.judgeModel).toBe('fake-model');
     expect(payload?.verdict?.judgeBuildId).toBe('build-1');
-    expect(payload?.verdict?.perSample).toHaveLength(2);
+    expect(payload?.verdict?.perSample).toEqual(LEGACY_PER_SAMPLE);
     expect(payload?.verdict?.aCount).toBe(2);
+    expect(payload?.verdict?.bCount).toBe(0);
+    expect(payload?.verdict?.tieCount).toBe(0);
   });
 
   it('startSideBySide (idea-seeded): pins base sha, clones per arm, launches both tagged', async () => {

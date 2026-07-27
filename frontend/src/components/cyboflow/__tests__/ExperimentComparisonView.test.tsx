@@ -19,6 +19,7 @@ import type {
   ExperimentComparisonPayload,
   ExperimentComparisonDiffs,
   ExperimentArmView,
+  PairwiseSample,
 } from '../../../../../shared/types/experiments';
 
 const getQuery = vi.fn();
@@ -147,17 +148,28 @@ function makePayload(over: Partial<ExperimentComparisonPayload> = {}): Experimen
       sampleCount: 3,
       judgeModel: 'legacy-model',
       judgeBuildId: null,
-      perSample: [
-        { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'r1' },
-        { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.85, rationale: 'r2' },
-        { sampleIndex: 2, positionAFirst: true, rawPreference: '2', preference: 'B', confidence: 0.6, rationale: 'r3' },
-      ],
+      perSample: [...LEGACY_SAMPLES],
     },
     armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'variant-a', status: 'awaiting_review' }),
     armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'awaiting_review' }),
     ...over,
   };
 }
+
+const LEGACY_SAMPLES: PairwiseSample[] = [
+  { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'r1' },
+  { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.85, rationale: 'r2' },
+  { sampleIndex: 2, positionAFirst: true, rawPreference: '2', preference: 'B', confidence: 0.6, rationale: 'r3' },
+];
+
+const IDENTIFIED_SAMPLES: PairwiseSample[] = [
+  { ...LEGACY_SAMPLES[0], judgeName: 'judge-a', judgeModel: 'sample-model' },
+  { ...LEGACY_SAMPLES[1], judgeName: 'judge-b', judgeModel: 'sample-model' },
+];
+
+const NULL_IDENTITY_SAMPLES: PairwiseSample[] = [
+  { ...LEGACY_SAMPLES[0], judgeModel: null },
+];
 
 const DIFF_A = [
   'diff --git a/src/a.ts b/src/a.ts',
@@ -220,8 +232,11 @@ describe('ExperimentComparisonView', () => {
     expect(await screen.findByTestId('experiment-verdict-preference')).toHaveTextContent('Prefers A');
     expect(screen.getByTestId('experiment-verdict-confidence')).toHaveTextContent('80%');
     expect(screen.getByTestId('experiment-verdict-rationale')).toHaveTextContent('edge case');
-    expect(screen.getAllByTestId('experiment-sample-chip')).toHaveLength(3);
-    expect(screen.getAllByTestId('experiment-sample-chip')[0]).toHaveTextContent('legacy-model');
+    const chips = screen.getAllByTestId('experiment-sample-chip');
+    expect(chips).toHaveLength(3);
+    for (const [index, chip] of chips.entries()) {
+      expect(chip).toHaveTextContent(new RegExp(`^#${index + 1} .* · legacy-model$`));
+    }
     expect(screen.getByTestId('experiment-verdict-judge-provenance')).toHaveTextContent('graded by legacy-model');
     expect(screen.getAllByTestId('experiment-verdict-judge-provenance')).toHaveLength(1);
     expect(screen.getByTestId('experiment-arm-a')).toBeInTheDocument();
@@ -235,10 +250,7 @@ describe('ExperimentComparisonView', () => {
         verdict: {
           ...makePayload().verdict!,
           judgeModel: 'row-model',
-          perSample: [
-            { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'r1', judgeName: 'judge-a', judgeModel: 'sample-model' },
-            { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.85, rationale: 'r2', judgeName: 'judge-b', judgeModel: 'sample-model' },
-          ],
+          perSample: [...IDENTIFIED_SAMPLES],
           sampleCount: 2,
         },
       }),
@@ -248,23 +260,47 @@ describe('ExperimentComparisonView', () => {
     render(<ExperimentComparisonView experimentId="exp_1" />);
 
     const chips = await screen.findAllByTestId('experiment-sample-chip');
-    expect(chips[0]).toHaveTextContent('judge-a');
-    expect(chips[0]).toHaveAttribute('title', expect.stringContaining('Solution 1 = Arm A · Solution 2 = Arm B · confidence 90%'));
-    expect(chips[0]).toHaveAttribute('title', expect.stringContaining('graded by judge-a · sample-model'));
-    expect(screen.getByTestId('experiment-verdict-judge-provenance')).toHaveTextContent('judge-a · sample-model, judge-b · sample-model');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent(/^#1 Arm A · judge-a$/);
+    expect(chips[1]).toHaveTextContent(/^#2 Arm A · judge-b$/);
+    expect(chips[0]).toHaveAttribute(
+      'title',
+      'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by judge-a · sample-model',
+    );
+    expect(chips[1]).toHaveAttribute(
+      'title',
+      'Solution 1 = Arm B · Solution 2 = Arm A · confidence 85% · graded by judge-b · sample-model',
+    );
+    const provenance = screen.getAllByTestId('experiment-verdict-judge-provenance');
+    expect(provenance).toHaveLength(1);
+    expect(provenance[0]).toHaveTextContent('graded by judge-a · sample-model, judge-b · sample-model');
   });
 
-  it('renders unknown when neither sample nor verdict has judge provenance', async () => {
+  it('renders explicit unknown for a null/null judge identity', async () => {
     getQuery.mockResolvedValue(makeExp());
     getComparisonQuery.mockResolvedValue(
-      makePayload({ verdict: { ...makePayload().verdict!, judgeModel: null } }),
+      makePayload({
+        verdict: {
+          ...makePayload().verdict!,
+          judgeModel: null,
+          perSample: [...NULL_IDENTITY_SAMPLES],
+          sampleCount: 1,
+        },
+      }),
     );
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
 
     expect(await screen.findByTestId('experiment-verdict-judge-provenance')).toHaveTextContent('graded by unknown');
-    expect(screen.getAllByTestId('experiment-sample-chip')[0]).toHaveTextContent('unknown');
+    const chips = screen.getAllByTestId('experiment-sample-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent(/^#1 Arm A · unknown$/);
+    expect(chips[0]).toHaveAttribute(
+      'title',
+      'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by unknown',
+    );
+    expect(screen.getAllByTestId('experiment-verdict-judge-provenance')).toHaveLength(1);
   });
 
   it('shows the "did not complete" message when an arm failed and grading failed', async () => {
