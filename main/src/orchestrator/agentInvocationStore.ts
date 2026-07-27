@@ -17,6 +17,14 @@ export interface CreateAgentInvocationInput {
   model?: string | null;
   /** Optional stable id for callers that already own invocation identity. */
   agentInvocationId?: string;
+  /**
+   * Owning chat panel, for turns driven per-panel rather than per-run. A quick
+   * session's chat_run_id is SESSION-scoped (every chat panel shares it), so
+   * without this a second chat panel's resume lookup returns the FIRST panel's
+   * provider thread and the two conversations merge. Null/absent for workflow
+   * runs and every pre-083 row — the run-scoped lookup ignores it.
+   */
+  panelId?: string | null;
 }
 
 export interface AgentResumeTarget {
@@ -49,8 +57,8 @@ export class AgentInvocationStore {
     this.db
       .prepare(
         `INSERT INTO agent_invocations
-           (agent_invocation_id, run_id, step_id, agent_provider, agent_runtime, model)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (agent_invocation_id, run_id, step_id, agent_provider, agent_runtime, model, panel_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agentInvocationId,
@@ -59,6 +67,7 @@ export class AgentInvocationStore {
         input.provider,
         input.runtime,
         input.model ?? null,
+        input.panelId ?? null,
       );
     return agentInvocationId;
   }
@@ -87,6 +96,56 @@ export class AgentInvocationStore {
       )
       .run(externalSessionId, runId, agentInvocationId);
     return result.changes === 1;
+  }
+
+  /**
+   * Resolve the newest captured top-level invocation FOR ONE CHAT PANEL.
+   *
+   * A quick session's chat_run_id is SESSION-scoped: every chat panel resolves
+   * the same run id, so `getLatestTopLevelResumeTarget(chat_run_id)` hands a
+   * second chat panel the FIRST panel's provider thread and the two panels
+   * replay one conversation. This filters to rows this panel actually wrote.
+   *
+   * Returns null when the panel has no captured invocation yet — a NEW panel
+   * must start a FRESH provider thread, never inherit a sibling's. It also
+   * deliberately does NOT fall back to the run-level lookup or to the legacy
+   * workflow_runs.claude_session_id: both are session-scoped and inheriting them
+   * is the exact bug this exists to prevent. Pre-083 rows carry panel_id NULL,
+   * so the panel that owns them is identified by the caller (see the ownership
+   * note at the codex-sdk turn seam), not by this query.
+   */
+  getLatestPanelResumeTarget(runId: string, panelId: string): AgentResumeTarget | null {
+    let invocation: ResumeTargetRow | undefined;
+    try {
+      invocation = this.db
+        .prepare(
+          `SELECT agent_provider AS provider,
+                  agent_runtime AS runtime,
+                  external_session_id AS externalSessionId
+             FROM agent_invocations
+            WHERE run_id = ?
+              AND panel_id = ?
+              AND step_id IS NULL
+              AND external_session_id IS NOT NULL
+              AND trim(external_session_id) != ''
+            ORDER BY id DESC
+            LIMIT 1`,
+        )
+        .get(runId, panelId) as ResumeTargetRow | undefined;
+    } catch (error) {
+      // A pre-083 database (no panel_id column) or a pre-065 one (no table) has
+      // nothing panel-scoped to return — fail soft to "no target", i.e. a fresh
+      // thread, which is the safe direction.
+      if (
+        !(error instanceof Error) ||
+        !/no such (table:\s*agent_invocations|column:\s*panel_id)/i.test(error.message)
+      ) {
+        throw error;
+      }
+      return null;
+    }
+
+    return invocation ? this.toResumeTarget(invocation) : null;
   }
 
   /**

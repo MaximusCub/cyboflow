@@ -62,7 +62,10 @@ function createDb(): Database.Database {
       agent_runtime TEXT NOT NULL,
       model TEXT,
       external_session_id TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      -- migration 083: owning chat panel, so two chat panels sharing one
+      -- session-scoped chat_run_id resolve DISTINCT Codex threads.
+      panel_id TEXT
     );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

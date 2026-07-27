@@ -902,6 +902,12 @@ export class CodexSdkManager extends AbstractCliManager {
         provider: 'codex',
         runtime: 'codex-sdk',
         model: resolveAgentModelAlias('codex', options.model),
+        // Stamp the owning chat panel so a per-panel resume lookup can tell this
+        // panel's Codex thread from a sibling chat panel's. For workflow runs
+        // panelId === runId, so this is redundant-but-harmless there; for a quick
+        // session the runId is the SESSION-shared chat sentinel and this column
+        // is the only thing that distinguishes two chats (TASK-103 Add-chat).
+        panelId: displayPanelId,
       });
       this.captureInvocationCodexThreadId(runId, agentInvocationId, entry.threadId);
       this.emitProjected(

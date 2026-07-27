@@ -112,6 +112,8 @@ describe('Full-chain migration continuity', () => {
         'model',
         'external_session_id',
         'created_at',
+        // 083 adds the owning chat panel (per-panel Codex resume identity).
+        'panel_id',
       ]),
     );
 

@@ -323,8 +323,22 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     // where it rides Options.effort and must sit in the warm fingerprint).
     const rawEffort = settings?.reasoningEffort;
     const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
-    const resumeTarget = new AgentInvocationStore(databaseService.getDb())
-      .getLatestTopLevelResumeTarget(runId);
+    // PER-PANEL resume target. `runId` here is the session's chat sentinel —
+    // shared by EVERY chat panel of the session — so the run-scoped lookup handed
+    // a second Codex chat the FIRST chat's thread and both panels then replayed
+    // one conversation (the "two chats share a history" bug). Resolve by panelId
+    // instead so each chat continues its OWN thread.
+    //
+    // Pre-083 rows carry panel_id NULL and belong to the panel that existed when
+    // they were written — the session's FIRST chat panel. Fall back to the
+    // run-scoped lookup for exactly that panel so an in-flight single-chat
+    // session keeps resuming across the upgrade; any other panel starts fresh,
+    // which is the correct answer for a chat that never had its own thread.
+    const invocationStore = new AgentInvocationStore(databaseService.getDb());
+    const isFirstChatPanel = panelId === resolveClaudePanelId(panel.sessionId);
+    const resumeTarget =
+      invocationStore.getLatestPanelResumeTarget(runId, panelId) ??
+      (isFirstChatPanel ? invocationStore.getLatestTopLevelResumeTarget(runId) : null);
     const resumeSessionId =
       resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
         ? resumeTarget.externalSessionId

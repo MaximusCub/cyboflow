@@ -47,6 +47,10 @@ vi.mock('../../orchestrator/agentInvocationStore', () => ({
     getLatestTopLevelResumeTarget() {
       return undefined;
     }
+    /** Per-panel resume identity (083) — no prior thread for these fixtures. */
+    getLatestPanelResumeTarget() {
+      return null;
+    }
   },
 }));
 

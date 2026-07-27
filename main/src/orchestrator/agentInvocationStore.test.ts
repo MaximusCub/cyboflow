@@ -9,6 +9,11 @@ const MIGRATION = readFileSync(
   join(__dirname, '..', 'database', 'migrations', '065_agent_invocations.sql'),
   'utf-8',
 );
+/** 083 adds agent_invocations.panel_id — the per-chat-panel resume identity. */
+const MIGRATION_PANEL_ID = readFileSync(
+  join(__dirname, '..', 'database', 'migrations', '083_agent_invocation_panel_id.sql'),
+  'utf-8',
+);
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -26,6 +31,7 @@ function buildDb(): Database.Database {
     );
   `);
   db.exec(MIGRATION);
+  db.exec(MIGRATION_PANEL_ID);
   return db;
 }
 
@@ -242,6 +248,132 @@ describe('AgentInvocationStore', () => {
       runtime: 'claude-sdk',
       externalSessionId: 'legacy-session',
     });
+    legacyDb.close();
+  });
+});
+
+/**
+ * Per-chat-panel resume identity (the "two Codex chats share a history" bug).
+ *
+ * A quick session's chat_run_id is SESSION-scoped, so every chat panel resolves
+ * the same run id. Resolving the resume target by run id therefore handed a
+ * SECOND Codex chat the FIRST chat's thread and both panels replayed one
+ * conversation. getLatestPanelResumeTarget filters to the panel's own rows.
+ */
+describe('AgentInvocationStore — per-panel resume targets', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = buildDb();
+    seedRun(db, 'chat-run', { provider: 'codex', runtime: 'codex-sdk' });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function captureFor(panelId: string, invocationId: string, threadId: string): void {
+    const store = new AgentInvocationStore(dbAdapter(db));
+    store.createInvocation({
+      agentInvocationId: invocationId,
+      runId: 'chat-run',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      panelId,
+    });
+    store.captureExternalSessionId('chat-run', invocationId, threadId);
+  }
+
+  it('keeps two chat panels on the SAME run id pointed at their own threads', () => {
+    captureFor('panel-1', 'inv-1', 'thread-panel-1');
+    captureFor('panel-2', 'inv-2', 'thread-panel-2');
+    const store = new AgentInvocationStore(dbAdapter(db));
+
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')?.externalSessionId).toBe(
+      'thread-panel-1',
+    );
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-2')?.externalSessionId).toBe(
+      'thread-panel-2',
+    );
+    // The run-scoped lookup is what both panels used to share — it still returns
+    // the newest row overall, which is exactly why it is the wrong per-panel key.
+    expect(store.getLatestTopLevelResumeTarget('chat-run')?.externalSessionId).toBe(
+      'thread-panel-2',
+    );
+  });
+
+  it('returns null for a panel with no captured invocation (a NEW chat starts fresh)', () => {
+    captureFor('panel-1', 'inv-1', 'thread-panel-1');
+    const store = new AgentInvocationStore(dbAdapter(db));
+
+    // Must NOT inherit panel-1's thread — that inheritance IS the bug.
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-2')).toBeNull();
+  });
+
+  it('returns the NEWEST captured thread for the panel across turns', () => {
+    captureFor('panel-1', 'inv-old', 'thread-old');
+    captureFor('panel-1', 'inv-new', 'thread-new');
+    const store = new AgentInvocationStore(dbAdapter(db));
+
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')?.externalSessionId).toBe(
+      'thread-new',
+    );
+  });
+
+  it('ignores pre-083 rows (panel_id NULL) — they are claimed by the caller, not this query', () => {
+    const store = new AgentInvocationStore(dbAdapter(db));
+    store.createInvocation({
+      agentInvocationId: 'inv-legacy',
+      runId: 'chat-run',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+    });
+    store.captureExternalSessionId('chat-run', 'inv-legacy', 'thread-legacy');
+
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')).toBeNull();
+    // The run-scoped lookup still finds it, which is how the first chat panel
+    // keeps resuming across the 083 upgrade.
+    expect(store.getLatestTopLevelResumeTarget('chat-run')?.externalSessionId).toBe('thread-legacy');
+  });
+
+  it('ignores step invocations and uncaptured rows', () => {
+    const store = new AgentInvocationStore(dbAdapter(db));
+    store.createInvocation({
+      agentInvocationId: 'inv-step',
+      runId: 'chat-run',
+      stepId: 'step-1',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      panelId: 'panel-1',
+    });
+    store.captureExternalSessionId('chat-run', 'inv-step', 'thread-step');
+    store.createInvocation({
+      agentInvocationId: 'inv-uncaptured',
+      runId: 'chat-run',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      panelId: 'panel-1',
+    });
+
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')).toBeNull();
+  });
+
+  it('fails soft to null on a pre-083 database with no panel_id column', () => {
+    const legacyDb = new Database(':memory:');
+    legacyDb.exec(`
+      CREATE TABLE workflow_runs (
+        id TEXT PRIMARY KEY,
+        claude_session_id TEXT,
+        agent_provider TEXT NOT NULL,
+        agent_runtime TEXT NOT NULL,
+        model TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    legacyDb.exec(MIGRATION); // 065 only — no panel_id column.
+
+    const store = new AgentInvocationStore(dbAdapter(legacyDb));
+    expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')).toBeNull();
     legacyDb.close();
   });
 });
