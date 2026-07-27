@@ -6,6 +6,23 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.32] — 2026-07-27
+
+### Added
+
+- **Design mode (v0.5)**: a fullscreen design surface for an idea, entered from the ui-prototype artifact header. A Design arm in the session wizard (idea-gated, SDK-substrate pinned) launches a design session with a clarify-first kickoff; a dedicated `design` MCP scope exposes a minimal toolset. Drafts round-trip through an artifact revision counter with compare-and-swap freshness, and an Approve control folds the approved design atomically, exits design mode, and prompts a planner handoff. Includes a live prototype iframe with an in-app "Open in browser", a working-indicator overlay, and a consent-gated style-kit step (repo-wide design-system discovery with tracked / untracked / skip options and backlog handoff). Schema in migrations 082–085.
+- **Idle quick-session summaries**: a one-shot Haiku summary of a quick session, scheduled on an idle debounce and gated behind an Assistant setting. Surfaced as a summary card with expandable history on the quick-session canvas (opening with the session objective), served via `sessions:get-summary` with lazy catch-up. Backed by PTY transcript ingestion into `conversation_messages` and a liveness-gated in-flight probe (migrations 082/083).
+- **Code-review blocking-finding escalation ladder**: a code-review verdict channel on the programmatic plane, a mint-time audience axis for review items (migration 085), and a per-lane failure summary on the terminal sprint gate.
+
+### Changed
+
+- Loopback-eligible defects are guarded against being filed as findings, with a fail-safe code-review loopback on a trailer-less turn; `audience=machine` findings are excluded from human Insights and metrics, and the under-cap visual loopback finding is audience-tagged plane-aware.
+
+### Fixed
+
+- Sprint-batch sessions inherit ALL idea artifacts, not just the dominant idea's.
+- Blank assistant bubble: LiveTail is gated on visible content rather than block existence.
+
 ## [0.1.31] — 2026-07-24
 
 ### Added
