@@ -154,7 +154,7 @@ export interface ConversationMessage {
   content: string;
   timestamp: string;
   /**
-   * The source transcript entry's own `uuid` (migration 083), set only for rows
+   * The source transcript entry's own `uuid` (migration 084), set only for rows
    * ingested from a PTY session's Claude-CLI JSONL transcript
    * (main/src/services/ptyTranscriptIngest.ts). NULL for SDK-written rows. The
    * dedupe key behind idempotent re-ingestion (partial unique index on
@@ -721,7 +721,7 @@ export interface ApprovedDesignRow {
 }
 
 /**
- * `session_summaries` row (migration 082) — one row per session, upserted in
+ * `session_summaries` row (migration 083) — one row per session, upserted in
  * place by the idle-gated quick-session summarizer
  * (docs/proposals/session-summary-plan.md §4). `summary` is the current
  * 1-2 sentence rolling summary. `last_turn_id` is the content watermark —
@@ -740,7 +740,7 @@ export interface SessionSummary {
 }
 
 /**
- * `session_summary_entries` row (migration 082) — one append-only "past
+ * `session_summary_entries` row (migration 083) — one append-only "past
  * sitting" history sentence per row, oldest first via `id ASC`. Deleting the
  * owning session cascades these rows.
  */

@@ -6,7 +6,7 @@
  * summary + history are produced by the idle-debounced Haiku summarizer
  * (`main/src/orchestrator/sessionSummary/`, session-summary-plan.md); this is
  * the pure read shape — the write side lives in `session_summaries` /
- * `session_summary_entries` (migration 082).
+ * `session_summary_entries` (migration 083).
  *
  * Promoted to shared per the IPC parity rules (`docs/CODE-PATTERNS.md`): both
  * the main handler's `IPCResponse<T>` and the two frontend mirror surfaces

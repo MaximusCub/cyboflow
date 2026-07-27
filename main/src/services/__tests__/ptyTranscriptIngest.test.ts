@@ -1,7 +1,7 @@
 /**
  * Tests for ptyTranscriptIngest — the PTY-session transcript backfill that lets
  * the idle-gated session summarizer see interactive-substrate conversations
- * (migration 083, docs/proposals/session-summary-plan.md PTY follow-up).
+ * (migration 084, docs/proposals/session-summary-plan.md PTY follow-up).
  *
  * Uses a REAL DatabaseService against a temp-file DB (so the migration-083
  * partial-unique dedupe index is exactly as it ships) and a REAL fixture JSONL

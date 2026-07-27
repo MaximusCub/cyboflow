@@ -1,9 +1,9 @@
--- Migration 083: dedupe key for PTY transcript ingestion into
+-- Migration 084: dedupe key for PTY transcript ingestion into
 -- conversation_messages, docs/proposals/session-summary-plan.md (PTY follow-up).
 --
 -- Interactive (PTY) quick sessions never write conversation_messages rows — their
 -- content lives only as raw ANSI stdout blobs in session_outputs — so the
--- session-summary scheduler's watermark read (migration 082) always sees an empty
+-- session-summary scheduler's watermark read (migration 083) always sees an empty
 -- delta for them. The fix ingests the Claude-CLI JSONL transcript
 -- (~/.claude/projects/<encodeCwd(cwd)>/<claude_session_id>.jsonl) into
 -- conversation_messages on the scheduler's fire path.

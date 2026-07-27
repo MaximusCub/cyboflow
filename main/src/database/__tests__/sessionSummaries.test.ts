@@ -3,7 +3,7 @@
  * DatabaseService (main/src/database/database.ts): getSessionSummary,
  * upsertSessionSummary, appendSessionSummaryEntries,
  * listSessionSummaryEntries, getConversationMessagesAfter, and the
- * transactional persistSessionSummaryResult (migration 082,
+ * transactional persistSessionSummaryResult (migration 083,
  * docs/proposals/session-summary-plan.md §4).
  *
  * Uses a REAL DatabaseService against a temp-file DB and a full initialize()
@@ -151,7 +151,7 @@ describe('getConversationMessagesAfter', () => {
   });
 });
 
-describe('insertTranscriptConversationMessage (migration 083 PTY ingest)', () => {
+describe('insertTranscriptConversationMessage (migration 084 PTY ingest)', () => {
   it('inserts with an EXPLICIT timestamp and source_uuid, returning true', () => {
     createSession('s1');
     const ts = '2026-03-04T12:00:00.000Z';

@@ -1,4 +1,4 @@
--- Migration 082: idle-gated quick-session summaries (rolling summary +
+-- Migration 083: idle-gated quick-session summaries (rolling summary +
 -- append-only history), docs/proposals/session-summary-plan.md §4.
 --
 -- Separate tables, not `sessions` columns: summary writes must never bump

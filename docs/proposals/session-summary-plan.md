@@ -215,11 +215,11 @@ and normalize in the transcript formatter; also confirm the assistant row is
 committed BEFORE the turn-end event fires on both substrates (composition
 test, §8).
 
-## 4. Persistence (migration 082)
+## 4. Persistence (migration 083)
 
 Separate tables, not `sessions` columns — summary writes must never bump
 `sessions.updated_at` (activity clock), and cascade-delete stays clean.
-Target number: **082** — `080_agent_thread_last_turn.sql` is this branch's
+Target number: **083** (was 082 pre-rebase; design-mode v0 claimed 082 on main) — `080_agent_thread_last_turn.sql` is this branch's
 ceiling, but 081 is already claimed by the in-flight final-gate auto-handover
 branch (misty-birch, merging as of 2026-07-23). Renumber-on-land applies;
 re-check `main/src/database/migrations/` ceiling at implementation time.
@@ -227,7 +227,7 @@ Runtime FK enforcement was verified during review, so `ON DELETE CASCADE` is
 live (migration-file rule regardless: FK pragma toggles stay outside the
 per-file transaction, `docs/CODE-PATTERNS.md`).
 
-`main/src/database/migrations/082_session_summaries.sql`:
+`main/src/database/migrations/083_session_summaries.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS session_summaries (

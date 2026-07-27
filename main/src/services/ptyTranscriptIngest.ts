@@ -6,12 +6,12 @@
  * WHY THIS EXISTS: the SDK substrate writes each turn into `conversation_messages`
  * as it streams, but the interactive substrate does not — a PTY session's content
  * exists only as raw ANSI stdout blobs in `session_outputs`. So the scheduler's
- * content-watermark read (migration 082) always sees an empty delta for PTY
+ * content-watermark read (migration 083) always sees an empty delta for PTY
  * sessions and never summarizes them. The Claude CLI, however, writes its OWN
  * structured transcript to `~/.claude/projects/<encodeCwd(cwd)>/<uuid>.jsonl`
  * (the same file `transcriptTailSource.ts` tails). This service reads that JSONL
  * and mirrors its top-level user/assistant turns into `conversation_messages`,
- * idempotently (migration 083's `source_uuid` dedupe key), so the watermark read
+ * idempotently (migration 084's `source_uuid` dedupe key), so the watermark read
  * has real rows to fold.
  *
  * Layering: this is a services-layer file (it reads the filesystem and the DB),

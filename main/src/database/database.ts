@@ -2660,7 +2660,7 @@ export class DatabaseService {
   }
 
   // Idempotent ingest of ONE PTY-transcript turn into conversation_messages
-  // (migration 083, session-summary-plan.md PTY follow-up). Unlike
+  // (migration 084, session-summary-plan.md PTY follow-up). Unlike
   // addConversationMessage, this writes an EXPLICIT timestamp (the JSONL entry's
   // own ISO time — sitting segmentation depends on real times, never
   // CURRENT_TIMESTAMP) and a `source_uuid` (the transcript entry's uuid) so
@@ -3736,7 +3736,7 @@ export class DatabaseService {
     `).all(sessionId, afterId) as ConversationMessage[];
   }
 
-  // Session-summary operations (migration 082, session-summary-plan.md §4).
+  // Session-summary operations (migration 083, session-summary-plan.md §4).
   getSessionSummary(sessionId: string): SessionSummary | undefined {
     return this.db.prepare(`
       SELECT * FROM session_summaries WHERE session_id = ?
