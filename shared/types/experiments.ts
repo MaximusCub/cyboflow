@@ -308,6 +308,9 @@ export interface PairwiseSample {
   preference: PairwisePreference;
   confidence: number; // 0..1
   rationale: string;
+  /** Judge identity fields are absent on rows written before this change. */
+  judgeName?: string;
+  judgeModel?: string | null;
 }
 
 /** Aggregate verdict over the surviving K pairwise samples. */
@@ -320,6 +323,8 @@ export interface PairwiseVerdict {
   tieCount: number;
   sampleCount: number; // valid samples that survived (<= K)
   perSample: PairwiseSample[];
+  judgeModel: string | null;
+  judgeBuildId: string | null;
 }
 
 /** `experiment_comparisons` DB row (migration 050). */

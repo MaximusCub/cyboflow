@@ -64,6 +64,8 @@ export function aggregatePairwise(samples: PairwiseSample[]): PairwiseVerdict {
     tieCount,
     sampleCount: samples.length,
     perSample: samples,
+    judgeModel: null,
+    judgeBuildId: null,
   };
 }
 

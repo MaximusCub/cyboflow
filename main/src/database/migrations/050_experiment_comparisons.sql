@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS experiment_comparisons (
 
   -- K-sample verdict.
   sample_count            INTEGER,                -- valid samples that survived (<= K)
-  per_sample_json         TEXT,                   -- [{sampleIndex, positionAFirst, rawPreference, preference, confidence, rationale}]
+  per_sample_json         TEXT,                   -- [{sampleIndex, positionAFirst, rawPreference, preference, confidence, rationale, judgeName?, judgeModel?}]
   preference              TEXT CHECK (preference IN ('A','B','tie')),  -- NULL until complete
   confidence              REAL,                   -- 0..1, mean confidence of winning-side samples
   rationale               TEXT,                   -- representative (highest-confidence winning-side) rationale

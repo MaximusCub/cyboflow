@@ -23,8 +23,12 @@ import {
   decideRotationExperiment,
   abandonRotationExperiment,
   getRunningRotationSummary,
+  buildVerdict,
+  experimentsRouter,
+  setExperimentsDeps,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
+import { createContext } from '../trpc/context';
 import {
   getExperiment,
   listExperimentSeedTasks,
@@ -32,7 +36,11 @@ import {
   getRunningRotationExperiment,
   reconcileRotationExperiment,
 } from '../experimentStore';
-import type { WorkflowVariantRow, ExperimentStatusChangedEvent } from '../../../../shared/types/experiments';
+import type {
+  WorkflowVariantRow,
+  ExperimentStatusChangedEvent,
+  ExperimentComparisonRow,
+} from '../../../../shared/types/experiments';
 import { experimentEvents } from '../trpc/routers/events';
 
 function buildDb(): Database.Database {
@@ -43,7 +51,8 @@ function buildDb(): Database.Database {
   const migDir = join(__dirname, '..', '..', 'database', 'migrations');
   for (const f of [
     '006_cyboflow_schema.sql', '011_workflow_step_tracking.sql', '014_native_tasks.sql',
-    '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '028_idea_attachments.sql',
+    '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '026_run_usage_spec_hash_revisions.sql',
+    '028_idea_attachments.sql', '043_run_evals.sql', '069_run_eval_jury.sql',
     '085_review_item_audience.sql',
   ]) db.exec(readFileSync(join(migDir, f), 'utf-8'));
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
@@ -253,10 +262,115 @@ function field(db: Database.Database, table: string, id: string, col: string): u
   return (db.prepare(`SELECT ${col} AS v FROM ${table} WHERE id = ?`).get(id) as { v: unknown } | undefined)?.v;
 }
 
+function comparisonRow(over: Partial<ExperimentComparisonRow> = {}): ExperimentComparisonRow {
+  return {
+    id: 'cmp_1',
+    experiment_id: 'exp_1',
+    run_id_a: 'run_a',
+    run_id_b: 'run_b',
+    eval_status: 'complete',
+    base_sha: 'sha',
+    diff_a_text: null,
+    diff_b_text: null,
+    diff_a_stats_json: null,
+    diff_b_stats_json: null,
+    seed_context: null,
+    sample_count: 2,
+    per_sample_json: JSON.stringify([
+      { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'a' },
+      { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.8, rationale: 'b' },
+    ]),
+    preference: 'A',
+    confidence: 0.85,
+    rationale: 'A wins',
+    a_count: 2,
+    b_count: 0,
+    tie_count: 0,
+    judge_model: 'fake-model',
+    judge_build_id: 'build-1',
+    prompt_hash: null,
+    error: null,
+    decision_review_item_id: null,
+    snapshot_at: null,
+    completed_at: null,
+    created_at: '',
+    updated_at: '',
+    ...over,
+  };
+}
+
 describe('experiments router orchestration (slice B)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();
+  });
+
+  describe('buildVerdict', () => {
+    it('maps stamped row-level judge provenance', () => {
+      const verdict = buildVerdict(comparisonRow());
+      expect(verdict?.judgeModel).toBe('fake-model');
+      expect(verdict?.judgeBuildId).toBe('build-1');
+    });
+
+    it('preserves NULL row-level judge provenance', () => {
+      const verdict = buildVerdict(comparisonRow({ judge_model: null, judge_build_id: null }));
+      expect(verdict?.judgeModel).toBeNull();
+      expect(verdict?.judgeBuildId).toBeNull();
+    });
+
+    it('parses legacy six-field samples and keeps their counts', () => {
+      const verdict = buildVerdict(comparisonRow({
+        per_sample_json: JSON.stringify([
+          { sampleIndex: 0, positionAFirst: true, rawPreference: '1', preference: 'A', confidence: 0.9, rationale: 'a' },
+          { sampleIndex: 1, positionAFirst: false, rawPreference: '2', preference: 'A', confidence: 0.8, rationale: 'b' },
+        ]),
+      }));
+      expect(verdict?.perSample).toHaveLength(2);
+      expect(verdict?.aCount).toBe(2);
+      expect(verdict?.bCount).toBe(0);
+      expect(verdict?.tieCount).toBe(0);
+    });
+
+    it('swallows malformed per-sample JSON', () => {
+      const verdict = buildVerdict(comparisonRow({ per_sample_json: '{not-json' }));
+      expect(verdict?.perSample).toEqual([]);
+    });
+  });
+
+  it('getComparison returns row-level judge provenance with legacy samples intact', async () => {
+    const h = makeHarness();
+    const started = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: 'vA',
+      variantBId: 'vB',
+    });
+    h.db
+      .prepare(
+        `INSERT INTO experiment_comparisons
+          (id, experiment_id, run_id_a, run_id_b, eval_status, sample_count, per_sample_json,
+           preference, confidence, rationale, a_count, b_count, tie_count, judge_model, judge_build_id)
+         VALUES (?, ?, ?, ?, 'complete', 2, ?, 'A', 0.85, 'A wins', 2, 0, 0, ?, ?)`,
+      )
+      .run(
+        'cmp_get_comparison',
+        started.experimentId,
+        started.armA.runId,
+        started.armB.runId,
+        comparisonRow().per_sample_json,
+        'fake-model',
+        'build-1',
+      );
+    setExperimentsDeps(h.deps);
+
+    const payload = await experimentsRouter.createCaller(createContext({ db: h.deps.db })).getComparison({
+      experimentId: started.experimentId,
+    });
+
+    expect(payload?.verdict?.judgeModel).toBe('fake-model');
+    expect(payload?.verdict?.judgeBuildId).toBe('build-1');
+    expect(payload?.verdict?.perSample).toHaveLength(2);
+    expect(payload?.verdict?.aCount).toBe(2);
   });
 
   it('startSideBySide (idea-seeded): pins base sha, clones per arm, launches both tagged', async () => {

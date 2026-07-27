@@ -259,9 +259,15 @@ describe('process — sampling + persistence', () => {
     expect(row.n).toBe(3);
     expect(row.jm).toBe('fake-model');
     expect(row.d).toBe('rvw_x');
-    const perSample = JSON.parse(row.ps) as Array<{ preference: string; positionAFirst: boolean }>;
+    const perSample = JSON.parse(row.ps) as Array<{
+      preference: string;
+      positionAFirst: boolean;
+      judgeName: string;
+      judgeModel: string | null;
+    }>;
     expect(perSample).toHaveLength(3);
     expect(perSample.every((s) => s.preference === 'A')).toBe(true);
+    expect(perSample.every((s) => s.judgeName === 'fake' && s.judgeModel === 'fake-model')).toBe(true);
 
     // decision review item minted with the experiment id payload.
     expect(reviewItemWriter).toHaveBeenCalledOnce();

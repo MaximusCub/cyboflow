@@ -1805,7 +1805,7 @@ function readComparisonDiffRow(db: DatabaseLike, experimentId: string): Comparis
 }
 
 /** Build the aggregate verdict from a complete comparison row (null otherwise). */
-function buildVerdict(row: ComparisonStatusRow | null): PairwiseVerdict | null {
+export function buildVerdict(row: ComparisonStatusRow | null): PairwiseVerdict | null {
   if (!row || row.eval_status !== 'complete' || row.preference === null) return null;
   let perSample: PairwiseSample[] = [];
   if (row.per_sample_json) {
@@ -1827,6 +1827,8 @@ function buildVerdict(row: ComparisonStatusRow | null): PairwiseVerdict | null {
     tieCount: row.tie_count,
     sampleCount: row.sample_count ?? perSample.length,
     perSample,
+    judgeModel: row.judge_model,
+    judgeBuildId: row.judge_build_id,
   };
 }
 

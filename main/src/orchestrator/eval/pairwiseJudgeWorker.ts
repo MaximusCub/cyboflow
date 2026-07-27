@@ -453,6 +453,8 @@ export class PairwiseJudgeWorker {
         preference,
         confidence: raw.confidence,
         rationale: raw.rationale,
+        judgeName: this.deps.judge.name,
+        judgeModel: this.deps.judge.resolvedModel ?? null,
       });
     }
     return samples;

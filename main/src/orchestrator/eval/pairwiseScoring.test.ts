@@ -106,7 +106,10 @@ describe('aggregatePairwise', () => {
   });
 
   it('carries the samples verbatim on perSample', () => {
-    const samples = [sample('A', 0.7), sample('tie', 0.2)];
+    const samples = [
+      { ...sample('A', 0.7), judgeName: 'fake', judgeModel: 'fake-model' },
+      { ...sample('tie', 0.2), judgeName: 'fake', judgeModel: 'fake-model' },
+    ];
     const v = aggregatePairwise(samples);
     expect(v.perSample).toEqual(samples);
   });

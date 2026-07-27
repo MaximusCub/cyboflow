@@ -934,15 +934,25 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 
 const PREFERENCE_LABEL: Record<'A' | 'B' | 'tie', string> = { A: 'Prefers A', B: 'Prefers B', tie: 'Tie' };
 
-function SampleChip({ sample }: { sample: PairwiseSample }): React.JSX.Element {
+function judgeAttribution(sample: PairwiseSample, verdictModel: string | null): { compact: string; full: string } {
+  const model = sample.judgeModel ?? verdictModel ?? 'unknown';
+  const name = sample.judgeName;
+  return {
+    compact: name ?? model,
+    full: name === undefined ? model : `${name} · ${model}`,
+  };
+}
+
+function SampleChip({ sample, verdictModel }: { sample: PairwiseSample; verdictModel: string | null }): React.JSX.Element {
   const label = sample.preference === 'tie' ? 'Tie' : `Arm ${sample.preference}`;
+  const judge = judgeAttribution(sample, verdictModel);
   return (
     <span
-      title={`Solution 1 = Arm ${sample.positionAFirst ? 'A' : 'B'} · Solution 2 = Arm ${sample.positionAFirst ? 'B' : 'A'} · confidence ${Math.round(sample.confidence * 100)}%`}
+      title={`Solution 1 = Arm ${sample.positionAFirst ? 'A' : 'B'} · Solution 2 = Arm ${sample.positionAFirst ? 'B' : 'A'} · confidence ${Math.round(sample.confidence * 100)}% · graded by ${judge.full}`}
       data-testid="experiment-sample-chip"
       className="inline-flex items-center gap-1 rounded-full border border-border-primary bg-surface-secondary px-2 py-0.5 text-[11px] font-medium text-text-secondary"
     >
-      #{sample.sampleIndex + 1} {label}
+      #{sample.sampleIndex + 1} {label} · {judge.compact}
     </span>
   );
 }
@@ -1010,9 +1020,23 @@ function VerdictCard({
           )}
           <div className="flex flex-wrap gap-1.5" data-testid="experiment-verdict-samples">
             {payload.verdict.perSample.map((s) => (
-              <SampleChip key={s.sampleIndex} sample={s} />
+              <SampleChip key={s.sampleIndex} sample={s} verdictModel={payload.verdict?.judgeModel ?? null} />
             ))}
           </div>
+          {(payload.verdict.sampleCount > 0 || payload.verdict.judgeModel !== null) && (
+            <div className="text-[11px] leading-relaxed text-text-tertiary" data-testid="experiment-verdict-judge-provenance">
+              graded by{' '}
+              <span className="font-medium text-text-secondary">
+                {Array.from(
+                  new Set(
+                    payload.verdict.perSample.length > 0
+                      ? payload.verdict.perSample.map((sample) => judgeAttribution(sample, payload.verdict?.judgeModel ?? null).full)
+                      : [payload.verdict.judgeModel ?? 'unknown'],
+                  ),
+                ).join(', ')}
+              </span>
+            </div>
+          )}
         </div>
       ) : (
         <p className="mt-3 text-sm text-text-secondary" data-testid="experiment-verdict-absent">
