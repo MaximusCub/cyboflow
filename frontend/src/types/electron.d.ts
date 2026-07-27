@@ -3,7 +3,7 @@ import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
-import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
+import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
@@ -373,7 +373,10 @@ interface ElectronAPI {
   // Panel operations
   panels: {
     getSessionPanels: (sessionId: string) => Promise<IPCResponse<ToolPanel[]>>;
-    createPanel: (sessionId: string, type: string, name: string, config?: Record<string, unknown>) => Promise<IPCResponse<ToolPanel>>;
+    /** Takes the WHOLE CreatePanelRequest — the old positional form dropped
+     *  `substrate` and `metadata` at the preload boundary. KEEP IN SYNC with
+     *  main/src/preload.ts's structural request type. */
+    createPanel: (request: CreatePanelRequest) => Promise<IPCResponse<ToolPanel>>;
     deletePanel: (panelId: string) => Promise<IPCResponse<void>>;
     renamePanel: (panelId: string, name: string) => Promise<IPCResponse<void>>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse<void>>;

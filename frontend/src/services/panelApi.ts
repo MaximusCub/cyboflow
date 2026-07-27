@@ -2,12 +2,11 @@ import { CreatePanelRequest, ToolPanel } from '../../../shared/types/panels';
 
 export const panelApi = {
   async createPanel(request: CreatePanelRequest): Promise<ToolPanel> {
-    const response = await window.electronAPI.panels.createPanel(
-      request.sessionId, 
-      request.type, 
-      request.title || '', 
-      request.initialState as Record<string, unknown> | undefined
-    );
+    // Pass the request THROUGH — never re-spread it into positional args. The
+    // old four-arg call dropped `substrate` and `metadata` on the floor (see the
+    // preload note); forwarding the object keeps this seam field-complete by
+    // construction.
+    const response = await window.electronAPI.panels.createPanel(request);
     if (!response.success || !response.data) {
       throw new Error(response.error || 'Failed to create panel');
     }

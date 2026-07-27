@@ -619,8 +619,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Panels API for Claude panels and other panel types
   panels: {
-    createPanel: (sessionId: string, type: string, name: string, config?: Record<string, unknown>): Promise<IPCResponse> => 
-      ipcRenderer.invoke('panels:create', { sessionId, type, title: name, initialState: config }),
+    // Forwards the WHOLE CreatePanelRequest verbatim. It used to take four
+    // positional args and REBUILD the request here, which silently dropped every
+    // field the signature did not name — `substrate` (the Add-chat picker's
+    // per-panel override, so an added PTY chat always launched as SDK) and
+    // `metadata` (the dashboard/setup-tasks `permanent` flag). A structural
+    // request type keeps renderer and main in type parity: a new field on
+    // CreatePanelRequest reaches the handler without touching this line.
+    createPanel: (request: {
+      sessionId: string;
+      type: string;
+      title?: string;
+      initialState?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      substrate?: 'sdk' | 'interactive';
+    }): Promise<IPCResponse> => ipcRenderer.invoke('panels:create', request),
     getSessionPanels: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:list', sessionId),
     deletePanel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:delete', panelId),
     renamePanel: (panelId: string, name: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:update', panelId, { name }),
