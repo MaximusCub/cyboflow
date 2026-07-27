@@ -768,6 +768,149 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 21b. Sub-agent: parented assistant TEXT / THINKING is internal narration,
+  //      never a turn in the parent chat.
+  // -------------------------------------------------------------------------
+
+  it('returns null for a parented assistant event carrying text (SUB-AGENT narration, not a chat turn)', () => {
+    // Real prod shape (raw_events, 2026-07-24): a dispatched sub-agent's own
+    // narration forwarded with parent_tool_use_id set. Pre-fix these projected
+    // to top-level assistant bubbles, so the sub-agent appeared to be talking
+    // in the main chat.
+    const PARENT_TOOL_ID = 'toolu_parent_agent';
+
+    const parentAssistantEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_parent_text',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: PARENT_TOOL_ID, name: 'Agent', input: { subagent_type: 'code-review', prompt: 'Review X' } },
+        ],
+      },
+      session_id: SESSION_ID,
+    };
+
+    const subAgentTextEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_subagent_text',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I have completed a thorough review. Here are my findings.' },
+        ],
+      },
+      parent_tool_use_id: PARENT_TOOL_ID,
+      session_id: SESSION_ID,
+    };
+
+    projection.project(parentAssistantEvent);
+    expect(projection.project(subAgentTextEvent)).toBeNull();
+  });
+
+  it('returns null for a parented assistant event carrying thinking (SUB-AGENT reasoning)', () => {
+    const PARENT_TOOL_ID = 'toolu_parent_agent_thinking';
+
+    const parentAssistantEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_parent_thinking',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: PARENT_TOOL_ID, name: 'Agent', input: { subagent_type: 'general', prompt: 'Do X' } },
+        ],
+      },
+      session_id: SESSION_ID,
+    };
+
+    const subAgentThinkingEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_subagent_thinking',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Let me check how sessions:input resolves the panel.' },
+        ],
+      },
+      parent_tool_use_id: PARENT_TOOL_ID,
+      session_id: SESSION_ID,
+    };
+
+    projection.project(parentAssistantEvent);
+    expect(projection.project(subAgentThinkingEvent)).toBeNull();
+  });
+
+  it('still nests a parented tool_use when the same event also carries suppressed sub-agent text', () => {
+    // Mixed block shape: the narration must be dropped WITHOUT losing the
+    // child tool_use's link into the parent's childToolCalls.
+    const PARENT_TOOL_ID = 'toolu_parent_mixed';
+    const CHILD_TOOL_ID = 'toolu_child_mixed';
+
+    const parentAssistantEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_parent_mixed',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: PARENT_TOOL_ID, name: 'Agent', input: { subagent_type: 'general', prompt: 'Do X' } },
+        ],
+      },
+      session_id: SESSION_ID,
+    };
+
+    const subAgentMixedEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_subagent_mixed',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Let me check the remaining set-substrate path.' },
+          { type: 'tool_use', id: CHILD_TOOL_ID, name: 'Bash', input: { command: 'echo hi' } },
+        ],
+      },
+      parent_tool_use_id: PARENT_TOOL_ID,
+      session_id: SESSION_ID,
+    };
+
+    const parentResult = projection.project(parentAssistantEvent) as UnifiedMessage;
+    expect(projection.project(subAgentMixedEvent)).toBeNull();
+
+    const parentToolSeg = parentResult.segments.find(s => s.type === 'tool_call');
+    expect(parentToolSeg?.type).toBe('tool_call');
+    if (parentToolSeg?.type === 'tool_call') {
+      expect(parentToolSeg.tool.childToolCalls).toHaveLength(1);
+      expect(parentToolSeg.tool.childToolCalls?.[0].id).toBe(CHILD_TOOL_ID);
+    }
+  });
+
+  it('still emits text and thinking for a TOP-LEVEL (parentless) assistant event', () => {
+    // Guard the guard: the parent-less main-agent turn must be unaffected.
+    const topLevelEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_top_level_mixed',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Considering the options.' },
+          { type: 'text', text: 'Here is the answer.' },
+        ],
+      },
+      session_id: SESSION_ID,
+    };
+
+    const result = projection.project(topLevelEvent) as UnifiedMessage;
+    expect(result).not.toBeNull();
+    expect(result.segments.map(s => s.type)).toEqual(['thinking', 'text']);
+  });
+
+  // -------------------------------------------------------------------------
   // 22. Partial-message streaming: blocks of ONE logical message arrive as
   //     separate `assistant` events that all share `message.id`. They must
   //     coalesce into a SINGLE UnifiedMessage (no duplicate-keyed messages).

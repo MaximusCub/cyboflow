@@ -221,10 +221,23 @@ export class MessageProjection {
     }
 
     // Step 2: build segments from content blocks.
+    //
+    // A parented assistant event is a SUB-AGENT's own turn, forwarded by the SDK
+    // nested under the dispatching tool_use. Its narration ("Let me check…",
+    // "I have completed a thorough review…") is internal to the sub-agent, never
+    // a turn in THIS chat — emitting it produced top-level assistant bubbles from
+    // the sub-agent in the parent transcript (DB-confirmed: 587 parented
+    // assistant/text events in July alone). Sub-agent `tool_use` blocks are
+    // already suppressed here and re-attached to the parent's `childToolCalls`
+    // below; `text`/`thinking` simply never got the same guard. The user-event
+    // side has carried the mirror image of this guard since 2026-06-22 (Step 3 of
+    // projectUserEvent). Nothing is lost: the sub-agent's tool calls still render
+    // nested, and its final report is the dispatching tool's `tool_result`.
+    const isSubAgentTurn = Boolean(event.parent_tool_use_id);
     for (const block of content) {
-      if (block.type === 'text' && block.text.trim()) {
+      if (block.type === 'text' && !isSubAgentTurn && block.text.trim()) {
         segments.push({ type: 'text', content: block.text.trim() });
-      } else if (block.type === 'thinking') {
+      } else if (block.type === 'thinking' && !isSubAgentTurn) {
         const thinkingContent = block.thinking.trim();
         if (thinkingContent) {
           segments.push({ type: 'thinking', content: thinkingContent });
