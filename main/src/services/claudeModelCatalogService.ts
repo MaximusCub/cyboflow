@@ -4,7 +4,7 @@ import type { ClaudeModelCatalog, ClaudeModelOption } from '../../../shared/type
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
 import { loadSdkQuery } from '../utils/lazyAgentSdk';
 import { resolveClaudeExecutablePath } from './panels/claude/claudeExecutablePath';
-import { resolveModelAlias } from './panels/claude/modelContext';
+import { bareModelId, resolveModelAlias } from './panels/claude/modelContext';
 
 /**
  * ClaudeModelCatalogService — the DYNAMIC half of the Claude model picker.
@@ -55,13 +55,20 @@ const PROBE_TIMEOUT_MS = 15_000;
  * the "Other models" section never duplicates a curated one. Derived from the pinned
  * aliases resolved through {@link resolveModelAlias}, so it stays correct across a
  * model bump automatically.
+ *
+ * BOTH window forms of each pinned id are excluded — the `[1m]`-suffixed spawn id
+ * AND its bare snapshot ({@link bareModelId}). A pinned alias that carries a window
+ * marker (e.g. `opus` → `claude-opus-5[1m]`) would otherwise fail to match the SDK's
+ * dynamic row for the same family, which reports the BARE id, and the pinned family
+ * would appear a second time under "Other models".
  */
 function pinnedExclusionSet(): Set<string> {
   const excluded = new Set<string>(['auto', 'default']);
   for (const alias of AGENT_MODEL_ALIASES) {
     excluded.add(alias.toLowerCase());
-    const concrete = resolveModelAlias(alias);
-    if (concrete) excluded.add(concrete.toLowerCase());
+    for (const id of [resolveModelAlias(alias), bareModelId(alias)]) {
+      if (id) excluded.add(id.toLowerCase());
+    }
   }
   return excluded;
 }
