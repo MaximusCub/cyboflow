@@ -20,7 +20,7 @@ import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVer
  * Artifact kinds. The bespoke (templated) types plus the two live-canvas types
  * (`ui-prototype`/`generic` — static srcdoc — and `interactive-prototype` — the
  * JS-enabled OOPIF canvas). Keep in sync with the `artifacts.atype` CHECK
- * constraint (currently widened by migration 089).
+ * constraint (currently widened by migration 091).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -32,7 +32,13 @@ export type ArtifactType =
   | 'arch-design'
   | 'compound-recommendations'
   | 'approve-ideas'
-  | 'approve-designs';
+  | 'approve-designs'
+  /**
+   * The ad-hoc code-review eval's full verdict report (system-minted by
+   * EvalWorker for run_evals rows with origin='adhoc' — NOT agent-reportable).
+   * Payload-backed markdown, like 'compound-recommendations'.
+   */
+  | 'eval-report';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -272,6 +278,22 @@ export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
     // design gate reads as "approve the architecture designs".
     color: '#8a7326',
     glyph: '⊡',
+    perEntity: false,
+  },
+  'eval-report': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    // System-minted by EvalWorker for run_evals rows with origin='adhoc' — an
+    // agent report would bypass the eval pipeline entirely.
+    reportable: false,
+    // Amber — the quality/score register, distinct from every other accent so an
+    // eval report never reads as a planner or compound deliverable.
+    color: '#f59e0b',
+    glyph: '◎',
     perEntity: false,
   },
 };
@@ -876,6 +898,23 @@ export interface UiPrototypeArtifactPayload {
  */
 export interface RecommendationsArtifactPayload {
   /** The full recommendations doc, rendered through MarkdownPreview. */
+  markdown?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * The parsed `payload_json` shape of an `eval-report` artifact — the ad-hoc
+ * code-review eval's FULL verdict (overall score/band/CI, per-dimension rows,
+ * cap/security/requirements/gate flags, jury findings), composed by EvalWorker
+ * when it completes a `run_evals` row with `origin='adhoc'`.
+ *
+ * Payload-backed exactly like {@link RecommendationsArtifactPayload}: there is no
+ * entity source, so the renderer reads the markdown straight from the payload (no
+ * fetch, no source_ref). Identity is one-per-(run, atype), so a re-eval UPSERTs
+ * the newest verdict over the previous one. Extra keys are tolerated.
+ */
+export interface EvalReportPayload {
+  /** The full verdict report, rendered through MarkdownPreview. */
   markdown?: string;
   [key: string]: unknown;
 }

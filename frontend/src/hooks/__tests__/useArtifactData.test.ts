@@ -240,6 +240,30 @@ describe('useArtifactData', () => {
     expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
   });
 
+  it("resolves 'eval-report' synchronously from payload_json (no fetch, no source entity)", () => {
+    const { result } = renderHook(() =>
+      useArtifactData(
+        // System-minted by EvalWorker with sourceRef null — payload-backed, so it
+        // must NOT hit the no-source error path the entity-backed atypes take.
+        makeArtifact({
+          atype: 'eval-report',
+          sourceRef: null,
+          payloadJson: '{"markdown":"# Ad-hoc code-review eval\\n\\n**82/100 — Good**"}',
+        }),
+        null,
+      ),
+    );
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({
+      kind: 'eval-report',
+      payload: { markdown: '# Ad-hoc code-review eval\n\n**82/100 — Good**' },
+    });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
+  });
+
   // --- live refresh ---------------------------------------------------------
 
   it("does NOT subscribe when projectId is null (one-shot tab)", async () => {

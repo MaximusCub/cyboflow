@@ -349,6 +349,34 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
   });
 
+  // --- eval-report -----------------------------------------------------------
+
+  it('renders the eval-report markdown doc with the amber eyebrow', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'eval-report',
+        payload: { markdown: '# Ad-hoc code-review eval\n\n**82/100 — Good**' },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'eval-report', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-eval-report')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · eval report');
+    expect(eyebrow).toHaveStyle({ color: '#f59e0b' });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('82/100');
+  });
+
+  it('shows the eval-report empty state when the payload has no markdown', () => {
+    setHook({ loading: false, error: null, data: { kind: 'eval-report', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'eval-report', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-eval-report-empty')).toHaveTextContent('No eval verdict recorded yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
   // --- decomposed-stories --------------------------------------------------
 
   function makeStoriesIdea(): BacklogTaskItem {
@@ -1321,6 +1349,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'generic', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
       { atype: 'arch-design', mode: 'template', testid: 'artifact-arch-design', data: { loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } } },
       { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
+      { atype: 'eval-report', mode: 'template', testid: 'artifact-eval-report', data: { loading: false, error: null, data: { kind: 'eval-report', payload: { markdown: '## x' } } } },
     ];
     for (const c of cases) {
       setHook(c.data);

@@ -11,8 +11,11 @@ import {
   JUDGE_RETRY_BACKOFF_MS,
   MAX_SLOT_ERROR_CHARS,
   truncateSlotError,
+  EVAL_REPORT_ARTIFACT_LABEL,
+  EVAL_REPORT_POINTER,
   type JurySlot,
 } from './evalWorker';
+import type { ArtifactCreate } from '../artifactRouter';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
@@ -727,6 +730,204 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
 
     expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
     expect(db.runs.some((r) => r.sql.includes("eval_status = 'failed'"))).toBe(false);
+  });
+
+  // ── Ad-hoc eval-report artifact (migration 083 atype) ────────────────────
+
+  it("publishes ONE 'eval-report' artifact with the full verdict when origin is 'adhoc'", async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const artifactWriter = vi.fn(async () => ({ artifactId: 'art-1' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(
+        new FakeJudge(async () =>
+          sampleAllPass(BROAD_PASS, [
+            {
+              subCheckId: 'SEC-2',
+              dimension: 'security',
+              severity: 'error',
+              title: 'Unvalidated path join',
+              body: 'The handler joins user input into a filesystem path.',
+              file: 'main/src/x.ts',
+              line: 42,
+              netNew: true,
+              catastrophic: false,
+            },
+          ]),
+        ),
+      ),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      artifactWriter,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(artifactWriter).toHaveBeenCalledTimes(1);
+    const [projectId, change] = artifactWriter.mock.calls[0] as unknown as [number, ArtifactCreate];
+    expect(projectId).toBe(7);
+    expect(change.op).toBe('create');
+    expect(change.runId).toBe('run-1');
+    expect(change.atype).toBe('eval-report');
+    expect(change.label).toBe(EVAL_REPORT_ARTIFACT_LABEL);
+    expect(change.actor).toBe('agent:eval');
+
+    const payload = JSON.parse(change.payloadJson as string) as { markdown: string };
+    const md = payload.markdown;
+    // Headline score + band, the per-dimension table, the flags block, and the
+    // deduped findings digest all render.
+    expect(md).toMatch(/# Ad-hoc code-review eval/);
+    expect(md).toMatch(/\*\*\d+\/100 — \w+\*\*/);
+    expect(md).toContain('Jury samples scored: 3');
+    expect(md).toContain('## Dimensions');
+    expect(md).toContain('| Dimension | Score | Band | Pass | Fail | Unknown |');
+    expect(md).toContain('## Flags');
+    expect(md).toContain('## Findings');
+    expect(md).toContain('Unvalidated path join');
+    expect(md).toContain('`main/src/x.ts:42`');
+    expect(md).toContain('[SEC-2]');
+    // Graded-at timestamp is an ISO string.
+    expect(md).toMatch(/Graded at: \d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("the summary review item points at the 'Eval report' artifact tab", async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const writer = vi.fn(async () => ({ reviewItemId: 'ri' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: writer,
+      artifactWriter: vi.fn(async () => ({ artifactId: 'art-1' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    const [, change] = writer.mock.calls[0] as unknown as [number, ReviewItemCreate];
+    expect(change.body).toContain(EVAL_REPORT_POINTER);
+  });
+
+  it('does NOT publish the artifact for an automatic (origin NULL) row', async () => {
+    const db = noExistingFindings(); // evalRunRow() has no origin => NULL
+    const artifactWriter = vi.fn(async () => ({ artifactId: 'art' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      artifactWriter,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(artifactWriter).not.toHaveBeenCalled();
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
+  });
+
+  it('an artifact-write failure never fails the eval and never skips the review item', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const writer = vi.fn(async () => ({ reviewItemId: 'ri' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: writer,
+      artifactWriter: vi.fn(async () => {
+        throw new Error('artifact router exploded');
+      }),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(writer).toHaveBeenCalledTimes(1); // the summary still landed
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'failed'"))).toBe(false);
+  });
+
+  it('a review-item failure never skips the artifact (independent sibling surfaces)', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const artifactWriter = vi.fn(async () => ({ artifactId: 'art-1' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: vi.fn(async () => {
+        throw new Error('review queue exploded');
+      }),
+      artifactWriter,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(artifactWriter).toHaveBeenCalledTimes(1);
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'failed'"))).toBe(false);
+  });
+
+  it('a requeued eval re-publishes the SAME atype (UPSERT overwrites the markdown)', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const artifactWriter = vi.fn(async () => ({ artifactId: 'art-1' }));
+    // Second grade reports a different verdict shape (one FAIL) so the two
+    // published payloads must differ.
+    let round = 0;
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(
+        new FakeJudge(async () => {
+          const ids = round === 0 ? BROAD_PASS : BROAD_PASS.slice(1);
+          const sample = sampleAllPass(ids);
+          if (round > 0) sample.verdicts.push({ id: 'COR-1', verdict: 'FAIL', evidence: 'regressed' });
+          return sample;
+        }),
+      ),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      artifactWriter,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+    round = 1;
+    worker.enqueue('run-1', RUBRIC_VERSION); // the requeue path
+    await worker._queue().onIdle();
+
+    expect(artifactWriter).toHaveBeenCalledTimes(2);
+    const [first, second] = artifactWriter.mock.calls.map(
+      (call) => (call as unknown as [number, ArtifactCreate])[1],
+    );
+    // Same identity (run, atype) => the router UPSERTs one row, not two tabs.
+    expect(second.runId).toBe(first.runId);
+    expect(second.atype).toBe('eval-report');
+    expect(second.payloadJson).not.toBe(first.payloadJson);
+  });
+
+  it('skips the artifact (and never throws) when no artifactWriter is wired', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const writer = vi.fn(async () => ({ reviewItemId: 'ri' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: writer,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(writer).toHaveBeenCalledTimes(1);
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
   });
 
   it('runAdHoc delegates to the ad-hoc snapshot and does NOT swallow its errors', async () => {

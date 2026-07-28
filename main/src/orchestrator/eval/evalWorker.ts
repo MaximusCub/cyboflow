@@ -27,6 +27,10 @@ import type { RunGitDiff } from '../../../../shared/types/runFiles';
 // Type-only import (erased at compile) — keeps the worker free of the concrete
 // router while reusing its create-change shape for the findings write.
 import type { ReviewItemCreate } from '../reviewItemRouter';
+// Type-only (erased at compile) — same reason as ReviewItemCreate above: the
+// artifact write is an injected closure, so the worker holds no concrete router.
+import type { ArtifactCreate } from '../artifactRouter';
+import type { EvalReportPayload } from '../../../../shared/types/artifacts';
 import { RUBRIC_VERSION } from './rubric';
 import {
   scoreSamples,
@@ -78,6 +82,20 @@ export function truncateSlotError(message: string): string {
     : `${message.slice(0, MAX_SLOT_ERROR_CHARS)}…`;
 }
 
+/** Tab label of the ad-hoc verdict's full-report artifact. */
+export const EVAL_REPORT_ARTIFACT_LABEL = 'Eval report';
+
+/** Trailer appended to the ad-hoc summary review item, pointing at that tab. */
+export const EVAL_REPORT_POINTER =
+  `Full report: see the "${EVAL_REPORT_ARTIFACT_LABEL}" artifact tab on this session.`;
+
+/**
+ * Cap on jury findings listed in the eval-report doc. The review queue already
+ * holds each net-new finding as its own item; the report's list is a digest, so
+ * an unbounded dump would bloat the artifact payload without adding signal.
+ */
+export const MAX_FINDINGS_IN_EVAL_REPORT = 20;
+
 export interface JurySlot {
   slot: string;
   provider: 'claude' | 'codex';
@@ -113,6 +131,18 @@ export interface EvalWorkerDeps {
     projectId: number,
     change: ReviewItemCreate,
   ) => Promise<{ reviewItemId: string }>;
+  /**
+   * Artifact chokepoint — closure over ArtifactRouter.getInstance().apply, used
+   * ONLY to publish the ad-hoc verdict's `eval-report` tab. OPTIONAL (mirroring
+   * `isVariantAutoGradeEnabled`) so the unit tests, which drive the worker against
+   * a fake DatabaseLike with no ArtifactRouter singleton, stay valid; absent =>
+   * the report tab is skipped and only the review-item rollup is written. The one
+   * production wiring lives in main/src/index.ts.
+   */
+  artifactWriter?: (
+    projectId: number,
+    change: ArtifactCreate,
+  ) => Promise<{ artifactId: string }>;
   /** App version (package.json) for judge_build_id. */
   appVersion: string;
   /**
@@ -398,8 +428,11 @@ export class EvalWorker {
     this.persistComplete(runId, rubricVersion, result, samples, slots);
     await this.writeFindings(runId, row.project_id, result, samples);
     // Ad-hoc verdicts have no score panel to land in — surface the whole rollup as
-    // ONE informational review item. Fail-soft by contract (see the method).
+    // ONE informational review item PLUS a persistent 'eval-report' artifact tab.
+    // Two SIBLING calls (not one nested pair) so a failure in either surface can
+    // never skip the other; both are fail-soft by contract (see the methods).
     await this.maybeWriteAdHocSummary(runId, row.project_id, row.origin, result);
+    await this.maybeWriteAdHocArtifact(runId, row.project_id, row.origin, result, samples);
 
     this.logger?.info('[eval] complete', {
       runId,
@@ -827,6 +860,8 @@ export class EvalWorker {
         '**Per dimension**',
         ...(dimensionLines.length > 0 ? dimensionLines : ['- (no dimension had enough applicable checks to activate)']),
         ...(flags.length > 0 ? ['', '**Flags**', ...flags] : []),
+        '',
+        EVAL_REPORT_POINTER,
       ].join('\n');
 
       const change: ReviewItemCreate = {
@@ -849,6 +884,160 @@ export class EvalWorker {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Publish the AD-HOC verdict as an `eval-report` run artifact — the persistent
+   * report tab the summary review item points at.
+   *
+   * SIBLING of {@link maybeWriteAdHocSummary}, deliberately not nested inside it:
+   * the two surfaces are independent, so a review-queue fault must not suppress
+   * the artifact and vice versa. Same origin gate — rows with origin NULL (every
+   * automatic + every legacy row) are a no-op, because a workflow run already
+   * renders its verdict in WorkflowSummaryPanel.
+   *
+   * Identity is one-per-(run, atype) (migration 083's idx_artifacts_one_per_atype),
+   * so a REQUEUED eval UPSERTs the newest markdown over the previous verdict —
+   * exactly one report tab per run, always showing the latest grade.
+   *
+   * Fail-soft: the eval is already persisted 'complete' by the time this runs, so
+   * a write failure (or an unwired artifactWriter) is logged and swallowed — it
+   * must never turn a successful grade into a failed one.
+   */
+  private async maybeWriteAdHocArtifact(
+    runId: string,
+    projectId: number,
+    origin: string | null,
+    result: ScoringResult,
+    samples: JudgeSample[],
+  ): Promise<void> {
+    if (origin !== EVAL_ORIGIN_ADHOC) return;
+    const writeArtifact = this.deps.artifactWriter;
+    if (!writeArtifact) {
+      this.logger?.debug('[eval] no artifactWriter wired — skipping eval-report artifact', { runId });
+      return;
+    }
+    try {
+      const payload: EvalReportPayload = { markdown: this.buildEvalReportMarkdown(result, samples) };
+      await writeArtifact(projectId, {
+        op: 'create',
+        runId,
+        atype: 'eval-report',
+        label: EVAL_REPORT_ARTIFACT_LABEL,
+        payloadJson: JSON.stringify(payload),
+        isNew: true,
+        actor: 'agent:eval',
+      });
+      this.logger?.info('[eval] ad-hoc eval-report artifact published', { runId });
+    } catch (err) {
+      this.logger?.warn('[eval] ad-hoc eval-report artifact write failed (swallowed)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Compose the eval-report doc: the FULL verdict, a superset of the one-line
+   * review-item rollup — headline score/band/CI/sample count, a per-dimension
+   * table (score, band, pass/fail/unknown counts), the cap/security/requirements/
+   * gate flags, and a digest of the jury findings deduped across samples.
+   *
+   * Only fields the {@link ScoringResult} / {@link JudgeSample} contracts actually
+   * carry are rendered — nothing is inferred or invented.
+   */
+  private buildEvalReportMarkdown(result: ScoringResult, samples: JudgeSample[]): string {
+    // An inert diff scores NULL (no dimension activated) rather than 0 — say so
+    // instead of printing a fabricated 0/Poor.
+    const score = result.overallScore === null ? 'n/a' : `${result.overallScore}`;
+    const bandLabel = result.band ?? 'No score';
+    const ci =
+      result.ciLow === null || result.ciHigh === null
+        ? 'n/a'
+        : `${result.ciLow.toFixed(1)}–${result.ciHigh.toFixed(1)}`;
+
+    const lines: string[] = [
+      `# Ad-hoc code-review eval`,
+      '',
+      `**${score}/100 — ${bandLabel}**`,
+      '',
+      `- 95% CI: ${ci}`,
+      `- Jury samples scored: ${result.sampleCount}`,
+      `- Rubric: v${RUBRIC_VERSION}`,
+      `- Graded at: ${new Date().toISOString()}`,
+      '',
+      '## Dimensions',
+      '',
+      '| Dimension | Score | Band | Pass | Fail | Unknown |',
+      '| --- | --- | --- | --- | --- | --- |',
+    ];
+
+    const active = result.dimensions.filter((d) => d.active);
+    if (active.length > 0) {
+      for (const d of active) {
+        lines.push(
+          `| ${d.name} | ${d.score ?? 'n/a'} | ${d.band ?? 'n/a'} | ${d.passCount} | ${d.failCount} | ${d.unknownCount} |`,
+        );
+      }
+    } else {
+      lines.push('| _(none activated)_ | n/a | n/a | 0 | 0 | 0 |');
+    }
+
+    // Inactive dimensions are thin-evidence (<2 applicable non-UNKNOWN sub-checks)
+    // and excluded from the mean — name them so a missing row is never read as a
+    // silent zero.
+    const inactive = result.dimensions.filter((d) => !d.active);
+    if (inactive.length > 0) {
+      lines.push(
+        '',
+        `_Not scored (too few applicable checks to activate): ${inactive.map((d) => d.name).join(', ')}._`,
+      );
+    }
+
+    const flags: string[] = [];
+    if (result.capTriggered) {
+      flags.push(
+        `- **Catastrophic cap fired** (${result.capTriggers.join(', ') || 'unspecified'}) — the score is soft-capped, not organic.`,
+      );
+    }
+    if (result.securityFlag) flags.push('- **Security flag** raised by the jury.');
+    if (result.requirementsUnmet) flags.push('- **Requirements unmet** (SCP-1) raised by the jury.');
+    if (result.gated) flags.push('- **Deterministic gate failed** (build/test/lint) for this run.');
+    lines.push('', '## Flags', '', ...(flags.length > 0 ? flags : ['- None raised.']));
+
+    // Findings digest — deduped across samples on the SAME key writeFindings uses,
+    // so the report and the review queue group identical issues identically.
+    const byKey = new Map<string, JudgeFinding>();
+    for (const sample of samples) {
+      for (const f of sample.findings) {
+        const key = this.findingKey(f);
+        const prev = byKey.get(key);
+        // Keep the most severe paraphrase (same rule as writeFindings).
+        if (!prev || SEVERITY_RANK[f.severity] > SEVERITY_RANK[prev.severity]) byKey.set(key, f);
+      }
+    }
+    const findings = [...byKey.values()].sort(
+      (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity],
+    );
+    lines.push('', '## Findings', '');
+    if (findings.length === 0) {
+      lines.push('- The jury surfaced no findings.');
+    } else {
+      for (const f of findings.slice(0, MAX_FINDINGS_IN_EVAL_REPORT)) {
+        const where = f.file ? ` — \`${f.file}${f.line ? `:${f.line}` : ''}\`` : '';
+        const sub = f.subCheckId ? ` [${f.subCheckId}]` : '';
+        lines.push(`- **${f.severity.toUpperCase()}**${sub} ${f.title}${where}`);
+        if (f.body) lines.push(`  ${f.body}`);
+      }
+      if (findings.length > MAX_FINDINGS_IN_EVAL_REPORT) {
+        lines.push(
+          '',
+          `_…and ${findings.length - MAX_FINDINGS_IN_EVAL_REPORT} more; the net-new ones were filed in the review queue._`,
+        );
+      }
+    }
+
+    return lines.join('\n');
   }
 
   private readExistingFindingKeys(runId: string): Set<string> {

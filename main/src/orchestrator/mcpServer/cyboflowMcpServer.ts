@@ -2196,6 +2196,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // render a broken tab. 'compound-recommendations' IS reportable — it is
       // payload-backed (payload_json.markdown), so it renders correctly with
       // source_ref NULL, unlike the entity-backed templated atypes.
+      // 'eval-report' is likewise payload-backed but SYSTEM-MINTED ONLY
+      // (reportable:false — EvalWorker composes it from the scored verdict): an
+      // agent-authored one would be an unscored doc wearing the verdict tab.
       const validAtypes: string[] = REPORTABLE_ARTIFACT_ATYPES;
       if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
         return {

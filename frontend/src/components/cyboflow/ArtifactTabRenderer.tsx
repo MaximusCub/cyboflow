@@ -345,6 +345,68 @@ function RecommendationsBody({ artifact, projectId }: { artifact: Artifact; proj
 }
 
 // ---------------------------------------------------------------------------
+// eval-report — the ad-hoc code-review eval's full verdict, rendered as a
+// markdown doc with the same chrome as compound-recommendations (amber accent).
+// Payload-backed and SYSTEM-MINTED: EvalWorker composed the report into
+// payload_json.markdown when it completed an origin='adhoc' run_evals row, so it
+// renders straight from the payload (no entity source, no fetch). This is the
+// only score surface a quick session has — a workflow run shows its verdict in
+// WorkflowSummaryPanel instead.
+// ---------------------------------------------------------------------------
+function EvalReportBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['eval-report'];
+  const { data } = useArtifactData(artifact, projectId);
+  // `markdown` comes verbatim from EvalWorker-supplied payload_json (laundered
+  // through parsePayload as Record<string, unknown>), so narrow to a string.
+  const markdown =
+    data?.kind === 'eval-report' && typeof data.payload.markdown === 'string'
+      ? data.payload.markdown
+      : '';
+
+  return (
+    <Shell testid="artifact-eval-report">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · eval report"
+        meta={artifact.stepOrigin ?? 'code-review eval'}
+      />
+      <div style={{ flex: 1 }}>
+        <div
+          data-testid="artifact-eval-report-doc"
+          style={{
+            maxWidth: 680,
+            margin: '0 auto',
+            background: 'var(--color-surface-primary)',
+            border: `1px solid ${HAIRLINE}`,
+            padding: '34px 40px 56px',
+            marginTop: 18,
+            marginBottom: 18,
+          }}
+        >
+          <div
+            style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+          >
+            Quality
+          </div>
+          <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+            Eval report
+          </h1>
+          {markdown ? (
+            <MarkdownPreview content={markdown} />
+          ) : (
+            <div data-testid="artifact-eval-report-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+              No eval verdict recorded yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // decomposed-stories — one card per epic; tasks stacked vertically (one card
 // per row), each card a clickable button that opens the TaskDetailModal.
 // ---------------------------------------------------------------------------
@@ -2662,6 +2724,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <ArchDesignBody artifact={artifact} projectId={projectId} />;
     case 'compound-recommendations':
       return <RecommendationsBody artifact={artifact} projectId={projectId} />;
+    case 'eval-report':
+      return <EvalReportBody artifact={artifact} projectId={projectId} />;
     case 'decomposed-stories':
       return <DecomposedStoriesBody artifact={artifact} projectId={projectId} />;
     case 'screenshots':

@@ -1752,6 +1752,10 @@ async function initializeServices() {
     ],
     reviewItemWriter: (projectId, change) =>
       ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+    // Artifact chokepoint — the ONE production wiring for the ad-hoc verdict's
+    // 'eval-report' tab (never a raw INSERT into artifacts). Same closure shape as
+    // reviewItemWriter so the eval module imports no concrete router.
+    artifactWriter: (projectId, change) => ArtifactRouter.getInstance().apply(projectId, change),
     appVersion: app.getVersion(),
     // GLOBAL code-review-eval toggle (default ON) — read fresh per trigger so a
     // Settings change takes effect without relaunch. A per-run override

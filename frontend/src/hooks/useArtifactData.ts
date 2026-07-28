@@ -50,6 +50,7 @@ import { trpc } from '../trpc/client';
 import { isCanvasArtifact } from '../../../shared/types/artifacts';
 import type {
   Artifact,
+  EvalReportPayload,
   RecommendationsArtifactPayload,
   ScreenshotsArtifactPayload,
 } from '../../../shared/types/artifacts';
@@ -92,6 +93,14 @@ export type ScreenshotsPayload = ScreenshotsArtifactPayload;
 export type RecommendationsPayload = RecommendationsArtifactPayload;
 
 /**
+ * Parsed `payload_json` shape for the ad-hoc eval's verdict report. Re-exported
+ * alias of the shared {@link EvalReportPayload} — EvalWorker writes `{ markdown }`
+ * when it completes an `origin='adhoc'` row, resolved straight from the payload
+ * (no entity source, no fetch), kept under this local name for renderer imports.
+ */
+export type EvalReportArtifactPayload = EvalReportPayload;
+
+/**
  * Discriminated content union the renderer switches on. `kind` mirrors the
  * resolved data source, NOT the atype 1:1 (idea-spec + decomposed-stories both
  * resolve from the entity model but produce different shapes).
@@ -102,6 +111,7 @@ export type ArtifactContent =
   | { kind: 'arch'; idea: BacklogTaskItem }
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
   | { kind: 'recommendations'; payload: RecommendationsPayload }
+  | { kind: 'eval-report'; payload: EvalReportArtifactPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
 export interface ArtifactData {
@@ -153,6 +163,17 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
         loading: false,
         error: null,
         data: { kind: 'recommendations', payload: parsePayload(payloadJson) },
+      });
+      return;
+    }
+    // eval-report is payload-backed for the same reason: EvalWorker composed the
+    // verdict doc into payload_json.markdown when the ad-hoc eval completed, so
+    // there is no entity to re-derive from and it resolves synchronously.
+    if (atype === 'eval-report') {
+      setState({
+        loading: false,
+        error: null,
+        data: { kind: 'eval-report', payload: parsePayload(payloadJson) },
       });
       return;
     }

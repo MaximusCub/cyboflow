@@ -81,6 +81,10 @@ function buildDb(): Database.Database {
     '062_approve_ideas_atype.sql',
     '063_per_idea_spec_artifacts.sql',
     '073_approve_designs_and_per_idea_arch.sql',
+    // 083 widens the atype CHECK to include 'eval-report' (the ad-hoc eval's
+    // system-minted verdict tab) — required by the "accepts every atype in the
+    // ArtifactType union" sweep below.
+    '083_eval_report_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
