@@ -4,17 +4,31 @@ import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
+import { providerForRuntime } from '../cyboflow/agentRuntimeUi';
 import { Button } from '../ui/Button';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
 import { useSession } from '../../contexts/SessionContext';
 import { StatusDot } from '../ui/StatusDot';
 
-/** "Add chat" substrate picker options — undefined means "inherit the session". */
-const ADD_CHAT_SUBSTRATE_ITEMS: ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> = [
-  { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },
-  { id: 'sdk', label: 'SDK', description: 'Run this chat with the Claude SDK', substrate: 'sdk' },
-  { id: 'interactive', label: 'PTY (interactive)', description: 'Run this chat with the interactive terminal', substrate: 'interactive' },
-];
+/**
+ * "Add chat" substrate picker options — undefined means "inherit the session".
+ *
+ * The picker chooses a SUBSTRATE (sdk vs interactive), never a provider: which
+ * agent runs is a session-wide property (`sessions.agent_runtime`), so "SDK" in
+ * a Codex session is the Codex SDK. The copy is therefore derived from the
+ * session's provider — a hardcoded "Claude SDK" misdescribed half the sessions.
+ */
+function addChatSubstrateItems(
+  provider: AgentProvider,
+): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> {
+  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  return [
+    { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },
+    { id: 'sdk', label: `${providerLabel} SDK`, description: `Run this chat with the ${providerLabel} SDK`, substrate: 'sdk' },
+    { id: 'interactive', label: 'PTY (interactive)', description: `Run this chat with the interactive ${providerLabel} terminal`, substrate: 'interactive' },
+  ];
+}
 
 function getPanelDisplayTitle(panel: ToolPanel): string {
   if (panel.type === 'diff') return 'Diff';
@@ -124,7 +138,13 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   }, [onAddChat]);
 
-  const addChatItems: DropdownItem[] = ADD_CHAT_SUBSTRATE_ITEMS.map((opt) => ({
+  // No session in context (panel-only render paths, and the unit tests) → Claude,
+  // which is also the runtime default when a session leaves it unset.
+  const chatProvider: AgentProvider = sessionContext?.session?.agentRuntime
+    ? providerForRuntime(sessionContext.session.agentRuntime)
+    : 'claude';
+
+  const addChatItems: DropdownItem[] = addChatSubstrateItems(chatProvider).map((opt) => ({
     id: opt.id,
     label: opt.label,
     description: opt.description,

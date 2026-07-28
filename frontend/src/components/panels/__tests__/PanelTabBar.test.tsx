@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ToolPanel } from '../../../../../shared/types/panels';
+import type { Session } from '../../../types/session';
+import { SessionProvider } from '../../../contexts/SessionContext';
 import { PanelTabBar } from '../PanelTabBar';
 
 function panel(id: string, title: string): ToolPanel {
@@ -128,5 +130,38 @@ describe('PanelTabBar add chat action', () => {
     });
 
     errorSpy.mockRestore();
+  });
+
+  /**
+   * The picker chooses a substrate, not a provider — "SDK" in a Codex session
+   * launches the CODEX SDK, because the provider is session-wide. The copy used
+   * to say "Claude SDK" unconditionally, which named the wrong agent for every
+   * Codex session.
+   */
+  it.each([
+    { runtime: 'codex-sdk' as const, expected: 'Codex SDK', wrong: 'Claude SDK' },
+    { runtime: 'claude-sdk' as const, expected: 'Claude SDK', wrong: 'Codex SDK' },
+  ])('names the session provider in the SDK option ($runtime)', ({ runtime, expected, wrong }) => {
+    const onAddChat = vi.fn();
+    const session = {
+      id: 'session-1',
+      worktreePath: '/wt/session-1',
+      projectId: 1,
+      agentRuntime: runtime,
+    } as unknown as Session;
+
+    render(
+      <SessionProvider session={session}>
+        <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={onAddChat} />
+      </SessionProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    expect(screen.getByText(expected)).toBeInTheDocument();
+    expect(screen.queryByText(wrong)).not.toBeInTheDocument();
+
+    // The provider is display-only: the callback still carries just the substrate.
+    fireEvent.click(screen.getByText(expected));
+    expect(onAddChat).toHaveBeenCalledWith('sdk');
   });
 });
