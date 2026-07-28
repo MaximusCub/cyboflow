@@ -63,7 +63,7 @@ function createDb(): Database.Database {
       model TEXT,
       external_session_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      -- migration 083: owning chat panel, so two chat panels sharing one
+      -- migration 087: owning chat panel, so two chat panels sharing one
       -- session-scoped chat_run_id resolve DISTINCT Codex threads.
       panel_id TEXT
     );

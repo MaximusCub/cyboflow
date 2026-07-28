@@ -33,4 +33,34 @@ describe('migration 086: per-panel substrate override', () => {
     expect(() => insert.run('interactive', 'Chat 3', 'interactive')).not.toThrow();
     expect(() => insert.run('invalid', 'Chat 4', 'unknown')).toThrow();
   });
+
+  it('round-trips an override and preserves NULL inheritance after the migration replay', () => {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE tool_panels (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        state TEXT,
+        metadata TEXT
+      );
+    `);
+    db.exec(migration);
+
+    db.prepare(
+      "INSERT INTO tool_panels (id, session_id, type, title, substrate) VALUES ('inherit', 'session-1', 'claude', 'Chat 1', NULL), ('override', 'session-1', 'claude', 'Chat 2', 'interactive')",
+    ).run();
+
+    const rows = db
+      .prepare('SELECT id, substrate FROM tool_panels ORDER BY id')
+      .all() as Array<{ id: string; substrate: string | null }>;
+    expect(rows).toEqual([
+      { id: 'inherit', substrate: null },
+      { id: 'override', substrate: 'interactive' },
+    ]);
+
+    expect(() => db.exec(migration)).toThrow(/duplicate column name/i);
+    db.close();
+  });
 });

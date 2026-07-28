@@ -1,4 +1,4 @@
--- Migration 083: per-panel identity on agent invocations.
+-- Migration 087: per-panel identity on agent invocations.
 --
 -- WHY. A quick session's Codex resume target was resolved by
 -- `getLatestTopLevelResumeTarget(chat_run_id)`. That run id is SESSION-scoped —
@@ -6,7 +6,7 @@
 -- Codex SDK chat (TASK-103 Add-chat) picked up the FIRST chat's Codex thread as
 -- its resumeSessionId and the two panels replayed one conversation.
 --
--- NULL is deliberate and is the whole back-compat story: every pre-083 row keeps
+-- NULL is deliberate and is the whole back-compat story: every pre-087 row keeps
 -- panel_id NULL, and the run-scoped `getLatestTopLevelResumeTarget` still reads
 -- rows regardless of panel_id, so workflow runs and existing single-panel chat
 -- sessions resolve exactly the target they did before. Only the new

@@ -22,7 +22,7 @@ export interface CreateAgentInvocationInput {
    * session's chat_run_id is SESSION-scoped (every chat panel shares it), so
    * without this a second chat panel's resume lookup returns the FIRST panel's
    * provider thread and the two conversations merge. Null/absent for workflow
-   * runs and every pre-083 row — the run-scoped lookup ignores it.
+   * runs and every pre-087 row — the run-scoped lookup ignores it.
    */
   panelId?: string | null;
 }
@@ -110,7 +110,7 @@ export class AgentInvocationStore {
    * must start a FRESH provider thread, never inherit a sibling's. It also
    * deliberately does NOT fall back to the run-level lookup or to the legacy
    * workflow_runs.claude_session_id: both are session-scoped and inheriting them
-   * is the exact bug this exists to prevent. Pre-083 rows carry panel_id NULL,
+   * is the exact bug this exists to prevent. Pre-087 rows carry panel_id NULL,
    * so the panel that owns them is identified by the caller (see the ownership
    * note at the codex-sdk turn seam), not by this query.
    */
@@ -133,7 +133,7 @@ export class AgentInvocationStore {
         )
         .get(runId, panelId) as ResumeTargetRow | undefined;
     } catch (error) {
-      // A pre-083 database (no panel_id column) or a pre-065 one (no table) has
+      // A pre-087 database (no panel_id column) or a pre-065 one (no table) has
       // nothing panel-scoped to return — fail soft to "no target", i.e. a fresh
       // thread, which is the safe direction.
       if (

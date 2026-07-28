@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 const base = readFileSync(join(__dirname, '..', 'migrations', '065_agent_invocations.sql'), 'utf8');
 const migration = readFileSync(
-  join(__dirname, '..', 'migrations', '083_agent_invocation_panel_id.sql'),
+  join(__dirname, '..', 'migrations', '087_agent_invocation_panel_id.sql'),
   'utf8',
 );
 
@@ -43,7 +43,7 @@ function seedInvocation(
   ).run(id, externalSessionId, panelId);
 }
 
-describe('migration 083: per-panel agent invocation identity', () => {
+describe('migration 087: per-panel agent invocation identity', () => {
   it('adds a nullable panel_id column and the panel-scoped index', () => {
     const db = buildDb();
     db.exec(migration);
@@ -60,7 +60,7 @@ describe('migration 083: per-panel agent invocation identity', () => {
     db.close();
   });
 
-  it('leaves pre-083 rows with panel_id NULL so the run-scoped lookup is unchanged', () => {
+  it('leaves pre-087 rows with panel_id NULL so the run-scoped lookup is unchanged', () => {
     const db = buildDb();
     // A row written BEFORE the migration — the column does not exist yet.
     db.prepare(

@@ -9,9 +9,9 @@ const MIGRATION = readFileSync(
   join(__dirname, '..', 'database', 'migrations', '065_agent_invocations.sql'),
   'utf-8',
 );
-/** 083 adds agent_invocations.panel_id — the per-chat-panel resume identity. */
+/** 087 adds agent_invocations.panel_id — the per-chat-panel resume identity. */
 const MIGRATION_PANEL_ID = readFileSync(
-  join(__dirname, '..', 'database', 'migrations', '083_agent_invocation_panel_id.sql'),
+  join(__dirname, '..', 'database', 'migrations', '087_agent_invocation_panel_id.sql'),
   'utf-8',
 );
 
@@ -320,7 +320,7 @@ describe('AgentInvocationStore — per-panel resume targets', () => {
     );
   });
 
-  it('ignores pre-083 rows (panel_id NULL) — they are claimed by the caller, not this query', () => {
+  it('ignores pre-087 rows (panel_id NULL) — they are claimed by the caller, not this query', () => {
     const store = new AgentInvocationStore(dbAdapter(db));
     store.createInvocation({
       agentInvocationId: 'inv-legacy',
@@ -332,7 +332,7 @@ describe('AgentInvocationStore — per-panel resume targets', () => {
 
     expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')).toBeNull();
     // The run-scoped lookup still finds it, which is how the first chat panel
-    // keeps resuming across the 083 upgrade.
+    // keeps resuming across the 087 upgrade.
     expect(store.getLatestTopLevelResumeTarget('chat-run')?.externalSessionId).toBe('thread-legacy');
   });
 
@@ -358,7 +358,7 @@ describe('AgentInvocationStore — per-panel resume targets', () => {
     expect(store.getLatestPanelResumeTarget('chat-run', 'panel-1')).toBeNull();
   });
 
-  it('fails soft to null on a pre-083 database with no panel_id column', () => {
+  it('fails soft to null on a pre-087 database with no panel_id column', () => {
     const legacyDb = new Database(':memory:');
     legacyDb.exec(`
       CREATE TABLE workflow_runs (

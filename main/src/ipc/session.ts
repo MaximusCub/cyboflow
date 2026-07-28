@@ -350,7 +350,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     // one conversation (the "two chats share a history" bug). Resolve by panelId
     // instead so each chat continues its OWN thread.
     //
-    // Pre-083 rows carry panel_id NULL and belong to the panel that existed when
+    // Pre-087 rows carry panel_id NULL and belong to the panel that existed when
     // they were written — the session's FIRST chat panel. Fall back to the
     // run-scoped lookup for exactly that panel so an in-flight single-chat
     // session keeps resuming across the upgrade; any other panel starts fresh,
