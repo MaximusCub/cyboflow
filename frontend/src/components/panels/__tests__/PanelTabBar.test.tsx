@@ -20,6 +20,15 @@ function panel(id: string, title: string): ToolPanel {
   };
 }
 
+function sessionWithRuntime(agentRuntime: 'claude-sdk' | 'codex-sdk' | 'codex-pty'): Session {
+  return {
+    id: 'session-1',
+    worktreePath: '/wt/session-1',
+    projectId: 1,
+    agentRuntime,
+  } as unknown as Session;
+}
+
 describe('PanelTabBar chat labels', () => {
   it('renders legacy provider-generated titles as provider-neutral Chat tabs', () => {
     const panels = [
@@ -143,15 +152,9 @@ describe('PanelTabBar add chat action', () => {
     { runtime: 'claude-sdk' as const, expected: 'Claude SDK', wrong: 'Codex SDK' },
   ])('names the session provider in the SDK option ($runtime)', ({ runtime, expected, wrong }) => {
     const onAddChat = vi.fn();
-    const session = {
-      id: 'session-1',
-      worktreePath: '/wt/session-1',
-      projectId: 1,
-      agentRuntime: runtime,
-    } as unknown as Session;
 
     render(
-      <SessionProvider session={session}>
+      <SessionProvider session={sessionWithRuntime(runtime)}>
         <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={onAddChat} />
       </SessionProvider>,
     );
@@ -163,5 +166,46 @@ describe('PanelTabBar add chat action', () => {
     // The provider is display-only: the callback still carries just the substrate.
     fireEvent.click(screen.getByText(expected));
     expect(onAddChat).toHaveBeenCalledWith('sdk');
+  });
+
+  /**
+   * relayOrSpawnPtyPanel picks its PTY manager off `agent_runtime === 'codex-pty'`,
+   * NOT off the provider — so an interactive override in a codex-SDK session runs
+   * the Claude terminal. The copy must not promise a Codex one.
+   */
+  it('warns that a PTY override in a Codex SDK session runs the Claude terminal', () => {
+    render(
+      <SessionProvider session={sessionWithRuntime('codex-sdk')}>
+        <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={vi.fn()} />
+      </SessionProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    expect(
+      screen.getByText('Run this chat in the interactive Claude terminal (PTY chats always run Claude)'),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * In a codex-pty session that same check runs BEFORE any substrate test, so
+   * both overrides are dead letters — they must not be clickable.
+   */
+  it('disables both overrides in a Codex terminal session, where they are ignored', () => {
+    const onAddChat = vi.fn();
+
+    render(
+      <SessionProvider session={sessionWithRuntime('codex-pty')}>
+        <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={onAddChat} />
+      </SessionProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
+    fireEvent.click(screen.getByText('Codex SDK'));
+    fireEvent.click(screen.getByText('PTY (interactive)'));
+    expect(onAddChat).not.toHaveBeenCalled();
+
+    // Inheriting still works — that is the only honest choice here.
+    fireEvent.click(screen.getByText('Inherit session'));
+    expect(onAddChat).toHaveBeenCalledWith(undefined);
   });
 });

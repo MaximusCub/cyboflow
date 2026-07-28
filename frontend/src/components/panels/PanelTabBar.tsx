@@ -4,7 +4,7 @@ import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
-import type { AgentProvider } from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, SessionAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { providerForRuntime } from '../cyboflow/agentRuntimeUi';
 import { Button } from '../ui/Button';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
@@ -15,18 +15,51 @@ import { StatusDot } from '../ui/StatusDot';
  * "Add chat" substrate picker options — undefined means "inherit the session".
  *
  * The picker chooses a SUBSTRATE (sdk vs interactive), never a provider: which
- * agent runs is a session-wide property (`sessions.agent_runtime`), so "SDK" in
- * a Codex session is the Codex SDK. The copy is therefore derived from the
- * session's provider — a hardcoded "Claude SDK" misdescribed half the sessions.
+ * agent runs is session-wide (`sessions.agent_runtime`). The copy must therefore
+ * describe what the OVERRIDE ACTUALLY ROUTES TO, which is not symmetric:
+ *
+ *  - claude-* session — both overrides honored, both run Claude.
+ *  - codex-sdk session — SDK runs the Codex SDK, but the interactive arm of
+ *    `relayOrSpawnPtyPanel` picks its manager off `agent_runtime === 'codex-pty'`,
+ *    so a PTY override lands on the CLAUDE terminal. Say so rather than promise
+ *    a Codex terminal the dispatcher will not give.
+ *  - codex-pty session — that same codex-pty test runs BEFORE any substrate
+ *    test, so overrides are ignored outright: every chat is the Codex terminal.
+ *    Both overrides are disabled here; a control that silently does nothing is
+ *    worse than no control.
  */
 function addChatSubstrateItems(
-  provider: AgentProvider,
-): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> {
-  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  runtime: SessionAgentRuntime | undefined,
+): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate; disabled?: boolean }> {
+  const provider: AgentProvider = runtime ? providerForRuntime(runtime) : 'claude';
+  const sdkLabel = provider === 'codex' ? 'Codex SDK' : 'Claude SDK';
+  const inherit = {
+    id: 'inherit',
+    label: 'Inherit session',
+    description: 'Same substrate as the rest of this session (recommended)',
+  };
+
+  if (runtime === 'codex-pty') {
+    const ignored = 'Not available — a Codex terminal session runs every chat in the Codex terminal';
+    return [
+      inherit,
+      { id: 'sdk', label: sdkLabel, description: ignored, substrate: 'sdk', disabled: true },
+      { id: 'interactive', label: 'PTY (interactive)', description: ignored, substrate: 'interactive', disabled: true },
+    ];
+  }
+
   return [
-    { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },
-    { id: 'sdk', label: `${providerLabel} SDK`, description: `Run this chat with the ${providerLabel} SDK`, substrate: 'sdk' },
-    { id: 'interactive', label: 'PTY (interactive)', description: `Run this chat with the interactive ${providerLabel} terminal`, substrate: 'interactive' },
+    inherit,
+    { id: 'sdk', label: sdkLabel, description: `Run this chat with the ${sdkLabel}`, substrate: 'sdk' },
+    {
+      id: 'interactive',
+      label: 'PTY (interactive)',
+      description:
+        provider === 'codex'
+          ? 'Run this chat in the interactive Claude terminal (PTY chats always run Claude)'
+          : 'Run this chat with the interactive Claude terminal',
+      substrate: 'interactive',
+    },
   ];
 }
 
@@ -138,16 +171,13 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   }, [onAddChat]);
 
-  // No session in context (panel-only render paths, and the unit tests) → Claude,
-  // which is also the runtime default when a session leaves it unset.
-  const chatProvider: AgentProvider = sessionContext?.session?.agentRuntime
-    ? providerForRuntime(sessionContext.session.agentRuntime)
-    : 'claude';
-
-  const addChatItems: DropdownItem[] = addChatSubstrateItems(chatProvider).map((opt) => ({
+  // No session in context (panel-only render paths, and the unit tests) → the
+  // claude-sdk shape, which is also the default when a session leaves it unset.
+  const addChatItems: DropdownItem[] = addChatSubstrateItems(sessionContext?.session?.agentRuntime).map((opt) => ({
     id: opt.id,
     label: opt.label,
     description: opt.description,
+    disabled: opt.disabled,
     onClick: () => handleAddChat(opt.substrate),
   }));
 
