@@ -19,10 +19,24 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
 import { isAgentDispatchToolName } from '../../../../shared/types/agentIdentity';
 import type { ILogger } from './types';
+
+/**
+ * Classify a background task from its `task_started.task_type`.
+ *
+ * Observed values (raw_events): `local_bash` (a backgrounded shell command),
+ * `local_agent` (an Agent-tool subagent), `in_process_teammate` (a teammate
+ * agent). Anything unrecognised — including a missing task_started — stays
+ * undefined so the renderer falls back to a neutral label rather than guessing.
+ */
+function resolveTaskKind(taskType: string | undefined): 'agent' | 'command' | undefined {
+  if (taskType === 'local_agent' || taskType === 'in_process_teammate') return 'agent';
+  if (taskType === 'local_bash') return 'command';
+  return undefined;
+}
 
 export class MessageProjection {
   private readonly runId: string;
@@ -49,6 +63,13 @@ export class MessageProjection {
    * returning null for the follow-up events.
    */
   private emittedAssistantMessages = new Map<string, UnifiedMessage>();
+  /**
+   * Map from background `task_id` → the identity fields carried ONLY by its
+   * `task_started` event. The terminal `task_notification` has no `task_type` /
+   * `subagent_type`, so without this the projection cannot tell an Agent-tool
+   * subagent's report from a backgrounded `local_bash` command's output.
+   */
+  private backgroundTasks = new Map<string, { taskType?: string; subagentType?: string; description?: string }>();
 
   constructor(runId: string, logger?: Pick<ILogger, 'warn'>) {
     this.runId = runId;
@@ -85,7 +106,7 @@ export class MessageProjection {
 
       switch (event.type) {
         case 'system': {
-          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskNotificationEvent;
+          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskNotificationEvent;
           return this.projectSystemEvent(sysEvent);
         }
         case 'assistant': {
@@ -113,9 +134,24 @@ export class MessageProjection {
   // ---------------------------------------------------------------------------
 
   private projectSystemEvent(
-    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskNotificationEvent,
+    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskNotificationEvent,
   ): UnifiedMessage | null {
     const subtype = event.subtype;
+
+    // A background task began. Not rendered, but its IDENTITY is recorded so the
+    // terminal task_notification (which carries no type fields) can be attributed
+    // correctly — `local_bash` background commands share this lifecycle with
+    // Agent-tool subagents and are in fact the MAJORITY of background tasks, so
+    // labelling every notification "sub-agent" would be wrong more often than right.
+    if (subtype === 'task_started') {
+      const started = event as SystemTaskStartedEvent;
+      this.backgroundTasks.set(started.task_id, {
+        taskType: started.task_type,
+        subagentType: started.subagent_type,
+        description: started.description,
+      });
+      return null;
+    }
 
     // A background task settled. `summary` is the task's FINAL REPORT, and for a
     // backgrounded Agent-tool subagent it is the ONLY copy on the parent stream —
@@ -124,17 +160,35 @@ export class MessageProjection {
     // Render it as a system message so the report stays visible.
     if (subtype === 'task_notification') {
       const task = event as SystemTaskNotificationEvent;
+      const started = this.backgroundTasks.get(task.task_id);
       const summary = task.summary?.trim();
-      if (!summary) return null;
+      const failed = task.status !== 'completed';
+
+      // `summary` is optional on the wire. A silent drop is fine for a completed
+      // task with nothing to report, but a FAILED/STOPPED one must still surface —
+      // the notification is the only terminal signal the user gets, so fall back to
+      // a status line rather than swallowing the failure.
+      const content = summary
+        ?? (failed
+          ? [`Task ${task.status}.`, started?.description].filter(Boolean).join(' ')
+          : undefined);
+      if (!content) return null;
+
       return {
         id: `task_notification_msg_${++this.messageIdCounter}`,
         role: 'system',
         timestamp: new Date().toISOString(),
-        segments: [{ type: 'text', content: summary }],
+        segments: [{ type: 'text', content }],
         metadata: {
           systemSubtype: 'task_complete',
           taskId: task.task_id,
           taskStatus: task.status,
+          // 'agent' | 'command' | undefined when no task_started was seen (a
+          // truncated/resumed stream) — the renderer must stay neutral then.
+          taskKind: resolveTaskKind(started?.taskType),
+          subagentType: started?.subagentType,
+          taskDescription: started?.description,
+          outputFile: task.output_file,
           // The dispatching tool_use, so a renderer can attribute the report to
           // the Agent call it came from.
           parentToolId: task.tool_use_id,

@@ -433,6 +433,18 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
         ? sysMessage.metadata.taskStatus
         : 'completed';
       const taskFailed = taskStatus !== 'completed';
+      // `local_bash` background commands share the task lifecycle with Agent-tool
+      // subagents and are the majority of background tasks, so only label this a
+      // sub-agent when the task_started identity actually said so.
+      const taskKind = sysMessage.metadata.taskKind;
+      const subagentType = typeof sysMessage.metadata.subagentType === 'string'
+        ? sysMessage.metadata.subagentType
+        : null;
+      const taskLabel = taskKind === 'agent'
+        ? (subagentType ? `Sub-agent ${subagentType}` : 'Sub-agent')
+        : taskKind === 'command'
+          ? 'Background command'
+          : 'Background task';
       return (
         <div
           className={`
@@ -447,7 +459,7 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
           <div className="flex items-center gap-2 mb-2">
             <span>{taskFailed ? '⚠️' : '✅'}</span>
             <span className={`text-xs font-semibold ${taskFailed ? 'text-status-error' : 'text-status-success'}`}>
-              Sub-agent {taskStatus}
+              {taskLabel} {taskStatus}
             </span>
             <span className="text-xs text-text-tertiary">
               {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}

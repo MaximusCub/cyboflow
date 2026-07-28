@@ -27,6 +27,7 @@ import { MessageProjection } from '../messageProjection';
 import type {
   SystemInitEvent,
   SystemCompactBoundaryEvent,
+  SystemTaskStartedEvent,
   SystemTaskNotificationEvent,
   AssistantEvent,
   UserEvent,
@@ -957,9 +958,96 @@ describe('MessageProjection', () => {
     expect(result.segments).toEqual([{ type: 'text', content: 'Ran out of context.' }]);
   });
 
-  it('returns null for a task_notification with no summary (nothing to show)', () => {
+  it('returns null for a COMPLETED task_notification with no summary (nothing to show)', () => {
     expect(projection.project(taskNotification({ summary: undefined }))).toBeNull();
     expect(projection.project(taskNotification({ summary: '   ' }))).toBeNull();
+  });
+
+  it('still surfaces a FAILED/STOPPED task_notification that carries no summary', () => {
+    // `summary` is optional on the wire; the notification is the only terminal
+    // signal for a background task, so a failure must never be swallowed.
+    projection.project(taskStarted({ task_id: 'task_fail', description: 'Run the gate' }));
+    const failed = projection.project(
+      taskNotification({ task_id: 'task_fail', status: 'failed', summary: undefined }),
+    ) as UnifiedMessage;
+
+    expect(failed).not.toBeNull();
+    expect(failed.metadata?.taskStatus).toBe('failed');
+    expect(failed.segments).toEqual([{ type: 'text', content: 'Task failed. Run the gate' }]);
+
+    const stopped = projection.project(
+      taskNotification({ task_id: 'task_stop', status: 'stopped', summary: undefined }),
+    ) as UnifiedMessage;
+    // No task_started seen for this one — still surfaced, just without a description.
+    expect(stopped.segments).toEqual([{ type: 'text', content: 'Task stopped.' }]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 21d. Task ATTRIBUTION — `local_bash` background commands share the task
+  //      lifecycle with Agent-tool subagents (and outnumber them), so a
+  //      notification must not be labelled a sub-agent report by default.
+  // -------------------------------------------------------------------------
+
+  function taskStarted(overrides: Partial<SystemTaskStartedEvent> = {}): SystemTaskStartedEvent {
+    return {
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'b48iau5q5',
+      tool_use_id: 'toolu_01UKGFjnFervr56MbWGBbSQJ',
+      description: 'background work',
+      task_type: 'local_agent',
+      uuid: 'uuid-task-started',
+      session_id: SESSION_ID,
+      ...overrides,
+    };
+  }
+
+  it('projects task_started to null but records the task identity', () => {
+    expect(projection.project(taskStarted())).toBeNull();
+
+    const result = projection.project(taskNotification({ task_id: 'b48iau5q5' })) as UnifiedMessage;
+    expect(result.metadata?.taskKind).toBe('agent');
+  });
+
+  it('classifies a local_bash task as a command, not a sub-agent', () => {
+    projection.project(taskStarted({
+      task_id: 'bash_1',
+      task_type: 'local_bash',
+      description: 'Locate soloflow plugin root',
+    }));
+    const result = projection.project(
+      taskNotification({ task_id: 'bash_1', summary: 'found it' }),
+    ) as UnifiedMessage;
+
+    expect(result.metadata?.taskKind).toBe('command');
+    expect(result.metadata?.subagentType).toBeUndefined();
+    expect(result.metadata?.taskDescription).toBe('Locate soloflow plugin root');
+  });
+
+  it('attributes CONCURRENT agent and local_bash tasks to the right identity', () => {
+    // Both lifecycles interleave on one stream; attribution is by task_id, so a
+    // notification must never pick up the other task's identity.
+    projection.project(taskStarted({ task_id: 'agent_1', task_type: 'local_agent', subagent_type: 'cyboflow-code-review' }));
+    projection.project(taskStarted({ task_id: 'bash_1', task_type: 'local_bash', description: 'pnpm test' }));
+
+    const bashResult = projection.project(
+      taskNotification({ task_id: 'bash_1', summary: '12 passed' }),
+    ) as UnifiedMessage;
+    const agentResult = projection.project(
+      taskNotification({ task_id: 'agent_1', summary: 'Review findings…' }),
+    ) as UnifiedMessage;
+
+    expect(bashResult.metadata?.taskKind).toBe('command');
+    expect(bashResult.metadata?.subagentType).toBeUndefined();
+    expect(agentResult.metadata?.taskKind).toBe('agent');
+    expect(agentResult.metadata?.subagentType).toBe('cyboflow-code-review');
+  });
+
+  it('leaves taskKind undefined when no task_started was seen (truncated stream)', () => {
+    // The renderer must stay neutral rather than guessing "sub-agent".
+    const result = projection.project(taskNotification({ task_id: 'orphan' })) as UnifiedMessage;
+    expect(result.metadata?.taskKind).toBeUndefined();
+    expect(result.segments[0]).toEqual({ type: 'text', content: '## Dependencies\n\nTASK-108 depends on TASK-107.' });
   });
 
   // -------------------------------------------------------------------------
