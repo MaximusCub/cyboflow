@@ -34,13 +34,15 @@ Agents in this repo usually run *inside* a cyboflow session while editing cybofl
 ```bash
 pnpm dev               # Electron dev (run `pnpm build:main` at least once first)
 pnpm typecheck && pnpm lint
-pnpm test:unit         # THE headless AC gate for code changes
+pnpm test:unit         # THE headless AC gate — for a SETTLED tree, not per-change (see below)
 pnpm test:integration  # Mocked-SDK itest suite (required for panels/claude changes)
 pnpm test:e2e          # Built-bundle Playwright; needs a real display — NOT an AC gate
 pnpm electron:rebuild  # better-sqlite3 host-Node ABI (NMV 127) → Electron ABI (NMV 136)
 pnpm rebuild better-sqlite3  # reverse fix: back to host-Node ABI after e2e/packaging, before vitest
 pnpm test:gate         # Day-gate integration; needs `claude` on PATH — manual only
 ```
+
+**Which tests to run when.** `pnpm test:unit` is the *final* gate, not the per-change gate. **Inside a sprint/ship lane** (an implement / write-tests / task-verify subagent) run only the tests covering your files — `cd main && npx vitest run <paths>` — never the full suite: lanes share ONE worktree, so a full-suite run there also executes siblings' half-finished uncommitted edits, making failures noise and a green result meaningless. The full suite is `sprint-verify`'s job, once, over the settled tree. Detail: `docs/ARCHITECTURE.md` → "Build & Run".
 
 Full test-tier and ABI mechanics: `docs/ARCHITECTURE.md` → "Build & Run". Packaging/releases: `docs/RELEASE-RUNBOOK.md` (per-arch DMGs — `build:mac:universal` currently fails).
 

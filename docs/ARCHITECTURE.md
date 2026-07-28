@@ -834,7 +834,26 @@ pnpm test:gate            # Day-gate integration test; manual/unscheduled
 
 **`pnpm test:unit`** is the headless code-change AC gate: `pnpm --filter main test` +
 `pnpm --filter frontend test` (vitest, both one-shot) + schema-parity checks + build-script
-tests, chained by the root `test:unit` script. Use this to verify any code change.
+tests, chained by the root `test:unit` script.
+
+**Which tests to run when.** `test:unit` is the gate for a *settled* tree — it is NOT the
+per-change command, and it is NOT something every agent should run:
+
+- **Inside a sprint/ship lane** (an implement / write-tests / task-verify subagent): run only
+  the tests covering the lane's files — `cd main && npx vitest run <paths>`, or the `frontend`
+  equivalent. The flow prompts already require this (`sprint/agents/write-tests.md`,
+  `task-verify.md`). Two reasons. **Correctness:** lanes fan out into ONE shared session
+  worktree (`SPRINT_BATCH_CAP` = 5 concurrent), so a full-suite run there also executes
+  siblings' half-finished uncommitted edits — unrelated failures are noise, and green proves
+  nothing about the lane's own task. **Cost:** each `test:unit` is two full vitest suites; a
+  Codex sprint was measured running it 14–24× per run (Claude 4–6×), which saturates every
+  core. The fork-width half of this is capped separately by
+  `shared/types/testConcurrency.ts` (see `vitestForkCap.ts`).
+- **Final verification** (`sprint-verify`, or an interactive session finishing a change):
+  `pnpm test:unit` once, over the combined/settled state.
+
+Prefer `npx vitest run` per workspace over `pnpm --filter <ws> test` for scoped runs — filter
+recursion has broken bin PATH resolution in this repo.
 
 **`pnpm test:integration`** runs the Tier-3 mocked-SDK `*.itest.ts` suite
 (`vitest.config.integration.ts`, `main/src/**/*.itest.ts`) — a blocking CI job, and structurally

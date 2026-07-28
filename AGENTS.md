@@ -10,7 +10,7 @@
 - Build all: `pnpm build` (frontend, main, then electron package).
 - Package (examples): `pnpm build:mac:arm64`, `pnpm build:mac:x64` (macOS-only; per-arch — the universal `build:mac` currently fails on the bundled agent binaries, see `docs/RELEASE-RUNBOOK.md`).
 - Lint: `pnpm lint`; Type-check: `pnpm typecheck` (runs per package).
-- **Code-change gate: `pnpm test:unit`** (main + frontend vitest + schema parity + build scripts). Use this to verify changes.
+- **Final code-change gate: `pnpm test:unit`** (main + frontend vitest + schema parity + build scripts) — for a *settled* tree. While work is in progress, and always inside a sprint lane, run scoped tests instead: `cd main && npx vitest run <paths>`. See "Testing Guidelines".
 - E2E (`pnpm test:e2e`, `pnpm test:ui`): drives the built Electron bundle via Playwright `_electron.launch()`; needs a real display, so it is NOT the headless gate. See `docs/ARCHITECTURE.md` "Build & Run".
 - Main unit tests (if added): `pnpm --filter main test`, coverage: `pnpm --filter main run test:coverage`.
 
@@ -21,7 +21,10 @@
 - Run `pnpm lint && pnpm typecheck` before sending PRs.
 
 ## Testing Guidelines
-- Run `pnpm test:unit` as the verifier gate for any code change (see `CLAUDE.md` for why E2E is not the gate).
+- **Which tests to run when.** `pnpm test:unit` is the *final* gate, not the per-change gate — it runs two full vitest suites, so several agents running it at once pin every core.
+  - **Inside a sprint/ship lane** (you are an implement / write-tests / task-verify subagent): run ONLY the tests covering your files — `cd main && npx vitest run <paths>`. Do **not** run `pnpm test:unit`. Lanes fan out into ONE shared worktree, so a full-suite run there also executes your siblings' half-finished uncommitted edits: unrelated failures are noise and a green result proves nothing about your task. The full suite is `sprint-verify`'s job, once, over the combined state.
+  - **Final verification** (`sprint-verify`, or an interactive session finishing a change): `pnpm test:unit` once, over the settled tree. See `CLAUDE.md` for why E2E is not the gate.
+  - Prefer `npx vitest run` per workspace over `pnpm --filter` — filter recursion has broken bin PATH resolution in this repo.
 - For backend logic in `main/`, use Vitest colocated under `main/src/**/__tests__` or `*.spec.ts`; frontend likewise.
 - E2E tests live in `tests/*.spec.ts` (Playwright); they drive the built Electron bundle via `_electron.launch()` and need a real display (after a run, `pnpm rebuild better-sqlite3` restores the host-Node ABI).
 
@@ -45,5 +48,6 @@
 - Before editing or reasoning about files, scan for every `CLAUDE.md` in the repository.
 - Apply `CLAUDE.md` files by directory scope: read the root `CLAUDE.md` first, then any `CLAUDE.md` files on the path from the repository root to the files being changed. The closest `CLAUDE.md` to the changed file provides the most specific local guidance.
 - If `AGENTS.md` and `CLAUDE.md` conflict, follow `AGENTS.md` as the automation entrypoint unless the user explicitly says otherwise. If two `CLAUDE.md` files conflict, the lower-level directory-scoped file wins for files under its directory.
+- **Exception — your workflow prompt outranks this file on scope.** When you run as a Cyboflow flow subagent, your step's instructions define what YOU are responsible for and win over the general advice here. Concretely: this file names the repo's gate, but if your step says to run only the tests covering your files and never the full suite, obey that. Do not escalate to a repo-wide command just because `AGENTS.md` mentions one.
 - Do not use `cyboflow_*` MCP tools unless the user explicitly asks to modify live Cyboflow app data.
-- Use `pnpm test:unit` as the code-change verifier gate unless the user explicitly asks for a different verification path.
+- Use `pnpm test:unit` as the FINAL verifier gate for a settled tree, unless the user explicitly asks for a different verification path. While work is in progress — and always inside a sprint lane — run scoped tests instead (see "Testing Guidelines").
