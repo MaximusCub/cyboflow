@@ -167,6 +167,10 @@ const IDENTIFIED_SAMPLES: PairwiseSample[] = [
   { ...LEGACY_SAMPLES[1], judgeName: 'judge-b', judgeModel: 'sample-model' },
 ];
 
+const IDENTIFIED_SAMPLE_WITH_NULL_VERDICT_MODEL: PairwiseSample[] = [
+  { ...LEGACY_SAMPLES[0], judgeName: 'judge-a', judgeModel: 'sample-model' },
+];
+
 const NULL_IDENTITY_SAMPLES: PairwiseSample[] = [
   { ...LEGACY_SAMPLES[0], judgeModel: null },
 ];
@@ -236,6 +240,7 @@ describe('ExperimentComparisonView', () => {
     expect(chips).toHaveLength(3);
     for (const [index, chip] of chips.entries()) {
       expect(chip).toHaveTextContent(new RegExp(`^#${index + 1} .* · legacy-model$`));
+      expect(chip).toHaveAttribute('title', expect.stringContaining('graded by legacy-model'));
     }
     expect(screen.getByTestId('experiment-verdict-judge-provenance')).toHaveTextContent('graded by legacy-model');
     expect(screen.getAllByTestId('experiment-verdict-judge-provenance')).toHaveLength(1);
@@ -275,6 +280,34 @@ describe('ExperimentComparisonView', () => {
     expect(provenance).toHaveLength(1);
     expect(provenance[0].tagName).toBe('FOOTER');
     expect(provenance[0]).toHaveTextContent('graded by row-model');
+  });
+
+  it('uses per-sample identity while the provenance footer falls back to unknown', async () => {
+    getQuery.mockResolvedValue(makeExp());
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        verdict: {
+          ...makePayload().verdict!,
+          judgeModel: null,
+          perSample: [...IDENTIFIED_SAMPLE_WITH_NULL_VERDICT_MODEL],
+          sampleCount: 1,
+        },
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    const chips = await screen.findAllByTestId('experiment-sample-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent(/^#1 Arm A · judge-a$/);
+    expect(chips[0]).toHaveAttribute(
+      'title',
+      'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by judge-a · sample-model',
+    );
+    const provenance = screen.getAllByTestId('experiment-verdict-judge-provenance');
+    expect(provenance).toHaveLength(1);
+    expect(provenance[0]).toHaveTextContent('graded by unknown');
   });
 
   it('renders explicit unknown for a null/null judge identity', async () => {
