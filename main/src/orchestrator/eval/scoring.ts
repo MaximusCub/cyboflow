@@ -6,7 +6,7 @@
  *
  * This module is DATA + PURE FUNCTIONS ONLY — zero I/O, no Date/random, no SDK,
  * no DB. Every rule here transcribes "How scoring works" from
- * docs/proposals/code-review-eval-checklist.md (rubric v1.1); the EvalWorker owns
+ * docs/proposals/code-review-eval-checklist.md (rubric v1.2); the EvalWorker owns
  * the impure edges (SDK call, DB persistence, findings write). Keeping the math
  * pure is what makes the rubric's tricky cases (UNKNOWN exclusion, thin-evidence
  * INACTIVE + renormalization, floor-at-1, catastrophic cap, GATED sentinel)

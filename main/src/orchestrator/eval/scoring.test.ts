@@ -125,6 +125,7 @@ describe('thin-evidence INACTIVE + weight renormalization', () => {
       'maintainability',
       'tests',
       'scope',
+      'efficiency',
     ] as DimensionKey[]) {
       setDim(key, 'NOT_APPLICABLE', overrides);
     }
@@ -138,13 +139,13 @@ describe('thin-evidence INACTIVE + weight renormalization', () => {
     expect(dimByKey(result, 'robustness').active).toBe(false);
     expect(dimByKey(result, 'tests').active).toBe(false);
 
-    // overall = weighted geo mean over {correctness(w26,100), security(w18,~44)}
-    // renormalized to weights {26,18}. If weights were NOT renormalized (divided by
+    // overall = weighted geo mean over {correctness(w24,100), security(w18,~44)}
+    // renormalized to weights {24,18}. If weights were NOT renormalized (divided by
     // 100) the number would be far lower — this pins renormalization.
     const corScore = dimByKey(result, 'correctness').score as number;
     const secScore = dimByKey(result, 'security').score as number;
     const expected = Math.round(
-      Math.exp((26 * Math.log(corScore) + 18 * Math.log(secScore)) / (26 + 18)),
+      Math.exp((24 * Math.log(corScore) + 18 * Math.log(secScore)) / (24 + 18)),
     );
     expect(result.overallScore).toBe(expected);
     expect(result.overallScore).toBeGreaterThan(secScore); // pulled up by correctness
@@ -306,6 +307,7 @@ describe('inert diff (no active dimension) earns NO score, not 0/Poor', () => {
       'maintainability',
       'tests',
       'scope',
+      'efficiency',
     ] as DimensionKey[]) {
       setDim(key, 'NOT_APPLICABLE', overrides);
     }
@@ -347,8 +349,8 @@ describe('test gate-dodge forces an ACTIVE tests dimension despite thin evidence
 
 describe('special ceiling (COR-2 self-authored green tests)', () => {
   it('caps the correctness dimension at 0.89 when COR-2 resolves FAIL', () => {
-    // All correctness PASS except COR-2 FAIL => raw fraction 8/9=0.889, but the
-    // 0.89 ceiling still allows 0.889; force more context: fail COR-2 only.
+    // All correctness PASS except COR-2 FAIL => raw fraction 7/8=0.875, which the
+    // 0.89 ceiling already allows; the assertion pins the ceiling itself.
     const result = scoreSamples([buildSample({ 'COR-2': 'FAIL' })]);
     const c = dimByKey(result, 'correctness');
     expect(c.ceiling).toBe(0.89);

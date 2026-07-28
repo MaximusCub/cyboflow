@@ -1,5 +1,5 @@
 /**
- * Code-Review Eval rubric v1.1 — the frozen, data-only transcription of
+ * Code-Review Eval rubric v1.2 — the frozen, data-only transcription of
  * docs/proposals/code-review-eval-checklist.md that an out-of-loop judge runs
  * against a workflow's pre-human diff snapshot.
  *
@@ -8,12 +8,12 @@
  * string is hashed into `run_evals.prompt_hash`, so the serialization MUST be
  * deterministic (stable array ordering, no environment-dependent values).
  *
- * Faithfulness contract: 7 dimensions, weights 26/18/14/14/12/8/8 (sum 100),
- * 58 sub-checks (9+9+8+7+8+9+8). Every sub-check carries its verbatim *Applies*
+ * Faithfulness contract: 8 dimensions, weights 24/18/14/11/8/8/7/10 (sum 100),
+ * 60 sub-checks (8+9+8+6+6+9+8+6). Every sub-check carries its verbatim *Applies*
  * scope and *Unknown* clause from the doc.
  */
 
-export const RUBRIC_VERSION = '1.1';
+export const RUBRIC_VERSION = '1.2';
 
 /** Stable per-dimension keys — persisted in run_evals.dimensions_json. */
 export type DimensionKey =
@@ -23,7 +23,8 @@ export type DimensionKey =
   | 'design'
   | 'maintainability'
   | 'tests'
-  | 'scope';
+  | 'scope'
+  | 'efficiency';
 
 /**
  * Catastrophic-cap tier ("How scoring works"): a CONFIRMED finding of one of the
@@ -64,8 +65,9 @@ export interface RubricSubCheck {
 /**
  * A dimension-level ceiling that fires only when EVERY listed sub-check resolves
  * FAIL together (a conjunction the per-sub-check `specialCeiling` cannot express).
- * The doc's only such rule: Maintainability MTN-2 (naming) AND MTN-4 (size) both
- * FAIL => cap the dimension at Fair (<=0.69).
+ * The doc's two such rules: Maintainability MTN-2 (naming) AND MTN-4 (size) both
+ * FAIL, and Efficiency EFF-1 (speculative generality) AND EFF-2 (gratuitous
+ * indirection) both FAIL => cap that dimension at Fair (<=0.69).
  */
 export interface DimensionPairCap {
   readonly whenAllFail: readonly string[];
@@ -138,7 +140,7 @@ export const AGGREGATION = {
   THIN_EVIDENCE_MIN_SUBCHECKS: 2,
   /** COR-2 self-authored-green-tests ceiling (mirrors that sub-check's specialCeiling). */
   SELF_AUTHORED_TEST_CEILING: 0.89,
-  /** Fair-band ceiling (<=0.69): SCP-1 / DES-2 / MTN-2∧MTN-4 dimension soft-caps. */
+  /** Fair-band ceiling (<=0.69): SCP-1 / DES-2 / MTN-2∧MTN-4 / EFF-1∧EFF-2 dimension soft-caps. */
   FAIR_CEILING: 0.69,
   /** Poor-band ceiling (<0.40): ROB-3/4/5 catastrophic dimension soft-cap. */
   ROBUSTNESS_CATASTROPHIC_CEILING: 0.39,
@@ -225,13 +227,6 @@ const CORRECTNESS_SUBCHECKS: readonly RubricSubCheck[] = [
     'Control-flow and state invariants hold: no unconditionally shadowed branch, no inverted boolean/guard, no unreachable-after-early-return, no mutation that violates a documented immutability invariant (e.g., a field the body marks write-once is re-UPDATEd).',
     'always',
     'The intended invariant is not stated in the body and cannot be inferred from surrounding snapshot code.',
-  ),
-  subCheck(
-    'COR-9',
-    'correctness',
-    'No gross algorithmic-cost regression in the changed code: no obvious super-linear DB/loop cost (N+1 query in a loop, O(n^2) scan) on a hot path, no synchronous blocking call on the Electron main thread, and no unbounded in-memory accumulation on a per-event/per-stream path (LLM-judged, advisory).',
-    'only when the diff adds/changes loops over collections, DB access, main-thread synchronous work, or per-event accumulation',
-    'The call frequency / input size cannot be judged from the snapshot (path may be cold), so cost impact is indeterminate.',
   ),
 ];
 
@@ -379,13 +374,8 @@ const DESIGN_SUBCHECKS: readonly RubricSubCheck[] = [
     'Whether the annotated code is truly live/dead cannot be determined even after grepping call sites in the snapshot.',
     { specialCeiling: 0.69 },
   ),
-  subCheck(
-    'DES-3',
-    'design',
-    'No wrong-abstraction over-engineering: added interfaces, factories, generic type params, base classes, or indirection layers are justified by an actual current second caller/variant (found by grepping the snapshot) — not speculative generality.',
-    'only when the diff introduces new interfaces, factories, abstract/base classes, generics, or indirection wrappers',
-    'A second consumer would provably live outside the repo and the task spec is silent on multi-variant intent.',
-  ),
+  // DES-3 moved to EFF-1 in v1.2; DES-4..7 keep their numbers (no renumber) so
+  // existing cross-references stay valid.
   subCheck(
     'DES-4',
     'design',
@@ -445,13 +435,8 @@ const MAINTAINABILITY_SUBCHECKS: readonly RubricSubCheck[] = [
     'only when the diff adds or substantially rewrites a function or file',
     'The function/file body is only partially shown and the judge did not open the full file in the snapshot to gauge true size.',
   ),
-  subCheck(
-    'MTN-5',
-    'maintainability',
-    'In-scope logic is expressed concisely — no redundant intermediate variables, duplicated blocks, or verbose restatement where an existing shared util/pattern reads cleaner.',
-    'always (any authored code touch)',
-    'Whether a cleaner shared util exists cannot be confirmed even after a snapshot grep the judge attempted.',
-  ),
+  // MTN-5 moved to EFF-3 and MTN-8 to EFF-2 in v1.2; MTN-6/MTN-7 keep their
+  // numbers (no renumber) so existing cross-references stay valid.
   subCheck(
     'MTN-6',
     'maintainability',
@@ -465,13 +450,6 @@ const MAINTAINABILITY_SUBCHECKS: readonly RubricSubCheck[] = [
     'Migration SQL and workflow-prompt markdown, when touched, are readable: migration has a clear intent (comment/name) and is not a wall of unexplained ALTERs; prompt edits stay coherent, not bloated with contradictory instructions.',
     'only when the diff touches a SQL migration or a workflow-prompt .md file',
     'The touched file\'s full text cannot be read from the snapshot to judge its clarity in context.',
-  ),
-  subCheck(
-    'MTN-8',
-    'maintainability',
-    'No over-abstraction of in-scope code: the change does not wrap simple in-scope logic in gratuitous layers (single-use factories, one-line wrapper indirections, config objects for a fixed value) that add reading cost without payoff.',
-    'only when the diff introduces a new local abstraction/wrapper for in-scope logic',
-    'Whether the abstraction has other call sites (justifying it) cannot be confirmed even after a snapshot grep; if it plausibly reaches beyond the task it belongs to Design — mark UNKNOWN here.',
   ),
 ];
 
@@ -601,13 +579,63 @@ const SCOPE_SUBCHECKS: readonly RubricSubCheck[] = [
   ),
 ];
 
+/**
+ * Dimension 8, added in v1.2. EFF-1..EFF-4 are MOVES (DES-3, MTN-8, MTN-5, COR-9
+ * respectively) so the rubric keeps a single owner per defect class; EFF-5/EFF-6
+ * are net-new. Advisory dimension: no capTrigger/capFlag on any sub-check.
+ */
+const EFFICIENCY_SUBCHECKS: readonly RubricSubCheck[] = [
+  subCheck(
+    'EFF-1',
+    'efficiency',
+    'No wrong-abstraction over-engineering: added interfaces, factories, generic type params, base classes, or indirection layers are justified by an actual current second caller/variant (found by grepping the snapshot) — not speculative generality.',
+    'only when the diff introduces new interfaces, factories, abstract/base classes, generics, or indirection wrappers',
+    'A second consumer would provably live outside the repo and the task spec is silent on multi-variant intent.',
+  ),
+  subCheck(
+    'EFF-2',
+    'efficiency',
+    'No over-abstraction of in-scope code: the change does not wrap simple in-scope logic in gratuitous layers (single-use factories, one-line wrapper indirections, config objects for a fixed value) that add reading cost without payoff.',
+    'only when the diff introduces a new local abstraction/wrapper for in-scope logic',
+    'Whether the abstraction has other call sites (justifying it) cannot be confirmed even after a snapshot grep; if it plausibly reaches beyond the task it belongs to EFF-1 — mark UNKNOWN here.',
+  ),
+  subCheck(
+    'EFF-3',
+    'efficiency',
+    'In-scope logic is expressed concisely — no redundant intermediate variables, duplicated blocks, or verbose restatement where an existing shared util/pattern reads cleaner.',
+    'always (any authored code touch)',
+    'Whether a cleaner shared util exists cannot be confirmed even after a snapshot grep the judge attempted.',
+  ),
+  subCheck(
+    'EFF-4',
+    'efficiency',
+    'No gross algorithmic-cost regression in the changed code: no obvious super-linear DB/loop cost (N+1 query in a loop, O(n^2) scan) on a hot path, no synchronous blocking call on the Electron main thread, and no unbounded in-memory accumulation on a per-event/per-stream path (LLM-judged, advisory).',
+    'only when the diff adds/changes loops over collections, DB access, main-thread synchronous work, or per-event accumulation',
+    'The call frequency / input size cannot be judged from the snapshot (path may be cold), so cost impact is indeterminate.',
+  ),
+  subCheck(
+    'EFF-5',
+    'efficiency',
+    'No dead weight: the diff introduces no unused exports, unused function parameters, unread config keys/feature flags, unreachable branches, or unreferenced new files (confirmed by grepping the snapshot for references); @cyboflow-hidden-annotated code is EXEMPT — it is intentionally unreferenced and its integrity is DES-2\'s sole ownership.',
+    'only when the diff adds new exports, function parameters, config keys, feature flags, or files',
+    'A referencing consumer would provably live outside the repo (external/generated caller) and cannot be enumerated from the snapshot.',
+  ),
+  subCheck(
+    'EFF-6',
+    'efficiency',
+    'Mechanism is proportionate to the task: the diff does not ship substantially more machinery (new tables, services, abstraction layers, dependencies, generalized frameworks) than its acceptance criteria require, where a materially smaller change would satisfy them.',
+    'always (whenever the dimension is active)',
+    'No task spec is inferable from the snapshot, so the acceptance criteria the machinery must be proportionate to cannot be established.',
+  ),
+];
+
 export const RUBRIC: Rubric = {
   version: RUBRIC_VERSION,
   dimensions: [
     {
       key: 'correctness',
       name: 'Correctness & Logic Soundness',
-      weight: 26,
+      weight: 24,
       overallCapOnHighSeverity: false,
       subChecks: CORRECTNESS_SUBCHECKS,
     },
@@ -630,14 +658,14 @@ export const RUBRIC: Rubric = {
     {
       key: 'design',
       name: 'Design & Architecture Fit',
-      weight: 14,
+      weight: 11,
       overallCapOnHighSeverity: false,
       subChecks: DESIGN_SUBCHECKS,
     },
     {
       key: 'maintainability',
       name: 'Maintainability & Simplicity',
-      weight: 12,
+      weight: 8,
       overallCapOnHighSeverity: false,
       // Doc "Gate / cap behavior": MTN-2 (naming) AND MTN-4 (size) both FAIL caps
       // the dimension at Fair (<=0.69) — a conjunction, not a per-sub-check ceiling.
@@ -654,9 +682,20 @@ export const RUBRIC: Rubric = {
     {
       key: 'scope',
       name: 'Scope Fidelity',
-      weight: 8,
+      weight: 7,
       overallCapOnHighSeverity: false,
       subChecks: SCOPE_SUBCHECKS,
+    },
+    {
+      key: 'efficiency',
+      name: 'Efficiency & Economy',
+      weight: 10,
+      overallCapOnHighSeverity: false,
+      // Doc "Gate / cap behavior": EFF-1 (speculative generality) AND EFF-2
+      // (gratuitous in-scope indirection) both FAIL caps the dimension at Fair
+      // (<=0.69) — a conjunction, not a per-sub-check ceiling.
+      pairCaps: [{ whenAllFail: ['EFF-1', 'EFF-2'], ceiling: 0.69 }],
+      subChecks: EFFICIENCY_SUBCHECKS,
     },
   ],
 };

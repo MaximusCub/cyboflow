@@ -607,7 +607,7 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.getByTestId('run-summary-eval-gate-typecheck')).toHaveAttribute('data-gate-status', 'fail');
     expect(screen.getByTestId('run-summary-eval-gate-lint')).toHaveAttribute('data-gate-status', 'pass');
     // one active dimension of the two fixture dims.
-    expect(screen.getByTestId('run-summary-eval-dims-active')).toHaveTextContent('1 / 7 dimensions active');
+    expect(screen.getByTestId('run-summary-eval-dims-active')).toHaveTextContent('1 / 8 dimensions active');
   });
 
   it('renders heterogeneous jury composition and warns when Codex was unavailable', async () => {

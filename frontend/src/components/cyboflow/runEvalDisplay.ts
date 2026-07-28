@@ -6,8 +6,8 @@ import type { RunEvalBand } from '../../../../shared/types/insights';
  * testable without rendering (the panel's own tests mock tRPC).
  */
 
-/** How many rubric dimensions the checklist defines (the "N / 7" denominator). */
-export const RUBRIC_DIMENSION_COUNT = 7;
+/** How many rubric dimensions the checklist defines (the "N / 8" denominator). */
+export const RUBRIC_DIMENSION_COUNT = 8;
 
 export interface BandDisplay {
   /** Uppercased band word shown as the hero label. */

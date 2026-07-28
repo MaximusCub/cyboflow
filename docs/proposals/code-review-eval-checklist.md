@@ -1,6 +1,8 @@
-# Code-Review Eval — Full Evaluation Checklist (rubric v1.1)
+# Code-Review Eval — Full Evaluation Checklist (rubric v1.2)
 
 > Draft for review. This is the concrete per-dimension checklist an **independent, out-of-loop judge** runs against the frozen pre-human diff snapshot a workflow produced. It measures how workflow variants perform. Output = overall /100 + per-dimension sub-scores.
+
+> **v1.2** adds an 8th dimension — **Efficiency & Economy** (weight 10, 6 sub-checks) — owning ECONOMY OF MECHANISM. Four of its sub-checks are MOVES that preserve the rubric's sole-owner de-dup discipline (DES-3 → EFF-1, MTN-8 → EFF-2, MTN-5 → EFF-3, COR-9 → EFF-4); EFF-5 (dead weight) and EFF-6 (mechanism proportionality) are net-new. Donor dimensions keep their surviving sub-check numbers — the gaps at DES-3 / MTN-5 / MTN-8 / COR-9 are intentional so existing cross-references stay valid. Weights rebalanced to 24/18/14/11/8/8/7/10. See the Revision history for the full rationale.
 
 ## How scoring works
 
@@ -29,21 +31,24 @@
 
 | # | Dimension | Weight | # sub-checks |
 |---|---|---|---|
-| 1 | Correctness & Logic Soundness | 26 | 9 |
+| 1 | Correctness & Logic Soundness | 24 | 8 |
 | 2 | Security & Safety | 18 | 9 |
 | 3 | Robustness & Contract Safety | 14 | 8 |
-| 4 | Design & Architecture Fit | 14 | 7 |
-| 5 | Maintainability & Simplicity | 12 | 8 |
+| 4 | Design & Architecture Fit | 11 | 6 |
+| 5 | Maintainability & Simplicity | 8 | 6 |
 | 6 | Test Meaningfulness | 8 | 9 |
-| 7 | Scope Fidelity | 8 | 8 |
+| 7 | Scope Fidelity | 7 | 8 |
+| 8 | Efficiency & Economy | 10 | 6 |
+
+Total: **60 sub-checks** (8+9+8+6+6+9+8+6).
 
 ---
 
-## 1. Correctness & Logic Soundness — weight 26
+## 1. Correctness & Logic Soundness — weight 24
 
 **Activation.** EVIDENCE RULE (applies to every sub-check): the judge has the FULL FROZEN REPO SNAPSHOT, not just the diff — before marking any sub-check UNKNOWN for a 'symbol/caller/counterpart-file/migration-list/pre-existing-test not visible' reason, the judge MUST open/grep the snapshot; UNKNOWN is reserved for genuinely external deps or runtime state not derivable from the repo. Active on every diff that changes runtime behavior (TS/JS logic, SQL migrations, prompt bodies that drive agent control flow, IPC/tRPC handlers, chokepoint routers). Dropped ONLY when the diff is exclusively non-behavioral: pure docs/markdown prose, formatting/whitespace, asset/config renames with no logic, or test-only files (test meaningfulness is owned by the Test dimension). If even one behavioral hunk exists, the dimension is active and grades that hunk.
 
-**Ownership (de-dup).** Owns whether the changed code COMPUTES THE RIGHT ANSWER for intended, edge, and error inputs per the task/entity body as reference spec; whether an in-repo caller now reads a dropped/renamed field and produces a WRONG RESULT; hallucinated/non-existent API detection (advisory); and gross algorithmic-cost regressions (COR-9). Does NOT own: declared-T-vs-runtime-shape drift or one-sided IPC interface edits as a CONTRACT defect (ROB-1 is sole owner — charge here only the resulting wrong output at a specific caller); migration destructiveness/idempotency/collision (ROB-3/ROB-4 — here only code↔schema column consistency, COR-7); whether tests are meaningful (Test) or whether build/typecheck/lint/vitest pass (deterministic gate); off-chokepoint direct-entity-UPDATE (Robustness ROB-5); wrong abstraction level (Design); verbose-but-correct expression (Maintainability); unrequested features (Scope). When a defect is both 'wrong result' and 'wrong design', charge here only if the OUTPUT is wrong.
+**Ownership (de-dup).** Owns whether the changed code COMPUTES THE RIGHT ANSWER for intended, edge, and error inputs per the task/entity body as reference spec; whether an in-repo caller now reads a dropped/renamed field and produces a WRONG RESULT; and hallucinated/non-existent API detection (advisory). Does NOT own: declared-T-vs-runtime-shape drift or one-sided IPC interface edits as a CONTRACT defect (ROB-1 is sole owner — charge here only the resulting wrong output at a specific caller); migration destructiveness/idempotency/collision (ROB-3/ROB-4 — here only code↔schema column consistency, COR-7); whether tests are meaningful (Test) or whether build/typecheck/lint/vitest pass (deterministic gate); off-chokepoint direct-entity-UPDATE (Robustness ROB-5); gross algorithmic-cost regressions (Efficiency EFF-4 — moved out of Correctness in v1.2); wrong abstraction level (Design placement / Efficiency economy); verbose-but-correct expression (Maintainability); unrequested features (Scope). When a defect is both 'wrong result' and 'wrong design', charge here only if the OUTPUT is wrong.
 
 **Gate / cap behavior.** Sets the Correctness CONFIDENCE FLAG (advisory) whenever a risky changed path is corroborated ONLY by self-authored-green tests or is judge-UNKNOWN. SOFT CAP: if the primary behavioral change is corroborated solely by tests added in this same diff with no independent signal (pre-existing test, explicit reference-spec statement in the body, or judge line-by-line verification that the logic is demonstrably STRAIGHT-LINE), this dimension cannot exceed the Good ceiling (0.89) — the Excellent band requires at least one independent corroboration on the primary path, and judge self-verification counts as independent ONLY for demonstrably straight-line logic. THIN-EVIDENCE: if fewer than 2 sub-checks resolve non-UNKNOWN, mark the dimension INACTIVE (excluded from the weighted mean, weights renormalize) and flag low-confidence. No hard gate on overall score; UNKNOWN sub-checks leave the denominator and are logged.
 
@@ -105,12 +110,7 @@
 - **Evidence** — Cite the branch/guard/mutation line and the invariant it violates (quote the body if stated).
 - **Applies** — always
 
-#### COR-9 · No gross algorithmic-cost regression in the changed code: no obvious super-linear DB/loop cost (N+1 query in a loop, O(n^2) scan) on a hot path, no synchronous blocking call on the Electron main thread, and no unbounded in-memory accumulation on a per-event/per-stream path (LLM-judged, advisory).
-- **Pass** — The changed hot-path code is at most linear in its input, does not issue per-iteration DB round-trips where a batch/join exists, does not block the main thread synchronously, and bounds any accumulator.
-- **Fail** — The judge identifies an N+1 loop, an O(n^2)+ scan on a frequently-run path, a synchronous fs/exec/deep-compute call on the Electron main thread, or an unbounded buffer that grows per event.
-- **Unknown** — The call frequency / input size cannot be judged from the snapshot (path may be cold), so cost impact is indeterminate.
-- **Evidence** — Cite the loop/query/blocking-call line and the cost class; label advisory (no profiler/complexity tool).
-- **Applies** — only when the diff adds/changes loops over collections, DB access, main-thread synchronous work, or per-event accumulation
+*(COR-9 moved to EFF-4 in v1.2 — gross algorithmic-cost regression is now charged to Efficiency & Economy. COR-1..COR-8 keep their numbers.)*
 
 ---
 
@@ -257,11 +257,11 @@
 
 ---
 
-## 4. Design & Architecture Fit — weight 14
+## 4. Design & Architecture Fit — weight 11
 
 **Activation.** EVIDENCE RULE: the judge has the full snapshot and must inspect the surrounding class structure / call graph / seam definitions before marking UNKNOWN. ACTIVE whenever the diff adds or changes production code that participates in the architecture — new modules, services, routers, IPC/tRPC handlers, spawn/facade seams, data-flow wiring, or edits to entity/review/artifact write paths, CLI-manager classes, or @cyboflow-hidden regions. DROPPED (whole dimension excluded) only when the diff is exclusively docs/markdown, comments, test-only files, pure copy/string changes, config/version bumps, or asset changes with zero production-logic wiring. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize) and flags low-confidence.
 
-**Ownership (de-dup).** Owns whether the change fits the EXISTING architecture at the RIGHT abstraction level: module-boundary placement, reuse of the sanctioned seam vs a parallel bespoke path, honoring preserved extension points (DES-2 is the SOLE OWNER of AbstractCliManager-collapse and @cyboflow-hidden deletion/mislabel across all dimensions), WRONG-ABSTRACTION over-engineering (speculative generality, needless indirection, single-caller factories/interfaces), and IPC boundary PLACEMENT (DES-5, distinct from ROB-1's shape-drift). Does NOT own: verbose-but-correct expression (Maintainability); UNREQUESTED features/scope creep (Scope); off-chokepoint direct entity UPDATE (Robustness ROB-5); correctness/logic bugs (Correctness); test meaningfulness (Test); declared-T-vs-runtime shape-drift as a runtime defect (ROB-1) — DES-5 judges only boundary type PLACEMENT and must not re-charge a drift ROB-1 already failed.
+**Ownership (de-dup).** Owns WHERE the change sits in the EXISTING architecture: module-boundary placement, reuse of the sanctioned seam vs a parallel bespoke path, honoring preserved extension points (DES-2 is the SOLE OWNER of AbstractCliManager-collapse and @cyboflow-hidden deletion/mislabel across all dimensions), and IPC boundary PLACEMENT (DES-5, distinct from ROB-1's shape-drift). Does NOT own: WRONG-ABSTRACTION over-engineering — speculative generality, needless indirection, single-caller factories/interfaces (Efficiency EFF-1, moved out of Design in v1.2; Design judges whether the code sits in the right PLACE, Efficiency whether the mechanism is the right SIZE); verbose-but-correct expression (Maintainability); UNREQUESTED features/scope creep (Scope); off-chokepoint direct entity UPDATE (Robustness ROB-5); correctness/logic bugs (Correctness); test meaningfulness (Test); declared-T-vs-runtime shape-drift as a runtime defect (ROB-1) — DES-5 judges only boundary type PLACEMENT and must not re-charge a drift ROB-1 already failed.
 
 **Gate / cap behavior.** No hard gate on overall score. SOFT-CAP: if DES-2 (collapses/prunes a preserved extension point like AbstractCliManager or its live PTY methods, or deletes/marks @cyboflow-hidden on live code) is FAIL, cap this dimension at Fair (<=0.69) and set a confidence flag noting an architectural-invariant breach. CONFIDENCE-FLAG (not a cap): if 3+ sub-checks are UNKNOWN after snapshot inspection, flag the dimension low-confidence. No deterministic tool backs this dimension — all verdicts are line-cited judgment.
 
@@ -281,12 +281,7 @@
 - **Evidence** — Cite the touched file:line in main/src/services/panels/cli/ or the removed/annotated block and the invariant implicated. This is the SOLE dimension charging this defect; a FAIL here triggers the Fair soft-cap.
 - **Applies** — only when the diff touches AbstractCliManager, ClaudeCodeManager, interactiveClaudeManager, the substrate facade/seam, or any @cyboflow-hidden-annotated region
 
-#### DES-3 · No wrong-abstraction over-engineering: added interfaces, factories, generic type params, base classes, or indirection layers are justified by an actual current second caller/variant (found by grepping the snapshot) — not speculative generality.
-- **Pass** — Every new abstraction has >=2 concrete uses now (confirmed via snapshot grep) OR is an explicitly preserved extension point; simple in-scope logic is expressed directly.
-- **Fail** — The diff adds an interface/factory/generic/indirection with exactly one caller and no preserved-extension-point mandate, or wraps a trivial operation in needless layers for anticipated future flexibility.
-- **Unknown** — A second consumer would provably live outside the repo and the task spec is silent on multi-variant intent.
-- **Evidence** — Cite the abstraction file:line and the grepped count of concrete call sites; name the speculative-generality symptom (single-impl interface, one-branch factory, unused generic param).
-- **Applies** — only when the diff introduces new interfaces, factories, abstract/base classes, generics, or indirection wrappers
+*(DES-3 moved to EFF-1 in v1.2 — wrong-abstraction over-engineering is now charged to Efficiency & Economy. DES-4..DES-7 deliberately keep their numbers so existing cross-references stay valid.)*
 
 #### DES-4 · Code is placed at the correct module boundary per the layer stack (shared/ types, main/orchestrator vs services vs db, frontend/): domain/orchestration logic is not embedded in a renderer component, and shared cross-boundary types live in shared/ rather than being redeclared per side.
 - **Pass** — New logic sits in the layer owning that concern (spawn/registry logic in main orchestrator/services, board/entity rules behind the router, UI-only concerns in frontend) and cross-boundary types are defined once in shared/.
@@ -318,11 +313,11 @@
 
 ---
 
-## 5. Maintainability & Simplicity — weight 12
+## 5. Maintainability & Simplicity — weight 8
 
 **Activation.** EVIDENCE RULE: the judge may open the full file in the snapshot to gauge true function/file size and whether a cleaner shared util exists before marking UNKNOWN. ACTIVE whenever the diff adds or modifies human-authored source (TS/TSX, SQL migrations, markdown workflow prompts, config). DROPPED only when the diff is pure generated/lockfile/vendored output, a pure binary/asset change, or a pure revert with no net new authored lines. If the diff is trivially small (<=5 net authored lines) the dimension still runs but sub-checks that find no touchpoint resolve UNKNOWN rather than PASS.
 
-**Ownership (de-dup).** Owns VERBOSE EXPRESSION of in-scope code (needless length, over-commenting, redundant local abstraction, dead-weight wrappers), naming clarity, and comment intent. Does NOT own: WRONG ABSTRACTION LEVEL / speculative generality reaching beyond the task (Design); UNREQUESTED functionality (Scope); off-chokepoint UPDATE or dropped-logger as a correctness/robustness fault (Robustness — the same code may still be judged here purely for readability); lint/formatting conformance (deterministic lint gate — never rewarded/penalized here); test meaningfulness (Test) or gate pass/fail. When a construct is both over-abstracted-beyond-scope AND verbose, charge the beyond-scope aspect to Design and only the in-scope verbosity here.
+**Ownership (de-dup).** Owns READABILITY of code that is already right-sized: naming clarity, comment intent, comment noise, function/file size and single-responsibility, and type-annotation legibility. Does NOT own: ECONOMY OF MECHANISM — gratuitous indirection, duplication of an existing shared util, speculative generality, dead weight (Efficiency EFF-1/EFF-2/EFF-3/EFF-5; MTN-5 and MTN-8 moved there in v1.2); MODULE-BOUNDARY PLACEMENT (Design); UNREQUESTED functionality (Scope); off-chokepoint UPDATE or dropped-logger as a correctness/robustness fault (Robustness — the same code may still be judged here purely for readability); lint/formatting conformance (deterministic lint gate — never rewarded/penalized here); test meaningfulness (Test) or gate pass/fail. When a construct is both over-abstracted AND hard to read, charge the over-abstraction to Efficiency and only the residual readability defect (naming, comments, sprawl) here.
 
 **Gate / cap behavior.** No hard gate (advisory, weighted below Security). SOFT-CAP: if MTN-2 (naming) AND MTN-4 (function/file size) both FAIL, cap this dimension at Fair (<=0.69). CONFIDENCE-FLAG (not a score change) raised when >40% of sub-checks resolve UNKNOWN. The `any`-type observation (MTN-6) is a readability signal here only; its authoritative penalty lives in the lint gate, so a FAIL here must NOT also be double-charged as a gate failure. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize).
 
@@ -356,12 +351,7 @@
 - **Evidence** — Cite the function/file with approximate added line count and nesting depth, file:line.
 - **Applies** — only when the diff adds or substantially rewrites a function or file
 
-#### MTN-5 · In-scope logic is expressed concisely — no redundant intermediate variables, duplicated blocks, or verbose restatement where an existing shared util/pattern reads cleaner.
-- **Pass** — Changed code avoids obvious local duplication and needless verbosity; repeated in-scope logic is factored or uses an existing helper where that improves readability.
-- **Fail** — The diff repeats a near-identical block multiple times, threads pointless pass-through locals, or hand-rolls verbose logic that an obvious existing in-file/shared utility would express more clearly.
-- **Unknown** — Whether a cleaner shared util exists cannot be confirmed even after a snapshot grep the judge attempted.
-- **Evidence** — Cite the duplicated/verbose spans (file:line x2+) or redundant locals; name the cleaner form if asserting one exists.
-- **Applies** — always (any authored code touch)
+*(MTN-5 moved to EFF-3 and MTN-8 to EFF-2 in v1.2 — concise expression and gratuitous in-scope indirection are now charged to Efficiency & Economy. MTN-6 and MTN-7 deliberately keep their numbers so existing cross-references stay valid.)*
 
 #### MTN-6 · Type annotations aid readability without `any`: added TS uses `unknown`+guards or precise types, keeping call sites self-documenting (readability lens only; lint gate owns the hard penalty).
 - **Pass** — No new `any` (explicit or via `as any`) is introduced in authored TS; added types make boundary shapes legible.
@@ -376,13 +366,6 @@
 - **Unknown** — The touched file's full text cannot be read from the snapshot to judge its clarity in context.
 - **Evidence** — Cite the migration/prompt file with file:line and describe the clarity defect or its absence.
 - **Applies** — only when the diff touches a SQL migration or a workflow-prompt .md file
-
-#### MTN-8 · No over-abstraction of in-scope code: the change does not wrap simple in-scope logic in gratuitous layers (single-use factories, one-line wrapper indirections, config objects for a fixed value) that add reading cost without payoff.
-- **Pass** — In-scope logic is implemented at the flattest level that works; any new indirection earns its keep by removing real duplication or clarifying intent.
-- **Fail** — The diff introduces a wrapper/indirection/config-object used exactly once for in-scope work that a direct call would express more clearly, with no dedup or clarity payoff.
-- **Unknown** — Whether the abstraction has other call sites (justifying it) cannot be confirmed even after a snapshot grep; if it plausibly reaches beyond the task it belongs to Design — mark UNKNOWN here.
-- **Evidence** — Cite the wrapper/indirection with file:line and note its single in-scope use.
-- **Applies** — only when the diff introduces a new local abstraction/wrapper for in-scope logic
 
 ---
 
@@ -461,11 +444,11 @@
 
 ---
 
-## 7. Scope Fidelity — weight 8
+## 7. Scope Fidelity — weight 7
 
 **Activation.** EVIDENCE RULE: the judge has the full snapshot to distinguish net-new surfaces from moved/pre-existing code. ALWAYS ACTIVE whenever a task spec / requirement statement is available alongside a non-empty diff. DROP (mark whole dimension UNKNOWN, excluded from the weighted mean) only when: (a) no task spec / requirement text is recoverable, or (b) the diff is empty/whitespace-only. When the spec is prose (cyboflow entity bodies are usually a single markdown body), the judge MUST derive the implied discrete requirements from the prose and judge against them — do NOT auto-DROP SCP-1 merely because criteria are not bullet-listed.
 
-**Ownership (de-dup).** Owns the MATCH between requirement set and delivered change in BOTH directions: (1) UNREQUESTED functionality/features/files/flags (excess), and (2) MISSING required behavior/dropped acceptance criteria (under-coverage — anti-gaming so shrinking blast radius by omission does not score well). Also owns silent assumptions and out-of-scope refactors that inflate blast radius. Does NOT own: WRONG ABSTRACTION LEVEL / speculative generality (Design owns 'over-engineering' even when out of scope — charge excess to Design if the defect is fundamentally 'too abstract', to Scope if 'unasked-for capability'); VERBOSE EXPRESSION (Maintainability); off-chokepoint UPDATE (Robustness); test meaningfulness (Test) or gate pass/fail; migration renumber/collision correctness (Robustness). Scope only flags a migration whose EXISTENCE is unrequested creep. The @cyboflow-hidden/AbstractCliManager INVARIANT itself is owned by DES-2; SCP-7 charges only the UNREQUESTED-ness of such a change.
+**Ownership (de-dup).** Owns the MATCH between requirement set and delivered change in BOTH directions: (1) UNREQUESTED functionality/features/files/flags (excess), and (2) MISSING required behavior/dropped acceptance criteria (under-coverage — anti-gaming so shrinking blast radius by omission does not score well). Also owns silent assumptions and out-of-scope refactors that inflate blast radius. FEATURES vs MECHANISM boundary (v1.2): Scope owns UNREQUESTED FUNCTIONALITY — a capability the task never asked for; Efficiency (EFF-6) owns OVERSIZED MECHANISM for functionality that IS in scope. Charge here if the defect is 'nobody asked for this behavior', to Efficiency if it is 'the right behavior built with far more machinery than it needs'. Does NOT own: WRONG ABSTRACTION LEVEL / speculative generality (Efficiency EFF-1); MODULE-BOUNDARY PLACEMENT (Design); VERBOSE EXPRESSION (Maintainability); off-chokepoint UPDATE (Robustness); test meaningfulness (Test) or gate pass/fail; migration renumber/collision correctness (Robustness). Scope only flags a migration whose EXISTENCE is unrequested creep. The @cyboflow-hidden/AbstractCliManager INVARIANT itself is owned by DES-2; SCP-7 charges only the UNREQUESTED-ness of such a change.
 
 **Gate / cap behavior.** SOFT-CAP (CATASTROPHIC-CLASS): if any required acceptance criterion (derived from spec prose if needed) is provably UNIMPLEMENTED (SCP-1 FAIL), cap this dimension at Fair (<=0.69) AND soft-cap the OVERALL score at Fair (≤0.69) with the `requirements_unmet` flag and a BLOCKING review_item. Rationale: at 8% weight a dimension-only cap costs ~2 overall points in the geometric mean — no deterrent — and Correctness cannot catch code that simply doesn't exist (it grades changed hunks); a variant that ships 80% of the asks "cleanly" must not outscore one that ships 100%. CONFIDENCE-FLAG (advisory): raise when >40% of sub-checks resolve UNKNOWN due to an ambiguous/missing spec. Excess-only violations (SCP-2/3/4 FAIL with full coverage) do NOT trigger the soft-cap but lower the pass fraction. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize).
 
@@ -482,7 +465,7 @@
 - **Pass** — All net-new capabilities map to an explicit or clearly-implied spec requirement.
 - **Fail** — The diff ships an unrequested capability (extra IPC channel, extra config toggle, new panel/pill, new CLI flag) with no basis in the spec.
 - **Unknown** — Whether a surface is new vs pre-existing/moved cannot be determined even after grepping the snapshot.
-- **Evidence** — Cite the added surface (file:line) and state the spec contains no corresponding ask. Charge here only for unasked-for CAPABILITY, not an over-abstract implementation of an in-scope one (that is Design).
+- **Evidence** — Cite the added surface (file:line) and state the spec contains no corresponding ask. Charge here only for unasked-for CAPABILITY, not an over-abstract or over-built implementation of an in-scope one (that is Efficiency EFF-1/EFF-6).
 - **Applies** — always
 
 #### SCP-3 · No out-of-scope refactor, rename, reformat, or drive-by cleanup inflates blast radius beyond what the task needs.
@@ -529,19 +512,73 @@
 
 ---
 
+## 8. Efficiency & Economy — weight 10
+
+**Activation.** EVIDENCE RULE: the judge has the full frozen snapshot and MUST grep it for an abstraction's other call sites, an added symbol's references, and the existing shared utility a hand-rolled block duplicates before marking UNKNOWN — 'only one use visible in the diff' is NOT grounds for UNKNOWN when the repo is greppable. ACTIVE whenever the diff adds or modifies production source (TS/TSX, SQL, config wiring). DROPPED (whole dimension excluded) only when the diff is exclusively docs/markdown prose, comments, test-only files, pure formatting/whitespace, or asset-only changes. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize) and flags low-confidence.
+
+**Ownership (de-dup).** Owns ECONOMY OF MECHANISM — whether the change is the SMALLEST thing that does the job: speculative generality (EFF-1), gratuitous in-scope indirection (EFF-2), duplication of logic an existing shared utility already expresses (EFF-3), gross algorithmic cost (EFF-4), dead weight the diff leaves behind (EFF-5), and machinery disproportionate to the task's acceptance criteria (EFF-6). Does NOT own: UNREQUESTED FEATURES (Scope — Scope asks 'was this behavior asked for?', Efficiency asks 'is this the smallest mechanism for behavior that WAS asked for?'); verbose expression, naming, or comment noise in code that is otherwise right-sized (Maintainability); MODULE-BOUNDARY PLACEMENT (Design DES-4/DES-6); correctness/logic bugs (Correctness); off-chokepoint direct entity write (Robustness ROB-5); preserved-seam/@cyboflow-hidden integrity (Design DES-2 — an unreferenced @cyboflow-hidden region is EXEMPT from EFF-5 by construction, since being intentionally unreferenced is the annotation's whole point). Every verdict is line-cited judgment; no complexity/dead-code tool backs this dimension.
+
+**Gate / cap behavior.** No hard gate on overall score — this dimension is ADVISORY and no sub-check is a catastrophic-cap trigger. SOFT-CAP: if EFF-1 (speculative generality) AND EFF-2 (gratuitous in-scope indirection) both FAIL, cap this dimension at Fair (<=0.69) — a diff that is over-abstract at BOTH the architectural and the local level is systematically over-built, not incidentally so. CONFIDENCE-FLAG (not a score change) raised when >40% of sub-checks resolve UNKNOWN. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize).
+
+**Sub-checks:**
+
+#### EFF-1 · No wrong-abstraction over-engineering: added interfaces, factories, generic type params, base classes, or indirection layers are justified by an actual current second caller/variant (found by grepping the snapshot) — not speculative generality.
+- **Pass** — Every new abstraction has >=2 concrete uses now (confirmed via snapshot grep) OR is an explicitly preserved extension point; simple in-scope logic is expressed directly.
+- **Fail** — The diff adds an interface/factory/generic/indirection with exactly one caller and no preserved-extension-point mandate, or wraps a trivial operation in needless layers for anticipated future flexibility.
+- **Unknown** — A second consumer would provably live outside the repo and the task spec is silent on multi-variant intent.
+- **Evidence** — Cite the abstraction file:line and the grepped count of concrete call sites; name the speculative-generality symptom (single-impl interface, one-branch factory, unused generic param). *(Formerly DES-3; moved here in v1.2.)*
+- **Applies** — only when the diff introduces new interfaces, factories, abstract/base classes, generics, or indirection wrappers
+
+#### EFF-2 · No over-abstraction of in-scope code: the change does not wrap simple in-scope logic in gratuitous layers (single-use factories, one-line wrapper indirections, config objects for a fixed value) that add reading cost without payoff.
+- **Pass** — In-scope logic is implemented at the flattest level that works; any new indirection earns its keep by removing real duplication or clarifying intent.
+- **Fail** — The diff introduces a wrapper/indirection/config-object used exactly once for in-scope work that a direct call would express more clearly, with no dedup or clarity payoff.
+- **Unknown** — Whether the abstraction has other call sites (justifying it) cannot be confirmed even after a snapshot grep; if it plausibly reaches beyond the task it belongs to EFF-1 — mark UNKNOWN here.
+- **Evidence** — Cite the wrapper/indirection with file:line and note its single in-scope use. *(Formerly MTN-8; moved here in v1.2.)*
+- **Applies** — only when the diff introduces a new local abstraction/wrapper for in-scope logic
+
+#### EFF-3 · In-scope logic is expressed concisely — no redundant intermediate variables, duplicated blocks, or verbose restatement where an existing shared util/pattern reads cleaner.
+- **Pass** — Changed code avoids obvious local duplication and needless verbosity; repeated in-scope logic is factored or uses an existing helper where that improves readability.
+- **Fail** — The diff repeats a near-identical block multiple times, threads pointless pass-through locals, or hand-rolls verbose logic that an obvious existing in-file/shared utility would express more clearly.
+- **Unknown** — Whether a cleaner shared util exists cannot be confirmed even after a snapshot grep the judge attempted.
+- **Evidence** — Cite the duplicated/verbose spans (file:line x2+) or redundant locals; name the cleaner form if asserting one exists. *(Formerly MTN-5; moved here in v1.2.)*
+- **Applies** — always (any authored code touch)
+
+#### EFF-4 · No gross algorithmic-cost regression in the changed code: no obvious super-linear DB/loop cost (N+1 query in a loop, O(n^2) scan) on a hot path, no synchronous blocking call on the Electron main thread, and no unbounded in-memory accumulation on a per-event/per-stream path (LLM-judged, advisory).
+- **Pass** — The changed hot-path code is at most linear in its input, does not issue per-iteration DB round-trips where a batch/join exists, does not block the main thread synchronously, and bounds any accumulator.
+- **Fail** — The judge identifies an N+1 loop, an O(n^2)+ scan on a frequently-run path, a synchronous fs/exec/deep-compute call on the Electron main thread, or an unbounded buffer that grows per event.
+- **Unknown** — The call frequency / input size cannot be judged from the snapshot (path may be cold), so cost impact is indeterminate.
+- **Evidence** — Cite the loop/query/blocking-call line and the cost class; label advisory (no profiler/complexity tool). *(Formerly COR-9; moved here in v1.2.)*
+- **Applies** — only when the diff adds/changes loops over collections, DB access, main-thread synchronous work, or per-event accumulation
+
+#### EFF-5 · No dead weight: the diff introduces no unused exports, unused function parameters, unread config keys/feature flags, unreachable branches, or unreferenced new files (confirmed by grepping the snapshot for references); @cyboflow-hidden-annotated code is EXEMPT — it is intentionally unreferenced and its integrity is DES-2's sole ownership.
+- **Pass** — Every added export, function parameter, config key, feature flag, and file has at least one real reference found by grepping the snapshot, and every added branch is reachable — or the unreferenced region is @cyboflow-hidden-annotated (exempt).
+- **Fail** — The judge greps the snapshot and finds an added export, parameter, config key/flag, or file with zero references, or a branch the surrounding conditions render unreachable, with no @cyboflow-hidden annotation covering it.
+- **Unknown** — A referencing consumer would provably live outside the repo (external/generated caller) and cannot be enumerated from the snapshot.
+- **Evidence** — Cite the added symbol/file (file:line) and the grep that resolved zero references. State explicitly when an unreferenced region carries @cyboflow-hidden — that is EXEMPT here and charged nowhere in this dimension.
+- **Applies** — only when the diff adds new exports, function parameters, config keys, feature flags, or files
+
+#### EFF-6 · Mechanism is proportionate to the task: the diff does not ship substantially more machinery (new tables, services, abstraction layers, dependencies, generalized frameworks) than its acceptance criteria require, where a materially smaller change would satisfy them.
+- **Pass** — The machinery introduced is the smallest that satisfies the derived acceptance criteria; no new table/service/layer/dependency/framework exists that a materially simpler in-place change would have made unnecessary.
+- **Fail** — The diff stands up a new table, service, abstraction layer, dependency, or generalized framework where a materially smaller change would satisfy the same acceptance criteria (e.g. a registry + config table for two fixed cases, a new service for a single call site).
+- **Unknown** — No task spec is inferable from the snapshot, so the acceptance criteria the machinery must be proportionate to cannot be established.
+- **Evidence** — Cite the introduced mechanism (file:line) and name the materially smaller change that would satisfy the same criteria. NOTE: an UNREQUESTED FEATURE is charged to Scope (SCP-2), not here — EFF-6 owns only oversized MECHANISM for in-scope functionality.
+- **Applies** — always (whenever the dimension is active)
+
+---
+
 ## Appendix — how this checklist was refined
 
-The draft (7 dimensions generated independently) was run through a coherence critic, then revised. Changes applied:
+The draft (7 dimensions generated independently) was run through a coherence critic, then revised. Changes applied. *(This appendix is a historical record of the v1.0 refinement pass; sub-check ids below are the ids as of that pass — four have since moved, see the v1.2 note at the top.)*
 
 - De-duplicated IPC/tRPC silent-drop (was triple-owned COR-5/ROB-1/DES-5): ROB-1 is now the SOLE owner of the declared-T-vs-runtime-shape + one-sided-interface CONTRACT defect; COR-5 rewritten to own only a concrete in-repo caller computing a WRONG OUTPUT from a dropped/renamed field; DES-5 narrowed to PLACEMENT only (local IPCResponse redecl / missing explicit T / hand-mirrored onData) with explicit 'do not re-charge ROB-1' text.
 - Trimmed COR-7 to its unique code-schema-consistency concern (a changed query reads a column no migration creates); removed all destructive/idempotent/collision/schema-parity language, leaving those solely in ROB-3 (destructive/idempotent/parity) and ROB-4 (collision).
 - Collapsed the @cyboflow-hidden / AbstractCliManager triple-charge: DES-2 is now the SOLE owner (carries the Fair soft-cap); deleted the old ROB-8 preserved-seam check entirely; narrowed SCP-7 to fire only when the change is UNREQUESTED and made it mutually exclusive with DES-2 by spec-mandate presence.
 - Assigned optional-logger dropping to ONE owner: ROB-6 owns simple logger omission; DES-7 rewritten to own only a NEW bespoke construction/wiring path that STRUCTURALLY cannot receive the collaborator, with 'do not re-charge ROB-6' text.
 - Partitioned the boundary-`any` triple-touch: SEC-7 owns `any`/unknown reaching a SINK (added 'do not re-charge ROB-1 shape-drift'); ROB-1 owns the parity/shape smell; MTN-6 stays a readability-only signal with an explicit no-double-charge-as-gate note.
-- Added a global EVIDENCE RULE to every dimension header: the judge has the FULL FROZEN SNAPSHOT and MUST open/grep it (callers, counterpart interfaces, migration directory, symbol existence, test bodies, pre-existing coverage) before ever marking UNKNOWN; UNKNOWN reserved for genuinely external deps/runtime state. Rewrote the systemic 'not visible in the diff' unknownWhen clauses across COR-5/6, ROB-1/2/4/5/6/7, DES-3, MTN-4, TST-1/2/8, SCP-2/3 accordingly.
+- Added a global EVIDENCE RULE to every dimension header: the judge has the FULL FROZEN SNAPSHOT and MUST open/grep it (callers, counterpart interfaces, migration directory, symbol existence, test bodies, pre-existing coverage) before ever marking UNKNOWN; UNKNOWN reserved for genuinely external deps/runtime state. Rewrote the systemic 'not visible in the diff' unknownWhen clauses across COR-5/6, ROB-1/2/4/5/6/7, DES-3 (now EFF-1), MTN-4, TST-1/2/8, SCP-2/3 accordingly.
 - Made ROB-4 REQUIRE enumerating the migrations directory in the snapshot before verdict (closes the MEMORY-documented 035-039 collision gap that previously always resolved UNKNOWN); promoted a confirmed collision to a Poor soft-cap in ROB gateBehavior.
 - Fixed the COR-2 self-authored-test loophole: judge self-verification now counts as independent corroboration ONLY for demonstrably straight-line logic; branch-heavy paths with only same-diff tests FAIL and bind the 0.89 ceiling. Also defined 'primary path' in COR-1/COR-2 as the judge-selected riskiest behavioral hunk (not author-chosen) to close the multi-hunk mis-selection gap.
-- Added COR-9 (performance): flags N+1 DB loops, O(n^2)+ hot-path scans, synchronous blocking on the Electron main thread, and unbounded per-event accumulation — previously uncharged.
+- Added COR-9 (performance, now EFF-4): flags N+1 DB loops, O(n^2)+ hot-path scans, synchronous blocking on the Electron main thread, and unbounded per-event accumulation — previously uncharged.
 - Added SEC-9 (path traversal / arbitrary fs access): fs read/write/delete built from agent/session/user-controlled worktree/branch/log paths without normalization/containment.
 - Added ROB-8 (migrateLocalStorageKey): hand-rolled getItem/setItem key renames now FAIL instead of slipping through as an incidental DES-6 example; removed the localStorage example from DES-6.
 - Decoupled TST-4 from author commit-type labels: appliesWhen now keys on whether the CODE corrects a defect (guard added, condition inverted-back, off-by-one/null-deref fixed), closing the 'mislabel a fix as feat' regression-test dodge.
@@ -552,6 +589,16 @@ The draft (7 dimensions generated independently) was run through a coherence cri
 - Tightened TST-1 unknownWhen so a behavioral change with no test present is FAIL (never UNKNOWN), and TST-2/TST-8 UNKNOWN now requires the test body to be genuinely absent from the snapshot, closing the truncated-diff stub-dodge.
 
 ## Revision history
+
+### v1.2 (Efficiency & Economy)
+
+- **8th dimension added — Efficiency & Economy (weight 10, 6 sub-checks):** the rubric graded whether a change was correct, safe, well-placed, and in scope, but never whether it was the SMALLEST thing that does the job. Over-built work — a registry for two fixed cases, a service for a single call site, a wrapper nobody else calls — could score Excellent across all seven dimensions. Efficiency owns economy of mechanism explicitly.
+- **Four sub-checks MOVED, not duplicated,** so the sole-owner de-dup discipline survives a new dimension that would otherwise double-charge defects three others already owned: DES-3 → EFF-1 (speculative generality), MTN-8 → EFF-2 (gratuitous in-scope indirection), MTN-5 → EFF-3 (concise expression), COR-9 → EFF-4 (gross algorithmic cost). Their Pass/Fail/Unknown/Evidence/Applies text is carried over verbatim; only cross-referenced ids changed.
+- **Donor sub-check numbers are NOT reused:** COR-1..8, DES-4..7, and MTN-6/MTN-7 keep their ids, leaving intentional gaps at COR-9, DES-3, MTN-5, and MTN-8, so every existing cross-reference elsewhere in the doc (and in the frozen transcription) stays valid.
+- **Two net-new sub-checks:** EFF-5 (dead weight — unused exports/params/config keys/flags/unreachable branches/unreferenced files, with @cyboflow-hidden explicitly EXEMPT since being intentionally unreferenced is that annotation's whole point and DES-2 owns its integrity) and EFF-6 (mechanism proportionate to the task's acceptance criteria).
+- **Features-vs-mechanism boundary drawn between Scope and Efficiency:** Scope asks 'was this behavior asked for?', Efficiency asks 'is this the smallest mechanism for behavior that WAS asked for?'. Design correspondingly narrows to WHERE code sits (placement/seam reuse), Maintainability to READABILITY of code that is already right-sized.
+- **Weights rebalanced to 24/18/14/11/8/8/7/10 (sum 100):** the 10 points come from the dimensions that gave up sub-checks (Correctness 26→24, Design 14→11, Maintainability 12→8) plus one from Scope (8→7), keeping Security/Robustness/Tests untouched.
+- **Advisory dimension:** no sub-check is a catastrophic-cap trigger. Its only cap is a SOFT-CAP at Fair (<=0.69) when EFF-1 AND EFF-2 both FAIL — over-abstract at both the architectural and the local level is systematic, not incidental — mirroring the MTN-2∧MTN-4 pair rule.
 
 ### v1.1 (review pass)
 

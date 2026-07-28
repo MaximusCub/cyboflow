@@ -33,8 +33,8 @@ describe('judgeStaticPromptText', () => {
     for (const check of allSubChecks(RUBRIC)) {
       expect(text.includes(check.id)).toBe(true);
     }
-    // Sanity: all 58 sub-checks are present (7 dimensions, 9+9+8+7+8+9+8).
-    expect(allSubChecks(RUBRIC)).toHaveLength(58);
+    // Sanity: all 60 sub-checks are present (8 dimensions, 8+9+8+6+6+9+8+6).
+    expect(allSubChecks(RUBRIC)).toHaveLength(60);
   });
 
   it('is a pure function of the rubric — two calls are byte-identical (prompt_hash stability)', () => {

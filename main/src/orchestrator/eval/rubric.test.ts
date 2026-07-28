@@ -1,5 +1,5 @@
 /**
- * Faithfulness tests for the Code-Review Eval rubric v1.1 data module.
+ * Faithfulness tests for the Code-Review Eval rubric v1.2 data module.
  *
  * Guards the frozen transcription of docs/proposals/code-review-eval-checklist.md
  * against silent drift: dimension/weight/sub-check counts, id uniqueness, and a
@@ -21,32 +21,34 @@ import {
 } from './rubric';
 
 const EXPECTED_SUBCHECK_COUNTS: Record<DimensionKey, number> = {
-  correctness: 9,
+  correctness: 8,
   security: 9,
   robustness: 8,
-  design: 7,
-  maintainability: 8,
+  design: 6,
+  maintainability: 6,
   tests: 9,
   scope: 8,
+  efficiency: 6,
 };
 
 const EXPECTED_WEIGHTS: Record<DimensionKey, number> = {
-  correctness: 26,
+  correctness: 24,
   security: 18,
   robustness: 14,
-  design: 14,
-  maintainability: 12,
+  design: 11,
+  maintainability: 8,
   tests: 8,
-  scope: 8,
+  scope: 7,
+  efficiency: 10,
 };
 
-describe('rubric v1.1 shape', () => {
-  it('pins the rubric version to 1.1', () => {
-    expect(RUBRIC_VERSION).toBe('1.1');
-    expect(RUBRIC.version).toBe('1.1');
+describe('rubric v1.2 shape', () => {
+  it('pins the rubric version to 1.2', () => {
+    expect(RUBRIC_VERSION).toBe('1.2');
+    expect(RUBRIC.version).toBe('1.2');
   });
 
-  it('has exactly 7 dimensions in stable order', () => {
+  it('has exactly 8 dimensions in stable order', () => {
     expect(RUBRIC.dimensions.map((d) => d.key)).toEqual([
       'correctness',
       'security',
@@ -55,6 +57,7 @@ describe('rubric v1.1 shape', () => {
       'maintainability',
       'tests',
       'scope',
+      'efficiency',
     ]);
   });
 
@@ -65,16 +68,23 @@ describe('rubric v1.1 shape', () => {
     }
   });
 
-  it('has the documented sub-check count per dimension (9+9+8+7+8+9+8)', () => {
+  it('has the documented sub-check count per dimension (8+9+8+6+6+9+8+6)', () => {
     for (const dim of RUBRIC.dimensions) {
       expect(dim.subChecks.length).toBe(EXPECTED_SUBCHECK_COUNTS[dim.key]);
     }
   });
 
-  it('has exactly 58 sub-checks total', () => {
-    expect(allSubChecks().length).toBe(58);
+  it('has exactly 60 sub-checks total', () => {
+    expect(allSubChecks().length).toBe(60);
     const sum = Object.values(EXPECTED_SUBCHECK_COUNTS).reduce((a, b) => a + b, 0);
-    expect(sum).toBe(58);
+    expect(sum).toBe(60);
+  });
+
+  it('leaves the v1.2 donor ids retired, not reused', () => {
+    const ids = new Set(allSubChecks().map((c) => c.id));
+    for (const retired of ['COR-9', 'DES-3', 'MTN-5', 'MTN-8']) {
+      expect(ids.has(retired)).toBe(false);
+    }
   });
 
   it('has unique sub-check ids, each prefixed by its dimension family', () => {
@@ -88,6 +98,7 @@ describe('rubric v1.1 shape', () => {
       maintainability: 'MTN-',
       tests: 'TST-',
       scope: 'SCP-',
+      efficiency: 'EFF-',
     };
     for (const check of allSubChecks()) {
       expect(check.id.startsWith(prefix[check.dimension])).toBe(true);
@@ -102,7 +113,7 @@ describe('rubric v1.1 shape', () => {
   });
 });
 
-describe('rubric v1.1 catastrophic-cap tier + special ceilings', () => {
+describe('rubric v1.2 catastrophic-cap tier + special ceilings', () => {
   const byId = (id: string) => {
     const found = allSubChecks().find((c) => c.id === id);
     if (!found) throw new Error(`sub-check ${id} not found`);
@@ -131,9 +142,29 @@ describe('rubric v1.1 catastrophic-cap tier + special ceilings', () => {
     expect(byId('COR-2').specialCeiling).toBe(0.89);
     expect(AGGREGATION.SELF_AUTHORED_TEST_CEILING).toBe(0.89);
   });
+
+  it('declares the two documented pair caps (MTN-2∧MTN-4, EFF-1∧EFF-2) and no others', () => {
+    const pairs = RUBRIC.dimensions.flatMap((d) =>
+      (d.pairCaps ?? []).map((pc) => [d.key, pc.whenAllFail.join('+'), pc.ceiling]),
+    );
+    expect(pairs).toEqual([
+      ['maintainability', 'MTN-2+MTN-4', 0.69],
+      ['efficiency', 'EFF-1+EFF-2', 0.69],
+    ]);
+  });
+
+  it('keeps Efficiency advisory — no EFF sub-check carries a cap trigger or flag', () => {
+    const eff = allSubChecks().filter((c) => c.dimension === 'efficiency');
+    expect(eff).toHaveLength(6);
+    for (const check of eff) {
+      expect(check.capTrigger).toBeNull();
+      expect(check.capFlag).toBeNull();
+      expect(check.specialCeiling).toBeNull();
+    }
+  });
 });
 
-describe('rubric v1.1 verbatim spot-checks', () => {
+describe('rubric v1.2 verbatim spot-checks', () => {
   const propositionOf = (id: string): string => {
     const found = allSubChecks().find((c) => c.id === id);
     if (!found) throw new Error(`sub-check ${id} not found`);
@@ -171,7 +202,7 @@ describe('rubric v1.1 verbatim spot-checks', () => {
   });
 });
 
-describe('rubric v1.1 bands + aggregation constants', () => {
+describe('rubric v1.2 bands + aggregation constants', () => {
   it('exposes the four fractional bands with the documented thresholds', () => {
     expect(BANDS.map((b) => [b.name, b.minFraction])).toEqual([
       ['Excellent', 0.9],
@@ -206,7 +237,7 @@ describe('serializeRubricForPrompt determinism', () => {
 
   it('includes the version, every sub-check id, and every Applies scope', () => {
     const out = serializeRubricForPrompt();
-    expect(out).toContain('RUBRIC v1.1');
+    expect(out).toContain('RUBRIC v1.2');
     for (const check of allSubChecks()) {
       expect(out).toContain(check.id);
     }

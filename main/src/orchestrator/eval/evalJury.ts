@@ -126,6 +126,7 @@ const VALID_DIMENSIONS: ReadonlySet<string> = new Set<DimensionKey>([
   'maintainability',
   'tests',
   'scope',
+  'efficiency',
 ]);
 
 /** Deterministically truncate a diff to MAX_DIFF_CHARS with an explicit note. */

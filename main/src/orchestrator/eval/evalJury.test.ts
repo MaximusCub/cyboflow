@@ -153,7 +153,7 @@ describe('buildJudgePrompt', () => {
       diff: 'DIFF_MARKER_HUNK',
       gateResults: { test: 'fail' },
     });
-    expect(prompt).toContain('RUBRIC v1.1');
+    expect(prompt).toContain('RUBRIC v1.2');
     expect(prompt).toContain('COR-1');
     expect(prompt).toContain('DIFF_MARKER_HUNK');
     expect(prompt).toContain('GATE RESULTS');
