@@ -129,6 +129,65 @@ files still exist alongside them in the bucket.
 
 ---
 
+## Measuring downloads
+
+There is no download counter in the bucket. `updates.cyboflow.com` is a plain R2
+custom domain — objects go straight from bucket to edge with no Worker in the
+path — so the only record of a download is Cloudflare's edge request log.
+
+**That log expires.** Per-path detail (`httpRequestsAdaptiveGroups`) is gone after
+roughly **3 days**; the daily rollup (`httpRequests1dGroups`) after about **30**.
+Nothing older is recoverable at any granularity. GitHub release assets are not a
+fallback — they read zero, because nothing links to them.
+
+Two scripts, and a scheduled job that makes them durable:
+
+| Script | Purpose |
+|---|---|
+| `scripts/r2-download-stats.mjs` | Reads live analytics. Ad-hoc queries — `--days=N`, `--daily` for long-range volume, `--by-ip` to spot dev boxes. Needs `CLOUDFLARE_ANALYTICS_API` (or `CLOUDFLARE_API_TOKEN`) with Zone › Analytics:Read. |
+| `scripts/snapshot-download-stats.mjs` | Freezes one UTC day into JSON in a **private** R2 bucket, so it survives retention. |
+| `.github/workflows/download-stats.yml` | Runs the snapshot nightly at 02:17 UTC. `workflow_dispatch` takes `since`/`until` to backfill. |
+
+Required repo secrets for the nightly job:
+
+```
+CLOUDFLARE_ANALYTICS_API          Zone › Analytics:Read
+CLOUDFLARE_ZONE_ID                cyboflow.com zone id (avoids needing Zone:Read)
+DOWNLOAD_STATS_SALT               openssl rand -hex 32 — see below
+R2_ACCOUNT_ID
+R2_ANALYTICS_ACCESS_KEY_ID        scoped to the PRIVATE analytics bucket
+R2_ANALYTICS_SECRET_ACCESS_KEY
+```
+
+**The analytics bucket must be private and separate from `cyboflow-updates`.** The
+release bucket is served publicly over `updates.cyboflow.com`, so anything written
+there — including download statistics — is world-readable at a guessable URL.
+
+**`DOWNLOAD_STATS_SALT` must stay stable.** Per-downloader counts are what answer
+"how many people", so each IP is stored as `sha256(monthlySalt + ip)` and the raw
+address is dropped. The salt is required and never defaulted: IPv4 is small enough
+that an unsalted hash is brute-forceable straight back to the address. It rotates
+monthly by derivation (`sha256(SALT + ':' + YYYY-MM)`), which bounds linkability to
+a calendar month — long enough for unique-downloader counts per release cycle, and
+longer than residential IPs survive anyway. Changing the secret renumbers every id
+and breaks continuity across the change.
+
+### Reading the numbers
+
+Counts are download *attempts*, not installs, and overstate reality in three ways:
+a resumed download is several range requests; `-latest-` aliases double-count
+alongside versioned files; and datacenter crawlers pull the `.dmg` constantly.
+Snapshots carry a `botLikely` flag — downloaded the installer, never polled
+`latest-mac.yml` — as the crawler signature, stored rather than applied so the
+heuristic can be revised against history.
+
+Egress bytes are the more honest measure than the row count: divide by the ~305 MB
+(arm64) / ~328 MB (x64) DMG size for full-installer equivalents. `latest-mac.yml`
+poll counts are the best proxy for *active* installs, since only a running app
+polls. Neither dedupes to humans across months — that gap is Aptabase's job.
+
+---
+
 ## Gotchas
 
 | Concern | Detail |
