@@ -934,12 +934,16 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 
 const PREFERENCE_LABEL: Record<'A' | 'B' | 'tie', string> = { A: 'Prefers A', B: 'Prefers B', tie: 'Tie' };
 
+function nonBlank(value: string | null | undefined): string | null {
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
 function judgeAttribution(sample: PairwiseSample, verdictModel: string | null): { compact: string; full: string } {
-  const model = sample.judgeModel ?? verdictModel ?? 'unknown';
-  const name = sample.judgeName;
+  const model = nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown';
+  const name = nonBlank(sample.judgeName);
   return {
-    compact: name ?? model,
-    full: name === undefined ? model : `${name} · ${model}`,
+    compact: name ?? nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown',
+    full: name === null ? model : `${name} · ${model}`,
   };
 }
 
@@ -1024,18 +1028,12 @@ function VerdictCard({
             ))}
           </div>
           {(payload.verdict.sampleCount > 0 || payload.verdict.judgeModel !== null) && (
-            <div className="text-[11px] leading-relaxed text-text-tertiary" data-testid="experiment-verdict-judge-provenance">
+            <footer className="text-[11px] leading-relaxed text-text-tertiary" data-testid="experiment-verdict-judge-provenance">
               graded by{' '}
               <span className="font-medium text-text-secondary">
-                {Array.from(
-                  new Set(
-                    payload.verdict.perSample.length > 0
-                      ? payload.verdict.perSample.map((sample) => judgeAttribution(sample, payload.verdict?.judgeModel ?? null).full)
-                      : [payload.verdict.judgeModel ?? 'unknown'],
-                  ),
-                ).join(', ')}
+                {nonBlank(payload.verdict.judgeModel) ?? 'unknown'}
               </span>
-            </div>
+            </footer>
           )}
         </div>
       ) : (

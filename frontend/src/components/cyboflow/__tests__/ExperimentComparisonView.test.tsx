@@ -273,7 +273,8 @@ describe('ExperimentComparisonView', () => {
     );
     const provenance = screen.getAllByTestId('experiment-verdict-judge-provenance');
     expect(provenance).toHaveLength(1);
-    expect(provenance[0]).toHaveTextContent('graded by judge-a · sample-model, judge-b · sample-model');
+    expect(provenance[0].tagName).toBe('FOOTER');
+    expect(provenance[0]).toHaveTextContent('graded by row-model');
   });
 
   it('renders explicit unknown for a null/null judge identity', async () => {
@@ -301,6 +302,26 @@ describe('ExperimentComparisonView', () => {
       'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by unknown',
     );
     expect(screen.getAllByTestId('experiment-verdict-judge-provenance')).toHaveLength(1);
+  });
+
+  it('suppresses the provenance footer for an empty legacy verdict', async () => {
+    getQuery.mockResolvedValue(makeExp());
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        verdict: {
+          ...makePayload().verdict!,
+          judgeModel: null,
+          sampleCount: 0,
+          perSample: [],
+        },
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    await screen.findByTestId('experiment-verdict-card');
+    expect(screen.queryByTestId('experiment-verdict-judge-provenance')).not.toBeInTheDocument();
   });
 
   it('shows the "did not complete" message when an arm failed and grading failed', async () => {
