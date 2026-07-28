@@ -22,6 +22,13 @@ interface OnboardingModalCardProps {
   onBack: () => void;
   onSkip: () => void;
   onGoTo: (step: number) => void;
+  /**
+   * Scrim strength, 0–1 (default 1). During the spiral reveal the terracotta
+   * wrapper is itself the backdrop, so the scrim starts fully transparent and
+   * fades in as the app underneath is exposed — dimming an intact wrapper would
+   * just muddy the brand color.
+   */
+  scrimOpacity?: number;
 }
 
 /**
@@ -39,11 +46,16 @@ export function OnboardingModalCard({
   onBack,
   onSkip,
   onGoTo,
+  scrimOpacity = 1,
 }: OnboardingModalCardProps): React.JSX.Element {
   const showBack = step > 0;
   return (
     <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-modal-overlay" aria-hidden="true" />
+      <div
+        className="absolute inset-0 bg-modal-overlay"
+        aria-hidden="true"
+        style={{ opacity: scrimOpacity, transition: 'opacity 520ms ease-out' }}
+      />
       <div
         role="dialog"
         aria-modal="true"

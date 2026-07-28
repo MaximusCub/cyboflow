@@ -18,6 +18,8 @@ import { ONBOARDING_EVENTS, ONBOARDING_MODAL_STEPS, ONBOARDING_PREF_KEY } from '
 import { emitTelemetryChangeEvents, trackEvent } from '../../utils/telemetry';
 import { OnboardingOverlay } from './OnboardingOverlay';
 import { OnboardingModalCard, type PrimaryAction } from './OnboardingModalCard';
+import { OnboardingSpiralReveal } from './OnboardingSpiralReveal';
+import { revealFraction } from '../../utils/onboardingSpiral';
 import { Coachmark } from './Coachmark';
 import { WelcomeStep } from './steps/WelcomeStep';
 import { ConnectStep } from './steps/ConnectStep';
@@ -477,6 +479,9 @@ export function OnboardingGate(): React.JSX.Element | null {
 
   return (
     <OnboardingOverlay>
+      {/* Behind the card: the terracotta wrapper the app unwinds out of. Renders
+          null once the reveal completes, so coach steps see an untouched app. */}
+      <OnboardingSpiralReveal step={step} />
       {isModal ? (
         <OnboardingModalCard
           step={step}
@@ -486,6 +491,7 @@ export function OnboardingGate(): React.JSX.Element | null {
           onBack={back}
           onSkip={skip}
           onGoTo={goTo}
+          scrimOpacity={revealFraction(step)}
         >
           {body}
         </OnboardingModalCard>
