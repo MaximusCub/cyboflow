@@ -220,7 +220,11 @@ function buildSnapshot(day) {
 // Year/month prefixes keep the bucket listable as it grows past a few hundred days.
 const objectKey = (day) => `snapshots/${day.slice(0, 4)}/${day.slice(5, 7)}/${day}.json`;
 
-async function upload(day, snapshot) {
+// One lazily-built client shared across the run, so a backfill of N days does not
+// construct N clients (and so --dry-run / --out-dir never need R2 credentials).
+let r2 = null;
+async function getR2() {
+  if (r2) return r2;
   const accountId = process.env.R2_ACCOUNT_ID;
   const accessKeyId = process.env.R2_ANALYTICS_ACCESS_KEY_ID;
   const secretAccessKey = process.env.R2_ANALYTICS_SECRET_ACCESS_KEY;
@@ -232,26 +236,37 @@ async function upload(day, snapshot) {
         '  served publicly over updates.cyboflow.com.',
     );
   }
-  const bucket = process.env.R2_ANALYTICS_BUCKET || 'cyboflow-analytics';
   const { S3Client, PutObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
-  const s3 = new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: { accessKeyId, secretAccessKey },
-  });
-  const Key = objectKey(day);
+  r2 = {
+    client: new S3Client({
+      region: 'auto',
+      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+      credentials: { accessKeyId, secretAccessKey },
+    }),
+    bucket: process.env.R2_ANALYTICS_BUCKET || 'cyboflow-analytics',
+    PutObjectCommand,
+    HeadObjectCommand,
+  };
+  return r2;
+}
 
-  if (!args.force) {
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: bucket, Key }));
-      console.log(`  ${day}  already snapshotted (skip; --force to overwrite)`);
-      return;
-    } catch {
-      // Not found — the normal path for a fresh day.
-    }
+// Checked BEFORE building a snapshot, not after: the scheduled job re-walks a
+// trailing multi-day window every night so a failed run self-heals, and building
+// first would re-query Cloudflare three times per already-stored day.
+async function alreadySnapshotted(day) {
+  const { client, bucket, HeadObjectCommand } = await getR2();
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey(day) }));
+    return true;
+  } catch {
+    return false; // Not found — the normal path for a fresh day.
   }
+}
 
-  await s3.send(
+async function upload(day, snapshot) {
+  const { client, bucket, PutObjectCommand } = await getR2();
+  const Key = objectKey(day);
+  await client.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key,
@@ -266,8 +281,17 @@ async function main() {
   const days = targetDays();
   console.log(`\nSnapshotting ${days.length} day(s): ${days[0]}${days.length > 1 ? ` → ${days[days.length - 1]}` : ''}`);
 
+  const uploading = !args['dry-run'] && !args['out-dir'];
+
   for (const day of days) {
-    // eslint-disable-next-line no-await-in-loop -- sequential keeps us off Cloudflare's rate limits
+    if (uploading && !args.force) {
+      // eslint-disable-next-line no-await-in-loop -- sequential keeps us off Cloudflare's rate limits
+      if (await alreadySnapshotted(day)) {
+        console.log(`  ${day}  already snapshotted (skip; --force to overwrite)`);
+        continue;
+      }
+    }
+
     const snapshot = buildSnapshot(day);
     const t = snapshot.totals;
 

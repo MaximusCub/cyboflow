@@ -1,0 +1,95 @@
+name: Download Stats Snapshot
+
+# Freezes Cloudflare edge analytics into durable R2 snapshots before they expire.
+# Per-path detail is gone after ~3 days and the daily rollup after ~30, so this has
+# to run on a schedule — a missed week is a permanently unanswerable week.
+#
+# It runs in CI rather than on a laptop precisely because of that retention window:
+# a machine that is asleep for three days loses data that no later run can recover.
+
+on:
+  schedule:
+    # 02:17 UTC — comfortably after the UTC day closes, so the day being snapshotted
+    # is complete. Cron here can be delayed under load, which is harmless: the job
+    # captures a trailing window, not a single instant.
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Backfill start YYYY-MM-DD (must be given with "until")'
+        required: false
+      until:
+        description: 'Backfill end YYYY-MM-DD (inclusive)'
+        required: false
+      force:
+        description: 'Re-snapshot days that already have an object'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never let a manual backfill and the nightly run write the same key at once.
+concurrency:
+  group: download-stats-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: Snapshot download analytics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      # --ignore-scripts skips the Electron download and the better-sqlite3 native
+      # build; this job only needs @aws-sdk/client-s3, which is pure JS.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Snapshot
+        env:
+          CLOUDFLARE_ANALYTICS_API: ${{ secrets.CLOUDFLARE_ANALYTICS_API }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          DOWNLOAD_STATS_SALT: ${{ secrets.DOWNLOAD_STATS_SALT }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ANALYTICS_ACCESS_KEY_ID: ${{ secrets.R2_ANALYTICS_ACCESS_KEY_ID }}
+          R2_ANALYTICS_SECRET_ACCESS_KEY: ${{ secrets.R2_ANALYTICS_SECRET_ACCESS_KEY }}
+          # Read inputs through env rather than interpolating them into the script
+          # body — a ${{ }} expansion inside `run` is a shell-injection seam.
+          INPUT_SINCE: ${{ inputs.since }}
+          INPUT_UNTIL: ${{ inputs.until }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_SINCE:-}" ] || [ -n "${INPUT_UNTIL:-}" ]; then
+            if [ -z "${INPUT_SINCE:-}" ] || [ -z "${INPUT_UNTIL:-}" ]; then
+              echo "::error::Provide both 'since' and 'until', or neither."
+              exit 1
+            fi
+            SINCE="$INPUT_SINCE"
+            UNTIL="$INPUT_UNTIL"
+          else
+            # Trailing 3-day window, not just yesterday. Days already stored are
+            # skipped, so this costs nothing on a healthy day — but if a run fails
+            # or is skipped, the next run silently repairs the gap. Without it, one
+            # failed night would be lost the moment adaptive retention rolled past.
+            SINCE="$(date -u -d '3 days ago' +%F)"
+            UNTIL="$(date -u -d 'yesterday' +%F)"
+          fi
+
+          FORCE=""
+          if [ "${INPUT_FORCE:-false}" = "true" ]; then FORCE="--force"; fi
+
+          echo "Snapshotting ${SINCE} → ${UNTIL}"
+          node scripts/snapshot-download-stats.mjs --since="$SINCE" --until="$UNTIL" $FORCE
