@@ -19,7 +19,7 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
 import { isAgentDispatchToolName } from '../../../../shared/types/agentIdentity';
 import type { ILogger } from './types';
@@ -85,7 +85,7 @@ export class MessageProjection {
 
       switch (event.type) {
         case 'system': {
-          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent;
+          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskNotificationEvent;
           return this.projectSystemEvent(sysEvent);
         }
         case 'assistant': {
@@ -112,8 +112,37 @@ export class MessageProjection {
   // System events
   // ---------------------------------------------------------------------------
 
-  private projectSystemEvent(event: SystemInitEvent | SystemCompactBoundaryEvent): UnifiedMessage | null {
+  private projectSystemEvent(
+    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskNotificationEvent,
+  ): UnifiedMessage | null {
     const subtype = event.subtype;
+
+    // A background task settled. `summary` is the task's FINAL REPORT, and for a
+    // backgrounded Agent-tool subagent it is the ONLY copy on the parent stream —
+    // the dispatching tool's `tool_result` is just the spawn ack, and the
+    // sub-agent's own narration is suppressed as internal (projectAssistantEvent).
+    // Render it as a system message so the report stays visible.
+    if (subtype === 'task_notification') {
+      const task = event as SystemTaskNotificationEvent;
+      const summary = task.summary?.trim();
+      if (!summary) return null;
+      return {
+        id: `task_notification_msg_${++this.messageIdCounter}`,
+        role: 'system',
+        timestamp: new Date().toISOString(),
+        segments: [{ type: 'text', content: summary }],
+        metadata: {
+          systemSubtype: 'task_complete',
+          taskId: task.task_id,
+          taskStatus: task.status,
+          // The dispatching tool_use, so a renderer can attribute the report to
+          // the Agent call it came from.
+          parentToolId: task.tool_use_id,
+          tokens: task.usage?.total_tokens,
+          duration: task.usage?.duration_ms,
+        },
+      };
+    }
 
     if (subtype === 'init') {
       const init = event as SystemInitEvent;
@@ -238,8 +267,7 @@ export class MessageProjection {
     // Agent-tool dispatches, so that result is only the spawn ack ("Async agent
     // launched successfully…") and nothing patches it when the task settles. The
     // report arrives separately as a `system`/`task_notification` event, which
-    // TypedEventNarrowing currently drops as `__unknown__` — so the report is not
-    // rendered anywhere today. Known gap; the parent's own turn usually relays it.
+    // projectSystemEvent renders as a system message.
     const isSubAgentTurn = Boolean(event.parent_tool_use_id);
     for (const block of content) {
       if (block.type === 'text' && !isSubAgentTurn && block.text.trim()) {

@@ -388,6 +388,64 @@ export interface SystemStatusEvent {
 }
 
 /**
+ * SDK `system/task_started` — a background task began. SDK >=0.3.201 backgrounds
+ * Agent-tool subagents by default, and `local_bash` background commands use the
+ * same lifecycle. Not part of the SDK's published SDKMessage union; shape observed
+ * on the wire (raw_events) and mirrored by the fake-SDK builders.
+ */
+export interface SystemTaskStartedEvent {
+  type: 'system';
+  subtype: 'task_started';
+  task_id: string;
+  tool_use_id?: string;
+  description?: string;
+  /** Present for Agent-tool dispatches. */
+  subagent_type?: string;
+  /** e.g. 'local_bash' for a backgrounded shell command. */
+  task_type?: string;
+  uuid: string;
+  session_id: string;
+}
+
+/**
+ * SDK `system/task_updated` — a partial patch to a live background task
+ * (`{ status, end_time }`, `{ is_backgrounded: true }`, …).
+ */
+export interface SystemTaskUpdatedEvent {
+  type: 'system';
+  subtype: 'task_updated';
+  task_id: string;
+  patch: Record<string, unknown>;
+  uuid: string;
+  session_id: string;
+}
+
+/**
+ * SDK `system/task_notification` — a background task reached a terminal status.
+ *
+ * `summary` carries the task's FINAL REPORT. For a backgrounded Agent-tool
+ * subagent this is the only place the report reaches the parent stream: the
+ * dispatching tool's `tool_result` is just the spawn ack, and nothing patches it
+ * when the task settles. See projectSystemEvent.
+ */
+export interface SystemTaskNotificationEvent {
+  type: 'system';
+  subtype: 'task_notification';
+  task_id: string;
+  tool_use_id?: string;
+  status: string;
+  summary?: string;
+  output_file?: string;
+  usage?: {
+    total_tokens?: number;
+    tool_uses?: number;
+    duration_ms?: number;
+  };
+  uuid: string;
+  session_id: string;
+}
+
+/**
  * Parser-only catch-all variant for events that do not match any known wire discriminant.
  *
  * The sentinel discriminant is `kind: '__unknown__'` (not `type`) so it cannot collide with
@@ -413,7 +471,8 @@ export interface UnknownStreamEvent {
  * `event.kind === '__unknown__'` for the catch-all.
  *
  * For `system` events, also check `event.subtype`
- * (`'init' | 'api_retry' | 'compact' | 'compact_boundary' | 'hook_started' | 'hook_response' | 'status'`).
+ * (`'init' | 'api_retry' | 'compact' | 'compact_boundary' | 'hook_started' | 'hook_response' | 'status'
+ * `| 'task_started' | 'task_updated' | 'task_notification'`).
  * For `result` events, also check `event.subtype` (`'success' | 'error_max_turns' | ...`).
  *
  * Additional top-level discriminators added in TASK-696:
@@ -428,6 +487,9 @@ export type ClaudeStreamEvent =
   | SystemHookStartedEvent
   | SystemHookResponseEvent
   | SystemStatusEvent
+  | SystemTaskStartedEvent
+  | SystemTaskUpdatedEvent
+  | SystemTaskNotificationEvent
   | SessionInfoEvent
   | RateLimitEvent
   | AssistantEvent
@@ -472,7 +534,7 @@ export type StreamEventType =
  * Updated alongside StreamEventType — keep the two unions in sync.
  */
 export type StreamEnvelopePayload =
-  | { type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent }
+  | { type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent }
   | { type: 'assistant';         payload: AssistantEvent }
   | { type: 'user';              payload: UserEvent }
   | { type: 'result';            payload: ResultEvent }

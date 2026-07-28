@@ -146,6 +146,56 @@ const systemStatusSchema = z.object({
   session_id: z.string(),
 });
 
+/**
+ * system/task_started: a background task began. SDK >=0.3.201 backgrounds
+ * Agent-tool subagents by default; `local_bash` background commands share the
+ * lifecycle. NOT in the SDK's published SDKMessage union — shape observed on the
+ * wire (raw_events) and mirrored by the fake-SDK builders.
+ */
+const systemTaskStartedSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('task_started'),
+  task_id: z.string(),
+  tool_use_id: z.string().optional(),
+  description: z.string().optional(),
+  subagent_type: z.string().optional(),
+  task_type: z.string().optional(),
+  uuid: z.string(),
+  session_id: z.string(),
+});
+
+/** system/task_updated: partial patch to a live background task. */
+const systemTaskUpdatedSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('task_updated'),
+  task_id: z.string(),
+  patch: z.record(z.unknown()),
+  uuid: z.string(),
+  session_id: z.string(),
+});
+
+/**
+ * system/task_notification: background task reached a terminal status. `summary`
+ * carries the task's FINAL REPORT — for a backgrounded subagent it is the only
+ * copy that reaches the parent stream.
+ */
+const systemTaskNotificationSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('task_notification'),
+  task_id: z.string(),
+  tool_use_id: z.string().optional(),
+  status: z.string(),
+  summary: z.string().optional(),
+  output_file: z.string().optional(),
+  usage: z.object({
+    total_tokens: z.number().optional(),
+    tool_uses: z.number().optional(),
+    duration_ms: z.number().optional(),
+  }).optional(),
+  uuid: z.string(),
+  session_id: z.string(),
+});
+
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemInitSchema,
@@ -153,6 +203,9 @@ const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemHookStartedSchema,
   systemHookResponseSchema,
   systemStatusSchema,
+  systemTaskStartedSchema,
+  systemTaskUpdatedSchema,
+  systemTaskNotificationSchema,
 ]);
 
 // ---------------------------------------------------------------------------

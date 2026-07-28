@@ -189,4 +189,60 @@ describe('TypedEventNarrowing', () => {
     if (event.type !== 'user') throw new Error('Expected UserEvent');
     expect(event.message.content[0].type).toBe('tool_result');
   });
+
+  // -------------------------------------------------------------------------
+  // Background-task lifecycle system events
+  // -------------------------------------------------------------------------
+
+  it('narrows system/task_notification to the system variant, not __unknown__', () => {
+    // Verbatim shape observed in raw_events. Modelling only init/compact_boundary/
+    // hook_*/status demoted every task_* event to { kind: '__unknown__' }, so a
+    // backgrounded sub-agent's FINAL REPORT (carried in `summary`) never reached
+    // the projection and rendered nowhere.
+    const raw = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'a4aff561826d6af1d',
+      tool_use_id: 'toolu_01Kg1f8DZg7qmL4T941zw7eL',
+      status: 'completed',
+      output_file: '/tmp/tasks/a4aff561826d6af1d.output',
+      summary: '## Dependencies\n\nTASK-108 depends on TASK-107.',
+      usage: { total_tokens: 57286, tool_uses: 6, duration_ms: 17830 },
+      uuid: '563f32e5-c75e-4b1a-9f3a-8d2e1c4b7a90',
+      session_id: '074ba29b-36b0-4389-b75c-e1f964a46c42',
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('task_notification narrowed to __unknown__');
+    if (event.type !== 'system' || event.subtype !== 'task_notification') {
+      throw new Error('Expected SystemTaskNotificationEvent');
+    }
+    expect(event.summary).toContain('TASK-108 depends on TASK-107');
+    expect(event.status).toBe('completed');
+  });
+
+  it('narrows system/task_started and system/task_updated to the system variant', () => {
+    const started = narrower.narrow({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'b48iau5q5',
+      tool_use_id: 'toolu_01UKGFjnFervr56MbWGBbSQJ',
+      description: 'Locate soloflow plugin root',
+      task_type: 'local_bash',
+      uuid: '8f9587fa-2941-4f6c-8db4-38e57098088b',
+      session_id: '9ac69ae6-7b4a-4007-b470-b6c9628dfb71',
+    });
+    expect('kind' in started).toBe(false);
+
+    const updated = narrower.narrow({
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: 'b48iau5q5',
+      patch: { is_backgrounded: true },
+      uuid: 'b6d30dcf-7782-45a1-94bb-8a326bec46d1',
+      session_id: '9ac69ae6-7b4a-4007-b470-b6c9628dfb71',
+    });
+    expect('kind' in updated).toBe(false);
+  });
 });

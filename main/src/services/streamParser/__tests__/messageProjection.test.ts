@@ -27,6 +27,7 @@ import { MessageProjection } from '../messageProjection';
 import type {
   SystemInitEvent,
   SystemCompactBoundaryEvent,
+  SystemTaskNotificationEvent,
   AssistantEvent,
   UserEvent,
   ResultEvent,
@@ -908,6 +909,57 @@ describe('MessageProjection', () => {
     const result = projection.project(topLevelEvent) as UnifiedMessage;
     expect(result).not.toBeNull();
     expect(result.segments.map(s => s.type)).toEqual(['thinking', 'text']);
+  });
+
+  // -------------------------------------------------------------------------
+  // 21c. system/task_notification — the background task's FINAL REPORT. For a
+  //      backgrounded sub-agent this is the only copy on the parent stream.
+  // -------------------------------------------------------------------------
+
+  function taskNotification(overrides: Partial<SystemTaskNotificationEvent> = {}): SystemTaskNotificationEvent {
+    return {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'a4aff561826d6af1d',
+      tool_use_id: 'toolu_01Kg1f8DZg7qmL4T941zw7eL',
+      status: 'completed',
+      summary: '## Dependencies\n\nTASK-108 depends on TASK-107.',
+      output_file: '/tmp/tasks/a4aff561826d6af1d.output',
+      usage: { total_tokens: 57286, tool_uses: 6, duration_ms: 17830 },
+      uuid: 'uuid-task-notification',
+      session_id: SESSION_ID,
+      ...overrides,
+    };
+  }
+
+  it('projects system/task_notification into a system message carrying the report', () => {
+    const result = projection.project(taskNotification()) as UnifiedMessage;
+
+    expect(result).not.toBeNull();
+    expect(result.role).toBe('system');
+    expect(result.metadata?.systemSubtype).toBe('task_complete');
+    expect(result.segments).toEqual([
+      { type: 'text', content: '## Dependencies\n\nTASK-108 depends on TASK-107.' },
+    ]);
+    // The dispatching tool_use, so a renderer can attribute the report.
+    expect(result.metadata?.parentToolId).toBe('toolu_01Kg1f8DZg7qmL4T941zw7eL');
+    expect(result.metadata?.taskStatus).toBe('completed');
+    expect(result.metadata?.tokens).toBe(57286);
+    expect(result.metadata?.duration).toBe(17830);
+  });
+
+  it('preserves a non-completed task status so the renderer can flag it', () => {
+    const result = projection.project(
+      taskNotification({ status: 'failed', summary: 'Ran out of context.' }),
+    ) as UnifiedMessage;
+
+    expect(result.metadata?.taskStatus).toBe('failed');
+    expect(result.segments).toEqual([{ type: 'text', content: 'Ran out of context.' }]);
+  });
+
+  it('returns null for a task_notification with no summary (nothing to show)', () => {
+    expect(projection.project(taskNotification({ summary: undefined }))).toBeNull();
+    expect(projection.project(taskNotification({ summary: '   ' }))).toBeNull();
   });
 
   // -------------------------------------------------------------------------

@@ -424,6 +424,40 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
           </div>
         </div>
       );
+    } else if (sysMessage.metadata?.systemSubtype === 'task_complete') {
+      // A background task settled (SDK >=0.3.201 backgrounds Agent-tool subagents).
+      // The text is the task's FINAL REPORT — for a backgrounded sub-agent it is the
+      // only copy on the parent stream, since the sub-agent's own narration is
+      // suppressed as internal and the dispatching tool_result is just the spawn ack.
+      const taskStatus = typeof sysMessage.metadata.taskStatus === 'string'
+        ? sysMessage.metadata.taskStatus
+        : 'completed';
+      const taskFailed = taskStatus !== 'completed';
+      return (
+        <div
+          className={`
+            rounded-lg transition-all border
+            ${taskFailed
+              ? 'bg-status-error/5 border-status-error/20'
+              : 'bg-status-success/5 border-status-success/20'}
+            ${settings.compactMode ? 'p-3' : 'p-4'}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
+          `}
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <span>{taskFailed ? '⚠️' : '✅'}</span>
+            <span className={`text-xs font-semibold ${taskFailed ? 'text-status-error' : 'text-status-success'}`}>
+              Sub-agent {taskStatus}
+            </span>
+            <span className="text-xs text-text-tertiary">
+              {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
+            </span>
+          </div>
+          <div className="bg-surface-secondary rounded-lg p-3 text-sm text-text-primary whitespace-pre-wrap">
+            {textContent}
+          </div>
+        </div>
+      );
     } else if (sysMessage.metadata?.systemSubtype === 'slash_command_result') {
       // Render slash command result with subtle styling
       return (
