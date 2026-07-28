@@ -21,11 +21,19 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * 1M-context at standard pricing.
  *
  * The families reach their 1M window differently:
- *   - Opus 5 is 1M by DEFAULT — the bare `claude-opus-5` id already reports a
- *     1M window, so it carries NO `[1m]` suffix and needs NO beta. The legacy
- *     `opus-250k` alias still maps to the older default-window `claude-opus-4-8`
- *     for back-compat (a stored picker value never strands) but is no longer
- *     offered in the picker (removed from picker, IDEA-017).
+ *   - Opus 5 needs the `[1m]` suffix on THIS plane. Anthropic's published API
+ *     docs say Opus 5 is 1M by default and maximum, with no suffix or beta — and
+ *     that is true of the raw API. It is NOT true of the plane the bundled CLI
+ *     talks to under a Claude Code login, which reports a 200K window for the
+ *     bare id and a 1M window for `claude-opus-5[1m]` (measured 2026-07-28; the
+ *     same discrepancy is reported against the CLI generally). Do NOT "correct"
+ *     this back to the bare id on the strength of the API docs — verify against
+ *     a live `modelUsage.contextWindow` first. The suffix is passed through
+ *     verbatim by {@link sdkModelAndBetas} with no beta, exactly as the previous
+ *     `claude-opus-4-8[1m]` pin was. The legacy `opus-250k` alias still maps to
+ *     the older default-window `claude-opus-4-8` for back-compat (a stored
+ *     picker value never strands) but is no longer offered in the picker
+ *     (removed from picker, IDEA-017).
  *   - Sonnet 5 is 1M by DEFAULT — the bare `claude-sonnet-5` id already reports a
  *     1M window, so it carries NO `[1m]` suffix and needs NO beta. Sonnet 5 has
  *     no separate 250K mode; the legacy `sonnet-250k` alias maps to the same id
@@ -44,7 +52,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
   fable: 'claude-fable-5',
-  opus: 'claude-opus-5',
+  opus: 'claude-opus-5[1m]',
   'opus-250k': 'claude-opus-4-8',
   sonnet: 'claude-sonnet-5',
   'sonnet-250k': 'claude-sonnet-5',
@@ -77,7 +85,7 @@ export function resolveModelAlias(model?: string | null): string | undefined {
  * singleton), so this stays a pure, unit-testable transform with no service
  * dependency. When a guarded model is unavailable, its fallback alias is resolved
  * back through {@link resolveModelAlias} so the return value is a real spawn-seam id
- * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-5'`, which
+ * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-5[1m]'`, which
  * {@link sdkModelAndBetas} / {@link interactiveModelArg} then translate normally.
  */
 export function applyModelAvailabilityFallback(
@@ -123,8 +131,9 @@ export function resolveUnavailableDefaultModelFallback(
  *
  * The beta is a Sonnet 4.x ONLY mechanism, so we gate strictly on explicit
  * `claude-sonnet-4-*` ids. Everything else returns false — including
- * `claude-sonnet-5` and `claude-opus-5`, whose 1M windows are NATIVE (no beta).
- * `'auto'`/undefined also return false:
+ * `claude-sonnet-5`, whose 1M window is NATIVE, and `claude-opus-5[1m]`, whose
+ * 1M is unlocked by the suffix in the id rather than by a beta (see
+ * {@link MODEL_ALIAS_TO_ID}). `'auto'`/undefined also return false:
  * the resolved model is unknown, so requesting the Sonnet-only beta could land
  * on a non-Sonnet model and be rejected.
  *

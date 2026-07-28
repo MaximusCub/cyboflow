@@ -36,7 +36,8 @@ export interface ModelOption {
 
 // Fable 5 is Anthropic's frontier model (1M-native, like Sonnet 5) and leads the
 // list. Opus has a single honest 1M row; the spawn seam (modelContext.ts) maps
-// `fable`→claude-fable-5, `opus`→claude-opus-5. The legacy `opus-250k` alias stays
+// `fable`→claude-fable-5, `opus`→claude-opus-5[1m] (the suffix is what actually
+// unlocks 1M on the Claude Code login plane). The legacy `opus-250k` alias stays
 // resolvable (→ Opus 4.8) for back-compat but is not offered here.
 // Sonnet 5 is 1M-native (no context-1m beta, no 250K mode), so it has a single
 // honest 1M row; the `sonnet-250k` alias stays resolvable (→ Sonnet 5) for
