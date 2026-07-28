@@ -115,7 +115,21 @@ function makeServices(over: { isPanelRunning: boolean }) {
       stopPanel,
       spawnCliProcess,
     },
-    codexPtyManager: { on: vi.fn() },
+    // Full PTY surface: panels:continue now routes the codex-pty lane through
+    // relayOrSpawnPtyPanel, which drives these directly off `services`.
+    codexPtyManager: {
+      on: vi.fn(),
+      isPanelRunning: vi.fn(() => false),
+      relayUserTurn: vi.fn(),
+      startPanel: vi.fn(async () => {}),
+    },
+    interactiveCliManager: {
+      isPanelRunning: vi.fn(() => false),
+      relayUserTurn: vi.fn(),
+      startPanel: vi.fn(async () => {}),
+    },
+    registerLivePanel: vi.fn(),
+    registerCodexPtyPanel: vi.fn(),
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
   return { services, isPanelRunning, stopPanel, spawnCliProcess, codexHandlers, state };
@@ -183,6 +197,75 @@ describe('panels:continue — codex-sdk parity branch', () => {
       data: Array<{ id: string; text: string }>;
     };
     expect(listed.data).toEqual([{ id: 'pending-i', text: 'now' }]);
+  });
+});
+
+/**
+ * Lane routing at panels:continue. The handler used to test
+ * `agent_runtime === 'codex-sdk'` and otherwise fall through to
+ * claudePanelManager — which reaches only the two CLAUDE managers. So a Codex
+ * TERMINAL panel (every panel of a codex-pty session, and an interactive
+ * override on a codex-sdk one) was answered by Claude.
+ */
+describe('panels:continue — lane routing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(panelManager.getPanel).mockReturnValue(CODEX_PANEL);
+  });
+
+  it('relays a codex-pty panel into its own terminal instead of the Claude manager', async () => {
+    const { services } = makeServices({ isPanelRunning: false });
+    // A Codex terminal session: the panel inherits codex-pty.
+    const codexPtySession = {
+      id: 's1',
+      agent_runtime: 'codex-pty',
+      substrate: 'interactive',
+      chat_run_id: 'quick-run-1',
+    };
+    vi.mocked(services.databaseService.getSession).mockReturnValue(codexPtySession as never);
+    vi.mocked(services.sessionManager.getDbSession).mockReturnValue(codexPtySession as never);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'panels:continue', 'panel-1', 'hello', undefined, false, 'p-1')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    const codexPty = services.codexPtyManager as unknown as { startPanel: ReturnType<typeof vi.fn> };
+    expect(codexPty.startPanel).toHaveBeenCalledTimes(1);
+    expect(codexPty.startPanel.mock.calls[0][0]).toBe('panel-1');
+    expect(codexPty.startPanel.mock.calls[0][3]).toBe('hello');
+  });
+
+  it('starts a Codex SDK turn for an sdk-override panel inside a codex-pty session', async () => {
+    const { services, spawnCliProcess } = makeServices({ isPanelRunning: false });
+    const codexPtySession = {
+      id: 's1',
+      agent_runtime: 'codex-pty',
+      substrate: 'interactive',
+      chat_run_id: 'quick-run-1',
+    };
+    vi.mocked(services.databaseService.getSession).mockReturnValue(codexPtySession as never);
+    vi.mocked(services.sessionManager.getDbSession).mockReturnValue(codexPtySession as never);
+    // The panel overrides its session onto the SDK substrate.
+    vi.mocked(panelManager.getPanel).mockReturnValue({
+      id: 'panel-1',
+      sessionId: 's1',
+      type: 'claude',
+      substrate: 'sdk',
+    } as never);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'panels:continue', 'panel-1', 'hello', undefined, false, 'p-2')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    // The app-server, not the Codex terminal it would have inherited.
+    expect(spawnCliProcess).toHaveBeenCalledTimes(1);
+    expect(spawnCliProcess.mock.calls[0][0]).toMatchObject({ panelId: 'panel-1', prompt: 'hello' });
+    const codexPty = services.codexPtyManager as unknown as { startPanel: ReturnType<typeof vi.fn> };
+    expect(codexPty.startPanel).not.toHaveBeenCalled();
   });
 });
 

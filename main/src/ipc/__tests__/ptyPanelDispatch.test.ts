@@ -155,6 +155,56 @@ describe('relayOrSpawnPtyPanel — Codex PTY', () => {
     expect(codex.relayUserTurn).toHaveBeenCalledWith('codex-P', 'ping');
     expect(codex.startPanel).not.toHaveBeenCalled();
   });
+
+  it('keeps a codex-pty session on the Codex terminal when substrate was never stamped', async () => {
+    // The substrate resolver floors an absent value to 'sdk'; the lane resolver
+    // supplies 'interactive' for codex-pty so an older session row cannot lose
+    // its terminal to the SDK lane.
+    const { deps, codex } = makeDeps({ agent_runtime: 'codex-pty' });
+    const handled = await relayOrSpawnPtyPanel(deps, panel('legacy-P'), 'ping');
+    expect(handled).toBe(true);
+    expect(codex.startPanel).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The provider (session-wide) and the substrate (per-panel) resolve
+ * INDEPENDENTLY. Both cells below were unreachable while this seam tested
+ * `agent_runtime === 'codex-pty'` alone.
+ */
+describe('relayOrSpawnPtyPanel — per-panel overrides stay inside the session provider', () => {
+  it('routes an interactive override in a codex-SDK session to the CODEX terminal, not Claude', async () => {
+    const { deps, codex, interactive, registerCodexPtyPanel } = makeDeps({
+      agent_runtime: 'codex-sdk',
+      substrate: 'sdk',
+      chat_run_id: 'chat-run',
+    });
+
+    const handled = await relayOrSpawnPtyPanel(deps, panel('codex-override-P', 'sess', 'interactive'), 'hi');
+
+    expect(handled).toBe(true);
+    expect(codex.startPanel).toHaveBeenCalledTimes(1);
+    expect(registerCodexPtyPanel).toHaveBeenCalledWith('codex-override-P', 'codex-override-P');
+    // The provider must NOT flip mid-session.
+    expect(interactive.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('leaves an sdk override in a codex-PTY session to the caller (the app-server path)', async () => {
+    const { deps, codex, interactive } = makeDeps({ agent_runtime: 'codex-pty', substrate: 'interactive' });
+
+    const handled = await relayOrSpawnPtyPanel(deps, panel('sdk-override-P', 'sess', 'sdk'), 'hi');
+
+    expect(handled).toBe(false); // not a PTY lane — panels:continue starts a Codex SDK turn
+    expect(codex.startPanel).not.toHaveBeenCalled();
+    expect(interactive.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('still honors demo mode only for the Claude terminal, never for Codex', async () => {
+    const { deps, codex } = makeDeps({ agent_runtime: 'codex-sdk', substrate: 'sdk' }, { demoMode: true });
+    const handled = await relayOrSpawnPtyPanel(deps, panel('codex-demo-P', 'sess', 'interactive'), null);
+    expect(handled).toBe(true);
+    expect(codex.startPanel).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('relayOrSpawnPtyPanel — not handled', () => {

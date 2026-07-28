@@ -169,43 +169,29 @@ describe('PanelTabBar add chat action', () => {
   });
 
   /**
-   * relayOrSpawnPtyPanel picks its PTY manager off `agent_runtime === 'codex-pty'`,
-   * NOT off the provider — so an interactive override in a codex-SDK session runs
-   * the Claude terminal. The copy must not promise a Codex one.
+   * Both axes resolve independently in main (services/panelLane.ts), so an
+   * override stays inside the session's provider: the PTY option in a Codex
+   * session is the CODEX terminal, and both options are live in every session
+   * type — including codex-pty, where they used to be ignored outright.
    */
-  it('warns that a PTY override in a Codex SDK session runs the Claude terminal', () => {
-    render(
-      <SessionProvider session={sessionWithRuntime('codex-sdk')}>
-        <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={vi.fn()} />
-      </SessionProvider>,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
-    expect(
-      screen.getByText('Run this chat in the interactive Claude terminal (PTY chats always run Claude)'),
-    ).toBeInTheDocument();
-  });
-
-  /**
-   * In a codex-pty session that same check runs BEFORE any substrate test, so
-   * both overrides are dead letters — they must not be clickable.
-   */
-  it('disables both overrides in a Codex terminal session, where they are ignored', () => {
+  it.each([
+    { runtime: 'codex-sdk' as const, provider: 'Codex' },
+    { runtime: 'codex-pty' as const, provider: 'Codex' },
+    { runtime: 'claude-sdk' as const, provider: 'Claude' },
+  ])('names the session provider in the PTY option ($runtime)', ({ runtime, provider }) => {
     const onAddChat = vi.fn();
 
     render(
-      <SessionProvider session={sessionWithRuntime('codex-pty')}>
+      <SessionProvider session={sessionWithRuntime(runtime)}>
         <PanelTabBar panels={[]} onPanelSelect={vi.fn()} onPanelClose={vi.fn()} onAddChat={onAddChat} />
       </SessionProvider>,
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Add chat panel' }));
-    fireEvent.click(screen.getByText('Codex SDK'));
-    fireEvent.click(screen.getByText('PTY (interactive)'));
-    expect(onAddChat).not.toHaveBeenCalled();
+    expect(screen.getByText(`Run this chat with the interactive ${provider} terminal`)).toBeInTheDocument();
 
-    // Inheriting still works — that is the only honest choice here.
-    fireEvent.click(screen.getByText('Inherit session'));
-    expect(onAddChat).toHaveBeenCalledWith(undefined);
+    // Live in every session type — the override actually routes now.
+    fireEvent.click(screen.getByText('PTY (interactive)'));
+    expect(onAddChat).toHaveBeenCalledWith('interactive');
   });
 });

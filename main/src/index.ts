@@ -28,7 +28,7 @@ import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
-import { resolveSubstrate } from './orchestrator/substrateResolver';
+import { resolvePanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
@@ -1988,23 +1988,24 @@ async function initializeServices() {
   // `panel.id` (a session's panels all share ONE chat_run_id, so the sentinel
   // cannot identify a panel), and a panel id matches no run — it used to floor to
   // 'sdk', making relayInput/relayResize silently no-op for a reopened PTY chat.
-  // This lookup answers "which manager owns THIS panel" using the same ladder
-  // ClaudePanelManager.getCliManager walks: per-panel override → session substrate
-  // → floor, with the session's agent_runtime picking the Codex managers.
-  // `env: {}` — panel routing inherits only the session value, never the process
-  // environment (matching ptyPanelDispatch / ClaudePanelManager).
+  // This lookup answers "which manager owns THIS panel" via the shared lane
+  // resolver (services/panelLane.ts), so the facade agrees with every dispatch
+  // seam on both axes: the session fixes the provider, the panel's own override
+  // fixes the substrate.
   const resolvePanelOwner = (panelId: string): AbstractCliManager | undefined => {
     const panel = panelManager.getPanel(panelId);
     if (!panel || panel.type !== 'claude') return undefined;
     const dbSession = databaseService.getSession(panel.sessionId);
-    if (dbSession?.agent_runtime === 'codex-pty') return codexPtyManager;
-    if (dbSession?.agent_runtime === 'codex-sdk') return createdCodexSdkManager;
-    const substrate = resolveSubstrate({
-      panelOverrideSubstrate: panel.substrate ?? undefined,
-      requestedSubstrate: dbSession?.substrate ?? undefined,
-      env: {},
-    });
-    return substrate === 'interactive' ? interactiveCliManager : defaultCliManager;
+    switch (resolvePanelLane(dbSession, panel)) {
+      case 'codex-pty':
+        return codexPtyManager;
+      case 'codex-sdk':
+        return createdCodexSdkManager;
+      case 'claude-interactive':
+        return interactiveCliManager;
+      default:
+        return defaultCliManager;
+    }
   };
 
   substrateFacade = new SubstrateDispatchFacade(

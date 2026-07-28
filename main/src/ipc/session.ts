@@ -49,6 +49,7 @@ import {
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
+import { resolvePanelLane, type PanelLane } from '../services/panelLane';
 import type { ToolPanel } from '../../../shared/types/panels';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
@@ -294,6 +295,23 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       env: {},
     });
 
+  /**
+   * The (provider × substrate) lane that owns a panel — see services/panelLane.ts.
+   *
+   * Every chat dispatch seam below switches on THIS, never on the session's
+   * `agent_runtime` alone: the runtime fixes only the provider, and reading it as
+   * if it also fixed the substrate is what made per-panel overrides inert on the
+   * Codex side.
+   */
+  const laneForPanel = (panel: ToolPanel): PanelLane =>
+    resolvePanelLane(databaseService.getSession(panel.sessionId), panel);
+
+  /** Lane for a panel id, when only the id is in hand (event handlers). */
+  const laneForPanelId = (panelId: string): PanelLane | undefined => {
+    const panel = panelManager.getPanel(panelId);
+    return panel ? laneForPanel(panel) : undefined;
+  };
+
   interface QueuedCodexPanelInput {
     id: string;
     text: string;
@@ -305,8 +323,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     const panel = panelManager.getPanel(panelId);
     if (!panel || panel.type !== 'claude') throw new Error(`Codex panel ${panelId} not found`);
     const dbSession = databaseService.getSession(panel.sessionId);
-    if (!dbSession || dbSession.agent_runtime !== 'codex-sdk') {
-      throw new Error(`Panel ${panelId} is not owned by a Codex SDK session`);
+    // Lane, not runtime: an sdk-override panel in a codex-PTY session belongs on
+    // the app-server too, and an interactive-override panel in a codex-SDK
+    // session must NOT be dragged onto it.
+    if (!dbSession || resolvePanelLane(dbSession, panel) !== 'codex-sdk') {
+      throw new Error(`Panel ${panelId} is not owned by a Codex SDK chat`);
     }
     const session = await sessionManager.getSession(panel.sessionId);
     if (!session) throw new Error(`Session ${panel.sessionId} not found`);
@@ -436,8 +457,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   codexSdkManager?.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
     if (typeof payload.sessionId !== 'string') return;
+    // Lane, not session runtime: this manager also serves an sdk-override panel
+    // inside a codex-PTY session, whose runtime would fail a `=== 'codex-sdk'`
+    // test and leave the session stuck showing "working" after the turn ended.
+    // With no panelId on the payload there is no lane to read — keep the old
+    // session-level test rather than resting a session this manager may not own.
+    const exitLane = typeof payload.panelId === 'string' ? laneForPanelId(payload.panelId) : undefined;
     const dbSession = databaseService.getSession(payload.sessionId);
-    if (dbSession?.agent_runtime !== 'codex-sdk') return;
+    if (exitLane ? exitLane !== 'codex-sdk' : dbSession?.agent_runtime !== 'codex-sdk') return;
     try {
       sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
     } catch (error) {
@@ -450,8 +477,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   codexPtyManager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
     if (typeof payload.sessionId !== 'string') return;
+    // Mirror of the codex-sdk listener above: this manager now also serves an
+    // interactive-override panel inside a codex-SDK session.
+    const ptyExitLane = typeof payload.panelId === 'string' ? laneForPanelId(payload.panelId) : undefined;
     const dbSession = databaseService.getSession(payload.sessionId);
-    if (dbSession?.agent_runtime !== 'codex-pty') return;
+    if (ptyExitLane ? ptyExitLane !== 'codex-pty' : dbSession?.agent_runtime !== 'codex-pty') return;
     try {
       sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
     } catch (error) {
@@ -1318,18 +1348,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const dismissPanels = panelManager.getPanelsForSession(sessionId).filter((p) => p.type === 'claude');
       for (const panel of dismissPanels) {
         try {
-          if (dbSession.agent_runtime === 'codex-sdk') {
-            await codexSdkManager.stopPanel(panel.id);
-          } else if (dbSession.agent_runtime === 'codex-pty') {
-            await codexPtyManager.stopPanel(panel.id);
-          } else if (panel.substrate === 'interactive' || (panel.substrate === undefined && dbSession.substrate === 'interactive')) {
-            if (interactiveCliManager) {
-              await interactiveCliManager.stopPanel(panel.id);
-            } else if (dismissGateRunId) {
-              await killLiveSession(dismissGateRunId);
-            }
-          } else {
-            await claudeCodeManager.stopPanel(panel.id);
+          // Per-PANEL lane: a mixed session (an overridden chat next to inherited
+          // ones) has panels on two different managers, so a session-level test
+          // would leave the odd one out running.
+          switch (resolvePanelLane(dbSession, panel)) {
+            case 'codex-sdk':
+              await codexSdkManager.stopPanel(panel.id);
+              break;
+            case 'codex-pty':
+              await codexPtyManager.stopPanel(panel.id);
+              break;
+            case 'claude-interactive':
+              if (interactiveCliManager) {
+                await interactiveCliManager.stopPanel(panel.id);
+              } else if (dismissGateRunId) {
+                await killLiveSession(dismissGateRunId);
+              }
+              break;
+            default:
+              await claudeCodeManager.stopPanel(panel.id);
           }
         } catch (err) {
           console.warn(`[IPC:session] Failed to tear down live panel ${panel.id} for dismissed session ${sessionId}:`, err);
@@ -2478,8 +2515,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // continues through — see dispatchQuickSessionInput). isPanelRunning is
             // exact for codex: warm-parked entries are NOT in `processes`, so there
             // is no warm-idle false-positive (unlike Claude's isPanelTurnInFlight).
-            const continueDbSession = sessionManager.getDbSession(panel.sessionId);
-            if (continueDbSession?.agent_runtime === 'codex-sdk') {
+            const continueLane = laneForPanel(panel);
+            // The codex-pty lane relays a PANEL-SCOPED turn into this panel's own
+            // REPL. claudePanelManager below reaches only the two CLAUDE managers,
+            // so a Codex terminal panel — every panel of a codex-pty session, and
+            // an interactive override on a codex-sdk one — must be intercepted
+            // here or Claude would answer it. The claude-interactive lane is left
+            // on claudePanelManager.continuePanel, whose getCliManager already
+            // routes it correctly.
+            if (continueLane === 'codex-pty') {
+              const relayed = await relayOrSpawnPtyPanel(services, panel, input);
+              if (relayed) return { success: true };
+              return { success: false, error: 'Could not reach the Codex terminal for this chat' };
+            }
+            if (continueLane === 'codex-sdk') {
               if (!codexSdkManager) {
                 return { success: false, error: 'Codex SDK manager is not available' };
               }
@@ -2658,8 +2707,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Nothing to queue' };
       }
       const panel = panelManager.getPanel(panelId);
-      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
-      if (dbSession?.agent_runtime === 'codex-sdk') {
+      if (panel && laneForPanel(panel) === 'codex-sdk') {
         enqueueCodexPanelInput(panelId, id, text);
         return { success: true, data: { queued: true } };
       }
@@ -2680,8 +2728,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
     try {
       const panel = panelManager.getPanel(panelId);
-      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
-      if (dbSession?.agent_runtime === 'codex-sdk') {
+      if (panel && laneForPanel(panel) === 'codex-sdk') {
         return { success: true, data: [...(codexPanelInputQueues.get(panelId) ?? [])] };
       }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
@@ -2697,8 +2744,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   ipcMain.handle('panels:dequeue-input', async (_event, panelId: string, id: string) => {
     try {
       const panel = panelManager.getPanel(panelId);
-      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
-      if (dbSession?.agent_runtime === 'codex-sdk') {
+      if (panel && laneForPanel(panel) === 'codex-sdk') {
         const queue = codexPanelInputQueues.get(panelId) ?? [];
         const next = queue.filter((entry) => entry.id !== id);
         if (next.length === 0) codexPanelInputQueues.delete(panelId);
@@ -2882,12 +2928,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // Stop all Claude panels for this session
         console.log(`[IPC] Stopping ${stopClaudePanels.length} agent panel(s) for session ${sessionId}`);
         for (const claudePanel of stopClaudePanels) {
-          if (dbSession.agent_runtime === 'codex-sdk') {
-            await codexSdkManager.stopPanel(claudePanel.id);
-          } else if (dbSession.agent_runtime === 'codex-pty') {
-            await codexPtyManager.stopPanel(claudePanel.id);
-          } else {
-            await claudeCodeManager.stopPanel(claudePanel.id);
+          // Per-PANEL lane — see the dismiss teardown above. claudeCodeManager
+          // covers both Claude lanes here (its stopPanel is the session-level
+          // Stop that predates the interactive split).
+          switch (resolvePanelLane(dbSession, claudePanel)) {
+            case 'codex-sdk':
+              await codexSdkManager.stopPanel(claudePanel.id);
+              break;
+            case 'codex-pty':
+              await codexPtyManager.stopPanel(claudePanel.id);
+              break;
+            default:
+              await claudeCodeManager.stopPanel(claudePanel.id);
           }
         }
       } else {

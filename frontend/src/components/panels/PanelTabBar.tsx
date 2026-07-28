@@ -15,49 +15,29 @@ import { StatusDot } from '../ui/StatusDot';
  * "Add chat" substrate picker options — undefined means "inherit the session".
  *
  * The picker chooses a SUBSTRATE (sdk vs interactive), never a provider: which
- * agent runs is session-wide (`sessions.agent_runtime`). The copy must therefore
- * describe what the OVERRIDE ACTUALLY ROUTES TO, which is not symmetric:
- *
- *  - claude-* session — both overrides honored, both run Claude.
- *  - codex-sdk session — SDK runs the Codex SDK, but the interactive arm of
- *    `relayOrSpawnPtyPanel` picks its manager off `agent_runtime === 'codex-pty'`,
- *    so a PTY override lands on the CLAUDE terminal. Say so rather than promise
- *    a Codex terminal the dispatcher will not give.
- *  - codex-pty session — that same codex-pty test runs BEFORE any substrate
- *    test, so overrides are ignored outright: every chat is the Codex terminal.
- *    Both overrides are disabled here; a control that silently does nothing is
- *    worse than no control.
+ * agent runs is session-wide (`sessions.agent_runtime`), so a chat added inside a
+ * Codex session is a Codex chat either way. Both options are live in all four
+ * session types — main resolves the two axes independently (services/panelLane.ts)
+ * — so the labels can simply name what you get.
  */
 function addChatSubstrateItems(
   runtime: SessionAgentRuntime | undefined,
-): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate; disabled?: boolean }> {
+): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> {
   const provider: AgentProvider = runtime ? providerForRuntime(runtime) : 'claude';
-  const sdkLabel = provider === 'codex' ? 'Codex SDK' : 'Claude SDK';
-  const inherit = {
-    id: 'inherit',
-    label: 'Inherit session',
-    description: 'Same substrate as the rest of this session (recommended)',
-  };
-
-  if (runtime === 'codex-pty') {
-    const ignored = 'Not available — a Codex terminal session runs every chat in the Codex terminal';
-    return [
-      inherit,
-      { id: 'sdk', label: sdkLabel, description: ignored, substrate: 'sdk', disabled: true },
-      { id: 'interactive', label: 'PTY (interactive)', description: ignored, substrate: 'interactive', disabled: true },
-    ];
-  }
+  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
 
   return [
-    inherit,
-    { id: 'sdk', label: sdkLabel, description: `Run this chat with the ${sdkLabel}`, substrate: 'sdk' },
+    { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },
+    {
+      id: 'sdk',
+      label: `${providerLabel} SDK`,
+      description: `Run this chat with the ${providerLabel} SDK`,
+      substrate: 'sdk',
+    },
     {
       id: 'interactive',
       label: 'PTY (interactive)',
-      description:
-        provider === 'codex'
-          ? 'Run this chat in the interactive Claude terminal (PTY chats always run Claude)'
-          : 'Run this chat with the interactive Claude terminal',
+      description: `Run this chat with the interactive ${providerLabel} terminal`,
       substrate: 'interactive',
     },
   ];
@@ -177,7 +157,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     id: opt.id,
     label: opt.label,
     description: opt.description,
-    disabled: opt.disabled,
     onClick: () => handleAddChat(opt.substrate),
   }));
 

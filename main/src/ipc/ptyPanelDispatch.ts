@@ -24,7 +24,7 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
-import { resolveSubstrate } from '../orchestrator/substrateResolver';
+import { isPtyLane, resolvePanelLane } from '../services/panelLane';
 import { QUICK_PTY_BRIEFING, QUICK_CODEX_PTY_BRIEFING } from './quickSessionBriefings';
 
 /** Common live-REPL relay surface shared by both PTY managers. */
@@ -124,17 +124,14 @@ export async function relayOrSpawnPtyPanel(
   input: string | null,
 ): Promise<boolean> {
   const dbSession = deps.sessionManager.getDbSession(panel.sessionId);
-  const isCodexPty = dbSession?.agent_runtime === 'codex-pty';
-  // Effective substrate mirrors ClaudePanelManager.getCliManager: a per-panel
-  // override (Add-chat picker / claude-panels:set-substrate) wins over the
-  // session's substrate. env:{} — panel routing inherits only the session value.
-  const effectiveSubstrate = resolveSubstrate({
-    panelOverrideSubstrate: panel.substrate ?? undefined,
-    requestedSubstrate: dbSession?.substrate ?? undefined,
-    env: {},
-  });
-  const isInteractive = effectiveSubstrate === 'interactive';
-  if (!isCodexPty && !isInteractive) return false; // SDK panel — caller owns it.
+  // Provider and substrate resolve INDEPENDENTLY (services/panelLane.ts): the
+  // session fixes the vendor, the panel's own override fixes the substrate. This
+  // used to be one test against `agent_runtime === 'codex-pty'`, which both
+  // ignored an sdk override in a Codex terminal session and handed a Codex
+  // session's interactive override to the CLAUDE manager.
+  const lane = resolvePanelLane(dbSession, panel);
+  if (!isPtyLane(lane)) return false; // SDK lane — caller owns it.
+  const isCodexPty = lane === 'codex-pty';
   // Demo interactive sessions never spawn a real REPL (DemoTerminalView paints a
   // canned, client-side session) — leave them to the SDK/demo path.
   if (!isCodexPty && deps.configManager.isDemoMode()) return false;

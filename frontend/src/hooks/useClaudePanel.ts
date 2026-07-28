@@ -4,6 +4,8 @@ import { useTheme } from '../contexts/ThemeContext';
 import { API } from '../utils/api';
 import { GitCommands } from '../types/session';
 import type { AttachedImage, AttachedText, Session } from '../types/session';
+import type { CliSubstrate } from '../../../shared/types/substrate';
+import { usePanelStore } from '../stores/panelStore';
 
 export async function dispatchQuickSessionInput(
   session: Session,
@@ -13,15 +15,29 @@ export async function dispatchQuickSessionInput(
   modelOverride?: string,
   interrupt?: boolean,
   pendingId?: string,
+  /**
+   * The panel's OWN substrate override, when it has one (Add-chat picker /
+   * claude-panels:set-substrate). Absent means the panel inherits its session.
+   */
+  panelSubstrate?: CliSubstrate | null,
 ): Promise<{ success: boolean; error?: string; queued?: boolean }> {
-  if (session.agentRuntime === 'codex-sdk') {
+  // An overridden panel does not run what its session runs, so it can never use
+  // the SESSION-scoped path: sessions:input resolves the session's FIRST chat
+  // panel, which would answer on the inherited lane instead of this panel's.
+  const inherits = panelSubstrate === undefined || panelSubstrate === null;
+  const isCodexSdkPanel =
+    session.agentRuntime === 'codex-sdk'
+      ? panelSubstrate !== 'interactive'
+      : session.agentRuntime === 'codex-pty' && panelSubstrate === 'sdk';
+
+  if (isCodexSdkPanel) {
     // The FIRST message starts the codex turn via the session-scoped input path
     // (the panel is idle, so there is nothing to guard against). A CONTINUE routes
     // through the panel-scoped panels:continue — the codex branch there gives it
     // the SAME mid-turn queue guard + Interrupt & send behavior Claude gets,
     // instead of the old sessions:input hard-reject ("Codex is still processing")
     // that turned a mid-turn send into a FAILED row.
-    if (mode === 'initial') {
+    if (mode === 'initial' && inherits) {
       const response = await API.sessions.sendInput(session.id, input);
       return { success: response.success, error: response.error };
     }
@@ -59,6 +75,16 @@ export const useClaudePanel = (
   });
 
   const activeSessionId = activeSession?.id;
+
+  // This panel's OWN substrate override, if any. The dispatcher needs it because
+  // an overridden panel runs a different lane than its session (an interactive
+  // chat on a Codex SDK session, say) and so must never take a session-scoped
+  // path, which would answer on the session's first panel instead.
+  const panelSubstrate = usePanelStore((state) =>
+    activeSessionId
+      ? state.panels[activeSessionId]?.find((p) => p.id === panelId)?.substrate ?? null
+      : null,
+  );
 
   // States specific to Claude functionality
   const [input, setInput] = useState('');
@@ -326,7 +352,7 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'initial');
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'initial', undefined, undefined, undefined, panelSubstrate);
   };
 
   const handleContinueConversation = async (
@@ -401,7 +427,7 @@ export const useClaudePanel = (
     }
     
     // Output will be loaded automatically when session status changes.
-    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt, pendingId);
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride, interrupt, pendingId, panelSubstrate);
   };
 
   const handleTerminalCommand = async () => {

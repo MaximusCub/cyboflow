@@ -77,3 +77,59 @@ describe('dispatchQuickSessionInput', () => {
     expect(mocks.sessionSendInput).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * An overridden panel runs a different lane than its session, so it must never
+ * take the SESSION-scoped path: sessions:input resolves the session's FIRST chat
+ * panel, which would answer on the inherited lane instead of this panel's.
+ */
+describe('dispatchQuickSessionInput — per-panel substrate overrides', () => {
+  it('keeps an INHERITED codex-sdk panel on the session-scoped initial path', async () => {
+    await dispatchQuickSessionInput(session('codex-sdk'), 'panel-1', 'hi', 'initial', undefined, undefined, undefined, null);
+
+    expect(mocks.sessionSendInput).toHaveBeenCalledWith('session-1', 'hi');
+    expect(mocks.panelSendInput).not.toHaveBeenCalled();
+  });
+
+  it('sends an interactive-override panel in a Codex SDK session down the PTY path', async () => {
+    await dispatchQuickSessionInput(
+      session('codex-sdk'),
+      'panel-2',
+      'hi',
+      'initial',
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+    );
+
+    // panels:send-input — main relays this into the panel's own Codex terminal.
+    expect(mocks.panelSendInput).toHaveBeenCalledWith('panel-2', 'hi\n');
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+  });
+
+  it('sends an sdk-override panel in a Codex terminal session to the panel-scoped Codex SDK path', async () => {
+    await dispatchQuickSessionInput(
+      session('codex-pty'),
+      'panel-2',
+      'hi',
+      'initial',
+      undefined,
+      undefined,
+      undefined,
+      'sdk',
+    );
+
+    // Panel-scoped continue: the codex-sdk lane in main starts the app-server turn.
+    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-2', 'hi', undefined, undefined, undefined);
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+    expect(mocks.panelSendInput).not.toHaveBeenCalled();
+  });
+
+  it('leaves an INHERITED codex-pty panel on the PTY path', async () => {
+    await dispatchQuickSessionInput(session('codex-pty'), 'panel-1', 'hi', 'initial', undefined, undefined, undefined, null);
+
+    expect(mocks.panelSendInput).toHaveBeenCalledWith('panel-1', 'hi\n');
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+  });
+});
