@@ -171,6 +171,9 @@ function createInsightsDb(): Database.Database {
       run_model TEXT,
       subagent_models_json TEXT,
       difficulty_proxy_prerun REAL,
+      -- migration 082: NULL = the automatic human-review trigger, 'adhoc' = the
+      -- cyboflow_run_eval MCP tool.
+      origin TEXT,
       error TEXT,
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),

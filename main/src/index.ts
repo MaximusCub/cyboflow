@@ -1963,6 +1963,14 @@ async function initializeServices() {
         deleteVariant: (variantId) => workflowRegistry.deleteVariant(variantId),
         setBaselineRotation: (id, patch) => workflowRegistry.setBaselineRotation(id, patch),
       },
+      // Ad-hoc code-review eval tool (cyboflow_run_eval): forward to the EvalWorker
+      // singleton initialized above, which owns the ONE definition of the snapshot
+      // deps (diff closure, app version, config toggles, enqueue) shared with the
+      // automatic human-review trigger — so the two mint paths can never drift.
+      // Deliberately NOT error-swallowed here (unlike the automatic trigger's
+      // snapshot()): an explicit caller must get a reason, and the MCP handler maps
+      // a throw to an ok:false reply.
+      runAdHocEval: (runId) => EvalWorker.getInstance().runAdHoc(runId),
     },
   );
   // Keep the start promise so the MCP subprocess (below) can be gated on the

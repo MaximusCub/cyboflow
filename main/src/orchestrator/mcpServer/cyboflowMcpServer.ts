@@ -827,6 +827,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: [],
         },
       },
+      {
+        name: 'cyboflow_run_eval',
+        description:
+          "Request an ad-hoc code-review eval of THIS session's current working-tree diff against its base. FIRE-AND-CONTINUE: returns { status, rubricVersion } immediately ('queued' | 'requeued' = replaced a prior ad-hoc verdict | 'in_flight' = one is already grading); a 3-slot jury (2×Claude + 1×Codex) grades asynchronously and the verdict lands as a non-blocking review-queue item. Errors: adhoc_eval_tagged_run_rejected (A/B-tagged runs auto-grade; ad-hoc would distort arm comparison), adhoc_eval_exists_auto (the run already has its canonical automatic eval), adhoc_eval_no_diff (no diff to grade), run_not_found. Explicit calls bypass the automatic-eval on/off settings.",
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
       // ---------------------------------------------------------------------
       // Workflow + variant configuration (edit flows / configure variants from
       // a quick session instead of the UI). WARNING: editing a BUILT-IN
@@ -2328,6 +2334,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // taskRef: the lane attribution for the visual merge-gate (verdict→lane).
       if (task_ref !== undefined) queryParams['taskRef'] = task_ref;
       return executeMcpQuery('mcp-request-verification', queryParams);
+    }
+
+    case 'cyboflow_run_eval': {
+      // Run-bound + parameterless: the graded artifact is THIS run's current diff
+      // (the run comes from CYBOFLOW_RUN_ID via the transport envelope), so there
+      // is nothing to validate. Fire-and-continue — the reply is the queue status,
+      // never the verdict.
+      return executeMcpQuery('mcp-run-eval', {});
     }
 
     case 'cyboflow_list_workflows': {

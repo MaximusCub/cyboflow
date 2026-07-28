@@ -1,0 +1,31 @@
+-- Migration 082: run_evals.origin — how this eval row came to exist.
+--
+-- Until now every run_evals row was minted by the SAME trigger: the automatic
+-- human-review step-transition subscriber (index.ts) → snapshotRunForEval. The
+-- ad-hoc MCP tool `cyboflow_run_eval` adds a SECOND mint path — any session
+-- (primarily a quick session, which the automatic trigger deliberately never
+-- grades) can request an eval of its own current working-tree diff.
+--
+-- The two mint paths must stay distinguishable because they have DIFFERENT
+-- lifecycle rules:
+--   NULL     — the AUTOMATIC pre-human snapshot (every legacy row is NULL by
+--              backfill-free definition). It is the run's CANONICAL score: the
+--              Insights/score panel reads it and the ad-hoc path must NEVER
+--              delete or replace it (adhoc → rejected/exists_auto).
+--   'adhoc'  — minted by the MCP tool. Re-grading is the POINT of the tool
+--              (iterate in-session, re-request after more work), so a terminal
+--              ad-hoc row is deleted + re-snapshotted on the next request, and
+--              its completion posts a summary review item (a quick session has
+--              no score panel; the review queue is where the verdict surfaces).
+--
+-- Deliberately NOT a CHECK-constrained enum: a third origin would otherwise
+-- require a table rebuild, and every reader treats "not 'adhoc'" as automatic.
+--
+-- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support it.
+-- Re-running raises 'duplicate column name: origin', the idempotency signal
+-- runFileBasedMigrations() in database.ts uses to skip an already-applied file.
+--
+-- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in a
+-- this.transaction(...) call.
+
+ALTER TABLE run_evals ADD COLUMN origin TEXT;

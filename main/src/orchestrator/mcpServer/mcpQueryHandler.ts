@@ -142,6 +142,7 @@ import type {
   VerificationTaskV1,
   VisualBackendId,
 } from '../../../../shared/types/visualVerification';
+import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
@@ -176,6 +177,30 @@ import {
  * approve-plan silent-pass guard in handleReportStep.
  */
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
+
+/**
+ * Wire error per ad-hoc-eval rejection reason (`cyboflow_run_eval`). Keyed by the
+ * AdHocSnapshotResult reason union, so a new reason fails the build here instead
+ * of silently degrading to an undefined error string. Each value is
+ * `<code>: <human-readable explanation>` — the calling agent gets a machine token
+ * to branch on AND enough prose to decide whether to stop asking.
+ */
+const AD_HOC_EVAL_REJECTION_ERRORS: Record<
+  Extract<AdHocSnapshotResult, { outcome: 'rejected' }>['reason'],
+  string
+> = {
+  run_not_found: 'run_not_found: this session has no workflow_runs row to grade.',
+  tagged_run:
+    'adhoc_eval_tagged_run_rejected: this run is part of an A/B experiment or variant rotation. ' +
+    'Tagged runs auto-grade at settle so both arms are scored under identical conditions; an ' +
+    'ad-hoc eval would replace that canonical score and distort the comparison.',
+  exists_auto:
+    'adhoc_eval_exists_auto: this run already has its canonical automatic eval, which is never ' +
+    "overwritten. See the run's quality panel (or retry it there) instead.",
+  no_diff:
+    'adhoc_eval_no_diff: no diff was captured for this run (no worktree, or nothing changed since ' +
+    'its base), so there is nothing to grade.',
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -455,6 +480,18 @@ export type McpQueryMessage =
        * the only lane; non-sprint runs have no gate).
        */
       taskRef?: string;
+    }
+  | {
+      /**
+       * FIRE-AND-CONTINUE ad-hoc code-review eval request (cyboflow_run_eval).
+       * No parameters beyond the transport envelope: the run is the CALLER's own
+       * run (CYBOFLOW_RUN_ID) and the graded artifact is its current working-tree
+       * diff. Replies { status, rubricVersion } synchronously; the 3-slot jury
+       * grades asynchronously and posts its verdict to the review queue.
+       */
+      type: 'mcp-run-eval';
+      requestId: string;
+      runId: string;
     }
   // -------------------------------------------------------------------------
   // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
@@ -1208,6 +1245,22 @@ export interface McpQueryHandlerDeps {
    * default). Only affects PROJECT roots — configured extras are never excluded.
    */
   getAssistantExcludedProjectPaths?: () => string[];
+
+  /**
+   * Request an AD-HOC code-review eval of a run's current diff (the
+   * `cyboflow_run_eval` tool). Wired in main/src/index.ts to
+   * `EvalWorker.getInstance().runAdHoc` — a CALLBACK rather than the worker
+   * itself because EvalWorker's boot wiring reaches main/src/services
+   * (GitDiffManager, ConfigManager, ReviewItemRouter) and the ORCHESTRATOR
+   * LAYERING RULE forbids importing those from here. The result TYPE is imported
+   * (type-only, from the orchestrator-layer eval module) purely so the mapping
+   * below is exhaustively checked.
+   *
+   * FIRE-AND-CONTINUE: the callback resolves as soon as the snapshot lands and
+   * the jury is enqueued — never after the verdict. Absent ⇒ 'eval_unavailable'
+   * (the documented degrade pattern shared with workflowConfig / agentThreadStore).
+   */
+  runAdHocEval?: (runId: string) => Promise<AdHocSnapshotResult>;
 }
 
 /**
@@ -1382,6 +1435,11 @@ export class McpQueryHandler {
           // { requestId } (or { skipped:true } for a disabled run), then nudges the
           // scheduler — the lane never blocks on the verdict.
           this.handleRequestVerification(msg, client);
+          break;
+        case 'mcp-run-eval':
+          // FIRE-AND-CONTINUE: awaits only the snapshot + enqueue (never the jury),
+          // then replies with the queued/requeued/in_flight status or a reason code.
+          await this.handleRunEval(msg, client);
           break;
         case 'mcp-list-workflows':
           this.handleListWorkflows(msg, client);
@@ -3908,6 +3966,85 @@ export class McpQueryHandler {
         error: 'verification_enqueue_failed',
       });
     }
+  }
+
+  /**
+   * Request an AD-HOC code-review eval of the CALLING run's current diff
+   * (cyboflow_run_eval) and reply synchronously with the queue status — the jury
+   * grades asynchronously and posts its verdict to the review queue.
+   *
+   * Guards:
+   *   - the 'orchestrator' sentinel runId has no workflow_runs row and no diff
+   *     (mirrors resolveTaskRunContext's first guard) → eval_requires_real_run;
+   *   - the dep being absent → eval_unavailable (the established degrade pattern
+   *     shared with the workflowConfig / agentThreadStore tools).
+   *
+   * DELIBERATELY NOT resolveTaskRunContext: that helper also rejects TERMINAL
+   * runs, but a quick session's sentinel run is 'running' for the whole chat and
+   * a flow run may legitimately want a grade after settling. Run EXISTENCE is
+   * checked inside the snapshot (rejected/run_not_found), which is the only part
+   * of that guard this tool needs.
+   */
+  private async handleRunEval(
+    msg: Extract<McpQueryMessage, { type: 'mcp-run-eval' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    if (msg.runId === 'orchestrator') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error:
+          'eval_requires_real_run: an ad-hoc eval grades a specific run\'s diff, and the ' +
+          'global-agent sentinel has neither a run row nor a worktree.',
+      });
+      return;
+    }
+
+    const runAdHocEval = this.deps.runAdHocEval;
+    if (!runAdHocEval) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'eval_unavailable: the code-review eval worker is not wired in this process.',
+      });
+      return;
+    }
+
+    let result: AdHocSnapshotResult;
+    try {
+      result = await runAdHocEval(msg.runId);
+    } catch (err) {
+      this.logger?.error('[Cyboflow MCP Query] ad-hoc eval request failed', {
+        runId: msg.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'eval_request_failed',
+      });
+      return;
+    }
+
+    if (result.outcome !== 'rejected') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { status: result.outcome, rubricVersion: result.rubricVersion },
+      });
+      return;
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: false,
+      error: AD_HOC_EVAL_REJECTION_ERRORS[result.reason],
+    });
   }
 
   /**

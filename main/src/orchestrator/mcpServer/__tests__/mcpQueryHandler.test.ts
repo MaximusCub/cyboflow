@@ -4858,3 +4858,103 @@ describe('interactive-turn-end', () => {
     expect(writes).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// mcp-run-eval — the ad-hoc code-review eval tool (cyboflow_run_eval).
+//
+// The handler is a thin, DB-free mapper over the injected runAdHocEval callback
+// (the ORCHESTRATOR LAYERING RULE keeps EvalWorker's service-touching wiring out
+// of this layer), so these tests pin exactly that: the sentinel guard, the
+// absent-dep degrade, and the outcome→wire mapping for every branch.
+// ---------------------------------------------------------------------------
+
+describe('mcp-run-eval', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ disableForeignKeys: true });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const msg = (requestId: string, runId: string): McpQueryMessage => ({
+    type: 'mcp-run-eval',
+    requestId,
+    runId,
+  });
+
+  it("rejects the 'orchestrator' sentinel runId without calling the dep", async () => {
+    const runAdHocEval = vi.fn(async () => ({ outcome: 'queued' as const, rubricVersion: '9.9' }));
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { runAdHocEval });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(msg('ev-1', 'orchestrator'), socket);
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^eval_requires_real_run/);
+    expect(runAdHocEval).not.toHaveBeenCalled();
+  });
+
+  it("returns 'eval_unavailable' when the dep is absent (documented degrade)", async () => {
+    const handler = new McpQueryHandler(dbAdapter(db)); // no deps
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(msg('ev-2', 'run-1'), socket);
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^eval_unavailable/);
+  });
+
+  it.each(['queued', 'requeued', 'in_flight'] as const)(
+    "maps the '%s' outcome to ok:true { status, rubricVersion }",
+    async (outcome) => {
+      const runAdHocEval = vi.fn(async () => ({ outcome, rubricVersion: '9.9' }));
+      const handler = new McpQueryHandler(dbAdapter(db), undefined, { runAdHocEval });
+      const { socket, writes } = makeSocketDouble();
+
+      await handler.handleMessage(msg('ev-3', 'run-1'), socket);
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ status: outcome, rubricVersion: '9.9' });
+      expect(runAdHocEval).toHaveBeenCalledWith('run-1');
+    },
+  );
+
+  it.each([
+    ['run_not_found', /^run_not_found/],
+    ['tagged_run', /^adhoc_eval_tagged_run_rejected/],
+    ['exists_auto', /^adhoc_eval_exists_auto/],
+    ['no_diff', /^adhoc_eval_no_diff/],
+  ] as const)("maps the '%s' rejection to its own wire code", async (reason, pattern) => {
+    const runAdHocEval = vi.fn(async () => ({ outcome: 'rejected' as const, reason }));
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { runAdHocEval });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(msg('ev-4', 'run-1'), socket);
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(pattern);
+    // Every rejection carries a human-readable explanation after the code.
+    expect((response.error ?? '').length).toBeGreaterThan(reason.length + 10);
+  });
+
+  it('surfaces a thrown dep as ok:false rather than escaping handleMessage', async () => {
+    const runAdHocEval = vi.fn(async () => {
+      throw new Error('worker not initialized');
+    });
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { runAdHocEval });
+    const { socket, writes } = makeSocketDouble();
+
+    await expect(handler.handleMessage(msg('ev-5', 'run-1'), socket)).resolves.toBeUndefined();
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('eval_request_failed');
+    expect(writes).toHaveLength(1);
+  });
+});

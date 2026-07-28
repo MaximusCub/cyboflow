@@ -38,7 +38,13 @@ import {
 import type { JudgeClient } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
 import { EvalJudgeMaxTurnsError, isDeterministicJudgeFailure } from './judgeErrors';
-import { snapshotRunForEval } from './snapshotRunForEval';
+import {
+  snapshotRunForEval,
+  snapshotRunForAdHocEval,
+  EVAL_ORIGIN_ADHOC,
+  type AdHocSnapshotResult,
+  type SnapshotDeps,
+} from './snapshotRunForEval';
 import { runJudgeGrade, type JudgeLane } from './judgeConcurrency';
 
 /** Legacy fallback count when a required jury is accidentally configured empty. */
@@ -138,6 +144,13 @@ interface EvalRunRow {
   diff_text: string | null;
   diff_stats_json: string | null;
   gate_results_json: string | null;
+  /**
+   * How the row was minted (migration 082): NULL = the automatic human-review
+   * trigger, 'adhoc' = the cyboflow_run_eval MCP tool. Only the ad-hoc rows get a
+   * completion summary review item (a workflow run already shows its score in
+   * WorkflowSummaryPanel; a quick session has no such surface).
+   */
+  origin: string | null;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
@@ -206,23 +219,40 @@ export class EvalWorker {
    */
   async snapshot(runId: string): Promise<void> {
     try {
-      await snapshotRunForEval(runId, {
-        db: this.db,
-        logger: this.logger,
-        gitDiff: this.deps.gitDiff,
-        appVersion: this.deps.appVersion,
-        isEvalEnabled: this.deps.isEvalEnabled,
-        ...(this.deps.isVariantAutoGradeEnabled
-          ? { isVariantAutoGradeEnabled: this.deps.isVariantAutoGradeEnabled }
-          : {}),
-        enqueue: (r, v) => this.enqueue(r, v),
-      });
+      await snapshotRunForEval(runId, this.buildSnapshotDeps());
     } catch (err) {
       this.logger?.warn('[eval] snapshot threw (swallowed)', {
         runId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * The AD-HOC (MCP `cyboflow_run_eval`) entry point. Same deps as the automatic
+   * trigger — one definition, so the two mint paths can never drift on the diff
+   * closure / app version / enqueue seam — but DELIBERATELY NOT error-swallowed:
+   * an explicit caller is waiting on a verdict-or-reason, so a fault must surface
+   * as an ok:false MCP reply rather than a silent no-op. The snapshot itself is
+   * still fire-and-continue (it enqueues; it never waits for the jury).
+   */
+  runAdHoc(runId: string): Promise<AdHocSnapshotResult> {
+    return snapshotRunForAdHocEval(runId, this.buildSnapshotDeps());
+  }
+
+  /** Single definition of the snapshot deps, shared by both mint paths. */
+  private buildSnapshotDeps(): SnapshotDeps {
+    return {
+      db: this.db,
+      logger: this.logger,
+      gitDiff: this.deps.gitDiff,
+      appVersion: this.deps.appVersion,
+      isEvalEnabled: this.deps.isEvalEnabled,
+      ...(this.deps.isVariantAutoGradeEnabled
+        ? { isVariantAutoGradeEnabled: this.deps.isVariantAutoGradeEnabled }
+        : {}),
+      enqueue: (r, v) => this.enqueue(r, v),
+    };
   }
 
   /** Enqueue a pending (run, rubric) for grading. Serialized behind the PQueue. */
@@ -304,7 +334,7 @@ export class EvalWorker {
         `SELECT r.project_id AS project_id, r.worktree_path AS worktree_path,
                 r.experiment_id AS experiment_id,
                 e.diff_text AS diff_text, e.diff_stats_json AS diff_stats_json,
-                e.gate_results_json AS gate_results_json
+                e.gate_results_json AS gate_results_json, e.origin AS origin
          FROM run_evals e
          JOIN workflow_runs r ON r.id = e.run_id
          WHERE e.run_id = ? AND e.rubric_version = ?`,
@@ -367,6 +397,9 @@ export class EvalWorker {
     const result = scoreSamples(samples, { gateResults });
     this.persistComplete(runId, rubricVersion, result, samples, slots);
     await this.writeFindings(runId, row.project_id, result, samples);
+    // Ad-hoc verdicts have no score panel to land in — surface the whole rollup as
+    // ONE informational review item. Fail-soft by contract (see the method).
+    await this.maybeWriteAdHocSummary(runId, row.project_id, row.origin, result);
 
     this.logger?.info('[eval] complete', {
       runId,
@@ -740,6 +773,80 @@ export class EvalWorker {
         blockingWritten,
         capTriggered: result.capTriggered,
         capTriggers: result.capTriggers,
+      });
+    }
+  }
+
+  /**
+   * Post the AD-HOC verdict rollup as ONE non-blocking, info-severity review item.
+   *
+   * Why only for origin='adhoc': a workflow run's score already renders in
+   * WorkflowSummaryPanel, so a summary item there would be pure duplication. The
+   * ad-hoc tool's primary caller is a QUICK session, which has no score panel at
+   * all — the review queue is the only surface where its verdict can appear. Rows
+   * with origin NULL (every automatic + every legacy row) are a no-op here.
+   *
+   * Fail-soft: the eval itself is already persisted 'complete' by the time this
+   * runs, so a summary-write failure is logged and swallowed — it must never turn a
+   * successful grade into a failed one (mirrors writeFindings' per-item swallow).
+   */
+  private async maybeWriteAdHocSummary(
+    runId: string,
+    projectId: number,
+    origin: string | null,
+    result: ScoringResult,
+  ): Promise<void> {
+    if (origin !== EVAL_ORIGIN_ADHOC) return;
+    try {
+      // An inert diff scores NULL (no dimension activated) rather than 0 — say so
+      // instead of printing a fabricated 0/Poor.
+      const score = result.overallScore === null ? 'n/a' : `${result.overallScore}`;
+      const bandLabel = result.band ?? 'No score';
+      const ci =
+        result.ciLow === null || result.ciHigh === null
+          ? 'n/a'
+          : `${result.ciLow.toFixed(1)}–${result.ciHigh.toFixed(1)}`;
+      const dimensionLines = result.dimensions
+        .filter((d) => d.active)
+        .map((d) => `- ${d.name}: ${d.score ?? 'n/a'} (${d.band ?? 'n/a'})`);
+      const flags: string[] = [];
+      if (result.capTriggered) {
+        flags.push(
+          `- **Catastrophic cap fired** (${result.capTriggers.join(', ') || 'unspecified'}) — the score is soft-capped, not organic.`,
+        );
+      }
+      if (result.securityFlag) flags.push('- **Security flag** raised by the jury.');
+      if (result.requirementsUnmet) flags.push('- **Requirements unmet** (SCP-1) raised by the jury.');
+      if (result.gated) flags.push('- **Deterministic gate failed** (build/test/lint) for this run.');
+
+      const body = [
+        `Ad-hoc code-review eval of this session's current diff.`,
+        '',
+        `**Overall: ${score}/100 (${bandLabel})** — 95% CI ${ci} across ${result.sampleCount} jury sample(s).`,
+        '',
+        '**Per dimension**',
+        ...(dimensionLines.length > 0 ? dimensionLines : ['- (no dimension had enough applicable checks to activate)']),
+        ...(flags.length > 0 ? ['', '**Flags**', ...flags] : []),
+      ].join('\n');
+
+      const change: ReviewItemCreate = {
+        op: 'create',
+        actor: 'agent:eval',
+        kind: 'finding',
+        title: `Ad-hoc eval: ${bandLabel} (${score}/100)`,
+        body,
+        severity: 'info',
+        source: 'agent:eval',
+        blocking: false,
+        runId,
+        payload: { kind: 'finding', category: 'eval' },
+      };
+      await this.deps.reviewItemWriter(projectId, change);
+      this.logger?.info('[eval] ad-hoc summary review item written', { runId, score });
+    } catch (err) {
+      this.logger?.warn('[eval] ad-hoc summary write failed (swallowed)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }

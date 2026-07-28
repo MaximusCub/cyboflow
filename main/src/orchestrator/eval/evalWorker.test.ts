@@ -19,6 +19,7 @@ import { CodexJurorUnavailableError } from './codexJudge';
 import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 import type { JudgeSample, JudgeFinding } from './scoring';
 import type { ReviewItemCreate } from '../reviewItemRouter';
+import { RUBRIC_VERSION } from './rubric';
 
 interface Call {
   sql: string;
@@ -592,7 +593,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     await worker._queue().onIdle();
     const complete = db.runs.find((r) => r.sql.includes("eval_status = 'complete'"));
     const dims = JSON.parse(complete?.params[8] as string) as Array<{ name: unknown; weight: unknown }>;
-    expect(dims.length).toBe(7);
+    expect(dims.length).toBe(8);
     for (const d of dims) {
       expect(typeof d.name).toBe('string');
       expect((d.name as string).length).toBeGreaterThan(0);
@@ -657,6 +658,108 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(spy).toHaveBeenCalledTimes(2);
     expect(spy).toHaveBeenCalledWith('r-a', '1.1');
     expect(spy).toHaveBeenCalledWith('r-b', '1.0');
+  });
+
+  // ── Ad-hoc completion summary (migration 082 origin='adhoc') ─────────────
+
+  it("writes ONE info summary review item when the row's origin is 'adhoc'", async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const writer = vi.fn(async () => ({ reviewItemId: 'ri-summary' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: writer,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    // No judge findings in these samples, so the summary is the ONLY write.
+    expect(writer).toHaveBeenCalledTimes(1);
+    const [projectId, change] = writer.mock.calls[0] as unknown as [number, ReviewItemCreate];
+    expect(projectId).toBe(7);
+    expect(change.kind).toBe('finding');
+    expect(change.severity).toBe('info');
+    expect(change.blocking).toBe(false);
+    expect(change.runId).toBe('run-1');
+    expect(change.payload).toMatchObject({ category: 'eval' });
+    expect(change.title).toMatch(/^Ad-hoc eval: .+ \(.+\/100\)$/);
+    // Body carries the rollup: overall + CI + per-dimension lines.
+    expect(change.body).toContain('**Overall:');
+    expect(change.body).toContain('95% CI');
+    expect(change.body).toContain('**Per dimension**');
+  });
+
+  it('does NOT write the summary for an automatic (origin NULL) row', async () => {
+    const db = noExistingFindings(); // evalRunRow() has no origin => NULL
+    const writer = vi.fn(async () => ({ reviewItemId: 'ri' }));
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: writer,
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(writer).not.toHaveBeenCalled();
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
+  });
+
+  it('a summary-write failure never fails the eval (still complete, never failed)', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: vi.fn(async () => {
+        throw new Error('review queue exploded');
+      }),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', RUBRIC_VERSION);
+    await worker._queue().onIdle();
+
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
+    expect(db.runs.some((r) => r.sql.includes("eval_status = 'failed'"))).toBe(false);
+  });
+
+  it('runAdHoc delegates to the ad-hoc snapshot and does NOT swallow its errors', async () => {
+    // The auto trigger swallows; the ad-hoc entry point must propagate so the MCP
+    // handler can answer the waiting caller. A run row that is absent makes the
+    // snapshot return rejected/run_not_found rather than throw, so assert both:
+    // the delegated result, and that a thrown DB fault surfaces.
+    const okDb = new FakeDb(() => undefined, () => []);
+    const worker = EvalWorker.initialize(okDb, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    expect(await worker.runAdHoc('missing')).toEqual({
+      outcome: 'rejected',
+      reason: 'run_not_found',
+    });
+
+    const throwingDb = new FakeDb(() => {
+      throw new Error('db down');
+    }, () => []);
+    const throwingWorker = EvalWorker.initialize(throwingDb, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    await expect(throwingWorker.runAdHoc('run-1')).rejects.toThrow('db down');
   });
 
   it('stop() pauses the queue', async () => {
