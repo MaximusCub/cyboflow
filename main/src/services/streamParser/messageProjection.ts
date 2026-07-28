@@ -231,8 +231,15 @@ export class MessageProjection {
     // already suppressed here and re-attached to the parent's `childToolCalls`
     // below; `text`/`thinking` simply never got the same guard. The user-event
     // side has carried the mirror image of this guard since 2026-06-22 (Step 3 of
-    // projectUserEvent). Nothing is lost: the sub-agent's tool calls still render
-    // nested, and its final report is the dispatching tool's `tool_result`.
+    // projectUserEvent).
+    //
+    // The sub-agent's tool calls still render nested. Its FINAL REPORT does NOT
+    // come from the dispatching tool's `tool_result` — SDK >=0.3.201 backgrounds
+    // Agent-tool dispatches, so that result is only the spawn ack ("Async agent
+    // launched successfully…") and nothing patches it when the task settles. The
+    // report arrives separately as a `system`/`task_notification` event, which
+    // TypedEventNarrowing currently drops as `__unknown__` — so the report is not
+    // rendered anywhere today. Known gap; the parent's own turn usually relays it.
     const isSubAgentTurn = Boolean(event.parent_tool_use_id);
     for (const block of content) {
       if (block.type === 'text' && !isSubAgentTurn && block.text.trim()) {
