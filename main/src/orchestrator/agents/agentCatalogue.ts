@@ -28,7 +28,7 @@ import { parseBundledAgent } from './bundledAgentParser';
  * widening this union is a compile error, which is the point: the role must stay
  * a closed set the Agents gallery can group by, not a bare `string`.
  */
-export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound' | 'ship' | 'verify-setup';
+export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound' | 'ship' | 'verify-setup' | 'launch';
 
 /**
  * One fully-parsed built-in agent. `name` is the frontmatter `name:`

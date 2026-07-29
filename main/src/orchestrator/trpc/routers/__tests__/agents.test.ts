@@ -122,6 +122,7 @@ function makeWiredCaller(rawDb: Database.Database): ReturnType<typeof appRouter.
 
 const ALL_CANONICAL_KEYS = [
   'context',
+  'interview',
   'research',
   'verify-setup',
   'ui-prototype',

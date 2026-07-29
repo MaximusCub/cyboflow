@@ -69,8 +69,8 @@ describe('AC-P0-3: no phantom labels remapped', () => {
 });
 
 describe('CANONICAL_AGENT_KEYS shape + isCanonicalAgentKey guard', () => {
-  it('has exactly 17 canonical keys', () => {
-    expect(CANONICAL_AGENT_KEYS.length).toBe(17);
+  it('has exactly 18 canonical keys', () => {
+    expect(CANONICAL_AGENT_KEYS.length).toBe(18);
   });
 
   it('includes the verify-setup flow agent', () => {
@@ -78,6 +78,12 @@ describe('CANONICAL_AGENT_KEYS shape + isCanonicalAgentKey guard', () => {
     // ONE agent whose key equals its workflow name; a missing key here would make
     // every verify-setup step fall back to `general-purpose` at spawn time.
     expect(isCanonicalAgentKey('verify-setup')).toBe(true);
+  });
+
+  it('includes the launch flow interview agent', () => {
+    // Launch's one flow-owned agent (no planner/sprint source); a missing key
+    // here would make its interview steps fall back to `general-purpose`.
+    expect(isCanonicalAgentKey('interview')).toBe(true);
   });
 
   it('returns true for a member and false for a non-member', () => {

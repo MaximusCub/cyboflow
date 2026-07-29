@@ -39,6 +39,7 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
 };
 
 const WORKFLOW_LABEL: Record<CyboflowWorkflowName, string> = {
+  launch: 'Launch',
   planner: 'Planner',
   sprint: 'Sprint',
   compound: 'Compound',

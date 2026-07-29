@@ -340,8 +340,12 @@ export interface WorkflowRunListRow {
  * The five user-facing built-in flows in cyboflow v1.
  *
  * Narrowed from the historical SoloFlow set of five: `planner`, `sprint`,
- * `compound`, `ship`, and `verify-setup` are cyboflow-native flows that write via
- * the `cyboflow_*` MCP tools, never `.soloflow/` files. The dropped `prune` flow
+ * `compound`, `ship`, `verify-setup`, and `launch` are cyboflow-native flows that
+ * write via the `cyboflow_*` MCP tools, never `.soloflow/` files. `launch` is the
+ * super-planner for a brand-new project — an in-depth interview produces a
+ * project brief, the brief decomposes into an idea set, and the foundation
+ * ideas become execution-ready epics and tasks; it ends at the approved
+ * backlog and never materializes a sprint itself. The dropped `prune` flow
  * keeps its prose under `docs/workflows-future/` for a future rebuild. The
  * internal `__quick__` sentinel is NOT a member here — it is filtered out of the
  * picker and handled separately by the quick-session pipeline.
@@ -358,6 +362,12 @@ export interface WorkflowRunListRow {
  * needs its flow `.md` + agent bundle on disk and a decision on the
  * code-review-eval auto-entry posture (`snapshotRunForEval`). See
  * `docs/proposals/verification-setup-flow.md` §5.1, which costs this out.
+ *
+ * ORDER MATTERS: `agentCatalogue.loadBuiltInAgents` walks this tuple and dedupes
+ * bundled agent basenames FIRST-WINS, so `launch` — whose bundle copies several
+ * planner/sprint agents verbatim (context/research/ui-prototype/architecture/
+ * adversarial-review/epics/tasks) — must stay LAST so those originating
+ * workflows stay the canonical `role` owner.
  *
  * A parallel sprint is a SINGLE session-hosted `sprint` run seeded with N task
  * ids: the sprint ORCHESTRATOR AGENT analyzes the task dependency DAG itself,
@@ -377,6 +387,8 @@ export const CYBOFLOW_WORKFLOW_NAMES = [
   'compound',
   'ship',
   'verify-setup',
+  // LAST on purpose — see "ORDER MATTERS" above (first-wins agent dedup).
+  'launch',
 ] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
@@ -1255,6 +1267,172 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: 'Final "merge in changes" gate over the committed runbook + repo diff and the per-modality proof outcomes (proven, or still an unproven draft with its diagnosis) — approve to make the branch mergeable, reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // launch — the super-planner for a brand-new project: an in-depth interview
+  // produces a project brief, the brief decomposes into an ordered idea set,
+  // and the foundation ("initial build") ideas become execution-ready epics
+  // and tasks. Ends at the approved backlog — Launch never materializes a
+  // sprint; Sprint/Ship run afterwards against the tasks it created. Reuses
+  // planner's approve-plan / decompose step ids so the hidden-draft reveal and
+  // idea-retirement machinery apply unchanged.
+  launch: {
+    id: 'launch',
+    phases: [
+      {
+        id: 'interview',
+        label: 'Interview',
+        color: '#3b6dd6',
+        steps: [
+          {
+            id: 'interview',
+            name: 'Project interview',
+            agent: 'interview',
+            mcps: ['filesystem', 'web-search'],
+            retries: 0,
+            desc: 'In-depth multi-round interview (up to 4 rounds of multiple-choice questions) covering vision, users, core loop, MVP boundary, stack, data, and risks.',
+          },
+          {
+            id: 'project-brief',
+            name: 'Project brief',
+            agent: 'interview',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Synthesize the interview into a self-contained project brief — vision, MVP scope, technical direction, data sketch, and build sequence.',
+            outputArtifact: { atype: 'project-brief', label: 'Project brief' },
+          },
+          {
+            id: 'approve-brief',
+            name: 'Approve brief',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You approve, revise, or reject the project brief before any decomposition.',
+          },
+        ],
+      },
+      {
+        id: 'ideas',
+        label: 'Ideas',
+        color: '#8b5cf6',
+        steps: [
+          {
+            id: 'ideas',
+            name: 'Decompose into ideas',
+            agent: 'interview',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Split the approved brief into an ordered idea set (aim 4-8) with a 1-3 idea initial build set; each idea lands on the board with a short stub.',
+          },
+          {
+            id: 'approve-ideas',
+            name: 'Approve ideas',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You approve or deny each idea in the set via the joint batch gate.',
+          },
+        ],
+      },
+      {
+        id: 'refine',
+        label: 'Refine',
+        color: '#5a4ad6',
+        steps: [
+          {
+            id: 'expand-spec',
+            name: 'Complete idea specs',
+            agent: 'context',
+            mcps: ['filesystem', 'web-search', 'context7'],
+            retries: 0,
+            desc: 'Expand each approved initial-build idea into a full spec (ungated), preserving the approved stub; research the proposed stack as needed.',
+          },
+          {
+            id: 'ui-prototype',
+            name: 'UI prototype',
+            agent: 'ui-prototype',
+            mcps: ['filesystem'],
+            retries: 1,
+            optional: true,
+            desc: 'Optional combined concept mockup when an initial-build idea has meaningful UI surface.',
+            outputArtifact: { atype: 'ui-prototype', label: 'UI prototype' },
+          },
+          {
+            id: 'architecture',
+            name: 'Architecture design',
+            agent: 'architecture',
+            mcps: ['filesystem'],
+            retries: 1,
+            optional: true,
+            desc: 'Optional project-level architecture (stack, repo layout, data model, seams), folded into the foundation idea.',
+            outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+          },
+          {
+            id: 'adversarial-review',
+            name: 'Adversarial review',
+            agent: 'adversarial-review',
+            mcps: ['filesystem'],
+            retries: 0,
+            optional: true,
+            desc: 'Stress-test brief + specs + design surfaces; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate.',
+          },
+          {
+            id: 'approve-design',
+            name: 'Approve design',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            optional: true,
+            human: true,
+            desc: 'You review the prototype and/or architecture before decomposition. Skipped when neither ran.',
+          },
+        ],
+      },
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#a87a2c',
+        steps: [
+          {
+            id: 'epics',
+            name: 'Create epics',
+            agent: 'epics',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Epic breakdown per initial-build idea — a full tree for a large idea; otherwise one fallback epic whenever an idea yields more than one task.',
+          },
+          {
+            id: 'tasks',
+            name: 'Fill out task details',
+            agent: 'tasks',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Capture each initial-build task via cyboflow_create_task with acceptance criteria and idea lineage.',
+            outputArtifact: { atype: 'decomposed-stories', label: 'Decomposed stories' },
+          },
+          {
+            id: 'approve-plan',
+            name: 'Approve task plan',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You sign off on the initial build plan before tasks queue for sprint.',
+          },
+          {
+            id: 'decompose',
+            name: 'Archive idea',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'Confirm archiving the decomposed foundation idea(s); later phase ideas stay on the backlog. Ends the run.',
           },
         ],
       },

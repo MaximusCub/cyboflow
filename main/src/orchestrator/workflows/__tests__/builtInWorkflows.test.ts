@@ -4,7 +4,7 @@
  *
  * Coverage:
  *  1. Maps EXACTLY the cyboflow built-in names (planner + sprint + compound +
- *     ship + verify-setup), keyed by CYBOFLOW_WORKFLOW_NAMES.
+ *     ship + verify-setup + launch), keyed by CYBOFLOW_WORKFLOW_NAMES.
  *  2. Each descriptor path points at an existing, readable, non-empty `.md`
  *     prompt body alongside the module.
  *  3. The prompt bodies are self-contained: no `.soloflow` / `IDEA-NNN.md` /
@@ -18,10 +18,10 @@ import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../sh
 import { CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT } from '../../../../../shared/types/agentIdentity';
 
 describe('buildBuiltInWorkflows', () => {
-  it('maps exactly the cyboflow built-in names (planner + sprint + compound + ship + verify-setup)', () => {
+  it('maps exactly the cyboflow built-in names (planner + sprint + compound + ship + verify-setup + launch)', () => {
     const descriptors = buildBuiltInWorkflows();
     const names = descriptors.map((d) => d.name).sort();
-    expect(names).toEqual(['compound', 'planner', 'ship', 'sprint', 'verify-setup']);
+    expect(names).toEqual(['compound', 'launch', 'planner', 'ship', 'sprint', 'verify-setup']);
     // Keyed by CYBOFLOW_WORKFLOW_NAMES — same set, no extras, no omissions.
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
   });

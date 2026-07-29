@@ -61,21 +61,22 @@ const TERMINAL_SKIP_STATUSES = new Set<string>(
 
 /**
  * Workflow names whose steps are permitted to auto-mint the templated planner
- * atypes ('idea-spec' / 'decomposed-stories'). A custom/edited NON-planner step
- * that declares one of these atypes would otherwise mint against the run's owned
- * ideas (finding H-automint-2). The atypes are planner-only by design, so a
- * non-planner workflow declaring them is fail-soft skipped.
+ * atypes ('idea-spec' / 'decomposed-stories'). A custom/edited step outside this
+ * set that declares one of these atypes would otherwise mint against the run's
+ * owned ideas (finding H-automint-2). The atypes are planner/launch-only by
+ * design — launch is a multi-idea planning flow (mint identical to planner's) —
+ * so a workflow outside this set declaring them is fail-soft skipped.
  */
-const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
+const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner', 'launch']);
 
 /**
  * Workflows whose steps are permitted to auto-mint the templated 'arch-design'
- * atype. Unlike idea-spec/decomposed-stories (planner-only), the optional
- * architecture-design step exists on BOTH planner and ship (head of the Refine
- * phase), so both mint. A custom non-planner/ship workflow declaring the atype
- * is fail-soft skipped, mirroring TEMPLATED_ATYPE_WORKFLOWS.
+ * atype. Unlike idea-spec/decomposed-stories (planner/launch-only), the optional
+ * architecture-design step exists on planner, ship, AND launch (head of the
+ * Refine phase), so all three mint. A custom workflow outside this set declaring
+ * the atype is fail-soft skipped, mirroring TEMPLATED_ATYPE_WORKFLOWS.
  */
-const ARCH_DESIGN_WORKFLOWS = new Set<string>(['planner', 'ship']);
+const ARCH_DESIGN_WORKFLOWS = new Set<string>(['planner', 'ship', 'launch']);
 
 /**
  * Workflows whose RUN START mints the templated baselines (idea-spec +
@@ -104,8 +105,12 @@ const ARCH_DESIGN_WORKFLOWS = new Set<string>(['planner', 'ship']);
  * hook on every planner 'running' transition — the first one after the idea
  * exists mints it, and the idempotent (runId, atype) UPSERT makes every later
  * call a no-op re-derive.
+ *
+ * Launch mirrors planner here: its ideas are created during the 'ideas' step
+ * (not yet present at the initial 'interview' running), so the same
+ * fires-on-every-'running' / idempotent-UPSERT reasoning applies unchanged.
  */
-const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship']);
+const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship', 'launch']);
 
 /**
  * Workflows whose templated baselines are CONTENT-DRIVEN: the deliverable tabs
@@ -113,10 +118,12 @@ const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship
  * write) rather than wholesale at run start. A seeded planner/ship mints its
  * idea-spec at start (the idea exists) but SKIPS decomposed-stories until the
  * first epic/task lands; a raw-prompt planner mints nothing at start (no idea
- * yet) and relies entirely on handleEntityWrite. Sprint stays run-start-driven —
- * its decomposition pre-exists, so both baselines are real at start.
+ * yet) and relies entirely on handleEntityWrite. Launch mints nothing at start
+ * either — its ideas don't exist until the 'ideas' step — and relies entirely on
+ * handleEntityWrite, same as a raw-prompt planner. Sprint stays run-start-driven
+ * — its decomposition pre-exists, so both baselines are real at start.
  */
-const CONTENT_DRIVEN_WORKFLOWS = new Set<string>(['planner', 'ship']);
+const CONTENT_DRIVEN_WORKFLOWS = new Set<string>(['planner', 'ship', 'launch']);
 
 /**
  * Workflows whose runs are scanned for on-disk screenshot PNGs (the agent-driven
@@ -163,6 +170,7 @@ const RUN_START_STEP_ORIGIN: Record<string, string> = {
   planner: 'Plan · run start',
   sprint: 'Sprint · run start',
   ship: 'Ship · run start',
+  launch: 'Launch · run start',
 };
 
 /** Entity-write provenance labels for the content-driven mint path. */
@@ -176,11 +184,11 @@ const ENTITY_WRITE_STEP_ORIGIN = {
 
 /**
  * Workflows whose runs auto-mint the JOINT batch-gate artifacts (approve-ideas /
- * approve-designs). Only the multi-idea planner has those gates — sprint has no
- * planning gate and ship is single-idea — so the batch surfaces are planner-only,
- * mirroring TEMPLATED_ATYPE_WORKFLOWS being planner-only.
+ * approve-designs). Only the multi-idea planning flows have those gates —
+ * sprint has no planning gate and ship is single-idea — so the batch surfaces
+ * are planner + launch, mirroring TEMPLATED_ATYPE_WORKFLOWS.
  */
-const BATCH_GATE_WORKFLOWS = new Set<string>(['planner']);
+const BATCH_GATE_WORKFLOWS = new Set<string>(['planner', 'launch']);
 
 // ---------------------------------------------------------------------------
 // Step-origin labels (human-readable provenance shown on the artifact tab)
@@ -358,7 +366,7 @@ async function mintIdeaSpecForIdea(
  * every OTHER atype stays strictly one-per-(run, atype).
  *
  * Resolution is the FULL result of `listRunOwnedOrBatchIdeaIds` — the run's
- * owned ideas (planner/ship seed/create them), else the single sprint-batch
+ * owned ideas (planner/ship/launch seed/create them), else the single sprint-batch
  * idea (a standalone sprint owns none) — vs. resolveOriginatingIdeaId, which
  * takes only the FIRST of that same list. No resolvable idea → fail-soft (logs
  * + returns). Each per-idea mint is itself content-gated inside
@@ -779,9 +787,10 @@ async function mintDecomposedStories(
  * normally — the explicit-agent report_step path never sets status terminal.
  *
  * WORKFLOW GATE (finding H-automint-2): the templated atypes ('idea-spec' /
- * 'decomposed-stories') are planner-only by design. A custom/edited non-planner
- * step declaring one of them is fail-soft skipped (it would otherwise mint
- * against the run's owned ideas).
+ * 'decomposed-stories') are planner/launch-only by design (launch is the
+ * multi-idea super-planner). A custom/edited step outside that set declaring
+ * one of them is fail-soft skipped (it would otherwise mint against the run's
+ * owned ideas).
  *
  * FAIL-SOFT: the whole body is wrapped in try/catch — any failure logs via
  * `logger` and returns. NEVER throws (the caller is in the step-transition path).
@@ -825,19 +834,19 @@ export async function handleStepCompletion(
         return;
       }
 
-      // Finding H-automint-2: the templated atypes are planner-only. A custom /
-      // edited non-planner step declaring them is fail-soft skipped.
+      // Finding H-automint-2: the templated atypes are planner/launch-only. A
+      // custom / edited step outside that set declaring them is fail-soft skipped.
       if (meta !== null && (meta.workflowName === null || !TEMPLATED_ATYPE_WORKFLOWS.has(meta.workflowName))) {
         logger?.debug(
-          '[autoMintArtifacts] skipped — templated atype declared by a non-planner workflow',
+          '[autoMintArtifacts] skipped — templated atype declared by a non-planner/launch workflow',
           { runId, stepId, workflowName: meta.workflowName, atype },
         );
         return;
       }
     }
 
-    // arch-design mirrors the templated gates, but is planner+ship (not
-    // planner-only): the optional architecture step exists on both workflows.
+    // arch-design mirrors the templated gates, but is planner+ship+launch (not
+    // planner-only): the optional architecture step exists on all three workflows.
     if (atype === 'arch-design') {
       const meta = resolveRunMeta(db, runId);
 
@@ -851,7 +860,7 @@ export async function handleStepCompletion(
 
       if (meta !== null && (meta.workflowName === null || !ARCH_DESIGN_WORKFLOWS.has(meta.workflowName))) {
         logger?.debug(
-          '[autoMintArtifacts] skipped — arch-design atype declared by a non-planner/ship workflow',
+          '[autoMintArtifacts] skipped — arch-design atype declared by a non-planner/ship/launch workflow',
           { runId, stepId, workflowName: meta.workflowName, atype },
         );
         return;
@@ -946,7 +955,8 @@ export async function handleRunStart(
     // Both mints are CONTENT-GATED inside their helpers: a seeded planner/ship
     // mints idea-spec (the idea has content) and SKIPS decomposed-stories (count
     // 0); a sprint mints both (its decomposition pre-exists). A raw-prompt planner
-    // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
+    // and launch (whose ideas don't exist until the 'ideas' step) mint nothing
+    // here (no resolvable idea yet) and rely on handleEntityWrite.
     //
     // idea-spec + arch-design iterate ALL owned ideas (both per-entity — the
     // multi-idea planner batch surfaces one spec AND one architecture tab per
@@ -959,7 +969,7 @@ export async function handleRunStart(
     // arch-design is content-gated inside its helper (no-op for an idea whose body
     // has no '## Architecture design' section).
     await mintArchDesignForOwnedIdeas(db, runId, projectId, stepOrigin, logger);
-    // Joint batch-gate surfaces (multi-idea planner only) — deterministic, so the
+    // Joint batch-gate surfaces (multi-idea planning flows only) — deterministic, so the
     // combined Approve-ideas / Approve-designs tabs never depend on the agent
     // reporting them. Each is batch-gated (>1 qualifying idea) inside its helper.
     if (BATCH_GATE_WORKFLOWS.has(meta.workflowName)) {
@@ -981,7 +991,7 @@ export async function handleRunStart(
 /**
  * CONTENT-DRIVEN auto-mint hook: fired AFTER a successful entity write (idea /
  * epic / task) by mcpQueryHandler, this mints the templated deliverable the write
- * just made non-empty, for a planner/ship run only (CONTENT_DRIVEN_WORKFLOWS).
+ * just made non-empty, for a planner/ship/launch run only (CONTENT_DRIVEN_WORKFLOWS).
  *
  *   - entityType 'idea'         -> idea-spec        (the spec the planner authored)
  *   - entityType 'epic'|'task'  -> decomposed-stories (the decomposition tree)
@@ -1062,7 +1072,7 @@ export async function handleEntityWrite(
         ENTITY_WRITE_STEP_ORIGIN.archDesign,
         logger,
       );
-      // Joint batch-gate surfaces (multi-idea planner only): refresh the combined
+      // Joint batch-gate surfaces (multi-idea planning flows only): refresh the combined
       // Approve-ideas / Approve-designs tabs as each idea's stub / architecture
       // fills in. Batch-gated (>1 qualifying idea) inside each helper.
       if (BATCH_GATE_WORKFLOWS.has(meta.workflowName)) {

@@ -4,7 +4,9 @@
  * The canonical agent key is the bundled agent's FILE BASENAME — the stem of each
  * `main/src/orchestrator/workflows/<wf>/agents/<key>.md` (equivalently the
  * frontmatter `name:` with the `cyboflow-` prefix stripped; a unit test asserts
- * the two agree for all 17 files). This single key is used by:
+ * the two agree for all 18 files, including launch's `interview` agent at
+ * `main/src/orchestrator/workflows/launch/agents/interview.md`). This single
+ * key is used by:
  *   (i)   `WorkflowStep.agent` in WORKFLOW_DEFINITIONS,
  *   (ii)  the Agents catalogue + gallery,
  *   (iii) the `agent_overrides.agent_key` column, and
@@ -20,6 +22,7 @@
 
 export const CANONICAL_AGENT_KEYS = [
   'context',
+  'interview',
   'research',
   'ui-prototype',
   'architecture',

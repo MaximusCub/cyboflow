@@ -433,10 +433,11 @@ const APPROVE_PLAN_STEP_ID = 'approve-plan';
 
 /**
  * Plan-gated built-in workflow names — the FALLBACK plan-gated signal used only
- * when a run's steps_snapshot_json is absent/unparseable (both built-ins carry an
- * approve-plan gate). The primary signal is the snapshot itself.
+ * when a run's steps_snapshot_json is absent/unparseable (all three built-ins
+ * carry an approve-plan gate; `launch` reuses planner's `approve-plan` step id).
+ * The primary signal is the snapshot itself.
  */
-const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship']);
+const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship', 'launch']);
 
 // ---------------------------------------------------------------------------
 // TaskChangeRouter

@@ -88,8 +88,10 @@ const READY_FOR_DEVELOPMENT_POSITION = 6;
  * step snapshot is absent/unparseable (the PRIMARY signal is the snapshot itself
  * containing APPROVE_PLAN_STEP_ID). Used by the F3 completion reveal to avoid
  * stamping plan_approved_at on a non-plan-gated run (e.g. a completed sprint).
+ * `launch` reuses planner's `approve-plan` step id (its Plan phase), so it
+ * belongs here too.
  */
-const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship']);
+const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship', 'launch']);
 
 /**
  * FIX-STAGE-MODEL (decompose): the planner step id whose answer is the separate

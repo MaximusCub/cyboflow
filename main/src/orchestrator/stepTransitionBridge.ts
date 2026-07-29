@@ -65,6 +65,7 @@ const INITIAL_STEP_IDS: Record<CyboflowWorkflowName, string> = {
   compound:       'load-sprint',
   ship:           'context',
   'verify-setup': 'inspect',
+  launch:         'interview',
 } as const;
 
 /**
