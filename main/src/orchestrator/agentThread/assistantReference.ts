@@ -17,7 +17,7 @@
  *
  * Every body is USER-FACING truth distilled from the product docs (repo
  * `CLAUDE.md`, `docs/cyboflow_system_design.md`, `docs/ARCHITECTURE.md`, and the
- * four `workflows/*.md` prompt bodies) — what the feature is, how a user drives
+ * five `workflows/*.md` prompt bodies) — what the feature is, how a user drives
  * it, the gates they will see, the artifacts it produces, and practical
  * caveats. It deliberately carries NO internal code structure (no file paths,
  * table names, or class names) — that belongs in the repo docs, not in the
@@ -36,16 +36,21 @@ export interface AssistantReferenceTopic {
 export const ASSISTANT_REFERENCE: Record<string, AssistantReferenceTopic> = {
   'workflows-overview': {
     title: 'Workflows overview',
-    oneLiner: 'The four built-in flows — Planner, Sprint, Compound, Ship — and how they relate.',
+    oneLiner: 'The five built-in flows — Launch, Planner, Sprint, Compound, Ship — and how they relate.',
     body: `# Workflows overview
 
-cyboflow ships **four built-in flows**. A flow is a scripted sequence of steps
+cyboflow ships **five built-in flows**. A flow is a scripted sequence of steps
 that drives Claude Code through a piece of work, pausing at **human gates** where
 you approve, revise, or reject before it continues. Each flow runs against a real
 repo in its own isolated git worktree.
 
-## The four flows
+## The five flows
 
+- **Launch** — the project bootstrap. It interviews a brand-new project into a
+  project brief (an approve-brief gate), decomposes the brief into an ordered
+  idea set (an approve-ideas batch gate), then refines and decomposes the
+  foundation ideas into epics and tasks that an approve-plan gate reveals. Later
+  ideas stay as backlog stubs for a dedicated Planner run.
 - **Planner** — turns a raw idea into a reviewed backlog. It sharpens the idea
   into a short stub you approve, expands it into a full spec, then decomposes it
   into execution-ready tasks. It does **not** write code — its output is planned
@@ -63,6 +68,7 @@ repo in its own isolated git worktree.
 
 ## Choosing one
 
+- Starting a brand-new project with little more than a raw idea → **Launch**.
 - Have a fuzzy idea and want a reviewed plan, but not code yet → **Planner**.
 - Have approved tasks ready to build → **Sprint**.
 - Want an idea taken end to end in one run → **Ship**.

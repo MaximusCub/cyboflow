@@ -4,10 +4,10 @@
  * Re-exports the canonical CLI tool vocabulary (the 8 tools an agent's
  * frontmatter `tools:` line may list — `cyboflow_*` MCP write tools are
  * deliberately excluded) and maps a workflow ROLE to an EXISTING repo
- * `--color-phase-*` design token. There is NO `--color-phase-planner` /
- * `-sprint` var, so the planner/sprint/compound roles fold onto the closest
- * phase color (plan / execute / compound respectively); any other role string
- * falls back to a neutral text token.
+ * `--color-phase-*` design token. There is NO `--color-phase-launch` /
+ * `-planner` / `-sprint` var, so the launch/planner/sprint/compound roles fold
+ * onto the closest phase color (plan / plan / execute / compound
+ * respectively); any other role string falls back to a neutral text token.
  *
  * `estimateTokens` is the front-end prompt-length heuristic used for the
  * "~N tokens" stat (the authoritative `estPromptTokens` is server-computed on
@@ -20,12 +20,14 @@ export { CLI_TOOLS };
 export type { CliTool };
 
 /**
- * Map a workflow role to an existing repo phase color CSS var. planner→plan,
- * sprint→execute, compound→compound. Anything else (custom-agent roles, the
- * raw canonical-key fallbacks) gets a neutral text color.
+ * Map a workflow role to an existing repo phase color CSS var. launch→plan,
+ * planner→plan, sprint→execute, compound→compound. Anything else (custom-agent
+ * roles, the raw canonical-key fallbacks) gets a neutral text color.
  */
 export function roleColorVar(role: string): string {
   switch (role) {
+    case 'launch':
+      return 'var(--color-phase-plan)';
     case 'planner':
       return 'var(--color-phase-plan)';
     case 'sprint':
@@ -41,6 +43,7 @@ export function roleColorVar(role: string): string {
 
 /** Lookup-style alias for `roleColorVar` (kept for the documented ROLE_COLOR name). */
 export const ROLE_COLOR = {
+  launch: 'var(--color-phase-plan)',
   planner: 'var(--color-phase-plan)',
   sprint: 'var(--color-phase-execute)',
   compound: 'var(--color-phase-compound)',

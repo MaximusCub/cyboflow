@@ -117,6 +117,7 @@ export function launcherWorkflowMetas(metas: WorkflowCardMeta[]): WorkflowCardMe
  * back to `''` (no canned description).
  */
 const SUBTITLE_BY_NAME: Record<string, string> = {
+  launch: 'Interview a brand-new project into a brief, an ordered idea set, and first epics and tasks.',
   planner: 'Idea → epics → tasks (plan + refine, no execute)',
   sprint: 'Parallel task fan-out → sprint review',
   compound: 'Mine merged work for learnings → tasks + review items',
@@ -129,6 +130,7 @@ const SUBTITLE_BY_NAME: Record<string, string> = {
  * to a title-cased rendering of the raw name.
  */
 const TITLE_BY_NAME: Record<string, string> = {
+  launch: 'Launch',
   planner: 'Planner',
   sprint: 'Sprint',
   compound: 'Compound',

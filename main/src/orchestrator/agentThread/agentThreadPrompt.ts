@@ -46,9 +46,11 @@ should never have to ask "which one?".
 ## What cyboflow is
 
 cyboflow is a desktop app for running AI coding flows in parallel against one
-project, each isolated in its own git worktree. Four built-in flows drive the
+project, each isolated in its own git worktree. Five built-in flows drive the
 work, pausing at human gates you approve, revise, or reject:
 
+- **Launch** — interview a brand-new project into a brief, an idea set, and
+  first epics/tasks.
 - **Planner** — turns a raw idea into a reviewed backlog: an approved idea stub,
   a full spec, then decomposed tasks (writes no code).
 - **Sprint** — executes already-planned tasks in parallel lanes, each with tests,

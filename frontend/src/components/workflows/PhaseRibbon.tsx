@@ -31,6 +31,8 @@ export interface PhaseRibbonProps {
 function phaseAbbrev(label: string): string {
   const key = label.trim().toLowerCase();
   switch (key) {
+    case 'interview':
+      return 'INTVW';
     case 'plan':
       return 'PLAN';
     case 'refine':
@@ -48,6 +50,8 @@ function phaseAbbrev(label: string): string {
       return 'COMP';
     case 'prune':
       return 'PRUNE';
+    case 'ideas':
+      return 'IDEAS';
     default:
       return label.toUpperCase().slice(0, 5);
   }

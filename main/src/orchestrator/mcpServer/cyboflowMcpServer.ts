@@ -269,7 +269,7 @@ const GLOBAL_AGENT_TOOLS = [
   {
     name: 'cyboflow_reference',
     description:
-      "READ-ONLY deeper product reference on cyboflow's features (the four built-in flows, sessions/worktrees, the backlog & board, the review queue, experiments & variants). Call with NO topic (or an empty one) to get the table of contents — every topic key plus a one-line summary — then call again with a `topic` key for that section's full markdown. Serves static, curated content: use it when the user asks how a cyboflow feature works or what a flow does. An unknown topic is rejected with the list of valid keys.",
+      "READ-ONLY deeper product reference on cyboflow's features (the five built-in flows, sessions/worktrees, the backlog & board, the review queue, experiments & variants). Call with NO topic (or an empty one) to get the table of contents — every topic key plus a one-line summary — then call again with a `topic` key for that section's full markdown. Serves static, curated content: use it when the user asks how a cyboflow feature works or what a flow does. An unknown topic is rejected with the list of valid keys.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -772,7 +772,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               // auto-mint-only (reportable:false). See the validAtypes comment in
               // the CallTool handler below.
               enum: REPORTABLE_ARTIFACT_ATYPES,
-              description: 'Artifact type (required). ui-prototype renders a static HTML+CSS mockup in a sandboxed frame from a file you already wrote (no dev server, no JS; inline html is rejected); interactive-prototype is the JS-enabled design-mode canvas (same on-disk file contract; scripts run, network egress still blocked); generic renders an embedded live canvas from a {url}; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); verify-runbook renders the same way for the verify-setup flow’s runbook proposal (the surface its approve-runbook gate reviews, enriched in place with the proof outcomes); approve-ideas / approve-designs are the per-idea Approve/Deny gate surfaces (auto-created — open the gate via cyboflow_report_finding); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
+              description: 'Artifact type (required). ui-prototype renders a static HTML+CSS mockup in a sandboxed frame from a file you already wrote (no dev server, no JS; inline html is rejected); interactive-prototype is the JS-enabled design-mode canvas (same on-disk file contract; scripts run, network egress still blocked); generic renders an embedded live canvas from a {url}; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); verify-runbook renders the same way for the verify-setup flow’s runbook proposal (the surface its approve-runbook gate reviews, enriched in place with the proof outcomes); project-brief renders a markdown doc from payload_json.markdown — the Launch flow’s project brief; approve-ideas / approve-designs are the per-idea Approve/Deny gate surfaces (auto-created — open the gate via cyboflow_report_finding); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
@@ -924,7 +924,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_list_workflows',
         description:
-          "List the workflows available in THIS run's project (the built-in planner/sprint/compound/ship plus any custom flows), reconciling the in-repo built-ins first. Read-only, run-bound (no project argument). Returns COMPACT rows (id, name, scope global|project, is_built_in, permission_mode, has_custom_spec) WITHOUT the full step graph — use cyboflow_get_workflow to fetch one flow's definition. Call this first to discover workflow ids before editing.",
+          "List the workflows available in THIS run's project (the built-in launch/planner/sprint/compound/ship plus any custom flows), reconciling the in-repo built-ins first. Read-only, run-bound (no project argument). Returns COMPACT rows (id, name, scope global|project, is_built_in, permission_mode, has_custom_spec) WITHOUT the full step graph — use cyboflow_get_workflow to fetch one flow's definition. Call this first to discover workflow ids before editing.",
         inputSchema: { type: 'object', properties: {}, required: [] },
       },
       {

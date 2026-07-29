@@ -1,6 +1,6 @@
 # cyboflow
 
-cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships four built-in flows — **Planner**, **Sprint**, **Compound**, and **Ship** — whose prompt bodies live in `main/src/orchestrator/workflows/*.md`. It is a fork of [Crystal](https://github.com/stravu/crystal) (tag `0.3.5`), heavily narrowed and rebuilt; `docs/ARCHITECTURE.md` describes what exists today.
+cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships five built-in flows — **Launch**, **Planner**, **Sprint**, **Compound**, and **Ship** — whose prompt bodies live in `main/src/orchestrator/workflows/*.md`. It is a fork of [Crystal](https://github.com/stravu/crystal) (tag `0.3.5`), heavily narrowed and rebuilt; `docs/ARCHITECTURE.md` describes what exists today.
 
 ## Two layers: running INSIDE cyboflow vs. working ON cyboflow
 

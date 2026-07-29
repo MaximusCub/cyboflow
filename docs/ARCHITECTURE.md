@@ -3,7 +3,8 @@
 ## Purpose
 
 Cyboflow is a macOS desktop app that orchestrates Claude Code as a multi-agent workflow runner.
-It is **self-contained**: the four user-facing flows — **Planner**, **Sprint**,
+It is **self-contained**: the five user-facing flows — **Launch** (interviews a brand-new project
+into a brief, an idea set, and first epics/tasks), **Planner**, **Sprint**,
 **Compound** (mines merged runs for durable learnings, launched from the Insights view), and
 **Ship** (planner + sprint end to end) — and their prompt bodies ship inside the app source
 (`main/src/orchestrator/workflows/`). There is **no
@@ -14,7 +15,7 @@ findings, human-gate decisions, and manual tasks — into a single workspace-sco
 queue**. That review queue, backed by a DB-canonical `review_items` inbox, is the product
 differentiator.
 
-Planner, Sprint, and Ship write the app's own DB-canonical **3-table entity model** (`ideas` /
+Launch, Planner, Sprint, and Ship write the app's own DB-canonical **3-table entity model** (`ideas` /
 `epics` / `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or
 `TASK-NNN.md` files. All entities share a single 4-stage board (see "Data Model"). The
 `__quick__` sentinel flow remains an internal, picker-hidden lightweight path.
