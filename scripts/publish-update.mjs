@@ -46,8 +46,10 @@
 import { createReadStream, statSync, readdirSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Agent as HttpsAgent } from 'node:https';
 import { S3Client, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(__dirname, '..', 'dist-electron');
@@ -143,6 +145,16 @@ if (onlySet) {
 console.log(`\nPublishing ${artifacts.length} ${VARIANT} artifact(s) → r2://${bucket}/${VARIANT}/ (${PUBLIC_BASE})`);
 if (dryRun) console.log('(dry run — nothing will be uploaded)\n');
 
+// When R2_UPLOAD_NO_KEEPALIVE=1, give each HTTP request a FRESH TCP connection
+// (keepAlive off). Some upload paths (VPN/DLP/MTU) reset a connection once a
+// cumulative byte/time threshold is crossed; with keep-alive the SDK reuses one
+// socket across all multipart parts, so the bytes accumulate and the reset hits.
+// A fresh short-lived connection per (small) part can slip under that threshold.
+const noKeepAlive = process.env.R2_UPLOAD_NO_KEEPALIVE === '1';
+const requestHandler = noKeepAlive
+  ? new NodeHttpHandler({ httpsAgent: new HttpsAgent({ keepAlive: false, maxSockets: uploadQueueSize }) })
+  : undefined;
+
 const client =
   dryRun || !endpoint
     ? null
@@ -150,6 +162,7 @@ const client =
         region: 'auto',
         endpoint,
         credentials: { accessKeyId, secretAccessKey },
+        ...(requestHandler ? { requestHandler } : {}),
       });
 
 for (const name of artifacts) {
