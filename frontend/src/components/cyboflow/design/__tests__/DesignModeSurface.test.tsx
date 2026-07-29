@@ -1,13 +1,17 @@
 /**
  * DesignModeSurface tests — the v0.5 fullscreen design takeover shell.
  *
- * ClaudePanel, DesignStage, and DesignApproveControl are stubbed (vi.mock) so
- * the tests exercise the surface's own wiring: exit → store, the missing-session
- * placeholder, the Approve render gate, and the prototype threaded to the stage.
- * The session/panel stores are seeded via setState; useSessionArtifactsList is
- * mocked with a per-test artifact list; useEnsureClaudePanel is a no-op.
+ * ClaudePanel, DesignStage, DesignApproveControl, DesignCommentMode, and
+ * useDesignComments are stubbed (vi.mock) so the tests exercise the surface's
+ * own wiring: exit → store, the missing-session placeholder, the Approve
+ * render gate, the prototype threaded to the stage, and the comment-mode
+ * toggle/swap plumbing — NOT useDesignComments' own capture/sanitize/host/
+ * send logic (covered by its own hook tests). The session/panel stores are
+ * seeded via setState; useSessionArtifactsList is mocked with a per-test
+ * artifact list; useEnsureClaudePanel is a no-op.
  */
 import '@testing-library/jest-dom';
+import { useEffect } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Artifact } from '../../../../../../shared/types/artifacts';
@@ -16,8 +20,9 @@ import type { ToolPanel } from '../../../../../../shared/types/panels';
 import { useDesignModeStore } from '../../../../stores/designModeStore';
 import { useSessionStore } from '../../../../stores/sessionStore';
 import { usePanelStore } from '../../../../stores/panelStore';
+import type { UseDesignCommentsResult } from '../../../../hooks/useDesignComments';
 
-// --- stubs for the three heavy children -------------------------------------
+// --- stubs for the heavy children -------------------------------------------
 vi.mock('../../../panels/claude/ClaudePanel', () => ({
   ClaudePanel: ({ panel, isActive }: { panel: ToolPanel; isActive: boolean }) => (
     <div data-testid="claude-panel-stub" data-panel-id={panel.id} data-active={String(isActive)} />
@@ -25,12 +30,30 @@ vi.mock('../../../panels/claude/ClaudePanel', () => ({
 }));
 
 vi.mock('../DesignStage', () => ({
-  DesignStage: (props: { prototypeArtifact: Artifact | null; sessionId: string }) => (
-    <div
-      data-testid="design-stage-stub"
-      data-session-id={props.sessionId}
-      data-proto-id={props.prototypeArtifact?.id ?? 'none'}
-    />
+  DesignStage: (props: {
+    prototypeArtifact: Artifact | null;
+    sessionId: string;
+    onPrototypeVisibleChange?: (visible: boolean) => void;
+  }) => {
+    // Mirrors the real DesignStage's own effect: fires whenever the resolved
+    // (bytes-backed) prototype changes, so the surface's toggle-enablement
+    // wiring can be exercised without re-implementing DesignStage's precedence.
+    useEffect(() => {
+      props.onPrototypeVisibleChange?.(props.prototypeArtifact !== null);
+    }, [props]);
+    return (
+      <div
+        data-testid="design-stage-stub"
+        data-session-id={props.sessionId}
+        data-proto-id={props.prototypeArtifact?.id ?? 'none'}
+      />
+    );
+  },
+}));
+
+vi.mock('../DesignCommentMode', () => ({
+  DesignCommentMode: (props: { commentUrl: string }) => (
+    <div data-testid="design-comment-mode-stub" data-comment-url={props.commentUrl} />
   ),
 }));
 
@@ -59,6 +82,45 @@ vi.mock('../../../../hooks/useArtifactsList', () => ({
 // --- ensure-claude-panel: no-op ---------------------------------------------
 vi.mock('../../../../hooks/useEnsureClaudePanel', () => ({
   useEnsureClaudePanel: () => vi.fn().mockResolvedValue(undefined),
+}));
+
+// --- useDesignComments: per-test controllable result ------------------------
+function makeDesignCommentsResult(overrides: Partial<UseDesignCommentsResult> = {}): UseDesignCommentsResult {
+  return {
+    status: 'live',
+    errorMessage: null,
+    commentUrl: null,
+    enter: vi.fn().mockResolvedValue(undefined),
+    exit: vi.fn(),
+    hoverBreadcrumb: null,
+    handleInspectorMessage: vi.fn(),
+    composer: null,
+    setComposerPickedIndex: vi.fn(),
+    closeComposer: vi.fn(),
+    composerText: '',
+    setComposerText: vi.fn(),
+    saveComposer: vi.fn().mockResolvedValue(undefined),
+    savingComposer: false,
+    composerDisabledReason: null,
+    drafts: [],
+    editingId: null,
+    startEdit: vi.fn(),
+    editText: '',
+    setEditText: vi.fn(),
+    saveEdit: vi.fn().mockResolvedValue(undefined),
+    cancelEdit: vi.fn(),
+    deleteDraft: vi.fn().mockResolvedValue(undefined),
+    chipStatus: null,
+    send: vi.fn().mockResolvedValue(undefined),
+    sending: false,
+    sendError: null,
+    sendDisabledReason: null,
+    ...overrides,
+  };
+}
+let mockDesignComments: UseDesignCommentsResult = makeDesignCommentsResult();
+vi.mock('../../../../hooks/useDesignComments', () => ({
+  useDesignComments: () => mockDesignComments,
 }));
 
 import { DesignModeSurface } from '../DesignModeSurface';
@@ -111,6 +173,7 @@ function seed(session: Session | null, panel: ToolPanel | null): void {
 describe('DesignModeSurface', () => {
   beforeEach(() => {
     mockArtifacts = [];
+    mockDesignComments = makeDesignCommentsResult();
     useDesignModeStore.setState({ activeDesignSessionId: 'sess-1', plannerPrompt: null });
     seed(makeSession(), makeClaudePanel());
   });
@@ -271,5 +334,78 @@ describe('DesignModeSurface', () => {
       ideaId: 'idea-1',
       ideaTitle: 'Nice Idea',
     });
+  });
+
+  // --- Comment mode (Stage D) -----------------------------------------------
+
+  it('(h) the comment toggle is absent for a static ui-prototype', () => {
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype' })];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-comment-toggle')).not.toBeInTheDocument();
+  });
+
+  it('(h2) the comment toggle is present and enabled for a bytes-backed interactive prototype', () => {
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    const toggle = screen.getByTestId('design-comment-toggle');
+    expect(toggle).toBeInTheDocument();
+    expect(toggle).not.toBeDisabled();
+    expect(toggle).toHaveTextContent('Comment');
+  });
+
+  it('(h3) the comment toggle is absent for the bytes-less interactive-prototype creation stub', () => {
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype', payloadJson: null })];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-comment-toggle')).not.toBeInTheDocument();
+  });
+
+  it('(h4) clicking the toggle in live mode calls designComments.enter()', () => {
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    fireEvent.click(screen.getByTestId('design-comment-toggle'));
+    expect(mockDesignComments.enter).toHaveBeenCalledTimes(1);
+  });
+
+  it('(h5) while entering, the toggle is disabled and reads "Entering comment mode…"', () => {
+    mockDesignComments = makeDesignCommentsResult({ status: 'entering' });
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    const toggle = screen.getByTestId('design-comment-toggle');
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveTextContent('Entering comment mode…');
+  });
+
+  it('(h6) an entry error surfaces inline near the toggle', () => {
+    mockDesignComments = makeDesignCommentsResult({ errorMessage: 'boom' });
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    expect(screen.getByTestId('design-comment-error')).toHaveTextContent('boom');
+  });
+
+  it('(h7) active comment mode swaps in DesignCommentMode, hides (but keeps mounted) the live stage, and the toggle reads "Exit comments"', () => {
+    mockDesignComments = makeDesignCommentsResult({ status: 'active', commentUrl: 'http://127.0.0.1:9/tok/comment/1.html' });
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+
+    const commentMode = screen.getByTestId('design-comment-mode-stub');
+    expect(commentMode).toHaveAttribute('data-comment-url', 'http://127.0.0.1:9/tok/comment/1.html');
+
+    // The live stage stays MOUNTED (hidden, not torn down) — design-mode.md
+    // "Comment mode": prototype JS state must survive a round trip.
+    const stage = screen.getByTestId('design-stage-stub');
+    expect(stage).toBeInTheDocument();
+    expect(stage.parentElement?.className).toContain('hidden');
+
+    const toggle = screen.getByTestId('design-comment-toggle');
+    expect(toggle).toHaveTextContent('Exit comments');
+    expect(toggle).not.toBeDisabled();
+  });
+
+  it('(h8) clicking the toggle while active calls designComments.exit()', () => {
+    mockDesignComments = makeDesignCommentsResult({ status: 'active', commentUrl: 'http://127.0.0.1:9/tok/comment/1.html' });
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    fireEvent.click(screen.getByTestId('design-comment-toggle'));
+    expect(mockDesignComments.exit).toHaveBeenCalledTimes(1);
   });
 });

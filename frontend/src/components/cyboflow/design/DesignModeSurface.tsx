@@ -20,16 +20,19 @@
  * ui-prototype artifact is threaded to BOTH the top-bar Approve control and the
  * stage — the canvas is the single place v1 later swaps in the isolated frame.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useDesignModeStore } from '../../../stores/designModeStore';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { usePanelStore } from '../../../stores/panelStore';
 import { useSessionArtifactsList } from '../../../hooks/useArtifactsList';
 import { useEnsureClaudePanel } from '../../../hooks/useEnsureClaudePanel';
+import { useDesignComments } from '../../../hooks/useDesignComments';
 import { ClaudePanel } from '../../panels/claude/ClaudePanel';
 import { DesignApproveControl } from '../DesignApproveControl';
 import { DesignStage } from './DesignStage';
+import { DesignCommentMode } from './DesignCommentMode';
+import type { InteractivePrototypeCaptureHandle } from './InteractivePrototypeEmbed';
 import type { Artifact } from '../../../../../shared/types/artifacts';
 
 /**
@@ -159,6 +162,25 @@ export function DesignModeSurface(): ReactElement | null {
     void ensureClaudePanel();
   }, [session, claudePanel, ensureClaudePanel]);
 
+  // Comment mode (v1 — design-mode.md "Comment mode"). The BYTES-BACKED
+  // prototype (never the creation-time stub) gates both the toggle and the
+  // stage prop below — a stub has no live frame to capture from.
+  const bytesBackedPrototype = prototypeHasBytes(prototypeArtifact) ? prototypeArtifact : null;
+  const isInteractiveWithBytes = bytesBackedPrototype !== null && bytesBackedPrototype.atype === 'interactive-prototype';
+  const captureRef = useRef<InteractivePrototypeCaptureHandle>(null);
+  const [prototypeVisible, setPrototypeVisible] = useState(false);
+  const designComments = useDesignComments({
+    projectId,
+    runId: isInteractiveWithBytes ? bytesBackedPrototype.runId : null,
+    sessionId: session?.id ?? null,
+    sourceRef: isInteractiveWithBytes ? bytesBackedPrototype.sourceRef : null,
+    atype: 'interactive-prototype',
+    captureRef,
+  });
+  const commentModeActive = designComments.status === 'active' && designComments.commentUrl !== null;
+  const commentToggleDisabled =
+    !isInteractiveWithBytes || (!commentModeActive && (!prototypeVisible || designComments.status === 'entering'));
+
   // Approve success ends the design loop: leave the fullscreen surface and —
   // when the approved idea is resolvable — arm the App-level "start the
   // planner?" prompt (it must outlive this surface's unmount, hence the store).
@@ -226,6 +248,34 @@ export function DesignModeSurface(): ReactElement | null {
               Open in browser ↗
             </button>
           )}
+          {isInteractiveWithBytes && (
+            <>
+              {designComments.errorMessage && (
+                <span data-testid="design-comment-error" className="text-[10px] text-red-500 whitespace-nowrap">
+                  {designComments.errorMessage}
+                </span>
+              )}
+              <button
+                type="button"
+                data-testid="design-comment-toggle"
+                disabled={commentToggleDisabled}
+                onClick={() => {
+                  if (commentModeActive) {
+                    designComments.exit();
+                  } else {
+                    void designComments.enter();
+                  }
+                }}
+                className="text-xs font-medium text-text-secondary hover:text-text-primary whitespace-nowrap disabled:opacity-40 disabled:cursor-default"
+              >
+                {designComments.status === 'entering'
+                  ? 'Entering comment mode…'
+                  : commentModeActive
+                    ? 'Exit comments'
+                    : 'Comment'}
+              </button>
+            </>
+          )}
           {session && approveGateOpen && (
             <DesignApproveControl
               sessionId={session.id}
@@ -248,17 +298,54 @@ export function DesignModeSurface(): ReactElement | null {
           <div className="w-[400px] shrink-0 border-r border-border-primary flex flex-col overflow-hidden">
             <ClaudePanel panel={claudePanel} isActive />
           </div>
-          {/* Center stage: clarify → working → prototype precedence. The stage
-              only receives a BYTES-BACKED prototype — the creation-time stub
-              (no fileName payload) must read as "no prototype yet", not as an
-              unreadable one. */}
-          <DesignStage
-            sessionId={session.id}
-            chatRunId={session.chatRunId ?? null}
-            panelId={claudePanel?.id ?? null}
-            sessionStatus={session.status ?? null}
-            prototypeArtifact={prototypeHasBytes(prototypeArtifact) ? prototypeArtifact : null}
-          />
+          {/* Center stage: clarify → working → prototype precedence, plus the
+              comment-mode swap. The live stage stays MOUNTED (hidden, not
+              unmounted) while comment mode is active — design-mode.md
+              "Comment mode": the prototype's JS state must survive a
+              comment-mode round trip. */}
+          <div className="relative flex-1 min-h-0 flex flex-col">
+            <div className={commentModeActive ? 'hidden' : 'flex-1 min-h-0 flex flex-col'}>
+              <DesignStage
+                sessionId={session.id}
+                chatRunId={session.chatRunId ?? null}
+                panelId={claudePanel?.id ?? null}
+                sessionStatus={session.status ?? null}
+                prototypeArtifact={bytesBackedPrototype}
+                captureRef={captureRef}
+                onPrototypeVisibleChange={setPrototypeVisible}
+              />
+            </div>
+            {commentModeActive && designComments.commentUrl !== null && (
+              <div className="flex-1 min-h-0 flex flex-col">
+                <DesignCommentMode
+                  commentUrl={designComments.commentUrl}
+                  hoverBreadcrumb={designComments.hoverBreadcrumb}
+                  onInspectorMessage={designComments.handleInspectorMessage}
+                  composer={designComments.composer}
+                  onComposerPickedIndex={designComments.setComposerPickedIndex}
+                  onComposerClose={designComments.closeComposer}
+                  composerText={designComments.composerText}
+                  onComposerTextChange={designComments.setComposerText}
+                  onComposerSave={() => void designComments.saveComposer()}
+                  savingComposer={designComments.savingComposer}
+                  composerDisabledReason={designComments.composerDisabledReason}
+                  drafts={designComments.drafts}
+                  editingId={designComments.editingId}
+                  onStartEdit={designComments.startEdit}
+                  editText={designComments.editText}
+                  onEditTextChange={designComments.setEditText}
+                  onSaveEdit={(id) => void designComments.saveEdit(id)}
+                  onCancelEdit={designComments.cancelEdit}
+                  onDeleteDraft={(id) => void designComments.deleteDraft(id)}
+                  chipStatus={designComments.chipStatus}
+                  onSend={() => void designComments.send()}
+                  sending={designComments.sending}
+                  sendError={designComments.sendError}
+                  sendDisabledReason={designComments.sendDisabledReason}
+                />
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <div

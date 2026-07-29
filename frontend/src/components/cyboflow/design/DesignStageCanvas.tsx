@@ -12,25 +12,32 @@
  *     (`StaticPrototypeCanvas`) so this component can dispatch on atype
  *     up front without a conditionally-called hook.
  */
-import type { ReactElement } from 'react';
+import type { ReactElement, Ref } from 'react';
 import { useArtifactHtml } from '../../../hooks/useArtifactHtml';
 import { LiveCanvasEmbed } from '../LiveCanvasEmbed';
-import { InteractivePrototypeEmbed } from './InteractivePrototypeEmbed';
+import { InteractivePrototypeEmbed, type InteractivePrototypeCaptureHandle } from './InteractivePrototypeEmbed';
 import type { Artifact } from '../../../../../shared/types/artifacts';
 
 const FAINT = 'var(--color-text-tertiary)';
 
 interface DesignStageCanvasProps {
   artifact: Artifact;
+  /**
+   * Comment mode's imperative capture handle for the interactive frame
+   * (design-mode.md "Comment mode", invariant 1). Only meaningful — and only
+   * forwarded — for an `interactive-prototype` artifact; the static pipeline
+   * has no live frame to capture from.
+   */
+  captureRef?: Ref<InteractivePrototypeCaptureHandle>;
 }
 
-export function DesignStageCanvas({ artifact }: DesignStageCanvasProps): ReactElement {
+export function DesignStageCanvas({ artifact, captureRef }: DesignStageCanvasProps): ReactElement {
   if (artifact.atype === 'interactive-prototype') {
     return (
       // Same flex-column contract as the static wrapper below (InteractivePrototypeEmbed
       // sizes itself `flex: 1`, same iframe-collapse hazard as LiveCanvasEmbed).
       <div data-testid="design-stage-canvas" className="h-full w-full flex flex-col min-h-0">
-        <InteractivePrototypeEmbed runId={artifact.runId} />
+        <InteractivePrototypeEmbed ref={captureRef} runId={artifact.runId} />
       </div>
     );
   }

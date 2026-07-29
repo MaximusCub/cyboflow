@@ -17,12 +17,13 @@
  *                 working animation.
  *   4. intro    — nothing above applies (idle, pre-kickoff, no artifact yet).
  */
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement, type Ref } from 'react';
 import { useQuestionStore } from '../../../stores/questionStore';
 import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
 import { reduceLiveTail } from '../../../utils/liveTailReducer';
 import { AskUserQuestionCard } from '../../AskUserQuestion/AskUserQuestionCard';
 import { DesignStageCanvas } from './DesignStageCanvas';
+import type { InteractivePrototypeCaptureHandle } from './InteractivePrototypeEmbed';
 import type { Artifact } from '../../../../../shared/types/artifacts';
 
 interface DesignStageProps {
@@ -31,6 +32,18 @@ interface DesignStageProps {
   panelId: string | null;
   sessionStatus: string | null;
   prototypeArtifact: Artifact | null;
+  /** Threaded straight through to DesignStageCanvas — see its doc comment. */
+  captureRef?: Ref<InteractivePrototypeCaptureHandle>;
+  /**
+   * Fired whenever the stage's "showing the live prototype" precedence
+   * (`pending.length === 0 && prototypeArtifact !== null`) changes — the
+   * exact condition the comment-mode toggle gates on (design-mode.md
+   * "Comment mode"), so the surface doesn't need its own duplicate read of
+   * the question queue to answer "is the live canvas actually visible right
+   * now" (it can be hidden behind a clarify gate even with an artifact
+   * present).
+   */
+  onPrototypeVisibleChange?: (visible: boolean) => void;
 }
 
 /** Cosmetic status lines cycled while the agent works. Purely decorative. */
@@ -108,6 +121,8 @@ export function DesignStage({
   panelId,
   sessionStatus,
   prototypeArtifact,
+  captureRef,
+  onPrototypeVisibleChange,
 }: DesignStageProps): ReactElement {
   // questionStore.init() is idempotent — safe to call unconditionally on mount.
   useEffect(() => {
@@ -123,6 +138,11 @@ export function DesignStage({
   const panelLiveEvents = usePanelLiveEventsStore((s) => (panelId !== null ? s.byPanel[panelId] : undefined));
   const liveTail = useMemo(() => reduceLiveTail(panelLiveEvents ?? []), [panelLiveEvents]);
   const working = sessionStatus === 'running' || liveTail.isGenerating;
+
+  const showingLivePrototype = pending.length === 0 && prototypeArtifact !== null;
+  useEffect(() => {
+    onPrototypeVisibleChange?.(showingLivePrototype);
+  }, [showingLivePrototype, onPrototypeVisibleChange]);
 
   if (pending.length > 0) {
     return (
@@ -142,7 +162,7 @@ export function DesignStage({
   if (prototypeArtifact !== null) {
     return (
       <div data-testid="design-stage-prototype" className="relative h-full w-full">
-        <DesignStageCanvas artifact={prototypeArtifact} />
+        <DesignStageCanvas artifact={prototypeArtifact} captureRef={captureRef} />
         {working && (
           <div
             data-testid="design-stage-working-overlay"

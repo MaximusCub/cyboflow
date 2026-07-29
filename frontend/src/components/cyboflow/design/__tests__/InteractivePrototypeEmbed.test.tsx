@@ -2,10 +2,14 @@
  * InteractivePrototypeEmbed — the v1 process-isolated interactive canvas.
  * Covers the ensure/render happy path, the fail-soft states (ensure failure,
  * bridge absent, server-stopped), the frame-terminated overlay + reload
- * cache-busting, runId-scoped event filtering, and the onEvent unsubscribe on
- * unmount. `window.electronAPI.designPrototypeServer` is mocked per test.
+ * cache-busting, runId-scoped event filtering, the onEvent unsubscribe on
+ * unmount, and the imperative `requestCapture` handle comment mode consumes
+ * (design-mode.md "Comment mode", invariant 1). `window.electronAPI.
+ * designPrototypeServer` is mocked per test.
  */
 import '@testing-library/jest-dom';
+import { createRef } from 'react';
+import type { RefObject } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type {
@@ -16,7 +20,7 @@ import type {
 } from '../../../../../../shared/types/designPrototypeServer';
 import type { IPCResponse } from '../../../../utils/api';
 
-import { InteractivePrototypeEmbed } from '../InteractivePrototypeEmbed';
+import { InteractivePrototypeEmbed, type InteractivePrototypeCaptureHandle } from '../InteractivePrototypeEmbed';
 
 type EventCallback = (event: PrototypeServerEvent) => void;
 
@@ -204,5 +208,125 @@ describe('InteractivePrototypeEmbed', () => {
     expect(bridge.onEvent).toHaveBeenCalledTimes(1);
     unmount();
     expect(bridge.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  describe('requestCapture (comment mode)', () => {
+    /** Mount, resolve the ready iframe, and spy on its postMessage BEFORE any
+     *  requestCapture call so the outbound captureId can be read back. */
+    async function mountReady(): Promise<{
+      ref: RefObject<InteractivePrototypeCaptureHandle | null>;
+      frameWindow: Window;
+      postSpy: ReturnType<typeof vi.spyOn>;
+    }> {
+      installBridge();
+      const ref = createRef<InteractivePrototypeCaptureHandle>();
+      render(<InteractivePrototypeEmbed ref={ref} runId="run-1" />);
+      const iframe = await screen.findByTestId('interactive-embed-iframe');
+      const frameWindow = (iframe as HTMLIFrameElement).contentWindow;
+      expect(frameWindow).not.toBeNull();
+      const postSpy = vi.spyOn(frameWindow as Window, 'postMessage');
+      return { ref, frameWindow: frameWindow as Window, postSpy };
+    }
+
+    function lastCaptureId(postSpy: ReturnType<typeof vi.spyOn>): string {
+      const call = postSpy.mock.calls.at(-1);
+      const payload = call?.[0] as { type: string; captureId: string };
+      expect(payload.type).toBe('cyboflow-design-capture');
+      return payload.captureId;
+    }
+
+    it('resolves with the html from a matching same-source reply', async () => {
+      const { ref, frameWindow, postSpy } = await mountReady();
+
+      const capturePromise = ref.current!.requestCapture();
+      const captureId = lastCaptureId(postSpy);
+
+      act(() => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'cyboflow-design-capture-result', captureId, html: '<html>frozen</html>' },
+            source: frameWindow,
+          }),
+        );
+      });
+
+      await expect(capturePromise).resolves.toBe('<html>frozen</html>');
+    });
+
+    it('ignores a reply from a different source', async () => {
+      const { ref, postSpy } = await mountReady();
+      const capturePromise = ref.current!.requestCapture();
+      const captureId = lastCaptureId(postSpy);
+
+      act(() => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'cyboflow-design-capture-result', captureId, html: '<html>impostor</html>' },
+            source: window, // not the iframe's contentWindow
+          }),
+        );
+      });
+
+      // The wrong-source reply must not resolve the promise — prove it's
+      // still pending by racing it against a timer tick.
+      let settled = false;
+      capturePromise.then(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(settled).toBe(false);
+    });
+
+    it('ignores a reply with a mismatched captureId', async () => {
+      const { ref, frameWindow } = await mountReady();
+      const capturePromise = ref.current!.requestCapture();
+
+      act(() => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'cyboflow-design-capture-result', captureId: 'some-other-id', html: '<html>stale</html>' },
+            source: frameWindow,
+          }),
+        );
+      });
+
+      let settled = false;
+      capturePromise.then(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(settled).toBe(false);
+    });
+
+    it('rejects on timeout with no matching reply', async () => {
+      // Fake timers are installed AFTER mountReady() resolves — findByTestId's
+      // internal polling relies on real setTimeout, so enabling fake timers
+      // any earlier would hang that wait indefinitely.
+      const { ref } = await mountReady();
+      vi.useFakeTimers();
+      try {
+        const capturePromise = ref.current!.requestCapture();
+        const assertion = expect(capturePromise).rejects.toThrow(/timed out/i);
+        await vi.advanceTimersByTimeAsync(3000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects immediately when the frame is not ready (status !== ready)', async () => {
+      let resolveEnsure: (v: IPCResponse<EnsurePrototypeServerResult>) => void = () => {};
+      installBridge({
+        ensure: () =>
+          new Promise((resolve) => {
+            resolveEnsure = resolve;
+          }),
+      });
+      const ref = createRef<InteractivePrototypeCaptureHandle>();
+      render(<InteractivePrototypeEmbed ref={ref} runId="run-1" />);
+      expect(screen.getByTestId('interactive-embed-loading')).toBeInTheDocument();
+
+      await expect(ref.current!.requestCapture()).rejects.toThrow(/not ready/i);
+
+      await act(async () => {
+        resolveEnsure({ success: true, data: { baseUrl: 'http://127.0.0.1:9999/tok/prototype/index.html' } });
+      });
+    });
   });
 });

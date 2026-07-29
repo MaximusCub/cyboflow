@@ -28,7 +28,7 @@
  *     Same fail-soft shape as `error`, different copy/affordance ("Restart"
  *     re-ensures and swaps in the fresh `baseUrl`).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import type { PrototypeFrameTerminationReason } from '../../../../../shared/types/designPrototypeServer';
 
@@ -37,6 +37,45 @@ interface InteractivePrototypeEmbedProps {
 }
 
 type EmbedStatus = 'loading' | 'ready' | 'error' | 'stopped';
+
+/**
+ * The capture request/reply `type` values posted across the postMessage
+ * boundary with the prototype frame's capture serializer
+ * (main/src/services/designPrototypeServer.ts `CAPTURE_SERIALIZER_TAG`).
+ * Duplicated as literals rather than imported: frontend/ never imports from
+ * main/src (separate bundles), so this is a small cross-process protocol
+ * string, mirrored intentionally — not a shared-module miss.
+ */
+const CAPTURE_REQUEST_TYPE = 'cyboflow-design-capture';
+const CAPTURE_RESULT_TYPE = 'cyboflow-design-capture-result';
+
+/** How long `requestCapture` waits for a matching reply before rejecting. */
+const CAPTURE_TIMEOUT_MS = 3000;
+
+/**
+ * Imperative handle exposed by {@link InteractivePrototypeEmbed} for comment
+ * mode (design-mode.md "Comment mode", invariant 1 — faithful freeze).
+ */
+export interface InteractivePrototypeCaptureHandle {
+  /**
+   * Request a serialization of the LIVE rendered DOM from the prototype
+   * frame. Mints a fresh `captureId`, posts `{ type: 'cyboflow-design-
+   * capture', captureId }` to the frame, and resolves with the `html` from
+   * the matching `{ type: 'cyboflow-design-capture-result', captureId, html
+   * }` reply.
+   *
+   * Validated by SOURCE IDENTITY (`event.source === iframe.contentWindow`) +
+   * message shape — NEVER by `event.origin`: the frame's sandbox carries no
+   * `allow-same-origin`, so its origin is the opaque string `'null'` and is
+   * useless for authentication. A reply from a different source, a stale/
+   * mismatched captureId, or a malformed shape is silently ignored (a later
+   * matching reply can still resolve the same pending call).
+   *
+   * Rejects when no frame is live (status !== 'ready') or after a 3s
+   * timeout with no matching reply.
+   */
+  requestCapture(): Promise<string>;
+}
 
 /**
  * Append a cache-busting query param so a re-set `src` is a genuinely
@@ -50,12 +89,14 @@ function withCacheBust(url: string, n: number): string {
   return `${url}${sep}r=${n}`;
 }
 
-export function InteractivePrototypeEmbed({ runId }: InteractivePrototypeEmbedProps): ReactElement {
+export const InteractivePrototypeEmbed = forwardRef<InteractivePrototypeCaptureHandle, InteractivePrototypeEmbedProps>(
+  function InteractivePrototypeEmbed({ runId }, ref): ReactElement {
   const [status, setStatus] = useState<EmbedStatus>('loading');
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [terminated, setTerminated] = useState<{ reason: PrototypeFrameTerminationReason } | null>(null);
   const isMountedRef = useRef(true);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -117,6 +158,55 @@ export function InteractivePrototypeEmbed({ runId }: InteractivePrototypeEmbedPr
     setTerminated(null);
   }, []);
 
+  const requestCapture = useCallback((): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      const frameWindow = iframeRef.current?.contentWindow ?? null;
+      if (status !== 'ready' || frameWindow === null) {
+        reject(new Error('Prototype frame is not ready'));
+        return;
+      }
+      const captureId = crypto.randomUUID();
+      let settled = false;
+
+      const cleanup = (): void => {
+        window.clearTimeout(timeoutId);
+        window.removeEventListener('message', onMessage);
+      };
+
+      const onMessage = (event: MessageEvent): void => {
+        if (settled) return;
+        // Source identity, not origin — see the handle's doc comment: an
+        // `allow-scripts`-only sandboxed frame has an opaque 'null' origin.
+        if (event.source !== frameWindow) return;
+        const data: unknown = event.data;
+        if (
+          typeof data !== 'object' ||
+          data === null ||
+          (data as { type?: unknown }).type !== CAPTURE_RESULT_TYPE ||
+          (data as { captureId?: unknown }).captureId !== captureId ||
+          typeof (data as { html?: unknown }).html !== 'string'
+        ) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve((data as { html: string }).html);
+      };
+
+      const timeoutId = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Capture request timed out'));
+      }, CAPTURE_TIMEOUT_MS);
+
+      window.addEventListener('message', onMessage);
+      frameWindow.postMessage({ type: CAPTURE_REQUEST_TYPE, captureId }, '*');
+    });
+  }, [status]);
+
+  useImperativeHandle(ref, () => ({ requestCapture }), [requestCapture]);
+
   if (status === 'loading') {
     return (
       <div data-testid="interactive-embed" className="relative flex-1 flex flex-col min-h-0">
@@ -157,6 +247,7 @@ export function InteractivePrototypeEmbed({ runId }: InteractivePrototypeEmbedPr
   return (
     <div data-testid="interactive-embed" className="relative flex-1 flex flex-col min-h-0">
       <iframe
+        ref={iframeRef}
         data-testid="interactive-embed-iframe"
         src={iframeSrc}
         title="Interactive prototype"
@@ -189,4 +280,5 @@ export function InteractivePrototypeEmbed({ runId }: InteractivePrototypeEmbedPr
       )}
     </div>
   );
-}
+  },
+);

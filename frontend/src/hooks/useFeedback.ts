@@ -31,7 +31,7 @@ import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
 import { isDocFeedbackAtype } from '../../../shared/types/feedback';
 import type {
-  CommentAnchor,
+  FeedbackAnchor,
   FeedbackAtype,
   FeedbackBatch,
   FeedbackChangedEvent,
@@ -44,8 +44,15 @@ export interface UseFeedbackResult {
   batches: FeedbackBatch[];
   /** False once the initial `feedback.list` seed has resolved (or failed). */
   loading: boolean;
-  /** Doc-scoped only — throws if the hook was not given `atype` + `sourceRef`. */
-  createComment: (anchor: CommentAnchor, body: string) => Promise<void>;
+  /**
+   * Requires the hook to have been constructed with `atype` + `sourceRef`
+   * (throws otherwise) — NOT restricted to the document surface: the
+   * underlying `feedback.createComment` mutation accepts either anchor
+   * variant (quote for the doc atypes, element for the design-prototype
+   * atypes), enforced by the FeedbackRouter chokepoint's anchor↔atype
+   * pairing, not by this hook.
+   */
+  createComment: (anchor: FeedbackAnchor, body: string) => Promise<void>;
   updateComment: (commentId: string, body: string) => Promise<void>;
   deleteComment: (commentId: string) => Promise<void>;
   /** Doc-scoped only — throws if the hook was not given `atype` + `sourceRef`. */
@@ -161,7 +168,7 @@ export function useFeedback(
     };
   }, [projectId, runId, atype, sourceRef]);
 
-  const createComment = async (anchor: CommentAnchor, body: string): Promise<void> => {
+  const createComment = async (anchor: FeedbackAnchor, body: string): Promise<void> => {
     if (runId === null || atype === undefined || sourceRef === undefined) {
       throw new Error('[useFeedback] createComment requires a doc-scoped hook (atype + sourceRef)');
     }
