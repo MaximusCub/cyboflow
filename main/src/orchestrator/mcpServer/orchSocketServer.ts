@@ -213,18 +213,29 @@ export class OrchSocketServer implements PermissionServerLike {
   }
 
   /**
-   * Close the server and resolve once closed. Best-effort unlink of the socket
-   * file — but ONLY while the path still resolves to the inode we bound.
+   * Close the server and resolve once closed — unless the socket path has been
+   * rebound by another instance, in which case we deliberately leave the handle
+   * open rather than take their socket down with us.
    *
    * The path is fixed and shared across instances (~/.cyboflow/sockets/orch.sock),
    * so "we are shutting down" does not imply "the file at that path is ours". An
    * older build that unlink-and-rebinds without probing (every build before the
    * start() guard above) leaves the path owned by someone else while our server
-   * object is still non-null; an unconditional rmSync here then deletes THEIR
-   * live socket. That is not hypothetical — it is the failure that stranded every
-   * MCP subprocess spawned after 2026-07-28: the file vanished while the owning
-   * app kept its bound-but-unlinked inode and all existing connections, so the UI
-   * stayed green while every new connect() got ENOENT until the app restarted.
+   * object is still non-null.
+   *
+   * The subtle part: it is not enough to guard our own `fs.rmSync`. **libuv
+   * unlinks a unix socket BY PATH inside `close()`**, so merely closing a server
+   * whose path was rebound deletes the *other* instance's live socket — before
+   * any check of ours could run, and with no way to suppress it from JS. The only
+   * way not to perform that unlink is not to call close() at all. So when the path
+   * is foreign we destroy our connections, unref the handle (it must never hold
+   * the event loop open) and drop it; the process is shutting down and the kernel
+   * reclaims the fd without libuv's unlink path ever running.
+   *
+   * This is the failure mode that stranded every MCP subprocess spawned after
+   * 2026-07-28: the file vanished while the owning app kept its bound-but-unlinked
+   * inode and all existing connections, so health stayed green while every new
+   * connect() got ENOENT until the app restarted.
    */
   async stop(): Promise<void> {
     const server = this.server;
@@ -240,37 +251,45 @@ export class OrchSocketServer implements PermissionServerLike {
     }
     this.connections.clear();
 
+    // Ownership check must happen BEFORE close() — see the libuv note above.
+    if (this.pathBelongsToAnotherInstance(boundInode)) {
+      server.unref();
+      this.logger.warn(
+        '[Cyboflow Orch IPC] socket path was rebound by another instance — leaving it and our handle untouched',
+        { socketPath: this.socketPath, boundInode },
+      );
+      return;
+    }
+
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
 
-    if (boundInode === null) {
-      this.logger.debug('[Cyboflow Orch IPC] socket file unlink skipped — bound inode unknown', {
-        socketPath: this.socketPath,
-      });
-      return;
-    }
-
+    // close() already unlinked our own socket; this is a belt-and-braces sweep
+    // for the case where it did not (e.g. never fully bound). ENOENT is expected.
     try {
-      // Ownership check. A mismatch means the path was replaced while we ran, so
-      // the file now belongs to a live peer — leave it alone. (The stat→rmSync
-      // window is not atomic, but it narrows an unconditional clobber to a race
-      // that requires a rebind inside those few microseconds.)
-      const currentInode = fs.statSync(this.socketPath).ino;
-      if (currentInode !== boundInode) {
-        this.logger.warn('[Cyboflow Orch IPC] socket file replaced by another instance — not unlinking', {
-          socketPath: this.socketPath,
-          boundInode,
-          currentInode,
-        });
-        return;
-      }
       fs.rmSync(this.socketPath, { force: true });
     } catch (err) {
-      // ENOENT here just means someone already removed it — nothing to reclaim.
       this.logger.debug('[Cyboflow Orch IPC] socket file unlink skipped', {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  /**
+   * True when a file exists at the socket path but does NOT resolve to the inode
+   * we bound — i.e. a different instance owns it now and we must not disturb it.
+   *
+   * An absent path returns false: there is nothing to protect, and stop() should
+   * still close normally to release the handle. A null `boundInode` (stat failed
+   * at bind time) with a file present is treated as foreign — the safe direction,
+   * since leaking a handle costs nothing next to clobbering a live socket.
+   */
+  private pathBelongsToAnotherInstance(boundInode: number | null): boolean {
+    try {
+      return fs.statSync(this.socketPath).ino !== boundInode;
+    } catch {
+      return false;
     }
   }
 

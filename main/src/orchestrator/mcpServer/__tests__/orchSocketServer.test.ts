@@ -464,13 +464,15 @@ describe('OrchSocketServer', () => {
     await serverB.start();
     const inodeB = fs.statSync(socketPath).ino;
 
-    // A now shuts down. Its unlink must be a no-op: the file belongs to B.
+    // A now shuts down. It must leave B's file alone — which means NOT calling
+    // close() either: libuv unlinks a unix socket by PATH inside close(), so a
+    // plain close() here would delete B's socket before any guard could run.
     await serverA.stop();
 
     expect(fs.existsSync(socketPath)).toBe(true);
     expect(fs.statSync(socketPath).ino).toBe(inodeB);
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('not unlinking'),
+      expect.stringContaining('rebound by another instance'),
       expect.objectContaining({ socketPath }),
     );
 
