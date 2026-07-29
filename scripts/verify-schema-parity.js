@@ -109,8 +109,15 @@ function buildPath1Db() {
       // database.ts (ALTER TABLE … ADD COLUMN, ~line 281) and the `projects`
       // table itself is created imperatively (~lines 285-307) — neither is
       // replayed by path-1. See FIND-SPRINT-030-4 for the root-cause analysis.
+      //
+      // "duplicate column name" is tolerated to mirror the real migration
+      // runner (database.ts ~L1749), which treats a duplicate-column ALTER as a
+      // successful idempotent apply. Some migrations (e.g. 088's revision
+      // "ensure" guard) DELIBERATELY re-ALTER a column that an earlier applied
+      // migration/schema.sql already added; the runner self-heals, so the
+      // parity check must not be stricter than the runtime it models.
       const msg = String(err.message || err);
-      if (/no such (table|column)/i.test(msg)) {
+      if (/no such (table|column)|duplicate column name/i.test(msg)) {
         if (verbose) console.warn(`[skip] migration ${f} (path-1): ${msg}`);
         continue;
       }
@@ -131,9 +138,11 @@ function buildPath2Db() {
       // "no such table" AND "no such column" errors for symmetry with
       // buildPath1Db — divergent error policies between the two paths would
       // allow path-1 to silently skip a migration that path-2 throws on,
-      // producing a confusing diff. See FIND-SPRINT-030-4.
+      // producing a confusing diff. See FIND-SPRINT-030-4. "duplicate column
+      // name" is tolerated symmetrically with path-1 to mirror the migration
+      // runner's idempotent-ALTER self-heal (database.ts ~L1749).
       const msg = String(err.message || err);
-      if (/no such (table|column)/i.test(msg)) {
+      if (/no such (table|column)|duplicate column name/i.test(msg)) {
         if (verbose) console.warn(`[skip] migration ${f}: ${msg}`);
         continue;
       }
