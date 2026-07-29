@@ -32,6 +32,8 @@ import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { isRuntimeProviderEnabled } from '../../../../shared/types/agentRuntime';
+import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 
 export interface VariantEditorModalProps {
   isOpen: boolean;
@@ -69,6 +71,13 @@ function parseAgentOverrides(json: string | null): WorkflowVariantAgentOverrides
 
 /** Sentinel for the "Inherit" (null) option of the model / execution-model selects. */
 const INHERIT = '';
+
+/** Runtime-pin labels for the variant picker (kept verbatim from the old inline options). */
+const VARIANT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
+  'claude-sdk': 'Claude SDK',
+  'claude-interactive': 'Claude interactive (PTY)',
+  'codex-sdk': 'Codex SDK',
+};
 
 export function VariantEditorModal({
   isOpen,
@@ -120,6 +129,14 @@ export function VariantEditorModal({
     agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as LaunchAgentRuntime);
   const isCodexVariant = variantProvider === 'codex';
   const { options: codexModelOptions } = useCodexModelCatalog(isCodexVariant);
+  // Provider access (Settings → Integrations): a variant may not pin a runtime
+  // whose provider is switched off — createRun rejects such a pin at launch, so
+  // offering it here would only mint an unlaunchable variant. An already-saved
+  // pin stays listed so the select renders its own value until the user repins.
+  const providerAccess = useAgentProviderAccess();
+  const runtimePinOptions = (
+    ['claude-sdk', 'claude-interactive', 'codex-sdk'] as const
+  ).filter((r) => isRuntimeProviderEnabled(providerAccess, r) || r === agentRuntime);
 
   // Drop a run-level model pin that no longer matches the variant's provider (a
   // Claude alias under Codex, or a Codex id under Claude) — mirrors WorkflowPicker,
@@ -351,9 +368,12 @@ export function VariantEditorModal({
               data-testid="variant-editor-runtime-select"
             >
               <option value={INHERIT}>Inherit</option>
-              <option value="claude-sdk">Claude SDK</option>
-              <option value="claude-interactive">Claude interactive (PTY)</option>
-              <option value="codex-sdk">Codex SDK</option>
+              {runtimePinOptions.map((runtime) => (
+                <option key={runtime} value={runtime}>
+                  {VARIANT_RUNTIME_LABELS[runtime]}
+                  {isRuntimeProviderEnabled(providerAccess, runtime) ? '' : ' — provider off'}
+                </option>
+              ))}
             </select>
           </label>
           <label className="flex items-center gap-2 text-xs text-text-secondary">

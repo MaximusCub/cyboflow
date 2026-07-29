@@ -24,10 +24,21 @@ vi.mock('../../../hooks/useForcedSubstrate', () => ({
 }));
 
 import { SubstrateSelector } from '../SubstrateSelector';
+import { useConfigStore } from '../../../stores/configStore';
+import type { AppConfig } from '../../../types/config';
+import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
+
+/** Drive the picker's provider gate through the real config store. */
+function setProviderAccess(access: AgentProviderAccess | undefined): void {
+  useConfigStore.setState({
+    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+  });
+}
 
 beforeEach(() => {
   mockUseForcedSubstrate.mockReset();
   mockUseForcedSubstrate.mockReturnValue(null);
+  useConfigStore.setState({ config: null });
 });
 
 describe('SubstrateSelector — no forced pin', () => {
@@ -95,6 +106,65 @@ describe('SubstrateSelector — interactive PTY-only lock', () => {
     render(<SubstrateSelector value="claude-interactive" onChange={onChange} />);
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('SubstrateSelector — provider access toggles', () => {
+  it('hides both Codex runtimes when the Codex provider is switched off', () => {
+    setProviderAccess({ claude: true, codex: false });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
+
+    expect(screen.getByRole('option', { name: /Claude SDK/i })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Codex/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/turned off in Settings → Integrations are hidden/i)).toBeInTheDocument();
+  });
+
+  it('hides both Claude runtimes when the Claude provider is switched off', () => {
+    setProviderAccess({ claude: false, codex: true });
+    render(<SubstrateSelector value="codex-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
+
+    expect(screen.queryByRole('option', { name: /Claude/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).toBeInTheDocument();
+  });
+
+  it('snaps a selection whose provider was just switched off back to an available runtime', () => {
+    const onChange = vi.fn();
+    setProviderAccess({ claude: true, codex: false });
+    render(<SubstrateSelector value="codex-sdk" onChange={onChange} runtimeScope="mixed" />);
+
+    expect(onChange).toHaveBeenCalledWith('claude-sdk');
+  });
+
+  it('refuses a programmatic change to a runtime whose provider is switched off', () => {
+    const onChange = vi.fn();
+    setProviderAccess({ claude: true, codex: false });
+    render(<SubstrateSelector value="claude-sdk" onChange={onChange} runtimeScope="mixed" />);
+
+    fireEvent.change(screen.getByRole('combobox', { name: /select agent runtime/i }), {
+      target: { value: 'codex-sdk' },
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('offers everything when the toggles were never touched (absent config field)', () => {
+    setProviderAccess(undefined);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
+
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Claude SDK/i })).toBeInTheDocument();
+    expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+  });
+
+  it('surfaces the PTY-only ⨯ Claude-off conflict instead of a picker with no options', () => {
+    mockUseForcedSubstrate.mockReturnValue('interactive');
+    const onChange = vi.fn();
+    setProviderAccess({ claude: false, codex: true });
+    render(<SubstrateSelector value="codex-sdk" onChange={onChange} />);
+
+    expect(screen.getByTestId('substrate-provider-conflict')).toBeInTheDocument();
+    expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
+    // The lock's claude-interactive sync must NOT fire onto a disabled provider.
+    expect(onChange).not.toHaveBeenCalledWith('claude-interactive');
   });
 });
 

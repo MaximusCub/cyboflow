@@ -30,9 +30,13 @@
  */
 import { useEffect } from 'react';
 import {
+  firstEnabledRuntime,
+  isRuntimeProviderEnabled,
   isSessionAgentRuntime,
   isWorkflowAgentRuntime,
+  type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
+import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import {
   workflowRuntimeForLaunch,
@@ -64,10 +68,32 @@ interface SubstrateSelectorProps {
   runtimeScope?: 'workflow' | 'session' | 'mixed';
 }
 
+/** Every runtime the picker can offer, in display order. */
+const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = [
+  { runtime: 'claude-sdk', label: 'Claude SDK (default)' },
+  { runtime: 'claude-interactive', label: 'Claude interactive (PTY)' },
+  { runtime: 'codex-sdk', label: 'Codex SDK' },
+  { runtime: 'codex-pty', label: 'Codex PTY — quick sessions only' },
+];
+
+/**
+ * Scope-level unavailability — rendered as a DISABLED option so the user can
+ * see the runtime exists but not here (e.g. Codex PTY on a workflow launch).
+ * Provider access is a separate axis: a switched-off provider's runtimes are
+ * hidden outright (see enabledRuntimeOptions), because they aren't available
+ * anywhere until the toggle goes back on.
+ */
 function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): boolean {
   if (scope === 'workflow') return workflowRuntimeForLaunch(runtime) === null;
   if (scope === 'session') return false;
   return false;
+}
+
+/** The options a picker may show, given the provider toggles. */
+function enabledRuntimeOptions(
+  access: AgentProviderAccess,
+): readonly { runtime: LaunchAgentRuntime; label: string }[] {
+  return RUNTIME_OPTIONS.filter((o) => isRuntimeProviderEnabled(access, o.runtime));
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -109,19 +135,61 @@ export function SubstrateSelector({
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
   // Reactive read so a config fetch resolving AFTER mount still locks the picker.
   const forced = useForcedSubstrate();
+  // Provider toggles (Settings → Integrations / onboarding). A switched-off
+  // provider's runtimes leave the picker entirely and can never be submitted.
+  const providerAccess = useAgentProviderAccess();
+  const options = enabledRuntimeOptions(providerAccess);
+  const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
 
   // Under the interactive lock, keep the controlled value consistent so the
   // launch payload matches the backend pin. Scoped to 'interactive' only: demo's
   // 'sdk' pin is left alone so demo's picker behaves as before (cosmetic — the
   // backend forces 'sdk' regardless). After value reaches 'interactive' the
   // guard stops re-firing (safe with an unstable onChange identity).
+  // Skipped when Claude is switched off — the lock names a Claude runtime, so
+  // forcing the value there would hand the launch seam a provider it rejects;
+  // the conflict is surfaced in the locked branch below instead.
   useEffect(() => {
-    if (forced === 'interactive' && value !== 'claude-interactive') onChange('claude-interactive');
-  }, [forced, value, onChange]);
+    if (forced === 'interactive' && claudeEnabled && value !== 'claude-interactive') {
+      onChange('claude-interactive');
+    }
+  }, [forced, claudeEnabled, value, onChange]);
+
+  // Snap a selection whose provider was switched off (e.g. the user disabled
+  // Codex in Settings while a Codex runtime sat in this picker) back to the
+  // first still-available runtime, so the rendered value and the launch payload
+  // always name a provider the backend will accept.
+  const fallbackRuntime = firstEnabledRuntime(
+    providerAccess,
+    RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map((o) => o.runtime),
+  );
+  useEffect(() => {
+    if (isRuntimeProviderEnabled(providerAccess, value)) return;
+    if (fallbackRuntime !== null && fallbackRuntime !== value) onChange(fallbackRuntime);
+  }, [providerAccess, value, fallbackRuntime, onChange]);
 
   // Only the user-facing interactive lock gets the read-only locked UI. Demo
   // mode also pins ('sdk'), but it is a throwaway showcase profile — leave the
   // normal select so demo never falsely renders "Interactive (PTY) — locked".
+  if (forced === 'interactive' && !claudeEnabled) {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-text-secondary">{label}</label>
+        <div
+          data-testid="substrate-provider-conflict"
+          role="alert"
+          className="w-full rounded-input border border-status-error bg-bg-secondary px-2 py-1 text-sm text-text-secondary"
+        >
+          No runtime available
+        </div>
+        <p className="text-xs text-text-tertiary">
+          This app is locked to interactive-PTY-only mode, which runs on Claude — but Claude is
+          turned off in Settings → Integrations. Enable Claude, or lift the PTY-only lock, to launch.
+        </p>
+      </div>
+    );
+  }
+
   if (forced === 'interactive') {
     return (
       <div className="flex flex-col gap-1">
@@ -154,7 +222,8 @@ export function SubstrateSelector({
           const next = e.target.value;
           if (
             (isSessionAgentRuntime(next) || isWorkflowAgentRuntime(next)) &&
-            !isRuntimeDisabled(next, runtimeScope)
+            !isRuntimeDisabled(next, runtimeScope) &&
+            isRuntimeProviderEnabled(providerAccess, next)
           ) {
             onChange(next);
           }
@@ -162,17 +231,20 @@ export function SubstrateSelector({
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
         aria-label="Select agent runtime"
       >
-        <option value="claude-sdk">Claude SDK (default)</option>
-        <option value="claude-interactive">Claude interactive (PTY)</option>
-        <option value="codex-sdk" disabled={isRuntimeDisabled('codex-sdk', runtimeScope)}>
-          Codex SDK
-        </option>
-        <option value="codex-pty" disabled={isRuntimeDisabled('codex-pty', runtimeScope)}>
-          Codex PTY — quick sessions only
-        </option>
+        {options.map(({ runtime, label: optionLabel }) => (
+          <option
+            key={runtime}
+            value={runtime}
+            disabled={isRuntimeDisabled(runtime, runtimeScope)}
+          >
+            {optionLabel}
+          </option>
+        ))}
       </select>
       <p className="text-xs text-text-tertiary">
-        {scopeHelp(runtimeScope)}
+        {options.length === RUNTIME_OPTIONS.length
+          ? scopeHelp(runtimeScope)
+          : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
       </p>
 
       {value === 'claude-interactive' && <InteractiveCaveats testId={caveatsTestId} />}

@@ -32,8 +32,10 @@ import {
   WORKFLOW_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
+  isRuntimeProviderEnabled,
   type WorkflowAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
+import { useAgentProviderAccess } from '../../../hooks/useAgentProviderAccess';
 import type { McpEntry } from '../../../../../shared/types/integrations';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
@@ -77,6 +79,15 @@ export function AgentEditorForm({
   // deferring the network fetch until a Codex model picker is actually shown).
   const isCodexRuntime = draft.runtime === 'codex-sdk';
   const { options: codexModelOptions } = useCodexModelCatalog(isCodexRuntime);
+  // Provider access (Settings → Integrations): a runtime whose provider is
+  // switched off is not offerable — the deploy seam drops such a pin anyway
+  // (resolveStepAgent), so showing it here would only promise a route the run
+  // won't take. An ALREADY-PINNED runtime that just lost its provider stays in
+  // the list so the draft renders its own value honestly until the user repins.
+  const providerAccess = useAgentProviderAccess();
+  const runtimeOptions = WORKFLOW_AGENT_RUNTIMES.filter(
+    (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === draft.runtime,
+  );
   // The READ-ONLY name field shows the BARE key — strip the load-bearing
   // `cyboflow-` prefix the server persists on `name` — so it matches the
   // de-prefixed modal title and gallery card. The EDITABLE create-mode input
@@ -210,9 +221,10 @@ export function AgentEditorForm({
               data-testid="agent-runtime-select"
             >
               <option value="">inherits run runtime</option>
-              {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
+              {runtimeOptions.map((runtime) => (
                 <option key={runtime} value={runtime}>
                   {WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}
+                  {isRuntimeProviderEnabled(providerAccess, runtime) ? '' : ' — provider off'}
                 </option>
               ))}
             </select>

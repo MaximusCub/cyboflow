@@ -31,7 +31,9 @@ import {
   WORKFLOW_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
+  isRuntimeProviderEnabled,
 } from '../../../../shared/types/agentRuntime';
+import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
@@ -1034,6 +1036,10 @@ function AgentConfigSection({
   agentProvider: AgentProvider;
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }) {
+  // Provider access (Settings → Integrations). Read FIRST — this component has
+  // early returns below, and a hook may not sit after one.
+  const providerAccess = useAgentProviderAccess();
+
   // The human gate is not an agent (no model to pin, no body to edit).
   if (agentKey === HUMAN_GATE_AGENT) return null;
 
@@ -1077,6 +1083,13 @@ function AgentConfigSection({
   // is empty today, so this branch is currently unreachable — kept for a
   // future key that genuinely can't run on Codex.
   const claudeOnly = isClaudeOnlyAgentKey(agentKey);
+  // A runtime whose provider is switched off is not offerable — the deploy seam
+  // (resolveStepAgent) drops such a pin, so listing it would promise a route the
+  // run won't take. An ALREADY-PINNED runtime stays listed so the select renders
+  // its own value.
+  const runtimeOptions = WORKFLOW_AGENT_RUNTIMES.filter(
+    (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === selectedRuntime,
+  );
   // The effort scale is provider-specific: Codex when the base agent is a Codex
   // agent OR a per-agent `codex-sdk` runtime is pinned (Codex's none..xhigh),
   // else Claude's low..max. A stale cross-provider value is dropped at spawn.
@@ -1151,8 +1164,11 @@ function AgentConfigSection({
               data-testid={runtimeTestId}
             >
               <option value="">(inherit)</option>
-              {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
-                <option key={runtime} value={runtime}>{WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}</option>
+              {runtimeOptions.map((runtime) => (
+                <option key={runtime} value={runtime}>
+                  {WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}
+                  {isRuntimeProviderEnabled(providerAccess, runtime) ? '' : ' — provider off'}
+                </option>
               ))}
             </select>
             <p style={hintStyle} data-testid={runtimeHintTestId}>
