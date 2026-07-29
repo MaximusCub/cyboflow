@@ -12,6 +12,8 @@ interface ToggleProps {
   id?: string;
   variant?: 'default' | 'warning';
   title?: string;
+  /** Accessible name when no visible label is associated with the switch. */
+  'aria-label'?: string;
   children?: React.ReactNode;
 }
 
@@ -47,6 +49,7 @@ export const Toggle: React.FC<ToggleProps> = ({
   id,
   variant = 'default',
   title,
+  'aria-label': ariaLabel,
   children
 }) => {
   const sizes = sizeClasses[size];
@@ -93,6 +96,7 @@ export const Toggle: React.FC<ToggleProps> = ({
       type="button"
       role="switch"
       title={title}
+      aria-label={ariaLabel}
       aria-checked={isPressed}
       onClick={() => !disabled && handleChange(!isPressed)}
       disabled={disabled}
