@@ -23,10 +23,10 @@ interface OnboardingModalCardProps {
   onSkip: () => void;
   onGoTo: (step: number) => void;
   /**
-   * Scrim strength, 0–1 (default 1). During the spiral reveal the terracotta
-   * wrapper is itself the backdrop, so the scrim starts fully transparent and
-   * fades in as the app underneath is exposed — dimming an intact wrapper would
-   * just muddy the brand color.
+   * Scrim strength, 0–1 (default 1). During the spiral reveal the cream wrapper
+   * is itself the backdrop, so the scrim starts fully transparent and fades in
+   * as the app underneath is exposed — dimming an intact wrapper would only
+   * dirty the cream toward grey.
    */
   scrimOpacity?: number;
 }

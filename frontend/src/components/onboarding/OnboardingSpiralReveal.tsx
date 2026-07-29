@@ -8,9 +8,9 @@ import {
 } from '../../utils/onboardingSpiral';
 
 /**
- * OnboardingSpiralReveal — the terracotta wrapper the app arrives inside.
+ * OnboardingSpiralReveal — the cream wrapper the app arrives inside.
  *
- * The tour opens fully covered: a SPIRAL_GRID² sheet of opaque brand-colored tiles
+ * The tour opens fully covered: a SPIRAL_GRID² sheet of opaque cream tiles
  * over the whole viewport, with the step-0 welcome card centered on top of it.
  * Each modal-step advance peels one band of tiles away in a CLOCKWISE SPIRAL
  * starting top-left, and softens the blur over whatever is already exposed — so
@@ -32,6 +32,19 @@ import {
  * scrim, so input is blocked for every step this component is visible; opting in
  * here would only risk swallowing a later coachmark's click-through hole.
  */
+
+/**
+ * The wrapper's material. --paper-2 is the palette's chrome cream (rails,
+ * headers, title bar), which is the closest semantic match for a sheet laid
+ * OVER the app — and it stays cream under `.dark`, since the theme blocks
+ * remap only the semantic --color-* tokens and never the --paper-* primitives.
+ * That is deliberate: the wrapping is a physical material, not a themed
+ * surface, so a dark-mode user unwraps the same cream sheet.
+ *
+ * Swap here to retune: --paper (#f5f1e8) is near-invisible against the card,
+ * --paper-4 (#e1d8c0) is the deepest cream before it reads as tan.
+ */
+const WRAPPER_COLOR = 'var(--paper-2)';
 
 /** Blur over the exposed app at step 0, eased to 0 by REVEAL_COMPLETE_STEP. */
 const MAX_BLUR_PX = 18;
@@ -115,15 +128,15 @@ export function OnboardingSpiralReveal({ step }: { step: number }): React.JSX.El
           return (
             <div
               key={flatIndex}
-              className="bg-interactive"
               style={{
+                background: WRAPPER_COLOR,
                 opacity: gone ? 0 : 1,
                 // Scaling the tile down as it goes opens a seam against its
                 // neighbours — the tile reads as lifting off rather than fading.
                 transform: gone && !reducedMotion ? 'scale(0.86)' : 'scale(1)',
                 // Hairline guard: 1fr rounding can leave sub-pixel gaps between
                 // tiles that would show blurred app through an intact wrapper.
-                boxShadow: gone ? 'none' : '0 0 0 0.5px var(--color-interactive-primary)',
+                boxShadow: gone ? 'none' : `0 0 0 0.5px ${WRAPPER_COLOR}`,
                 transition: reducedMotion
                   ? `opacity ${REDUCED_MS}ms ease-out`
                   : `opacity ${TILE_MS}ms ease-out, transform ${TILE_MS}ms cubic-bezier(.22,.61,.36,1), box-shadow ${TILE_MS}ms linear`,
