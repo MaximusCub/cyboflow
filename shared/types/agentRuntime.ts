@@ -70,9 +70,89 @@ export function claudeRuntimeFromSubstrate(
   return substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk';
 }
 
-/** Derive the owning provider for a workflow-scoped agent runtime. */
-export function providerForRuntime(runtime: WorkflowAgentRuntime): AgentProvider {
-  return runtime === 'codex-sdk' ? 'codex' : 'claude';
+/** Derive the owning provider for an agent runtime. */
+export function providerForRuntime(runtime: AgentRuntime): AgentProvider {
+  return runtime.startsWith('codex-') ? 'codex' : 'claude';
+}
+
+/**
+ * Per-provider access toggles — the user's answer to "may Cyboflow use this
+ * agent account at all?", set in Settings → Integrations and in the onboarding
+ * Connect step (both write the SAME `AppConfig.agentProviderAccess` field).
+ *
+ * An ABSENT member floors to ENABLED, so existing config.json files stay
+ * byte-identical and every install that never touched the toggles behaves
+ * exactly as before. A disabled provider is removed from every runtime picker
+ * (SubstrateSelector / agent + variant editors) and rejected at the launch
+ * seams (WorkflowRegistry.createRun, the quick-session IPC handler), so it can
+ * never be reached by a stale payload or an MCP-written agent config.
+ *
+ * At least one provider must stay enabled — the Settings UI refuses to turn off
+ * the last one, mirroring onboarding's "enable at least one detected provider"
+ * gate. `resolveAgentProviderAccess` re-applies that floor defensively for any
+ * value read back off disk.
+ */
+export type AgentProviderAccess = Partial<Record<AgentProvider, boolean>>;
+
+/** True when `provider` may be used. Absent/unset ⇒ enabled (the floor). */
+export function isAgentProviderEnabled(
+  access: AgentProviderAccess | undefined,
+  provider: AgentProvider,
+): boolean {
+  return access?.[provider] ?? true;
+}
+
+/** True when `runtime`'s owning provider may be used. */
+export function isRuntimeProviderEnabled(
+  access: AgentProviderAccess | undefined,
+  runtime: AgentRuntime,
+): boolean {
+  return isAgentProviderEnabled(access, providerForRuntime(runtime));
+}
+
+/** The providers currently usable, in AGENT_PROVIDERS order. */
+export function enabledAgentProviders(
+  access: AgentProviderAccess | undefined,
+): AgentProvider[] {
+  return AGENT_PROVIDERS.filter((p) => isAgentProviderEnabled(access, p));
+}
+
+/**
+ * Normalize a persisted/IPC value into an access map with the "never disable
+ * everything" floor applied. An all-off map would leave the app unable to
+ * launch anything, so it degrades to the default (both enabled) rather than
+ * bricking every launch seam.
+ */
+export function resolveAgentProviderAccess(
+  access: AgentProviderAccess | undefined,
+): AgentProviderAccess {
+  const resolved: AgentProviderAccess = {
+    claude: isAgentProviderEnabled(access, 'claude'),
+    codex: isAgentProviderEnabled(access, 'codex'),
+  };
+  if (!resolved.claude && !resolved.codex) return { claude: true, codex: true };
+  return resolved;
+}
+
+/** Structural validator for the untyped IPC config patch. */
+export function isAgentProviderAccess(value: unknown): value is AgentProviderAccess {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return Object.entries(value).every(
+    ([key, member]) =>
+      isAgentProvider(key) && (member === undefined || typeof member === 'boolean'),
+  );
+}
+
+/**
+ * The runtime a picker should fall back to when the current selection belongs
+ * to a now-disabled provider. Returns null when `candidates` has no runtime on
+ * an enabled provider (the caller then has nothing to offer).
+ */
+export function firstEnabledRuntime<T extends AgentRuntime>(
+  access: AgentProviderAccess | undefined,
+  candidates: readonly T[],
+): T | null {
+  return candidates.find((r) => isRuntimeProviderEnabled(access, r)) ?? null;
 }
 
 /**

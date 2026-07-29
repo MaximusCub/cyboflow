@@ -1,3 +1,4 @@
+import type { AgentProviderAccess } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -86,6 +87,13 @@ export interface AppConfig {
   // via getForcedSubstrate() — outranks the per-run choice and the global default.
   // Demo mode still pins 'sdk' and wins over this. Defaults to false (allow SDK).
   interactivePtyOnly?: boolean;
+  // Per-provider access toggles ('claude' / 'codex'), written by BOTH Settings →
+  // Integrations and the onboarding Connect step. Absent members floor to ENABLED
+  // (see shared/types/agentRuntime.ts) and the field is NOT seeded into the
+  // constructor defaults, so existing config.json files stay byte-identical. A
+  // disabled provider is dropped from every runtime picker and rejected at the
+  // launch seams (WorkflowRegistry.createRun / the quick-session IPC handler).
+  agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
@@ -230,6 +238,8 @@ export interface UpdateConfigRequest {
   // Global hard lock — force the interactive PTY substrate and disable the SDK
   // (see AppConfig.interactivePtyOnly). Demo mode still wins with 'sdk'.
   interactivePtyOnly?: boolean;
+  // Per-provider access toggles (see AppConfig.agentProviderAccess).
+  agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').

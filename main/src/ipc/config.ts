@@ -1,5 +1,9 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
+import {
+  isAgentProviderAccess,
+  resolveAgentProviderAccess,
+} from '../../../shared/types/agentRuntime';
 
 export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claudeCodeManager }: AppServices): void {
   ipcMain.handle('config:get', async () => {
@@ -16,10 +20,22 @@ export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claude
     try {
       // Check if Claude path is being updated
       const oldConfig = configManager.getConfig();
-      const claudePathChanged = updates.claudeExecutablePath !== undefined && 
+      const claudePathChanged = updates.claudeExecutablePath !== undefined &&
                                updates.claudeExecutablePath !== oldConfig.claudeExecutablePath;
-      
-      await configManager.updateConfig(updates);
+
+      // Validate the untyped provider-access patch at the IPC boundary: a
+      // malformed shape is rejected outright, and a well-formed one is stored
+      // normalized (both members explicit, never all-off) so every downstream
+      // read — including a config.json edited by hand — sees the floors already
+      // applied. See shared/types/agentRuntime.ts.
+      if (updates.agentProviderAccess !== undefined && !isAgentProviderAccess(updates.agentProviderAccess)) {
+        return { success: false, error: 'Invalid agentProviderAccess payload' };
+      }
+      const normalized = updates.agentProviderAccess === undefined
+        ? updates
+        : { ...updates, agentProviderAccess: resolveAgentProviderAccess(updates.agentProviderAccess) };
+
+      await configManager.updateConfig(normalized);
       
       // Clear Claude availability cache if the path changed
       if (claudePathChanged) {

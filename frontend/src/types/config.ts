@@ -1,3 +1,4 @@
+import type { AgentProviderAccess } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -38,6 +39,11 @@ export interface AppConfig {
   // PTY substrate and the SDK is disabled (the per-run picker is hidden). Demo mode
   // still pins 'sdk' and wins. Defaults to false (allow SDK).
   interactivePtyOnly?: boolean;
+  // Per-provider access toggles ('claude' / 'codex') — Settings → Integrations and
+  // the onboarding Connect step write this SAME field. Absent members floor to
+  // ENABLED (shared/types/agentRuntime.ts). A disabled provider is dropped from
+  // every runtime picker and rejected at the backend launch seams.
+  agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' |

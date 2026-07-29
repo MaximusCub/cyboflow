@@ -7,6 +7,12 @@ import {
   DEFAULT_ASSISTANT_CONTEXT_RETENTION,
   isAssistantContextRetention,
 } from '../../../shared/types/agentThread';
+import {
+  type AgentProvider,
+  type AgentProviderAccess,
+  isAgentProviderEnabled,
+  resolveAgentProviderAccess,
+} from '../../../shared/types/agentRuntime';
 import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { type ExecutionModel, isExecutionModel } from '../../../shared/types/executionModel';
@@ -372,6 +378,29 @@ export class ConfigManager extends EventEmitter {
     if (this.isDemoMode()) return 'sdk';
     if (this.isInteractivePtyOnly()) return 'interactive';
     return null;
+  }
+
+  /**
+   * The user's per-provider access toggles (Settings → Integrations / the
+   * onboarding Connect step), with the floors applied: an absent member is
+   * ENABLED, and an all-off map degrades to both-enabled rather than leaving
+   * the app unable to launch anything. Like `defaultSubstrate`, the field is
+   * intentionally NOT seeded into the constructor defaults, so config.json
+   * stays byte-identical for users who never touch the toggles.
+   */
+  getAgentProviderAccess(): AgentProviderAccess {
+    return resolveAgentProviderAccess(this.config.agentProviderAccess);
+  }
+
+  /**
+   * True when `provider` may be used for a run/session. The authoritative read
+   * for the launch seams (WorkflowRegistry.createRun, the quick-session IPC
+   * handler, the per-step agent resolver) — the renderer's pickers mirror this
+   * via useAgentProviderAccess, but never substitute for it (an agent runtime
+   * can also be pinned through the MCP workflow-config tools, bypassing the UI).
+   */
+  isAgentProviderEnabled(provider: AgentProvider): boolean {
+    return isAgentProviderEnabled(this.getAgentProviderAccess(), provider);
   }
 
   /**
