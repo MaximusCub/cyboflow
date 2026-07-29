@@ -60,17 +60,35 @@ for an epic or task, attributing each to the idea it decomposes.
 1. **interview** → delegate to `cyboflow-interview` with `MODE: INTERVIEW` and
    the user's raw prompt (or, when the prompt is empty, say so — the agent's
    first round then opens with the basics). The agent returns an
-   `## Interview round` with `## Open questions` — each question carrying 2–4
-   concrete options and a `Recommended:` default. Ask them with
-   **AskUserQuestion** (up to 4 questions per call, the recommended default as
-   the first option; users can always answer free-form via Other). Re-delegate
-   with ALL accumulated answers in a `# Answers` block. Repeat for up to **4
-   rounds**; the agent stops earlier by returning `INTERVIEW_COMPLETE: yes`
-   when the picture is sharp. After round 4, require completion. This is the
-   flow's defining phase — do not rush it, and never skip straight to the brief
-   while material questions are open.
+   `## Interview round` with `## Open questions` in priority order — each
+   question carrying 2–4 concrete options and a `Recommended:` default.
+   - **Ask ONE question at a time**: one **AskUserQuestion** call per question
+     (the recommended default as the first option; users can always answer
+     free-form via Other). Never batch several interview questions into a
+     single call — each answer should be able to shape what you ask next.
+   - **Checkpoint every 4 questions.** Keep a running count of interview
+     questions asked (cumulative across delegations; the checkpoint itself
+     does not count). After every 4th, ask with **AskUserQuestion** (header
+     `Interview`): "Keep clarifying, or draft the brief from what we have?"
+     with options `Clarify further` / `Draft the brief` — put `Clarify
+     further` first while material questions remain, `Draft the brief` first
+     once only polish is left.
+   - When the agent's returned questions are exhausted (or an answer
+     materially changes the picture), re-delegate with ALL accumulated
+     question/answer pairs in a `# Answers` block for its next round. There is
+     **no cap on rounds or questions** — the interview ends when the agent
+     returns `INTERVIEW_COMPLETE: yes`, or the user picks `Draft the brief`
+     at a checkpoint. On an early `Draft the brief`, drop the remaining
+     questions and note for the brief step that the user cut the interview
+     short (the agent then records assumptions for anything unanswered).
+   This is the flow's defining phase — do not rush it, and never volunteer the
+   brief while material questions are open; the checkpoint is where the user
+   makes that call.
 2. **project-brief** → re-delegate to `cyboflow-interview` with `MODE: BRIEF`
-   and the full interview transcript (every question and answer). It returns a
+   and the full interview transcript (every question and answer; when the user
+   chose `Draft the brief` with questions still open, include a
+   `# Interview cut short` line listing them so the agent records assumptions
+   instead of inventing answers). It returns a
    self-contained `## Project brief`. Surface it as the run's deliverable:
    `cyboflow_report_artifact(atype: 'project-brief', label: 'Project brief',
    payload_json: {"markdown": "<the full brief markdown>"})`. Re-report the

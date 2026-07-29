@@ -1294,7 +1294,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'interview',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
-            desc: 'In-depth multi-round interview (up to 4 rounds of multiple-choice questions) covering vision, users, core loop, MVP boundary, stack, data, and risks.',
+            desc: 'In-depth interview — questions asked one at a time, uncapped, with a "clarify further or draft the brief?" checkpoint every four questions — covering vision, users, core loop, MVP boundary, stack, data, and risks.',
           },
           {
             id: 'project-brief',

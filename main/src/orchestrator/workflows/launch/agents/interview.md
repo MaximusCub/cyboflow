@@ -54,20 +54,28 @@ Round mechanics:
 - Round 1 always anchors on dimensions 1–4 (the shape of the thing). Later
   rounds go deeper based on the answers — stack trade-offs, data model, scope
   edges the answers exposed.
-- Each round: at most **4** questions, each with 2–4 concrete options plus a
-  one-line `Recommended:` default. An open "what do you want?" gets worse
-  answers than "I'd assume X — X, Y, or Z?". The user can always answer
-  free-form, so options are anchors, not fences.
+- Each round: return your open questions in **priority order, riskiest
+  assumption first** — typically 3–6. The orchestrator presents them to the
+  user ONE AT A TIME and, every four questions, checkpoints whether to keep
+  clarifying or draft the brief — so a question you rank last may never be
+  asked. Each question carries 2–4 concrete options plus a one-line
+  `Recommended:` default. An open "what do you want?" gets worse answers than
+  "I'd assume X — X, Y, or Z?". The user can always answer free-form, so
+  options are anchors, not fences.
 - Before writing questions, note the direction you WOULD take and the riskiest
   assumptions in it — then ask about the assumptions, highest-risk first.
-- Declare `INTERVIEW_COMPLETE: yes` as soon as another round would only
-  polish — the orchestrator caps the interview at 4 rounds regardless. List
-  the assumptions you are proceeding on for anything left open.
+- There is **no cap** on rounds or total questions — depth is the user's call
+  at the checkpoints. Declare `INTERVIEW_COMPLETE: yes` as soon as another
+  question would only polish, and list the assumptions you are proceeding on
+  for anything left open.
 
 ## MODE: BRIEF — the project's constitution
 
 Synthesize the transcript into a self-contained `## Project brief` a newcomer
 could build from without reading the interview. Keep it to roughly two screens.
+When the prompt carries a `# Interview cut short` line, the user chose to
+draft early with questions still open — do NOT invent their answers; pick the
+recommended default for each and record it under `### Risks & assumptions`.
 Sections, in order:
 
 - `### Vision` — the elevator pitch, 2–3 sentences.
