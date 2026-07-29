@@ -194,6 +194,11 @@ function makeServices(opts?: {
   forceResolvedSubstrate?: 'sdk' | 'interactive';
   /** configManager.isInteractivePtyOnly() — the design pre-flight's 2nd gate. */
   interactivePtyOnly?: boolean;
+  /**
+   * Settings → Integrations / onboarding Connect provider toggles. Defaults to
+   * both providers ON, so every existing test keeps its byte-identical path.
+   */
+  providerAccess?: { claude: boolean; codex: boolean };
 }) {
   const dbRunCalls: Array<{ sql: string; args: unknown[] }> = [];
   let lastPreparedSql = '';
@@ -355,6 +360,11 @@ function makeServices(opts?: {
       getQuickSessionWorktreeMode: () => 'worktree',
       isInteractivePtyOnly: () => opts?.interactivePtyOnly === true,
       getConfig: () => ({}),
+      // Provider-access gate (Settings → Integrations toggles). Both providers on
+      // unless a test opts out, so the launch path stays byte-identical here.
+      getAgentProviderAccess: () => opts?.providerAccess ?? { claude: true, codex: true },
+      isAgentProviderEnabled: (provider: 'claude' | 'codex') =>
+        (opts?.providerAccess ?? { claude: true, codex: true })[provider] ?? true,
     },
     cyboflow: {
       workflowRegistry: fakeWorkflowRegistry,
@@ -864,6 +874,64 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
   });
+
+  // ── Provider-access gate (Settings → Integrations / onboarding Connect
+  // toggles → AppConfig.agentProviderAccess → ConfigManager) ──
+
+  it('rejects a Codex launch when the Codex provider is switched off', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      providerAccess: { claude: true, codex: false },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Codex provider is turned off/i);
+    // Fails BEFORE anything is created — no session, no worktree.
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Claude launch when the Claude provider is switched off', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      providerAccess: { claude: false, codex: true },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentRuntime: 'claude-interactive',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Claude provider is turned off/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('reroutes an UNREQUESTED quick session to Codex when Claude is switched off', async () => {
+    const { services, fakeTaskQueue } = makeServices({
+      providerAccess: { claude: false, codex: true },
+    });
+    const handlers = registerWith(services);
+
+    // A Codex-only install must still start a quick session that names nothing.
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(true);
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+    }));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -882,6 +950,8 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
       isDemoMode: () => false,
       getQuickSessionWorktreeMode: () => 'worktree',
       getDefaultSubstrate: () => undefined,
+      getAgentProviderAccess: () => ({ claude: true, codex: true }),
+      isAgentProviderEnabled: () => true,
     });
     const handlers = registerWith(services);
 
@@ -904,6 +974,8 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
       isDemoMode: () => false,
       getQuickSessionWorktreeMode: () => 'in-place',
       getDefaultSubstrate: () => undefined,
+      getAgentProviderAccess: () => ({ claude: true, codex: true }),
+      isAgentProviderEnabled: () => true,
     });
     const handlers = registerWith(services);
 
@@ -925,6 +997,8 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
       isDemoMode: () => false,
       getQuickSessionWorktreeMode: () => 'in-place',
       getDefaultSubstrate: () => undefined,
+      getAgentProviderAccess: () => ({ claude: true, codex: true }),
+      isAgentProviderEnabled: () => true,
     });
     const handlers = registerWith(services);
 

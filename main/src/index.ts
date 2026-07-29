@@ -119,7 +119,7 @@ import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJu
 import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
-import { isAgentProvider } from '../../shared/types/agentRuntime';
+import { isAgentProvider, providerForRuntime } from '../../shared/types/agentRuntime';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
@@ -2317,6 +2317,22 @@ async function initializeServices(): Promise<boolean> {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
       if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
+      // written by the MCP workflow-config tools as well as the editor, so a pin
+      // naming a provider the user switched off in Settings → Integrations can
+      // reach here even though the editor hides it. Drop just the runtime pin
+      // (keeping model/effort) so the step falls back to the run-level provider,
+      // which createRun already resolved onto an ENABLED provider — same
+      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
+      const pinnedRuntime =
+        a.runtime && !configManager.isAgentProviderEnabled(providerForRuntime(a.runtime))
+          ? undefined
+          : a.runtime;
+      if (a.runtime && pinnedRuntime === undefined) {
+        cyboflowLogger.warn(
+          `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
+        );
+      }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
       // `opus` pin spawns `claude-opus-5` (default window), matching the
@@ -2325,7 +2341,7 @@ async function initializeServices(): Promise<boolean> {
       // per-agent pins are window-agnostic and consistent across both planes.
       const model = bareModelId(a.model, isModelUsable);
       return {
-        ...(a.runtime ? { runtime: a.runtime } : {}),
+        ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
         ...(model ? { model } : {}),
         ...(a.codexModel ? { codexModel: a.codexModel } : {}),
         ...(a.effort ? { effort: a.effort } : {}),

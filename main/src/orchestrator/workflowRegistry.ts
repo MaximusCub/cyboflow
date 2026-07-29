@@ -25,7 +25,9 @@ import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
   claudeRuntimeFromSubstrate,
+  isAgentProviderEnabled,
   type AgentProvider,
+  type AgentProviderAccess,
   type WorkflowAgentRuntime,
 } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
@@ -86,6 +88,13 @@ export interface WorkflowConfigProvider {
   getForcedSubstrate?(): CliSubstrate | null;
   /** True only for the scripted demo boot profile. */
   isDemoMode?(): boolean;
+  /**
+   * The user's per-provider access toggles (Settings → Integrations / onboarding
+   * Connect step). Consulted by createRun BELOW demo mode: a run may not resolve
+   * onto a provider the user switched off. Optional + absent => both providers
+   * enabled (the byte-identical default), so existing fixtures are unaffected.
+   */
+  getAgentProviderAccess?(): AgentProviderAccess;
   /**
    * Global default for the execution model (orchestrated vs programmatic),
    * consulted by resolveExecutionModel below its env level. Optional + absent =>
@@ -1169,8 +1178,38 @@ export class WorkflowRegistry {
         'WorkflowRegistry.createRun: agentProvider claude conflicts with agentRuntime codex-sdk',
       );
     }
-    const codexSdkRequested =
+
+    // Provider-access gate — the authoritative enforcement of the Settings →
+    // Integrations / onboarding Connect toggles. Sits BELOW demo mode (which
+    // never dispatches to a real provider and is therefore exempt) and ABOVE the
+    // substrate ladder, since it decides WHICH provider the run may resolve onto.
+    //
+    // An EXPLICIT request for a switched-off provider fails closed here rather
+    // than spawning an account the user disabled — the renderer's pickers already
+    // hide it, but a variant default, a stale payload, or an MCP-written config
+    // can still name it. An UNREQUESTED run whose default route (Claude) is
+    // switched off REROUTES to the other enabled provider instead of failing, so
+    // a Codex-only install can still launch every flow.
+    const providerAccess = demoMode ? undefined : this.config?.getAgentProviderAccess?.();
+    const claudeEnabled = isAgentProviderEnabled(providerAccess, 'claude');
+    const codexEnabled = isAgentProviderEnabled(providerAccess, 'codex');
+    const codexExplicit =
       requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
+    const claudeExplicit =
+      requestedAgentProvider === 'claude' ||
+      requestedAgentRuntime === 'claude-sdk' ||
+      requestedAgentRuntime === 'claude-interactive';
+    if (codexExplicit && !codexEnabled) {
+      throw new Error(
+        'WorkflowRegistry.createRun: the Codex provider is disabled in Settings → Integrations',
+      );
+    }
+    if (claudeExplicit && !claudeEnabled) {
+      throw new Error(
+        'WorkflowRegistry.createRun: the Claude provider is disabled in Settings → Integrations',
+      );
+    }
+    const codexSdkRequested = codexExplicit || (!claudeEnabled && codexEnabled);
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'

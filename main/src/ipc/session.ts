@@ -38,7 +38,13 @@ import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
-import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import {
+  claudeRuntimeFromSubstrate,
+  isAgentProvider,
+  isAgentProviderEnabled,
+  isSessionAgentRuntime,
+  providerForRuntime,
+} from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
@@ -781,6 +787,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // cover. Reuses the same detection helpers + state mapping as
         // onboarding (claudeDetection.ts computeState) so "available" means
         // the same thing in both places.
+        // Zeroth pre-flight: the Claude provider must be switched on at all.
+        // Design sessions hard-pin the Claude SDK, so a Claude-off install can
+        // never serve one — reject before the detection probe (which would
+        // otherwise report a perfectly healthy account the user disabled).
+        if (!configManager.isAgentProviderEnabled('claude')) {
+          return {
+            success: false,
+            error:
+              'Design sessions require Claude, which is turned off in Settings → Integrations. Enable Claude to start a design session.',
+          };
+        }
+
         const [designCredentials, designBinary] = await Promise.all([
           detectClaudeCredentials(),
           detectClaudeBinary(configManager.getConfig()?.claudeExecutablePath),
@@ -848,6 +866,30 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         };
       }
 
+      // Provider-access gate — the session-side twin of the createRun gate, and
+      // the authoritative enforcement of the Settings → Integrations / onboarding
+      // Connect toggles for quick sessions. A launch that EXPLICITLY names a
+      // switched-off provider fails closed (the wizard's picker already hides it,
+      // but a stale/scripted payload can still name it); a launch that names
+      // nothing and would default to Claude reroutes to Codex when Claude is the
+      // disabled one, so a Codex-only install can still start quick sessions.
+      const providerAccess = configManager.getAgentProviderAccess();
+      const explicitProvider: AgentProvider | undefined =
+        requestedAgentProvider ??
+        (requestedAgentRuntime !== undefined ? providerForRuntime(requestedAgentRuntime) : undefined);
+      if (explicitProvider !== undefined && !isAgentProviderEnabled(providerAccess, explicitProvider)) {
+        return {
+          success: false,
+          error: `The ${explicitProvider === 'codex' ? 'Codex' : 'Claude'} provider is turned off in Settings → Integrations. Enable it to start this session.`,
+        };
+      }
+      // Unrequested launch under a Claude-off install: fall back to the provider
+      // the user left enabled rather than resolving onto the disabled default.
+      const fallbackToCodex =
+        explicitProvider === undefined &&
+        !isAgentProviderEnabled(providerAccess, 'claude') &&
+        isAgentProviderEnabled(providerAccess, 'codex');
+
       // Design Mode (design-mode.md "Session plumbing — SDK-pinned,
       // fail-closed"): neither Codex flag may ever resolve true for a design
       // launch, regardless of what the request's own provider/runtime fields
@@ -858,7 +900,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const useCodexSdk =
         !isDesignSession &&
         (requestedAgentRuntime === 'codex-sdk' ||
-          (requestedAgentProvider === 'codex' && requestedAgentRuntime === undefined));
+          ((requestedAgentProvider === 'codex' || fallbackToCodex) &&
+            requestedAgentRuntime === undefined));
       const useCodexPty =
         !isDesignSession && requestedAgentRuntime === 'codex-pty';
 

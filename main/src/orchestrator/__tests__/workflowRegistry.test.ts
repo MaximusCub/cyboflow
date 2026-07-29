@@ -970,6 +970,133 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    // ───── Provider-access gate (Settings → Integrations / onboarding Connect
+    // toggles → AppConfig.agentProviderAccess → ConfigManager) ─────
+
+    it('rejects an explicit Codex request when the Codex provider is switched off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-off-workflow.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: true, codex: false }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'codex',
+            requestedAgentRuntime: 'codex-sdk',
+          }),
+        ).toThrow(/Codex provider is disabled/);
+      });
+    });
+
+    it('rejects a VARIANT-default Codex runtime when the Codex provider is switched off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-off-variant-workflow.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: true, codex: false }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        // The launch names nothing; the variant default supplies Codex. The gate
+        // must catch it there too — the editor hides a disabled runtime, but a
+        // variant saved BEFORE the toggle flipped still carries the pin.
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            variantAgentProvider: 'codex',
+            variantAgentRuntime: 'codex-sdk',
+          }),
+        ).toThrow(/Codex provider is disabled/);
+      });
+    });
+
+    it('rejects an explicit Claude request when the Claude provider is switched off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'claude-off-workflow.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: false, codex: true }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentRuntime: 'claude-sdk',
+          }),
+        ).toThrow(/Claude provider is disabled/);
+      });
+    });
+
+    it('reroutes an UNREQUESTED run to Codex when Claude is switched off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'claude-off-default-workflow.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: false, codex: true }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        // A Codex-only install must still be able to launch a flow that names no
+        // provider — falling through to the Claude default would be unlaunchable.
+        const result = gated.createRun(workflowId, undefined, TEST_SESSION_ID);
+        const run = gated.getRunById(result.runId);
+        expect(run!.agent_provider).toBe('codex');
+        expect(run!.agent_runtime).toBe('codex-sdk');
+      });
+    });
+
+    it('leaves both providers usable when the toggles are untouched (absent config)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'provider-access-absent-workflow.md', '---\n---\n');
+        // No getAgentProviderAccess on the provider at all — the byte-identical
+        // pre-feature shape. Codex must still launch.
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+        });
+        expect(registry.getRunById(result.runId)!.agent_provider).toBe('codex');
+      });
+    });
+
+    it('exempts demo mode from the provider-access gate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'demo-provider-access-workflow.md', '---\n---\n');
+        const demoRegistry = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getForcedSubstrate: () => 'sdk',
+          isDemoMode: () => true,
+          // Even with BOTH real providers off, demo runs on the scripted manager.
+          getAgentProviderAccess: () => ({ claude: false, codex: false }),
+        });
+        demoRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = demoRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        expect(demoRegistry.getRunById(result.runId)!.agent_provider).toBe('claude');
+      });
+    });
+
     it('rejects codex-sdk workflows when paired with the interactive substrate', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'codex-sdk-interactive-conflict.md', '---\n---\n');
