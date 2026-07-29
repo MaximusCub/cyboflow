@@ -34,10 +34,10 @@ export function computeSendDisabledReason(input: SendDisabledInput): string | nu
 // Addressed-comment history grouping
 // ---------------------------------------------------------------------------
 
-export interface AddressedRoundGroup {
+export interface AddressedRoundGroup<C extends FeedbackComment = FeedbackComment> {
   round: number;
   batchId: string;
-  comments: FeedbackComment[];
+  comments: C[];
 }
 
 /**
@@ -45,13 +45,17 @@ export interface AddressedRoundGroup {
  * first. A comment whose batch id is missing from `batches` (shouldn't happen —
  * batches outlive their comments) still groups under round 0 rather than being
  * dropped.
+ *
+ * Generic over the comment type so a caller that has already narrowed its
+ * comments (e.g. the doc panel, to quote-anchored ones) keeps that narrowing in
+ * the returned groups.
  */
-export function groupAddressedByRound(
-  comments: FeedbackComment[],
+export function groupAddressedByRound<C extends FeedbackComment>(
+  comments: C[],
   batches: FeedbackBatch[],
-): AddressedRoundGroup[] {
+): AddressedRoundGroup<C>[] {
   const roundByBatch = new Map(batches.map((b) => [b.id, b.round]));
-  const groups = new Map<string, AddressedRoundGroup>();
+  const groups = new Map<string, AddressedRoundGroup<C>>();
   for (const comment of comments) {
     if (comment.status !== 'addressed' || comment.batchId === null) continue;
     let group = groups.get(comment.batchId);
@@ -73,8 +77,22 @@ export type ChipStatus =
   | { kind: 'applied'; round: number }
   | { kind: 'failed'; round: number; error: string | null };
 
-/** Status priority when batches tie on `createdAt` — higher wins. */
-const STATUS_PRIORITY: Record<FeedbackBatch['status'], number> = { pending: 2, failed: 1, applied: 0 };
+/**
+ * Status priority when batches tie on `createdAt` — higher wins. In-flight beats
+ * terminal, because a revision still running is the most operationally relevant
+ * thing to show. The design-outbox statuses share the column (migration 090) but
+ * never reach this chip, which reads document batches only; they are ranked
+ * anyway so the map stays total and a future surface cannot silently fall through.
+ */
+const STATUS_PRIORITY: Record<FeedbackBatch['status'], number> = {
+  pending: 2,
+  queued: 2,
+  dispatching: 2,
+  dispatched: 2,
+  failed: 1,
+  blocked: 1,
+  applied: 0,
+};
 
 /**
  * The chip to show on one idea's gate row: derived from the most RECENT batch
@@ -92,7 +110,17 @@ export function latestBatchStatus(batches: FeedbackBatch[], ideaId: string): Chi
     if (b.createdAt !== a.createdAt) return b.createdAt > a.createdAt ? b : a;
     return STATUS_PRIORITY[b.status] > STATUS_PRIORITY[a.status] ? b : a;
   });
-  if (latest.status === 'pending') return { kind: 'pending', round: latest.round };
-  if (latest.status === 'applied') return { kind: 'applied', round: latest.round };
-  return { kind: 'failed', round: latest.round, error: latest.error };
+  switch (latest.status) {
+    case 'pending':
+    case 'queued':
+    case 'dispatching':
+    case 'dispatched':
+      return { kind: 'pending', round: latest.round };
+    case 'applied':
+      return { kind: 'applied', round: latest.round };
+    case 'blocked':
+      return { kind: 'failed', round: latest.round, error: latest.blockedReason };
+    case 'failed':
+      return { kind: 'failed', round: latest.round, error: latest.error };
+  }
 }

@@ -37,6 +37,12 @@ function makeBatch(overrides: Partial<FeedbackBatch> = {}): FeedbackBatch {
     error: null,
     createdAt: '2026-07-01T00:00:00.000Z',
     appliedAt: null,
+    sessionId: null,
+    currentAttemptId: null,
+    attemptCount: 0,
+    blockedReason: null,
+    dispatchedAt: null,
+    appliedPrototypeRevision: null,
     ...overrides,
   };
 }

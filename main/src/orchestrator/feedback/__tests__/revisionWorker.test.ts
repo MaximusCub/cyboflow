@@ -52,8 +52,19 @@ function buildDb(): Database.Database {
     '016_review_items.sql',
     '077_artifact_feedback.sql',
     '085_review_item_audience.sql',
+    // 090 widens both feedback tables (design-prototype atypes + the outbox
+    // columns/statuses). Its table recreate needs FK enforcement OFF — exactly
+    // what the migration runner does for the leading `PRAGMA foreign_keys=OFF`.
+    '090_design_feedback_outbox.sql',
   ]) {
-    db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+    const sql = readFileSync(join(MIG_DIR, f), 'utf-8');
+    // Mirror the migration runner: a file declaring `PRAGMA foreign_keys=OFF`
+    // gets FK enforcement toggled off around it, so its table recreate's
+    // DROP TABLE does not fire ON DELETE actions on child rows.
+    const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');
+    if (needsFkOff) db.pragma('foreign_keys = OFF');
+    db.exec(sql);
+    if (needsFkOff) db.pragma('foreign_keys = ON');
   }
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at DATETIME'); // migration 042 slice
   // Hand-seeded ideas use placeholder board/stage refs; no FK behavior is under test.

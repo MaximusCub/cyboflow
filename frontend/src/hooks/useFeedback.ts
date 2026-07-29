@@ -29,6 +29,7 @@
  */
 import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
+import { isDocFeedbackAtype } from '../../../shared/types/feedback';
 import type {
   CommentAnchor,
   FeedbackAtype,
@@ -184,6 +185,12 @@ export function useFeedback(
   const sendBatch = async (): Promise<SendFeedbackResult> => {
     if (runId === null || atype === undefined || sourceRef === undefined) {
       throw new Error('[useFeedback] sendBatch requires a doc-scoped hook (atype + sourceRef)');
+    }
+    // sendBatch is the parked-gate DOCUMENT path. Design-prototype batches go
+    // through the outbox instead, so a prototype atype here is a caller bug, not
+    // a request to send.
+    if (!isDocFeedbackAtype(atype)) {
+      throw new Error(`[useFeedback] sendBatch does not apply to the design-prototype atype '${atype}'`);
     }
     return trpc.cyboflow.feedback.sendBatch.mutate({ runId, atype, sourceRef });
   };

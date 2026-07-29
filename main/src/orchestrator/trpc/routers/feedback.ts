@@ -1,14 +1,26 @@
 /**
  * cyboflow.feedback sub-router — in-artifact feedback on the idea-spec /
- * arch-design document tabs (IDEA-033).
+ * arch-design document tabs (IDEA-033) AND element-tagged comments on design
+ * prototypes (Design Mode v1).
  *
- * Typed tRPC contract for the renderer's highlight+comment feedback surface:
+ * Typed tRPC contract for the renderer's feedback surfaces:
  *   - list              : query        -> { comments, batches } (a run's feedback)
  *   - createComment     : mutation     -> { commentId }
  *   - updateComment     : mutation     -> { commentId }
  *   - deleteComment     : mutation     -> { commentId }
  *   - sendBatch         : mutation     -> SendFeedbackResult (refusals are DATA)
  *   - onFeedbackChanged : subscription -> FeedbackChangedEvent (project-scoped)
+ *
+ * TWO SURFACES, ONE GATE SPLIT. The parked-run guard chain — run status in
+ * FEEDBACK_PARKED_RUN_STATUSES plus an open pending blocking decision gate, all
+ * enforced inside sendFeedbackHandler — is a DOCUMENT-path rule: a planner/ship
+ * document can only influence a decision while that decision is still open. A
+ * design session is a live chat that is never parked and has no gate, so the
+ * design-prototype atypes must NOT be routed through it. `sendBatch` therefore
+ * accepts the document atypes ONLY (a prototype atype is a BAD_REQUEST naming the
+ * design path); comment CRUD accepts both, gated only by the anchor↔atype pairing
+ * the FeedbackRouter chokepoint enforces. Sending a design batch is the outbox's
+ * job (FeedbackRouter.createDesignBatch), wired by a later stage.
  *
  * Comment CRUD forwards to the FeedbackRouter chokepoint (getInstance()); sendBatch
  * forwards to sendFeedbackHandler (guards + detached revision launch). `projectId`
@@ -67,9 +79,11 @@ function rethrowAsTRPCError(err: unknown): never {
       not_found: 'NOT_FOUND',
       invalid_atype: 'BAD_REQUEST',
       invalid_body: 'BAD_REQUEST',
+      invalid_anchor: 'BAD_REQUEST',
       not_draft: 'CONFLICT',
       busy: 'CONFLICT',
       no_comments: 'BAD_REQUEST',
+      invalid_transition: 'CONFLICT',
       invalid_op: 'BAD_REQUEST',
     };
     throw new TRPCError({ code: codeMap[err.code], message: `${err.code}: ${err.message}`, cause: err });
@@ -77,12 +91,42 @@ function rethrowAsTRPCError(err: unknown): never {
   throw err;
 }
 
-const feedbackAtypeSchema = z.enum(['idea-spec', 'arch-design']);
-const anchorSchema = z.object({
+/** The document atypes — the ONLY atypes the parked-gate sendBatch path accepts. */
+const docAtypeSchema = z.enum(['idea-spec', 'arch-design']);
+/** The design-prototype atypes — never parked-gated. */
+const designAtypeSchema = z.enum(['ui-prototype', 'interactive-prototype']);
+/** Either surface — comment CRUD and the read paths accept both. */
+const feedbackAtypeSchema = z.union([docAtypeSchema, designAtypeSchema]);
+
+/** Quote anchor (document surface). Legacy stored anchors carry no `kind` field. */
+const quoteAnchorSchema = z.object({
   quote: z.string(),
   occurrence: z.number().int().min(0),
   bodyHash: z.string(),
 });
+
+/**
+ * Element anchor (design-prototype surface). `ancestorStack` is ordered
+ * innermost-first (index 0 = the picked element, last = body) and `pickedIndex`
+ * indexes into it; the in-range check is left to the FeedbackRouter chokepoint so
+ * the rule lives in exactly one place.
+ */
+const elementAnchorSchema = z.object({
+  kind: z.literal('element'),
+  designId: z.string().nullable(),
+  ancestorStack: z
+    .array(
+      z.object({
+        tag: z.string().min(1),
+        designId: z.string().nullable(),
+        label: z.string().nullable(),
+      }),
+    )
+    .min(1),
+  pickedIndex: z.number().int().min(0),
+});
+
+const anchorSchema = z.union([elementAnchorSchema, quoteAnchorSchema]);
 
 // ---------------------------------------------------------------------------
 // Router
@@ -108,7 +152,12 @@ export const feedbackRouter = router({
       },
     ),
 
-  /** Create a draft comment on a document. */
+  /**
+   * Create a draft comment on a document OR a design prototype. Deliberately NOT
+   * parked-run gated for either surface: drafting is always allowed, and the
+   * design surface has no gate at all. The anchor↔atype pairing is enforced by the
+   * FeedbackRouter chokepoint (surfaced here as `invalid_anchor` → BAD_REQUEST).
+   */
   createComment: protectedProcedure
     .input(
       z.object({
@@ -178,14 +227,21 @@ export const feedbackRouter = router({
     }),
 
   /**
-   * "Send feedback": guard the request and, on success, fire the host-driven
-   * revision detached. Refusals are DATA (`{ noOp, reason }`), never thrown.
+   * "Send feedback" for the DOCUMENT surface: guard the request (parked run +
+   * open blocking gate + idea not decomposed) and, on success, fire the
+   * host-driven revision detached. Refusals are DATA (`{ noOp, reason }`), never
+   * thrown.
+   *
+   * The input schema accepts the document atypes ONLY. A design prototype has no
+   * parked gate to send against — its batches are minted into the durable outbox
+   * via FeedbackRouter.createDesignBatch, so routing one here would hit
+   * `not_parked` and read as a bug rather than a wrong door.
    */
   sendBatch: protectedProcedure
     .input(
       z.object({
         runId: z.string().min(1),
-        atype: feedbackAtypeSchema,
+        atype: docAtypeSchema,
         sourceRef: z.string().min(1),
       }),
     )

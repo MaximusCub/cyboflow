@@ -22,7 +22,19 @@ import { useFeedback } from '../../../hooks/useFeedback';
 import { useReviewItemsSlice } from '../../../stores/reviewItemsSlice';
 import { applyHighlights, captureAnchor, isAnchorStale } from '../../../utils/textAnchors';
 import { computeSendDisabledReason, groupAddressedByRound } from './feedbackLogic';
-import type { CommentAnchor, FeedbackAtype, FeedbackComment } from '../../../../../shared/types/feedback';
+import { isQuoteAnchor } from '../../../../../shared/types/feedback';
+import type {
+  CommentAnchor,
+  DocFeedbackAtype,
+  FeedbackComment,
+} from '../../../../../shared/types/feedback';
+
+/**
+ * A comment on a DOCUMENT — i.e. one whose stored anchor is the quote variant.
+ * The tables are shared with the design-prototype surface (element anchors), so
+ * this panel narrows once at the source rather than re-checking per render.
+ */
+type DocFeedbackComment = FeedbackComment & { anchor: CommentAnchor };
 
 const HAIRLINE = 'var(--color-border-primary)';
 const MUTED = 'var(--color-text-secondary)';
@@ -36,7 +48,7 @@ const PASS = '#2d8a5b';
 interface FeedbackDocPanelProps {
   projectId: number;
   runId: string;
-  atype: FeedbackAtype;
+  atype: DocFeedbackAtype;
   sourceRef: string;
   /** The exact markdown/text string being rendered — anchors hash against it. */
   documentSource: string;
@@ -66,11 +78,20 @@ export function FeedbackDocPanel({
   accent = 'var(--color-interactive-primary)',
   children,
 }: FeedbackDocPanelProps): ReactElement {
-  const { comments, batches, createComment, updateComment, deleteComment, sendBatch } = useFeedback(
+  const { comments: allComments, batches, createComment, updateComment, deleteComment, sendBatch } = useFeedback(
     projectId,
     runId,
     atype,
     sourceRef,
+  );
+
+  // This panel renders quotes and relocates highlights, both of which only make
+  // sense for the quote-anchor variant. A doc atype never stores element anchors
+  // (the FeedbackRouter chokepoint rejects that pairing), so the filter drops
+  // nothing in practice — it is the type-level proof of that invariant.
+  const comments = useMemo(
+    () => allComments.filter((c): c is DocFeedbackComment => isQuoteAnchor(c.anchor)),
+    [allComments],
   );
 
   // -- Selection capture + the floating "Comment" button/popover -----------
@@ -122,7 +143,7 @@ export function FeedbackDocPanel({
     const container = containerRef.current;
     if (!container) return undefined;
     const entries = comments
-      .filter((c): c is FeedbackComment => c.status === 'draft' || c.status === 'sent')
+      .filter((c) => c.status === 'draft' || c.status === 'sent')
       .map((c) => ({ id: c.id, anchor: c.anchor }));
     return applyHighlights(container, entries);
   }, [comments, documentSource]);
