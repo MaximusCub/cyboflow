@@ -69,6 +69,10 @@ import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
 import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
+import {
+  DesignFeedbackOutbox,
+  setDesignBatchNotifier,
+} from './orchestrator/feedback/designFeedbackOutbox';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
@@ -408,6 +412,14 @@ const prototypeServerReaper = new PrototypeServerReaper();
 // so it is null until boot finishes wiring.
 let designPrototypeServerManager: DesignPrototypeServerManager | null = null;
 
+// Design Mode v1 design-feedback delivery pipeline (design-mode.md "Design
+// feedback v1 — acknowledged durable outbox"). Module-level so the deferred boot
+// recovery scan (runDeferredStartupWork) can reach the SAME instance the
+// sendDesignBatch poke drives. Constructed in initializeServices — its
+// dispatchTurn seam needs the Claude panel manager, which only exists once
+// registerIpcHandlers has run — so it is null until boot finishes wiring.
+let designFeedbackOutbox: DesignFeedbackOutbox | null = null;
+
 // Reaper for the detached `openai-codex` plugin broker daemons a Codex-using
 // session leaks into a worktree (see CodexBrokerReaper). Stateless (ps +
 // process.kill + fs.existsSync) — safe to construct at module load. Wired into
@@ -675,6 +687,18 @@ function runDeferredStartupWork(): void {
   void codexBrokerReaper.sweepOrphans().catch((err) => {
     console.error('[Main] codex-broker boot sweep failed:', err);
   });
+
+  // Design Mode v1 boot recovery (design-mode.md "Design feedback v1"): re-drive
+  // every design-feedback batch a crash left queued/dispatching/dispatched.
+  // Guards are re-validated first (a failure lands the batch in the visible
+  // 'blocked' state), and a possibly-delivered batch is re-delivered under the
+  // SAME batch id with a NEW attempt id — never as if it were fresh.
+  //
+  // Deliberately NOT the FeedbackRouter.sweepInterruptedBatches seam next to it
+  // at boot: that sweep FAILS interrupted batches, which is right for the
+  // document path's 'pending' but would discard recoverable design feedback.
+  // Fire-and-forget — recoverOnBoot never rejects.
+  void designFeedbackOutbox?.recoverOnBoot();
 
   // Boot sweep #2: the same brokers, but in worktrees that STILL EXIST. The sweep
   // above spares those (their `--cwd` resolves) and WorktreeManager's reap only
@@ -3013,6 +3037,53 @@ async function initializeServices() {
     loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
     snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
     logger: cyboflowLogger,
+  });
+  // Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged durable
+  // outbox") — the delivery pipeline that drives a queued design-feedback batch
+  // through guards → 'dispatching' → the SDK revision turn → 'dispatched', and
+  // re-delivers whatever a crash left in flight.
+  //
+  // Wired HERE, after registerIpcHandlers, because `dispatchTurn` goes through
+  // the Claude panel continue path (the same internals behind the
+  // 'claude-panels:continue' IPC handler), and claudePanelManager only exists
+  // once the IPC handlers are registered. The lazy require mirrors taskQueue's
+  // continueQueue — index.ts must not take a static import on ipc/claudePanel.
+  //
+  // The lifecycle guards are the service's DB-backed defaults; only the SDK turn
+  // and the clock are host-supplied.
+  designFeedbackOutbox = new DesignFeedbackOutbox({
+    db: cyboflowDb,
+    feedbackRouter: FeedbackRouter.getInstance(),
+    dispatchTurn: async ({ sessionId, prompt }): Promise<void> => {
+      const session = sessionManager.getSession(sessionId);
+      if (!session) throw new Error(`design session ${sessionId} no longer exists`);
+      const claudePanel = panelManager
+        .getPanelsForSession(sessionId)
+        .find((panel) => panel.type === 'claude');
+      if (!claudePanel) throw new Error(`design session ${sessionId} has no Claude panel to deliver the turn to`);
+      const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
+      if (!claudePanelManager) throw new Error('the Claude panel manager is not available yet');
+      const conversationHistory = sessionManager.getPanelConversationMessages(claudePanel.id);
+      // Resolves once the SDK has ACCEPTED the turn — that acceptance is exactly
+      // what the outbox records as 'dispatched'.
+      await claudePanelManager.continuePanel(
+        claudePanel.id,
+        session.worktreePath,
+        prompt,
+        conversationHistory,
+      );
+      // Echo the dispatched turn into the panel transcript, exactly as the
+      // 'claude-panels:continue' IPC path does via handlePanelContinue — without
+      // this the host-sent revision turn is invisible in the design session's
+      // chat (the "sends missing from transcript" bug class).
+      sessionManager.addPanelConversationMessage(claudePanel.id, 'user', prompt);
+    },
+    logger: cyboflowLogger,
+  });
+  // The sendDesignBatch mutation's fire-and-track poke (the design analogue of
+  // setRevisionLauncher). notifyQueued never rejects, so voiding it is safe.
+  setDesignBatchNotifier((batchId: string) => {
+    void designFeedbackOutbox?.notifyQueued(batchId);
   });
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);

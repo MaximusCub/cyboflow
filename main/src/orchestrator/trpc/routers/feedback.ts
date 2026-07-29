@@ -19,8 +19,10 @@
  * design-prototype atypes must NOT be routed through it. `sendBatch` therefore
  * accepts the document atypes ONLY (a prototype atype is a BAD_REQUEST naming the
  * design path); comment CRUD accepts both, gated only by the anchor↔atype pairing
- * the FeedbackRouter chokepoint enforces. Sending a design batch is the outbox's
- * job (FeedbackRouter.createDesignBatch), wired by a later stage.
+ * the FeedbackRouter chokepoint enforces. Sending a design batch goes through
+ * `sendDesignBatch` instead: mint via FeedbackRouter.createDesignBatch, then poke
+ * the DesignFeedbackOutbox delivery pipeline (injected via
+ * getDesignBatchNotifier, the design analogue of getRevisionLauncher).
  *
  * Comment CRUD forwards to the FeedbackRouter chokepoint (getInstance()); sendBatch
  * forwards to sendFeedbackHandler (guards + detached revision launch). `projectId`
@@ -45,6 +47,7 @@ import type {
 import type { SendFeedbackResult } from '../../../../../shared/types/feedback';
 import { FeedbackRouter, FeedbackError } from '../../feedbackRouter';
 import { sendFeedbackHandler, getRevisionLauncher } from '../../sendFeedbackHandler';
+import { getDesignBatchNotifier } from '../../feedback/designFeedbackOutbox';
 import { eventToAsyncIterable, feedbackEvents, feedbackProjectChannel } from './events';
 
 // ---------------------------------------------------------------------------
@@ -260,12 +263,15 @@ export const feedbackRouter = router({
   /**
    * "Send feedback" for the DESIGN surface: mint the drafts into a durable
    * 'queued' outbox batch bound to the design session (FeedbackRouter
-   * createDesignBatch — no parked gate; a design session is a live chat).
+   * createDesignBatch — no parked gate; a design session is a live chat), then
+   * POKE the delivery pipeline.
    *
-   * QUEUE-ONLY SEAM for now: the design-feedback outbox pipeline picks queued
-   * batches up for dispatch (guards → dispatching → SDK revision turn →
-   * acknowledged result); until it is wired here, a queued batch simply waits.
-   * The pipeline stage extends THIS procedure with its dispatch poke.
+   * The poke is FIRE-AND-TRACK, exactly like the document path's detached
+   * launchRevision: the mutation returns as soon as the batch is durable, and the
+   * outbox drives guards → 'dispatching' → the SDK revision turn → 'dispatched'
+   * on its own, broadcasting each transition over the feedback subscription. The
+   * batch is already durable when the poke fires, so an unwired notifier (or a
+   * poke that never lands) costs nothing: boot recovery re-delivers it.
    */
   sendDesignBatch: protectedProcedure
     .input(
@@ -284,8 +290,9 @@ export const feedbackRouter = router({
       }): Promise<{ batchId: string; round: number; commentIds: string[] }> => {
         const db = requireDb(ctx.db, 'sendDesignBatch');
         const projectId = resolveProjectId(db, input.runId, 'sendDesignBatch');
+        let minted: { batchId: string; round: number; commentIds: string[] };
         try {
-          return await FeedbackRouter.getInstance().apply(projectId, {
+          minted = await FeedbackRouter.getInstance().apply(projectId, {
             op: 'create-design-batch',
             runId: input.runId,
             sessionId: input.sessionId,
@@ -296,6 +303,8 @@ export const feedbackRouter = router({
         } catch (err) {
           rethrowAsTRPCError(err);
         }
+        getDesignBatchNotifier()?.(minted.batchId);
+        return minted;
       },
     ),
 

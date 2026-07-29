@@ -31,6 +31,10 @@ import {
   _resetRevisionLauncherForTesting,
   type RevisionBatchInfo,
 } from '../../../sendFeedbackHandler';
+import {
+  setDesignBatchNotifier,
+  _resetDesignBatchNotifierForTesting,
+} from '../../../feedback/designFeedbackOutbox';
 import type { CommentAnchor, ElementCommentAnchor } from '../../../../../../shared/types/feedback';
 
 // ---------------------------------------------------------------------------
@@ -135,6 +139,7 @@ function buildCaller(): {
 afterEach(() => {
   FeedbackRouter._resetForTesting();
   _resetRevisionLauncherForTesting();
+  _resetDesignBatchNotifierForTesting();
   feedbackEvents.removeAllListeners();
 });
 
@@ -235,6 +240,84 @@ describe('cyboflow.feedback — design-prototype drafts need no parked run', () 
         sourceRef: 'idea-1',
       }),
     ).rejects.toBeInstanceOf(TRPCError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design surface: sendDesignBatch mints the outbox batch AND pokes the pipeline
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.feedback.sendDesignBatch', () => {
+  it('mints a queued batch bound to the session and pokes the outbox EXACTLY once', async () => {
+    const { caller, db } = buildCaller();
+    seedRun(db, 'run-1', 'running');
+    const poked: string[] = [];
+    setDesignBatchNotifier((batchId) => poked.push(batchId));
+
+    const { commentId } = await caller.cyboflow.feedback.createComment({
+      runId: 'run-1',
+      atype: 'interactive-prototype',
+      sourceRef: 'idea-1',
+      anchor: ELEMENT_ANCHOR,
+      body: 'make the CTA bigger',
+    });
+
+    const result = await caller.cyboflow.feedback.sendDesignBatch({
+      runId: 'run-1',
+      sessionId: 'sess-1',
+      atype: 'interactive-prototype',
+      sourceRef: 'idea-1',
+      commentIds: [commentId],
+    });
+
+    expect(result).toMatchObject({ round: 1, commentIds: [commentId] });
+    expect(poked).toEqual([result.batchId]);
+    expect(
+      db.prepare('SELECT status, session_id AS sessionId FROM feedback_batches WHERE id = ?').get(result.batchId),
+    ).toMatchObject({ status: 'queued', sessionId: 'sess-1' });
+  });
+
+  it('does NOT poke when the mint is refused', async () => {
+    const { caller, db } = buildCaller();
+    seedRun(db, 'run-1', 'running');
+    const poked: string[] = [];
+    setDesignBatchNotifier((batchId) => poked.push(batchId));
+
+    await expect(
+      caller.cyboflow.feedback.sendDesignBatch({
+        runId: 'run-1',
+        sessionId: 'sess-1',
+        atype: 'interactive-prototype',
+        sourceRef: 'idea-1',
+        commentIds: ['fbc_ghost'],
+      }),
+    ).rejects.toBeInstanceOf(TRPCError);
+    expect(poked).toEqual([]);
+  });
+
+  it('an UNWIRED notifier still mints the batch (boot recovery picks it up)', async () => {
+    const { caller, db } = buildCaller();
+    seedRun(db, 'run-1', 'running');
+    // Deliberately no setDesignBatchNotifier — the registry is null.
+    const { commentId } = await caller.cyboflow.feedback.createComment({
+      runId: 'run-1',
+      atype: 'ui-prototype',
+      sourceRef: 'idea-1',
+      anchor: ELEMENT_ANCHOR,
+      body: 'tighten this spacing',
+    });
+
+    const result = await caller.cyboflow.feedback.sendDesignBatch({
+      runId: 'run-1',
+      sessionId: 'sess-1',
+      atype: 'ui-prototype',
+      sourceRef: 'idea-1',
+      commentIds: [commentId],
+    });
+    expect(
+      (db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(result.batchId) as { status: string })
+        .status,
+    ).toBe('queued');
   });
 });
 

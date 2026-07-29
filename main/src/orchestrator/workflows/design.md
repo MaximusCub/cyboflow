@@ -127,6 +127,15 @@ H2 yourself. Always include:
 - **Stamp stable `data-design-id` attributes** on every significant element, and keep
   each id **stable across regenerations** — a later version anchors element-level
   comments to these ids, so a renamed or dropped id orphans its comment.
+- **Which elements get an id, concretely:** every semantic **region** (header, nav,
+  sidebar, each major section/panel), every **control** (button, input, select, tab,
+  link that acts as a control), and every **repeated item** (each row/card/list item —
+  give the container one id and each item its own stable id, e.g.
+  `session-list` / `session-row-1`). Use short, meaning-bearing ids (`hero-cta`, not
+  `btn-3`). **These ids are the element-comment anchor keys** and must survive every
+  re-report unchanged: when the user comments on `data-design-id="hero-cta"` and your
+  next version renames or drops it, their comment loses its anchor. Rename an id only
+  when the element it names is genuinely gone.
 - **Support light and dark** via the style kit's palettes wherever the kit provides
   them.
 - **Never open the prototype in a browser or launch any visible browser window
@@ -159,6 +168,38 @@ H2 yourself. Always include:
   One prototype, iterated in place — never spin up a second. You may ask further
   clarifying questions anytime the user's feedback is ambiguous, using the same
   `AskUserQuestion` tool.
+
+## The feedback revision turn — apply, re-report, then ACK
+
+Sometimes a turn arrives from the host rather than from the user: a **design feedback
+batch**. You will recognize it by its header — it names a **batch id** and an
+**attempt id**, and lists comments the user attached to specific elements of your
+prototype (each with the element's `data-design-id` and its ancestor path).
+
+Do exactly three things, in order:
+
+1. **Apply the comments to the prototype file** — minimally and faithfully. Change
+   only what the comments ask for, and keep every existing `data-design-id`
+   unchanged; those ids are what the comments are anchored to.
+2. **Re-report the artifact with the SAME atype** the turn names (`ui-prototype` or
+   `interactive-prototype`) so it enriches the existing prototype in place — never
+   report the other tier and never create a second prototype. Then refresh the spec
+   draft with `cyboflow_design_update_draft` as usual; the `boundArtifactRevision` it
+   returns is the prototype revision you need for step 3.
+3. **Acknowledge with `cyboflow_design_ack_feedback`**, passing the `batch_id` and
+   `attempt_id` from the turn **verbatim** plus `prototype_revision` = that
+   `boundArtifactRevision`.
+
+**The ack is MANDATORY.** The batch stays un-applied and the user's comments stay
+open in their queue until it lands — no matter how well you applied the feedback.
+Ack last, after the re-report, so the revision you name is the one that contains the
+change.
+
+**If the turn says the feedback may already have been delivered** (the app restarted
+mid-delivery), look at the current prototype *first*. If it already reflects every
+comment, **do not change it** — re-report only if something is genuinely missing, and
+go straight to the ack. Acking is always safe: the host keeps only the first result
+per batch, so a duplicate ack is discarded rather than double-applying anything.
 
 ## When the idea link breaks
 

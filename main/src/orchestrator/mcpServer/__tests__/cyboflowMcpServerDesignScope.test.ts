@@ -107,17 +107,26 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=design)', () => {
-  it('advertises EXACTLY the four design tools — no run-scoped or global-agent tool leaks in', async () => {
+  it('advertises EXACTLY the five design tools — no run-scoped or global-agent tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'cyboflow_design_get_idea',
         'cyboflow_design_update_draft',
+        'cyboflow_design_ack_feedback',
         'cyboflow_report_artifact',
         'cyboflow_create_task',
       ].sort(),
     );
+  });
+
+  it('cyboflow_design_ack_feedback requires batch_id + attempt_id + an INTEGER prototype_revision', async () => {
+    const tools = await listTools();
+    const ack = tools.find((t) => t.name === 'cyboflow_design_ack_feedback');
+    expect(ack).toBeDefined();
+    expect(ack!.inputSchema.required.sort()).toEqual(['attempt_id', 'batch_id', 'prototype_revision']);
+    expect(ack!.inputSchema.properties['prototype_revision'].type).toBe('integer');
   });
 
   it("cyboflow_create_task's design-scope schema is the narrowed arg set (title/body/priority only)", async () => {
@@ -180,6 +189,28 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=design)', () => {
   it('cyboflow_design_update_draft rejects a missing spec_markdown without dispatching, and dispatches a valid call', async () => {
     expect(await callTool('cyboflow_design_update_draft', {})).toMatchObject({ error: 'invalid_arguments' });
     const valid = await callTool('cyboflow_design_update_draft', { spec_markdown: '### Design\n\ncontent' });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_design_ack_feedback rejects malformed args without dispatching, and dispatches a valid call', async () => {
+    expect(await callTool('cyboflow_design_ack_feedback', {})).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_design_ack_feedback', { batch_id: 'fbb_1', attempt_id: 'fba_1' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    // A non-integer revision is rejected too — the router records it verbatim.
+    expect(
+      await callTool('cyboflow_design_ack_feedback', {
+        batch_id: 'fbb_1',
+        attempt_id: 'fba_1',
+        prototype_revision: 2.5,
+      }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+
+    const valid = await callTool('cyboflow_design_ack_feedback', {
+      batch_id: 'fbb_1',
+      attempt_id: 'fba_1',
+      prototype_revision: 3,
+    });
     expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 

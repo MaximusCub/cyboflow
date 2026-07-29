@@ -343,9 +343,10 @@ const GLOBAL_AGENT_TOOLS = [
 // ---------------------------------------------------------------------------
 // Design-session tool family (Design Mode v0) — the ONLY tools advertised when
 // IS_DESIGN_SCOPE is true. Deliberately minimal (design-mode.md "Session
-// plumbing"): read the linked idea, persist the design-spec draft, report the
-// prototype (ui-prototype or interactive-prototype), and mint a single follow-up
-// backlog TASK (the style-kit consent gate's "Add a task to the backlog"
+// plumbing"): read the linked idea, persist the design-spec draft, acknowledge a
+// delivered feedback batch (Design Mode v1's outbox ack), report the prototype
+// (ui-prototype or interactive-prototype), and mint a single follow-up backlog
+// TASK (the style-kit consent gate's "Add a task to the backlog"
 // option). report_artifact is the SAME tool as run scope but with its atype
 // narrowed to the two prototype atypes only; create_task is likewise narrowed to
 // task_type='task' with a minimal arg set.
@@ -371,6 +372,30 @@ const DESIGN_TOOLS = [
         },
       },
       required: ['spec_markdown'],
+    },
+  },
+  {
+    name: 'cyboflow_design_ack_feedback',
+    description:
+      "Acknowledge a batch of design feedback AFTER you have applied it and re-reported the prototype. The host sends the feedback as a revision turn carrying a batch id and an attempt id — echo both back here VERBATIM, together with the prototype artifact revision that now contains the change (the `boundArtifactRevision` cyboflow_design_update_draft returns after your re-report). This is what moves the batch to 'applied' and marks the user's comments addressed: WITHOUT it the feedback stays open no matter what you changed. First ack wins — a duplicate or late ack for the same batch is acknowledged-and-discarded (returns { applied: false }), never an error, so acknowledging a batch you suspect was already handled is always safe.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        batch_id: {
+          type: 'string',
+          description: 'The feedback batch id from the revision turn, verbatim (required).',
+        },
+        attempt_id: {
+          type: 'string',
+          description: 'The delivery attempt id from the revision turn, verbatim (required).',
+        },
+        prototype_revision: {
+          type: 'integer',
+          description:
+            'The prototype artifact revision that now contains the applied feedback (required) — the `boundArtifactRevision` returned by cyboflow_design_update_draft after your re-report.',
+        },
+      },
+      required: ['batch_id', 'attempt_id', 'prototype_revision'],
     },
   },
   {
@@ -1299,6 +1324,29 @@ async function handleDesignScopeCallTool(request: {
         return invalidArgs('spec_markdown: string');
       }
       return executeMcpQuery('mcp-design-update-draft', { specMarkdown: spec_markdown });
+    }
+
+    case 'cyboflow_design_ack_feedback': {
+      const args = (request.params.arguments ?? {}) as {
+        batch_id?: unknown;
+        attempt_id?: unknown;
+        prototype_revision?: unknown;
+      };
+      const { batch_id, attempt_id, prototype_revision } = args;
+      if (typeof batch_id !== 'string' || batch_id.length === 0) {
+        return invalidArgs('batch_id: string');
+      }
+      if (typeof attempt_id !== 'string' || attempt_id.length === 0) {
+        return invalidArgs('attempt_id: string');
+      }
+      if (typeof prototype_revision !== 'number' || !Number.isInteger(prototype_revision)) {
+        return invalidArgs('prototype_revision: integer');
+      }
+      return executeMcpQuery('mcp-design-ack-feedback', {
+        batchId: batch_id,
+        attemptId: attempt_id,
+        prototypeRevision: prototype_revision,
+      });
     }
 
     case 'cyboflow_report_artifact': {

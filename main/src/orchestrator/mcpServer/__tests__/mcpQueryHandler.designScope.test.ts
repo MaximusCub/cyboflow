@@ -20,6 +20,9 @@ import type * as net from 'net';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { ArtifactRouter, artifactChangeEvents } from '../../artifactRouter';
+import { FeedbackRouter } from '../../feedbackRouter';
+import { feedbackEvents } from '../../trpc/routers/events';
+import type { ElementCommentAnchor } from '../../../../../shared/types/feedback';
 
 function makeSocketDouble(): { socket: net.Socket; writes: string[] } {
   const writes: string[] = [];
@@ -61,6 +64,11 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '035_artifacts.sql',
+    // Design Mode v1 feedback outbox — the ack handler's tables. 090 carries its
+    // own PRAGMA foreign_keys=OFF/ON pair around the table recreate, and db.exec
+    // runs outside a transaction, so the file's own toggles take effect.
+    '077_artifact_feedback.sql',
+    '090_design_feedback_outbox.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -150,12 +158,15 @@ describe('McpQueryHandler design-scope handlers', () => {
   beforeEach(() => {
     db = buildDb();
     ArtifactRouter.initialize(dbAdapter(db));
+    FeedbackRouter.initialize(dbAdapter(db));
     handler = new McpQueryHandler(dbAdapter(db));
   });
 
   afterEach(() => {
     ArtifactRouter._resetForTesting();
+    FeedbackRouter._resetForTesting();
     artifactChangeEvents.removeAllListeners();
+    feedbackEvents.removeAllListeners();
     db.close();
   });
 
@@ -351,6 +362,164 @@ describe('McpQueryHandler design-scope handlers', () => {
       expect(res.ok).toBe(false);
       expect(res.error).toBe('not_a_design_session');
       expect((db.prepare('SELECT COUNT(*) AS n FROM design_spec_drafts').get() as { n: number }).n).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // mcp-design-ack-feedback — the outbox's one-result CAS, session-scoped
+  // -------------------------------------------------------------------------
+
+  describe('mcp-design-ack-feedback', () => {
+    const ELEMENT_ANCHOR: ElementCommentAnchor = {
+      kind: 'element',
+      designId: 'hero-cta',
+      ancestorStack: [
+        { tag: 'button', designId: 'hero-cta', label: 'Get started' },
+        { tag: 'body', designId: null, label: null },
+      ],
+      pickedIndex: 0,
+    };
+
+    async function ack(
+      runId: string,
+      args: { batchId: string; attemptId?: string; prototypeRevision?: number },
+    ): Promise<McpQueryResponse> {
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-design-ack-feedback',
+          requestId: 'a-1',
+          runId,
+          batchId: args.batchId,
+          attemptId: args.attemptId ?? 'fba_1',
+          prototypeRevision: args.prototypeRevision ?? 4,
+        },
+        socket,
+      );
+      return parseLastWrite(writes);
+    }
+
+    /** Mint a design batch bound to `sessionId` and drive it to 'dispatched'. */
+    async function dispatchedBatch(opts: {
+      runId: string;
+      sessionId: string;
+      sourceRef: string;
+    }): Promise<{ batchId: string; commentId: string }> {
+      const router = FeedbackRouter.getInstance();
+      const { commentId } = await router.apply(1, {
+        op: 'create-comment',
+        runId: opts.runId,
+        atype: 'interactive-prototype',
+        sourceRef: opts.sourceRef,
+        anchor: ELEMENT_ANCHOR,
+        body: 'make the CTA bigger',
+      });
+      const { batchId } = await router.createDesignBatch({
+        projectId: 1,
+        runId: opts.runId,
+        sessionId: opts.sessionId,
+        atype: 'interactive-prototype',
+        sourceRef: opts.sourceRef,
+        commentIds: [commentId],
+      });
+      await router.recordDispatchAttempt({ batchId, attemptId: 'fba_1' });
+      await router.transitionBatch({ batchId, from: 'dispatching', to: 'dispatched' });
+      return { batchId, commentId };
+    }
+
+    it('applies the batch: { applied: true }, batch → applied with the revision, comments → addressed', async () => {
+      seedDesignSession(db, { runId: 'run-ack', sessionId: 'sess-ack', ideaId: 'ide_ack' });
+      const { batchId, commentId } = await dispatchedBatch({
+        runId: 'run-ack',
+        sessionId: 'sess-ack',
+        sourceRef: 'ide_ack',
+      });
+
+      const res = await ack('run-ack', { batchId, prototypeRevision: 6 });
+      expect(res.ok).toBe(true);
+      expect(res.data).toEqual({ applied: true });
+
+      expect(
+        db.prepare('SELECT status, applied_prototype_revision AS rev, current_attempt_id AS att FROM feedback_batches WHERE id = ?').get(batchId),
+      ).toMatchObject({ status: 'applied', rev: 6, att: 'fba_1' });
+      expect(
+        (db.prepare('SELECT status FROM feedback_comments WHERE id = ?').get(commentId) as { status: string }).status,
+      ).toBe('addressed');
+    });
+
+    it('a SECOND ack is acknowledged-and-discarded: { applied: false } with a note, never an error', async () => {
+      seedDesignSession(db, { runId: 'run-dup', sessionId: 'sess-dup', ideaId: 'ide_dup' });
+      const { batchId } = await dispatchedBatch({
+        runId: 'run-dup',
+        sessionId: 'sess-dup',
+        sourceRef: 'ide_dup',
+      });
+
+      expect((await ack('run-dup', { batchId, prototypeRevision: 6 })).data).toEqual({ applied: true });
+
+      const second = await ack('run-dup', { batchId, attemptId: 'fba_2', prototypeRevision: 9 });
+      expect(second.ok).toBe(true);
+      expect(second.data).toMatchObject({ applied: false });
+      expect((second.data as { note: string }).note).toContain('already resolved');
+      // The first result stands — the loser never overwrites the recorded revision.
+      expect(
+        db.prepare('SELECT applied_prototype_revision AS rev FROM feedback_batches WHERE id = ?').get(batchId),
+      ).toMatchObject({ rev: 6 });
+    });
+
+    it("rejects a batch belonging to ANOTHER design session (batch_not_in_session)", async () => {
+      seedDesignSession(db, { runId: 'run-mine', sessionId: 'sess-mine', ideaId: 'ide_mine' });
+      seedDesignSession(db, {
+        runId: 'run-theirs',
+        sessionId: 'sess-theirs',
+        ideaId: 'ide_theirs',
+        ideaOpts: { ref: 'IDEA-002' },
+      });
+      const { batchId } = await dispatchedBatch({
+        runId: 'run-theirs',
+        sessionId: 'sess-theirs',
+        sourceRef: 'ide_theirs',
+      });
+
+      const res = await ack('run-mine', { batchId });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^batch_not_in_session:/);
+      // Untouched — the other session's batch is still awaiting its own ack.
+      expect(
+        (db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string }).status,
+      ).toBe('dispatched');
+    });
+
+    it('rejects an unknown batch id (batch_not_found)', async () => {
+      seedDesignSession(db, { runId: 'run-nb', sessionId: 'sess-nb', ideaId: 'ide_nb' });
+      const res = await ack('run-nb', { batchId: 'fbb_ghost' });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^batch_not_found:/);
+    });
+
+    it('re-runs the design-session integrity check first: a broken idea link rejects without touching the batch', async () => {
+      seedDesignSession(db, { runId: 'run-brk2', sessionId: 'sess-brk2', ideaId: 'ide_brk2' });
+      const { batchId } = await dispatchedBatch({
+        runId: 'run-brk2',
+        sessionId: 'sess-brk2',
+        sourceRef: 'ide_brk2',
+      });
+      db.prepare("UPDATE ideas SET decomposed_at = '2026-07-28T00:00:00.000Z' WHERE id = 'ide_brk2'").run();
+
+      const res = await ack('run-brk2', { batchId });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^idea_link_broken:/);
+      expect(
+        (db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string }).status,
+      ).toBe('dispatched');
+    });
+
+    it('rejects a non-design session (not_a_design_session)', async () => {
+      seedSession(db, 'sess-nd2', 1, null);
+      seedRun(db, 'run-nd2', 1, 'sess-nd2');
+      const res = await ack('run-nd2', { batchId: 'fbb_anything' });
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe('not_a_design_session');
     });
   });
 

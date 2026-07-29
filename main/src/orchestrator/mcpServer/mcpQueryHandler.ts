@@ -109,6 +109,7 @@ import { selectFindingForSeed } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
+import { FeedbackRouter, FeedbackError } from '../feedbackRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } from '../../../../shared/types/artifacts';
@@ -441,6 +442,22 @@ export type McpQueryMessage =
       requestId: string;
       runId: string;
       specMarkdown: string;
+    }
+  | {
+      /**
+       * Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged
+       * durable outbox") — the agent's acknowledgement of a delivered feedback
+       * batch, echoing the batch + attempt ids the revision turn carried plus the
+       * prototype revision that addressed it. Routed through FeedbackRouter's
+       * one-result CAS: replies { applied: true } for the winner and
+       * { applied: false, note } for a duplicate/late ack (never an error).
+       */
+      type: 'mcp-design-ack-feedback';
+      requestId: string;
+      runId: string;
+      batchId: string;
+      attemptId: string;
+      prototypeRevision: number;
     }
   | {
       /**
@@ -1429,6 +1446,12 @@ export class McpQueryHandler {
           // Design Mode v0: persists a monotonic design-spec draft bound to the
           // current ui-prototype revision (the CAS material Approve consumes).
           this.handleDesignUpdateDraft(msg, client);
+          break;
+        case 'mcp-design-ack-feedback':
+          // Design Mode v1: AWAITED — the one-result CAS runs through the
+          // FeedbackRouter queue, and the agent needs the applied/discarded
+          // outcome back before it moves on.
+          await this.handleDesignAckFeedback(msg, client);
           break;
         case 'mcp-request-verification':
           // FIRE-AND-CONTINUE: resolves posture + enqueues synchronously, replies
@@ -3740,6 +3763,88 @@ export class McpQueryHandler {
       ok: true,
       data: { draftRevision, boundArtifactRevision },
     });
+  }
+
+  /**
+   * Acknowledge a delivered design-feedback batch (Design Mode v1 —
+   * design-mode.md "Design feedback v1 — acknowledged durable outbox"). The
+   * revision turn carried the batch + attempt ids; the agent echoes them back
+   * with the prototype artifact revision that now contains the change, and the
+   * FeedbackRouter's ONE-RESULT CAS decides whether this ack is the winner.
+   *
+   * Guard chain, in order:
+   *   - the full design-session integrity re-validation (resolveDesignRunContext),
+   *     so a broken idea link / non-design session / cross-project id is rejected
+   *     here exactly as on every other design-scoped op;
+   *   - the batch must EXIST (`batch_not_found`) and must belong to THIS design
+   *     session (`batch_not_in_session`) — a design session acking another
+   *     session's batch would let one session close out another's feedback.
+   *
+   * The losing duplicate is DATA, not an error: `{ applied: false, note }`. Only
+   * a genuinely malformed request or a chokepoint failure replies ok:false.
+   */
+  private async handleDesignAckFeedback(
+    msg: Extract<McpQueryMessage, { type: 'mcp-design-ack-feedback' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveDesignRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const batch = this.db
+      .prepare('SELECT id, session_id AS sessionId FROM feedback_batches WHERE id = ?')
+      .get(msg.batchId) as { id?: unknown; sessionId?: unknown } | undefined;
+    if (!batch) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: `batch_not_found: no feedback batch ${msg.batchId}`,
+      });
+      return;
+    }
+    if (batch.sessionId !== ctx.sessionId) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: `batch_not_in_session: feedback batch ${msg.batchId} does not belong to this design session`,
+      });
+      return;
+    }
+
+    try {
+      const result = await FeedbackRouter.getInstance().applyBatchResult({
+        batchId: msg.batchId,
+        attemptId: msg.attemptId,
+        prototypeRevision: msg.prototypeRevision,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: result.applied
+          ? { applied: true }
+          : {
+              applied: false,
+              note: 'already resolved — this batch was acknowledged by an earlier attempt; nothing further to do',
+            },
+      });
+    } catch (err) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error:
+          err instanceof FeedbackError
+            ? `${err.code}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err),
+      });
+    }
   }
 
   // --------------------------------------------------------------------------
