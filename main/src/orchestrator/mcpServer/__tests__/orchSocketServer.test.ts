@@ -448,6 +448,48 @@ describe('OrchSocketServer', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 9. stop() refuses to unlink a socket file another instance now owns
+  // -------------------------------------------------------------------------
+
+  it('stop() does NOT unlink the socket file when another instance has rebound the path', async () => {
+    // Server A binds the path and records its inode.
+    const serverA = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await serverA.start();
+
+    // An older build (no pre-bind probe) clobbers the path and binds its own
+    // socket there — exactly the two-instance collision that stranded every
+    // later MCP subprocess. Reproduce it by force-replacing the file.
+    fs.rmSync(socketPath, { force: true });
+    const serverB = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await serverB.start();
+    const inodeB = fs.statSync(socketPath).ino;
+
+    // A now shuts down. Its unlink must be a no-op: the file belongs to B.
+    await serverA.stop();
+
+    expect(fs.existsSync(socketPath)).toBe(true);
+    expect(fs.statSync(socketPath).ino).toBe(inodeB);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('not unlinking'),
+      expect.objectContaining({ socketPath }),
+    );
+
+    // B is genuinely still reachable — a NEW connection succeeds, which is the
+    // property that actually broke in production (old fds survived; connect did not).
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+    client.write(
+      JSON.stringify({ type: 'mcp-list-pending-approvals', requestId: 'req-owned', runId: 'run-a' }) + '\n',
+    );
+    const lines = await waitForLines(1);
+    expect(parse(lines[0]).ok).toBe(true);
+
+    await serverB.stop();
+    // afterEach's stop() targets `server`, which this test never assigned.
+  });
+
+  // -------------------------------------------------------------------------
   // Structural interface conformance (compile-time assertions)
   // -------------------------------------------------------------------------
 

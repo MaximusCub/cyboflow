@@ -81,6 +81,13 @@ export class OrchSocketServer implements PermissionServerLike {
    * whenever a subprocess is still connected.
    */
   private readonly connections = new Set<net.Socket>();
+  /**
+   * Inode of the socket file THIS server bound, captured right after a
+   * successful listen(). stop() unlinks the path only while it still resolves
+   * to this inode — see the ownership check there for why an unconditional
+   * unlink is unsafe on a fixed, cross-instance path.
+   */
+  private boundInode: number | null = null;
 
   constructor(
     private readonly socketPath: string,
@@ -97,6 +104,8 @@ export class OrchSocketServer implements PermissionServerLike {
    * the server and resolve once it is listening.
    */
   async start(): Promise<void> {
+    // Any inode from a prior bind is stale the moment we re-enter start().
+    this.boundInode = null;
     fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
 
     // A unix socket fails to bind onto a leftover file from a prior run, so a
@@ -143,6 +152,18 @@ export class OrchSocketServer implements PermissionServerLike {
         server.on('error', (err: Error) => {
           this.logger.error('[Cyboflow Orch IPC] server error', { error: err.message });
         });
+        // Record the inode we just bound so stop() can prove ownership before
+        // unlinking. A failed stat leaves it null, which makes stop() skip the
+        // unlink — strictly the safe direction (a stale file is reclaimed by the
+        // next start()'s probe; a clobbered live socket is not recoverable).
+        try {
+          this.boundInode = fs.statSync(this.socketPath).ino;
+        } catch (err) {
+          this.boundInode = null;
+          this.logger.debug('[Cyboflow Orch IPC] could not stat bound socket', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         this.logger.info('[Cyboflow Orch IPC] listening', { socketPath: this.socketPath });
         resolve();
       };
@@ -193,12 +214,24 @@ export class OrchSocketServer implements PermissionServerLike {
 
   /**
    * Close the server and resolve once closed. Best-effort unlink of the socket
-   * file so a subsequent start() does not have to.
+   * file — but ONLY while the path still resolves to the inode we bound.
+   *
+   * The path is fixed and shared across instances (~/.cyboflow/sockets/orch.sock),
+   * so "we are shutting down" does not imply "the file at that path is ours". An
+   * older build that unlink-and-rebinds without probing (every build before the
+   * start() guard above) leaves the path owned by someone else while our server
+   * object is still non-null; an unconditional rmSync here then deletes THEIR
+   * live socket. That is not hypothetical — it is the failure that stranded every
+   * MCP subprocess spawned after 2026-07-28: the file vanished while the owning
+   * app kept its bound-but-unlinked inode and all existing connections, so the UI
+   * stayed green while every new connect() got ENOENT until the app restarted.
    */
   async stop(): Promise<void> {
     const server = this.server;
     if (!server) return;
     this.server = null;
+    const boundInode = this.boundInode;
+    this.boundInode = null;
 
     // Destroy any in-flight connections first; net.Server.close() resolves only
     // once every open connection has ended.
@@ -211,9 +244,30 @@ export class OrchSocketServer implements PermissionServerLike {
       server.close(() => resolve());
     });
 
+    if (boundInode === null) {
+      this.logger.debug('[Cyboflow Orch IPC] socket file unlink skipped — bound inode unknown', {
+        socketPath: this.socketPath,
+      });
+      return;
+    }
+
     try {
+      // Ownership check. A mismatch means the path was replaced while we ran, so
+      // the file now belongs to a live peer — leave it alone. (The stat→rmSync
+      // window is not atomic, but it narrows an unconditional clobber to a race
+      // that requires a rebind inside those few microseconds.)
+      const currentInode = fs.statSync(this.socketPath).ino;
+      if (currentInode !== boundInode) {
+        this.logger.warn('[Cyboflow Orch IPC] socket file replaced by another instance — not unlinking', {
+          socketPath: this.socketPath,
+          boundInode,
+          currentInode,
+        });
+        return;
+      }
       fs.rmSync(this.socketPath, { force: true });
     } catch (err) {
+      // ENOENT here just means someone already removed it — nothing to reclaim.
       this.logger.debug('[Cyboflow Orch IPC] socket file unlink skipped', {
         error: err instanceof Error ? err.message : String(err),
       });
