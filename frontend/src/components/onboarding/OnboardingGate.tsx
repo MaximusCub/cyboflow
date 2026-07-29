@@ -236,6 +236,18 @@ export function OnboardingGate(): React.JSX.Element | null {
     }
   }, [status, step, detection, codexDetection, checking, runDetect]);
 
+  // Step-1 toggles reflect the SAVED provider access, so replaying the
+  // walkthrough on a configured install opens on the user's current setting
+  // rather than a blank slate (and Continue then re-persists it unchanged).
+  // A pristine install has no saved value — the toggles stay off and the step
+  // gate keeps demanding an explicit opt-in, exactly as before.
+  const persistedProviderAccess = useConfigStore((s) => s.config?.agentProviderAccess);
+  useEffect(() => {
+    if (status !== 'active' || step !== 1 || persistedProviderAccess === undefined) return;
+    setConnected(persistedProviderAccess.claude ?? true);
+    setCodexConnected(persistedProviderAccess.codex ?? true);
+  }, [status, step, persistedProviderAccess, setConnected, setCodexConnected]);
+
   // Step-5 precondition: the Quick Session card lives in the wizard, so ensure it
   // is the center surface before the coachmark tries to anchor.
   useEffect(() => {
@@ -314,6 +326,29 @@ export function OnboardingGate(): React.JSX.Element | null {
     }
   }, [pickedPath, busyCreate]);
 
+  // Step-1 provider consent IS the global provider-access setting: Continue
+  // persists the two toggles to AppConfig.agentProviderAccess — the exact field
+  // Settings → Integrations edits — so a provider the user leaves off here is
+  // hidden from every runtime picker and rejected at the launch seams. Same
+  // re-entry guard and non-fatal posture as handlePermNext below.
+  const connectNextInFlight = useRef(false);
+  const handleConnectNext = useCallback(async () => {
+    if (connectNextInFlight.current) return;
+    connectNextInFlight.current = true;
+    try {
+      // Full access object, never a partial patch — the step gate guarantees at
+      // least one member is true, so this can never write an all-off map.
+      await useConfigStore.getState().updateConfig({
+        agentProviderAccess: { claude: connected, codex: codexConnected },
+      });
+    } catch {
+      /* non-fatal — advance regardless; the toggles live on in Settings → Integrations */
+    } finally {
+      connectNextInFlight.current = false;
+    }
+    next();
+  }, [connected, codexConnected, next]);
+
   // Re-entry guard: the config write is async, so a second activation (held
   // ArrowRight auto-repeat, double-click) while the await is in flight would
   // otherwise call next() twice and blow past step 3's UI-only project gate.
@@ -382,7 +417,12 @@ export function OnboardingGate(): React.JSX.Element | null {
   let primary: PrimaryAction;
   switch (step) {
     case 1:
-      primary = { label: 'Continue →', disabled: gateBlocked, title: 'Connect Claude or Codex to continue', onClick: next };
+      primary = {
+        label: 'Continue →',
+        disabled: gateBlocked,
+        title: 'Connect Claude or Codex to continue',
+        onClick: () => void handleConnectNext(),
+      };
       break;
     case 2:
       primary = { label: 'Next →', disabled: false, onClick: () => void handlePermNext() };
