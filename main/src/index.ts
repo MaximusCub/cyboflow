@@ -1062,7 +1062,68 @@ async function createWindow() {
   });
 }
 
-async function initializeServices() {
+/**
+ * Schema-version gate: refuse (or knowingly accept) a DB that a NEWER build
+ * forward-migrated past what this binary understands.
+ *
+ * ORDERING IS LOAD-BEARING. This runs immediately after the DB opens and BEFORE
+ * any service that touches state shared with other instances — above all the
+ * OrchSocketServer's socket file, whose path is fixed and cross-instance. It
+ * used to run after initializeServices() had already stood everything up, so a
+ * too-old build got far enough to bind (and, on the way out, unlink) the live
+ * instance's orch socket before the user ever saw this dialog. On 2026-07-28 a
+ * build that only knew migration 60 did exactly that against a v85 database and
+ * stranded every MCP subprocess spawned afterwards. A build that is about to be
+ * told "you are too old to open this" must not have mutated shared state first.
+ *
+ * Returns false when the user chose Quit — the caller must abort boot without
+ * constructing anything further.
+ */
+function runSchemaVersionGate(): boolean {
+  // Each packaged kind now owns its own data dir (stable → ~/.cyboflow, Dev DMG
+  // → ~/.cyboflow_dev_dmg), so cross-variant forward-migration no longer happens
+  // by default. The gate still guards the remaining ways a newer build can reach
+  // an older binary's DB — a shared CYBOFLOW_DIR override, or downgrading the
+  // same kind. (Always allow "Open Anyway" per product choice.)
+  const schemaStatus = databaseService.getSchemaVersionStatus();
+  if (!schemaStatus?.tooNew) return true;
+
+  logger.warn(
+    `[Main] Database schema (user_version=${schemaStatus.onDisk}) is newer than this build (max=${schemaStatus.appMax})`
+  );
+  const choice = dialog.showMessageBoxSync({
+    type: 'warning',
+    buttons: ['Check for Updates', 'Open Anyway', 'Quit'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+    title: 'Cyboflow',
+    message: 'This database was created by a newer version of Cyboflow',
+    detail:
+      'Your data (~/.cyboflow) was last opened by a newer build — most likely ' +
+      'Cyboflow Dev. This copy of Cyboflow is older and may not understand the ' +
+      'updated database.\n\nOpening it anyway can corrupt data if the newer build ' +
+      'changed table structures. Updating to the matching version is recommended.',
+  });
+  if (choice === 2) {
+    logger.info('[Main] User chose Quit at schema-version gate — not opening the newer DB');
+    databaseService.close();
+    app.quit();
+    return false;
+  }
+  if (choice === 0) {
+    pendingOpenUpdateSettings = true;
+  }
+  logger.info(`[Main] Continuing boot past schema-version gate (choice=${choice})`);
+  return true;
+}
+
+/**
+ * Stand up every service. Resolves false when boot was aborted at the
+ * schema-version gate, in which case NOTHING further was constructed and the
+ * caller must return immediately.
+ */
+async function initializeServices(): Promise<boolean> {
   configManager = new ConfigManager();
   await configManager.initialize();
 
@@ -1103,6 +1164,11 @@ async function initializeServices() {
 
   databaseService = new DatabaseService(dbPath);
   databaseService.initialize();
+
+  // The DB is open and its pre-migration user_version is known — gate NOW, while
+  // aborting is still free. Everything below this line either owns cross-instance
+  // state (the orch socket) or spawns subprocesses that depend on it.
+  if (!runSchemaVersionGate()) return false;
 
   sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
@@ -3101,6 +3167,8 @@ async function initializeServices() {
   // NOTE: git status polling is no longer started here — it is deferred to the
   // main window's first 'ready-to-show' (see runDeferredStartupWork) so it never
   // competes with the critical path to first paint.
+
+  return true;
 }
 
 // Initialize telemetry (error reporting + usage metrics) BEFORE the app 'ready'
@@ -3121,52 +3189,16 @@ app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;
 
   console.log('[Main] App is ready, initializing services...');
-  await initializeServices();
+  // The schema-version gate now runs INSIDE initializeServices, immediately
+  // after the DB opens and before anything binds the shared orch socket. A
+  // false result means the user chose Quit and nothing was constructed.
+  if (!(await initializeServices())) return;
 
   // NOTE: the prototype-server and codex-broker boot sweeps are no longer run
   // here — they are deferred to the main window's first 'ready-to-show' (see
   // runDeferredStartupWork) so they never compete with the critical path to
   // first paint. They were already fire-and-forget, so nothing downstream waits
   // on them.
-
-  // Schema-version gate: each packaged kind now owns its own data dir
-  // (stable → ~/.cyboflow, Dev DMG → ~/.cyboflow_dev_dmg), so cross-variant
-  // forward-migration no longer happens by default. The gate still guards the
-  // remaining ways a newer build can reach an older binary's DB — a shared
-  // CYBOFLOW_DIR override, or downgrading the same kind — where a newer build
-  // may have forward-migrated the DB past what this binary understands. Warn
-  // before we build the UI on top of a schema this binary may not fully grasp.
-  // (Always allow "Open Anyway" per product choice.)
-  const schemaStatus = databaseService.getSchemaVersionStatus();
-  if (schemaStatus?.tooNew) {
-    logger.warn(
-      `[Main] Database schema (user_version=${schemaStatus.onDisk}) is newer than this build (max=${schemaStatus.appMax})`
-    );
-    const choice = dialog.showMessageBoxSync({
-      type: 'warning',
-      buttons: ['Check for Updates', 'Open Anyway', 'Quit'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-      title: 'Cyboflow',
-      message: 'This database was created by a newer version of Cyboflow',
-      detail:
-        'Your data (~/.cyboflow) was last opened by a newer build — most likely ' +
-        'Cyboflow Dev. This copy of Cyboflow is older and may not understand the ' +
-        'updated database.\n\nOpening it anyway can corrupt data if the newer build ' +
-        'changed table structures. Updating to the matching version is recommended.',
-    });
-    if (choice === 2) {
-      logger.info('[Main] User chose Quit at schema-version gate — not opening the newer DB');
-      databaseService.close();
-      app.quit();
-      return;
-    }
-    if (choice === 0) {
-      pendingOpenUpdateSettings = true;
-    }
-    logger.info(`[Main] Continuing boot past schema-version gate (choice=${choice})`);
-  }
 
   // Architecture gate: an x64 bundle running under Rosetta/WOW on ARM hardware
   // boots fine but emulates the bundled Claude sidecar, which then blows past
