@@ -40,15 +40,81 @@ import {
   ARTIFACT_INTERACTIVE_CSP,
   PROTOTYPE_HTML_RELPATH,
 } from '../../../shared/types/artifacts';
+import type { HostCommentDocumentResult } from '../../../shared/types/designPrototypeServer';
 import { injectPrototypeCsp } from '../ipc/artifactHtml';
 import {
   registerScriptedFrameOrigin,
   unregisterScriptedFrameOrigin,
 } from '../ipc/artifactFrameGuard';
+import { renderDesignInspectorScriptTag } from './designInspectorScript';
 import type { FrameWatchdogControl, WatchdogTarget } from './designFrameWatchdog';
 
-/** The one path this server serves — the canonical interactive prototype document. */
+/** The prototype path this server serves — the canonical interactive document. */
 const SERVED_PATH = `/${PROTOTYPE_HTML_RELPATH}`;
+
+/**
+ * Path segment under the token that carries a hosted comment document. Matched
+ * by the frame guard too (a comment frame is confined harder than a prototype
+ * frame) — see artifactFrameGuard.ts `COMMENT_DOC_PATH_SEGMENT`.
+ */
+const COMMENT_PATH_SEGMENT = 'comment';
+
+/**
+ * The capture serializer injected into the PROTOTYPE document (design-mode.md
+ * "Comment mode", invariant 1 — faithful freeze). Entering comment mode must
+ * capture the LIVE RENDERED DOM, not a re-render of the source HTML, so the
+ * state prototype JS built is what the user comments on. Only code running
+ * INSIDE the frame can read that DOM, and the frame is deliberately
+ * cross-origin without `allow-same-origin`, so the parent cannot reach in — the
+ * capture is therefore a postMessage request this app-owned script answers.
+ *
+ * The reply is untrusted CONTENT, not a capability: it is sanitized parent-side
+ * and re-rendered under a nonce-only CSP where it cannot execute. Prototype JS
+ * tampering with its own serialization is self-sabotage of design content, not
+ * a boundary breach (spec, explicitly out of scope), so this script does not
+ * defend against being overwritten — it only refuses to BREAK: every step is
+ * wrapped so a hostile `document` getter cannot take the capture wiring down
+ * with it.
+ *
+ * Injected immediately after the CSP meta and ahead of all prototype markup so
+ * the listener is installed before any prototype script can run.
+ */
+const CAPTURE_SERIALIZER_TAG = `<script>
+(function () {
+  try {
+    window.addEventListener('message', function (event) {
+      try {
+        var data = event.data;
+        if (!data || data.type !== 'cyboflow-design-capture') return;
+        if (typeof data.captureId !== 'string') return;
+        var source = event.source;
+        if (!source || typeof source.postMessage !== 'function') return;
+        source.postMessage({
+          type: 'cyboflow-design-capture-result',
+          captureId: data.captureId,
+          html: '<!doctype html>' + document.documentElement.outerHTML
+        }, '*');
+      } catch (err) {
+        /* a broken prototype must not break capture wiring */
+      }
+    });
+  } catch (err) {
+    /* ditto */
+  }
+})();
+</script>`;
+
+/** The nonce-only policy a comment document is served under, as a RESPONSE HEADER. */
+function commentCsp(nonce: string): string {
+  return [
+    "default-src 'none'",
+    "style-src 'unsafe-inline'",
+    'img-src data:',
+    `script-src 'nonce-${nonce}'`,
+    "form-action 'none'",
+    "base-uri 'none'",
+  ].join('; ');
+}
 
 export interface DesignPrototypeServerManagerOptions {
   /**
@@ -72,13 +138,34 @@ export interface DesignPrototypeServerManagerOptions {
   logger?: LoggerLike;
 }
 
+/**
+ * The CURRENT hosted comment capture for a run. Exactly one is retained per
+ * server: a new capture evicts the previous (whose URL then 404s), and server
+ * teardown drops it with the entry — a frozen DOM is a moment in time, and
+ * keeping stale ones alive would both leak memory and leave dead frames
+ * addressable.
+ */
+interface CommentCapture {
+  captureId: string;
+  /** The `script-src 'nonce-…'` value, minted fresh per capture. */
+  nonce: string;
+  /** The exact request path this capture answers. */
+  path: string;
+  /** Sanitized bytes with the nonce-carrying inspector already injected. */
+  html: string;
+}
+
 /** One live server's tracked state. */
 interface ServerEntry {
   server: Server;
   origin: string;
   baseUrl: string;
+  /** The per-spawn authorization token — the first path segment of every URL. */
+  token: string;
   /** Open connections, force-destroyed on release so `close()` never hangs. */
   sockets: Set<Socket>;
+  /** The run's current comment document, if comment mode has captured one. */
+  comment: CommentCapture | null;
 }
 
 export class DesignPrototypeServerManager {
@@ -154,6 +241,45 @@ export class DesignPrototypeServerManager {
     this.maybeStopWatchdog();
   }
 
+  /**
+   * Host `sanitizedHtml` as the run's CURRENT comment document and return its
+   * tokenized URL (design-mode.md "Comment mode — live-DOM freeze + sanitizer +
+   * nonce-CSP", invariant 2 — sole-writer channel).
+   *
+   * The bytes ride the run's EXISTING prototype server, so the comment frame is
+   * cross-origin from the shell exactly as the prototype frame is (its own
+   * renderer process, same navigation-guard identity). Requires that server to
+   * be live — hosting a capture against a stopped/absent server throws rather
+   * than silently spawning one, because a capture is only ever produced by a
+   * frame that server is already serving.
+   *
+   * A fresh nonce AND a fresh captureId are minted per call: the nonce because a
+   * reused one would let a vector the sanitizer missed in an EARLIER capture
+   * carry over, the captureId so the frame's `src` genuinely changes (and the
+   * evicted capture's URL stops resolving).
+   */
+  async hostCommentDocument(runId: string, sanitizedHtml: string): Promise<HostCommentDocumentResult> {
+    const entry = this.servers.get(runId);
+    if (!entry) {
+      throw new Error('No prototype server is running for this run.');
+    }
+    const captureId = randomBytes(16).toString('hex');
+    const nonce = randomBytes(16).toString('hex');
+    const path = `/${entry.token}/${COMMENT_PATH_SEGMENT}/${captureId}.html`;
+    entry.comment = {
+      captureId,
+      nonce,
+      path,
+      // The inspector goes at position 0 so it is installed before any captured
+      // markup is parsed; under the nonce CSP nothing else in the document can
+      // run, so ordering is about the inspector seeing a complete DOM, not about
+      // outracing a competitor.
+      html: `${renderDesignInspectorScriptTag(nonce)}${sanitizedHtml}`,
+    };
+    this.logger?.debug('[DesignPrototypeServer] hosting comment document', { runId, captureId });
+    return { url: `${entry.origin}${path}` };
+  }
+
   /** The live (origin, runId) pairs the frame watchdog judges frames against. */
   getTargets(): WatchdogTarget[] {
     return [...this.servers.entries()].map(([runId, entry]) => ({ origin: entry.origin, runId }));
@@ -200,7 +326,7 @@ export class DesignPrototypeServerManager {
 
     const origin = `http://127.0.0.1:${port}`;
     const baseUrl = `${origin}/${token}/${PROTOTYPE_HTML_RELPATH}`;
-    this.servers.set(runId, { server, origin, baseUrl, sockets });
+    this.servers.set(runId, { server, origin, baseUrl, token, sockets, comment: null });
     this.registerOrigin(origin);
     this.watchdog?.start();
     this.logger?.info('[DesignPrototypeServer] listening', { runId, baseUrl });
@@ -224,9 +350,20 @@ export class DesignPrototypeServerManager {
         return;
       }
       const rawPath = (req.url ?? '/').split('?')[0] ?? '/';
-      // Single resource: the path must be EXACTLY `/<token>/prototype/index.html`.
-      // No path decoding/normalization is needed — there is nothing else to serve,
-      // so anything but the exact string is an indistinguishable 404.
+
+      // The CURRENT comment capture, if the path addresses it. Only the exact
+      // stored path resolves, so an EVICTED (or never-minted) captureId is an
+      // indistinguishable 404 like any other stray path.
+      const comment = this.servers.get(runId)?.comment ?? null;
+      if (comment !== null && rawPath === comment.path) {
+        this.sendComment(req, res, comment);
+        return;
+      }
+
+      // Otherwise the single prototype resource: the path must be EXACTLY
+      // `/<token>/prototype/index.html`. No path decoding/normalization is needed
+      // — there is nothing else to serve, so anything but the exact string is an
+      // indistinguishable 404.
       if (rawPath !== `/${token}${SERVED_PATH}`) {
         this.sendStatus(res, 404, 'Not Found');
         return;
@@ -239,7 +376,9 @@ export class DesignPrototypeServerManager {
         this.sendStatus(res, 404, 'Not Found');
         return;
       }
-      const html = injectPrototypeCsp(raw, ARTIFACT_INTERACTIVE_CSP);
+      // CSP meta at position 0 (see injectPrototypeCsp), then the app-owned
+      // capture serializer, then the untrusted prototype markup.
+      const html = injectPrototypeCsp(`${CAPTURE_SERIALIZER_TAG}${raw}`, ARTIFACT_INTERACTIVE_CSP);
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'X-Content-Type-Options': 'nosniff',
@@ -261,6 +400,26 @@ export class DesignPrototypeServerManager {
         res.destroy();
       }
     }
+  }
+
+  /**
+   * Serve a comment capture under its own nonce-only CSP, delivered as a RESPONSE
+   * HEADER rather than a `<meta>`: the document body is untrusted sanitizer output,
+   * and a header policy is applied by the browser before a single byte of it is
+   * parsed — no prefix/parser-differential trick can displace it.
+   */
+  private sendComment(req: IncomingMessage, res: ServerResponse, comment: CommentCapture): void {
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': commentCsp(comment.nonce),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(comment.html);
   }
 
   /** Unregister the origin, then close the server and force-destroy open sockets. */

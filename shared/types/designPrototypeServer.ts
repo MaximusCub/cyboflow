@@ -20,6 +20,7 @@
 /** IPC channel names — single source so main/preload can't drift. */
 export const DESIGN_PROTO_SERVER_ENSURE_CHANNEL = 'design:proto-server:ensure';
 export const DESIGN_PROTO_SERVER_STOP_CHANNEL = 'design:proto-server:stop';
+export const DESIGN_PROTO_SERVER_HOST_COMMENT_CHANNEL = 'design:proto-server:host-comment';
 export const DESIGN_PROTO_SERVER_EVENT_CHANNEL = 'design:proto-server:event';
 
 /**
@@ -51,6 +52,52 @@ export interface StopPrototypeServerRequest {
 export interface StopPrototypeServerResult {
   /** False when no server was running for the runId (already stopped). */
   stopped: boolean;
+}
+
+/**
+ * Ceiling on a hosted comment document (design-mode.md "Comment mode": the
+ * parent "caps payload size"). A freeze of a live rendered DOM is markup + inline
+ * CSS + `data:` images, so 2 MiB is generous for a prototype while keeping a
+ * runaway/adversarial serialization from parking unbounded bytes in the main
+ * process. Measured over the UTF-8 encoding of the sanitized document.
+ */
+export const MAX_COMMENT_DOCUMENT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Host the PARENT-SANITIZED freeze of the live prototype DOM as the run's
+ * current comment document (design-mode.md "Comment mode — live-DOM freeze +
+ * sanitizer + nonce-CSP").
+ *
+ * The bytes are served back from the SAME token-gated loopback server as the
+ * prototype (so the comment frame is likewise cross-origin → its own renderer
+ * process) under a nonce-only `script-src` delivered as a RESPONSE HEADER, with
+ * the app-owned inspector — the frame's sole possible writer — injected
+ * server-side carrying that nonce.
+ *
+ * Requires a LIVE server for the runId (the design surface `ensure`d one on
+ * entry); hosting against a stopped/absent server is an error, not a silent
+ * spawn. Only the CURRENT capture is retained: a second call evicts the previous
+ * one, whose URL then 404s.
+ */
+export interface HostCommentDocumentRequest {
+  runId: string;
+  /**
+   * The sanitized document string. Sanitization is a PARENT-side (renderer)
+   * responsibility — see frontend/src/utils/sanitizeFrozenDom.ts. The nonce CSP
+   * is the enforcement regardless, so the main process treats these bytes as
+   * untrusted content and only bounds their size.
+   */
+  sanitizedHtml: string;
+}
+
+export interface HostCommentDocumentResult {
+  /**
+   * The full tokenized URL of the freshly-hosted comment document
+   * (`http://127.0.0.1:<port>/<token>/comment/<captureId>.html`) — the comment
+   * frame's `src`, verbatim. A new captureId per call, so the URL always
+   * differs from the previous capture's (which is now evicted).
+   */
+  url: string;
 }
 
 /**

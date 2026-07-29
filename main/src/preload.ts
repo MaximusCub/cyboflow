@@ -19,11 +19,14 @@ import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import {
   DESIGN_PROTO_SERVER_ENSURE_CHANNEL,
   DESIGN_PROTO_SERVER_STOP_CHANNEL,
+  DESIGN_PROTO_SERVER_HOST_COMMENT_CHANNEL,
   DESIGN_PROTO_SERVER_EVENT_CHANNEL,
   type EnsurePrototypeServerRequest,
   type EnsurePrototypeServerResult,
   type StopPrototypeServerRequest,
   type StopPrototypeServerResult,
+  type HostCommentDocumentRequest,
+  type HostCommentDocumentResult,
   type PrototypeServerEvent,
 } from '../../shared/types/designPrototypeServer';
 import {
@@ -378,6 +381,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       req: StopPrototypeServerRequest,
     ): Promise<IPCResponse<StopPrototypeServerResult>> =>
       ipcRenderer.invoke(DESIGN_PROTO_SERVER_STOP_CHANNEL, req),
+    hostComment: (
+      req: HostCommentDocumentRequest,
+    ): Promise<IPCResponse<HostCommentDocumentResult>> =>
+      ipcRenderer.invoke(DESIGN_PROTO_SERVER_HOST_COMMENT_CHANNEL, req),
     onEvent: (callback: (event: PrototypeServerEvent) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, payload: PrototypeServerEvent) =>
         callback(payload);

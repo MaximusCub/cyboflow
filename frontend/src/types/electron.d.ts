@@ -22,6 +22,8 @@ import type {
   EnsurePrototypeServerResult,
   StopPrototypeServerRequest,
   StopPrototypeServerResult,
+  HostCommentDocumentRequest,
+  HostCommentDocumentResult,
   PrototypeServerEvent,
 } from '../../../shared/types/designPrototypeServer';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
@@ -260,6 +262,14 @@ interface ElectronAPI {
     stop: (
       req: StopPrototypeServerRequest,
     ) => Promise<IPCResponse<StopPrototypeServerResult>>;
+    /**
+     * Host a sanitized live-DOM freeze as the run's CURRENT comment document
+     * (comment mode) and get back its tokenized URL — the comment frame's `src`.
+     * Requires a live server for the run; a new capture evicts the previous one.
+     */
+    hostComment: (
+      req: HostCommentDocumentRequest,
+    ) => Promise<IPCResponse<HostCommentDocumentResult>>;
     /** Subscribe to watchdog terminations + out-of-band server stops; returns unsubscribe. */
     onEvent: (callback: (event: PrototypeServerEvent) => void) => () => void;
   };

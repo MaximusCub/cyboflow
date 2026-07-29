@@ -129,3 +129,85 @@ describe('scripted-frame origin registry + shell.openExternal invariant', () => 
     unregisterScriptedFrameOrigin(ORIGIN);
   });
 });
+
+// Design Mode v1 comment mode — the frozen-capture frame, hosted on the SAME
+// loopback origin as the prototype but confined harder (design-mode.md "Comment
+// mode": CSP does not govern document navigation, so the guard is what keeps a
+// captured <a href> / form submit / meta refresh from moving the frame).
+const COMMENT_URL = `${ORIGIN}/tok/comment/abc123.html`;
+const PROTOTYPE_URL = `${ORIGIN}/tok/prototype/index.html`;
+
+describe('shouldBlockScriptedFrameNavigation — comment frames', () => {
+  it('BLOCKS SAME-ORIGIN navigation from a comment frame (a captured link must not move it)', () => {
+    expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, `${ORIGIN}/tok/comment/abc123.html`, false, origins)).toBe(true);
+    expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, `${ORIGIN}/tok/prototype/index.html`, false, origins)).toBe(true);
+    expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, ORIGIN, false, origins)).toBe(true);
+    expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, `${ORIGIN}/tok/comment/other.html`, false, origins)).toBe(true);
+  });
+
+  it('BLOCKS cross-origin and about:/data:/file: navigation from a comment frame', () => {
+    for (const target of [
+      'https://attacker.example/beacon',
+      `${OTHER_ORIGIN}/x`,
+      'about:blank',
+      'about:srcdoc',
+      'data:text/html,x',
+      'file:///etc/passwd',
+    ]) {
+      expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, target, false, origins)).toBe(true);
+    }
+  });
+
+  it('BLOCKS regardless of a query string or fragment on the comment url', () => {
+    expect(shouldBlockScriptedFrameNavigation(`${COMMENT_URL}?r=2`, `${ORIGIN}/a`, false, origins)).toBe(true);
+    expect(shouldBlockScriptedFrameNavigation(`${COMMENT_URL}#top`, `${ORIGIN}/a`, false, origins)).toBe(true);
+  });
+
+  it('still ALLOWS the initial about:blank load of a comment frame (the parent setting src)', () => {
+    expect(shouldBlockScriptedFrameNavigation('about:blank', COMMENT_URL, false, origins)).toBe(false);
+    expect(shouldBlockScriptedFrameNavigation('', COMMENT_URL, false, origins)).toBe(false);
+  });
+
+  it('NEVER confines the app main frame, even at a comment url', () => {
+    expect(shouldBlockScriptedFrameNavigation(COMMENT_URL, 'https://evil/x', true, origins)).toBe(false);
+  });
+
+  it('leaves PROTOTYPE-frame allowances byte-for-byte intact', () => {
+    // Same-origin hops the prototype frame legitimately makes (reload / respawn).
+    expect(shouldBlockScriptedFrameNavigation(PROTOTYPE_URL, PROTOTYPE_URL, false, origins)).toBe(false);
+    expect(shouldBlockScriptedFrameNavigation(PROTOTYPE_URL, `${PROTOTYPE_URL}?r=1`, false, origins)).toBe(false);
+    expect(shouldBlockScriptedFrameNavigation(PROTOTYPE_URL, ORIGIN, false, origins)).toBe(false);
+    // …and everything off-origin still blocked.
+    expect(shouldBlockScriptedFrameNavigation(PROTOTYPE_URL, 'https://attacker.example/x', false, origins)).toBe(true);
+  });
+
+  it('does not treat a non-comment path containing the word as a comment frame', () => {
+    // The segment must sit directly under the token: `/comments/…` and a nested
+    // `/tok/prototype/comment/…` are prototype-frame paths.
+    expect(shouldBlockScriptedFrameNavigation(`${ORIGIN}/tok/comments/x.html`, `${ORIGIN}/a`, false, origins)).toBe(false);
+    expect(shouldBlockScriptedFrameNavigation(`${ORIGIN}/tok/prototype/comment/x`, `${ORIGIN}/a`, false, origins)).toBe(false);
+  });
+});
+
+describe('comment frames never reach the OS browser', () => {
+  it('NEVER offers a blocked comment-frame target to shell.openExternal', () => {
+    registerScriptedFrameOrigin(ORIGIN);
+    const openExternal = vi.fn();
+    const handle = (frameUrl: string, targetUrl: string): void => {
+      if (shouldBlockScriptedFrameNavigationFromRegistry(frameUrl, targetUrl, false)) return;
+      if (shouldBlockArtifactFrameNavigation(frameUrl, targetUrl, false)) {
+        if (isExternallyOpenable(targetUrl)) openExternal(targetUrl);
+      }
+    };
+    for (const target of [
+      'https://attacker.example/beacon?secrets=1',
+      'http://evil/x',
+      `${ORIGIN}/tok/prototype/index.html`,
+      'about:blank',
+    ]) {
+      handle(COMMENT_URL, target);
+    }
+    expect(openExternal).not.toHaveBeenCalled();
+    unregisterScriptedFrameOrigin(ORIGIN);
+  });
+});

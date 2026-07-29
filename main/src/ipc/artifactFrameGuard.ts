@@ -106,12 +106,38 @@ function containingOrigin(url: string, origins: ReadonlySet<string>): string | n
 }
 
 /**
+ * The path segment (directly under the per-spawn token) that marks a hosted
+ * COMMENT document — mirrors `COMMENT_PATH_SEGMENT` in designPrototypeServer.ts.
+ */
+const COMMENT_DOC_PATH_RE = /^\/[^/]+\/comment\//;
+
+/**
+ * Whether `url` addresses a comment document on `origin` — i.e. the frame is a
+ * COMMENT frame, not a prototype frame. Both classes live on the same loopback
+ * origin (the comment capture rides the run's existing prototype server), so the
+ * two are distinguished by path.
+ */
+function isCommentDocumentUrl(url: string, origin: string): boolean {
+  const rest = url.slice(origin.length).split(/[?#]/)[0] ?? '';
+  return COMMENT_DOC_PATH_RE.test(rest);
+}
+
+/**
  * Whether a `will-frame-navigate` of a SCRIPTED artifact frame should be
  * BLOCKED. Pure so it unit-tests without Electron (origins passed explicitly).
  *
  * Rule (design-mode.md "Frame navigation"):
  *   - never confine the app's own top frame;
- *   - a frame whose CURRENT url is within a registered origin may navigate ONLY
+ *   - a COMMENT frame (a frozen, sanitized capture — design-mode.md "Comment
+ *     mode") is confined HARDER than a prototype frame: EVERY navigation is
+ *     blocked, same-origin included. CSP does not govern document navigation, so
+ *     this is the only thing standing between a captured `<a href>` / form
+ *     submit / meta refresh and the frame moving off the freeze the user is
+ *     commenting on. A prototype frame legitimately re-navigates same-origin
+ *     (reload / respawn); a comment frame has nothing to re-navigate TO — its
+ *     bytes are replaced by hosting a NEW capture at a new URL, which the parent
+ *     drives by setting `src` on a fresh/blank frame (the initial-load arm below);
+ *   - any other frame whose CURRENT url is within a registered origin may navigate ONLY
  *     to a target within that SAME origin (covers reload / respawn / same-origin
  *     hops — the server only ever serves the one blessed doc anyway); EVERYTHING
  *     else is blocked, including `about:`, `data:`, `file:`, and cross-origin
@@ -140,7 +166,9 @@ export function shouldBlockScriptedFrameNavigation(
 
   const currentOrigin = containingOrigin(frameUrl, registeredOrigins);
   if (currentOrigin !== null) {
-    // Confined frame: allow only same-origin targets, block everything else.
+    // Comment frame: block EVERY navigation, same-origin and about: included.
+    if (isCommentDocumentUrl(frameUrl, currentOrigin)) return true;
+    // Prototype frame: allow only same-origin targets, block everything else.
     return containingOrigin(targetUrl, new Set([currentOrigin])) === null;
   }
 
