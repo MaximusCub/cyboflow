@@ -28,6 +28,7 @@ import type {
   SystemInitEvent,
   SystemCompactBoundaryEvent,
   SystemTaskStartedEvent,
+  SystemTaskUpdatedEvent,
   SystemTaskNotificationEvent,
   AssistantEvent,
   UserEvent,
@@ -1041,6 +1042,65 @@ describe('MessageProjection', () => {
     expect(bashResult.metadata?.subagentType).toBeUndefined();
     expect(agentResult.metadata?.taskKind).toBe('agent');
     expect(agentResult.metadata?.subagentType).toBe('cyboflow-code-review');
+  });
+
+  it('classifies as agent from subagent_type alone when task_type is absent', () => {
+    // The fake-SDK builders emit exactly this shape. Evidence in hand must not be
+    // thrown away in favour of the neutral label.
+    projection.project(taskStarted({
+      task_id: 'agent_no_type',
+      task_type: undefined,
+      subagent_type: 'cyboflow-implement',
+    }));
+    const result = projection.project(
+      taskNotification({ task_id: 'agent_no_type' }),
+    ) as UnifiedMessage;
+
+    expect(result.metadata?.taskKind).toBe('agent');
+    expect(result.metadata?.subagentType).toBe('cyboflow-implement');
+  });
+
+  // -------------------------------------------------------------------------
+  // 21e. A terminal `task_updated` patch is the OTHER settle path — a task can
+  //      end this way with no notification ever arriving (observed in the DB).
+  // -------------------------------------------------------------------------
+
+  function taskUpdated(taskId: string, patch: Record<string, unknown>): SystemTaskUpdatedEvent {
+    return {
+      type: 'system',
+      subtype: 'task_updated',
+      task_id: taskId,
+      patch,
+      uuid: 'uuid-task-updated',
+      session_id: SESSION_ID,
+    };
+  }
+
+  it('surfaces a task that FAILS via task_updated with no notification', () => {
+    projection.project(taskStarted({ task_id: 'upd_fail', task_type: 'local_bash', description: 'pnpm build' }));
+    const result = projection.project(taskUpdated('upd_fail', { status: 'failed' })) as UnifiedMessage;
+
+    expect(result).not.toBeNull();
+    expect(result.metadata?.systemSubtype).toBe('task_complete');
+    expect(result.metadata?.taskStatus).toBe('failed');
+    expect(result.metadata?.taskKind).toBe('command');
+    expect(result.segments).toEqual([{ type: 'text', content: 'Task failed. pnpm build' }]);
+  });
+
+  it('treats an unrecognised task_updated status as terminal (matches the turn-boundary tracker)', () => {
+    // LIVE_TASK_STATUSES is the allow-list; anything outside it settles. A status
+    // the vocabulary has not seen must not be assumed live.
+    projection.project(taskStarted({ task_id: 'upd_weird' }));
+    const result = projection.project(taskUpdated('upd_weird', { status: 'evicted' })) as UnifiedMessage;
+    expect(result?.metadata?.taskStatus).toBe('evicted');
+  });
+
+  it('ignores a task_updated that does not settle the task', () => {
+    projection.project(taskStarted({ task_id: 'upd_live' }));
+    expect(projection.project(taskUpdated('upd_live', { status: 'running' }))).toBeNull();
+    expect(projection.project(taskUpdated('upd_live', { is_backgrounded: true }))).toBeNull();
+    // A CLEAN completion via task_updated carries no summary — nothing to show.
+    expect(projection.project(taskUpdated('upd_live', { status: 'completed' }))).toBeNull();
   });
 
   it('leaves taskKind undefined when no task_started was seen (truncated stream)', () => {

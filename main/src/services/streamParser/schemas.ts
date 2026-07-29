@@ -149,8 +149,21 @@ const systemStatusSchema = z.object({
 /**
  * system/task_started: a background task began. SDK >=0.3.201 backgrounds
  * Agent-tool subagents by default; `local_bash` background commands share the
- * lifecycle. NOT in the SDK's published SDKMessage union — shape observed on the
- * wire (raw_events) and mirrored by the fake-SDK builders.
+ * lifecycle. NOT in the SDK's published SDKMessage union — shape modelled from
+ * observed `raw_events` samples, so it can drift without a type error anywhere.
+ *
+ * Hence, across all three task_* schemas ONLY the fields the projection actually
+ * dispatches on are required; everything else — including `uuid`/`session_id`,
+ * which no consumer reads — is optional, matching the init/compact_boundary
+ * siblings. This matters because a `safeParse` failure demotes the event to
+ * `{kind:'__unknown__'}`, which the projection drops: wire drift would silently
+ * un-render background-task reports rather than fail loudly.
+ *
+ * Deliberately NOT `.passthrough()`, despite these being sample-modelled: every
+ * top-level event schema here strips unknown keys, and opting out would force an
+ * index signature onto the wire types to satisfy the `_typeCheck` drift bridge.
+ * Consequence to know: the sink persists the NARROWED event, so an unmodelled
+ * future field is dropped from `raw_events`. No observed field is lost today.
  */
 const systemTaskStartedSchema = z.object({
   type: z.literal('system'),
@@ -160,8 +173,8 @@ const systemTaskStartedSchema = z.object({
   description: z.string().optional(),
   subagent_type: z.string().optional(),
   task_type: z.string().optional(),
-  uuid: z.string(),
-  session_id: z.string(),
+  uuid: z.string().optional(),
+  session_id: z.string().optional(),
 });
 
 /** system/task_updated: partial patch to a live background task. */
@@ -170,8 +183,8 @@ const systemTaskUpdatedSchema = z.object({
   subtype: z.literal('task_updated'),
   task_id: z.string(),
   patch: z.record(z.unknown()),
-  uuid: z.string(),
-  session_id: z.string(),
+  uuid: z.string().optional(),
+  session_id: z.string().optional(),
 });
 
 /**
@@ -191,9 +204,9 @@ const systemTaskNotificationSchema = z.object({
     total_tokens: z.number().optional(),
     tool_uses: z.number().optional(),
     duration_ms: z.number().optional(),
-  }).optional(),
-  uuid: z.string(),
-  session_id: z.string(),
+  }).passthrough().optional(),
+  uuid: z.string().optional(),
+  session_id: z.string().optional(),
 });
 
 // Inner discriminated union for system variants — dispatches on subtype.

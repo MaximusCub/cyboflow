@@ -404,7 +404,12 @@ type ScenarioStep =
  * description + subagent_type; `task_updated` a partial `patch`;
  * `task_notification` a terminal status. They are NOT part of the SDK's
  * published SDKMessage union, so the builders cast — exactly how the real
- * stream reaches the manager (narrowed to `__unknown__` downstream).
+ * stream reaches the manager.
+ *
+ * NOTE: `task_started` also carries `task_type` on the real wire (`local_bash` |
+ * `local_agent` | `in_process_teammate`), which these builders deliberately omit
+ * to exercise the projection's `subagent_type` fallback. Since 0.1.32 these
+ * events narrow to real typed variants rather than `__unknown__`.
  */
 export function sdkSystemTaskStarted(
   taskId: string,

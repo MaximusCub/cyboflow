@@ -52,6 +52,7 @@ import { createStreamingPromptInput, createPersistentPromptInput } from './strea
 import type { PersistentPromptInput, StreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
+import { LIVE_TASK_STATUSES } from '../../streamParser/taskLifecycle';
 import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
@@ -213,14 +214,6 @@ function terminalResultError(event: unknown): string | null {
     ? e.result
     : 'The agent session ended with an error.';
 }
-
-/**
- * Task-lifecycle statuses that still count as LIVE. A `task_updated` patch whose
- * status is anything OUTSIDE this set (completed / failed / cancelled / killed /
- * future terminal vocab) settles the task — defaulting unknown statuses to
- * settled keeps a missed vocabulary word from wedging a turn open forever.
- */
-const LIVE_TASK_STATUSES = new Set(['running', 'pending', 'queued', 'in_progress']);
 
 /**
  * Track the CLI's background-subagent task lifecycle. SDK ≥0.3.201 runs

@@ -19,9 +19,10 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskUpdatedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
 import { isAgentDispatchToolName } from '../../../../shared/types/agentIdentity';
+import { isFailedTaskStatus } from './taskLifecycle';
 import type { ILogger } from './types';
 
 /**
@@ -32,9 +33,17 @@ import type { ILogger } from './types';
  * agent). Anything unrecognised — including a missing task_started — stays
  * undefined so the renderer falls back to a neutral label rather than guessing.
  */
-function resolveTaskKind(taskType: string | undefined): 'agent' | 'command' | undefined {
+function resolveTaskKind(
+  taskType: string | undefined,
+  subagentType: string | undefined,
+): 'agent' | 'command' | undefined {
   if (taskType === 'local_agent' || taskType === 'in_process_teammate') return 'agent';
   if (taskType === 'local_bash') return 'command';
+  // `task_type` is absent from some observed `task_started` shapes (the fake-SDK
+  // builders model exactly that case). A `subagent_type` is only ever carried by
+  // an Agent dispatch, so treat it as sufficient evidence rather than falling
+  // back to the neutral label with the answer already in hand.
+  if (subagentType !== undefined) return 'agent';
   return undefined;
 }
 
@@ -106,7 +115,7 @@ export class MessageProjection {
 
       switch (event.type) {
         case 'system': {
-          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskNotificationEvent;
+          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent;
           return this.projectSystemEvent(sysEvent);
         }
         case 'assistant': {
@@ -134,7 +143,7 @@ export class MessageProjection {
   // ---------------------------------------------------------------------------
 
   private projectSystemEvent(
-    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskNotificationEvent,
+    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent,
   ): UnifiedMessage | null {
     const subtype = event.subtype;
 
@@ -160,42 +169,31 @@ export class MessageProjection {
     // Render it as a system message so the report stays visible.
     if (subtype === 'task_notification') {
       const task = event as SystemTaskNotificationEvent;
-      const started = this.backgroundTasks.get(task.task_id);
-      const summary = task.summary?.trim();
-      const failed = task.status !== 'completed';
 
       // `summary` is optional on the wire. A silent drop is fine for a completed
       // task with nothing to report, but a FAILED/STOPPED one must still surface —
       // the notification is the only terminal signal the user gets, so fall back to
       // a status line rather than swallowing the failure.
-      const content = summary
-        ?? (failed
-          ? [`Task ${task.status}.`, started?.description].filter(Boolean).join(' ')
-          : undefined);
-      if (!content) return null;
+      return this.projectSettledTask(task.task_id, task.status, task.summary?.trim(), {
+        outputFile: task.output_file,
+        // The dispatching tool_use, so a renderer can attribute the report to
+        // the Agent call it came from.
+        parentToolId: task.tool_use_id,
+        tokens: task.usage?.total_tokens,
+        duration: task.usage?.duration_ms,
+      });
+    }
 
-      return {
-        id: `task_notification_msg_${++this.messageIdCounter}`,
-        role: 'system',
-        timestamp: new Date().toISOString(),
-        segments: [{ type: 'text', content }],
-        metadata: {
-          systemSubtype: 'task_complete',
-          taskId: task.task_id,
-          taskStatus: task.status,
-          // 'agent' | 'command' | undefined when no task_started was seen (a
-          // truncated/resumed stream) — the renderer must stay neutral then.
-          taskKind: resolveTaskKind(started?.taskType),
-          subagentType: started?.subagentType,
-          taskDescription: started?.description,
-          outputFile: task.output_file,
-          // The dispatching tool_use, so a renderer can attribute the report to
-          // the Agent call it came from.
-          parentToolId: task.tool_use_id,
-          tokens: task.usage?.total_tokens,
-          duration: task.usage?.duration_ms,
-        },
-      };
+    // A `task_updated` patch whose status is terminal ALSO settles the task —
+    // trackBackgroundTasks retires the turn-boundary hold on exactly this signal,
+    // and a task can settle this way with no notification ever arriving (observed
+    // in the live DB). Surface only FAILURES: a clean completion here carries no
+    // summary, so there is nothing to show, but a failure would otherwise vanish.
+    if (subtype === 'task_updated') {
+      const updated = event as SystemTaskUpdatedEvent;
+      const status = updated.patch['status'];
+      if (typeof status !== 'string' || !isFailedTaskStatus(status)) return null;
+      return this.projectSettledTask(updated.task_id, status, undefined, {});
     }
 
     if (subtype === 'init') {
@@ -244,6 +242,45 @@ export class MessageProjection {
     }
 
     return null;
+  }
+
+  /**
+   * Build the system message for a settled background task, from either terminal
+   * path (`task_notification` or a terminal `task_updated` patch).
+   *
+   * Returns null only when there is genuinely nothing to show: a CLEAN completion
+   * with no summary. A failure always yields a message.
+   */
+  private projectSettledTask(
+    taskId: string,
+    status: string,
+    summary: string | undefined,
+    extra: { outputFile?: string; parentToolId?: string; tokens?: number; duration?: number },
+  ): UnifiedMessage | null {
+    const started = this.backgroundTasks.get(taskId);
+    const content = summary
+      ?? (isFailedTaskStatus(status)
+        ? [`Task ${status}.`, started?.description].filter(Boolean).join(' ')
+        : undefined);
+    if (!content) return null;
+
+    return {
+      id: `task_notification_msg_${++this.messageIdCounter}`,
+      role: 'system',
+      timestamp: new Date().toISOString(),
+      segments: [{ type: 'text', content }],
+      metadata: {
+        systemSubtype: 'task_complete',
+        taskId,
+        taskStatus: status,
+        // 'agent' | 'command' | undefined when no task_started was seen (a
+        // truncated/resumed stream) — the renderer must stay neutral then.
+        taskKind: resolveTaskKind(started?.taskType, started?.subagentType),
+        subagentType: started?.subagentType,
+        taskDescription: started?.description,
+        ...extra,
+      },
+    };
   }
 
   // ---------------------------------------------------------------------------

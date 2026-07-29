@@ -403,8 +403,8 @@ export interface SystemTaskStartedEvent {
   subagent_type?: string;
   /** e.g. 'local_bash' for a backgrounded shell command. */
   task_type?: string;
-  uuid: string;
-  session_id: string;
+  uuid?: string;
+  session_id?: string;
 }
 
 /**
@@ -416,8 +416,8 @@ export interface SystemTaskUpdatedEvent {
   subtype: 'task_updated';
   task_id: string;
   patch: Record<string, unknown>;
-  uuid: string;
-  session_id: string;
+  uuid?: string;
+  session_id?: string;
 }
 
 /**
@@ -441,8 +441,8 @@ export interface SystemTaskNotificationEvent {
     tool_uses?: number;
     duration_ms?: number;
   };
-  uuid: string;
-  session_id: string;
+  uuid?: string;
+  session_id?: string;
 }
 
 /**

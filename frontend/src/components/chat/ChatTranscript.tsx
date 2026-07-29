@@ -465,7 +465,10 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
               {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
             </span>
           </div>
-          <div className="bg-surface-secondary rounded-lg p-3 text-sm text-text-primary whitespace-pre-wrap">
+          {/* A task summary is unbounded — a sub-agent report or a backgrounded
+              command's output can run to thousands of lines. Cap the height and
+              scroll inside the card so one task cannot blow out the transcript. */}
+          <div className="bg-surface-secondary rounded-lg p-3 text-sm text-text-primary whitespace-pre-wrap max-h-96 overflow-y-auto">
             {textContent}
           </div>
         </div>
