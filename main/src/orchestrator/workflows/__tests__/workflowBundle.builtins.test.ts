@@ -95,6 +95,28 @@ describe('built-in workflow bundles', () => {
     expect(bundle.agents.map((a) => a.name)).toEqual(['verify-setup']);
     assertAgentShape(bundle.agents);
   });
+
+  it('launch ships its 8 heavy-phase subagents in order (gates stay inline)', () => {
+    const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'launch.md'));
+    // Human gates (approve-brief / approve-ideas / approve-design / approve-plan /
+    // decompose) run inline in the orchestrator — they are NOT delegated, so the
+    // bundle ships no commands, only subagents. Launch reuses planner's plan/
+    // refine set verbatim (see agentParity.test.ts) plus one flow-owned agent,
+    // `interview`, that has no planner/sprint source — it drives the multi-round
+    // interview, brief synthesis, and idea decomposition unique to Launch.
+    expect(bundle.commands).toEqual([]);
+    expect(bundle.agents.map((a) => a.name)).toEqual([
+      'adversarial-review',
+      'architecture',
+      'context',
+      'epics',
+      'interview',
+      'research',
+      'tasks',
+      'ui-prototype',
+    ]);
+    assertAgentShape(bundle.agents);
+  });
 });
 
 /**
