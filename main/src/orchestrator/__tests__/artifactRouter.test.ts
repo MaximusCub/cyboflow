@@ -110,6 +110,10 @@ function buildDb(): Database.Database {
   // flow's proposal doc). Same ordering rule as 091 above — each recreate names
   // its own atype list, so this must be LAST.
   db.exec(readFileSync(join(migDir, '097_verify_runbook_atype.sql'), 'utf-8'));
+  // Migration 099 further widens the CHECK to add 'project-brief' (same rebuild
+  // recipe as 089/091/097, same must-run-LAST rule) — the "accepts every atype
+  // in the union" loop below now iterates project-brief too.
+  db.exec(readFileSync(join(migDir, '099_project_brief_artifact.sql'), 'utf-8'));
   return db;
 }
 

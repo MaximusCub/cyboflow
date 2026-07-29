@@ -555,6 +555,64 @@ function EvalReportBody({ artifact, projectId }: { artifact: Artifact; projectId
 }
 
 // ---------------------------------------------------------------------------
+// project-brief — the Launch flow's synthesized project-brief doc, rendered as
+// a markdown doc (same chrome as compound-recommendations, Launch's
+// interview-phase blue accent). Payload-backed: the Launch orchestrator wrote
+// the doc into payload_json.markdown, so it renders straight from the payload
+// (no entity source, no fetch) — mirrors RecommendationsBody exactly.
+// ---------------------------------------------------------------------------
+function ProjectBriefBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['project-brief'];
+  const { data } = useArtifactData(artifact, projectId);
+  // `markdown` comes verbatim from orchestrator-supplied payload_json (laundered
+  // through parsePayload as Record<string, unknown>), so narrow to a string.
+  const markdown =
+    data?.kind === 'brief' && typeof data.payload.markdown === 'string' ? data.payload.markdown : '';
+
+  return (
+    <Shell testid="artifact-project-brief">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · project brief"
+        meta={artifact.stepOrigin ?? 'interview'}
+      />
+      <div style={{ flex: 1 }}>
+        <div
+          data-testid="artifact-project-brief-doc"
+          style={{
+            maxWidth: 680,
+            margin: '0 auto',
+            background: 'var(--color-surface-primary)',
+            border: `1px solid ${HAIRLINE}`,
+            padding: '34px 40px 56px',
+            marginTop: 18,
+            marginBottom: 18,
+          }}
+        >
+          <div
+            style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+          >
+            Launch
+          </div>
+          <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+            Project brief
+          </h1>
+          {markdown ? (
+            <MarkdownPreview content={markdown} />
+          ) : (
+            <div data-testid="artifact-project-brief-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+              No project brief drafted yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // decomposed-stories — one card per epic; tasks stacked vertically (one card
 // per row), each card a clickable button that opens the TaskDetailModal.
 // ---------------------------------------------------------------------------
@@ -2881,6 +2939,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <VerifyRunbookBody artifact={artifact} projectId={projectId} />;
     case 'eval-report':
       return <EvalReportBody artifact={artifact} projectId={projectId} />;
+    case 'project-brief':
+      return <ProjectBriefBody artifact={artifact} projectId={projectId} />;
     case 'decomposed-stories':
       return <DecomposedStoriesBody artifact={artifact} projectId={projectId} />;
     case 'screenshots':

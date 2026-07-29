@@ -264,6 +264,31 @@ describe('useArtifactData', () => {
     expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
   });
 
+  it("resolves 'project-brief' synchronously from payload_json (no fetch, no source entity)", () => {
+    const { result } = renderHook(() =>
+      useArtifactData(
+        // sourceRef null: unlike the entity-backed templated atypes, this must NOT
+        // hit the no-source error path — it is payload-backed, mirroring
+        // compound-recommendations.
+        makeArtifact({
+          atype: 'project-brief',
+          sourceRef: null,
+          payloadJson: '{"markdown":"## Project brief\\n\\n- ship the thing"}',
+        }),
+        null,
+      ),
+    );
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({
+      kind: 'brief',
+      payload: { markdown: '## Project brief\n\n- ship the thing' },
+    });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
+  });
+
   // --- live refresh ---------------------------------------------------------
 
   it("does NOT subscribe when projectId is null (one-shot tab)", async () => {

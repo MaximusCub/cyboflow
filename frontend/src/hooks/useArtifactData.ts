@@ -102,6 +102,15 @@ export type RecommendationsPayload = RecommendationsArtifactPayload;
 export type EvalReportArtifactPayload = EvalReportPayload;
 
 /**
+ * Parsed `payload_json` shape for the project-brief doc (Launch flow). Same
+ * shape as {@link RecommendationsArtifactPayload} — a payload-backed `{
+ * markdown }` doc with no entity source — reused rather than duplicated since
+ * the two atypes' payload contracts are identical; kept under its own local
+ * name for renderer imports (mirrors {@link RecommendationsPayload}).
+ */
+export type ProjectBriefPayload = RecommendationsArtifactPayload;
+
+/**
  * Discriminated content union the renderer switches on. `kind` mirrors the
  * resolved data source, NOT the atype 1:1 (idea-spec + decomposed-stories both
  * resolve from the entity model but produce different shapes).
@@ -114,6 +123,7 @@ export type ArtifactContent =
   | { kind: 'recommendations'; payload: RecommendationsPayload }
   | { kind: 'eval-report'; payload: EvalReportArtifactPayload }
   | { kind: 'verify-runbook'; payload: VerifyRunbookArtifactPayload }
+  | { kind: 'brief'; payload: ProjectBriefPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
 export interface ArtifactData {
@@ -188,6 +198,17 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
         loading: false,
         error: null,
         data: { kind: 'verify-runbook', payload: parsePayload(payloadJson) },
+      });
+      return;
+    }
+    // project-brief mirrors compound-recommendations exactly: payload-backed
+    // (no entity source), the Launch interview phase wrote the doc into
+    // payload_json.markdown, so it resolves synchronously too.
+    if (atype === 'project-brief') {
+      setState({
+        loading: false,
+        error: null,
+        data: { kind: 'brief', payload: parsePayload(payloadJson) },
       });
       return;
     }

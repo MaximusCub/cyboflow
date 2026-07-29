@@ -39,6 +39,7 @@ const LEGACY_RENDER_MODE: Record<ArtifactType, 'template' | 'canvas'> = {
   'interactive-prototype': 'canvas',
   'arch-design': 'template',
   'compound-recommendations': 'template',
+  'project-brief': 'template',
   'approve-ideas': 'template',
   'approve-designs': 'template',
   'eval-report': 'template',
@@ -53,6 +54,7 @@ const LEGACY_COLORS: Record<ArtifactType, string> = {
   'interactive-prototype': '#b5502e',
   'arch-design': '#2d7a8a',
   'compound-recommendations': '#8b5cf6',
+  'project-brief': '#3b6dd6',
   'approve-ideas': '#b8860b',
   'approve-designs': '#8a7326',
   'eval-report': '#f59e0b',
@@ -67,6 +69,7 @@ const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'interactive-prototype': '◱',
   'arch-design': '▣',
   'compound-recommendations': '▧',
+  'project-brief': '▣',
   'approve-ideas': '☑',
   'approve-designs': '⊡',
   'eval-report': '◎',
@@ -107,9 +110,10 @@ describe('ARTIFACT_POLICIES registry', () => {
     expect(isPerEntityArtifact('ui-prototype')).toBe(false);
   });
 
-  it('REPORTABLE_ARTIFACT_ATYPES excludes only the auto-mint-only atypes, in historical order + interactive-prototype', () => {
-    // The historical run-scope reportable list, with interactive-prototype added
-    // in its registry position (right after generic).
+  it('REPORTABLE_ARTIFACT_ATYPES excludes only the auto-mint-only atypes, in historical order + interactive-prototype + project-brief', () => {
+    // The historical run-scope reportable list, with interactive-prototype and
+    // project-brief added in their registry positions (right after generic,
+    // and right after compound-recommendations, respectively).
     expect(REPORTABLE_ARTIFACT_ATYPES).toEqual([
       'idea-spec',
       'decomposed-stories',
@@ -118,6 +122,7 @@ describe('ARTIFACT_POLICIES registry', () => {
       'generic',
       'interactive-prototype',
       'compound-recommendations',
+      'project-brief',
       'approve-ideas',
       // Appended LAST (registry order) so every historically-advertised atype
       // keeps its position in the MCP report tool's enum.

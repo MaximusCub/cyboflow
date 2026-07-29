@@ -20,7 +20,7 @@ import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVer
  * Artifact kinds. The bespoke (templated) types plus the two live-canvas types
  * (`ui-prototype`/`generic` — static srcdoc — and `interactive-prototype` — the
  * JS-enabled OOPIF canvas). Keep in sync with the `artifacts.atype` CHECK
- * constraint (currently widened by migration 091).
+ * constraint (currently widened by migration 099).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -31,6 +31,7 @@ export type ArtifactType =
   | 'interactive-prototype'
   | 'arch-design'
   | 'compound-recommendations'
+  | 'project-brief'
   | 'approve-ideas'
   | 'approve-designs'
   /**
@@ -260,6 +261,20 @@ export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
     // recommendations tab reads as part of the Compound flow.
     color: '#8b5cf6',
     glyph: '▧',
+    perEntity: false,
+  },
+  'project-brief': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    // Launch's interview-phase blue so the brief tab reads as part of the
+    // Launch flow.
+    color: '#3b6dd6',
+    glyph: '▣',
     perEntity: false,
   },
   'approve-ideas': {

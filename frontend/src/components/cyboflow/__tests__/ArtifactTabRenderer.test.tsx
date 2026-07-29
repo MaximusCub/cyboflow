@@ -504,6 +504,31 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('run-summary-eval')).not.toBeInTheDocument();
   });
 
+  // --- project-brief ---------------------------------------------------------
+
+  it('renders the project-brief markdown doc with the Launch blue eyebrow', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'brief', payload: { markdown: '## Goals\n\n- ship the launch flow' } },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'project-brief', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-project-brief')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · project brief');
+    expect(eyebrow).toHaveStyle({ color: '#3b6dd6' });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('ship the launch flow');
+  });
+
+  it('shows the project-brief empty state when the payload has no markdown', () => {
+    setHook({ loading: false, error: null, data: { kind: 'brief', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'project-brief', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-project-brief-empty')).toHaveTextContent('No project brief drafted yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
   // --- decomposed-stories --------------------------------------------------
 
   function makeStoriesIdea(): BacklogTaskItem {
@@ -1484,6 +1509,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
       { atype: 'eval-report', mode: 'template', testid: 'artifact-eval-report', data: { loading: false, error: null, data: { kind: 'eval-report', payload: { markdown: '## x' } } } },
       { atype: 'verify-runbook', mode: 'template', testid: 'artifact-verify-runbook', data: { loading: false, error: null, data: { kind: 'verify-runbook', payload: { markdown: '## x' } } } },
+      { atype: 'project-brief', mode: 'template', testid: 'artifact-project-brief', data: { loading: false, error: null, data: { kind: 'brief', payload: { markdown: '## x' } } } },
     ];
     for (const c of cases) {
       setHook(c.data);
