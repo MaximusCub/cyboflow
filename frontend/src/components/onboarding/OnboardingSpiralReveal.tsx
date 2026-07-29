@@ -49,9 +49,17 @@ const WRAPPER_COLOR = 'var(--paper-2)';
 /** Blur over the exposed app at step 0, eased to 0 by REVEAL_COMPLETE_STEP. */
 const MAX_BLUR_PX = 18;
 
-/** Per-tile peel duration, and the gap between consecutive tiles in a band. */
-const TILE_MS = 520;
-const STAGGER_MS = 26;
+/**
+ * Per-tile peel duration, and the gap between consecutive tiles in a band.
+ *
+ * STAGGER_MS is what makes the spiral legible as tiles rather than as one wave:
+ * a band is ~7 tiles, so at a 26ms gap the whole band was airborne at once and
+ * read as a single sheet dissolving. At 95ms the leading tile is most of the way
+ * gone before the next commits, so the eye can follow the path around the ring.
+ * Band duration works out ~1.2s (6 gaps + one tile's travel).
+ */
+const TILE_MS = 620;
+const STAGGER_MS = 95;
 /** Reduced-motion path: one flat cross-fade for the whole band, no stagger. */
 const REDUCED_MS = 260;
 
