@@ -77,7 +77,7 @@ function buildDb(): Database.Database {
   // selection tests insert that atype). 083 (revision-ensure) is SKIPPED: 082
   // already added `revision`, and a raw exec of its ALTER would throw the
   // duplicate-column error the ledger runner tolerates but db.exec does not.
-  db.exec(readFileSync(join(migDir, '084_interactive_prototype.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '089_interactive_prototype.sql'), 'utf-8'));
   // OFF *after* the migrations (some set PRAGMA foreign_keys=ON) so an idea can
   // be inserted with placeholder board_id/stage_id — the design handlers read
   // ideas by raw SELECT, where FK enforcement is irrelevant.

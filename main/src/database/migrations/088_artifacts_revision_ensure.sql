@@ -1,4 +1,4 @@
--- Migration 083: ensure artifacts.revision exists before 084's table recreate.
+-- Migration 088: ensure artifacts.revision exists before 089's table recreate.
 --
 -- WHY THIS FILE EXISTS (re-run convergence guard): the migration chain must be
 -- re-runnable end-to-end without errors (the runner's self-heal property — a
@@ -9,7 +9,7 @@
 -- `revision` — short-circuits via the runner's duplicate-column idempotency
 -- (its FIRST statement, `ALTER TABLE sessions ADD COLUMN design_idea_id`, hits
 -- "duplicate column name", which rolls back and ledger-marks the WHOLE file).
--- Net: `revision` is gone, and 084's INSERT..SELECT of it would fail with
+-- Net: `revision` is gone, and 089's INSERT..SELECT of it would fail with
 -- "no such column: revision".
 --
 -- This file restores convergence by containing EXACTLY ONE statement, the shape
@@ -18,8 +18,8 @@
 --     column name: revision" → the runner ledger-marks this file as idempotent-
 --     ok (warn, not error) and moves on;
 --   * replay path (073 re-ran and dropped it): the ALTER succeeds, re-adding
---     the column so 084's copy always has it.
--- Either way, artifacts carries `revision` when 084 runs.
+--     the column so 089's copy always has it.
+-- Either way, artifacts carries `revision` when 089 runs.
 --
 -- PATTERN NOTE for future artifacts recreates: any post-recreate ALTER-added
 -- column suffers this same replay hazard. Precede a recreate that copies such a

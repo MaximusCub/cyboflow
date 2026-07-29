@@ -94,10 +94,10 @@ function buildDb(): Database.Database {
   // table to join. No design session is seeded here, so the LEFT JOIN yields
   // NULL and no source_ref is stamped — non-design behavior stays unchanged.
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, design_idea_id TEXT)');
-  // Migration 084 widens the artifacts.atype CHECK to add 'interactive-prototype'
+  // Migration 089 widens the artifacts.atype CHECK to add 'interactive-prototype'
   // (rebuild recipe; preserves the revision column added just above). Applied
   // here so the interactive-prototype report tests can insert that atype.
-  db.exec(readFileSync(join(migDir, '084_interactive_prototype.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '089_interactive_prototype.sql'), 'utf-8'));
   return db;
 }
 

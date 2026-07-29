@@ -1,5 +1,5 @@
 /**
- * Migration 084_interactive_prototype.sql — schema + constraint tests.
+ * Migration 089_interactive_prototype.sql — schema + constraint tests.
  *
  * Applies the artifacts chain 006 -> … -> 073 -> 082 -> 083 -> 084 against an in-memory
  * SQLite instance. Proves:
@@ -60,7 +60,7 @@ function buildDb(): Database.Database {
   seedProject(db);
   apply(db, THROUGH_082);
   db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY)');
-  apply(db, ['082_design_mode_v0.sql', '084_interactive_prototype.sql']);
+  apply(db, ['082_design_mode_v0.sql', '089_interactive_prototype.sql']);
   return db;
 }
 
@@ -91,7 +91,7 @@ function insertArtifact(
   );
 }
 
-describe('Migration 084: interactive-prototype atype', () => {
+describe('Migration 089: interactive-prototype atype', () => {
   it('(a) accepts interactive-prototype alongside every pre-existing atype, rejects a bogus one', () => {
     const db = buildDb();
     seedRun(db, 'run-1');
@@ -153,7 +153,7 @@ describe('Migration 084: interactive-prototype atype', () => {
        VALUES ('art_keep', 'run-keep', 'ui-prototype', 'Keep me', 'canvas', NULL, NULL, 1, 5)`,
     ).run();
 
-    apply(db, ['084_interactive_prototype.sql']);
+    apply(db, ['089_interactive_prototype.sql']);
 
     const row = db
       .prepare(

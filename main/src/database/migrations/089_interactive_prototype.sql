@@ -1,4 +1,4 @@
--- Migration 084: widen the artifacts.atype CHECK to add 'interactive-prototype'.
+-- Migration 089: widen the artifacts.atype CHECK to add 'interactive-prototype'.
 --
 -- Design Mode v1 (docs/ideas/design-mode.md "Canvas v1") introduces the
 -- JS-enabled `interactive-prototype` canvas atype. The recreated CHECK carries
@@ -14,9 +14,9 @@
 -- the wrapping transaction so DROP TABLE does not cascade.
 --
 -- Runs AFTER 082_design_mode_v0 (the last artifacts change: `revision INTEGER
--- NOT NULL DEFAULT 1`) AND after 083's revision-ensure guard (which guarantees
+-- NOT NULL DEFAULT 1`) AND after 088's revision-ensure guard (which guarantees
 -- the column exists even on a ledger-wiped replay where 073's recreate dropped
--- it and 082 idempotently short-circuited — see 083's header), so this recreate
+-- it and 082 idempotently short-circuited — see 088's header), so this recreate
 -- reproduces the FULL current schema — 073's column set PLUS `revision` — and
 -- the INSERT..SELECT copies `revision` too. It preserves 073's split-identity rule (idea-spec/arch-design keyed by
 -- source_ref; every other atype one-per-(run, atype)); no table-level UNIQUE.

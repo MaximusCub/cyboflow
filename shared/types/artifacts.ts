@@ -20,7 +20,7 @@ import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVer
  * Artifact kinds. The bespoke (templated) types plus the two live-canvas types
  * (`ui-prototype`/`generic` — static srcdoc — and `interactive-prototype` — the
  * JS-enabled OOPIF canvas). Keep in sync with the `artifacts.atype` CHECK
- * constraint (currently widened by migration 084).
+ * constraint (currently widened by migration 089).
  */
 export type ArtifactType =
   | 'idea-spec'
