@@ -37,6 +37,10 @@
  *                          these files (skips everything else in dist-electron). Needed
  *                          when the dir holds a MIX of variants/arches/stale artifacts
  *                          (e.g. per-arch builds done in separate electron-builder runs).
+ *   R2_UPLOAD_QUEUE_SIZE   parallel multipart parts per object (default 4). Set to 1 for
+ *                          a single sequential connection when a throttling VPN/proxy
+ *                          resets parallel large-body PUTs (write EPIPE).
+ *   R2_UPLOAD_PART_SIZE_MB multipart part size in MB (default 5, the S3 floor).
  */
 
 import { createReadStream, statSync, readdirSync } from 'node:fs';
@@ -83,6 +87,13 @@ const accessKeyId = process.env.R2_ACCESS_KEY_ID;
 const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
 const bucket = process.env.R2_BUCKET || 'cyboflow-updates';
 const dryRun = process.env.UPDATE_DRY_RUN === 'true';
+// Multipart tunables. The SDK default fans out 4 parts in parallel per object;
+// on connections behind a throttling VPN/proxy those parallel large-body PUTs
+// get reset early (write EPIPE). Set R2_UPLOAD_QUEUE_SIZE=1 to force a single
+// sequential connection, and optionally a larger R2_UPLOAD_PART_SIZE_MB (min 5,
+// the S3 floor). Defaults preserve the original behaviour.
+const uploadQueueSize = Math.max(1, Number(process.env.R2_UPLOAD_QUEUE_SIZE) || 4);
+const uploadPartSizeMb = Math.max(5, Number(process.env.R2_UPLOAD_PART_SIZE_MB) || 5);
 const endpoint =
   process.env.R2_ENDPOINT ||
   (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined);
@@ -165,6 +176,8 @@ for (const name of artifacts) {
 
   const upload = new Upload({
     client,
+    queueSize: uploadQueueSize,
+    partSize: uploadPartSizeMb * 1024 * 1024,
     params: {
       Bucket: bucket,
       Key: `${VARIANT}/${name}`,
