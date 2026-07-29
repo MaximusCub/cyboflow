@@ -2898,7 +2898,11 @@ async function initializeServices(): Promise<boolean> {
   // procedure read live status (off the old hard-coded 'starting' fallback).
   // McpServerLifecycle structurally satisfies McpLifecycleReadable, so no adapter
   // is needed.
-  orchestratorHealth = new OrchestratorHealth(mcpServerLifecycle);
+  // The socket-integrity probe is what keeps this snapshot honest: the lifecycle
+  // only knows the subprocess is up, not that the path it dials still exists.
+  orchestratorHealth = new OrchestratorHealth(mcpServerLifecycle, {
+    isSocketPathIntact: () => orchSocketServer.isSocketPathIntact(),
+  });
 
   // Start the MCP server subprocess only AFTER the orch socket is listening — it
   // is a pure client (net.createConnection) that would otherwise race the bind,

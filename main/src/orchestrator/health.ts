@@ -26,6 +26,25 @@ export interface McpLifecycleReadable {
   getRestartAttempts(): number;
 }
 
+/** Optional collaborators. Omitted ⇒ behaviour is byte-identical to before. */
+export interface OrchestratorHealthDeps {
+  /**
+   * Sync probe: does the orch socket path still resolve to the inode the
+   * OrchSocketServer bound? Wire to `orchSocketServer.isSocketPathIntact`.
+   *
+   * The lifecycle state machine only knows whether the long-lived MCP
+   * SUBPROCESS is up. It cannot see that the socket path those subprocesses
+   * dial has been unlinked — so on 2026-07-28 it reported 'running' for two
+   * days while every newly spawned subprocess died on ENOENT.
+   */
+  isSocketPathIntact?: () => boolean;
+}
+
+/** lastError text when the socket path is gone but the lifecycle says running. */
+export const SOCKET_PATH_LOST_ERROR =
+  'Orchestrator socket file is missing or was replaced by another instance — ' +
+  'existing connections still work, but no new MCP subprocess can connect. Restart Cyboflow.';
+
 /**
  * Aggregates runtime health data for the cyboflow orchestrator subsystem.
  *
@@ -46,7 +65,10 @@ export class OrchestratorHealth {
    *                      Typically the real McpServerLifecycle singleton;
    *                      a sentinel stub is acceptable at boot.
    */
-  constructor(private readonly mcpLifecycle: McpLifecycleReadable) {}
+  constructor(
+    private readonly mcpLifecycle: McpLifecycleReadable,
+    private readonly deps: OrchestratorHealthDeps = {},
+  ) {}
 
   /**
    * Record an MCP-server-level error string.
@@ -69,10 +91,24 @@ export class OrchestratorHealth {
    * since the last manual start() call.
    */
   getMcpServerStatus(): McpServerHealth {
-    return {
-      status: this.mcpLifecycle.getStatus(),
-      lastError: this.lastMcpError,
-      restartAttempts: this.mcpLifecycle.getRestartAttempts(),
-    };
+    const status = this.mcpLifecycle.getStatus();
+    const restartAttempts = this.mcpLifecycle.getRestartAttempts();
+
+    // A live subprocess is necessary but NOT sufficient: if the socket path it
+    // dials is gone, the subsystem is unreachable to everything spawned from
+    // here on. Report that as 'failed' (→ 'error' in the UI) rather than
+    // inheriting the lifecycle's green, so the sidebar stops claiming health the
+    // subsystem does not have. Only downgrade a 'running' claim — 'starting',
+    // 'failed' and 'stopped' already describe themselves accurately, and during
+    // 'starting' the socket legitimately does not exist yet.
+    if (status === 'running' && this.deps.isSocketPathIntact?.() === false) {
+      return {
+        status: 'failed',
+        lastError: this.lastMcpError ?? SOCKET_PATH_LOST_ERROR,
+        restartAttempts,
+      };
+    }
+
+    return { status, lastError: this.lastMcpError, restartAttempts };
   }
 }

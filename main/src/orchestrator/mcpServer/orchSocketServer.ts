@@ -304,6 +304,27 @@ export class OrchSocketServer implements PermissionServerLike {
     return this.socketPath;
   }
 
+  /**
+   * Whether the socket path still resolves to the inode this server bound.
+   *
+   * False means we are in the silent-outage state: the server object is alive
+   * and every ALREADY-open connection keeps working (a unix socket survives
+   * unlink), but the path is gone or now belongs to someone else, so every NEW
+   * connect() fails with ENOENT. Health surfaces read this to avoid reporting
+   * green while no subprocess can actually reach us — the exact way the
+   * 2026-07-28 outage stayed invisible for two days.
+   *
+   * Sync and cheap (one stat), so it can be polled from a health snapshot.
+   */
+  isSocketPathIntact(): boolean {
+    if (!this.server || this.boundInode === null) return false;
+    try {
+      return fs.statSync(this.socketPath).ino === this.boundInode;
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether a client connection bound to `runId` is currently open. */
   hasClientForRun(runId: string): boolean {
     return (this.clientsByRun.get(runId)?.size ?? 0) > 0;

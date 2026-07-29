@@ -113,3 +113,72 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
     expect(health.getMcpServerStatus().lastError).toBe('second error');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Socket-integrity downgrade
+//
+// The lifecycle only knows the SUBPROCESS is up. When the orch socket path has
+// been unlinked or replaced, already-open connections keep working but no new
+// subprocess can connect — the state that let a two-day outage report green.
+// ---------------------------------------------------------------------------
+
+describe('OrchestratorHealth socket-integrity downgrade', () => {
+  const lifecycleArg = (stub: ReturnType<typeof makeLifecycleStub>) =>
+    stub as unknown as ConstructorParameters<typeof OrchestratorHealth>[0];
+
+  it('downgrades a running lifecycle to failed when the socket path is gone', () => {
+    const lifecycle = makeLifecycleStub('running', 1);
+    const health = new OrchestratorHealth(lifecycleArg(lifecycle), {
+      isSocketPathIntact: () => false,
+    });
+
+    const result = health.getMcpServerStatus();
+
+    expect(result.status).toBe('failed');
+    expect(result.lastError).toMatch(/no new MCP subprocess can connect/i);
+    // restartAttempts still reports truthfully through the downgrade.
+    expect(result.restartAttempts).toBe(1);
+  });
+
+  it('leaves a running lifecycle green while the socket path is intact', () => {
+    const lifecycle = makeLifecycleStub('running');
+    const health = new OrchestratorHealth(lifecycleArg(lifecycle), {
+      isSocketPathIntact: () => true,
+    });
+
+    const result = health.getMcpServerStatus();
+
+    expect(result.status).toBe('running');
+    expect(result.lastError).toBeUndefined();
+  });
+
+  it('does not mask a real lifecycle error message when downgrading', () => {
+    const lifecycle = makeLifecycleStub('running');
+    const health = new OrchestratorHealth(lifecycleArg(lifecycle), {
+      isSocketPathIntact: () => false,
+    });
+    health.setMcpError('subprocess exited with code 1');
+
+    expect(health.getMcpServerStatus().lastError).toBe('subprocess exited with code 1');
+  });
+
+  it('never downgrades a starting lifecycle — the socket legitimately does not exist yet', () => {
+    const lifecycle = makeLifecycleStub('starting');
+    const health = new OrchestratorHealth(lifecycleArg(lifecycle), {
+      isSocketPathIntact: () => false,
+    });
+
+    expect(health.getMcpServerStatus().status).toBe('starting');
+  });
+
+  it('behaves exactly as before when no probe is injected', () => {
+    const lifecycle = makeLifecycleStub('running', 3);
+    const health = new OrchestratorHealth(lifecycleArg(lifecycle));
+
+    expect(health.getMcpServerStatus()).toEqual({
+      status: 'running',
+      lastError: undefined,
+      restartAttempts: 3,
+    });
+  });
+});
