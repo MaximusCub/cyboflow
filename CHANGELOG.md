@@ -6,6 +6,29 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.33] — 2026-07-29
+
+### Added
+
+- **Design mode v1 — interactive prototype canvas**: an OOPIF-embedded live prototype with a surface-owned server lifecycle, terminated/respawn states, a frame watchdog, and a scripted-frame guard. Backed by an artifact-policy registry with an `interactive-prototype` artifact type, prototype-family draft binding, and a shared prototype-server IPC contract (preload bridge + type-parity). Schema in migrations 083–089.
+- **Multi-chat panels**: choose the chat substrate at Add-chat creation time, with Claude/Codex panels routed by substrate override and isolated by their own panel id across substrates. Each Codex SDK chat panel gets its own resume thread; the Add-chat picker names the concrete session provider each override routes to.
+- **Download analytics snapshots**: durable daily snapshots of R2 download analytics with a nightly CI job (accepts a `CLOUDFLARE_ANALYTICS_API` alias), since the upstream analytics window is not retained.
+- **Onboarding refresh**: the app unwraps across onboarding's modal steps, wrapped in cream rather than terracotta, with a slower tile-peel so individual tiles read.
+- Pairwise judge provenance is surfaced and attributed (with fallbacks), and the eval juror's failure reason is persisted and surfaced.
+
+### Changed
+
+- **Every multi-task idea gets an epic** — a fallback epic named after the idea — with the idea-needs-epic invariant enforced at the `TaskChangeRouter` chokepoint (and the unarchive-path bypass closed).
+- Compound raises its bar for instruction-file edits.
+- The full test gate is scoped to final verification rather than sprint lanes.
+
+### Fixed
+
+- Schema-parity check tolerates duplicate-column ALTERs, mirroring the migration runner's idempotent-ALTER self-heal (migration 088's revision "ensure" guard).
+- Chat-panel provider and substrate resolve as independent axes; the whole `CreatePanelRequest` is forwarded across the `panels:create` seam.
+- xterm/PTY listeners are disposed on panel and session close; PTY chat panels are isolated by their own id; mixed-provider retry sessions are guarded.
+- A small back-off precedes the eval juror's transient retry.
+
 ## [0.1.32] — 2026-07-27
 
 ### Added
