@@ -121,6 +121,19 @@ describe('sanitizeFrozenDom — active content is removed', () => {
     expect(out).not.toContain('<frame ');
   });
 
+  it('removes <template> whole — its content is a fragment the tree walk never visits', () => {
+    // A <script> inside <template> lives in template.content (a separate
+    // DocumentFragment), not the walked tree — dropping the element closes the
+    // blind spot. Fidelity-neutral: template content never renders.
+    const out = sanitizeFrozenDom(
+      '<body><template><script>alert(1)</script><img src=x onerror=alert(1)></template><p>kept</p></body>',
+    );
+    expect(out).not.toContain('<template');
+    expect(out).not.toContain('<script');
+    expect(out).not.toContain('onerror');
+    expect(out).toContain('<p>kept</p>');
+  });
+
   it('handles SVG subtrees with the same rules (SVG <script>, onload, xlink:href)', () => {
     const doc = parse(
       '<body><svg viewBox="0 0 10 10" onload="alert(1)">' +

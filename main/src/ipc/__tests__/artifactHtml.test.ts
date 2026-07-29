@@ -44,7 +44,11 @@ vi.mock('electron', () => ({
   shell: { openExternal: (...args: unknown[]) => mockOpenExternal(...args) },
 }));
 
-import { registerArtifactHtmlHandlers, injectPrototypeCsp } from '../artifactHtml';
+import {
+  registerArtifactHtmlHandlers,
+  injectPrototypeCsp,
+  injectAfterLeadingDoctype,
+} from '../artifactHtml';
 import { safeRunId } from '../../orchestrator/artifactSnapshot';
 
 function makeHandlerCapture() {
@@ -162,6 +166,38 @@ describe('injectPrototypeCsp', () => {
   it('prepends the meta when there is no <html>/<head> at all', () => {
     const out = injectPrototypeCsp('<body>hi</body>');
     expect(out).toBe(`${META}<body>hi</body>`);
+  });
+});
+
+// For app-owned NON-CSP injections into http-served documents (the comment-mode
+// capture serializer / inspector), where the CSP arrives as a response header
+// and placement is not security-load-bearing — the doctype must stay first so
+// the document keeps no-quirks parse mode over http.
+describe('injectAfterLeadingDoctype', () => {
+  const TAG = '<script>app()</script>';
+
+  it('inserts after a leading doctype, keeping the doctype first', () => {
+    const out = injectAfterLeadingDoctype('<!doctype html><body>hi</body>', TAG);
+    expect(out).toBe(`<!doctype html>${TAG}<body>hi</body>`);
+  });
+
+  it('tolerates case and HTML pre-doctype whitespace (space/tab/LF/FF/CR)', () => {
+    const out = injectAfterLeadingDoctype('\n\t <!DOCTYPE html>\n<body>hi</body>', TAG);
+    expect(out).toBe(`\n\t <!DOCTYPE html>${TAG}\n<body>hi</body>`);
+  });
+
+  it('falls back to position 0 when there is no doctype', () => {
+    const out = injectAfterLeadingDoctype('<body>hi</body>', TAG);
+    expect(out).toBe(`${TAG}<body>hi</body>`);
+  });
+
+  it('does NOT honor a doctype behind a parser-differential prefix (BOM / NBSP / VT)', () => {
+    // HTML treats these as content, so the parser ignores the doctype anyway —
+    // the probe must agree and fall back to prepending at position 0.
+    for (const prefix of ['\uFEFF', '\u00A0', '\u000B']) {
+      const doc = `${prefix}<!doctype html><body>hi</body>`;
+      expect(injectAfterLeadingDoctype(doc, TAG)).toBe(`${TAG}${doc}`);
+    }
   });
 });
 

@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 describe('DesignPrototypeServerManager serving', () => {
-  it('serves the CSP-injected canonical bytes at the tokenized path (meta at position 0)', async () => {
+  it('serves the canonical bytes under the interactive CSP as a RESPONSE HEADER', async () => {
     const { manager } = makeManager(async () => '<html><body>hello</body></html>');
     track(manager);
     const baseUrl = await manager.ensure('run-1');
@@ -54,15 +54,21 @@ describe('DesignPrototypeServerManager serving', () => {
     const res = await fetch(baseUrl);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    // Header, not meta: applied before any content byte is parsed, so no
+    // parser-differential trick in the prototype bytes can displace it — and
+    // the document's own doctype stays first (no-quirks parse over http).
+    expect(res.headers.get('content-security-policy')).toBe(ARTIFACT_INTERACTIVE_CSP);
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.text();
-    expect(body.startsWith(CSP_META)).toBe(true);
+    expect(body).not.toContain(CSP_META);
     expect(body).toContain('hello');
   });
 
-  it('injects the capture serializer after the CSP meta and ahead of prototype markup', async () => {
-    const { manager } = makeManager(async () => '<html><body>hello</body></html>');
+  it('injects the capture serializer ahead of prototype markup, after any leading doctype', async () => {
+    const { manager } = makeManager(
+      async () => '<!doctype html>\n<html><body>hello</body></html>',
+    );
     track(manager);
     const body = await (await fetch(await manager.ensure('run-1'))).text();
 
@@ -70,8 +76,17 @@ describe('DesignPrototypeServerManager serving', () => {
     expect(body).toContain("data.type !== 'cyboflow-design-capture'");
     expect(body).toContain("type: 'cyboflow-design-capture-result'");
     expect(body).toContain("'<!doctype html>' + document.documentElement.outerHTML");
-    // Ordering: CSP first (position 0), then the serializer, then untrusted markup.
-    expect(body.indexOf(CSP_META)).toBe(0);
+    // Ordering: the prototype's doctype stays FIRST (no-quirks), then the
+    // serializer, then the untrusted markup.
+    expect(body.startsWith('<!doctype html>')).toBe(true);
+    expect(body.indexOf('cyboflow-design-capture')).toBeLessThan(body.indexOf('hello'));
+  });
+
+  it('still installs the serializer at position 0 for doctype-less prototype bytes', async () => {
+    const { manager } = makeManager(async () => '<html><body>hello</body></html>');
+    track(manager);
+    const body = await (await fetch(await manager.ensure('run-1'))).text();
+    expect(body.startsWith('<script>')).toBe(true);
     expect(body.indexOf('cyboflow-design-capture')).toBeLessThan(body.indexOf('hello'));
   });
 
@@ -225,6 +240,18 @@ describe('DesignPrototypeServerManager comment documents', () => {
     expect(body).toContain('<p>frozen</p>');
   });
 
+  it("keeps the sanitizer's leading doctype FIRST, inspector after it (no-quirks parse)", async () => {
+    const { manager } = makeManager(async () => '<html>ok</html>');
+    track(manager);
+    await manager.ensure('run-1');
+    // sanitizeFrozenDom output shape: a leading doctype, then the document.
+    const { url } = await manager.hostCommentDocument('run-1', `<!doctype html>${FROZEN}`);
+
+    const body = await (await fetch(url)).text();
+    expect(body.startsWith('<!doctype html>')).toBe(true);
+    expect(body.indexOf('cyboflow-design-inspect')).toBeLessThan(body.indexOf('frozen'));
+  });
+
   it('mints a FRESH nonce and captureId per host call', async () => {
     const { manager } = makeManager(async () => '<html>ok</html>');
     track(manager);
@@ -302,8 +329,9 @@ describe('DesignPrototypeServerManager comment documents', () => {
 
     const res = await fetch(baseUrl);
     expect(res.status).toBe(200);
-    // The prototype keeps its meta CSP; only the comment doc gets a header policy.
-    expect(res.headers.get('content-security-policy')).toBeNull();
+    // Each document class carries its own header policy: the prototype the
+    // interactive CSP, the comment doc a nonce-only one.
+    expect(res.headers.get('content-security-policy')).toBe(ARTIFACT_INTERACTIVE_CSP);
     expect(await res.text()).toContain('proto');
   });
 });

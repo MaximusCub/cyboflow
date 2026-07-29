@@ -21,7 +21,10 @@
  * about whether a bad token was "close". The served bytes are loaded FRESH PER
  * REQUEST (not cached at spawn) so an agent re-report of the prototype is picked
  * up on the next reload without a server restart, and the interactive CSP is
- * injected at position 0 (see injectPrototypeCsp) so it governs the whole doc.
+ * delivered as a RESPONSE HEADER — applied by the browser before a single
+ * content byte is parsed, so no parser-differential trick can displace it, and
+ * the document's own doctype stays first (no-quirks parse; an http document
+ * with content before its doctype drops to quirks mode, unlike srcdoc).
  *
  * AUTHORIZATION: binding loopback is NOT access control — anything on 127.0.0.1
  * could hit the port. The first path segment is an unguessable per-spawn token
@@ -41,7 +44,7 @@ import {
   PROTOTYPE_HTML_RELPATH,
 } from '../../../shared/types/artifacts';
 import type { HostCommentDocumentResult } from '../../../shared/types/designPrototypeServer';
-import { injectPrototypeCsp } from '../ipc/artifactHtml';
+import { injectAfterLeadingDoctype } from '../ipc/artifactHtml';
 import {
   registerScriptedFrameOrigin,
   unregisterScriptedFrameOrigin,
@@ -270,11 +273,12 @@ export class DesignPrototypeServerManager {
       captureId,
       nonce,
       path,
-      // The inspector goes at position 0 so it is installed before any captured
-      // markup is parsed; under the nonce CSP nothing else in the document can
-      // run, so ordering is about the inspector seeing a complete DOM, not about
-      // outracing a competitor.
-      html: `${renderDesignInspectorScriptTag(nonce)}${sanitizedHtml}`,
+      // The inspector goes right after the sanitizer's leading doctype (kept
+      // first so the frame parses no-quirks — layout fidelity with the live
+      // prototype), before any captured markup; under the nonce CSP nothing
+      // else in the document can run, so ordering is about the inspector
+      // installing its listeners early, not about outracing a competitor.
+      html: injectAfterLeadingDoctype(sanitizedHtml, renderDesignInspectorScriptTag(nonce)),
     };
     this.logger?.debug('[DesignPrototypeServer] hosting comment document', { runId, captureId });
     return { url: `${entry.origin}${path}` };
@@ -376,11 +380,15 @@ export class DesignPrototypeServerManager {
         this.sendStatus(res, 404, 'Not Found');
         return;
       }
-      // CSP meta at position 0 (see injectPrototypeCsp), then the app-owned
-      // capture serializer, then the untrusted prototype markup.
-      const html = injectPrototypeCsp(`${CAPTURE_SERIALIZER_TAG}${raw}`, ARTIFACT_INTERACTIVE_CSP);
+      // CSP as a RESPONSE HEADER (undisplaceable by content, doctype stays
+      // first → no-quirks parse); the app-owned capture serializer is injected
+      // after the doctype, ahead of the untrusted prototype markup. Serializer
+      // placement is not security-load-bearing — a prototype byte-trick that
+      // moved it would only break that prototype's own capture (self-sabotage).
+      const html = injectAfterLeadingDoctype(raw, CAPTURE_SERIALIZER_TAG);
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': ARTIFACT_INTERACTIVE_CSP,
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'no-store',
       });

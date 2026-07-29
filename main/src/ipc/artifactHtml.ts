@@ -88,6 +88,35 @@ export function injectPrototypeCsp(html: string, csp: string = ARTIFACT_PROTOTYP
   return `${meta}${html}`;
 }
 
+/**
+ * A leading `<!doctype …>`, permitting ONLY the characters HTML itself treats as
+ * pre-doctype whitespace (space, tab, LF, FF, CR) — deliberately NOT `\s`, whose
+ * JS definition also matches U+FEFF/U+00A0/U+000B, the exact parser-differential
+ * characters the injectPrototypeCsp comment above rules out for CSP placement.
+ * With the class exact, "probe sees a doctype" and "parser sees a doctype" agree.
+ */
+const LEADING_DOCTYPE_RE = /^[ \t\n\r\f]*<!doctype[^>]*>/i;
+
+/**
+ * Insert app-owned markup AFTER a document's leading doctype (or at position 0
+ * when there is none), so the doctype stays FIRST and the document keeps
+ * no-quirks parse mode when served over HTTP.
+ *
+ * ONLY for injections whose placement is not security-load-bearing (the comment-
+ * mode capture serializer, the nonce-carrying inspector): those documents get
+ * their CSP as a RESPONSE HEADER, which no byte of content can displace, so a
+ * content trick that shoved this injection somewhere odd would only break the
+ * capture/inspector — self-sabotage, not a boundary breach. A CSP `<meta>` must
+ * still use the position-0 prepend above (see that comment for why probing is
+ * unsafe when the CSP itself rides in the content).
+ */
+export function injectAfterLeadingDoctype(html: string, injection: string): string {
+  const m = LEADING_DOCTYPE_RE.exec(html);
+  if (m === null) return `${injection}${html}`;
+  const end = m[0].length;
+  return `${html.slice(0, end)}${injection}${html.slice(end)}`;
+}
+
 /** IPCResponse-compatible result shape (mirrors frontend/src/utils/api.ts). */
 interface LoadHtmlResponse {
   success: boolean;

@@ -35,6 +35,10 @@
  * `<link>` goes because it is a subresource fetch (stylesheet, prefetch,
  * ping-adjacent) whose bytes we do not control; inline `<style>` is the
  * fidelity-preserving substitute and is kept.
+ * `<template>` goes because its content is a separate DocumentFragment the
+ * tree walk below never visits — a `<script>` hiding inside one would survive
+ * the sweep (inert under the nonce CSP, but this pass must not depend on that).
+ * Removing it is fidelity-neutral: template content never renders.
  */
 const FORBIDDEN_TAGS: ReadonlySet<string> = new Set([
   'script',
@@ -46,6 +50,7 @@ const FORBIDDEN_TAGS: ReadonlySet<string> = new Set([
   'portal',
   'base',
   'link',
+  'template',
 ]);
 
 /**
