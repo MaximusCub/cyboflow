@@ -257,6 +257,48 @@ export const feedbackRouter = router({
       );
     }),
 
+  /**
+   * "Send feedback" for the DESIGN surface: mint the drafts into a durable
+   * 'queued' outbox batch bound to the design session (FeedbackRouter
+   * createDesignBatch — no parked gate; a design session is a live chat).
+   *
+   * QUEUE-ONLY SEAM for now: the design-feedback outbox pipeline picks queued
+   * batches up for dispatch (guards → dispatching → SDK revision turn →
+   * acknowledged result); until it is wired here, a queued batch simply waits.
+   * The pipeline stage extends THIS procedure with its dispatch poke.
+   */
+  sendDesignBatch: protectedProcedure
+    .input(
+      z.object({
+        runId: z.string().min(1),
+        sessionId: z.string().min(1),
+        atype: designAtypeSchema,
+        sourceRef: z.string().min(1),
+        commentIds: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .mutation(
+      async ({
+        input,
+        ctx,
+      }): Promise<{ batchId: string; round: number; commentIds: string[] }> => {
+        const db = requireDb(ctx.db, 'sendDesignBatch');
+        const projectId = resolveProjectId(db, input.runId, 'sendDesignBatch');
+        try {
+          return await FeedbackRouter.getInstance().apply(projectId, {
+            op: 'create-design-batch',
+            runId: input.runId,
+            sessionId: input.sessionId,
+            atype: input.atype,
+            sourceRef: input.sourceRef,
+            commentIds: input.commentIds,
+          });
+        } catch (err) {
+          rethrowAsTRPCError(err);
+        }
+      },
+    ),
+
   /** Project-scoped feedback change stream (comment + batch lifecycle). */
   onFeedbackChanged: protectedProcedure
     .input(z.object({ projectId: z.number().int().positive() }))
