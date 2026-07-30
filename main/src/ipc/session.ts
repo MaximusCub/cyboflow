@@ -27,7 +27,7 @@ import {
 } from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
-import type { SessionOutput } from '../types/session';
+import type { SessionOutput, Session as SessionType } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
@@ -54,7 +54,7 @@ import {
   QUICK_CODEX_SDK_BRIEFING,
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
-import { agentProviderDisabledMessage } from '../services/agentProviderGuard';
+import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../services/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { resolvePanelLane, type PanelLane } from '../services/panelLane';
 import type { ToolPanel } from '../../../shared/types/panels';
@@ -326,6 +326,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   const codexPanelInputQueues = new Map<string, QueuedCodexPanelInput[]>();
 
   const startCodexSdkTurn = async (panelId: string, text: string): Promise<void> => {
+    // Refuse a switched-off provider BEFORE any side effect. The spawn below
+    // asserts too, but by then this function has already persisted the user turn
+    // and flipped the session to 'running' — and nothing rolls those back, so a
+    // refused send left the chat showing a phantom "Codex is thinking…" placeholder
+    // and a live Stop button with no turn behind them.
+    assertAgentProviderAllowed('codex', 'this chat turn');
     if (!codexSdkManager) throw new Error('Codex SDK manager is not available');
     const panel = panelManager.getPanel(panelId);
     if (!panel || panel.type !== 'claude') throw new Error(`Codex panel ${panelId} not found`);
@@ -375,20 +381,35 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       ? dbSession.agent_permission_mode
       : undefined;
 
+    const priorStatus = session.status;
     sessionManager.addPanelConversationMessage(panelId, 'user', text);
     await sessionManager.updateSession(panel.sessionId, { status: 'running' });
-    await codexSdkManager.spawnCliProcess({
-      panelId,
-      sessionId: panel.sessionId,
-      runId,
-      worktreePath: session.worktreePath,
-      prompt: text,
-      systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
-      ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
-      ...(model !== undefined ? { model } : {}),
-      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
-      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-    });
+    try {
+      await codexSdkManager.spawnCliProcess({
+        panelId,
+        sessionId: panel.sessionId,
+        runId,
+        worktreePath: session.worktreePath,
+        prompt: text,
+        systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
+        ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+        ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      });
+    } catch (error) {
+      // The turn never started, so nothing will ever flip 'running' back — the
+      // turn-end listeners key off events this spawn would have emitted. Leaving
+      // it stuck paints a "Codex is thinking…" placeholder and an un-stoppable
+      // Stop button over an idle chat. Restore the pre-turn status and re-throw
+      // so the caller still reports the failure.
+      try {
+        await sessionManager.updateSession(panel.sessionId, { status: priorStatus });
+      } catch (revertError: unknown) {
+        console.error(`[IPC] Failed to restore status after a Codex turn spawn failure on ${panelId}:`, revertError);
+      }
+      throw error;
+    }
   };
 
   // Put un-delivered entries BACK at the front of the queue. A queued message is
@@ -1577,6 +1598,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   });
 
   ipcMain.handle('sessions:input', async (_event, sessionId: string, input: string) => {
+    // Declared outside the try so the catch can undo the optimistic 'running'
+    // flip below; null means we never flipped and must not touch the status.
+    let flippedFromStatus: SessionType['status'] | null = null;
     try {
       // Validate session exists and is active
       const sessionValidation = validateSessionIsActive(sessionId);
@@ -1593,10 +1617,27 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // timer cannot fire mid-turn (the turn's own turn-end re-arms).
       services.sessionSummaryScheduler?.noteTurnStart(sessionId);
 
+      // Refuse a switched-off provider up here, ahead of every side effect below.
+      // The spawn seams assert too, but each branch flips the session to 'running'
+      // (and persists the user turn) FIRST, and no listener will ever flip it back
+      // for a turn that never started — the chat would sit on a phantom "thinking"
+      // placeholder with a Stop button behind it. This is the session-scoped input
+      // path, taken only when the panel inherits its session's lane, so the
+      // session's own runtime is the right provider to check.
+      const inputDbSession = databaseService.getSession(sessionId);
+      const inputRuntime = inputDbSession?.agent_runtime;
+      assertAgentProviderAllowed(
+        isSessionAgentRuntime(inputRuntime) ? providerForRuntime(inputRuntime) : 'claude',
+        'this chat turn',
+      );
+
       // Update session status back to running when user sends input
       const currentSession = await sessionManager.getSession(sessionId);
+      // Remembered so the catch below can undo it: everything after this point can
+      // throw, and a stranded 'running' outlives the failed turn forever.
       if (currentSession && currentSession.status === 'waiting') {
         console.log(`[Main] User sent input to session ${sessionId}, updating status to 'running'`);
+        flippedFromStatus = currentSession.status;
         await sessionManager.updateSession(sessionId, { status: 'running' });
       }
 
@@ -1609,7 +1650,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       });
 
       const finalInput = input;
-      const dbSession = databaseService.getSession(sessionId);
+      const dbSession = inputDbSession;
 
       // Get session to determine tool type
       const session = await sessionManager.getSession(sessionId);
@@ -1796,6 +1837,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       return { success: true };
     } catch (error) {
       console.error('Failed to send input:', error);
+      // Undo the optimistic 'running' flip. The turn never started, so none of the
+      // turn-end listeners (which key off the spawn's own events) will ever fire to
+      // clear it — the chat would keep painting a "thinking" placeholder and a Stop
+      // button over an idle session until something else moved the status.
+      if (flippedFromStatus !== null) {
+        try {
+          await sessionManager.updateSession(sessionId, { status: flippedFromStatus });
+        } catch (revertError: unknown) {
+          console.error(`[IPC] Failed to restore status after a failed input on ${sessionId}:`, revertError);
+        }
+      }
       // Surface a provider-disabled refusal verbatim: it is user-authored copy
       // (and carries the code the composer parses into an "Open Settings →
       // Integrations" action), so collapsing it into the generic string below

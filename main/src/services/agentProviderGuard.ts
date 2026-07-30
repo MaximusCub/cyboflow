@@ -9,16 +9,26 @@
  * create path. The toggle has to hold at the moment a provider is actually
  * called, not only when a session is born.
  *
- * The guard is installed at the four seams where a turn genuinely reaches a
- * vendor, so no path can bypass it:
+ * The guard is installed at every seam where a turn genuinely reaches a vendor,
+ * so no path can bypass it:
  *   1. `utils/lazyAgentSdk.loadSdkQuery()` — EVERY Claude Agent SDK `query()`
  *      in the app resolves the function through it, per call (chat turns, the
  *      eval/pairwise judges, the programmatic monitor, verification agents, the
  *      VLM judge, the model catalogue). One assert covers them all.
  *   2. `AbstractCliManager.spawnCliProcess` + each subclass override — every
  *      cold spawn of a CLI/PTY/app-server process.
- *   3. `relayOrSpawnPtyPanel` — a keystroke relayed into an ALREADY-LIVE PTY
+ *   3. `CodexAppServerClient.start()` — the one spawn seam shared by the Codex
+ *      SDK manager and the Codex eval juror (which bypasses that manager).
+ *   4. `relayOrSpawnPtyPanel` — a keystroke relayed into an ALREADY-LIVE PTY
  *      never respawns, so the spawn guard alone would miss it.
+ *
+ * The DISPATCH seams (`sessions:input`, `startCodexSdkTurn`) assert as well,
+ * ahead of the seams above. Not for coverage — for ORDER: each of them flips the
+ * session to 'running' (and persists the user turn) BEFORE reaching the spawn,
+ * and nothing rolls that back, because the turn-end listeners key off events a
+ * refused turn never emits. Asserting only at the vendor seam therefore left the
+ * chat painting a phantom "thinking" placeholder and a live Stop button over a
+ * turn that never ran. Refuse before the side effects, not after.
  *
  * Resolver injection (rather than importing ConfigManager) keeps this module
  * free of concrete-service imports and leaves it inert in unit/headless
