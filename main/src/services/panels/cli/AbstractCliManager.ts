@@ -10,6 +10,7 @@ import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 
@@ -518,6 +519,50 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
+   * Process-global key recording that this CLI's executable is a script whose
+   * shebang interpreter is unreachable, so every spawn must go straight to the
+   * explicit-Node invocation.
+   */
+  protected nodeFallbackFlagKey(): string {
+    return `${this.getCliToolName().toLowerCase()}NeedsNodeFallback`;
+  }
+
+  /**
+   * Pin the Node fallback for subsequent spawns.
+   *
+   * Called by the availability probe when `--version` only succeeded through an
+   * explicit Node invocation. Without this the PTY spawn would still try the
+   * bare shim first and appear to succeed: node-pty forks before it execs, so
+   * the shebang failure happens in the child and never throws on the parent
+   * side — the terminal just shows `env: node: No such file or directory` and
+   * the process exits, which is NOT one of the errors spawnPtyProcess's own
+   * retry can observe.
+   */
+  protected markNeedsNodeFallback(): void {
+    (global as typeof global & Record<string, boolean>)[this.nodeFallbackFlagKey()] = true;
+  }
+
+  /**
+   * Diagnosis for the "found it, but its interpreter is missing" failure, or
+   * null for any other failure.
+   *
+   * WHY: the generic "install it or check your PATH" text is actively wrong
+   * here — the CLI *was* installed and *was* found on PATH. Only its shebang
+   * interpreter was missing, and saying so turns a reinstall cycle into a
+   * one-line fix.
+   */
+  protected missingInterpreterAdvice(error?: string): string | null {
+    const interpreter = describeMissingInterpreter(error);
+    if (!interpreter) return null;
+    const toolName = this.getCliToolName();
+    return [
+      `${toolName} WAS found, but the executable is a script whose interpreter "${interpreter}" is not on the spawn PATH.`,
+      `This is typically an npm global shim (#!/usr/bin/env ${interpreter}) combined with a version-manager ${interpreter} (nvm/fnm/volta/asdf) that a GUI-launched app does not inherit.`,
+      `Fix by installing a native ${toolName} binary, or by adding the directory containing "${interpreter}" under Settings → Additional paths.`,
+    ].join('\n');
+  }
+
+  /**
    * Get cached availability result or perform fresh check
    */
   protected async getCachedAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
@@ -575,7 +620,10 @@ export abstract class AbstractCliManager extends EventEmitter {
       this.sessionManager.addSessionError(
         sessionId,
         `${this.getCliToolName()} not available`,
-        `${availability.error}\nPlease install ${this.getCliToolName()} or verify it is in your PATH.`
+        `${availability.error}\n${
+          this.missingInterpreterAdvice(availability.error) ??
+          `Please install ${this.getCliToolName()} or verify it is in your PATH.`
+        }`
       );
     } catch (err) {
       this.logger?.warn(
@@ -588,6 +636,17 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Get CLI not available error message (can be overridden by subclasses)
    */
   protected getCliNotAvailableMessage(error?: string): string {
+    const interpreterAdvice = this.missingInterpreterAdvice(error);
+    if (interpreterAdvice) {
+      return [
+        `Error: ${error}`,
+        '',
+        interpreterAdvice,
+        '',
+        `Enhanced PATH searched: ${getShellPath()}`,
+      ].join('\n');
+    }
+
     return [
       `Error: ${error}`,
       '',
@@ -649,8 +708,7 @@ export abstract class AbstractCliManager extends EventEmitter {
     let ptyProcess: pty.IPty;
     let spawnAttempt = 0;
     let lastError: unknown;
-    const toolName = this.getCliToolName().toLowerCase();
-    const needsNodeFallbackKey = `${toolName}NeedsNodeFallback`;
+    const needsNodeFallbackKey = this.nodeFallbackFlagKey();
 
     // Try normal spawn first, then fallback to Node.js invocation if it fails
     while (spawnAttempt < 2) {

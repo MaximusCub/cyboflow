@@ -7,6 +7,7 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { probeCliVersion } from '../cli/cliVersionProbe';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
@@ -495,10 +496,16 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     }
 
     try {
-      const version = execSync(`"${resolvedPath}" --version`, {
-        encoding: 'utf8',
-        timeout: 10_000,
-      }).trim();
+      // Probe with the SAME environment the spawn uses (enriched PATH + the
+      // resolved Node's directory). A bare probe inherits the GUI app's
+      // launchd PATH, which made this gate reject npm-shim installs whose
+      // shebang `node` lives in a version manager — installs the spawn path
+      // itself handles fine.
+      const probe = await probeCliVersion(resolvedPath, await this.getSystemEnvironment());
+      if (probe.usedNodeFallback) {
+        this.markNeedsNodeFallback();
+      }
+      const version = probe.version;
       this.resolvedExecutablePath = resolvedPath;
       return { available: true, version, path: resolvedPath };
     } catch (err) {
@@ -2009,12 +2016,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   protected getCliNotAvailableMessage(error?: string): string {
+    const interpreterAdvice = this.missingInterpreterAdvice(error);
     return [
       `Error: ${error}`,
       '',
       'Claude Code (Interactive) is not available.',
       '',
-      'Please install the `claude` CLI or set a custom executable path in Settings.',
+      interpreterAdvice ??
+        'Please install the `claude` CLI or set a custom executable path in Settings.',
     ].join('\n');
   }
 }
