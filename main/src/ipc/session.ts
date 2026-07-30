@@ -1897,7 +1897,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('sessions:resume-interactive', async (_event, sessionId: string, panelId?: string) => {
+  ipcMain.handle('sessions:resume-interactive', async (
+    _event,
+    sessionId: string,
+    panelId?: string,
+    /**
+     * The resume prompt's "Resume anyway" — the user was shown that Claude is
+     * switched off and chose to reopen the conversation regardless. Without it a
+     * disabled provider refuses here, with a reason the prompt can render.
+     */
+    acknowledgeProviderDisabled?: boolean,
+  ) => {
     try {
       const dbSession = databaseService.getSession(sessionId);
       if (!dbSession) {
@@ -1928,6 +1938,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // nothing to do.
       if (interactiveCliManager.isPanelRunning(claudePanelId)) {
         return { success: true };
+      }
+      // Provider gate. The spawn below is fire-and-forget (an interactive spawn
+      // promise resolves only when the REPL EXITS), so a refusal thrown down
+      // there lands in a .catch that only logs — the handler still answered
+      // success and the prompt closed onto a permanently blank terminal. Decide
+      // it HERE, where the answer can reach the user. Unless, of course, they
+      // already saw the warning and chose to reopen the conversation anyway: a
+      // lost REPL's history is recoverable only by respawning it, and that
+      // choice is theirs to make.
+      if (!acknowledgeProviderDisabled) {
+        assertAgentProviderAllowed('claude', 'resuming this terminal session');
       }
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1968,6 +1989,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           panelFastMode,
           claudeSessionId, // → `--resume <uuid>` (no fork)
           panelReasoningEffort,
+          acknowledgeProviderDisabled === true,
         )
         .catch((err: unknown) => {
           console.error(`[IPC] Interactive resume spawn failed for session ${sessionId}:`, err);
@@ -1976,7 +1998,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       return { success: true };
     } catch (error) {
       console.error('[IPC] Failed to resume interactive session:', error);
-      return { success: false, error: 'Failed to resume interactive session' };
+      // A provider-disabled refusal is user-authored copy carrying the code the
+      // prompt parses into its warning + "Resume anyway" action — pass it through
+      // rather than collapsing it into the generic string.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to resume interactive session' };
     }
   });
 

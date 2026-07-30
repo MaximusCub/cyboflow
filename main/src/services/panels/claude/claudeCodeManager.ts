@@ -591,6 +591,11 @@ export interface SpawnEventsSink {
 }
 
 export interface ClaudeSpawnOptions {
+  /**
+   * Set ONLY by a seam that showed the user their provider is switched off and
+   * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
+   */
+  userAcknowledgedProviderDisabled?: boolean;
   panelId: string;
   sessionId: string;
   worktreePath: string;
@@ -1218,7 +1223,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   override async spawnCliProcess(options: ClaudeSpawnOptions): Promise<CliSpawnOutcome> {
     // Provider-access gate (Settings → Integrations) — a switched-off provider
     // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
-    this.assertProviderEnabled();
+    this.assertProviderEnabled(options);
     // Additive per-lane identity. For a programmatic fan-out lane this is
     // `runId + ':' + itemId`; for every other path it DEFAULTS to panelId, so the
     // lock string, dup-guard, and per-spawn maps stay byte-identical to before.

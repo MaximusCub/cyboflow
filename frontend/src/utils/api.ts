@@ -109,9 +109,9 @@ export class API {
       return window.electronAPI.sessions.getInteractiveResumeState(sessionId, panelId);
     },
 
-    async resumeInteractive(sessionId: string, panelId?: string) {
+    async resumeInteractive(sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.resumeInteractive(sessionId, panelId);
+      return window.electronAPI.sessions.resumeInteractive(sessionId, panelId, acknowledgeProviderDisabled);
     },
 
     async getOutput(sessionId: string, limit?: number) {

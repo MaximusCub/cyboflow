@@ -248,7 +248,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
     continue: (sessionId: string, prompt?: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:continue', sessionId, prompt, model),
     getInteractiveResumeState: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-interactive-resume-state', sessionId, panelId),
-    resumeInteractive: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resume-interactive', sessionId, panelId),
+    resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resume-interactive', sessionId, panelId, acknowledgeProviderDisabled),
     getOutput: (sessionId: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-output', sessionId, limit),
     getStatistics: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-statistics', sessionId),
     getConversation: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation', sessionId),

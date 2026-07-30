@@ -9,6 +9,8 @@ import { useSession } from '../../../contexts/SessionContext';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
 import { ResumeSessionPrompt } from '../../cyboflow/ResumeSessionPrompt';
+import { useIsAgentProviderEnabled } from '../../../hooks/useAgentProviderAccess';
+import { useNavigationStore } from '../../../stores/navigationStore';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { API } from '../../../utils/api';
 import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
@@ -128,6 +130,11 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   /** Server-reported reason a resume attempt failed; surfaced instead of leaving
    *  a blank terminal with the prompt silently dismissed. */
   const [resumeError, setResumeError] = useState<string | null>(null);
+  // Resuming SPAWNS a claude REPL, so the Settings → Integrations toggle governs
+  // it. Read here (rather than discovering the refusal from a failed round-trip)
+  // so the prompt can warn BEFORE the click and relabel its primary action.
+  const claudeProviderEnabled = useIsAgentProviderEnabled('claude');
+  const openSettings = useNavigationStore((s) => s.openSettings);
 
   useEffect(() => {
     if (interactiveRunId === null) {
@@ -203,8 +210,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     // Resume THIS panel. A failure used to be swallowed while the prompt stayed
     // dismissed, so a rejected resume left a permanently blank terminal with no
     // way back — surface it and re-offer the prompt instead.
+    //
+    // With Claude switched off the prompt already SAID so and this click is the
+    // "Resume anyway" — pass that acknowledgement through, or the handler would
+    // refuse the very action the user just confirmed.
     void API.sessions
-      .resumeInteractive(panel.sessionId, panel.id)
+      .resumeInteractive(panel.sessionId, panel.id, !claudeProviderEnabled)
       .then((res) => {
         if (res?.success) return;
         setResumeArmed(false);
@@ -389,6 +400,8 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             onClose={handleDeclineResume}
             onResume={handleResumeSession}
             onStartFresh={handleDeclineResume}
+            claudeDisabled={!claudeProviderEnabled}
+            onOpenSettings={() => openSettings('integrations')}
           />
         )}
         {/* Transient cue while claude reopens the prior conversation. */}

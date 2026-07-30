@@ -552,7 +552,7 @@ export class CodexSdkManager extends AbstractCliManager {
   override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
     // Provider-access gate (Settings → Integrations) — a switched-off provider
     // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
-    this.assertProviderEnabled();
+    this.assertProviderEnabled(options);
     const spawnKey = options.spawnKey ?? options.panelId;
     if (this.processes.has(spawnKey) || this.reservedSpawnKeys.has(spawnKey)) {
       throw new Error(`Codex app-server process already running for spawn ${spawnKey}`);

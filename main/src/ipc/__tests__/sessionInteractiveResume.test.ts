@@ -15,7 +15,7 @@
  * Exercised via the same handler-capture harness as sessionPermissionMode.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -66,6 +66,8 @@ vi.mock('../../orchestrator/dynamicWorkflows', () => ({
 
 import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
+import { setAgentProviderAccessResolver } from '../../services/agentProviderGuard';
+import { AGENT_PROVIDER_DISABLED_CODE } from '../../../../shared/types/agentRuntime';
 
 const SESSION_ID = 'sess-001';
 const RUN_ID = 'run-1';
@@ -248,6 +250,37 @@ describe('sessions:resume-interactive (eager spawn)', () => {
     expect(call[1]).toBe(SESSION_ID);
     expect(call[3]).toBe(''); // empty prompt → bare resumed REPL, no first turn
     expect(call[8]).toBe(CLAUDE_SESSION_ID); // → plain `--resume <uuid>`
+  });
+
+  // Resuming SPAWNS a claude REPL, so the Settings → Integrations toggle governs
+  // it. The spawn here is fire-and-forget (an interactive spawn promise resolves
+  // only when the REPL EXITS), so a refusal thrown down in the manager landed in
+  // a .catch that only logged — the handler still answered success and the prompt
+  // closed onto a blank terminal. It has to be decided at the handler.
+  describe('Claude switched off', () => {
+    beforeEach(() => setAgentProviderAccessResolver((provider) => provider !== 'claude'));
+    afterEach(() => setAgentProviderAccessResolver(null));
+
+    it('refuses with a reason the prompt can render, instead of failing silently', async () => {
+      const { services, startPanel } = makeServices({ substrate: 'interactive', replRunning: false });
+      const handlers = registerWith(services);
+      const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean; error?: string };
+      expect(res.success).toBe(false);
+      expect(res.error).toContain(AGENT_PROVIDER_DISABLED_CODE);
+      expect(startPanel).not.toHaveBeenCalled();
+    });
+
+    it('honours "Resume anyway" — the history is recoverable only by respawning', async () => {
+      const { services, startPanel } = makeServices({ substrate: 'interactive', replRunning: false });
+      const handlers = registerWith(services);
+      const res = (await invoke(handlers, RESUME, SESSION_ID, undefined, true)) as { success: boolean };
+      expect(res.success).toBe(true);
+      expect(startPanel).toHaveBeenCalledTimes(1);
+      // The acknowledgement rides through to the manager as the 11th arg, which is
+      // what lets its own assertProviderEnabled stand down for this one spawn.
+      expect(startPanel.mock.calls[0][10]).toBe(true);
+      expect(startPanel.mock.calls[0][8]).toBe(CLAUDE_SESSION_ID);
+    });
   });
 
   it('is a no-op when the REPL is already running (does not re-spawn)', async () => {

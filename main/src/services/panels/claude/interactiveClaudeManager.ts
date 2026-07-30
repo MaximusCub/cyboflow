@@ -135,6 +135,11 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
 
 /** CLI spawn options accepted by the interactive substrate. */
 interface InteractiveClaudeSpawnOptions {
+  /**
+   * Set ONLY by a seam that showed the user their provider is switched off and
+   * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
+   */
+  userAcknowledgedProviderDisabled?: boolean;
   panelId: string;
   sessionId: string;
   worktreePath: string;
@@ -956,7 +961,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   override async spawnCliProcess(options: InteractiveClaudeSpawnOptions): Promise<void> {
     // Provider-access gate (Settings → Integrations) — a switched-off provider
     // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
-    this.assertProviderEnabled();
+    this.assertProviderEnabled(options);
     const { panelId, sessionId, worktreePath } = options;
 
     if (this.processes.has(panelId)) {
@@ -1873,6 +1878,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     fastMode?: boolean,
     resumeSessionId?: string,
     reasoningEffort?: ReasoningEffort,
+    /**
+     * Only ever true for the resume prompt's "Resume anyway", where the user was
+     * told Claude is switched off and chose to reopen the conversation regardless
+     * (see AbstractCliManager.assertProviderEnabled).
+     */
+    userAcknowledgedProviderDisabled?: boolean,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -1883,6 +1894,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       effort,
       fastMode,
       reasoningEffort,
+      ...(userAcknowledgedProviderDisabled ? { userAcknowledgedProviderDisabled } : {}),
       // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
       // prior conversation reopens live — eager resume passes an empty prompt.
       ...(resumeSessionId ? { resumeSessionId } : {}),

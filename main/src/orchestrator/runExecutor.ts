@@ -145,6 +145,11 @@ export interface SprintLaneTaskIdsLike {
  * The real ClaudeCodeManager satisfies this interface; tests use a vi.fn() stub.
  */
 export interface ClaudeSpawnerOptions {
+  /**
+   * Set ONLY by a seam that showed the user their provider is switched off and
+   * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
+   */
+  userAcknowledgedProviderDisabled?: boolean;
   panelId: string;
   sessionId: string;
   worktreePath: string;

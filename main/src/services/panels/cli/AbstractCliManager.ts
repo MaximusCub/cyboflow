@@ -8,7 +8,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
-import { assertAgentProviderAllowed } from '../../agentProviderGuard';
+import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../agentProviderGuard';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
@@ -63,6 +63,12 @@ interface CliSpawnOptions {
   worktreePath: string;
   prompt: string;
   isResume?: boolean;
+  /**
+   * Set ONLY by a seam that showed the user their provider is switched off and
+   * got an explicit "do it anyway". See assertProviderEnabled below for why this
+   * exists and what it does not license.
+   */
+  userAcknowledgedProviderDisabled?: boolean;
   [key: string]: unknown; // Allow CLI-specific options
 }
 
@@ -148,9 +154,28 @@ export abstract class AbstractCliManager extends EventEmitter {
    * most overrides do not chain to super. Cold spawns are only half the story:
    * a keystroke relayed into an already-live PTY never respawns, and is guarded
    * separately in ipc/ptyPanelDispatch.
+   *
+   * `userAcknowledgedProviderDisabled` is the ONE sanctioned bypass, and it is
+   * deliberately named for its only legitimate source: a human who was shown the
+   * provider is off and chose to proceed anyway. Today that is the interactive
+   * (PTY) resume prompt — a lost REPL's conversation is recoverable ONLY by
+   * respawning it with `--resume`, and declining costs the user their history
+   * permanently, which no later toggle flip can undo. It licenses exactly this
+   * spawn; it does not relax the guard for anything else (the composer's next
+   * turn is still refused at ipc/session), and it is never set from a default,
+   * a config value, or a retry.
    */
-  protected assertProviderEnabled(): void {
-    assertAgentProviderAllowed(this.getAgentProvider(), `${this.getCliToolName()} sessions`);
+  protected assertProviderEnabled(options?: { userAcknowledgedProviderDisabled?: boolean }): void {
+    const provider = this.getAgentProvider();
+    if (options?.userAcknowledgedProviderDisabled === true) {
+      if (!isAgentProviderAllowed(provider)) {
+        console.warn(
+          `[${this.getCliToolName()}] Spawning a ${provider} process while ${provider} is switched off — the user explicitly acknowledged this.`,
+        );
+      }
+      return;
+    }
+    assertAgentProviderAllowed(provider, `${this.getCliToolName()} sessions`);
   }
 
   /**
@@ -206,7 +231,7 @@ export abstract class AbstractCliManager extends EventEmitter {
   async spawnCliProcess(options: CliSpawnOptions): Promise<CliSpawnOutcome | void> {
     // Provider-access gate BEFORE the availability probe: a switched-off provider
     // must read as "turned off", not as "CLI unavailable".
-    this.assertProviderEnabled();
+    this.assertProviderEnabled(options);
     try {
       const { panelId, sessionId, worktreePath } = options;
       this.logger?.verbose(`Spawning ${this.getCliToolName()} for panel ${panelId} (session ${sessionId}) in ${worktreePath}`);
