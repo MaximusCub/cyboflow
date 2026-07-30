@@ -88,6 +88,9 @@ const tasksListQuery = vi.fn();
 // override with mockResolvedValueOnce + waitFor.
 const designDraftStatusQuery = vi.fn();
 const designApproveMutate = vi.fn();
+// eval-report's live ScoreSummary read (origin:'adhoc') + its findings list.
+const insightsRunEvalQuery = vi.fn();
+const reviewItemsListQuery = vi.fn();
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -96,6 +99,10 @@ vi.mock('../../../trpc/client', () => ({
       },
       reviewItems: {
         resolve: { mutate: (...args: unknown[]) => reviewItemsResolveMutate(...args) },
+        list: { query: (...args: unknown[]) => reviewItemsListQuery(...args) },
+      },
+      insights: {
+        runEval: { query: (...args: unknown[]) => insightsRunEvalQuery(...args) },
       },
       questions: {
         answer: { mutate: (...args: unknown[]) => questionsAnswerMutate(...args) },
@@ -253,6 +260,11 @@ describe('ArtifactTabRenderer', () => {
     designDraftStatusQuery.mockReset();
     designDraftStatusQuery.mockImplementation(() => new Promise(() => {})); // never resolves by default
     designApproveMutate.mockReset();
+    // eval-report defaults: no live row (markdown fallback), no findings.
+    insightsRunEvalQuery.mockReset();
+    insightsRunEvalQuery.mockResolvedValue(null);
+    reviewItemsListQuery.mockReset();
+    reviewItemsListQuery.mockResolvedValue([]);
     mockSelectedSessionId = null;
     mockSetActiveQuickSession.mockClear();
     mockEnterDesignMode.mockClear();
@@ -375,6 +387,94 @@ describe('ArtifactTabRenderer', () => {
 
     expect(screen.getByTestId('artifact-eval-report-empty')).toHaveTextContent('No eval verdict recorded yet.');
     expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
+  /** A complete ad-hoc RunEval row shaped like insights.runEval returns. */
+  function makeAdHocEval(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      runId: 'run-1',
+      rubricVersion: '1.2',
+      evalStatus: 'complete',
+      baseSha: null,
+      diffText: null,
+      diffStats: null,
+      gateResults: { build: true, test: true, typecheck: true, lint: 'pass' },
+      humanInfluenced: true,
+      snapshotAt: '2026-07-30T00:00:00.000Z',
+      overallScore: 48,
+      band: 'Fair',
+      ciLow: 37,
+      ciHigh: 44,
+      gated: false,
+      securityFlag: false,
+      requirementsUnmet: false,
+      capTriggers: null,
+      dimensions: [
+        { key: 'correctness', name: 'Correctness & Completeness', weight: 24, score: 50, active: true, passCount: 3, failCount: 3, unknownCount: 0 },
+        { key: 'efficiency', name: 'Efficiency & Economy', weight: 10, score: 33, active: true, passCount: 1, failCount: 2, unknownCount: 0 },
+      ],
+      perSample: null,
+      jury: null,
+      judgeModel: 'claude-opus-4-8',
+      sampleCount: 2,
+      promptHash: null,
+      judgeBuildId: '0.1.33',
+      workflowId: 'wf-q',
+      workflowName: '__quick__',
+      specHash: null,
+      runModel: null,
+      subagentModels: null,
+      difficultyProxyPrerun: null,
+      error: null,
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:00.000Z',
+      ...over,
+    };
+  }
+
+  it('renders the live ScoreSummary (sprint-end styling) when the ad-hoc eval row is complete', async () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'eval-report', payload: { markdown: '# fallback doc' } },
+    });
+    insightsRunEvalQuery.mockResolvedValue(makeAdHocEval());
+    reviewItemsListQuery.mockResolvedValue([
+      // Only the agent:eval-sourced finding may surface in the breakdown.
+      { id: 'ri-e', source: 'agent:eval', severity: 'warning', title: 'Eval finding', payload: null },
+      { id: 'ri-x', source: 'agent:code-review', severity: 'error', title: 'Sprint finding', payload: null },
+    ]);
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'eval-report', sourceRef: null })} {...PROPS} />);
+
+    // The live module replaces the markdown doc entirely.
+    const live = await screen.findByTestId('artifact-eval-report-live');
+    expect(live).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-eval')).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-eval-eyebrow')).toHaveTextContent('rubric v1.2');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+    // The tab IS the report — the breakdown starts open, with the v1.2 dimension.
+    expect(screen.getByTestId('run-summary-eval-breakdown')).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-eval-dim-efficiency')).toHaveTextContent('Efficiency & Economy');
+    // The origin filter reached the query.
+    expect(insightsRunEvalQuery).toHaveBeenCalledWith({ runId: 'run-1', origin: 'adhoc' });
+    // Findings filtered to the eval's own (agent:eval*) rows.
+    await screen.findByTestId('run-summary-eval-findings');
+    expect(screen.getByText('Eval finding')).toBeInTheDocument();
+    expect(screen.queryByText('Sprint finding')).not.toBeInTheDocument();
+  });
+
+  it('keeps the markdown fallback with an in-flight note while a re-eval is running', async () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'eval-report', payload: { markdown: '# previous verdict' } },
+    });
+    insightsRunEvalQuery.mockResolvedValue(makeAdHocEval({ evalStatus: 'running', overallScore: null, band: null }));
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'eval-report', sourceRef: null })} {...PROPS} />);
+
+    await screen.findByTestId('artifact-eval-report-inflight');
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('previous verdict');
+    expect(screen.queryByTestId('run-summary-eval')).not.toBeInTheDocument();
   });
 
   // --- decomposed-stories --------------------------------------------------

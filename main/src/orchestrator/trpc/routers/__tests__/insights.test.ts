@@ -286,7 +286,18 @@ describe('cyboflow.insights.runUsage', () => {
     const result = await caller.cyboflow.insights.runEval({ runId: 'run-1' });
 
     expect(result).toBe(evalRow);
-    expect(insightsQueries.getRunEval).toHaveBeenCalledWith(fakeDb, 'run-1');
+    expect(insightsQueries.getRunEval).toHaveBeenCalledWith(fakeDb, 'run-1', { origin: undefined });
+  });
+
+  it("runEval forwards the origin:'adhoc' filter to the helper", async () => {
+    const evalRow = { runId: 'run-1', evalStatus: 'complete' } as unknown as RunEval;
+    mocked('getRunEval').mockReturnValue(evalRow);
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.runEval({ runId: 'run-1', origin: 'adhoc' });
+
+    expect(result).toBe(evalRow);
+    expect(insightsQueries.getRunEval).toHaveBeenCalledWith(fakeDb, 'run-1', { origin: 'adhoc' });
   });
 
   it('runEval hands null straight through when no eval exists', async () => {

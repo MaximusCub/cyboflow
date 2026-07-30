@@ -2694,10 +2694,21 @@ function mapRunEvalRow(row: RunEvalRawRow): RunEval {
  * earliest, falling back to the earliest influenced row only when every row is
  * influenced. JSON columns are parsed defensively (bad JSON → null field).
  *
+ * With `origin: 'adhoc'` the selection flips to the LATEST ad-hoc row instead
+ * (`origin = 'adhoc'`, newest snapshot first): the eval-report artifact tab
+ * renders the verdict its artifact was minted from, which for a workflow run
+ * that ALSO carries a canonical automatic row is never that auto row.
+ *
  * @param db    - Narrow DatabaseLike surface.
  * @param runId - The run to read the evaluation for.
+ * @param opts  - Optional `origin` filter (see above).
  */
-export function getRunEval(db: DatabaseLike, runId: string): RunEval | null {
+export function getRunEval(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { origin?: 'adhoc' },
+): RunEval | null {
+  const adhocOnly = opts?.origin === 'adhoc';
   const row = db
     .prepare(
       // diff_text + per_sample_json are deliberately EXCLUDED — they can be
@@ -2709,8 +2720,8 @@ export function getRunEval(db: DatabaseLike, runId: string): RunEval | null {
               workflow_id, workflow_name, spec_hash, run_model, subagent_models_json,
               difficulty_proxy_prerun, error, created_at, updated_at
        FROM run_evals
-       WHERE run_id = ?
-       ORDER BY human_influenced ASC, snapshot_at ASC
+       WHERE run_id = ?${adhocOnly ? " AND origin = 'adhoc'" : ''}
+       ORDER BY ${adhocOnly ? 'snapshot_at DESC' : 'human_influenced ASC, snapshot_at ASC'}
        LIMIT 1`,
     )
     .get(runId) as RunEvalRawRow | undefined;

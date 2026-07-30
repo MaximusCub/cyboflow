@@ -324,6 +324,8 @@ interface SeedRunEvalOpts {
   workflowId?: string;
   workflowName?: string;
   error?: string | null;
+  /** run_evals.origin (migration 090): NULL = automatic trigger, 'adhoc' = MCP tool. */
+  origin?: string | null;
 }
 
 /** Insert a migration-043 `run_evals` row (the code-review eval read fixture). */
@@ -333,8 +335,8 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
        (run_id, rubric_version, eval_status, human_influenced, snapshot_at,
         overall_score, band, gated, security_flag, requirements_unmet, cap_triggers_json,
         dimensions_json, per_sample_json, jury_json,
-        diff_stats_json, subagent_models_json, workflow_id, workflow_name, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        diff_stats_json, subagent_models_json, workflow_id, workflow_name, error, origin)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     opts.runId,
     opts.rubricVersion ?? '1.1',
@@ -355,6 +357,7 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
     opts.workflowId ?? 'wf-1',
     opts.workflowName ?? 'Sprint',
     opts.error === undefined ? null : opts.error,
+    opts.origin === undefined ? null : opts.origin,
   );
 }
 
@@ -2226,6 +2229,32 @@ describe('getRunEval', () => {
 
   it('returns null when the run has no eval row', () => {
     expect(getRunEval(dbAdapter(db), 'nope')).toBeNull();
+  });
+
+  it("origin:'adhoc' returns the LATEST ad-hoc row, never the canonical auto row", () => {
+    // Canonical auto row (origin NULL) + a later ad-hoc re-grade under a newer rubric.
+    seedRunEval(db, { runId: 'r1', rubricVersion: '1.1', overallScore: 82, snapshotAt: '2026-07-01T10:00:00.000Z' });
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.2',
+      origin: 'adhoc',
+      humanInfluenced: 1,
+      overallScore: 48,
+      band: 'Fair',
+      snapshotAt: '2026-07-02T10:00:00.000Z',
+    });
+
+    // Default read is unchanged: the pristine automatic row stays canonical.
+    expect(getRunEval(dbAdapter(db), 'r1')?.overallScore).toBe(82);
+
+    const adhoc = getRunEval(dbAdapter(db), 'r1', { origin: 'adhoc' });
+    expect(adhoc?.overallScore).toBe(48);
+    expect(adhoc?.rubricVersion).toBe('1.2');
+  });
+
+  it("origin:'adhoc' returns null when the run has only automatic rows", () => {
+    seedRunEval(db, { runId: 'r1' });
+    expect(getRunEval(dbAdapter(db), 'r1', { origin: 'adhoc' })).toBeNull();
   });
 
   it('maps snake_case columns to the camelCase RunEval shape', () => {

@@ -83,8 +83,13 @@ export interface FindingRow {
   title: string;
 }
 
-/** Extract the first file:line location off a finding's parsed payload, if any. */
-function findingLocation(item: ReviewItem): string | null {
+/**
+ * Extract the first file:line location off a finding's parsed payload, if any.
+ * Exported (with {@link findingCategory}) so the eval-report artifact tab can
+ * flatten eval findings into the same {@link FindingRow} shape it feeds the
+ * reused {@link ScoreSummary}.
+ */
+export function findingLocation(item: ReviewItem): string | null {
   const payload = item.payload;
   if (payload === null || payload.kind !== 'finding') return null;
   const loc = payload.locations?.[0];
@@ -93,7 +98,7 @@ function findingLocation(item: ReviewItem): string | null {
 }
 
 /** The finding's optional grouping category (payload `category`), if any. */
-function findingCategory(item: ReviewItem): string | null {
+export function findingCategory(item: ReviewItem): string | null {
   const payload = item.payload;
   if (payload === null || payload.kind !== 'finding') return null;
   return payload.category ?? null;

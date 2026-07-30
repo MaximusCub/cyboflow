@@ -46,6 +46,9 @@ import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useDesignModeStore } from '../../stores/designModeStore';
+import { ScoreSummary, findingLocation, findingCategory } from './WorkflowSummaryPanel';
+import type { FindingRow } from './WorkflowSummaryPanel';
+import type { RunEval } from '../../../../shared/types/insights';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type {
   Artifact,
@@ -345,14 +348,19 @@ function RecommendationsBody({ artifact, projectId }: { artifact: Artifact; proj
 }
 
 // ---------------------------------------------------------------------------
-// eval-report — the ad-hoc code-review eval's full verdict, rendered as a
-// markdown doc with the same chrome as compound-recommendations (amber accent).
-// Payload-backed and SYSTEM-MINTED: EvalWorker composed the report into
-// payload_json.markdown when it completed an origin='adhoc' run_evals row, so it
-// renders straight from the payload (no entity source, no fetch). This is the
-// only score surface a quick session has — a workflow run shows its verdict in
-// WorkflowSummaryPanel instead.
+// eval-report — the ad-hoc code-review eval's full verdict, rendered with the
+// SAME ScoreSummary module the end-of-sprint WorkflowSummaryPanel shows (band
+// hero + CI scale + gate chips + per-dimension breakdown + findings), fed from
+// the LIVE run_evals row (`origin: 'adhoc'` — never the run's canonical
+// automatic eval) so a re-eval updates the tab in place. The EvalWorker-minted
+// payload_json.markdown stays as the durable fallback for when the live row is
+// unavailable (mid-requeue delete window, pruned DB, committed snapshot).
+// SYSTEM-MINTED: this is the only score surface a quick session has.
 // ---------------------------------------------------------------------------
+
+/** Poll cadence while the ad-hoc eval row is pending/running (matches the summary panel). */
+const EVAL_REPORT_POLL_MS = 10_000;
+
 function EvalReportBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['eval-report'];
   const { data } = useArtifactData(artifact, projectId);
@@ -362,6 +370,70 @@ function EvalReportBody({ artifact, projectId }: { artifact: Artifact; projectId
     data?.kind === 'eval-report' && typeof data.payload.markdown === 'string'
       ? data.payload.markdown
       : '';
+
+  const [runEval, setRunEval] = useState<RunEval | null>(null);
+  const [findings, setFindings] = useState<FindingRow[]>([]);
+  // The tab IS the full report, so the breakdown starts open (the sprint panel
+  // starts collapsed because the score is one module among many there).
+  const [breakdownOpen, setBreakdownOpen] = useState(true);
+
+  // Fetch the LATEST ad-hoc eval row; re-poll while it is pending/running so a
+  // requeued re-eval lands live in the tab (same cadence as the sprint panel).
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = (): void => {
+      trpc.cyboflow.insights.runEval
+        .query({ runId: artifact.runId, origin: 'adhoc' })
+        .then((r) => {
+          if (!alive) return;
+          setRunEval(r);
+          if (r !== null && (r.evalStatus === 'pending' || r.evalStatus === 'running')) {
+            timer = setTimeout(tick, EVAL_REPORT_POLL_MS);
+          }
+        })
+        .catch(() => {
+          /* leave the last-known state; the markdown fallback still renders */
+        });
+    };
+    tick();
+    return () => {
+      alive = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [artifact.runId]);
+
+  // The eval's findings (source 'agent:eval*'), flattened exactly like the
+  // sprint panel feeds ScoreSummary.
+  useEffect(() => {
+    if (runEval === null || runEval.evalStatus !== 'complete') return;
+    let alive = true;
+    trpc.cyboflow.reviewItems.list
+      .query({ projectId, kind: 'finding', runId: artifact.runId })
+      .then((items) => {
+        if (!alive) return;
+        const rows: FindingRow[] = items
+          .filter((it) => (it.source ?? '').startsWith('agent:eval'))
+          .map((it) => ({
+            id: it.id,
+            severity: it.severity ?? 'info',
+            location: findingLocation(it),
+            category: findingCategory(it),
+            title: it.title,
+          }));
+        setFindings(rows);
+      })
+      .catch(() => {
+        /* findings are advisory; a read error just leaves the list empty */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [projectId, artifact.runId, runEval]);
+
+  const showLive = runEval !== null && runEval.evalStatus === 'complete';
+  const inFlight =
+    runEval !== null && (runEval.evalStatus === 'pending' || runEval.evalStatus === 'running');
 
   return (
     <Shell testid="artifact-eval-report">
@@ -373,31 +445,44 @@ function EvalReportBody({ artifact, projectId }: { artifact: Artifact; projectId
         meta={artifact.stepOrigin ?? 'code-review eval'}
       />
       <div style={{ flex: 1 }}>
-        <div
-          data-testid="artifact-eval-report-doc"
-          style={{
-            maxWidth: 680,
-            margin: '0 auto',
-            background: 'var(--color-surface-primary)',
-            border: `1px solid ${HAIRLINE}`,
-            padding: '34px 40px 56px',
-            marginTop: 18,
-            marginBottom: 18,
-          }}
-        >
-          <div
-            style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
-          >
-            Quality
-          </div>
-          <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
-            Eval report
-          </h1>
-          {markdown ? (
-            <MarkdownPreview content={markdown} />
+        <div data-testid="artifact-eval-report-doc" style={{ maxWidth: 680, margin: '0 auto', paddingTop: 18, paddingBottom: 18 }}>
+          {showLive ? (
+            <div data-testid="artifact-eval-report-live">
+              <ScoreSummary
+                runEval={runEval}
+                findings={findings}
+                breakdownOpen={breakdownOpen}
+                onToggleBreakdown={() => setBreakdownOpen((v) => !v)}
+              />
+            </div>
           ) : (
-            <div data-testid="artifact-eval-report-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-              No eval verdict recorded yet.
+            <div
+              style={{
+                background: 'var(--color-surface-primary)',
+                border: `1px solid ${HAIRLINE}`,
+                padding: '34px 40px 56px',
+              }}
+            >
+              <div
+                style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+              >
+                Quality
+              </div>
+              <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+                Eval report
+              </h1>
+              {inFlight && (
+                <div data-testid="artifact-eval-report-inflight" style={{ fontSize: '12px', color: FAINT, marginBottom: 14 }}>
+                  Re-assessment running — this report updates when it completes.
+                </div>
+              )}
+              {markdown ? (
+                <MarkdownPreview content={markdown} />
+              ) : (
+                <div data-testid="artifact-eval-report-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+                  No eval verdict recorded yet.
+                </div>
+              )}
             </div>
           )}
         </div>

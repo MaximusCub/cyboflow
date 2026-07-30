@@ -175,10 +175,12 @@ export const insightsRouter = router({
    * through rather than fabricating a placeholder row.
    */
   runEval: protectedProcedure
-    .input(z.object({ runId: z.string().min(1) }))
+    // `origin: 'adhoc'` selects the LATEST ad-hoc eval row instead of the
+    // canonical automatic one — the eval-report artifact tab's read.
+    .input(z.object({ runId: z.string().min(1), origin: z.enum(['adhoc']).optional() }))
     .query(({ ctx, input }): RunEval | null => {
       const db = requireDb(ctx.db, 'runEval');
-      return getRunEval(db, input.runId);
+      return getRunEval(db, input.runId, { origin: input.origin });
     }),
 
   /**
