@@ -20,12 +20,22 @@
  * toggle flips back. It is recognized structurally, via the wire code the guard
  * embeds (shared/types/agentRuntime), never by matching prose.
  *
+ * RECOVERY: once that provider is switched back on, such a row re-frames itself
+ * as "Not sent · click to retry" and drops both the stale reason and the
+ * Settings shortcut. It is deliberately NOT auto-dismissed — the entry is the
+ * only remaining copy of the user's unsent message, so removing it would
+ * silently destroy their text. Only the framing goes stale, not the row.
+ *
  * Presentational apart from that one navigation action: it reads the entries +
  * a reopen callback from the host and owns no state.
  */
-import { Loader2, Clock, AlertTriangle, Settings2 } from 'lucide-react';
+import { Loader2, Clock, AlertTriangle, RotateCcw, Settings2 } from 'lucide-react';
 import { cn } from '../../../utils/cn';
-import { parseAgentProviderDisabled } from '../../../../../shared/types/agentRuntime';
+import {
+  isAgentProviderEnabled,
+  parseAgentProviderDisabled,
+} from '../../../../../shared/types/agentRuntime';
+import { useAgentProviderAccess } from '../../../hooks/useAgentProviderAccess';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import type { PendingSend } from '../../../stores/pendingSendStore';
 
@@ -49,6 +59,9 @@ function statusTitle(status: PendingSend['status']): string {
 
 export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): React.ReactElement | null {
   const openSettings = useNavigationStore((s) => s.openSettings);
+  // Live provider access, so a row blocked on a switched-off provider stops
+  // claiming that once the toggle goes back on (see `recovered` below).
+  const providerAccess = useAgentProviderAccess();
 
   if (entries.length === 0) return null;
 
@@ -62,7 +75,17 @@ export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): Reac
         // Only a 'failed' entry carries a reason; a provider-disabled one also
         // earns the Settings shortcut (retrying cannot help until it is on).
         const disabled = entry.status === 'failed' ? parseAgentProviderDisabled(entry.error) : null;
-        const reason = disabled?.message ?? (entry.status === 'failed' ? entry.error : undefined);
+        // The user turned the provider back on while this row sat here. The row
+        // must STAY — it still holds an unsent message, and dropping it would
+        // silently lose the user's text — but its framing is now stale: the
+        // stored reason describes a condition that no longer holds, and the
+        // Settings shortcut would send the user to a toggle already in the right
+        // position. Swap both for the action that is now actually available.
+        const recovered =
+          disabled !== null && isAgentProviderEnabled(providerAccess, disabled.provider);
+        const reason = recovered
+          ? `${disabled.provider === 'codex' ? 'Codex' : 'Claude'} is back on — click to retry.`
+          : (disabled?.message ?? (entry.status === 'failed' ? entry.error : undefined));
 
         return (
           <div
@@ -70,9 +93,12 @@ export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): Reac
             data-testid="pending-send-entry"
             className={cn(
               'border text-xs',
-              entry.status === 'failed'
+              // A recovered row is no longer an error — the blocker is gone and
+              // the only thing left to do is retry — so it drops the alarm
+              // treatment for the neutral "waiting on you" one.
+              entry.status === 'failed' && !recovered
                 ? 'border-status-error/40 bg-status-error/5 text-status-error'
-                : entry.status === 'queued'
+                : entry.status === 'queued' || recovered
                   ? 'border-dashed border-border-hover bg-surface-secondary text-text-secondary'
                   : 'border-border-primary bg-surface-secondary text-text-tertiary',
             )}
@@ -96,13 +122,15 @@ export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): Reac
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : entry.status === 'queued' ? (
                   <Clock className="h-3.5 w-3.5" />
+                ) : recovered ? (
+                  <RotateCcw className="h-3.5 w-3.5" />
                 ) : (
                   <AlertTriangle className="h-3.5 w-3.5" />
                 )}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-[0.1em] opacity-70">
-                  {statusLabel(entry.status)}
+                  {recovered ? 'Not sent · click to retry' : statusLabel(entry.status)}
                 </span>
                 {reason && (
                   <span
@@ -116,7 +144,7 @@ export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): Reac
               </span>
             </button>
 
-            {disabled && (
+            {disabled && !recovered && (
               <div className="border-t border-status-error/25 px-3 py-1.5">
                 <button
                   type="button"

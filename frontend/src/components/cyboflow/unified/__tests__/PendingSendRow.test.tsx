@@ -8,15 +8,32 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PendingSendRow } from '../PendingSendRow';
 import { useNavigationStore } from '../../../../stores/navigationStore';
+import { useConfigStore } from '../../../../stores/configStore';
+import type { AppConfig } from '../../../../types/config';
 import { formatAgentProviderDisabled } from '../../../../../../shared/types/agentRuntime';
 import type { PendingSend } from '../../../../stores/pendingSendStore';
 
 function entry(over: Partial<PendingSend>): PendingSend {
   return { id: 'e1', text: 'hello world', createdAt: Date.now(), status: 'sending', ...over };
 }
+
+/** Drive the row's live provider-access read through the real config store. */
+function setProviderAccess(access: { claude: boolean; codex: boolean } | undefined): void {
+  useConfigStore.setState({
+    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+  });
+}
+
+beforeEach(() => {
+  // Default: Claude OFF, Codex on. NOT both-off — resolveAgentProviderAccess
+  // floors an all-off map back to both-ON (the app must never be left unable to
+  // launch anything), which would silently read as "recovered". Tests that need
+  // a different posture set it themselves.
+  setProviderAccess({ claude: false, codex: true });
+});
 
 describe('PendingSendRow', () => {
   it('renders nothing when there are no entries', () => {
@@ -119,6 +136,87 @@ describe('PendingSendRow', () => {
   });
 
   it('keeps the retry click working alongside the Settings action', () => {
+    setProviderAccess({ claude: true, codex: false });
+    const onReopen = vi.fn();
+    render(
+      <PendingSendRow
+        entries={[
+          entry({
+            id: 'f',
+            status: 'failed',
+            error: formatAgentProviderDisabled('codex', 'Codex is turned off.'),
+          }),
+        ]}
+        onReopen={onReopen}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('pending-send-failed'));
+    expect(onReopen).toHaveBeenCalledWith(expect.objectContaining({ id: 'f' }));
+  });
+
+  it('re-frames a provider-disabled row once that provider is switched back on', () => {
+    setProviderAccess({ claude: true, codex: true });
+    render(
+      <PendingSendRow
+        entries={[
+          entry({
+            id: 'f',
+            text: 'You there?',
+            status: 'failed',
+            error: formatAgentProviderDisabled('codex', 'Codex is turned off, so it cannot run.'),
+          }),
+        ]}
+        onReopen={vi.fn()}
+      />,
+    );
+
+    // The stale reason and the now-pointless Settings shortcut both go...
+    expect(screen.queryByTestId('pending-send-open-integrations')).not.toBeInTheDocument();
+    expect(screen.getByTestId('pending-send-reason')).toHaveTextContent('Codex is back on');
+    expect(screen.queryByText(/Codex is turned off/)).not.toBeInTheDocument();
+    // ...but the row itself STAYS: it holds the only copy of the unsent message.
+    expect(screen.getByTestId('pending-send-failed')).toHaveTextContent('You there?');
+    expect(screen.getByTestId('pending-send-failed')).toHaveTextContent('Not sent · click to retry');
+  });
+
+  it('keeps the disabled treatment while that provider is still off', () => {
+    setProviderAccess({ claude: true, codex: false });
+    render(
+      <PendingSendRow
+        entries={[
+          entry({
+            id: 'f',
+            status: 'failed',
+            error: formatAgentProviderDisabled('codex', 'Codex is turned off.'),
+          }),
+        ]}
+        onReopen={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('pending-send-open-integrations')).toBeInTheDocument();
+    expect(screen.getByTestId('pending-send-reason')).toHaveTextContent('Codex is turned off.');
+  });
+
+  it('recovers per-provider — a Claude row is unaffected by Codex coming back', () => {
+    setProviderAccess({ claude: false, codex: true });
+    render(
+      <PendingSendRow
+        entries={[
+          entry({
+            id: 'f',
+            status: 'failed',
+            error: formatAgentProviderDisabled('claude', 'Claude is turned off.'),
+          }),
+        ]}
+        onReopen={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('pending-send-open-integrations')).toBeInTheDocument();
+    expect(screen.getByTestId('pending-send-reason')).toHaveTextContent('Claude is turned off.');
+  });
+
+  it('still reopens a recovered row so the retry actually sends', () => {
+    setProviderAccess({ claude: true, codex: true });
     const onReopen = vi.fn();
     render(
       <PendingSendRow
