@@ -248,7 +248,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     // Deterministic timeout: bails on the first try, no retry -> no back-off sleep.
     const timeoutDb = noExistingFindings();
     const timedOut = new FakeJudge(async () => {
-      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 600000ms');
     });
     const timeoutSleep = vi.fn(async () => {});
     const timeoutWorker = EvalWorker.initialize(timeoutDb, undefined, {
@@ -351,7 +351,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
   it('fails a timed-out slot on the FIRST try and skips the whole-eval retry when all slots are deterministic', async () => {
     const db = noExistingFindings();
     const timedOut = new FakeJudge(async () => {
-      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 600000ms');
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
@@ -413,7 +413,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     const db = noExistingFindings();
     const good = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
     const timedOut = new FakeJudge(async () => {
-      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 600000ms');
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),

@@ -32,13 +32,15 @@ import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 
 /**
  * Default per-sample deadline. A hung claude binary must not stall the worker.
- * 5 min (was 3): a judge sample can hit the wall under HOST CONTENTION — the eval
+ * 10 min (was 5): a judge sample can hit the wall under HOST CONTENTION — the eval
  * runs its jurors while the user may have many other live Claude sessions spawned
  * — even on a small diff, and a whole-eval failure needs EVERY juror to miss the
- * deadline. Extra headroom here (plus the trimmed JUDGE_MAX_TURNS below) keeps the
- * common case landing at least one sample.
+ * deadline. Live ad-hoc runs showed a juror slot reproducibly missing the 5-min
+ * wall while its siblings landed, silently shrinking the jury to 2/3 samples;
+ * the extra headroom (plus the trimmed JUDGE_MAX_TURNS below) keeps the common
+ * case landing the FULL sample count, not just one.
  */
-export const EVAL_JUDGE_TIMEOUT_MS = 300_000;
+export const EVAL_JUDGE_TIMEOUT_MS = 600_000;
 
 /** Read-only tools the judge may use to grep/open the frozen snapshot. */
 const JUDGE_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob'] as const;

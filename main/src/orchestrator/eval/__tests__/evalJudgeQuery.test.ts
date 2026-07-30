@@ -190,6 +190,6 @@ describe('makeEvalJudgeQuery', () => {
   });
 
   it('exports the default per-sample deadline as 300_000ms', () => {
-    expect(EVAL_JUDGE_TIMEOUT_MS).toBe(300_000);
+    expect(EVAL_JUDGE_TIMEOUT_MS).toBe(600_000);
   });
 });
