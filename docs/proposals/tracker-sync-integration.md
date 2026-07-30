@@ -1,6 +1,6 @@
 # Tracker sync integration — Linear + Plane (v1 design)
 
-Status: **proposal, decisions settled** (design conversation 2026-07-30).
+Status: **proposal, decisions settled** (design conversation 2026-07-30). Rev 2 folds in the Codex adversarial-review hardening: outbox-backed idempotent remote writes, crash-safe cursor semantics, and a deletion-detection sweep.
 Source design: `~/Downloads/Linear integration prototype.zip` — high-fidelity HTML prototype + handoff README (Settings → Integrations modal: catalog → 6-step wizard → connected view). The prototype's visual language matches the live Protoflow paper theme exactly; recreate it with the real design tokens and Tailwind utilities, not the prototype's `<x-dc>` runtime.
 
 ## Intent
@@ -60,7 +60,7 @@ When the planner decomposes a linked idea (mirroring toggle on):
 
 With mirroring off, decomposition writes "In Progress" to the origin issue and the all-children-done rollup closes it — same seams, no sub-issue fan-out.
 
-**Echo suppression is a correctness requirement**: the poller must recognize issues we created (external-link rows written at creation time, before the poll can observe them) so mirrored sub-issues never re-import as new ideas, and our own status writes never bounce back as remote changes (compare against `baseline_json`).
+**Echo suppression is a correctness requirement**: mirrored sub-issues must never re-import as new ideas, and our own status writes must never bounce back as remote changes. Both are guaranteed by the outbox (see *Durability & failure semantics*): every remote write has a durable local record **before** the API call is attempted, so the poller can always recognize our own artifacts — even mid-create, even across a crash — and inbound changes diff against `baseline_json` so our own writes are ignored. The inbound cursor never advances past an item whose outbox record is still unresolved.
 
 ## Conflict resolution
 
@@ -76,9 +76,15 @@ Local deletion/discard of a linked entity prompts immediately: leave the tracker
 ## Sync engine
 
 - Runs in the Electron main process; 5-minute interval while the app is running (desktop app — no sync when closed), immediate pass on connect and on "Sync now".
-- Inbound: cursor-based incremental fetch (`updatedAt >` cursor) per connection; changes apply via `TaskChangeRouter` with the provider actor.
-- Outbound: entity-event driven (stage changes on linked entities), debounced; failed writes retry with backoff and surface in the connected view's log.
+- Inbound: incremental fetch per connection with the cursor semantics below; changes apply via `TaskChangeRouter` with the provider actor.
+- Outbound: entity-event driven (stage changes on linked entities), debounced, executed through the outbox below; failures retry with backoff and surface in the connected view's log.
 - Rate limits: Linear GraphQL complexity budget and Plane REST limits both comfortably fit a 5-minute incremental poll; batch writes where the API allows.
+
+### Durability & failure semantics (adversarial-review hardening)
+
+1. **Outbox for every remote write.** No API call without a durable `tracker_outbox` row written first (kind: create-sub-issue / update-state / close-parent; state: `pending → in-flight → done | failed | ambiguous`). Each create carries a **client-generated key**: Linear's `issueCreate` accepts a client-supplied issue id, making creates natively idempotent — recovery is a lookup by that id; Plane has no idempotency key, so an ambiguous create (response lost, crash mid-flight) is reconciled by listing the parent's sub-issues and matching against the pending record before any retry. The external-link row is finalized from the completed outbox record, and the inbound cursor cannot advance past an item with an unresolved outbox entry — so a half-created sub-issue can never be double-created or re-imported.
+2. **Crash-safe cursor.** The inbound high-water mark is compound — `(updatedAt, externalId)` — not a bare timestamp, fetched with an overlap window and deduplicated by external id, so same-timestamp neighbors are never skipped. A fetched page is applied in one sqlite transaction **together with** the cursor update; a crash mid-page rewinds to the last durable cursor and the overlap window makes the replay idempotent.
+3. **Deletion sweep.** Polling only sees issues that still exist, so remote hard-deletes are invisible to the incremental path. Every Nth poll (and on every "Sync now"), a reconciliation sweep compares the remote ID set for the connection's source scope against active external links; IDs that have vanished become deletion events feeding the conflict machinery (Auto → archive local + orphan the link; Manual → conflict row). Where the provider distinguishes archived from deleted (Linear `archivedAt`/trash), archived issues are treated as remote archives rather than deletions.
 
 ## Auth & secrets
 
@@ -90,12 +96,18 @@ No existing pattern for app-owned third-party secrets exists (no keytar/safeStor
 interface TrackerAdapter {
   provider: 'linear' | 'plane';
   validateCredentials(creds): Promise<WorkspaceIdentity>;
-  listHierarchy(): Promise<SourceTree>;          // teams/projects → narrows (views, cycles, modules)
-  listStates(source): Promise<TrackerState[]>;   // id, name, color, canonical group
-  listIssues(source, cursor?): Promise<{ issues: TrackerIssue[]; cursor: string }>;
-  createSubIssue(parentExternalId, draft): Promise<TrackerIssue>;
+  listHierarchy(): Promise<SourceTree>;            // teams/projects → narrows (views, cycles, modules)
+  listStates(source): Promise<TrackerState[]>;     // id, name, color, canonical group
+  listIssues(source, since?): Promise<TrackerIssue[]>;      // incremental, overlap-windowed
+  listIssueIds(source): Promise<string[]>;         // full ID set — deletion sweep
+  getIssue(externalId): Promise<TrackerIssue | null>;       // point lookup — outbox recovery
+  createSubIssue(parentExternalId, draft, clientKey): Promise<TrackerIssue>;
   updateIssueState(externalId, stateId): Promise<void>;
-  capabilities: { nativeParentAutoClose: boolean; selfHostedBaseUrl: boolean };
+  capabilities: {
+    nativeParentAutoClose: boolean;   // Linear true, Plane false
+    selfHostedBaseUrl: boolean;       // Plane true
+    idempotentCreate: boolean;        // Linear true (client-supplied issue id); Plane false → reconcile-by-lookup
+  };
 }
 ```
 
