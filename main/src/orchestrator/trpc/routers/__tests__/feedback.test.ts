@@ -67,7 +67,7 @@ function buildDb(): Database.Database {
     '035_artifacts.sql',
     '077_artifact_feedback.sql',
     '085_review_item_audience.sql',
-    '090_design_feedback_outbox.sql',
+    '092_design_feedback_outbox.sql',
   ]) {
     const sql = readFileSync(join(migDir, f), 'utf-8');
     const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');

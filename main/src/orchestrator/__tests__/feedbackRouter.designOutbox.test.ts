@@ -1,6 +1,6 @@
 /**
  * Unit tests for FeedbackRouter's DESIGN-OUTBOX primitives (Design Mode v1,
- * migration 090) — the durable half of "Design feedback v1 — acknowledged
+ * migration 092) — the durable half of "Design feedback v1 — acknowledged
  * durable outbox" in docs/ideas/design-mode.md.
  *
  * Covered:
@@ -61,7 +61,7 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '077_artifact_feedback.sql',
-    '090_design_feedback_outbox.sql',
+    '092_design_feedback_outbox.sql',
   ]) {
     const sql = readFileSync(join(migDir, f), 'utf-8');
     const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');

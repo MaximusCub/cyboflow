@@ -4,7 +4,7 @@
  * durable outbox").
  *
  * These run the REAL FeedbackRouter over a real in-memory DB (migrations 077 +
- * 090) so every assertion is against the durable state machine, not a double.
+ * 092) so every assertion is against the durable state machine, not a double.
  * Only the impure seams are faked: `dispatchTurn` (the SDK turn), the clock, the
  * attempt-id minter, and — where a test is about a specific guard — the three
  * lifecycle guards. A separate block exercises the DB-backed default guards.
@@ -70,7 +70,7 @@ function buildDb(): Database.Database {
     '016_review_items.sql',
     '035_artifacts.sql',
     '077_artifact_feedback.sql',
-    '090_design_feedback_outbox.sql',
+    '092_design_feedback_outbox.sql',
   ]) {
     const sql = readFileSync(join(migDir, f), 'utf-8');
     const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');

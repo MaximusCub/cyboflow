@@ -1,4 +1,4 @@
--- Migration 090: widen the feedback tables for design-prototype feedback and the
+-- Migration 092: widen the feedback tables for design-prototype feedback and the
 -- acknowledged durable outbox (Design Mode v1 — docs/ideas/design-mode.md,
 -- "Design feedback v1 — acknowledged durable outbox").
 --
@@ -66,7 +66,7 @@
 --     ledger-marks the file. Skipping the rest is CORRECT, because the columns and
 --     the widened CHECKs were added in that same single transaction, so a DB that
 --     has the columns necessarily already has the CHECKs. Data is untouched.
--- The two states are therefore the only reachable ones: fully-077 or fully-090.
+-- The two states are therefore the only reachable ones: fully-077 or fully-092.
 --
 -- Timestamps stay writer-supplied ISO strings (FeedbackRouter); DEFAULT
 -- CURRENT_TIMESTAMP is only a safety net.

@@ -1,7 +1,7 @@
 /**
- * Migration 090_design_feedback_outbox.sql — schema + constraint + replay tests.
+ * Migration 092_design_feedback_outbox.sql — schema + constraint + replay tests.
  *
- * 090 widens BOTH feedback tables (077) so design-prototype feedback can exist:
+ * 092 widens BOTH feedback tables (077) so design-prototype feedback can exist:
  * the atype CHECKs gain 'ui-prototype'/'interactive-prototype', feedback_batches
  * gains the six outbox columns, and its status CHECK gains the outbox lifecycle.
  * Proves:
@@ -11,10 +11,10 @@
  *   4. Pre-existing 077-shaped rows (batch + its sent comment, incl. the batch_id
  *      linkage) survive the double table-recreate verbatim.
  *   5. The indexes are recreated, including the partial in-flight recovery index.
- *   6. THE LEDGER-REPLAY PATH: re-running the whole chain against an already-090
+ *   6. THE LEDGER-REPLAY PATH: re-running the whole chain against an already-092
  *      DB (the ledger-wiped existing-install case) is a no-op that preserves the
  *      outbox column DATA — the leading ALTERs short-circuit the file rather than
- *      letting a 077-column-only copy blank them. See 090's header.
+ *      letting a 077-column-only copy blank them. See 092's header.
  *   7. The fresh-DB initialize() path lands the same widened CHECKs.
  */
 import { describe, it, expect } from 'vitest';
@@ -55,11 +55,11 @@ function apply(db: Database.Database, files: string[]): void {
 }
 
 /**
- * Apply 090 the way the runner does: FK enforcement toggled off OUTSIDE the
+ * Apply 092 the way the runner does: FK enforcement toggled off OUTSIDE the
  * wrapping transaction (the runner keys that off the leading PRAGMA line).
  */
 function apply090(db: Database.Database): void {
-  const sql = readFileSync(join(MIG_DIR, '090_design_feedback_outbox.sql'), 'utf-8');
+  const sql = readFileSync(join(MIG_DIR, '092_design_feedback_outbox.sql'), 'utf-8');
   db.pragma('foreign_keys = OFF');
   try {
     db.exec('BEGIN');
@@ -112,7 +112,7 @@ function insertComment(db: Database.Database, id: string, o: { atype?: string; a
 const ALL_ATYPES = ['idea-spec', 'arch-design', 'ui-prototype', 'interactive-prototype'];
 const ALL_STATUSES = ['pending', 'applied', 'failed', 'queued', 'dispatching', 'dispatched', 'blocked'];
 
-describe('Migration 090: design feedback outbox', () => {
+describe('Migration 092: design feedback outbox', () => {
   it('(a) both tables accept every doc + prototype atype, and reject a bogus one', () => {
     const db = buildDb();
     ALL_ATYPES.forEach((atype, i) => {
@@ -236,7 +236,7 @@ describe('Migration 090: design feedback outbox', () => {
     db.close();
   });
 
-  it('(f) LEDGER REPLAY: re-running the chain on an already-090 DB preserves outbox data', () => {
+  it('(f) LEDGER REPLAY: re-running the chain on an already-092 DB preserves outbox data', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration090-'));
     try {
       const dbPath = join(dir, 'test.db');
@@ -245,7 +245,7 @@ describe('Migration 090: design feedback outbox', () => {
       svc.initialize();
       const db = svc.getDb();
 
-      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-090')`).run();
+      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-092')`).run();
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
       ).run();
@@ -265,7 +265,7 @@ describe('Migration 090: design feedback outbox', () => {
       // Wipe THIS file's ledger marker and re-run the whole chain, exactly as an
       // existing install whose ledger was reset would.
       db.prepare('DELETE FROM user_preferences WHERE key = ?').run(
-        'file_migration_applied:090_design_feedback_outbox.sql',
+        'file_migration_applied:092_design_feedback_outbox.sql',
       );
       svc.initialize();
 
@@ -284,7 +284,7 @@ describe('Migration 090: design feedback outbox', () => {
         svc
           .getDb()
           .prepare('SELECT value FROM user_preferences WHERE key = ?')
-          .get('file_migration_applied:090_design_feedback_outbox.sql'),
+          .get('file_migration_applied:092_design_feedback_outbox.sql'),
       ).toBeTruthy();
       svc.close();
     } finally {

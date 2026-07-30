@@ -64,11 +64,11 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '035_artifacts.sql',
-    // Design Mode v1 feedback outbox — the ack handler's tables. 090 carries its
+    // Design Mode v1 feedback outbox — the ack handler's tables. 092 carries its
     // own PRAGMA foreign_keys=OFF/ON pair around the table recreate, and db.exec
     // runs outside a transaction, so the file's own toggles take effect.
     '077_artifact_feedback.sql',
-    '090_design_feedback_outbox.sql',
+    '092_design_feedback_outbox.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

@@ -52,10 +52,10 @@ function buildDb(): Database.Database {
     '016_review_items.sql',
     '077_artifact_feedback.sql',
     '085_review_item_audience.sql',
-    // 090 widens both feedback tables (design-prototype atypes + the outbox
+    // 092 widens both feedback tables (design-prototype atypes + the outbox
     // columns/statuses). Its table recreate needs FK enforcement OFF — exactly
     // what the migration runner does for the leading `PRAGMA foreign_keys=OFF`.
-    '090_design_feedback_outbox.sql',
+    '092_design_feedback_outbox.sql',
   ]) {
     const sql = readFileSync(join(MIG_DIR, f), 'utf-8');
     // Mirror the migration runner: a file declaring `PRAGMA foreign_keys=OFF`

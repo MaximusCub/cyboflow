@@ -80,7 +80,7 @@ export type ChipStatus =
 /**
  * Status priority when batches tie on `createdAt` — higher wins. In-flight beats
  * terminal, because a revision still running is the most operationally relevant
- * thing to show. The design-outbox statuses share the column (migration 090) but
+ * thing to show. The design-outbox statuses share the column (migration 092) but
  * never reach this chip, which reads document batches only; they are ranked
  * anyway so the map stays total and a future surface cannot silently fall through.
  */

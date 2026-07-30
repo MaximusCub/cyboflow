@@ -20,7 +20,7 @@
  *    (FEEDBACK_PARKED_RUN_STATUSES / sendFeedbackHandler) applies to the document
  *    surface ONLY.
  *
- * Backed by migrations 077 + 090 (feedback_batches / feedback_comments); all
+ * Backed by migrations 077 + 092 (feedback_batches / feedback_comments); all
  * writes go through the FeedbackRouter chokepoint
  * (main/src/orchestrator/feedbackRouter.ts).
  */
@@ -149,7 +149,7 @@ export function isQuoteAnchor(anchor: FeedbackAnchor): anchor is CommentAnchor {
 export type FeedbackCommentStatus = 'draft' | 'sent' | 'addressed';
 
 /**
- * Two lifecycles share this column (migration 090):
+ * Two lifecycles share this column (migration 092):
  *   - document feedback (IDEA-033): pending → applied | failed;
  *   - design outbox (Design Mode v1):
  *       queued → dispatching → dispatched → applied | failed | blocked.
@@ -170,7 +170,7 @@ export type DesignBatchStatus = 'queued' | 'dispatching' | 'dispatched' | 'appli
 
 /**
  * Batches a crash could have left mid-delivery — the boot recovery scan's set,
- * mirroring migration 090's partial index idx_feedback_batches_inflight.
+ * mirroring migration 092's partial index idx_feedback_batches_inflight.
  * 'dispatching' is POSSIBLY-DELIVERED (the SDK call may have been accepted
  * before the process died), so recovery re-delivers under the same batch id with
  * a NEW attempt id rather than treating it as fresh.

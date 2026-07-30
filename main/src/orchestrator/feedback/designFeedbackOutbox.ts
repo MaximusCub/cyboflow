@@ -14,7 +14,7 @@
  *   - `notifyQueued(batchId)` — the live poke, fired (undetached) by the
  *     cyboflow.feedback.sendDesignBatch mutation right after the batch is minted.
  *   - `recoverOnBoot()` — the restart scan over every in-flight batch
- *     (DESIGN_BATCH_INFLIGHT_STATUSES / migration 090's partial index).
+ *     (DESIGN_BATCH_INFLIGHT_STATUSES / migration 092's partial index).
  *
  * Three invariants this file exists to hold:
  *
@@ -150,7 +150,7 @@ interface OutboxCommentRow {
 /** The prototype-family atypes, as a SQL IN-list of quoted literals. */
 const PROTOTYPE_ATYPE_SQL_IN = `(${DESIGN_FEEDBACK_ATYPES.map((a) => `'${a}'`).join(', ')})`;
 
-/** The in-flight statuses, as a SQL IN-list of quoted literals (mirrors migration 090's partial index). */
+/** The in-flight statuses, as a SQL IN-list of quoted literals (mirrors migration 092's partial index). */
 const INFLIGHT_STATUS_SQL_IN = `(${DESIGN_BATCH_INFLIGHT_STATUSES.map((s) => `'${s}'`).join(', ')})`;
 
 // ---------------------------------------------------------------------------

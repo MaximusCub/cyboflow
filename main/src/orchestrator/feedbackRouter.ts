@@ -1,6 +1,6 @@
 /**
  * FeedbackRouter — the SINGLE write chokepoint for the two in-artifact
- * feedback tables (feedback_batches / feedback_comments, migrations 077 + 090).
+ * feedback tables (feedback_batches / feedback_comments, migrations 077 + 092).
  *
  * TWO surfaces share the tables:
  *
@@ -1129,7 +1129,7 @@ export class FeedbackRouter {
    * sweep touches document batches only. Design-outbox batches left
    * queued/dispatching/dispatched are deliberately NOT failed here — they are
    * re-delivered under the same batch id with a new attempt id by the outbox's own
-   * recovery (see DESIGN_BATCH_INFLIGHT_STATUSES and migration 090's
+   * recovery (see DESIGN_BATCH_INFLIGHT_STATUSES and migration 092's
    * idx_feedback_batches_inflight).
    */
   async sweepInterruptedBatches(): Promise<number> {
