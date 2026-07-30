@@ -8,6 +8,8 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
+import { assertAgentProviderAllowed } from '../../agentProviderGuard';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
@@ -134,6 +136,24 @@ export abstract class AbstractCliManager extends EventEmitter {
   protected abstract getCliToolName(): string;
 
   /**
+   * The vendor this manager calls. Drives the provider-access guard below (the
+   * Settings → Integrations toggles) — distinct from getCliToolName(), which is
+   * a display string and from the substrate, which is the transport.
+   */
+  protected abstract getAgentProvider(): AgentProvider;
+
+  /**
+   * Refuse to call a provider the user switched off. Invoked at the top of every
+   * spawn entry point — the base one below AND each subclass override, since
+   * most overrides do not chain to super. Cold spawns are only half the story:
+   * a keystroke relayed into an already-live PTY never respawns, and is guarded
+   * separately in ipc/ptyPanelDispatch.
+   */
+  protected assertProviderEnabled(): void {
+    assertAgentProviderAllowed(this.getAgentProvider(), `${this.getCliToolName()} sessions`);
+  }
+
+  /**
    * Test if the CLI tool is available and get version/path info
    */
   protected abstract testCliAvailability(customPath?: string): Promise<{ available: boolean; error?: string; version?: string; path?: string }>;
@@ -184,6 +204,9 @@ export abstract class AbstractCliManager extends EventEmitter {
    * compiling unchanged.
    */
   async spawnCliProcess(options: CliSpawnOptions): Promise<CliSpawnOutcome | void> {
+    // Provider-access gate BEFORE the availability probe: a switched-off provider
+    // must read as "turned off", not as "CLI unavailable".
+    this.assertProviderEnabled();
     try {
       const { panelId, sessionId, worktreePath } = options;
       this.logger?.verbose(`Spawning ${this.getCliToolName()} for panel ${panelId} (session ${sessionId}) in ${worktreePath}`);

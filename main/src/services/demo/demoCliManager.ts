@@ -16,6 +16,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import { AbstractCliManager } from '../panels/cli/AbstractCliManager';
 import type { SessionManager } from '../sessionManager';
 import type { Logger } from '../../utils/logger';
@@ -239,6 +240,15 @@ export class DemoCliManager extends AbstractCliManager {
 
   protected getCliToolName(): string {
     return 'Demo Agent';
+  }
+
+  /**
+   * Vendor for the provider-access guard. Demo emits Claude-shaped events, so it
+   * names 'claude' — but the boot-installed resolver exempts demo mode outright
+   * (nothing here reaches a real vendor), so this never actually gates a spawn.
+   */
+  protected getAgentProvider(): AgentProvider {
+    return 'claude';
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {

@@ -18,12 +18,27 @@
  * per-file mocks keep working unchanged.
  */
 import type { query } from '@anthropic-ai/claude-agent-sdk';
+import { assertAgentProviderAllowed } from '../services/agentProviderGuard';
 
 type SdkQuery = typeof query;
 
 let cachedQuery: Promise<SdkQuery> | undefined;
 
+/**
+ * Resolve the SDK's `query`, refusing when the Claude provider is switched off
+ * in Settings → Integrations.
+ *
+ * This is the app's CALL-LEVEL Claude guard: every `query()` caller resolves the
+ * function through here on EVERY call (the cached module promise is reused, the
+ * assert is not), so the check covers a follow-up turn in an already-open chat —
+ * which never re-enters a launch seam — as well as the judges, the programmatic
+ * monitor, verification agents, the VLM judge, and the model catalogue.
+ *
+ * Throwing (rather than returning a no-op query) is deliberate: callers already
+ * handle a rejected SDK load, and a silent no-op would look like a hung turn.
+ */
 export function loadSdkQuery(): Promise<SdkQuery> {
+  assertAgentProviderAllowed('claude', 'Claude agent calls');
   if (!cachedQuery) {
     cachedQuery = import('@anthropic-ai/claude-agent-sdk').then((sdk) => sdk.query);
   }

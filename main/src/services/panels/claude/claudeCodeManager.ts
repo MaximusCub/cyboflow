@@ -4,6 +4,7 @@ import * as os from 'os';
 import { randomUUID, createHash } from 'crypto';
 import { app } from 'electron';
 import { loadSdkQuery } from '../../../utils/lazyAgentSdk';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
@@ -1104,6 +1105,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return 'Claude Code';
   }
 
+  /** Vendor for the provider-access guard (Settings → Integrations). */
+  protected getAgentProvider(): AgentProvider {
+    return 'claude';
+  }
+
   /**
    * SDK substrate is always available — no binary to probe.
    */
@@ -1210,6 +1216,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * spawn). The programmatic step runner reads it on the `ok` path.
    */
   override async spawnCliProcess(options: ClaudeSpawnOptions): Promise<CliSpawnOutcome> {
+    // Provider-access gate (Settings → Integrations) — a switched-off provider
+    // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
+    this.assertProviderEnabled();
     // Additive per-lane identity. For a programmatic fan-out lane this is
     // `runId + ':' + itemId`; for every other path it DEFAULTS to panelId, so the
     // lock string, dup-guard, and per-spawn maps stay byte-identical to before.

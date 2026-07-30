@@ -25,6 +25,8 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
 import { isPtyLane, resolvePanelLane } from '../services/panelLane';
+import { assertAgentProviderAllowed } from '../services/agentProviderGuard';
+import { providerForRuntime } from '../../../shared/types/agentRuntime';
 import { QUICK_PTY_BRIEFING, QUICK_CODEX_PTY_BRIEFING } from './quickSessionBriefings';
 
 /** Common live-REPL relay surface shared by both PTY managers. */
@@ -135,6 +137,13 @@ export async function relayOrSpawnPtyPanel(
   // Demo interactive sessions never spawn a real REPL (DemoTerminalView paints a
   // canned, client-side session) — leave them to the SDK/demo path.
   if (!isCodexPty && deps.configManager.isDemoMode()) return false;
+  // Provider-access gate (Settings → Integrations). The spawn path is already
+  // guarded inside the managers, but a turn relayed into an ALREADY-LIVE REPL
+  // never respawns — without this, switching a provider off would leave every
+  // open PTY chat fully usable. Placed after the demo bail-out so demo stays
+  // exempt, and before markRunning so a refused turn never flips the session to
+  // "working".
+  assertAgentProviderAllowed(providerForRuntime(lane), 'this terminal session');
 
   const session = await deps.sessionManager.getSession(panel.sessionId);
   if (!session?.worktreePath) return false; // Cannot spawn a REPL without a worktree.

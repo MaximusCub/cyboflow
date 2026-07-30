@@ -120,6 +120,7 @@ import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
 import { isAgentProvider, providerForRuntime } from '../../shared/types/agentRuntime';
+import { setAgentProviderAccessResolver } from './services/agentProviderGuard';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
@@ -1126,6 +1127,18 @@ function runSchemaVersionGate(): boolean {
 async function initializeServices(): Promise<boolean> {
   configManager = new ConfigManager();
   await configManager.initialize();
+
+  // Install the authoritative provider-access resolver for the CALL-LEVEL guard
+  // (services/agentProviderGuard). Everything downstream — every Claude SDK
+  // query(), every CLI/PTY/app-server spawn, every live-PTY relay — asks this
+  // closure, so a provider the user switched off in Settings → Integrations
+  // cannot be called even by an ALREADY-OPEN session (whose follow-up turns
+  // never re-enter a launch seam). Read fresh on every call, so a toggle takes
+  // effect immediately without a restart. Demo mode is exempt: its spawns go to
+  // the scripted DemoCliManager and never reach a real vendor.
+  setAgentProviderAccessResolver(
+    (provider) => configManager.isDemoMode() || configManager.isAgentProviderEnabled(provider),
+  );
 
   // NOTE: telemetry is initialized BEFORE app 'ready' (see the initTelemetry call
   // ahead of app.whenReady() below), because the Aptabase SDK disables itself if

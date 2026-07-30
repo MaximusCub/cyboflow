@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Logger } from '../../../utils/logger';
@@ -337,6 +338,11 @@ export class CodexSdkManager extends AbstractCliManager {
     return 'Codex app-server';
   }
 
+  /** Vendor for the provider-access guard (Settings → Integrations). */
+  protected getAgentProvider(): AgentProvider {
+    return 'codex';
+  }
+
   setCyboflowMcpRuntimeConfig(config: CodexMcpRuntimeConfig): void {
     this.cyboflowMcpRuntimeConfig = config;
   }
@@ -544,6 +550,9 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
+    // Provider-access gate (Settings → Integrations) — a switched-off provider
+    // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
+    this.assertProviderEnabled();
     const spawnKey = options.spawnKey ?? options.panelId;
     if (this.processes.has(spawnKey) || this.reservedSpawnKeys.has(spawnKey)) {
       throw new Error(`Codex app-server process already running for spawn ${spawnKey}`);

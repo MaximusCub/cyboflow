@@ -1,3 +1,4 @@
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { ConversationMessage } from '../../../database/models';
@@ -74,6 +75,11 @@ export class CodexPtyManager extends AbstractCliManager {
 
   protected getCliToolName(): string {
     return 'Codex';
+  }
+
+  /** Vendor for the provider-access guard (Settings → Integrations). */
+  protected getAgentProvider(): AgentProvider {
+    return 'codex';
   }
 
   /**

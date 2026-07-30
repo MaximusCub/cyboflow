@@ -1,4 +1,5 @@
 import * as path from 'path';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
 import type Database from 'better-sqlite3';
@@ -460,6 +461,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
   protected getCliToolName(): string {
     return 'Claude Code (Interactive)';
+  }
+
+  /** Vendor for the provider-access guard (Settings → Integrations). */
+  protected getAgentProvider(): AgentProvider {
+    return 'claude';
   }
 
   /**
@@ -948,6 +954,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * 'failed'). A run with no turn-end + no exit NEVER resolves.
    */
   override async spawnCliProcess(options: InteractiveClaudeSpawnOptions): Promise<void> {
+    // Provider-access gate (Settings → Integrations) — a switched-off provider
+    // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
+    this.assertProviderEnabled();
     const { panelId, sessionId, worktreePath } = options;
 
     if (this.processes.has(panelId)) {

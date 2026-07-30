@@ -51,6 +51,10 @@ class TestCliManager extends AbstractCliManager {
   protected getCliToolName(): string {
     return 'testcli';
   }
+
+  protected getAgentProvider(): 'claude' | 'codex' {
+    return 'claude';
+  }
   protected async testCliAvailability(): Promise<{ available: boolean }> {
     return { available: true };
   }

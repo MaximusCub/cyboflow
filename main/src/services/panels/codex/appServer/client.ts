@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import { assertAgentProviderAllowed } from '../../../agentProviderGuard';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -572,6 +573,11 @@ export class CodexAppServerClient {
   }
 
   start(): void {
+    // Provider-access gate (Settings → Integrations). This is the ONE spawn seam
+    // for the Codex app server, shared by the SDK panel manager and the Codex
+    // eval juror — the juror never passes through CodexSdkManager, so guarding
+    // only there would leave it able to call a switched-off provider.
+    assertAgentProviderAllowed('codex', 'the Codex app server');
     if (this.currentState !== 'idle') {
       throw new AppServerTransportError(`Cannot start app-server from ${this.currentState} state`);
     }
