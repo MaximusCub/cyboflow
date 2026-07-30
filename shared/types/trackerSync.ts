@@ -20,6 +20,8 @@ export interface TrackerCredentialsInput {
   apiKey: string;
   /** Plane self-hosted instance origin; omitted = the provider's cloud default. */
   baseUrl?: string;
+  /** Plane only: the workspace slug all API paths are scoped under. */
+  workspaceSlug?: string;
 }
 
 /** Result of a successful credential validation ("Authorized as …" card). */
@@ -101,7 +103,12 @@ export interface TrackerUserRef {
 }
 
 export interface TrackerIssue {
-  /** Provider UUID — the stable sync key. */
+  /**
+   * The stable sync key. ADAPTER-OPAQUE: each adapter owns its format and the
+   * core never parses it. Linear uses the bare issue UUID; Plane composites
+   * the project scope in ("<projectId>/<issueId>") because its REST paths are
+   * project-scoped.
+   */
   externalId: string;
   /** Human ref shown in lowercase mono, e.g. "CORE-142" / "WEB-12". */
   identifier: string;
