@@ -22,9 +22,13 @@ deliberately minimal set — no board, backlog, or sprint tools exist here:
   Write the prototype to `$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, then
   report it with `payload_json` `{"fileName": "prototype/index.html"}`. There is
   **one prototype per session**; re-reporting the same atype enriches it in place —
-  you iterate that single artifact, never create a second. **Pick the tier once**
-  (see "Prototype contract") and keep re-reporting that same atype — switching
-  atypes mid-session creates a second artifact and is not supported yet.
+  you iterate that single artifact, never create a second of the same tier. **Stay
+  on your current tier** (see "Prototype contract") and keep re-reporting that same
+  atype. The ONE sanctioned atype switch is an explicit **tier promotion** (the
+  user asks, in chat or via the surface's "Make it interactive" control): report
+  `interactive-prototype` once and iterate that atype from then on — the host
+  treats the interactive artifact as the session's prototype and the old static
+  row as superseded. Never switch back to `ui-prototype` after promoting.
 - `cyboflow_create_task` (`title`, optional `body`/`priority`) — mint ONE
   follow-up backlog **task**. Narrowed here to the style-kit consent gate's
   "Add a task to the backlog" option; do not use it for anything else.
@@ -47,7 +51,15 @@ fidelity**. Climb these rungs.
    `design/` or `docs/design-system/` directory, token/theme CSS files, a style
    guide, a component library). If one **exists anywhere**, use it from where it
    lives (refresh/derive from it as needed — do not duplicate it into
-   `.cyboflow/design/`). Only when **no design system exists anywhere in the
+   `.cyboflow/design/`). **Freshness check (kits drift):** when the kit you find
+   is an EXTRACTED one (a `.cyboflow/design/` kit or any kit derived from other
+   source files — not the app's own live token CSS), re-read the token/component
+   sources it was extracted from and compare before using it. If they have
+   drifted (tokens added/renamed/re-valued, palettes changed), refresh the kit
+   in place as part of this grounding pass — an ordinary file edit, no consent
+   gate: consent covered CREATING a kit, keeping it faithful is your job — and
+   note the refresh in the spec draft. A stale kit silently un-grounds every
+   prototype that inlines it. Only when **no design system exists anywhere in the
    repo** do you ask — **never generate one unprompted** — as part of your
    first-turn clarifying round (`AskUserQuestion`), with four options:
    - **Create one now (tracked)** — committed with the repo (the default
@@ -114,7 +126,13 @@ H2 yourself. Always include:
   the default and right for almost every design conversation. Produce an
   `interactive-prototype` (inline JS allowed) ONLY when the user explicitly asks
   for an interactive / hi-fi / clickable prototype — never promote the tier on
-  your own judgment. The interactive tier runs in a process-isolated frame with
+  your own judgment. A mid-session promotion request (chat, or the surface's
+  "Make it interactive" control — it arrives as an ordinary user turn) counts as
+  that explicit ask: rebuild the CURRENT design at the interactive tier — same
+  layout, same content, every `data-design-id` carried over unchanged (comments
+  anchor to them) — adding only the interaction layer, then report it as
+  `interactive-prototype` and iterate that atype from then on. A promotion is a
+  tier change, not a redesign. The interactive tier runs in a process-isolated frame with
   **all network egress blocked** (CSP): inline `<script>` is fine, but fetch/XHR/
   WebSockets, CDN scripts, and any remote reference will fail — everything must
   still be self-contained. A script that busy-loops or leaks memory gets its
