@@ -1,9 +1,14 @@
-import { execFileSync } from 'child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
+import { probeCliVersion, type CliVersionProbeResult } from '../cli/cliVersionProbe';
+import {
+  prependCodexPathToEnvironment,
+  resolveCodexExecutablePath,
+  type ResolvedCodexExecutable,
+} from './codexExecutablePath';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
@@ -62,6 +67,7 @@ export function codexPermissionFlagsForMode(mode: PermissionMode): CodexPermissi
 
 export class CodexPtyManager extends AbstractCliManager {
   private resolvedExecutablePath: string | null = null;
+  private bundledPathDir: string | null = null;
   private readonly panelRunIds = new Map<string, string>();
   private readonly ptyBacklog = new Map<string, string>();
   private readonly ptySpawnContext = new AsyncLocalStorage<CodexPtySpawnContext>();
@@ -70,21 +76,57 @@ export class CodexPtyManager extends AbstractCliManager {
     return 'Codex';
   }
 
+  /**
+   * Resolve the Codex CLI, preferring the binary Cyboflow ships over whatever
+   * the user happens to have on PATH.
+   *
+   * WHY bundled-first: the app already vendors `@openai/codex` as a native
+   * platform package, and every OTHER Codex consumer (the app-server/SDK
+   * manager, the eval judge, the visual verifier) resolves it through
+   * resolveCodexExecutablePath. This PTY lane alone hunted PATH, so a session
+   * could fail with "Codex not available" at the same moment a codex-sdk run
+   * was healthy. The bundled binary is native per-arch with no Node dependency,
+   * which also removes the npm-shim shebang failure entirely.
+   *
+   * An explicit customPath still wins, and PATH remains the fallback for dev
+   * trees where the platform package is not installed.
+   */
   protected async testCliAvailability(customPath?: string): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
+    const configuredPath = customPath?.trim();
+
+    if (!configuredPath) {
+      const bundled = this.resolveBundledExecutable();
+      if (bundled) {
+        this.bundledPathDir = bundled.pathDir;
+        try {
+          const probe = await this.probeVersion(bundled.executablePath);
+          this.resolvedExecutablePath = bundled.executablePath;
+          return { available: true, version: probe.version, path: bundled.executablePath };
+        } catch (err) {
+          // Fall through to PATH resolution: a broken bundle should degrade to
+          // the user's own install rather than take the lane down with it.
+          this.bundledPathDir = null;
+          this.logger?.warn(
+            `[Codex] Bundled Codex executable at ${bundled.executablePath} failed its version probe, falling back to PATH: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+
     getShellPath();
-    const resolvedPath = customPath?.trim() || findExecutableInPath('codex');
+    const resolvedPath = configuredPath || findExecutableInPath('codex');
     if (!resolvedPath) {
       this.resolvedExecutablePath = null;
       return { available: false, error: 'codex executable not found in PATH' };
     }
 
     try {
-      const version = execFileSync(resolvedPath, ['--version'], {
-        encoding: 'utf8',
-        timeout: 10_000,
-      }).trim();
+      const probe = await this.probeVersion(resolvedPath);
+      if (probe.usedNodeFallback) {
+        this.markNeedsNodeFallback();
+      }
       this.resolvedExecutablePath = resolvedPath;
-      return { available: true, version, path: resolvedPath };
+      return { available: true, version: probe.version, path: resolvedPath };
     } catch (err) {
       this.resolvedExecutablePath = null;
       return {
@@ -93,6 +135,45 @@ export class CodexPtyManager extends AbstractCliManager {
         path: resolvedPath,
       };
     }
+  }
+
+  /**
+   * Resolve the vendored Codex binary, or null when this tree has no platform
+   * package (a dev checkout that skipped the optional dependency).
+   */
+  protected resolveBundledExecutable(): ResolvedCodexExecutable | null {
+    try {
+      return resolveCodexExecutablePath();
+    } catch (err) {
+      this.logger?.verbose(
+        `[Codex] No bundled Codex executable available, using PATH: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Probe `--version` with the SAME environment the spawn will use. Seam kept
+   * protected so tests can drive availability without touching the real
+   * filesystem or shelling out.
+   */
+  protected async probeVersion(executablePath: string): Promise<CliVersionProbeResult> {
+    return probeCliVersion(executablePath, await this.getSystemEnvironment());
+  }
+
+  /**
+   * Put the bundled distribution's `codex-path` directory on PATH, matching
+   * what the app-server manager does — the Codex binary resolves its own helper
+   * executables from there.
+   */
+  protected override async getSystemEnvironment(): Promise<{ [key: string]: string }> {
+    const environment = await super.getSystemEnvironment();
+    if (!this.bundledPathDir) {
+      return environment;
+    }
+    return prependCodexPathToEnvironment(environment, this.bundledPathDir) as {
+      [key: string]: string;
+    };
   }
 
   protected async getCliExecutablePath(): Promise<string> {
@@ -278,12 +359,14 @@ export class CodexPtyManager extends AbstractCliManager {
   }
 
   protected getCliNotAvailableMessage(error?: string): string {
+    const interpreterAdvice = this.missingInterpreterAdvice(error);
     return [
       `Error: ${error}`,
       '',
       'Codex CLI is not available.',
       '',
-      'Install and sign in to Codex with ChatGPT auth, then verify `codex --version` works in your shell.',
+      interpreterAdvice ??
+        'Install and sign in to Codex with ChatGPT auth, then verify `codex --version` works in your shell.',
     ].join('\n');
   }
 
