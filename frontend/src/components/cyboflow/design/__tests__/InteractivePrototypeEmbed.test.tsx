@@ -155,6 +155,39 @@ describe('InteractivePrototypeEmbed', () => {
     expect(newSrc).toBe(`${originalSrc}?r=1`);
   });
 
+  it('a contentKey change after mount re-navigates the iframe with a cache-busting query param', async () => {
+    installBridge();
+    const { rerender } = render(<InteractivePrototypeEmbed runId="run-1" contentKey={1} />);
+    const iframe = await screen.findByTestId('interactive-embed-iframe');
+    const originalSrc = iframe.getAttribute('src');
+    expect(originalSrc).not.toMatch(/\?r=/);
+
+    rerender(<InteractivePrototypeEmbed runId="run-1" contentKey={2} />);
+
+    const newSrc = screen.getByTestId('interactive-embed-iframe').getAttribute('src');
+    expect(newSrc).toBe(`${originalSrc}?r=1`);
+  });
+
+  it('a contentKey change clears a terminated overlay', async () => {
+    const bridge = installBridge();
+    const { rerender } = render(<InteractivePrototypeEmbed runId="run-1" contentKey={1} />);
+    await screen.findByTestId('interactive-embed-iframe');
+
+    bridge.emit({ runId: 'run-1', kind: 'frame-terminated', reason: 'cpu' });
+    expect(screen.getByTestId('interactive-embed-terminated')).toBeInTheDocument();
+
+    rerender(<InteractivePrototypeEmbed runId="run-1" contentKey={2} />);
+
+    expect(screen.queryByTestId('interactive-embed-terminated')).not.toBeInTheDocument();
+  });
+
+  it('mounting with a contentKey does NOT itself trigger a reload', async () => {
+    installBridge();
+    render(<InteractivePrototypeEmbed runId="run-1" contentKey={7} />);
+    const iframe = await screen.findByTestId('interactive-embed-iframe');
+    expect(iframe.getAttribute('src')).not.toMatch(/\?r=/);
+  });
+
   it('ignores a frame-terminated event for a different runId', async () => {
     const bridge = installBridge();
     render(<InteractivePrototypeEmbed runId="run-1" />);

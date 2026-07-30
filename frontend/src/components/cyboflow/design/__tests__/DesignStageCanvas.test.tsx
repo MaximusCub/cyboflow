@@ -27,8 +27,8 @@ vi.mock('../../LiveCanvasEmbed', () => ({
 }));
 
 vi.mock('../InteractivePrototypeEmbed', () => ({
-  InteractivePrototypeEmbed: ({ runId }: { runId: string }) => (
-    <div data-testid="interactive-embed-stub" data-run-id={runId} />
+  InteractivePrototypeEmbed: ({ runId, contentKey }: { runId: string; contentKey?: number }) => (
+    <div data-testid="interactive-embed-stub" data-run-id={runId} data-content-key={String(contentKey)} />
   ),
 }));
 
@@ -64,7 +64,17 @@ describe('DesignStageCanvas', () => {
 
   it('resolves the artifact html by runId with the ui-prototype atype', () => {
     render(<DesignStageCanvas artifact={makeArtifact({ runId: 'run-9' })} />);
-    expect(mockUseArtifactHtml).toHaveBeenCalledWith('run-9', 'ui-prototype', true);
+    expect(mockUseArtifactHtml).toHaveBeenCalledWith('run-9', 'ui-prototype', true, 5);
+  });
+
+  it('threads the artifact revision as the refreshKey so a revision bump re-fetches', () => {
+    render(<DesignStageCanvas artifact={makeArtifact({ revision: 12 })} />);
+    expect(mockUseArtifactHtml).toHaveBeenCalledWith('run-1', 'ui-prototype', true, 12);
+  });
+
+  it('defaults the refreshKey to 0 when revision is absent', () => {
+    render(<DesignStageCanvas artifact={makeArtifact({ revision: undefined })} />);
+    expect(mockUseArtifactHtml).toHaveBeenCalledWith('run-1', 'ui-prototype', true, 0);
   });
 
   it('shows the loading state while the html resolves', () => {
@@ -98,6 +108,11 @@ describe('DesignStageCanvas', () => {
     // Static-only pipeline must not engage for the interactive atype.
     expect(mockUseArtifactHtml).not.toHaveBeenCalled();
     expect(screen.queryByTestId('live-canvas-embed-stub')).not.toBeInTheDocument();
+  });
+
+  it('threads the artifact revision to InteractivePrototypeEmbed as contentKey', () => {
+    render(<DesignStageCanvas artifact={makeArtifact({ atype: 'interactive-prototype', revision: 9 })} />);
+    expect(screen.getByTestId('interactive-embed-stub')).toHaveAttribute('data-content-key', '9');
   });
 
   it('keeps the flex-column wrapper for the interactive-prototype dispatch too', () => {

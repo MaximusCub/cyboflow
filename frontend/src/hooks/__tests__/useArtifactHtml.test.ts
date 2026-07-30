@@ -95,6 +95,36 @@ describe('useArtifactHtml', () => {
     expect(result.current.error).toBe('ipc down');
   });
 
+  it('a refreshKey change re-invokes the loadHtml IPC', async () => {
+    loadHtmlSpy.mockResolvedValue({ success: true, data: { html: '<p>v1</p>' } });
+    const { result, rerender } = renderHook(
+      ({ refreshKey }: { refreshKey: number }) => useArtifactHtml('run-1', 'ui-prototype', true, refreshKey),
+      { initialProps: { refreshKey: 1 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(loadHtmlSpy).toHaveBeenCalledTimes(1);
+
+    loadHtmlSpy.mockResolvedValue({ success: true, data: { html: '<p>v2</p>' } });
+    rerender({ refreshKey: 2 });
+
+    await waitFor(() => expect(result.current.html).toBe('<p>v2</p>'));
+    expect(loadHtmlSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('an unchanged rerender does not re-invoke loadHtml', async () => {
+    loadHtmlSpy.mockResolvedValue({ success: true, data: { html: '<p>v1</p>' } });
+    const { result, rerender } = renderHook(
+      ({ refreshKey }: { refreshKey: number }) => useArtifactHtml('run-1', 'ui-prototype', true, refreshKey),
+      { initialProps: { refreshKey: 1 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(loadHtmlSpy).toHaveBeenCalledTimes(1);
+
+    rerender({ refreshKey: 1 });
+
+    expect(loadHtmlSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('drops a stale in-flight result when the inputs change (cancelled guard)', async () => {
     // First run's load never settles; the rerender to a new run must win.
     let resolveFirst: (r: LoadHtmlResp) => void = () => {};

@@ -51,6 +51,10 @@ export function useArtifactHtml(
   runId: string,
   atype: LoadArtifactHtmlAtype,
   enabled: boolean,
+  // Opaque content-identity key (the artifact's `revision`) — a change re-runs
+  // the fetch effect so a stale-canvas static prototype re-fetches its HTML
+  // after the agent re-reports it. Omitted call sites are unaffected.
+  refreshKey?: number,
 ): UseArtifactHtml {
   const [html, setHtml] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -101,7 +105,7 @@ export function useArtifactHtml(
     return () => {
       cancelled = true;
     };
-  }, [runId, atype, enabled]);
+  }, [runId, atype, enabled, refreshKey]);
 
   return { html, loading, error };
 }

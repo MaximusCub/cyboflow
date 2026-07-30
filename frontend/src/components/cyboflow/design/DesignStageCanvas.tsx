@@ -37,7 +37,7 @@ export function DesignStageCanvas({ artifact, captureRef }: DesignStageCanvasPro
       // Same flex-column contract as the static wrapper below (InteractivePrototypeEmbed
       // sizes itself `flex: 1`, same iframe-collapse hazard as LiveCanvasEmbed).
       <div data-testid="design-stage-canvas" className="h-full w-full flex flex-col min-h-0">
-        <InteractivePrototypeEmbed ref={captureRef} runId={artifact.runId} />
+        <InteractivePrototypeEmbed ref={captureRef} runId={artifact.runId} contentKey={artifact.revision ?? 0} />
       </div>
     );
   }
@@ -46,7 +46,7 @@ export function DesignStageCanvas({ artifact, captureRef }: DesignStageCanvasPro
 
 /** The pre-v1 static pipeline — unchanged behavior, just its own component. */
 function StaticPrototypeCanvas({ artifact }: DesignStageCanvasProps): ReactElement {
-  const { html, loading } = useArtifactHtml(artifact.runId, 'ui-prototype', true);
+  const { html, loading } = useArtifactHtml(artifact.runId, 'ui-prototype', true, artifact.revision ?? 0);
 
   if (loading) {
     return (

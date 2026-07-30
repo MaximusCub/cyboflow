@@ -34,6 +34,16 @@ import type { PrototypeFrameTerminationReason } from '../../../../../shared/type
 
 interface InteractivePrototypeEmbedProps {
   runId: string;
+  /**
+   * Opaque content-identity key (the prototype artifact's `revision`) — when
+   * this CHANGES after the first render, the embed reloads exactly like the
+   * `handleReload` affordance: bump `reloadNonce` + clear any terminated
+   * overlay, so `withCacheBust` mints a fresh `?r=N` URL and the iframe
+   * re-navigates to a fresh OOPIF process. A change on mount is not a reload
+   * (nothing stale to refresh yet) — only a change relative to the PREVIOUS
+   * render counts, tracked via a ref.
+   */
+  contentKey?: number;
 }
 
 type EmbedStatus = 'loading' | 'ready' | 'error' | 'stopped';
@@ -90,13 +100,14 @@ function withCacheBust(url: string, n: number): string {
 }
 
 export const InteractivePrototypeEmbed = forwardRef<InteractivePrototypeCaptureHandle, InteractivePrototypeEmbedProps>(
-  function InteractivePrototypeEmbed({ runId }, ref): ReactElement {
+  function InteractivePrototypeEmbed({ runId, contentKey }, ref): ReactElement {
   const [status, setStatus] = useState<EmbedStatus>('loading');
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [terminated, setTerminated] = useState<{ reason: PrototypeFrameTerminationReason } | null>(null);
   const isMountedRef = useRef(true);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const prevContentKeyRef = useRef<number | undefined>(contentKey);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -157,6 +168,16 @@ export const InteractivePrototypeEmbed = forwardRef<InteractivePrototypeCaptureH
     setReloadNonce((n) => n + 1);
     setTerminated(null);
   }, []);
+
+  // Auto-refresh when the prototype's content identity changes (the artifact's
+  // `revision` bumped from a re-report) — but NOT on mount, where prevContentKeyRef
+  // is seeded to the initial contentKey and there is nothing stale to refresh yet.
+  useEffect(() => {
+    if (prevContentKeyRef.current !== contentKey) {
+      prevContentKeyRef.current = contentKey;
+      handleReload();
+    }
+  }, [contentKey, handleReload]);
 
   const requestCapture = useCallback((): Promise<string> => {
     return new Promise<string>((resolve, reject) => {
