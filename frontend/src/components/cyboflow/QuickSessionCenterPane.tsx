@@ -33,7 +33,7 @@
  * TerminalDock (the chat) stays mounted across tab switches — only the top plane
  * swaps between the canvas and a file/artifact tab.
  */
-import { useEffect, type ReactNode, type ReactElement } from 'react';
+import { useEffect, useMemo, type ReactNode, type ReactElement } from 'react';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
@@ -43,6 +43,7 @@ import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPan
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
+import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
 import type { Session } from '../../types/session';
 
 interface QuickSessionCenterPaneProps {
@@ -79,7 +80,15 @@ export function QuickSessionCenterPane({
   // store below is keyed by sessionKey: a run-scoped list would read a past
   // flow run's tabs as "vanished" the moment this component (re)mounts.
   const { artifacts, loaded } = useSessionArtifactsList(sessionKey, projectId);
-  useArtifactTabsSync(sessionKey, artifacts, loaded);
+  // A superseded static `ui-prototype` row (the pre-first-report stub, or a
+  // row left behind by a mid-session tier promotion) must neither open a tab
+  // nor keep an already-open one alive once a payload-bearing
+  // `interactive-prototype` exists — pickPrototype (the design surface's own
+  // selection rule) would never pick it, so its tab is inert clutter next to
+  // the live interactive tab. Filtering here (not just at render) means the
+  // tab-sync hook's prune effect sees it vanish from the list and closes it.
+  const visibleArtifacts = useMemo(() => hideSupersededPrototypes(artifacts), [artifacts]);
+  useArtifactTabsSync(sessionKey, visibleArtifacts, loaded);
 
   useEffect(() => {
     ensureSession(sessionKey);
@@ -108,8 +117,8 @@ export function QuickSessionCenterPane({
       // tabs carry only atype until the row arrives). The artifacts table is one
       // row per (run, atype) so atype is a stable secondary key.
       const artifact =
-        artifacts.find((a) => a.id === activeTab.artifactId) ??
-        artifacts.find((a) => a.atype === activeTab.atype);
+        visibleArtifacts.find((a) => a.id === activeTab.artifactId) ??
+        visibleArtifacts.find((a) => a.atype === activeTab.atype);
       if (artifact) {
         // The artifact's OWN runId (not the chat sentinel) — the list is now
         // session-scoped, so a tab's backing row may belong to a past flow run

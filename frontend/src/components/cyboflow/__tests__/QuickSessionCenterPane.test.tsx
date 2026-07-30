@@ -189,6 +189,31 @@ describe('QuickSessionCenterPane — artifact tabs', () => {
     expect(screen.queryByTestId('mock-quick-session-canvas')).not.toBeInTheDocument();
   });
 
+  it('a bytes-less ui-prototype stub is not opened as a tab once a payload-bearing interactive-prototype exists', () => {
+    mockArtifacts = [
+      makeArtifact({ id: 'a-stub', atype: 'ui-prototype', label: 'Prototype', payloadJson: null }),
+      makeArtifact({
+        id: 'a-live',
+        atype: 'interactive-prototype',
+        label: 'Prototype',
+        payloadJson: JSON.stringify({ fileName: 'prototype/index.html' }),
+      }),
+    ];
+
+    renderPane();
+
+    expect(screen.getByTestId(`center-pane-tab-art:interactive-prototype`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`center-pane-tab-art:ui-prototype`)).not.toBeInTheDocument();
+  });
+
+  it('a ui-prototype tab still appears when the list holds only a ui-prototype (no interactive-prototype)', () => {
+    mockArtifacts = [makeArtifact({ id: 'a-proto', atype: 'ui-prototype', label: 'Prototype' })];
+
+    renderPane();
+
+    expect(screen.getByTestId(`center-pane-tab-art:ui-prototype`)).toBeInTheDocument();
+  });
+
   it('renders the "Loading…" fallback for an artifact tab whose row has not resolved yet', () => {
     const sessionKey = String(SESSION.id);
     // The tab is open (e.g. chip-opened) but the seed query is STILL in flight
