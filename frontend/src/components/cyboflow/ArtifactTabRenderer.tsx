@@ -1684,8 +1684,13 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   // `actions` stays exactly `openInBrowser`, unchanged from before.
   // "Enter design mode" CTA (v0.5 fullscreen design surface, second entry
   // door) — same render gate as designControl, rendered leftmost of the two.
+  // BOTH prototype-family atypes qualify: a mid-session tier switch leaves an
+  // interactive-prototype tab alongside the lo-fi one, and an interactive-only
+  // run would otherwise have NO entry door at all.
   const isDesignCanvas =
-    artifact.atype === 'ui-prototype' && artifact.sourceRef !== null && artifact.sessionId !== null;
+    (artifact.atype === 'ui-prototype' || artifact.atype === 'interactive-prototype') &&
+    artifact.sourceRef !== null &&
+    artifact.sessionId !== null;
   const enterDesignModeCta: ReactNode = isDesignCanvas ? (
     <button
       type="button"

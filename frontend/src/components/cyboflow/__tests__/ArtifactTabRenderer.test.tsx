@@ -1196,6 +1196,12 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('design-mode-enter-cta')).toHaveTextContent('Design mode');
   });
 
+  it('renders the "Enter design mode" CTA for a design-session interactive-prototype (an interactive-only run needs an entry door too)', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'interactive-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.getByTestId('design-mode-enter-cta')).toHaveTextContent('Design mode');
+  });
+
   it('does NOT render the "Enter design mode" CTA for a sourceRef-less ui-prototype', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
     render(
