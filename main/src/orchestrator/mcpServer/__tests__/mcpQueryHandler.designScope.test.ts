@@ -342,6 +342,33 @@ describe('McpQueryHandler design-scope handlers', () => {
       expect(row).toEqual({ id: 'art_live', rev: 2 });
     });
 
+    it('prototype-family selection: interactive-prototype beats a payload-bearing ui-prototype with a HIGHER revision (mid-session tier switch)', async () => {
+      seedDesignSession(db, { runId: 'run-tier', sessionId: 'sess-tier', ideaId: 'ide_tier' });
+      // A mid-session tier switch leaves BOTH rows payload-bearing: the lo-fi
+      // ui-prototype iterated to revision 2 in its earlier life, then the user
+      // asked for interactive (revision 1). Revision alone must never break
+      // this tie — the interactive tier is the live canvas, and binding the
+      // lo-fi row makes the approve CAS guard the wrong artifact.
+      db.prepare(
+        `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json, created_at)
+         VALUES ('art_lofi', 'run-tier', 'ui-prototype', 'mockup', 'canvas', 2,
+                 '{"fileName":"prototype/index.html"}', '2026-07-22T00:00:00.000Z')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json, created_at)
+         VALUES ('art_hifi', 'run-tier', 'interactive-prototype', 'mockup', 'canvas', 1,
+                 '{"fileName":"prototype/index.html"}', '2026-07-22T01:00:00.000Z')`,
+      ).run();
+
+      const res = await updateDraft('run-tier', '### Design\n\nbound to the interactive tier');
+      expect(res.ok).toBe(true);
+      expect(res.data).toEqual({ draftRevision: 1, boundArtifactRevision: 1 });
+      const row = db
+        .prepare('SELECT bound_artifact_id AS id, bound_artifact_revision AS rev FROM design_spec_drafts WHERE session_id = ?')
+        .get('sess-tier') as { id: string; rev: number };
+      expect(row).toEqual({ id: 'art_hifi', rev: 1 });
+    });
+
     it('propagates a broken idea link and writes NO draft row', async () => {
       seedDesignSession(db, {
         runId: 'run-brk',

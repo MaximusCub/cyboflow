@@ -881,6 +881,16 @@ export interface ScreenshotsArtifactPayload {
 export interface UiPrototypeArtifactPayload {
   /** On-disk relative path to the static mockup document (ui-prototype). */
   fileName?: string;
+  /**
+   * sha256 (hex) of the on-disk document at report time, minted by the
+   * content-blesser alongside `fileName`. Exists so the stored payload — and
+   * therefore the ArtifactRouter's delta-gated `revision` counter — changes
+   * when the prototype's BYTES change even though the pointer is constant
+   * (an in-place edit + re-report must advance the revision the design-spec
+   * draft binding and feedback ack record). Absent on rows minted before
+   * this field existed and on the bytes-less re-entry stub.
+   */
+  contentHash?: string;
   /** Legacy/generic live-canvas URL (cross-origin iframe embed). */
   url?: string;
   [key: string]: unknown;

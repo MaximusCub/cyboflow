@@ -64,7 +64,7 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
 import type { Dirent, Stats } from 'fs';
 import {
@@ -3412,8 +3412,17 @@ export class McpQueryHandler {
           );
         }
         if (policy.blessing === 'prototype-file') {
-          this.validatePrototypeFile(msg.runId);
-          payloadJson = JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH });
+          const validatedPath = this.validatePrototypeFile(msg.runId);
+          // `contentHash` makes the minted payload change whenever the on-disk
+          // bytes change: the ArtifactRouter's revision bump is delta-gated on
+          // stored fields, and a bare `{ fileName }` pointer is byte-identical
+          // across re-reports — so an in-place prototype edit would never
+          // advance `revision`, freezing the counter the design-spec draft
+          // binding and the feedback ack's applied_prototype_revision rely on.
+          // An idempotent re-report (same bytes) still mints the same payload
+          // and correctly does NOT bump.
+          const contentHash = createHash('sha256').update(readFileSync(validatedPath)).digest('hex');
+          payloadJson = JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH, contentHash });
         }
       }
       const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
@@ -3464,7 +3473,8 @@ export class McpQueryHandler {
    * 'prototype_missing|prototype_invalid|prototype_too_large: …')` on any failure
    * so the report tool surfaces a precise reason to the producing agent.
    */
-  private validatePrototypeFile(runId: string): void {
+  /** Returns the validated, realpath'd absolute path of the prototype document. */
+  private validatePrototypeFile(runId: string): string {
     const runRoot = path.resolve(getCyboflowSubdirectory('artifacts', 'runs', runId));
     const target = path.resolve(runRoot, PROTOTYPE_HTML_RELPATH);
     // Containment on the resolved (pre-realpath) path — defense in depth even
@@ -3494,6 +3504,7 @@ export class McpQueryHandler {
     if (st.size > MAX_PROTOTYPE_HTML_BYTES) {
       throw new ArtifactError('invalid_payload', `prototype_too_large: ${st.size} > ${MAX_PROTOTYPE_HTML_BYTES}`);
     }
+    return realTarget;
   }
 
   /**
@@ -3720,18 +3731,24 @@ export class McpQueryHandler {
       return;
     }
 
-    // The session's single current prototype — one PROTOTYPE-FAMILY artifact
-    // per session (static 'ui-prototype' or v1's 'interactive-prototype'),
-    // reported against this run. When both exist (the re-entry stub is minted
-    // as a bytes-less ui-prototype, and an interactive session's first real
-    // report lands as interactive-prototype), the REAL one wins: prefer the
-    // row with a payload (the stub's payload_json is NULL), then the higher
-    // revision. NULLs when none exists yet.
+    // The session's single current prototype — THE prototype-family selection
+    // rule, mirrored verbatim in draftStatus (design.ts router) and
+    // pickPrototype (DesignModeSurface); change all three together:
+    //   1. payload-bearing beats the bytes-less re-entry stub;
+    //   2. 'interactive-prototype' beats 'ui-prototype' — an explicit
+    //      mid-session tier switch leaves BOTH rows payload-bearing, and the
+    //      interactive tier is the live canvas from then on (the lo-fi row may
+    //      hold a HIGHER revision from its earlier life, which is why revision
+    //      alone must never break this tie);
+    //   3. revision, then created_at, as residual tie-breaks (one artifact per
+    //      atype makes these near-moot, kept for determinism).
+    // NULLs when none exists yet.
     const proto = this.db
       .prepare(
         `SELECT id, revision FROM artifacts
          WHERE run_id = ? AND atype IN ('ui-prototype', 'interactive-prototype')
-         ORDER BY (payload_json IS NOT NULL) DESC, revision DESC
+         ORDER BY (payload_json IS NOT NULL) DESC, (atype = 'interactive-prototype') DESC,
+                  revision DESC, created_at DESC
          LIMIT 1`,
       )
       .get(msg.runId) as { id?: unknown; revision?: unknown } | undefined;

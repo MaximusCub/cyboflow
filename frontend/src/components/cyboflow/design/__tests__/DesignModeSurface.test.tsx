@@ -263,6 +263,19 @@ describe('DesignModeSurface', () => {
     expect(screen.getByTestId('design-approve-stub')).toBeInTheDocument();
   });
 
+  it('(d5) tier precedence: interactive-prototype beats a payload-bearing ui-prototype with a HIGHER revision', () => {
+    // Mid-session tier switch: the lo-fi row iterated to a higher revision in
+    // its earlier life; the interactive tier is the live canvas regardless.
+    // Same rule as the backend draft binding — revision must never outrank
+    // the atype tier when both rows carry bytes.
+    mockArtifacts = [
+      makeArtifact({ id: 'art-lofi', atype: 'ui-prototype', revision: 7, createdAt: '2026-07-20T00:00:00Z' }),
+      makeArtifact({ id: 'art-hifi', atype: 'interactive-prototype', revision: 1, createdAt: '2026-07-23T00:00:00Z' }),
+    ];
+    render(<DesignModeSurface />);
+    expect(screen.getByTestId('design-stage-stub')).toHaveAttribute('data-proto-id', 'art-hifi');
+  });
+
   it('(d4) a malformed payload also reads as bytes-less rather than crashing', () => {
     mockArtifacts = [makeArtifact({ id: 'art-bad', payloadJson: 'not json' })];
     render(<DesignModeSurface />);

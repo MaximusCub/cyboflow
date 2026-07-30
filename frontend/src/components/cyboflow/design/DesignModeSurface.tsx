@@ -78,22 +78,31 @@ function pickPrototype(artifacts: Artifact[]): Artifact | null {
       best = a;
       continue;
     }
-    // Payload-bearing beats the bytes-less re-entry stub FIRST — the SAME
-    // selection rule the backend uses for draft binding + draftStatus
-    // (mcpQueryHandler / design router: payload_json IS NOT NULL DESC,
-    // revision DESC), so the surface and the Approve CAS can never disagree
-    // about WHICH artifact is "the session's prototype". createdAt is only a
-    // same-bytes-class tie-break (created_at is second-granular in SQLite —
-    // a stub and a real report can share a timestamp in tests).
+    // THE prototype-family selection rule, mirrored verbatim in the backend's
+    // draft binding (mcpQueryHandler, where the rationale lives) and
+    // draftStatus (design router) — change all three together so the surface
+    // and the Approve CAS never disagree about WHICH artifact is "the
+    // session's prototype":
+    //   1. payload-bearing beats the bytes-less re-entry stub;
+    //   2. the interactive tier beats the static one (a mid-session tier
+    //      switch leaves both payload-bearing; the lo-fi row may hold a
+    //      higher revision from its earlier life);
+    //   3. revision, then createdAt, as residual deterministic tie-breaks.
     const aBytes = prototypeHasBytes(a);
     const bestBytes = prototypeHasBytes(best);
     if (aBytes !== bestBytes) {
       if (aBytes) best = a;
       continue;
     }
-    if (a.createdAt > best.createdAt) {
+    const aInteractive = a.atype === 'interactive-prototype';
+    const bestInteractive = best.atype === 'interactive-prototype';
+    if (aInteractive !== bestInteractive) {
+      if (aInteractive) best = a;
+      continue;
+    }
+    if ((a.revision ?? 0) > (best.revision ?? 0)) {
       best = a;
-    } else if (a.createdAt === best.createdAt && (a.revision ?? 0) > (best.revision ?? 0)) {
+    } else if ((a.revision ?? 0) === (best.revision ?? 0) && a.createdAt > best.createdAt) {
       best = a;
     }
   }

@@ -20,6 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 import * as os from 'node:os';
 import type * as net from 'net';
 
@@ -289,19 +290,29 @@ describe('McpQueryHandler artifact handlers', () => {
       return parseLastWrite(writes);
     }
 
-    it('valid ui-prototype: mints the canonical {fileName} payload, discarding the agent-sent payload', async () => {
+    /** The blesser's minted payload for given document bytes. */
+    function blessedPayload(contents: string): string {
+      return JSON.stringify({
+        fileName: PROTOTYPE_HTML_RELPATH,
+        contentHash: createHash('sha256').update(contents).digest('hex'),
+      });
+    }
+
+    it('valid ui-prototype: mints the canonical {fileName, contentHash} payload, discarding the agent-sent payload', async () => {
       seedRun(db, 'run-1');
-      writeRunPrototype('run-1', '<html><head></head><body>mock</body></html>');
+      const html = '<html><head></head><body>mock</body></html>';
+      writeRunPrototype('run-1', html);
       const res = await report('run-1', 'ui-prototype', JSON.stringify({ fileName: 'whatever-agent-claimed.html', extra: 1 }));
       expect(res.ok).toBe(true);
       const { artifactId } = res.data as { artifactId: string };
       const row = artifactRow(db, artifactId)!;
-      expect(row.payload_json).toBe(JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }));
+      expect(row.payload_json).toBe(blessedPayload(html));
     });
 
-    it('valid interactive-prototype: same blessing as ui-prototype (mints the canonical {fileName})', async () => {
+    it('valid interactive-prototype: same blessing as ui-prototype (mints the canonical {fileName, contentHash})', async () => {
       seedRun(db, 'run-1');
-      writeRunPrototype('run-1', '<html><head></head><body><script>1</script></body></html>');
+      const html = '<html><head></head><body><script>1</script></body></html>';
+      writeRunPrototype('run-1', html);
       const res = await report(
         'run-1',
         'interactive-prototype',
@@ -311,7 +322,31 @@ describe('McpQueryHandler artifact handlers', () => {
       const { artifactId } = res.data as { artifactId: string };
       const row = artifactRow(db, artifactId)!;
       expect(row.atype).toBe('interactive-prototype');
-      expect(row.payload_json).toBe(JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }));
+      expect(row.payload_json).toBe(blessedPayload(html));
+    });
+
+    it('re-report after an in-place content edit bumps revision; identical re-report does not', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', '<html><head></head><body>v1</body></html>');
+      const first = await report('run-1', 'interactive-prototype');
+      expect(first.ok).toBe(true);
+      const { artifactId } = first.data as { artifactId: string };
+      const rev1 = artifactRow(db, artifactId)!.revision as number;
+
+      // Same bytes → same minted payload → the delta-gated bump must NOT fire.
+      const idempotent = await report('run-1', 'interactive-prototype');
+      expect(idempotent.ok).toBe(true);
+      expect((idempotent.data as { artifactId: string }).artifactId).toBe(artifactId);
+      expect(artifactRow(db, artifactId)!.revision).toBe(rev1);
+
+      // Changed bytes → contentHash delta → revision advances (the feedback
+      // ack's applied_prototype_revision depends on this; a bare {fileName}
+      // pointer froze the counter forever).
+      writeRunPrototype('run-1', '<html><head></head><body>v2 — Lights Out!</body></html>');
+      const edited = await report('run-1', 'interactive-prototype');
+      expect(edited.ok).toBe(true);
+      expect((edited.data as { artifactId: string }).artifactId).toBe(artifactId);
+      expect(artifactRow(db, artifactId)!.revision).toBe(rev1 + 1);
     });
 
     it('rejects an interactive-prototype payload carrying inline html (invalid_payload)', async () => {

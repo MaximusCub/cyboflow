@@ -131,14 +131,18 @@ export const designRouter = router({
         .get(input.sessionId) as DraftStatusRow | undefined;
       if (!draft) return null;
 
-      // The current prototype on the session's chat run (enrich-in-place → newest).
+      // The current prototype on the session's chat run — THE prototype-family
+      // selection rule (payload-bearing, then interactive tier, then revision;
+      // rationale at the draft-binding site in mcpQueryHandler); mirrored in
+      // pickPrototype (DesignModeSurface). Change all three together.
       let prototype: PrototypeStatusRow | undefined;
       if (session.chat_run_id) {
         prototype = db
           .prepare(
             `SELECT id, revision FROM artifacts
               WHERE run_id = ? AND atype IN ('ui-prototype', 'interactive-prototype')
-              ORDER BY (payload_json IS NOT NULL) DESC, revision DESC, created_at DESC LIMIT 1`,
+              ORDER BY (payload_json IS NOT NULL) DESC, (atype = 'interactive-prototype') DESC,
+                       revision DESC, created_at DESC LIMIT 1`,
           )
           .get(session.chat_run_id) as PrototypeStatusRow | undefined;
       }
