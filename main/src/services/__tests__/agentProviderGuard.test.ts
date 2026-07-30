@@ -16,10 +16,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   AgentProviderDisabledError,
+  agentProviderDisabledMessage,
   assertAgentProviderAllowed,
   isAgentProviderAllowed,
   setAgentProviderAccessResolver,
 } from '../agentProviderGuard';
+import { parseAgentProviderDisabled } from '../../../../shared/types/agentRuntime';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import { relayOrSpawnPtyPanel } from '../../ipc/ptyPanelDispatch';
 import { AbstractCliManager } from '../panels/cli/AbstractCliManager';
@@ -49,8 +51,11 @@ describe('agentProviderGuard', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(AgentProviderDisabledError);
       expect((error as AgentProviderDisabledError).provider).toBe('codex');
-      expect((error as Error).message).toMatch(/Codex is turned off in Settings → Integrations/);
+      // The wire form carries the machine code plus the user-facing sentence.
+      expect((error as Error).message).toMatch(/^ERR_AGENT_PROVIDER_DISABLED\[codex\]:/);
+      expect((error as Error).message).toMatch(/Codex is turned off/);
       expect((error as Error).message).toMatch(/this chat turn cannot run/);
+      expect((error as Error).message).toMatch(/Settings → Integrations/);
     }
   });
 
@@ -127,24 +132,28 @@ describe('AbstractCliManager.spawnCliProcess — the spawn guard', () => {
         availabilityProbe();
         return { available: true };
       }
-      protected getCliNotAvailableMessage(): string {
-        return 'unavailable';
-      }
+      // The remaining abstract surface is never reached: the guard refuses ahead
+      // of every one of them.
       protected buildCommandArgs(): string[] {
+        return [];
+      }
+      protected async getCliExecutablePath(): Promise<string> {
+        return 'true';
+      }
+      protected parseCliOutput(): never[] {
         return [];
       }
       protected async initializeCliEnvironment(): Promise<Record<string, string>> {
         return {};
       }
-      protected handleCliOutput(): void {}
-      protected parseCliResponse(): unknown {
-        return null;
+      protected async cleanupCliResources(): Promise<void> {}
+      protected async getCliEnvironment(): Promise<Record<string, string>> {
+        return {};
       }
-      protected async handleCliNotAvailable(): Promise<void> {}
-      protected getCliCommand(): string {
-        return 'true';
-      }
-      protected async continueConversation(): Promise<void> {}
+      async startPanel(): Promise<void> {}
+      async continuePanel(): Promise<void> {}
+      async stopPanel(): Promise<void> {}
+      async restartPanelWithHistory(): Promise<void> {}
     }
     return new TestManager();
   }
@@ -208,5 +217,30 @@ describe('relayOrSpawnPtyPanel — the live-PTY relay guard', () => {
       relayOrSpawnPtyPanel(deps as any, panel, 'another turn'),
     ).resolves.toBe(true);
     expect(relayUserTurn).toHaveBeenCalledWith('panel-1', 'another turn');
+  });
+});
+
+describe('agentProviderDisabledMessage — the IPC propagation helper', () => {
+  it('returns the user-facing message, parseable back into provider + prose', () => {
+    const error = new AgentProviderDisabledError('claude', 'this chat turn');
+    const message = agentProviderDisabledMessage(error);
+
+    expect(message).not.toBeNull();
+    // The renderer must be able to recover the provider and strip the code — this
+    // is the contract that makes the composer's "Open Settings" action possible.
+    expect(parseAgentProviderDisabled(message)).toMatchObject({ provider: 'claude' });
+    expect(parseAgentProviderDisabled(message)?.message).toMatch(/Claude is turned off/);
+  });
+
+  it('recognizes an error that lost its prototype crossing a boundary', () => {
+    const plain = new Error('ERR_AGENT_PROVIDER_DISABLED[codex]: Codex is turned off.');
+    plain.name = 'AgentProviderDisabledError';
+    expect(agentProviderDisabledMessage(plain)).toMatch(/Codex is turned off/);
+  });
+
+  it('returns null for an ordinary error, so generic copy still wins', () => {
+    expect(agentProviderDisabledMessage(new Error('worktree locked'))).toBeNull();
+    expect(agentProviderDisabledMessage('nope')).toBeNull();
+    expect(agentProviderDisabledMessage(undefined)).toBeNull();
   });
 });

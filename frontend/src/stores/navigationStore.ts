@@ -6,6 +6,15 @@ function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflo
   trackEvent('view_opened', { view });
 }
 
+/** Tabs the Settings dialog can open on (mirrors Settings.tsx's own union). */
+export type SettingsTab =
+  | 'general'
+  | 'ai'
+  | 'assistant'
+  | 'integrations'
+  | 'notifications'
+  | 'updates';
+
 /**
  * Options carried into the new-flow wizard when it becomes the center surface.
  * `lockProjectId` pins the wizard to a project (rail "+ NEW FLOW" on a project);
@@ -111,6 +120,10 @@ interface NavigationState {
    * pane at a time.
    */
   verifyQueueOpen: boolean;
+  /** Whether the Settings dialog is open (a modal, not a center surface). */
+  settingsOpen: boolean;
+  /** Tab the Settings dialog opens on. */
+  settingsTab: SettingsTab;
 
   // Actions
   goHome: () => void;
@@ -138,6 +151,16 @@ interface NavigationState {
   openVerifyQueue: () => void;
   closeVerifyQueue: () => void;
   toggleVerifyQueue: () => void;
+  /**
+   * Open the Settings dialog on a given tab. Deliberately NOT part of the
+   * mutually-exclusive center-surface group above — Settings is a MODAL that
+   * floats over whatever is beneath, so opening it neither closes a pane nor is
+   * closed by a nav action. Lives here (rather than in Sidebar-local state, its
+   * only renderer) so any surface can offer a "fix this in Settings" affordance —
+   * e.g. the chat's provider-disabled failure row, several components deep.
+   */
+  openSettings: (tab?: SettingsTab) => void;
+  closeSettings: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -151,6 +174,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   workflowsOpen: false,
   experimentComparisonId: null,
   verifyQueueOpen: false,
+  settingsOpen: false,
+  settingsTab: 'general',
 
   // Center-surface state machine. goHome returns to the rail-overlay surface
   // (clearing any wizard opts + all five overlays); goToWizard swaps in the
@@ -243,6 +268,13 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     if (!s.verifyQueueOpen) fireViewOpened('verify_queue');
     return { view: 'home', verifyQueueOpen: !s.verifyQueueOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null };
   }),
+
+  // Settings modal. Independent of the center-surface group: no nav action
+  // clears it and it clears nothing, so it can be opened from anywhere (the
+  // chat's provider-disabled row, the rail button) and layer over the surface
+  // the user was already on.
+  openSettings: (tab = 'general') => set({ settingsOpen: true, settingsTab: tab }),
+  closeSettings: () => set({ settingsOpen: false }),
 
   // Sixth sibling (A/B testing slice C) — opening the experiment comparison
   // closes all the other overlays and forces home, mirroring the workflows

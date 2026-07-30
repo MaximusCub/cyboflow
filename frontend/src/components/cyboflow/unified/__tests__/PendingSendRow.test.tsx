@@ -10,6 +10,8 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { PendingSendRow } from '../PendingSendRow';
+import { useNavigationStore } from '../../../../stores/navigationStore';
+import { formatAgentProviderDisabled } from '../../../../../../shared/types/agentRuntime';
 import type { PendingSend } from '../../../../stores/pendingSendStore';
 
 function entry(over: Partial<PendingSend>): PendingSend {
@@ -61,5 +63,76 @@ describe('PendingSendRow', () => {
     fireEvent.click(screen.getByTestId('pending-send-failed'));
     expect(onReopen).toHaveBeenCalledTimes(2);
     expect(onReopen).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'f' }));
+  });
+
+  it('shows the failure REASON so the row explains itself', () => {
+    render(
+      <PendingSendRow
+        entries={[entry({ id: 'f', status: 'failed', error: 'Worktree is locked' })]}
+        onReopen={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('pending-send-reason')).toHaveTextContent('Worktree is locked');
+  });
+
+  it('never shows a stale reason on a non-failed row', () => {
+    render(
+      <PendingSendRow
+        entries={[entry({ id: 'q', status: 'queued', error: 'stale' })]}
+        onReopen={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('pending-send-reason')).not.toBeInTheDocument();
+  });
+
+  it('offers Settings → Integrations for a provider-disabled failure, and strips the wire code', () => {
+    useNavigationStore.setState({ settingsOpen: false, settingsTab: 'general' });
+    const wire = formatAgentProviderDisabled(
+      'claude',
+      'Claude is turned off, so Claude agent calls cannot run.',
+    );
+    render(
+      <PendingSendRow
+        entries={[entry({ id: 'f', status: 'failed', error: wire })]}
+        onReopen={vi.fn()}
+      />,
+    );
+
+    // The machine prefix is display noise — the user reads the sentence only.
+    const reason = screen.getByTestId('pending-send-reason');
+    expect(reason).toHaveTextContent('Claude is turned off, so Claude agent calls cannot run.');
+    expect(reason.textContent).not.toContain('ERR_AGENT_PROVIDER_DISABLED');
+
+    fireEvent.click(screen.getByTestId('pending-send-open-integrations'));
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
+    expect(useNavigationStore.getState().settingsTab).toBe('integrations');
+  });
+
+  it('offers no Settings shortcut for an ordinary failure', () => {
+    render(
+      <PendingSendRow
+        entries={[entry({ id: 'f', status: 'failed', error: 'Failed to continue panel' })]}
+        onReopen={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('pending-send-open-integrations')).not.toBeInTheDocument();
+  });
+
+  it('keeps the retry click working alongside the Settings action', () => {
+    const onReopen = vi.fn();
+    render(
+      <PendingSendRow
+        entries={[
+          entry({
+            id: 'f',
+            status: 'failed',
+            error: formatAgentProviderDisabled('codex', 'Codex is turned off.'),
+          }),
+        ]}
+        onReopen={onReopen}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('pending-send-failed'));
+    expect(onReopen).toHaveBeenCalledWith(expect.objectContaining({ id: 'f' }));
   });
 });

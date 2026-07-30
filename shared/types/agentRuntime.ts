@@ -134,6 +134,45 @@ export function resolveAgentProviderAccess(
   return resolved;
 }
 
+/**
+ * Wire format for "you called a provider you switched off".
+ *
+ * The guard throws on the MAIN side but every IPC surface flattens an error to
+ * a bare `error: string`, so the structured class is lost by the time the
+ * renderer sees it. Rather than have the UI sniff prose (which breaks the
+ * moment the copy is reworded), the message carries a stable machine prefix
+ * that `parseAgentProviderDisabled` strips back off for display. A surface that
+ * does not parse still shows a readable sentence, just with the code in front.
+ */
+export const AGENT_PROVIDER_DISABLED_CODE = 'ERR_AGENT_PROVIDER_DISABLED';
+
+const DISABLED_PATTERN = new RegExp(`^${AGENT_PROVIDER_DISABLED_CODE}\\[(claude|codex)\\]:\\s*`);
+
+/** Build the wire message: `ERR_AGENT_PROVIDER_DISABLED[claude]: <prose>`. */
+export function formatAgentProviderDisabled(provider: AgentProvider, message: string): string {
+  return `${AGENT_PROVIDER_DISABLED_CODE}[${provider}]: ${message}`;
+}
+
+/**
+ * Recognize a provider-disabled failure anywhere in an error string (IPC may
+ * wrap the thrown message in its own prefix), returning the provider and the
+ * human sentence with the code removed. Null when it is an ordinary failure.
+ */
+export function parseAgentProviderDisabled(
+  text: string | undefined | null,
+): { provider: AgentProvider; message: string } | null {
+  if (typeof text !== 'string') return null;
+  const start = text.indexOf(AGENT_PROVIDER_DISABLED_CODE);
+  if (start === -1) return null;
+  const tail = text.slice(start);
+  const match = DISABLED_PATTERN.exec(tail);
+  if (!match) return null;
+  return {
+    provider: match[1] === 'codex' ? 'codex' : 'claude',
+    message: tail.slice(match[0].length).trim(),
+  };
+}
+
 /** Structural validator for the untyped IPC config patch. */
 export function isAgentProviderAccess(value: unknown): value is AgentProviderAccess {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;

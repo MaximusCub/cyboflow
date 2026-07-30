@@ -10,6 +10,7 @@ import { useConfigStore } from '../stores/configStore';
 import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { useOnboardingStore } from '../stores/onboardingStore';
+import { useNavigationStore } from '../stores/navigationStore';
 import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
 
 interface SidebarProps {
@@ -83,13 +84,19 @@ export const Sidebar = memo(function Sidebar({
   verifyQueueActive = false,
   onToggleVerifyQueue,
 }: SidebarProps) {
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Settings dialog state lives in navigationStore, not here: any surface can
+  // need to open it (e.g. the chat's provider-disabled failure row offering
+  // "Open Settings → Integrations"), and Sidebar is simply where the dialog is
+  // mounted. Keeping ONE source avoids a second, unreachable open path.
+  const isSettingsOpen = useNavigationStore((s) => s.settingsOpen);
+  const settingsInitialTab = useNavigationStore((s) => s.settingsTab);
+  const openSettings = useNavigationStore((s) => s.openSettings);
+  const closeSettings = useNavigationStore((s) => s.closeSettings);
   const onboardingHydrated = useOnboardingStore((state) => state.hydrated);
   const onboardingStatus = useOnboardingStore((state) => state.status);
   const onboardingStep = useOnboardingStore((state) => state.step);
   const showResumeSetup =
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
-  const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>('general');
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [version, setVersion] = useState<string>('');
@@ -148,14 +155,16 @@ export const Sidebar = memo(function Sidebar({
       try {
         const open = await window.electronAPI.invoke('app:consume-open-update-settings');
         if (open === true) {
-          setSettingsInitialTab('updates');
-          setIsSettingsOpen(true);
+          openSettings('updates');
         }
       } catch (error) {
         console.error('Failed to consume open-update-settings flag:', error);
       }
     };
     consumeOpenUpdateSettings();
+    // Mount-once by design (the flag is one-shot); openSettings is a stable
+    // zustand action, so omitting it cannot go stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -212,7 +221,7 @@ export const Sidebar = memo(function Sidebar({
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
             <IconButton
-              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); trackEvent('settings_opened'); }}
+              onClick={() => { openSettings('general'); trackEvent('settings_opened'); }}
               aria-label="Settings"
               data-testid="settings-button"
               size="md"
@@ -493,7 +502,7 @@ export const Sidebar = memo(function Sidebar({
         </div>
     </div>
 
-      <Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} initialTab={settingsInitialTab} />
+      <Settings isOpen={isSettingsOpen} onClose={closeSettings} initialTab={settingsInitialTab} />
       
       {/* Status Guide Modal */}
       <Modal 

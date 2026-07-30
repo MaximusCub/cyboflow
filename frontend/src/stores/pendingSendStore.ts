@@ -32,6 +32,13 @@ export interface PendingSend {
   /** epoch ms at dispatch — the lower bound of the reconciliation window. */
   createdAt: number;
   status: PendingSendStatus;
+  /**
+   * Why a 'failed' entry failed — the dispatch's `error` string (or a thrown
+   * message), surfaced verbatim in the row so a failure explains itself instead
+   * of reading as a bare "Failed · click to retry". Absent for non-failed
+   * entries, and absent on a failure the caller could not attribute.
+   */
+  error?: string;
 }
 
 /**
@@ -97,8 +104,13 @@ interface PendingSendState {
 
   /** Push a pending entry; returns its id. Defaults to 'sending'. */
   addPending: (hostKey: string, text: string, status?: PendingSendStatus) => string;
-  /** Flip an entry's status (e.g. 'sending' → 'failed', or → 'queued'). */
-  setStatus: (hostKey: string, id: string, status: PendingSendStatus) => void;
+  /**
+   * Flip an entry's status (e.g. 'sending' → 'failed', or → 'queued'). `error`
+   * is the failure reason to display; passing it on a non-failure is harmless
+   * (it is cleared whenever the status is not 'failed', so a retry that queues
+   * never carries a stale message).
+   */
+  setStatus: (hostKey: string, id: string, status: PendingSendStatus, error?: string) => void;
   /** Remove an entry outright (reconciled / reopened / dropped). */
   removePending: (hostKey: string, id: string) => void;
   /**
@@ -129,11 +141,15 @@ export const usePendingSendStore = create<PendingSendState>((set, get) => ({
     return id;
   },
 
-  setStatus: (hostKey, id, status) => {
+  setStatus: (hostKey, id, status, error) => {
     set((state) => {
       const list = state.byHost[hostKey];
       if (!list) return state;
-      const next = list.map((e) => (e.id === id ? { ...e, status } : e));
+      const next = list.map((e) =>
+        e.id === id
+          ? { ...e, status, ...(status === 'failed' && error ? { error } : { error: undefined }) }
+          : e,
+      );
       return { byHost: { ...state.byHost, [hostKey]: next } };
     });
   },

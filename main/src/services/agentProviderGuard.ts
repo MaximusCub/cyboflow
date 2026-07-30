@@ -28,7 +28,10 @@
  * folding in the demo-mode exemption (demo dispatches to the scripted
  * DemoCliManager, never a real vendor).
  */
-import type { AgentProvider } from '../../../shared/types/agentRuntime';
+import {
+  formatAgentProviderDisabled,
+  type AgentProvider,
+} from '../../../shared/types/agentRuntime';
 
 /** Human label used in the thrown message. */
 const PROVIDER_LABELS: Record<AgentProvider, string> = {
@@ -45,9 +48,15 @@ export class AgentProviderDisabledError extends Error {
   readonly provider: AgentProvider;
 
   constructor(provider: AgentProvider, context: string) {
+    // Carries the machine prefix (shared/types/agentRuntime) because every IPC
+    // surface flattens this to a bare string — the renderer parses it back into
+    // {provider, message} to show the reason plus an "Open Settings" affordance.
     super(
-      `${PROVIDER_LABELS[provider]} is turned off in Settings → Integrations, so ${context} cannot run. ` +
-        `Enable ${PROVIDER_LABELS[provider]} to continue.`,
+      formatAgentProviderDisabled(
+        provider,
+        `${PROVIDER_LABELS[provider]} is turned off, so ${context} cannot run. ` +
+          `Turn ${PROVIDER_LABELS[provider]} back on in Settings → Integrations to continue.`,
+      ),
     );
     this.name = 'AgentProviderDisabledError';
     this.provider = provider;
@@ -89,4 +98,30 @@ export function assertAgentProviderAllowed(provider: AgentProvider, context: str
   if (!isAgentProviderAllowed(provider)) {
     throw new AgentProviderDisabledError(provider, context);
   }
+}
+
+/**
+ * The user-facing message when `error` is a provider-disabled refusal, else
+ * null.
+ *
+ * IPC handlers deliberately collapse a caught error into a generic string so
+ * internals never reach the renderer — which also swallowed THIS refusal,
+ * leaving the chat showing a bare "Failed · click to retry" with no reason. Call
+ * this first in such a catch and return its result when non-null: the message is
+ * authored for the user, carries the machine code the renderer parses to offer
+ * "Open Settings → Integrations", and leaks nothing.
+ *
+ * Matches by name as well as by instance so an error that crossed a module or
+ * process boundary (losing its prototype) is still recognized.
+ */
+export function agentProviderDisabledMessage(error: unknown): string | null {
+  if (error instanceof AgentProviderDisabledError) return error.message;
+  if (
+    error instanceof Error &&
+    error.name === 'AgentProviderDisabledError' &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  return null;
 }

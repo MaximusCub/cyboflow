@@ -54,6 +54,7 @@ import {
   QUICK_CODEX_SDK_BRIEFING,
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
+import { agentProviderDisabledMessage } from '../services/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { resolvePanelLane, type PanelLane } from '../services/panelLane';
 import type { ToolPanel } from '../../../shared/types/panels';
@@ -1795,7 +1796,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       return { success: true };
     } catch (error) {
       console.error('Failed to send input:', error);
-      return { success: false, error: 'Failed to send input' };
+      // Surface a provider-disabled refusal verbatim: it is user-authored copy
+      // (and carries the code the composer parses into an "Open Settings →
+      // Integrations" action), so collapsing it into the generic string below
+      // would strand the user retrying with no stated reason.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to send input' };
     }
   });
 
@@ -2507,7 +2513,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             return { success: true };
           } catch (err) {
             console.error('Failed to send input to Claude panel:', err);
-            return { success: false, error: 'Failed to send input to Claude panel' };
+            // Surface a provider-disabled refusal verbatim: it is user-authored copy
+            // (and carries the code the composer parses into an "Open Settings →
+            // Integrations" action), so collapsing it into the generic string below
+            // would strand the user retrying with no stated reason.
+            const disabled = agentProviderDisabledMessage(err);
+            return { success: false, error: disabled ?? 'Failed to send input to Claude panel' };
           }
         case 'terminal':
           // Terminal panels don't have input handlers - they use runTerminalCommand
@@ -2517,7 +2528,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
     } catch (error) {
       console.error('Failed to send input to panel:', error);
-      return { success: false, error: 'Failed to send input to panel' };
+      // Surface a provider-disabled refusal verbatim: it is user-authored copy
+      // (and carries the code the composer parses into an "Open Settings →
+      // Integrations" action), so collapsing it into the generic string below
+      // would strand the user retrying with no stated reason.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to send input to panel' };
     }
   });
 
@@ -2720,14 +2736,24 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             return { success: true };
           } catch (err) {
             console.error('Failed to continue Claude panel:', err);
-            return { success: false, error: 'Failed to continue Claude panel' };
+            // Surface a provider-disabled refusal verbatim: it is user-authored copy
+            // (and carries the code the composer parses into an "Open Settings →
+            // Integrations" action), so collapsing it into the generic string below
+            // would strand the user retrying with no stated reason.
+            const disabled = agentProviderDisabledMessage(err);
+            return { success: false, error: disabled ?? 'Failed to continue Claude panel' };
           }
         default:
           return { success: false, error: `Panel type ${panel.type} does not support continue operation` };
       }
     } catch (error) {
       console.error('Failed to continue panel conversation:', error);
-      return { success: false, error: 'Failed to continue panel conversation' };
+      // Surface a provider-disabled refusal verbatim: it is user-authored copy
+      // (and carries the code the composer parses into an "Open Settings →
+      // Integrations" action), so collapsing it into the generic string below
+      // would strand the user retrying with no stated reason.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to continue panel conversation' };
     }
   });
 
@@ -2764,7 +2790,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       return { success: true, data: { queued: true } };
     } catch (error) {
       console.error('Failed to queue panel input:', error);
-      return { success: false, error: 'Failed to queue panel input' };
+      // Surface a provider-disabled refusal verbatim: it is user-authored copy
+      // (and carries the code the composer parses into an "Open Settings →
+      // Integrations" action), so collapsing it into the generic string below
+      // would strand the user retrying with no stated reason.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to queue panel input' };
     }
   });
 

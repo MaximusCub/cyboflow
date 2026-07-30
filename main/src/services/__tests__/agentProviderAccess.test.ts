@@ -12,11 +12,14 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  AGENT_PROVIDER_DISABLED_CODE,
   enabledAgentProviders,
   firstEnabledRuntime,
   isAgentProviderAccess,
   isAgentProviderEnabled,
   isRuntimeProviderEnabled,
+  formatAgentProviderDisabled,
+  parseAgentProviderDisabled,
   providerForRuntime,
   resolveAgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
@@ -95,5 +98,32 @@ describe('firstEnabledRuntime', () => {
 
   it('returns null when no candidate is available', () => {
     expect(firstEnabledRuntime({ claude: false, codex: true }, ['claude-sdk'] as const)).toBeNull();
+  });
+});
+
+describe('provider-disabled wire format', () => {
+  it('round-trips provider + message through the machine prefix', () => {
+    const wire = formatAgentProviderDisabled('codex', 'Codex is turned off.');
+    expect(wire.startsWith(AGENT_PROVIDER_DISABLED_CODE)).toBe(true);
+    expect(parseAgentProviderDisabled(wire)).toEqual({
+      provider: 'codex',
+      message: 'Codex is turned off.',
+    });
+  });
+
+  it('still parses when an IPC layer prefixes its own text', () => {
+    const wrapped = `Error invoking remote method: ${formatAgentProviderDisabled('claude', 'Claude is off.')}`;
+    expect(parseAgentProviderDisabled(wrapped)).toEqual({
+      provider: 'claude',
+      message: 'Claude is off.',
+    });
+  });
+
+  it('returns null for an ordinary failure or a non-string', () => {
+    expect(parseAgentProviderDisabled('Failed to continue panel conversation')).toBeNull();
+    expect(parseAgentProviderDisabled(undefined)).toBeNull();
+    expect(parseAgentProviderDisabled(null)).toBeNull();
+    // Right code, malformed payload — must not be mistaken for a real refusal.
+    expect(parseAgentProviderDisabled(`${AGENT_PROVIDER_DISABLED_CODE}[gemini]: nope`)).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
+import { errorText } from '../../../utils/errorText';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { EffortPill } from './EffortPill';
@@ -372,9 +373,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
         void API.panels
           .queueInput(panelId, id, text)
           .then((res) => {
-            if (!res.success || res.data?.queued !== true) setPendingStatus(hostKey, id, 'failed');
+            if (!res.success || res.data?.queued !== true) {
+              setPendingStatus(hostKey, id, 'failed', res.error);
+            }
           })
-          .catch(() => setPendingStatus(hostKey, id, 'failed'));
+          .catch((error) => setPendingStatus(hostKey, id, 'failed', errorText(error)));
         return;
       }
 
@@ -392,14 +395,14 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       // `res && res.success === false` only flips on an explicit failure result.
       void Promise.resolve(dispatch)
         .then((res) => {
-          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed');
+          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed', res.error);
           // Status-flap fallback: the backend queued this continue (keyed by `id`)
           // instead of dispatching it. Flip the optimistic 'sending' row to the
           // addressable 'queued' state so it reconciles/dequeues like a normal
           // running-state queue, instead of lingering as a stuck 'sending' row.
           else if (res && (res as { queued?: boolean }).queued === true) setPendingStatus(hostKey, id, 'queued');
         })
-        .catch(() => setPendingStatus(hostKey, id, 'failed'));
+        .catch((error) => setPendingStatus(hostKey, id, 'failed', errorText(error)));
     },
     [
       interactive,
@@ -435,9 +438,9 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
         handleContinueConversation(text, atts.images, atts.texts, modelId ?? undefined, true),
       )
         .then((res) => {
-          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed');
+          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed', res.error);
         })
-        .catch(() => setPendingStatus(hostKey, id, 'failed'));
+        .catch((error) => setPendingStatus(hostKey, id, 'failed', errorText(error)));
     },
     [input, setInput, hostKey, addPending, setPendingStatus, handleContinueConversation, modelId],
   );
