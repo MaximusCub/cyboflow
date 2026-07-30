@@ -175,7 +175,7 @@ interface EvalRunRow {
   diff_stats_json: string | null;
   gate_results_json: string | null;
   /**
-   * How the row was minted (migration 082): NULL = the automatic human-review
+   * How the row was minted (migration 090): NULL = the automatic human-review
    * trigger, 'adhoc' = the cyboflow_run_eval MCP tool. Only the ad-hoc rows get a
    * completion summary review item (a workflow run already shows its score in
    * WorkflowSummaryPanel; a quick session has no such surface).
@@ -896,7 +896,7 @@ export class EvalWorker {
    * automatic + every legacy row) are a no-op, because a workflow run already
    * renders its verdict in WorkflowSummaryPanel.
    *
-   * Identity is one-per-(run, atype) (migration 083's idx_artifacts_one_per_atype),
+   * Identity is one-per-(run, atype) (migration 091's idx_artifacts_one_per_atype),
    * so a REQUEUED eval UPSERTs the newest markdown over the previous verdict —
    * exactly one report tab per run, always showing the latest grade.
    *

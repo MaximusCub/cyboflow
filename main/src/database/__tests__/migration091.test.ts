@@ -1,8 +1,8 @@
 /**
- * Migration 083_eval_report_atype.sql — schema + constraint tests.
+ * Migration 091_eval_report_atype.sql — schema + constraint tests.
  *
- * Applies the artifacts chain 006 -> … -> 063 -> 073 -> 083 against an in-memory
- * SQLite instance (mirroring migration073.test.ts). Proves:
+ * Applies the artifacts chain 006 -> … -> 073 -> 088 -> 089 -> 091 against an
+ * in-memory SQLite instance (mirroring migration073.test.ts). Proves:
  *   1. 'eval-report' is insertable alongside every pre-existing atype; a bogus
  *      atype is still rejected by the widened CHECK.
  *   2. 'eval-report' is NOT per-entity: it stays strictly one-per-(run, atype),
@@ -53,10 +53,19 @@ const THROUGH_073 = [
   '073_approve_designs_and_per_idea_arch.sql',
 ];
 
+// 088 adds `revision` (the ensure-guard; a plain ALTER here since this subset
+// skips 082_design_mode_v0) and 089 is the prior recreate whose shape 091
+// reproduces — both must precede 091 so its INSERT..SELECT of `revision` works.
+const THROUGH_089 = [
+  ...THROUGH_073,
+  '088_artifacts_revision_ensure.sql',
+  '089_interactive_prototype.sql',
+];
+
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_073, '083_eval_report_atype.sql']);
+  apply(db, [...THROUGH_089, '091_eval_report_atype.sql']);
   return db;
 }
 
@@ -87,7 +96,7 @@ function insertArtifact(
   );
 }
 
-describe('Migration 083: eval-report artifact atype', () => {
+describe('Migration 091: eval-report artifact atype', () => {
   it('(a) accepts eval-report alongside every pre-existing atype, rejects a bogus one', () => {
     const db = buildDb();
     seedRun(db, 'run-1');
@@ -97,6 +106,7 @@ describe('Migration 083: eval-report artifact atype', () => {
       'screenshots',
       'ui-prototype',
       'generic',
+      'interactive-prototype',
       'arch-design',
       'compound-recommendations',
       'approve-ideas',
@@ -147,21 +157,21 @@ describe('Migration 083: eval-report artifact atype', () => {
   it('(d) preserves pre-existing artifacts rows across the copy (full column shape)', () => {
     const db = new Database(':memory:');
     seedProject(db);
-    apply(db, THROUGH_073); // up to but NOT including 083
+    apply(db, THROUGH_089); // up to but NOT including 091
     seedRun(db, 'run-keep');
     db.prepare(
       `INSERT INTO artifacts (id, run_id, session_id, atype, label, step_origin, mode, committed,
-                              session_only, is_new, payload_json, source_ref, committed_at)
+                              session_only, is_new, payload_json, source_ref, committed_at, revision)
        VALUES ('art_keep', 'run-keep', 'sess-9', 'compound-recommendations', 'Keep me',
-               'Compound · extract', 'template', 1, 0, 0, '{"markdown":"x"}', 'ide_1', '2026-07-01T00:00:00.000Z')`,
+               'Compound · extract', 'template', 1, 0, 0, '{"markdown":"x"}', 'ide_1', '2026-07-01T00:00:00.000Z', 3)`,
     ).run();
 
-    apply(db, ['083_eval_report_atype.sql']);
+    apply(db, ['091_eval_report_atype.sql']);
 
     const row = db
       .prepare(
         `SELECT id, run_id, session_id, atype, label, step_origin, mode, committed,
-                session_only, is_new, payload_json, source_ref, committed_at
+                session_only, is_new, payload_json, source_ref, committed_at, revision
            FROM artifacts WHERE id = 'art_keep'`,
       )
       .get() as Record<string, unknown> | undefined;
@@ -179,6 +189,8 @@ describe('Migration 083: eval-report artifact atype', () => {
       payload_json: '{"markdown":"x"}',
       source_ref: 'ide_1',
       committed_at: '2026-07-01T00:00:00.000Z',
+      // 089-era column carried through the 091 copy, not re-defaulted to 1.
+      revision: 3,
     });
     db.close();
   });
@@ -198,14 +210,14 @@ describe('Migration 083: eval-report artifact atype', () => {
   });
 
   it('(f) the fresh-DB initialize() path includes eval-report in the atype CHECK', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration083-'));
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration091-'));
     try {
       const svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
 
-      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-083')`).run();
+      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-091')`).run();
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
       ).run();

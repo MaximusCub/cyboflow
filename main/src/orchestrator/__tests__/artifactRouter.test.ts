@@ -81,10 +81,6 @@ function buildDb(): Database.Database {
     '062_approve_ideas_atype.sql',
     '063_per_idea_spec_artifacts.sql',
     '073_approve_designs_and_per_idea_arch.sql',
-    // 083 widens the atype CHECK to include 'eval-report' (the ad-hoc eval's
-    // system-minted verdict tab) — required by the "accepts every atype in the
-    // ArtifactType union" sweep below.
-    '083_eval_report_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -105,6 +101,11 @@ function buildDb(): Database.Database {
   // the "accepts every atype in the union" loop can write interactive-prototype,
   // now that VALID_ATYPES derives from the exhaustive registry.
   db.exec(readFileSync(join(migDir, '089_interactive_prototype.sql'), 'utf-8'));
+  // Migration 091 widens the CHECK again to add 'eval-report' (the ad-hoc
+  // eval's system-minted verdict tab). MUST run after 089 — each recreate
+  // carries only the atypes it names, so applying it earlier would let 089
+  // drop 'eval-report' right back out of the CHECK.
+  db.exec(readFileSync(join(migDir, '091_eval_report_atype.sql'), 'utf-8'));
   return db;
 }
 

@@ -26,7 +26,7 @@
  * create a second row — instead it flips human_influenced=1 (the first, pre-human
  * snapshot is canonical) and does NOT re-enqueue or re-capture.
  *
- * AD-HOC INTERACTION (migration 082): snapshotRunForAdHocEval below can mint a row
+ * AD-HOC INTERACTION (migration 090): snapshotRunForAdHocEval below can mint a row
  * with origin='adhoc' for the SAME (run, rubric_version) PK slot before this
  * automatic trigger ever fires. When that happens the existing-row branch here
  * treats the ad-hoc row as a re-fire: it flips human_influenced=1 (already 1 on an
@@ -109,7 +109,7 @@ export type AdHocSnapshotResult =
   | { outcome: 'in_flight'; rubricVersion: string }
   | { outcome: 'rejected'; reason: 'run_not_found' | 'tagged_run' | 'exists_auto' | 'no_diff' };
 
-/** Value of run_evals.origin for a row minted by the ad-hoc MCP tool (migration 082). */
+/** Value of run_evals.origin for a row minted by the ad-hoc MCP tool (migration 090). */
 export const EVAL_ORIGIN_ADHOC = 'adhoc';
 
 interface RunRow {
@@ -344,7 +344,7 @@ export async function snapshotRunForEval(
   // INSERT OR IGNORE gives re-fire dedup for free even against a race: if a
   // concurrent trigger inserted first, changes===0 and we flip human_influenced.
   //
-  // `origin` (migration 082) is deliberately ABSENT from this column list: the
+  // `origin` (migration 090) is deliberately ABSENT from this column list: the
   // automatic trigger is the NULL origin (every legacy row is NULL too), and the
   // column defaults NULL. Do not add it here — "NULL means automatic" is the
   // contract the ad-hoc path's exists_auto guard reads.
@@ -486,7 +486,7 @@ export async function snapshotRunForAdHocEval(
       return { outcome: 'in_flight', rubricVersion: RUBRIC_VERSION };
     }
     // (5) The existing terminal row is the run's CANONICAL automatic eval (origin
-    // NULL — see migration 082). Insights + the score panel read it; destroying it
+    // NULL — see migration 090). Insights + the score panel read it; destroying it
     // to re-grade a later diff would rewrite history. Reject instead.
     if (existing.origin !== EVAL_ORIGIN_ADHOC) {
       logger?.info('[eval] ad-hoc eval rejected — canonical automatic eval exists', { runId });

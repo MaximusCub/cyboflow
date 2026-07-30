@@ -41,6 +41,7 @@ const LEGACY_RENDER_MODE: Record<ArtifactType, 'template' | 'canvas'> = {
   'compound-recommendations': 'template',
   'approve-ideas': 'template',
   'approve-designs': 'template',
+  'eval-report': 'template',
 };
 const LEGACY_COLORS: Record<ArtifactType, string> = {
   'idea-spec': '#3b6dd6',
@@ -53,6 +54,7 @@ const LEGACY_COLORS: Record<ArtifactType, string> = {
   'compound-recommendations': '#8b5cf6',
   'approve-ideas': '#b8860b',
   'approve-designs': '#8a7326',
+  'eval-report': '#f59e0b',
 };
 const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'idea-spec': '▤',
@@ -65,6 +67,7 @@ const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'compound-recommendations': '▧',
   'approve-ideas': '☑',
   'approve-designs': '⊡',
+  'eval-report': '◎',
 };
 
 const ALL_ATYPES = Object.keys(LEGACY_RENDER_MODE) as ArtifactType[];
@@ -114,9 +117,11 @@ describe('ARTIFACT_POLICIES registry', () => {
       'compound-recommendations',
       'approve-ideas',
     ]);
-    // arch-design / approve-designs are auto-mint-only (never agent-reportable).
+    // arch-design / approve-designs are auto-mint-only (never agent-reportable);
+    // eval-report is likewise system-minted only (EvalWorker).
     expect(REPORTABLE_ARTIFACT_ATYPES).not.toContain('arch-design');
     expect(REPORTABLE_ARTIFACT_ATYPES).not.toContain('approve-designs');
+    expect(REPORTABLE_ARTIFACT_ATYPES).not.toContain('eval-report');
     // reportable flag agrees with the derived list.
     for (const atype of ALL_ATYPES) {
       expect(ARTIFACT_POLICIES[atype].reportable).toBe(REPORTABLE_ARTIFACT_ATYPES.includes(atype));

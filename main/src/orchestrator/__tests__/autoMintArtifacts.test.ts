@@ -97,10 +97,6 @@ function buildDb(): Database.Database {
   // 070 adds the 'approve-designs' atype to the CHECK and makes 'arch-design'
   // per-entity (one-per-(run, atype, source_ref)) alongside idea-spec.
   db.exec(readFileSync(join(migDir, '073_approve_designs_and_per_idea_arch.sql'), 'utf-8'));
-  // 083 widens the atype CHECK to include 'eval-report' (system-minted by the
-  // ad-hoc code-review eval); auto-mint never writes it, but the table shape must
-  // match production.
-  db.exec(readFileSync(join(migDir, '083_eval_report_atype.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here; migration 019
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
@@ -110,6 +106,11 @@ function buildDb(): Database.Database {
   // enrich-with-deltas (the re-mint / verdict-preserve paths exercised here);
   // add the additive column since this DB hand-picks a subset predating 082.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  // 091 widens the atype CHECK to include 'eval-report' (system-minted by the
+  // ad-hoc code-review eval); auto-mint never writes it, but the table shape must
+  // match production. Applied AFTER the revision ALTER above — 091's recreate
+  // copies `revision`, so the column must exist first.
+  db.exec(readFileSync(join(migDir, '091_eval_report_atype.sql'), 'utf-8'));
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));

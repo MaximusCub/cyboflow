@@ -663,7 +663,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(spy).toHaveBeenCalledWith('r-b', '1.0');
   });
 
-  // ── Ad-hoc completion summary (migration 082 origin='adhoc') ─────────────
+  // ── Ad-hoc completion summary (migration 090 origin='adhoc') ─────────────
 
   it("writes ONE info summary review item when the row's origin is 'adhoc'", async () => {
     const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
@@ -732,7 +732,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(db.runs.some((r) => r.sql.includes("eval_status = 'failed'"))).toBe(false);
   });
 
-  // ── Ad-hoc eval-report artifact (migration 083 atype) ────────────────────
+  // ── Ad-hoc eval-report artifact (migration 091 atype) ────────────────────
 
   it("publishes ONE 'eval-report' artifact with the full verdict when origin is 'adhoc'", async () => {
     const db = new FakeDb(() => ({ ...evalRunRow(), origin: 'adhoc' }), () => []);
