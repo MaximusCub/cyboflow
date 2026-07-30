@@ -147,6 +147,7 @@ Two scripts, and a scheduled job that makes them durable:
 | `scripts/r2-download-stats.mjs` | Reads live analytics. Ad-hoc queries — `--days=N`, `--daily` for long-range volume, `--by-ip` to spot dev boxes. Needs `CLOUDFLARE_ANALYTICS_API` (or `CLOUDFLARE_API_TOKEN`) with Zone › Analytics:Read. |
 | `scripts/snapshot-download-stats.mjs` | Freezes one UTC day into JSON in a **private** R2 bucket, so it survives retention. |
 | `.github/workflows/download-stats.yml` | Runs the snapshot nightly at 02:17 UTC. `workflow_dispatch` takes `since`/`until` to backfill. |
+| `workers/download-counter/` | **Tier 1** — counts installer downloads first-party at `dl.cyboflow.com`, then 302s to R2. One row per download *start*, so no range inflation; ASN/bot flags stored per row. Shares `DOWNLOAD_STATS_SALT` with the snapshot job so downloader ids join across both. See its `README.md`. |
 
 Required repo secrets for the nightly job:
 

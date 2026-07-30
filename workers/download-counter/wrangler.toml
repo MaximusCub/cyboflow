@@ -1,0 +1,24 @@
+name = "cyboflow-download-counter"
+main = "src/index.ts"
+compatibility_date = "2026-07-30"
+
+# dl.cyboflow.com is a SEPARATE hostname from updates.cyboflow.com on purpose.
+# The updater polls updates.* for latest-mac.yml and pulls differential .zip
+# payloads; putting compute in front of that path means a Worker bug strands every
+# existing install on an old version, and the fix ships through the thing you broke.
+# This Worker only ever sees website install clicks.
+# custom_domain = true makes Cloudflare provision the DNS record and certificate on
+# deploy. A plain route pattern would additionally need a proxied DNS record for
+# dl.cyboflow.com to exist first, which is an easy step to forget and fails as a 404.
+routes = [
+  { pattern = "dl.cyboflow.com", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cyboflow-downloads"
+# Filled in by `wrangler d1 create cyboflow-downloads` — see README.md.
+database_id = "REPLACE_ME"
+
+[observability]
+enabled = true
