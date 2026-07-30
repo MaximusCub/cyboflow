@@ -18,7 +18,7 @@ routes = [
 binding = "DB"
 database_name = "cyboflow-downloads"
 # Filled in by `wrangler d1 create cyboflow-downloads` — see README.md.
-database_id = "REPLACE_ME"
+database_id = "c89771d2-9149-46fd-931e-bc46c9b7289e"
 
 [observability]
 enabled = true
