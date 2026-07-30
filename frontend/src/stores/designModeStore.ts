@@ -24,6 +24,12 @@ export interface PlannerPromptState {
   projectId: number;
   ideaId: string;
   ideaTitle: string | null;
+  /**
+   * The design session that produced the approve. Feeds the modal's
+   * "start in this session" option — the modal resolves this session's
+   * worktree/busy status to decide whether same-session hosting is offered.
+   */
+  sessionId: string;
 }
 
 interface DesignModeStore {

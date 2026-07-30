@@ -69,6 +69,23 @@ describe('useLaunchWorkflow', () => {
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-1');
   });
 
+  it('hostSessionId bypasses ensureSessionForLaunch and threads the given id verbatim', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+
+    let runId: string | null = null;
+    await act(async () => {
+      runId = await result.current.launch('wf-planner', { ideaId: 'idea-1' }, { hostSessionId: 'design-sess-1' });
+    });
+
+    expect(runId).toBe('run-9');
+    expect(mockEnsureSession).not.toHaveBeenCalled();
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'design-sess-1' }),
+    );
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-9');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('design-sess-1');
+  });
+
   it('threads forceNew:true into ensureSessionForLaunch when the hook opts in', async () => {
     // In-place / main-repo host sessions must never absorb the current selection —
     // the canvas passes forceNew so the run lands in a fresh worktree-backed session.

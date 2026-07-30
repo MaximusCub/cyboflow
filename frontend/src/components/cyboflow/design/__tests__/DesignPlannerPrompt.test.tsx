@@ -1,14 +1,20 @@
 /**
  * DesignPlannerPrompt — the post-approve "start the planner?" modal. Covers:
- * hidden when unarmed; renders the idea title; Start resolves the planner
- * workflow row by name and launches it seeded with the idea in a FRESH
- * session; Not-now dismisses without launching; missing planner row degrades
- * to an inline error with Start disabled.
+ * hidden when unarmed; renders the idea title; an eligible design session
+ * renders both launch choices enabled; same-session click launches with
+ * `{ hostSessionId }`; new-session click launches with `{ forceNewSession }`;
+ * an in-place/main-repo session or a busy session disables the same-session
+ * button with the matching hint; Not-now dismisses without launching; missing
+ * planner row degrades to an inline error with both launch buttons disabled.
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { useDesignModeStore } from '../../../../stores/designModeStore';
+import { useSessionStore } from '../../../../stores/sessionStore';
+import { useActiveRunsStore } from '../../../../stores/activeRunsStore';
+import type { Session } from '../../../../types/session';
+import type { ActiveRunRow } from '../../../../stores/activeRunsStore';
 
 const workflowsListQuery = vi.fn();
 vi.mock('../../../../trpc/client', () => ({
@@ -35,6 +41,28 @@ vi.mock('../../../../stores/navigationStore', () => ({
 
 import { DesignPlannerPrompt } from '../DesignPlannerPrompt';
 
+function makeSession(overrides: Partial<Session> = {}): Session {
+  return {
+    id: 'sess-1',
+    name: 'My Design Session',
+    status: 'running',
+    projectId: 7,
+    ...overrides,
+  } as unknown as Session;
+}
+
+function makeActiveRun(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+  return {
+    id: 'run-existing',
+    session_id: 'sess-1',
+    status: 'running',
+    workflowName: 'planner',
+    workflow_id: 'wf-3-planner',
+    created_at: '2026-07-29T00:00:00Z',
+    ...overrides,
+  } as unknown as ActiveRunRow;
+}
+
 describe('DesignPlannerPrompt', () => {
   beforeEach(() => {
     workflowsListQuery.mockReset();
@@ -42,6 +70,8 @@ describe('DesignPlannerPrompt', () => {
     goToSession.mockReset();
     capturedLaunchOpts = undefined;
     useDesignModeStore.setState({ activeDesignSessionId: null, plannerPrompt: null });
+    useSessionStore.setState({ sessions: [] });
+    useActiveRunsStore.setState({ runsByProject: {} });
   });
 
   it('renders nothing while unarmed', () => {
@@ -49,26 +79,42 @@ describe('DesignPlannerPrompt', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('shows the idea title and launches the planner seeded with the idea in a fresh session', async () => {
+  it('shows the idea title and both launch buttons enabled for an eligible session', async () => {
     workflowsListQuery.mockResolvedValue([
       { id: 'wf-2-sprint', name: 'sprint' },
       { id: 'wf-3-planner', name: 'planner' },
     ]);
-    launchMock.mockResolvedValue('run-1');
+    useSessionStore.setState({ sessions: [makeSession()] });
     useDesignModeStore.setState({
-      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea' },
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
     });
     render(<DesignPlannerPrompt />);
 
     expect(screen.getByTestId('design-planner-prompt')).toHaveTextContent('Nice Idea');
-    const start = screen.getByTestId('design-planner-prompt-start');
-    await waitFor(() => expect(start).not.toBeDisabled());
+    const startSame = screen.getByTestId('design-planner-prompt-start-same');
+    const startNew = screen.getByTestId('design-planner-prompt-start-new');
+    await waitFor(() => expect(startSame).not.toBeDisabled());
+    expect(startNew).not.toBeDisabled();
+    expect(screen.queryByTestId('design-planner-prompt-same-hint')).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(start);
+  it('same-session click launches with hostSessionId', async () => {
+    workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    launchMock.mockResolvedValue('run-1');
+    useSessionStore.setState({ sessions: [makeSession()] });
+    useDesignModeStore.setState({
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
+    });
+    render(<DesignPlannerPrompt />);
+
+    const startSame = screen.getByTestId('design-planner-prompt-start-same');
+    await waitFor(() => expect(startSame).not.toBeDisabled());
+    fireEvent.click(startSame);
+
     expect(launchMock).toHaveBeenCalledWith(
       'wf-3-planner',
       { ideaId: 'idea-1' },
-      { forceNewSession: true },
+      { hostSessionId: 'sess-1' },
     );
 
     // The hook's onLaunched navigates to the session view and dismisses.
@@ -77,10 +123,62 @@ describe('DesignPlannerPrompt', () => {
     expect(useDesignModeStore.getState().plannerPrompt).toBeNull();
   });
 
+  it('new-session click launches with forceNewSession', async () => {
+    workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    launchMock.mockResolvedValue('run-1');
+    useSessionStore.setState({ sessions: [makeSession()] });
+    useDesignModeStore.setState({
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
+    });
+    render(<DesignPlannerPrompt />);
+
+    const startNew = screen.getByTestId('design-planner-prompt-start-new');
+    await waitFor(() => expect(startNew).not.toBeDisabled());
+    fireEvent.click(startNew);
+
+    expect(launchMock).toHaveBeenCalledWith(
+      'wf-3-planner',
+      { ideaId: 'idea-1' },
+      { forceNewSession: true },
+    );
+  });
+
+  it('disables the same-session button and shows the in-place hint for an in-place session', async () => {
+    workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    useSessionStore.setState({ sessions: [makeSession({ inPlace: true })] });
+    useDesignModeStore.setState({
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
+    });
+    render(<DesignPlannerPrompt />);
+
+    await waitFor(() => expect(screen.getByTestId('design-planner-prompt-start-new')).not.toBeDisabled());
+    expect(screen.getByTestId('design-planner-prompt-start-same')).toBeDisabled();
+    expect(screen.getByTestId('design-planner-prompt-same-hint')).toHaveTextContent(
+      "This session works directly in the checkout — starting here isn't possible; a planner run needs its own worktree.",
+    );
+  });
+
+  it('disables the same-session button and shows the busy hint for a busy session', async () => {
+    workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    useSessionStore.setState({ sessions: [makeSession()] });
+    useActiveRunsStore.setState({ runsByProject: { 7: [makeActiveRun()] } });
+    useDesignModeStore.setState({
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
+    });
+    render(<DesignPlannerPrompt />);
+
+    await waitFor(() => expect(screen.getByTestId('design-planner-prompt-start-new')).not.toBeDisabled());
+    expect(screen.getByTestId('design-planner-prompt-start-same')).toBeDisabled();
+    expect(screen.getByTestId('design-planner-prompt-same-hint')).toHaveTextContent(
+      'This session is busy with another run.',
+    );
+  });
+
   it('"Not now" dismisses without launching', async () => {
     workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    useSessionStore.setState({ sessions: [makeSession()] });
     useDesignModeStore.setState({
-      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: null },
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: null, sessionId: 'sess-1' },
     });
     render(<DesignPlannerPrompt />);
 
@@ -89,16 +187,18 @@ describe('DesignPlannerPrompt', () => {
     expect(launchMock).not.toHaveBeenCalled();
   });
 
-  it('degrades to an inline error with Start disabled when the planner row is missing', async () => {
+  it('degrades to an inline error with both launch buttons disabled when the planner row is missing', async () => {
     workflowsListQuery.mockResolvedValue([{ id: 'wf-2-sprint', name: 'sprint' }]);
+    useSessionStore.setState({ sessions: [makeSession()] });
     useDesignModeStore.setState({
-      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea' },
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
     });
     render(<DesignPlannerPrompt />);
 
     expect(await screen.findByTestId('design-planner-prompt-error')).toHaveTextContent(
       'Planner workflow not found.',
     );
-    expect(screen.getByTestId('design-planner-prompt-start')).toBeDisabled();
+    expect(screen.getByTestId('design-planner-prompt-start-same')).toBeDisabled();
+    expect(screen.getByTestId('design-planner-prompt-start-new')).toBeDisabled();
   });
 });

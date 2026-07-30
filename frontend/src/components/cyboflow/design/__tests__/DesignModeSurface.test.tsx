@@ -356,6 +356,7 @@ describe('DesignModeSurface', () => {
       projectId: 1,
       ideaId: 'idea-1',
       ideaTitle: 'Nice Idea',
+      sessionId: 'sess-1',
     });
   });
 

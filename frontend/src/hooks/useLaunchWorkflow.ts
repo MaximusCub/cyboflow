@@ -52,11 +52,19 @@ export interface UseLaunchWorkflowResult {
    * `activeRunsStore`, which learns about that run only via an ASYNC re-fetch —
    * a sequential peeled launch would re-select the now-busy session and be
    * rejected by the backend's one-running-per-session guard.
+   *
+   * `launchOpts.hostSessionId`, when provided, SKIPS `ensureSessionForLaunch`
+   * entirely and uses the given id verbatim as the run's host session (e.g. a
+   * Design Mode session continuing the planner in place). The caller vouches
+   * that the session is worktree-backed and free — the backend's guards
+   * (no runs on an in-place/main-repo session, one-active-workflow-per-session)
+   * remain the backstop and surface as this hook's normal `error` on rejection.
+   * Takes precedence over `forceNewSession` when both are set.
    */
   launch: (
     workflowId: string,
     seed?: LaunchSeed,
-    launchOpts?: { forceNewSession?: boolean },
+    launchOpts?: { forceNewSession?: boolean; hostSessionId?: string },
   ) => Promise<string | null>;
   isLaunching: boolean;
   error: string | null;
@@ -97,21 +105,27 @@ export function useLaunchWorkflow(
     async (
       workflowId: string,
       seed?: LaunchSeed,
-      launchOpts?: { forceNewSession?: boolean },
+      launchOpts?: { forceNewSession?: boolean; hostSessionId?: string },
     ): Promise<string | null> => {
       if (inFlightRef.current) return null;
       inFlightRef.current = true;
       setError(null);
       setIsLaunching(true);
       try {
-        // Launch INTO the active session (the resting quick session), reusing
-        // its worktree — ensureSessionForLaunch returns selectedSessionId when set.
-        // `forceNew` (in-place / main-repo host session) and the per-call
-        // `forceNewSession` (a "Plan separately" peeled launch) skip that reuse
-        // and create a fresh worktree-backed session instead.
-        const sessionId = await ensureSessionForLaunch(projectId, {
-          forceNew: forceNew || launchOpts?.forceNewSession === true,
-        });
+        // `hostSessionId` bypasses session resolution entirely — the caller
+        // already knows which (worktree-backed, free) session should host the
+        // run. Otherwise launch INTO the active session (the resting quick
+        // session), reusing its worktree — ensureSessionForLaunch returns
+        // selectedSessionId when set. `forceNew` (in-place / main-repo host
+        // session) and the per-call `forceNewSession` (a "Plan separately"
+        // peeled launch) skip that reuse and create a fresh worktree-backed
+        // session instead.
+        const sessionId =
+          launchOpts?.hostSessionId !== undefined
+            ? launchOpts.hostSessionId
+            : await ensureSessionForLaunch(projectId, {
+                forceNew: forceNew || launchOpts?.forceNewSession === true,
+              });
         const base = {
           workflowId,
           projectId,

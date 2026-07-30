@@ -160,12 +160,17 @@ export function DesignModeSurface(): ReactElement | null {
   const handleApproved = useCallback(
     (info: { ideaId: string | null; ideaTitle: string | null }) => {
       const store = useDesignModeStore.getState();
-      if (info.ideaId !== null && projectId !== null) {
-        store.showPlannerPrompt({ projectId, ideaId: info.ideaId, ideaTitle: info.ideaTitle });
+      if (info.ideaId !== null && projectId !== null && session) {
+        store.showPlannerPrompt({
+          projectId,
+          ideaId: info.ideaId,
+          ideaTitle: info.ideaTitle,
+          sessionId: session.id,
+        });
       }
       store.exitDesignMode();
     },
-    [projectId],
+    [projectId, session],
   );
 
   // App gates mounting on activeDesignSessionId; this is belt-and-suspenders.
