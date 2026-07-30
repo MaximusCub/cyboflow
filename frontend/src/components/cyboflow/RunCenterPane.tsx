@@ -14,7 +14,7 @@
  * terminal dock collapses via display:none and NEVER unmounts RunBottomPane, so
  * the live interactive xterm survives a collapse (see TerminalDock).
  */
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane, type RunBottomTabKind } from './RunBottomPane';
@@ -26,6 +26,7 @@ import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
+import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
@@ -97,13 +98,19 @@ export function RunCenterPane({
   const runScoped = useArtifactsList(parentSessionId === null ? activeRunId : null, projectId);
   const { artifacts, loaded } = parentSessionId !== null ? sessionScoped : runScoped;
 
+  // Same superseded-prototype filter as QuickSessionCenterPane (both hosts feed
+  // the SAME session-keyed tab store): a design session can now host a planner
+  // run post-approve, and without the filter this host would re-open the dead
+  // static/stub prototype tab the quick pane hides.
+  const visibleArtifacts = useMemo(() => hideSupersededPrototypes(artifacts), [artifacts]);
+
   useEffect(() => {
     ensureSession(sessionKey);
   }, [ensureSession, sessionKey]);
 
   // Auto-open + prune artifact tabs (shared with QuickSessionCenterPane) — see
   // useArtifactTabsSync for the focus-steal / loading-vs-deleted-flicker fixes.
-  useArtifactTabsSync(sessionKey, artifacts, loaded);
+  useArtifactTabsSync(sessionKey, visibleArtifacts, loaded);
 
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
@@ -201,8 +208,8 @@ export function RunCenterPane({
       // tabs carry only atype until the row arrives). The artifacts table is one
       // row per (run, atype) so atype is a stable secondary key.
       const artifact =
-        artifacts.find((a) => a.id === activeTab.artifactId) ??
-        artifacts.find((a) => a.atype === activeTab.atype);
+        visibleArtifacts.find((a) => a.id === activeTab.artifactId) ??
+        visibleArtifacts.find((a) => a.atype === activeTab.atype);
       if (artifact && projectId !== null) {
         // The artifact's OWN runId — the list may now be session-scoped (see
         // above), so a tab's backing row can belong to a DIFFERENT run than
