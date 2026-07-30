@@ -28,12 +28,14 @@ import { usePanelStore } from '../../../stores/panelStore';
 import { useSessionArtifactsList } from '../../../hooks/useArtifactsList';
 import { useEnsureClaudePanel } from '../../../hooks/useEnsureClaudePanel';
 import { useDesignComments } from '../../../hooks/useDesignComments';
+import { dispatchQuickSessionInput } from '../../../hooks/useClaudePanel';
 import { ClaudePanel } from '../../panels/claude/ClaudePanel';
 import { DesignApproveControl } from '../DesignApproveControl';
 import { DesignStage } from './DesignStage';
 import { DesignCommentMode } from './DesignCommentMode';
 import type { InteractivePrototypeCaptureHandle } from './InteractivePrototypeEmbed';
 import { pickPrototype, prototypeHasBytes } from '../../../utils/prototypeArtifacts';
+import { DESIGN_PROMOTE_PROMPT } from './designKickoff';
 
 export function DesignModeSurface(): ReactElement | null {
   const activeDesignSessionId = useDesignModeStore((s) => s.activeDesignSessionId);
@@ -116,6 +118,42 @@ export function DesignModeSurface(): ReactElement | null {
   const commentToggleDisabled =
     !isInteractiveWithBytes || (!commentModeActive && (!prototypeVisible || designComments.status === 'entering'));
 
+  // "Make it interactive" tier promotion (design-mode.md "In-session tier
+  // promotion") — dispatches DESIGN_PROMOTE_PROMPT as a real continue turn.
+  // Reset on a bytesBackedPrototype IDENTITY change: the normal path is the
+  // button unmounting once the promoted interactive artifact lands, but a
+  // stale `promoting=true` would wedge a remounted button if the pick ever
+  // flips back to a different static row.
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  useEffect(() => {
+    setPromoting(false);
+    setPromoteError(null);
+  }, [bytesBackedPrototype?.id]);
+  const canPromote =
+    session != null &&
+    claudePanel !== null &&
+    bytesBackedPrototype !== null &&
+    bytesBackedPrototype.atype === 'ui-prototype';
+  const handlePromote = useCallback(() => {
+    if (!session || !claudePanel) return;
+    setPromoteError(null);
+    setPromoting(true);
+    dispatchQuickSessionInput(session, claudePanel.id, DESIGN_PROMOTE_PROMPT, 'continue')
+      .then((result) => {
+        if (!result.success) {
+          setPromoting(false);
+          setPromoteError(result.error ?? 'Failed to promote prototype.');
+        }
+        // On success, stay in the "Promoting…" disabled state until the
+        // interactive artifact lands and the button unmounts.
+      })
+      .catch((err: unknown) => {
+        setPromoting(false);
+        setPromoteError(err instanceof Error ? err.message : 'Failed to promote prototype.');
+      });
+  }, [session, claudePanel]);
+
   // Approve success ends the design loop: leave the fullscreen surface and —
   // when the approved idea is resolvable — arm the App-level "start the
   // planner?" prompt (it must outlive this surface's unmount, hence the store).
@@ -162,6 +200,24 @@ export function DesignModeSurface(): ReactElement | null {
           <span className="text-xs text-text-secondary truncate">{session.name}</span>
         )}
         <div className="ml-auto flex items-center gap-3">
+          {canPromote && (
+            <>
+              {promoteError && (
+                <span data-testid="design-promote-error" className="text-[10px] text-red-500 whitespace-nowrap">
+                  {promoteError}
+                </span>
+              )}
+              <button
+                type="button"
+                data-testid="design-promote-tier"
+                disabled={promoting}
+                onClick={handlePromote}
+                className="text-xs font-medium text-text-secondary hover:text-text-primary whitespace-nowrap disabled:opacity-40 disabled:cursor-default"
+              >
+                {promoting ? 'Promoting…' : 'Make it interactive'}
+              </button>
+            </>
+          )}
           {prototypeArtifact !== null && prototypeHasBytes(prototypeArtifact) && (
             <button
               type="button"

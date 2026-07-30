@@ -12,7 +12,7 @@
  */
 import '@testing-library/jest-dom';
 import { useEffect } from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Artifact } from '../../../../../../shared/types/artifacts';
 import type { Session } from '../../../../types/session';
@@ -82,6 +82,14 @@ vi.mock('../../../../hooks/useArtifactsList', () => ({
 // --- ensure-claude-panel: no-op ---------------------------------------------
 vi.mock('../../../../hooks/useEnsureClaudePanel', () => ({
   useEnsureClaudePanel: () => vi.fn().mockResolvedValue(undefined),
+}));
+
+// --- claude panel dispatch: per-test controllable mock -----------------------
+const mockDispatchQuickSessionInput = vi.fn(
+  () => Promise.resolve({ success: true }) as Promise<{ success: boolean; error?: string; queued?: boolean }>,
+);
+vi.mock('../../../../hooks/useClaudePanel', () => ({
+  dispatchQuickSessionInput: (...args: unknown[]) => mockDispatchQuickSessionInput(...(args as [])),
 }));
 
 // --- useDesignComments: per-test controllable result ------------------------
@@ -174,6 +182,8 @@ describe('DesignModeSurface', () => {
   beforeEach(() => {
     mockArtifacts = [];
     mockDesignComments = makeDesignCommentsResult();
+    mockDispatchQuickSessionInput.mockReset();
+    mockDispatchQuickSessionInput.mockResolvedValue({ success: true });
     useDesignModeStore.setState({ activeDesignSessionId: 'sess-1', plannerPrompt: null });
     seed(makeSession(), makeClaudePanel());
   });
@@ -420,5 +430,84 @@ describe('DesignModeSurface', () => {
     render(<DesignModeSurface />);
     fireEvent.click(screen.getByTestId('design-comment-toggle'));
     expect(mockDesignComments.exit).toHaveBeenCalledTimes(1);
+  });
+
+  // --- "Make it interactive" tier promotion ----------------------------------
+
+  it('(i) the promote button renders for a bytes-backed ui-prototype', () => {
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype' })];
+    render(<DesignModeSurface />);
+    expect(screen.getByTestId('design-promote-tier')).toBeInTheDocument();
+    expect(screen.getByTestId('design-promote-tier')).toHaveTextContent('Make it interactive');
+  });
+
+  it('(i2) the promote button is absent for the bytes-less creation stub', () => {
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype', payloadJson: null })];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-promote-tier')).not.toBeInTheDocument();
+  });
+
+  it('(i3) the promote button is absent for an interactive-prototype', () => {
+    mockArtifacts = [makeArtifact({ atype: 'interactive-prototype' })];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-promote-tier')).not.toBeInTheDocument();
+  });
+
+  it('(i4) the promote button is absent when there is no prototype at all', () => {
+    mockArtifacts = [];
+    render(<DesignModeSurface />);
+    expect(screen.queryByTestId('design-promote-tier')).not.toBeInTheDocument();
+  });
+
+  it('(i5) clicking dispatches DESIGN_PROMOTE_PROMPT as a continue turn and disables the button', async () => {
+    let resolveDispatch: (r: { success: boolean; error?: string }) => void = () => {};
+    mockDispatchQuickSessionInput.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDispatch = resolve;
+      }),
+    );
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype' })];
+    render(<DesignModeSurface />);
+
+    fireEvent.click(screen.getByTestId('design-promote-tier'));
+
+    expect(mockDispatchQuickSessionInput).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-1' }),
+      'panel-1',
+      expect.stringContaining('Promote the prototype to the interactive tier'),
+      'continue',
+    );
+    const btn = screen.getByTestId('design-promote-tier');
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveTextContent('Promoting…');
+
+    await act(async () => {
+      resolveDispatch({ success: true });
+    });
+    // Stays disabled/"Promoting…" after success — no double-dispatch invitation.
+    expect(screen.getByTestId('design-promote-tier')).toBeDisabled();
+    expect(screen.getByTestId('design-promote-tier')).toHaveTextContent('Promoting…');
+  });
+
+  it('(i6) a dispatch failure surfaces the inline error and re-enables the button', async () => {
+    mockDispatchQuickSessionInput.mockResolvedValue({ success: false, error: 'panel busy' });
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype' })];
+    render(<DesignModeSurface />);
+
+    fireEvent.click(screen.getByTestId('design-promote-tier'));
+
+    await waitFor(() => expect(screen.getByTestId('design-promote-error')).toHaveTextContent('panel busy'));
+    expect(screen.getByTestId('design-promote-tier')).not.toBeDisabled();
+  });
+
+  it('(i7) a rejected dispatch promise is handled like a failure', async () => {
+    mockDispatchQuickSessionInput.mockRejectedValue(new Error('network down'));
+    mockArtifacts = [makeArtifact({ atype: 'ui-prototype' })];
+    render(<DesignModeSurface />);
+
+    fireEvent.click(screen.getByTestId('design-promote-tier'));
+
+    await waitFor(() => expect(screen.getByTestId('design-promote-error')).toHaveTextContent('network down'));
+    expect(screen.getByTestId('design-promote-tier')).not.toBeDisabled();
   });
 });
