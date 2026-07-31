@@ -481,6 +481,16 @@ Generated from the phase-1 roster; nearly invisible for most users.
 
 - v1 (2026-07-30): initial proposal from the four-phase synthesis
   (recon workflow + adversarial critique).
+- v3.1 (2026-07-31): Codex round-3 re-review of the fix delta — 6 findings
+  (3 critical), all fixed (`b4c2fc39..84f1eccc`): ordinary requests can no
+  longer carry wire pins (authorized setup proofs only); the MCP enqueue path
+  now stamps the snapshot sha (the orchestrated plane had been running the
+  dirty fallback as its normal mode — proofs additionally refuse promotion on
+  a sha-null run); attestation gained kernel-truth serve-identity binding
+  (port-owner process group + pinned-command match, defeating nonce-echoing
+  decoy servers); the transport carve-out narrowed by transcript emptiness
+  (mid-session deaths block — an accepted §3.1 annoyance); mirror GC gained a
+  15-min grace window; driver serve gained replace semantics.
 - v3 (2026-07-31): Codex adversarial review of the IMPLEMENTATION branch —
   7 findings (2 critical / 5 high), all fixed (`4ffd6dbb..aabb1379`):
   gate-integrity chokepoint (deployed+ambiguous skips now block; transport +
