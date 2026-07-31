@@ -1,10 +1,21 @@
 /**
  * snapshotProvisioner tests — run against a REAL throwaway git repo fixture
  * (no DB, no Electron). Covers captureSnapshotSha, provisionSnapshot's
- * exact-sha checkout + node_modules symlinking, the §7.2 prepared-dependency
- * mirror seam (link at the mirror when a set exists, at the live worktree when
- * it does not) and its kill switch, the typed bad-sha error, and dispose's
+ * exact-sha checkout + node_modules CLONING, the §7.2 prepared-dependency
+ * mirror seam (clone from the mirror when a set exists, from the live worktree
+ * when it does not) and its kill switch, the typed bad-sha error, and dispose's
  * unconditional/idempotent teardown.
+ *
+ * THE CLONE IS THE SUBJECT, SO THE CLONE IS REAL. Every dependency case below
+ * runs the REAL `cp` binary — for the snapshot (whose `exec` is left at its
+ * production default) and for the preparer's mirror (whose fake exec delegates
+ * `cp` to `defaultDepExec`). That is not incidental. `fsPromises.cp` REWRITES a
+ * relative symlink into an absolute path pointing back at the SOURCE tree, so a
+ * fixture built with it would hand the workspace-link case a link that resolves
+ * into the live worktree — i.e. it would silently reproduce the exact bug these
+ * tests exist to prove is gone, and pass. `-c` (clonefile) may or may not be
+ * available on the temp filesystem; the module's `-R` fallback covers that and
+ * the observable end state is identical either way.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -18,26 +29,21 @@ import {
   resolveDefaultDepPreparer,
   SnapshotProvisionError,
 } from '../snapshotProvisioner';
-import { VerifyDepPreparer, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
 /**
- * An exec seam for VerifyDepPreparer that performs `cp` in-process and treats
- * the Electron rebuild as a recorded no-op — the preparer's own suite proves its
- * mechanics; here it only has to produce a REAL mirror on disk for the link to
- * point at.
+ * An exec seam for VerifyDepPreparer that performs `cp` FOR REAL (see the file
+ * header — a JS-level copy would rewrite relative symlinks and invalidate the
+ * workspace-link case) and treats the Electron rebuild as a no-op: the
+ * preparer's own suite proves its mechanics, and here it only has to produce a
+ * real mirror on disk for the snapshot to clone from.
  */
-function fakeDepExec(): DepExec {
-  return async (cmd, args) => {
-    if (cmd === 'cp') {
-      await fsPromises.cp(args[1], args[2], { recursive: true });
-      return { code: 0, out: '' };
-    }
-    return { code: 0, out: '' };
-  };
+function realCpDepExec(): DepExec {
+  return async (cmd, args, opts) => (cmd === 'cp' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' });
 }
 
 /** Adds the lockfile + package.json the preparer keys on (uncommitted is fine — it reads the live worktree). */
@@ -54,6 +60,23 @@ async function initFixtureRepo(dir: string): Promise<void> {
   await fsPromises.writeFile(path.join(dir, 'README.md'), 'v1\n');
   git(dir, ['add', '.']);
   git(dir, ['commit', '-q', '-m', 'init']);
+}
+
+/** The single published prepared set under `baseDir` (the fixtures only ever build one). */
+async function soleMirrorRoot(baseDir: string): Promise<string> {
+  const entries = await fsPromises.readdir(baseDir);
+  expect(entries).toHaveLength(1);
+  return path.join(baseDir, entries[0]);
+}
+
+/** Whether a path exists at all (a dangling symlink counts as existing — `lstat`, not `stat`). */
+async function exists(target: string): Promise<boolean> {
+  try {
+    await fsPromises.lstat(target);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -132,7 +155,7 @@ describe('snapshotProvisioner', () => {
       });
     });
 
-    it('symlinks node_modules dirs (root + nested) and skips scanning inside node_modules', async () => {
+    it('CLONES node_modules dirs (root + nested) into the snapshot, skips scanning inside one, and a snapshot write never reaches the worktree', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
         await initFixtureRepo(dir);
 
@@ -144,7 +167,7 @@ describe('snapshotProvisioner', () => {
         await fsPromises.mkdir(path.join(dir, 'sub', 'node_modules'), { recursive: true });
         await fsPromises.writeFile(path.join(dir, 'sub', 'node_modules', 'marker.txt'), 'sub-marker\n');
         // `sub` itself must exist in the snapshot's checked-out tree for the
-        // link to land — track it via a placeholder file and commit.
+        // clone to land — track it via a placeholder file and commit.
         await fsPromises.writeFile(path.join(dir, 'sub', 'keep.txt'), 'keep\n');
         git(dir, ['add', 'sub/keep.txt']);
         git(dir, ['commit', '-q', '-m', 'add sub dir']);
@@ -162,29 +185,92 @@ describe('snapshotProvisioner', () => {
         const snapshotSha = await captureSnapshotSha(dir);
         const provision = await provisionSnapshot({ runWorktreePath: dir, snapshotSha });
         try {
-          const rootMarker = await fsPromises.readFile(
-            path.join(provision.worktreePath, 'node_modules', 'marker.txt'),
-            'utf8',
-          );
-          expect(rootMarker).toBe('root-marker\n');
+          const rootDep = path.join(provision.worktreePath, 'node_modules');
+          const subDep = path.join(provision.worktreePath, 'sub', 'node_modules');
 
-          const subMarker = await fsPromises.readFile(
-            path.join(provision.worktreePath, 'sub', 'node_modules', 'marker.txt'),
-            'utf8',
-          );
-          expect(subMarker).toBe('sub-marker\n');
+          expect(await fsPromises.readFile(path.join(rootDep, 'marker.txt'), 'utf8')).toBe('root-marker\n');
+          expect(await fsPromises.readFile(path.join(subDep, 'marker.txt'), 'utf8')).toBe('sub-marker\n');
 
-          const rootLinkStat = await fsPromises.lstat(path.join(provision.worktreePath, 'node_modules'));
-          expect(rootLinkStat.isSymbolicLink()).toBe(true);
-          const subLinkStat = await fsPromises.lstat(path.join(provision.worktreePath, 'sub', 'node_modules'));
-          expect(subLinkStat.isSymbolicLink()).toBe(true);
+          // The §7.2 fix in one assertion pair: these are the snapshot's OWN
+          // directories, not aliases of the shared worktree's.
+          const rootStat = await fsPromises.lstat(rootDep);
+          expect(rootStat.isSymbolicLink()).toBe(false);
+          expect(rootStat.isDirectory()).toBe(true);
+          const subStat = await fsPromises.lstat(subDep);
+          expect(subStat.isSymbolicLink()).toBe(false);
+          expect(subStat.isDirectory()).toBe(true);
+
+          // …so a write inside the snapshot (an install, a hand-edited module, a
+          // build artifact) cannot reach the tree sibling lanes are building in.
+          await fsPromises.writeFile(path.join(rootDep, 'written-by-verification.txt'), 'x\n');
+          await fsPromises.writeFile(path.join(subDep, 'written-by-verification.txt'), 'x\n');
+          expect(await exists(path.join(dir, 'node_modules', 'written-by-verification.txt'))).toBe(false);
+          expect(await exists(path.join(dir, 'sub', 'node_modules', 'written-by-verification.txt'))).toBe(false);
         } finally {
           await provision.dispose();
         }
       });
     });
 
-    it('links dependency dirs at the PREPARED MIRROR when a prepared set exists (§7.2)', async () => {
+    it('a pnpm WORKSPACE link inside a cloned mirror resolves against the SNAPSHOT source — not the live worktree, not the mirror (§7.2 finding 6)', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        const worktree = path.join(dir, 'worktree');
+        await fsPromises.mkdir(worktree, { recursive: true });
+        await initFixtureRepo(worktree);
+        await addPreparerInputs(worktree);
+
+        // The workspace shape that broke: `frontend` depends on the local
+        // `shared` package, and pnpm expresses that as a RELATIVE symlink out of
+        // node_modules into WORKSPACE SOURCE — not into the `.pnpm` store.
+        await fsPromises.mkdir(path.join(worktree, 'shared'), { recursive: true });
+        await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'committed at the snapshot sha\n');
+        await fsPromises.mkdir(path.join(worktree, 'frontend'), { recursive: true });
+        await fsPromises.writeFile(path.join(worktree, 'frontend', 'package.json'), JSON.stringify({ name: 'fe' }));
+        git(worktree, ['add', 'shared/mod.js', 'frontend/package.json']);
+        git(worktree, ['commit', '-q', '-m', 'workspace source']);
+        const snapshotSha = await captureSnapshotSha(worktree);
+
+        await fsPromises.mkdir(path.join(worktree, 'frontend', 'node_modules'), { recursive: true });
+        await fsPromises.symlink('../../shared', path.join(worktree, 'frontend', 'node_modules', 'shared'), 'dir');
+        await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+
+        // A sibling lane edits the workspace source AFTER the recorded sha. If
+        // the link resolved into the live worktree we would read this string;
+        // reading the committed one is the proof it resolved into the snapshot.
+        await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'uncommitted sibling-lane edit\n');
+
+        const baseDir = path.join(dir, 'verify-deps');
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
+
+        const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
+        try {
+          const linkPath = path.join(provision.worktreePath, 'frontend', 'node_modules', 'shared');
+
+          // The link survived both copies VERBATIM — dereferencing it anywhere
+          // along the way would have re-pinned the snapshot to foreign source.
+          expect((await fsPromises.lstat(linkPath)).isSymbolicLink()).toBe(true);
+          expect(await fsPromises.readlink(linkPath)).toBe('../../shared');
+
+          // …and it resolves to the SNAPSHOT's checked-out `shared/`.
+          expect(await fsPromises.realpath(linkPath)).toBe(
+            await fsPromises.realpath(path.join(provision.worktreePath, 'shared')),
+          );
+          expect(await fsPromises.readFile(path.join(linkPath, 'mod.js'), 'utf8')).toBe(
+            'committed at the snapshot sha\n',
+          );
+
+          // The mirror could never have satisfied this link: it holds
+          // dependencies and deliberately no source, so `<mirror>/shared` does
+          // not exist. That is finding 6 stated as a fixture fact — before the
+          // clone, this link pointed here and dangled.
+          expect(await exists(path.join(await soleMirrorRoot(baseDir), 'shared'))).toBe(false);
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
+    it('clones from the PREPARED MIRROR when a prepared set exists (§7.2), and snapshot writes reach neither the mirror nor the worktree', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
         const worktree = path.join(dir, 'worktree');
         await fsPromises.mkdir(worktree, { recursive: true });
@@ -194,28 +280,33 @@ describe('snapshotProvisioner', () => {
         await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
 
         const baseDir = path.join(dir, 'verify-deps');
-        const depPreparer = new VerifyDepPreparer({ baseDir, exec: fakeDepExec() });
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
         const snapshotSha = await captureSnapshotSha(worktree);
 
         const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
         try {
-          const linkPath = path.join(provision.worktreePath, 'node_modules');
-          const target = await fsPromises.readlink(linkPath);
+          const depDir = path.join(provision.worktreePath, 'node_modules');
+          const mirrorRoot = await soleMirrorRoot(baseDir);
 
-          // The link points INTO the disposable prepared-set cache, not at the
-          // shared worktree — so a write-through cannot flip a sibling lane's ABI.
-          expect(target.startsWith(baseDir + path.sep)).toBe(true);
-          expect(path.basename(target)).toBe('node_modules');
-          expect(target).not.toBe(path.join(worktree, 'node_modules'));
-          // …and it is a usable mirror of the live tree.
-          expect(await fsPromises.readFile(path.join(linkPath, 'marker.txt'), 'utf8')).toBe('live-marker\n');
+          // A prepared set really was built and really was the source: the
+          // snapshot's tree carries the mirror's contents…
+          expect(await exists(path.join(mirrorRoot, 'node_modules', 'marker.txt'))).toBe(true);
+          expect(await fsPromises.readFile(path.join(depDir, 'marker.txt'), 'utf8')).toBe('live-marker\n');
+
+          // …as its OWN directory. Nothing in the snapshot references the cache
+          // or the worktree, which is what makes the write below terminal.
+          expect((await fsPromises.lstat(depDir)).isSymbolicLink()).toBe(false);
+
+          await fsPromises.writeFile(path.join(depDir, 'written-by-verification.txt'), 'x\n');
+          expect(await exists(path.join(mirrorRoot, 'node_modules', 'written-by-verification.txt'))).toBe(false);
+          expect(await exists(path.join(worktree, 'node_modules', 'written-by-verification.txt'))).toBe(false);
         } finally {
           await provision.dispose();
         }
       });
     });
 
-    it('links at the LIVE worktree dirs when the preparer declines (no prepared set)', async () => {
+    it('clones from the LIVE worktree dirs when the preparer declines (no prepared set) — cold, still isolated', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
         const worktree = path.join(dir, 'worktree');
         await fsPromises.mkdir(worktree, { recursive: true });
@@ -224,32 +315,77 @@ describe('snapshotProvisioner', () => {
         await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
         await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
 
-        const depPreparer = new VerifyDepPreparer({ baseDir: path.join(dir, 'verify-deps'), exec: fakeDepExec() });
+        const baseDir = path.join(dir, 'verify-deps');
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
         const snapshotSha = await captureSnapshotSha(worktree);
 
         const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
         try {
-          const target = await fsPromises.readlink(path.join(provision.worktreePath, 'node_modules'));
-          expect(target).toBe(path.join(worktree, 'node_modules'));
+          const depDir = path.join(provision.worktreePath, 'node_modules');
+          expect(await fsPromises.readFile(path.join(depDir, 'marker.txt'), 'utf8')).toBe('live-marker\n');
+          expect((await fsPromises.lstat(depDir)).isSymbolicLink()).toBe(false);
+          // Nothing was cached — the fallback is a direct live→snapshot clone.
+          expect(await exists(baseDir)).toBe(false);
+
+          // The no-mirror path is the one the old symlink hazard lived on, so
+          // this is the assertion that matters most: a write still stops here.
+          await fsPromises.writeFile(path.join(depDir, 'written-by-verification.txt'), 'x\n');
+          expect(await exists(path.join(worktree, 'node_modules', 'written-by-verification.txt'))).toBe(false);
         } finally {
           await provision.dispose();
         }
       });
     });
 
-    it('depPreparer: null is the pre-§7.2 behavior verbatim (live-worktree symlinks, no cache built)', async () => {
+    it('depPreparer: null (the §7.2 kill switch) still clones into the snapshot — no mirror, no re-opened write-through', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
         const worktree = path.join(dir, 'worktree');
         await fsPromises.mkdir(worktree, { recursive: true });
         await initFixtureRepo(worktree);
         await addPreparerInputs(worktree);
         await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+        await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
 
         const snapshotSha = await captureSnapshotSha(worktree);
         const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer: null });
         try {
-          const target = await fsPromises.readlink(path.join(provision.worktreePath, 'node_modules'));
-          expect(target).toBe(path.join(worktree, 'node_modules'));
+          const depDir = path.join(provision.worktreePath, 'node_modules');
+          expect(await fsPromises.readFile(path.join(depDir, 'marker.txt'), 'utf8')).toBe('live-marker\n');
+          expect((await fsPromises.lstat(depDir)).isSymbolicLink()).toBe(false);
+
+          await fsPromises.writeFile(path.join(depDir, 'written-by-verification.txt'), 'x\n');
+          expect(await exists(path.join(worktree, 'node_modules', 'written-by-verification.txt'))).toBe(false);
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
+    it('a failed clone is SKIPPED, not thrown: the snapshot provisions without that dep dir rather than falling back to a link', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        await initFixtureRepo(dir);
+        await fsPromises.mkdir(path.join(dir, 'node_modules'), { recursive: true });
+        await fsPromises.writeFile(path.join(dir, 'node_modules', 'marker.txt'), 'live-marker\n');
+        const snapshotSha = await captureSnapshotSha(dir);
+
+        // Both rungs of the ladder fail — a full disk, a permissions problem, a
+        // filesystem that refuses the copy outright.
+        const cpArgs: string[][] = [];
+        const provision = await provisionSnapshot({
+          runWorktreePath: dir,
+          snapshotSha,
+          exec: async (cmd, args) => {
+            cpArgs.push([cmd, ...args]);
+            return { code: 1, out: 'cp: no space left on device' };
+          },
+        });
+        try {
+          // It tried clonefile first, then the plain recursive copy…
+          expect(cpArgs.map((a) => a[1])).toEqual(['-Rc', '-R']);
+          // …and then left the dir absent, which surfaces downstream as an
+          // honest build failure. A symlink here would be the §7.2 hazard
+          // re-opened for exactly the case least able to notice it.
+          expect(await exists(path.join(provision.worktreePath, 'node_modules'))).toBe(false);
         } finally {
           await provision.dispose();
         }

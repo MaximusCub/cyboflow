@@ -4,17 +4,27 @@
  * `dependencyCommandGuard.ts`, says what a verification may not RUN; this module
  * removes the reason it wanted to run it at all.
  *
- * THE HAZARD IT CLOSES. `snapshotProvisioner.linkDependencyDirs` SYMLINKS the
- * live sprint worktree's `node_modules` into the detached verification snapshot,
- * so the snapshot is not dependency-isolated in either direction: anything the
- * verification writes into `node_modules` lands in the tree every sibling lane
- * is building against (§1 root cause (c) — a host-Node better-sqlite3 under an
- * Electron that needs NMV 136), and `checkSnapshotMutated`'s `git diff HEAD`
- * cannot see it because `node_modules` is untracked. Pointing the snapshot at a
- * DISPOSABLE MIRROR makes that write-through land in a cache we own and throw
- * away, and lets the Electron-ABI rebuild happen ONCE, outside every snapshot,
- * where it is allowed to happen (§7.2: "the electron-ABI rebuild lives here,
- * never in runbook commands").
+ * WHAT IT IS FOR, NOW THAT IT IS NOT THE ISOLATION. This module was introduced
+ * to redirect the snapshot's `node_modules` SYMLINK away from the live sprint
+ * worktree (where a verification's writes flipped native-module ABIs under every
+ * sibling lane) and into a disposable mirror. `snapshotProvisioner` no longer
+ * symlinks at all — it CLONES the dep dirs INTO the snapshot, which closes the
+ * write-through hazard outright and independently of anything here (see that
+ * module's `cloneDependencyDirs` for the full argument). This module's mirror is
+ * therefore a clone SOURCE, never a symlink target: nothing outside the cache
+ * ever holds a reference into it, and a snapshot's writes land in the snapshot's
+ * own copy.
+ *
+ * That leaves it two jobs, both of which are the reason to keep it:
+ *  - THE ELECTRON-ABI REBUILD, once, outside every snapshot, where §7.2 says it
+ *    belongs ("the electron-ABI rebuild lives here, never in runbook commands").
+ *    Cloning the live tree straight into a snapshot would carry the developer's
+ *    host-Node better-sqlite3 (NMV 127) under an Electron that needs NMV 136 —
+ *    §1 root cause (c), unfixed. The mirror is where that gets corrected, once
+ *    per key rather than once per verification.
+ *  - WARMTH. A published set is reused across runs and branches, so the
+ *    per-verification cost is one copy-on-write clone of an already-correct
+ *    tree rather than a rebuild.
  *
  * CLONE, NOT "FRESH INSTALL" — a deliberate, documented deviation from §7.2's
  * wording, with the same guarantees. The proposal describes building a prepared
@@ -46,17 +56,24 @@
  * stays `sub/node_modules`). pnpm's trees are a web of RELATIVE symlinks from a
  * package dir into the root `.pnpm` store; flattening the layout would break
  * every one of them, while preserving it keeps them resolving entirely inside
- * the mirror. The adjacent manifests (`package.json` next to each cloned dir,
- * `pnpm-workspace.yaml`, the lockfile) are copied to their same relative spots
- * for the same reason: `electron-builder install-app-deps` reads them.
+ * the mirror. Preserving it is also what lets the snapshot clone a mirror dir
+ * back to its own matching relative path, which is how a workspace link
+ * (`frontend/node_modules/shared -> ../../shared`, pointing at SOURCE rather
+ * than into the store) ends up resolving against the snapshot's checked-out
+ * tree — a link the mirror alone can never satisfy, because a mirror holds
+ * dependencies and deliberately never the project's source. The adjacent
+ * manifests (`package.json` next to each cloned dir, `pnpm-workspace.yaml`, the
+ * lockfile) are copied to their same relative spots for a third reason:
+ * `electron-builder install-app-deps` reads them.
  *
  * FAIL-SOFT, ALWAYS. Every failure path — no lockfile, a failed clone, a failed
  * rebuild, a half-published set, an unexpected throw — warns and returns
- * `null`, which the caller reads as "use the live worktree dirs as before". A
- * dep-cache problem must never fail a verification: without a mirror the runner
- * is exactly as safe as it was before this module existed, because the Bash
- * guard (dependencyCommandGuard + the runner's canUseTool) still refuses the
- * commands that would corrupt the shared tree.
+ * `null`, which the caller reads as "clone the live worktree dirs instead". A
+ * dep-cache problem must never fail a verification, and it cannot make one
+ * UNSAFE either: the snapshot gets its own copy on both paths, so all a null
+ * costs is the warmth and the ABI rebuild above. What is lost is real (a
+ * verification of an Electron app may hit root cause (c) again) but it is a
+ * loud, honest build failure, not a silent cross-lane write.
  *
  * Electron-free by construction (mirrors snapshotProvisioner.ts): plain node
  * `fs/promises`/`path`/`crypto` plus an INJECTED exec seam, so the whole module
@@ -210,9 +227,10 @@ export class VerifyDepPreparer {
   }
 
   /**
-   * Returns a `src dir → mirror dir` map the caller can symlink against, or
-   * `null` meaning "no prepared set; use the live worktree dirs" (the caller
-   * falls back to the pre-existing behavior, and the Bash guard still holds).
+   * Returns a `src dir → mirror dir` map the caller CLONES FROM, or `null`
+   * meaning "no prepared set; clone the live worktree dirs instead" — which is
+   * slower and ABI-cold, never less isolated (the caller's destination is the
+   * snapshot on both paths).
    *
    * Null — never a throw — is returned for: no dependency dirs, no lockfile at
    * the worktree root, a dependency dir outside the worktree, a failed

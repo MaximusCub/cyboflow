@@ -1,51 +1,65 @@
 /**
- * dependencyCommandGuard — the ONE place the "a verification may not mutate
- * dependencies" rule is spelled out (docs/proposals/verification-setup-flow.md
- * §7.2 "Snapshot dep isolation — a specified preparer, runner-enforced", plus
- * §5.3's "Dependency mutation is runner-enforced, not linted").
+ * dependencyCommandGuard — the DIAGNOSTICS half of the §7.2 "a verification may
+ * not mutate dependencies" rule (docs/proposals/verification-setup-flow.md §7.2
+ * "Snapshot dep isolation — a specified preparer, runner-enforced", plus §5.3's
+ * "Dependency mutation is runner-enforced, not linted").
  *
- * THE HAZARD, CONCRETELY. `snapshotProvisioner.linkDependencyDirs` SYMLINKS
- * `node_modules` from the live sprint worktree into the detached verification
- * snapshot. A snapshot is therefore NOT dependency-isolated: any `pnpm install`
- * / `npm rebuild` / `npx playwright install` a composed task runs inside it
- * writes THROUGH that symlink into the shared worktree every sibling lane is
- * building against. The classic outcome is §1's root cause (c) inverted — a
- * fresh install leaves better-sqlite3 on the host-Node ABI (NMV 127) while the
- * sibling lanes' Electron needs NMV 136 — and the damage is INVISIBLE to the
- * runner's own guard rails: `checkSnapshotMutated` runs `git diff HEAD`, which
- * sees tracked files only and `node_modules` is not tracked. A whole sprint can
- * be poisoned by one verification's build step with nothing in the verdict
- * hinting at it.
+ * WHAT ENFORCES THE RULE — NOT THIS FILE. `snapshotProvisioner` CLONES each
+ * dependency dir into the snapshot rather than symlinking the live sprint
+ * worktree's into it, so a `pnpm install` inside a verification writes into that
+ * snapshot's own disposable copy and is thrown away with it. That is the
+ * enforcement point, and it is structural: it covers writes no pattern can see —
+ * an install spelled through an env var or a script file, a package.json edited
+ * and installed, a file written straight into `node_modules`. This module was
+ * the only control before that landed (the Codex §7.2 review's finding 5 is
+ * precisely that a regex over shell strings is bypassable by indirection); it is
+ * now the cheap layer on top, and per the project's belt-and-suspenders posture
+ * it is the ONLY layer on top.
  *
- * WHY A REGEX AND NOT A LINT. §5.3's v2 correction has teeth: build steps reach
- * the runner from TWO sources — a committed runbook's
+ * SO WHY KEEP IT. Because "the write was contained" and "the agent understands
+ * what it did wrong" are different goods. A composed task carrying
+ * `pnpm install` is still a task that will burn minutes of a bounded deadline
+ * reinstalling a tree it was handed, and — for an Electron project — will leave
+ * the snapshot's better-sqlite3 on the host-Node ABI (NMV 127) under an Electron
+ * that needs NMV 136 (§1 root cause (c)), producing a confusing launch failure
+ * the agent has no reason to attribute to its own build step. Rejecting it at
+ * ENQUEUE turns that into a structured error naming the offending command, while
+ * the composer still has the context to recompose. The rule it enforces is a
+ * fast, legible NO, not a containment boundary.
+ *
+ * WHY A REGEX AND NOT A LINT. §5.3's v2 correction still holds: build steps
+ * reach the runner from TWO sources — a committed runbook's
  * `VerifyRunbookModalityEntry.build` and an AGENT-composed
  * `VerificationTaskV1.build` (task-verify's own exemplar recommended
  * `pnpm install` until this phase changed it). A validator on the runbook file
- * cannot reach the second source at all, so the guard has to sit on the
- * COMPOSED TASK, where both converge. It is applied at two seams:
+ * cannot reach the second source at all, so the check has to sit on the COMPOSED
+ * TASK, where both converge — which is what {@link findForbiddenTaskCommands}
+ * takes as its argument. Two callers consume this module, and they want
+ * different halves of it:
  *
- *   - ENQUEUE (this phase, verify/enqueueFromTask.ts): a matching task is
- *     REJECTED before a row is ever written, so the composing agent gets a
- *     structured error naming the offending command while it still has the
- *     context to recompose. This is the cheap half.
- *   - EXECUTION (the sibling agent-session Bash guard + the dependency
- *     preparer): the backstop for anything that reaches a shell anyway.
+ *   - ENQUEUE (verify/enqueueFromTask.ts) calls
+ *     {@link findForbiddenTaskCommands} and REJECTS the task before a row is
+ *     written — the structured "you wrote this, recompose it" error above.
+ *   - EXECUTION (verificationAgentQuery's `canUseTool`) tests
+ *     {@link FORBIDDEN_DEP_COMMAND_PATTERN} against a `Bash` command the agent
+ *     improvised at runtime, which no enqueue-time check can have seen.
  *
- * Both consume the SAME {@link FORBIDDEN_DEP_COMMAND_PATTERN}. That is the whole
- * point of this module existing rather than each seam carrying its own copy: a
- * pattern that is widened in one place and not the other is a guard that
- * silently stops covering the case someone just discovered.
+ * Both consume the SAME pattern, which is the whole reason this module exists
+ * rather than each seam carrying its own copy: a pattern widened in one place
+ * and not the other is a check that silently stops covering the case someone
+ * just discovered.
  *
- * CONSERVATIVE BY DESIGN, IN THE SAFE DIRECTION. A false positive costs the
- * composer one recomposition with an explicit reason. A false negative costs a
- * cross-lane ABI flip that presents as unrelated lanes failing to build. So the
- * pattern matches ANYWHERE in a shell string — after `&&`, after `;`, inside a
- * `sh -c "..."` — rather than only at the start, and it is case-insensitive.
- * What it deliberately does NOT do is guess: it matches package-manager
- * DEPENDENCY VERBS, never a script invocation (`pnpm run build`, `pnpm dev`,
- * `pnpm test:unit` are all fine — running a project's own scripts is the entire
- * job of a build step).
+ * CONSERVATIVE BY DESIGN, IN THE CHEAP DIRECTION. A false positive costs the
+ * composer one recomposition with an explicit reason; a false negative now costs
+ * a slow, confusing verification rather than a poisoned sprint, because the
+ * clone caught what the pattern missed. So the pattern still matches ANYWHERE in
+ * a shell string — after `&&`, after `;`, inside a `sh -c "..."` — and is
+ * case-insensitive, but this is deliberately NOT a place to keep bolting on
+ * cleverness chasing the next indirection: that arms race was the finding, and
+ * the clone is the answer to it. What it deliberately does NOT do is guess: it
+ * matches package-manager DEPENDENCY VERBS, never a script invocation
+ * (`pnpm run build`, `pnpm dev`, `pnpm test:unit` are all fine — running a
+ * project's own scripts is the entire job of a build step).
  *
  * Standalone-typecheck invariant (mirrors capabilityStore.ts / runbookHash.ts):
  * imports ONE shared type and nothing else — no node, no electron, no

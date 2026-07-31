@@ -12,16 +12,17 @@
  * lanes' own chains); uncommitted mess is excluded by construction.
  *
  * This module owns only the mechanics — resolve/validate the sha, create the
- * snapshot worktree, link in untracked dependency directories (a fresh
+ * snapshot worktree, provision untracked dependency directories (a fresh
  * `git worktree` has no `node_modules`), and dispose of it unconditionally.
  * It knows nothing about the scheduler, leases, or the agent runner; those
  * compose this as a building block (§5.4/§5.6).
  *
- * Dependency linking has one seam beyond the mechanics: when a prepared dep set
- * exists (`depPreparer`, verification-setup-flow §7.2) the links point at that
- * per-key MIRROR instead of the live worktree, so a write inside the snapshot
- * can no longer flip a native module's ABI under the sibling lanes. Absent a
- * prepared set, linking is unchanged.
+ * Dependency provisioning is a CLONE into the snapshot, never a symlink out of
+ * it (see {@link cloneDependencyDirs} for the full argument). When a prepared
+ * dep set exists (`depPreparer`, verification-setup-flow §7.2) the clone source
+ * is that per-key MIRROR — already rebuilt for the deliverable's Electron ABI
+ * and warm across runs; absent one it is the live worktree dir. Either way the
+ * snapshot ends up with its own disposable copy.
  *
  * Electron-free by design (plain Node `child_process`/`fs`/`os`/`path`) so it
  * can be unit-tested with no DB/Electron and reused from any process.
@@ -33,7 +34,7 @@ import type { Dirent } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
-import { VerifyDepPreparer, defaultDepExec } from './depPreparer';
+import { VerifyDepPreparer, defaultDepExec, type DepExec } from './depPreparer';
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +44,13 @@ const GIT_MAX_BUFFER = 10 * 1024 * 1024;
 
 /** How many directory levels below the run worktree root to scan for `node_modules`. */
 const NODE_MODULES_SCAN_MAX_DEPTH = 3;
+
+/**
+ * Per-dependency-dir clone bound. APFS clonefile is near-instant even for a
+ * multi-GB tree; the `-R` fallback is a real byte copy, hence minutes rather
+ * than seconds. Same value as `depPreparer`'s, for the same reason.
+ */
+const CLONE_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Injectable git seam
@@ -109,7 +117,7 @@ export async function captureSnapshotSha(runWorktreePath: string, gitExec: GitEx
 }
 
 // ---------------------------------------------------------------------------
-// Dependency-dir linking
+// Dependency-dir provisioning (clone-into-snapshot)
 // ---------------------------------------------------------------------------
 
 /**
@@ -146,28 +154,67 @@ export async function findDependencyDirs(root: string, maxDepth = NODE_MODULES_S
 }
 
 /**
- * Symlinks each dependency dir found in the run worktree into the same
- * relative path inside the snapshot worktree. Symlinks only (never copies —
- * §5.5 "symlink; hardlink-copy where a tool resolves symlinks poorly" is a
- * documented future refinement, not this slice). Best-effort per-dir: a
- * missing parent (the snapshot's checked-out tree doesn't have that nested
- * dir) or a symlink failure is logged and skipped, never thrown.
+ * Provisions each dependency dir found in the run worktree at the same relative
+ * path inside the snapshot worktree, by CLONING it in — never by symlinking out
+ * of it, which is what this did until the §7.2 adversarial review (findings 5
+ * and 6; see WHY A CLONE below). The clone SOURCE is the per-key MIRROR when a
+ * prepared set exists (`mirrors`, from `depPreparer`) and the LIVE worktree dir
+ * when it does not; the DESTINATION is the snapshot in both cases, which is the
+ * part that carries every guarantee here. Per-dir lookup, not all-or-nothing: a
+ * src with no mirror entry simply clones live.
  *
- * WHAT THE LINK POINTS AT (verification-setup-flow §7.2). With no prepared set
- * it points at the LIVE worktree dir, which is the pre-existing behavior and the
- * documented hazard: anything the verification writes into `node_modules` writes
- * THROUGH the symlink into the tree every sibling lane is building against, and
- * `checkSnapshotMutated`'s `git diff HEAD` cannot see it (untracked). With a
- * prepared set (`mirrors`), it points at the per-key MIRROR instead, so the same
- * write-through lands in a disposable cache and the native-module ABI inside is
- * already the deliverable's (the mirror was rebuilt for it, outside every
- * snapshot). Per-dir lookup, not all-or-nothing: a src with no mirror entry
- * simply links live.
+ * WHY A CLONE AND NOT A SYMLINK. Three consequences, each of which was a live
+ * defect while this symlinked:
+ *
+ *  (a) WRITE-THROUGH IS DEAD IN BOTH PATHS. A symlink made the snapshot's
+ *      `node_modules` an ALIAS, so anything the verification wrote into it
+ *      landed in whatever the link pointed at: the shared sprint worktree every
+ *      sibling lane is building against (root cause (c) — a host-Node
+ *      better-sqlite3 under an Electron needing NMV 136 — and invisible to
+ *      `checkSnapshotMutated` because `node_modules` is untracked), or the
+ *      shared dep cache on the mirror path. A clone gives the snapshot its OWN
+ *      copy, discarded with the snapshot, so no write inside a verification has
+ *      a path back to anything a sibling lane or a later verification reads.
+ *      That holds for writes this process never sees — a `node_modules` file
+ *      edited directly, an install spelled through an env var or a script file —
+ *      which is exactly what a command-pattern guard cannot promise.
+ *  (b) WORKSPACE-RELATIVE SYMLINKS RESOLVE AGAINST THE SNAPSHOT. A pnpm
+ *      workspace link like `frontend/node_modules/shared -> ../../shared` points
+ *      at WORKSPACE SOURCE, not into the `.pnpm` store. Pointed at the mirror it
+ *      resolved to `<mirror>/shared` — a path that does not exist, because the
+ *      mirror holds dependencies and deliberately never the project's source. So
+ *      every workspace-linked import broke inside verification while building
+ *      fine in the developer's own tree: a build failure the deliverable did not
+ *      cause, which the classifier can only read as a real one (a false blocking
+ *      rewrite of working code). Cloned INTO the snapshot, the same relative
+ *      link resolves to `<snapshot>/shared` — the checked-out source the
+ *      verification is supposed to be building against in the first place.
+ *  (c) THE §7.2 COMMAND REGEX BECOMES DIAGNOSTICS. `dependencyCommandGuard` is
+ *      bypassable by construction (indirection through an env var, a script
+ *      file, a direct write), so it was never a security control — it was
+ *      merely the only one. The clone is the enforcement now; the regex keeps
+ *      earning its place as the cheap, legible half that tells a composing agent
+ *      WHY its `pnpm install` was refused, instead of leaving it to infer that
+ *      from a confusing build.
+ *
+ * `checkSnapshotMutated` needs nothing from this change: it runs `git diff
+ * --quiet HEAD`, which sees TRACKED files only, and a cloned `node_modules` is
+ * untracked in the snapshot exactly as it was in the live tree.
+ *
+ * FAIL-SOFT, WITH THE POSTURE STATED. A missing parent (the snapshot's
+ * checked-out tree has no such nested dir) or a failed clone is logged and the
+ * dir is SKIPPED — never thrown, same as the symlink version. What changed is
+ * what a skip costs: the snapshot then simply lacks that dependency dir and the
+ * build fails loudly for want of it. That is the intended trade. The tempting
+ * recovery — fall back to a symlink for the one dir whose clone failed — would
+ * buy a working build by silently re-opening (a) for it, and an honest build
+ * failure beats a silent cross-lane write every time.
  */
-async function linkDependencyDirs(
+async function cloneDependencyDirs(
   runWorktreePath: string,
   snapshotWorktreePath: string,
   dependencyDirs: readonly string[],
+  exec: DepExec,
   logger?: LoggerLike,
   mirrors?: ReadonlyMap<string, string> | null,
 ): Promise<void> {
@@ -175,12 +222,12 @@ async function linkDependencyDirs(
     const rel = path.relative(runWorktreePath, srcDir);
     const destPath = path.join(snapshotWorktreePath, rel);
     const destParent = path.dirname(destPath);
-    const linkTarget = mirrors?.get(srcDir) ?? srcDir;
+    const cloneSource = mirrors?.get(srcDir) ?? srcDir;
 
     try {
       await fsPromises.access(destParent);
     } catch {
-      logger?.debug('snapshotProvisioner: skipping dependency-dir link, parent missing in snapshot', {
+      logger?.debug('snapshotProvisioner: skipping dependency-dir clone, parent missing in snapshot', {
         srcDir,
         destPath,
       });
@@ -188,15 +235,99 @@ async function linkDependencyDirs(
     }
 
     try {
-      await fsPromises.symlink(linkTarget, destPath, 'dir');
+      await cloneDependencyDir(cloneSource, destPath, snapshotWorktreePath, exec, logger);
     } catch (err) {
-      logger?.warn('snapshotProvisioner: failed to symlink dependency dir', {
+      logger?.warn('snapshotProvisioner: failed to clone dependency dir; the snapshot will not have it', {
         srcDir,
-        linkTarget,
+        cloneSource,
         destPath,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+}
+
+/**
+ * Clone one dependency dir into the snapshot. `cp -Rc` asks APFS for
+ * clonefile(2) — copy-on-write, so even a multi-GB `node_modules` costs seconds
+ * and near-zero disk until something writes into it. `-c` is macOS-only and
+ * clonefile is refused ACROSS filesystems (the snapshot lives under
+ * `os.tmpdir()`, which need not share a volume with the worktree or the dep
+ * cache), so any failure retries as a plain recursive copy: slower, identical
+ * result. A partial destination from the failed attempt is removed first so the
+ * retry starts clean.
+ *
+ * Symlinks inside the tree are preserved AS SYMLINKS by both forms (BSD `cp -R`
+ * implies `-P` for the traversal, and clonefile clones the link itself). That is
+ * load-bearing twice over: it keeps a pnpm store's web of relative links intact,
+ * and it is what makes consequence (b) above work at all — a `cp -L` here would
+ * dereference `../../shared` against the SOURCE tree and copy the workspace's
+ * source in, quietly re-pinning the snapshot to code it is not verifying.
+ *
+ * Deliberately the same ladder as `depPreparer.cloneDir` rather than a shared
+ * helper: the two run against different roots with different delete guards
+ * (cache vs snapshot), and the part that would actually be shared — the `cp`
+ * argv — is three tokens.
+ */
+async function cloneDependencyDir(
+  src: string,
+  dest: string,
+  snapshotWorktreePath: string,
+  exec: DepExec,
+  logger?: LoggerLike,
+): Promise<void> {
+  const cloned = await exec('cp', ['-Rc', src, dest], {
+    cwd: snapshotWorktreePath,
+    timeoutMs: CLONE_TIMEOUT_MS,
+  });
+  if (cloned.code === 0) return;
+
+  logger?.debug('snapshotProvisioner: clonefile copy unavailable, falling back to a plain recursive copy', {
+    src,
+    dest,
+    out: cloned.out,
+  });
+  await removeInsideSnapshot(snapshotWorktreePath, dest, logger);
+  const copied = await exec('cp', ['-R', src, dest], {
+    cwd: snapshotWorktreePath,
+    timeoutMs: CLONE_TIMEOUT_MS,
+  });
+  if (copied.code !== 0) {
+    throw new Error(`cp -R failed for ${src} (code ${copied.code}): ${copied.out}`);
+  }
+}
+
+/**
+ * The only recursive delete in this module, and it refuses anything that is not
+ * strictly inside the snapshot worktree. Every path handed to it is composed
+ * from that root plus a worktree-relative dependency path, so a violation means
+ * a bug upstream — which is exactly when a guard on `rm -rf` earns its keep.
+ * Same posture (and phrasing) as `depPreparer.removeInsideBaseDir`, whose root
+ * is the dep cache instead: log and decline rather than throw, because a refused
+ * delete leaves garbage in a temp dir we are about to remove wholesale, while an
+ * unrefused one could delete a user's tree.
+ */
+async function removeInsideSnapshot(
+  snapshotWorktreePath: string,
+  target: string,
+  logger?: LoggerLike,
+): Promise<void> {
+  const base = path.resolve(snapshotWorktreePath);
+  const resolved = path.resolve(target);
+  if (resolved === base || !resolved.startsWith(base + path.sep)) {
+    logger?.error('snapshotProvisioner: refusing to remove a path outside the snapshot worktree', {
+      snapshotWorktreePath: base,
+      target: resolved,
+    });
+    return;
+  }
+  try {
+    await fsPromises.rm(resolved, { recursive: true, force: true });
+  } catch (err) {
+    logger?.warn('snapshotProvisioner: failed to remove a partial dependency-dir clone', {
+      target: resolved,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -234,11 +365,14 @@ function resolveDefaultDepBaseDir(): string {
  * The default preparer, or `null` when disabled.
  *
  * `CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER=1` is the rollback lever (mirroring
- * `CYBOFLOW_DISABLE_WARM_SDK=1` for warm SDK sessions): it reverts dependency
- * linking to the pre-§7.2 behavior — symlinks straight into the live worktree —
- * with no rebuild, no cache, no clone. Read on EVERY call rather than at module
- * load so flipping it takes effect on the next verification, and so a test can
- * set it per-case.
+ * `CYBOFLOW_DISABLE_WARM_SDK=1` for warm SDK sessions): it drops the §7.2 mirror
+ * entirely, so dependency dirs are cloned from the LIVE worktree — no per-key
+ * cache, no in-mirror Electron-ABI rebuild, a cold clone every run. Note what it
+ * does NOT revert: the snapshot still gets its OWN copy either way, so flipping
+ * this cannot re-open the cross-lane write-through hazard, only the warmth and
+ * ABI-correctness the mirror buys. Read on EVERY call rather than at module load
+ * so flipping it takes effect on the next verification, and so a test can set it
+ * per-case.
  *
  * Exported for tests only; production reaches it through `provisionSnapshot`.
  */
@@ -274,19 +408,30 @@ export interface ProvisionSnapshotOptions {
   /** Injectable git seam (tests only); defaults to a real `execFile('git', ...)`. */
   gitExec?: GitExec;
   /**
+   * Injectable subprocess seam for the dependency `cp`, shaped exactly like
+   * `depPreparer`'s (a non-zero exit is a VALUE, not a throw — the clonefile
+   * fallback ladder depends on reading the code). Defaults to the same
+   * production `execFile` runner that module uses. Tests inject it to simulate a
+   * clone failure without needing a filesystem that refuses `cp`; the primary
+   * suite otherwise runs the REAL `cp`, because "does the tree survive the copy
+   * with its symlinks intact" is the claim under test.
+   */
+  exec?: DepExec;
+  /**
    * Dependency preparer (§7.2). Omitted ⇒ the lazy default
    * ({@link resolveDefaultDepPreparer}, itself disabled by
    * `CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER=1`). `null` ⇒ explicitly disabled for
-   * this call, which is the pre-§7.2 behavior verbatim: dependency dirs are
-   * symlinked straight into the live worktree.
+   * this call: dependency dirs are cloned straight from the live worktree, with
+   * none of the mirror's warmth or ABI rebuild — but still INTO the snapshot,
+   * which is where the isolation lives.
    */
   depPreparer?: VerifyDepPreparer | null;
 }
 
 /**
  * Creates a temporary, detached `git worktree` at `snapshotSha`, linked from
- * `runWorktreePath` (so it shares that repo's object store), then links in
- * dependency directories (§5.5) since a fresh worktree checkout has none.
+ * `runWorktreePath` (so it shares that repo's object store), then CLONES in
+ * dependency directories (§5.5/§7.2) since a fresh worktree checkout has none.
  *
  * Throws `SnapshotProvisionError('bad_sha')` when `snapshotSha` does not
  * resolve to a commit reachable from the run worktree's repo, and
@@ -297,6 +442,7 @@ export interface ProvisionSnapshotOptions {
 export async function provisionSnapshot(opts: ProvisionSnapshotOptions): Promise<SnapshotProvision> {
   const { runWorktreePath, snapshotSha, logger } = opts;
   const gitExec = opts.gitExec ?? defaultGitExec;
+  const exec = opts.exec ?? defaultDepExec;
 
   try {
     await gitExec(['cat-file', '-e', `${snapshotSha}^{commit}`], runWorktreePath);
@@ -325,18 +471,20 @@ export async function provisionSnapshot(opts: ProvisionSnapshotOptions): Promise
 
   try {
     const dependencyDirs = await findDependencyDirs(runWorktreePath);
-    // §7.2: prepare BEFORE linking, so the links can point at the mirror. The
-    // preparer is fail-soft by contract — a null map means "no prepared set",
-    // and linking then behaves exactly as it did before this seam existed.
+    // §7.2: prepare BEFORE cloning, so the clone can read from the warm,
+    // ABI-rebuilt mirror instead of the live tree. The preparer is fail-soft by
+    // contract — a null map means "no prepared set", and the clone then simply
+    // sources the live dirs. The DESTINATION is the snapshot either way, so the
+    // isolation guarantee does not depend on the preparer succeeding.
     const preparer = opts.depPreparer === undefined ? resolveDefaultDepPreparer(logger) : opts.depPreparer;
     const mirrors = preparer ? await preparer.prepare(runWorktreePath, dependencyDirs) : null;
-    await linkDependencyDirs(runWorktreePath, worktreePath, dependencyDirs, logger, mirrors);
+    await cloneDependencyDirs(runWorktreePath, worktreePath, dependencyDirs, exec, logger, mirrors);
   } catch (err) {
-    // Dependency-dir linking is a convenience for the agent's build step, not
-    // a correctness requirement of the snapshot itself — never fail
+    // Dependency-dir provisioning is a convenience for the agent's build step,
+    // not a correctness requirement of the snapshot itself — never fail
     // provisioning over it. A missing dependency surfaces as a real build
     // error downstream, which is the documented risk (§5.5).
-    logger?.warn('snapshotProvisioner: dependency-dir scan/link failed', {
+    logger?.warn('snapshotProvisioner: dependency-dir scan/clone failed', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
