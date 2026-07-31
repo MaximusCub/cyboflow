@@ -10,8 +10,10 @@
  * sinceIso filtering, createSubIssue's request shape (including the
  * `cyboflow-sync: <clientKey>` recovery marker every create stamps into the
  * description), the marker's removal on every read path, the client-key lookup
- * ambiguous-create recovery runs, and state-group passthrough including the
- * unknown-group → 'backlog' fallback.
+ * ambiguous-create recovery runs, state-group passthrough including the
+ * unknown-group → 'backlog' fallback, and the `/work-items/` ↔ `/issues/`
+ * path-rename compatibility fallback (default segment, the 404→fallback
+ * latch, and the both-404 error).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { PlaneAdapter } from './planeAdapter';
@@ -155,7 +157,7 @@ describe('PlaneAdapter composite externalId round-trip', () => {
   function projectScopedFetch() {
     return scriptedFetch([
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/',
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
         respond: () => ({ status: 200, body: { results: [issueWire], next_cursor: null, next_page_results: false } }),
       },
       {
@@ -163,17 +165,17 @@ describe('PlaneAdapter composite externalId round-trip', () => {
         respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj One', identifier: 'PROJ' } }),
       },
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/iss1/',
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
         respond: () => ({ status: 200, body: issueWire }),
       },
       {
-        test: (method, path) => method === 'PATCH' && path === '/api/v1/workspaces/acme/projects/proj1/issues/iss1/',
+        test: (method, path) => method === 'PATCH' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
         respond: () => ({ status: 200, body: { ...issueWire, state: 'state-done' } }),
       },
     ]);
   }
 
-  it('listIssues → getIssue → updateIssueState all hit the same project-scoped path', async () => {
+  it('listIssues → getIssue → updateIssueState all hit the same project-scoped /work-items/ path', async () => {
     const { fetchImpl, calls } = projectScopedFetch();
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
 
@@ -190,18 +192,26 @@ describe('PlaneAdapter composite externalId round-trip', () => {
     await adapter.updateIssueState(issues[0].externalId, 'state-done');
 
     const getCall = calls.find(
-      (c) => c.method === 'GET' && c.url.includes('/projects/proj1/issues/iss1/')
+      (c) => c.method === 'GET' && c.url.includes('/projects/proj1/work-items/iss1/')
     );
     expect(getCall).toBeDefined();
     const patchCall = calls.find((c) => c.method === 'PATCH');
-    expect(patchCall?.url).toContain('/workspaces/acme/projects/proj1/issues/iss1/');
+    expect(patchCall?.url).toContain('/workspaces/acme/projects/proj1/work-items/iss1/');
     expect(patchCall?.body).toEqual({ state: 'state-done' });
+    // Not the retired path — this is the regression the rename fix targets.
+    expect(calls.every((c) => !c.url.includes('/projects/proj1/issues/'))).toBe(true);
   });
 
-  it('getIssue returns null on a 404 rather than throwing', async () => {
+  it('getIssue returns null on a 404 rather than throwing (both /work-items/ and the fallback /issues/ miss)', async () => {
     const { fetchImpl } = scriptedFetch([
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/missing/',
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/missing/',
+        respond: () => ({ status: 404, body: { detail: 'not found' } }),
+      },
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/missing/',
         respond: () => ({ status: 404, body: { detail: 'not found' } }),
       },
     ]);
@@ -267,7 +277,7 @@ describe('PlaneAdapter.listIssues sinceIso filtering', () => {
     ];
     const { fetchImpl } = scriptedFetch([
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/',
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
         respond: () => ({ status: 200, body: { results: issuesWire, next_cursor: null, next_page_results: false } }),
       },
       {
@@ -287,7 +297,7 @@ describe('PlaneAdapter.createSubIssue', () => {
   function createFetch(created: Record<string, unknown>) {
     return scriptedFetch([
       {
-        test: (method, path) => method === 'POST' && path === '/api/v1/workspaces/acme/projects/proj1/issues/',
+        test: (method, path) => method === 'POST' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
         respond: (body) => ({
           status: 201,
           body: {
@@ -371,7 +381,7 @@ describe('PlaneAdapter marker stripping on read', () => {
   function readFetch(issueWire: Record<string, unknown>) {
     return scriptedFetch([
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/iss1/',
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
         respond: () => ({ status: 200, body: issueWire }),
       },
       {
@@ -432,12 +442,12 @@ describe('PlaneAdapter.findSubIssueByClientKey', () => {
   function listFetch(results: Array<Record<string, unknown>>, details: Record<string, unknown> = {}) {
     return scriptedFetch([
       {
-        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/',
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
         respond: () => ({ status: 200, body: { results, next_cursor: null, next_page_results: false } }),
       },
       {
         test: (method, path) =>
-          method === 'GET' && /^\/api\/v1\/workspaces\/acme\/projects\/proj1\/issues\/[^/]+\/$/.test(path),
+          method === 'GET' && /^\/api\/v1\/workspaces\/acme\/projects\/proj1\/work-items\/[^/]+\/$/.test(path),
         respond: () => ({ status: 200, body: details }),
       },
       {
@@ -500,7 +510,7 @@ describe('PlaneAdapter.findSubIssueByClientKey', () => {
     const found = await adapter.findSubIssueByClientKey('proj1/parentIss', CLIENT_KEY);
 
     expect(found?.externalId).toBe('proj1/ours');
-    expect(calls.some((c) => c.url.includes('/projects/proj1/issues/ours/'))).toBe(true);
+    expect(calls.some((c) => c.url.includes('/projects/proj1/work-items/ours/'))).toBe(true);
   });
 });
 
@@ -532,5 +542,122 @@ describe('PlaneAdapter.listStates', () => {
       { id: 's2', name: 'Done', color: '#22c55e', group: 'completed' },
       { id: 's3', name: 'Mystery', color: null, group: 'backlog' },
     ]);
+  });
+});
+
+describe('PlaneAdapter /work-items/ ↔ /issues/ path-rename compatibility', () => {
+  const workItemBase = {
+    name: 'Fix the bug',
+    sequence_id: 42,
+    description: null as string | null,
+    state: 'state-open',
+    assignees: [] as string[],
+    estimate_point: null,
+    parent: null as string | null,
+    updated_at: '2026-07-01T00:00:00.000Z',
+    archived_at: null,
+  };
+
+  it('defaults list, detail, create, and update to /work-items/ — never the retired /issues/', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: () => ({
+          status: 200,
+          body: { results: [{ ...workItemBase, id: 'iss1' }], next_cursor: null, next_page_results: false },
+        }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
+        respond: () => ({ status: 200, body: { ...workItemBase, id: 'iss1' } }),
+      },
+      {
+        test: (method, path) => method === 'POST' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: () => ({ status: 201, body: { ...workItemBase, id: 'child1', parent: 'iss1' } }),
+      },
+      {
+        test: (method, path) =>
+          method === 'PATCH' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
+        respond: () => ({ status: 200, body: { ...workItemBase, id: 'iss1', state: 'state-done' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const listed = await adapter.listIssues(ALL_SELECTION);
+    const fetched = await adapter.getIssue('proj1/iss1');
+    const created = await adapter.createSubIssue('proj1/iss1', { title: 'Sub task' }, CLIENT_KEY);
+    await adapter.updateIssueState('proj1/iss1', 'state-done');
+
+    expect(listed[0]?.externalId).toBe('proj1/iss1');
+    expect(fetched?.externalId).toBe('proj1/iss1');
+    expect(created.externalId).toBe('proj1/child1');
+    // Every request landed on /work-items/; the retired /issues/ segment was
+    // never touched. This is the regression the path-rename fix targets —
+    // without it, every one of these calls would 404 against the handlers
+    // above (which only answer on /work-items/) and the test would fail
+    // with "unhandled request" for the /issues/ URLs the old adapter sent.
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    expect(calls.every((c) => !c.url.includes('/projects/proj1/issues/'))).toBe(true);
+    expect(calls.filter((c) => c.url.includes('/projects/proj1/work-items')).length).toBe(calls.length - 1); // -1 for the project-identifier GET
+  });
+
+  it('falls back to /issues/ on a 404 from /work-items/ and latches — the next request skips the probe entirely', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      // Simulates an older self-hosted instance: the /work-items/ route does
+      // not exist at all, so every request against it 404s regardless of id.
+      {
+        test: (_method, path) => path.includes('/work-items/'),
+        respond: () => ({ status: 404, body: { detail: 'not found' } }),
+      },
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/iss1/',
+        respond: () => ({ status: 200, body: { ...workItemBase, id: 'iss1' } }),
+      },
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/issues/iss2/',
+        respond: () => ({ status: 200, body: { ...workItemBase, id: 'iss2' } }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const first = await adapter.getIssue('proj1/iss1');
+    expect(first?.externalId).toBe('proj1/iss1');
+    // Exactly one probe against the retired path before the fallback landed.
+    expect(calls.filter((c) => c.url.includes('/work-items/')).length).toBe(1);
+    expect(calls.filter((c) => c.url.includes('/issues/iss1/')).length).toBe(1);
+
+    const second = await adapter.getIssue('proj1/iss2');
+
+    expect(second?.externalId).toBe('proj1/iss2');
+    // Latched: the second request goes straight to /issues/ — no re-probe of
+    // /work-items/. Without the latch this would be 2, not 1.
+    expect(calls.filter((c) => c.url.includes('/work-items/')).length).toBe(1);
+    expect(calls.filter((c) => c.url.includes('/issues/iss2/')).length).toBe(1);
+  });
+
+  it('throws TrackerApiError when both /work-items/ and /issues/ 404 (a real 404, not a naming mismatch)', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) =>
+          method === 'PATCH' &&
+          (path === '/api/v1/workspaces/acme/projects/proj1/work-items/missing/' ||
+            path === '/api/v1/workspaces/acme/projects/proj1/issues/missing/'),
+        respond: () => ({ status: 404, body: { detail: 'not found' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await expect(adapter.updateIssueState('proj1/missing', 'state-x')).rejects.toBeInstanceOf(TrackerApiError);
   });
 });

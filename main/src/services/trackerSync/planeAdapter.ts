@@ -18,6 +18,16 @@
  * Verified against https://developers.plane.so (2026-07-30). A few response
  * shapes are under-documented there; see the "documented choice" comments
  * below for what this adapter assumes and why.
+ *
+ * Path rename: Plane Cloud's work-item endpoints (list/create/retrieve/
+ * update) moved from `/issues/` to `/work-items/`, ending support for the
+ * old name (https://developers.plane.so/api-reference/issue/list-issues,
+ * re-verified 2026-07-30). This adapter defaults to `/work-items/` and falls
+ * back to `/issues/` for older self-hosted instances that predate the rename
+ * — see {@link PlaneAdapter.workItemsSegment}. The cycle-issues/module-issues
+ * membership link endpoints were checked against the same docs and did NOT
+ * rename; they still answer under `cycle-issues/`/`module-issues/`, so
+ * {@link PlaneAdapter.filterByMembership} is untouched by this.
  */
 
 import type {
@@ -153,6 +163,9 @@ interface PlaneMembershipLinkWire {
   issue: string;
 }
 
+/** The two names the work-item collection/detail path has answered under — see {@link PlaneAdapter.workItemsSegment}. */
+type WorkItemsSegment = 'work-items' | 'issues';
+
 // ---------------------------------------------------------------------------
 
 export class PlaneAdapter implements TrackerAdapter {
@@ -165,6 +178,19 @@ export class PlaneAdapter implements TrackerAdapter {
   private readonly fetchImpl: FetchLike;
   /** projectId → project.identifier ("COR"), fetched once and reused. */
   private readonly projectIdentifierCache = new Map<string, string>();
+  /**
+   * Which path segment names the work-item collection/detail endpoints on
+   * THIS instance. Plane Cloud renamed `/issues/` → `/work-items/` (verified
+   * against https://developers.plane.so/api-reference/issue/list-issues,
+   * 2026-07-30); older self-hosted deployments predate the rename and only
+   * answer on `/issues/`. Starts optimistic on the current name and flips —
+   * once, permanently, for the life of this adapter instance — the first
+   * time a `/work-items/` 404 turns out to be a naming mismatch rather than
+   * a real 404 (see {@link sendWorkItem}). Deliberately simple: no TTL, no
+   * re-probing once latched, no persistence across adapter instances — a
+   * fresh instance re-derives it the same way every time.
+   */
+  private workItemsSegment: WorkItemsSegment = 'work-items';
 
   constructor(options: PlaneAdapterOptions) {
     this.apiKey = options.apiKey;
@@ -246,8 +272,8 @@ export class PlaneAdapter implements TrackerAdapter {
     sinceIso?: string
   ): Promise<TrackerIssue[]> {
     const projectId = selection.containerId;
-    const raw = await this.paginateAll<PlaneIssueWire>(
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/`,
+    const raw = await this.paginateAllWorkItems<PlaneIssueWire>(
+      projectId,
       // Documented choice: Plane's issue list returns bare assignee UUIDs by
       // default; `expand=assignees` (per the API's documented `expand` query
       // param) returns full user objects so assignee.name/initials can be
@@ -267,8 +293,8 @@ export class PlaneAdapter implements TrackerAdapter {
 
   async listIssueIds(selection: TrackerSourceSelection): Promise<string[]> {
     const projectId = selection.containerId;
-    const raw = await this.paginateAll<{ id: string }>(
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/`,
+    const raw = await this.paginateAllWorkItems<{ id: string }>(
+      projectId,
       // Slim response: the deletion sweep only needs ids.
       { fields: 'id' }
     );
@@ -302,9 +328,9 @@ export class PlaneAdapter implements TrackerAdapter {
     if (draft.stateId !== undefined) {
       body.state = draft.stateId;
     }
-    const raw = await this.request<PlaneIssueWire>(
+    const raw = await this.requestWorkItem<PlaneIssueWire>(
       'POST',
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/`,
+      (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/`,
       body
     );
     const identifier = await this.getProjectIdentifier(projectId);
@@ -313,9 +339,9 @@ export class PlaneAdapter implements TrackerAdapter {
 
   async updateIssueState(externalId: string, stateId: string): Promise<void> {
     const { projectId, issueId } = splitExternalId(externalId);
-    await this.request(
+    await this.requestWorkItem(
       'PATCH',
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/${issueId}/`,
+      (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/${issueId}/`,
       { state: stateId }
     );
   }
@@ -341,8 +367,8 @@ export class PlaneAdapter implements TrackerAdapter {
     const { projectId, issueId: parentIssueId } = splitExternalId(parentExternalId);
     // Parent-scoped by construction: a Plane sub-issue always lives in its
     // parent's project, so the project issue list is the whole search space.
-    const raw = await this.paginateAll<PlaneIssueWire>(
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/`,
+    const raw = await this.paginateAllWorkItems<PlaneIssueWire>(
+      projectId,
       // Same expansion listIssues uses, so an adopted issue maps identically to
       // one that arrived through the inbound path.
       { expand: 'assignees' }
@@ -366,11 +392,17 @@ export class PlaneAdapter implements TrackerAdapter {
 
   // ---- internals -----------------------------------------------------
 
-  /** Raw detail fetch; null on 404 (the issue does not exist / is hard-deleted). */
+  /**
+   * Raw detail fetch; null on 404 (the issue does not exist / is hard-deleted).
+   * Routed through {@link sendWorkItem}'s fallback, so a 404 here only maps to
+   * "does not exist" once BOTH `/work-items/` and `/issues/` have been tried —
+   * a bare naming mismatch never surfaces as a false "not found".
+   */
   private async fetchIssueWire(projectId: string, issueId: string): Promise<PlaneIssueWire | null> {
-    const response = await this.send(
+    const response = await this.sendWorkItem(
       'GET',
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/${issueId}/?expand=assignees`
+      (segment) =>
+        `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/${issueId}/?expand=assignees`
     );
     if (response.status === 404) return null;
     this.assertOk(response);
@@ -384,6 +416,12 @@ export class PlaneAdapter implements TrackerAdapter {
    * `cycle-issues`/`module-issues` overview) rather than full issue objects,
    * so this filters the project-scoped fetch by membership instead of
    * re-mapping from the link endpoint directly — one shape to map, not two.
+   *
+   * Unlike the work-item collection/detail endpoints, these two paths did
+   * NOT rename: re-checked against https://developers.plane.so/api-reference
+   * (cycle/list-cycle-work-items, module/list-module-work-items) 2026-07-30
+   * and both still answer under the literal `cycle-issues/`/`module-issues/`
+   * segments used below — no {@link workItemsSegment} fallback needed here.
    */
   private async filterByNarrow<T extends { id: string }>(
     projectId: string,
@@ -475,6 +513,69 @@ export class PlaneAdapter implements TrackerAdapter {
     if (response.status === 204) return undefined as unknown as T;
     const text = await response.text();
     return (text.length > 0 ? JSON.parse(text) : undefined) as T;
+  }
+
+  /**
+   * Sends one request against a work-item collection/detail path, applying
+   * the `/work-items/` ↔ `/issues/` compatibility fallback documented on
+   * {@link workItemsSegment}: a 404 on the current segment is retried once
+   * against the other segment before being treated as a real 404.
+   *
+   * - Fallback succeeds (not 404) → latch {@link workItemsSegment} onto that
+   *   segment for every later call, and return the fallback response.
+   * - Fallback also 404s → return the ORIGINAL (current-segment) response
+   *   unchanged, so callers that treat 404 as "does not exist" (see
+   *   `fetchIssueWire`) keep working exactly as before; nothing is latched.
+   * - Already latched onto `/issues/` → no probing left to do, a 404 there
+   *   is just a real 404.
+   */
+  private async sendWorkItem(
+    method: string,
+    pathBuilder: (segment: WorkItemsSegment) => string,
+    body?: unknown
+  ): Promise<Response> {
+    const primarySegment = this.workItemsSegment;
+    const primary = await this.send(method, pathBuilder(primarySegment), body);
+    if (primary.status !== 404 || primarySegment === 'issues') return primary;
+    const fallback = await this.send(method, pathBuilder('issues'), body);
+    if (fallback.status === 404) return primary;
+    this.workItemsSegment = 'issues';
+    return fallback;
+  }
+
+  /** Like {@link request}, but routed through {@link sendWorkItem}'s compatibility fallback. */
+  private async requestWorkItem<T>(
+    method: string,
+    pathBuilder: (segment: WorkItemsSegment) => string,
+    body?: unknown
+  ): Promise<T> {
+    const response = await this.sendWorkItem(method, pathBuilder, body);
+    this.assertOk(response);
+    if (response.status === 204) return undefined as unknown as T;
+    const text = await response.text();
+    return (text.length > 0 ? JSON.parse(text) : undefined) as T;
+  }
+
+  /** Like {@link paginateAll}, but for the work-item collection endpoint specifically (see {@link sendWorkItem}). */
+  private async paginateAllWorkItems<T>(
+    projectId: string,
+    extraParams: Record<string, string> = {}
+  ): Promise<T[]> {
+    const results: T[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const params = new URLSearchParams({ per_page: '100', ...extraParams });
+      if (cursor !== undefined) params.set('cursor', cursor);
+      const query = params.toString();
+      const page = await this.requestWorkItem<PlanePage<T>>(
+        'GET',
+        (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/?${query}`
+      );
+      results.push(...page.results);
+      if (!page.next_page_results || page.next_cursor === null) break;
+      cursor = page.next_cursor;
+    }
+    return results;
   }
 
   private send(method: string, pathFromApiV1: string, body?: unknown): Promise<Response> {
