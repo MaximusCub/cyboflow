@@ -19,8 +19,9 @@
  * inline `MINIMAL_SCHEMA` const declared below (no real migration runner — tests are hermetic). A writes-capturing
  * socket test double is used to assert on the JSON response bodies.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import * as os from 'node:os';
@@ -4291,19 +4292,34 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   const NON_SETUP_WORKFLOW_ID = 'wf-1';
   const VERIFY_SETUP_WORKFLOW_ID = 'wf-verify-setup';
 
-  /** Seed a run with the migration-036 verify stamp applied inline. */
+  /**
+   * Seed a run with the migration-036 verify stamp applied inline.
+   *
+   * `worktreePath` defaults to a path that is NOT a git repo, which is the
+   * fail-soft snapshot case (§5.5): `captureSnapshotSha` throws and the row is
+   * stamped `snapshot_sha = NULL`. Tests that care about the snapshot pass
+   * `gitRepo` (the real throwaway repo below) explicitly.
+   */
   function seedVerifyRun(
     db: Database.Database,
     id: string,
-    opts: { enabled: boolean; type?: string | null; chain?: string[] | null; status?: string; workflowId?: string },
+    opts: {
+      enabled: boolean;
+      type?: string | null;
+      chain?: string[] | null;
+      status?: string;
+      workflowId?: string;
+      worktreePath?: string;
+    },
   ): void {
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json,
                                   verify_enabled, verify_type, verify_chain)
-       VALUES (?, ?, 1, '/tmp/test', ?, '{}', ?, ?, ?)`,
+       VALUES (?, ?, 1, ?, ?, '{}', ?, ?, ?)`,
     ).run(
       id,
       opts.workflowId ?? NON_SETUP_WORKFLOW_ID,
+      opts.worktreePath ?? nonRepoDir,
       opts.status ?? 'running',
       opts.enabled ? 1 : 0,
       opts.type ?? null,
@@ -4335,6 +4351,65 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         },
       }),
     );
+  }
+
+  /**
+   * Two real on-disk fixtures for the §5.5 snapshot capture (round-3 finding 2).
+   * `gitRepo` is a throwaway repo with one commit so `captureSnapshotSha`
+   * resolves a real HEAD; `nonRepoDir` EXISTS but is not a repo, so the capture
+   * fails for the reason under test (no git metadata) rather than for a missing
+   * cwd. Both are process-wide for this block — nothing in it writes to them.
+   */
+  let gitRepo: string;
+  let gitRepoHead: string;
+  let nonRepoDir: string;
+
+  beforeAll(() => {
+    gitRepo = mkdtempSync(join(os.tmpdir(), 'cyboflow-mcp-verify-git-'));
+    const git = (...args: string[]): string =>
+      execFileSync('git', args, { cwd: gitRepo, encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 't@t.dev');
+    git('config', 'user.name', 'T');
+    writeFileSync(join(gitRepo, 'f.txt'), 'hi');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    gitRepoHead = git('rev-parse', 'HEAD').trim();
+    nonRepoDir = mkdtempSync(join(os.tmpdir(), 'cyboflow-mcp-verify-plain-'));
+  });
+
+  afterAll(() => {
+    rmSync(gitRepo, { recursive: true, force: true });
+    rmSync(nonRepoDir, { recursive: true, force: true });
+  });
+
+  /**
+   * (Re)initialize the scheduler singleton. `runbookStore` is passed only by the
+   * proven-runbook injection test: with no store wired,
+   * `resolveProvenRunbook` answers null and every other test in this block
+   * enqueues unpinned, which is what they assert.
+   */
+  function initVerifyScheduler(runbookStore?: VerifyRunbookStore): void {
+    VerificationScheduler._resetForTesting();
+    VerificationScheduler.initialize({
+      db: dbAdapter(vdb),
+      backends: {},
+      judge: {
+        judge: vi.fn(
+          async (): Promise<VerdictV1> => ({
+            status: 'pass',
+            confidence: 0.95,
+            issues: [],
+            feedback: 'ok',
+            judgedFileNames: [],
+            baselineUsed: false,
+            model: 'fake',
+          }),
+        ),
+      },
+      artifactsDirResolver: () => '/tmp/artifacts',
+      ...(runbookStore ? { runbookStore } : {}),
+    });
   }
 
   beforeEach(() => {
@@ -4405,21 +4480,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
       .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'verify-setup', '{}')`)
       .run(VERIFY_SETUP_WORKFLOW_ID);
 
-    VerificationScheduler._resetForTesting();
-    VerificationScheduler.initialize({
-      db: dbAdapter(vdb),
-      backends: {},
-      judge: { judge: vi.fn(async (): Promise<VerdictV1> => ({
-        status: 'pass',
-        confidence: 0.95,
-        issues: [],
-        feedback: 'ok',
-        judgedFileNames: [],
-        baselineUsed: false,
-        model: 'fake',
-      })) },
-      artifactsDirResolver: () => '/tmp/artifacts',
-    });
+    initVerifyScheduler();
 
     // Wired for the setup-proof pin-resolution tests below (getByHash reads the
     // DB directly; these IO deps are never invoked by getByHash but the store's
@@ -4953,6 +5014,10 @@ describe('McpQueryHandler — mcp-request-verification', () => {
       type: 'interactive-web-behavior',
       chain: ['playwright'],
       workflowId: VERIFY_SETUP_WORKFLOW_ID,
+      // A real repo so this test also pins down round-3 finding 2's worst case:
+      // the setup flow's own PROOF run used to run the dirty live-worktree
+      // fallback, i.e. a runbook could be marked proven off an unisolated build.
+      worktreePath: gitRepo,
     });
     seedRunbookDraft(vdb, 'hash-abc');
 
@@ -4981,16 +5046,18 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const data = response.data as { requestId: string };
     const row = vdb
       .prepare(
-        'SELECT setup_proof, runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?',
+        'SELECT setup_proof, runbook_hash, runbook_local_version, snapshot_sha FROM verification_requests WHERE id = ?',
       )
       .get(data.requestId) as {
       setup_proof: number;
       runbook_hash: string | null;
       runbook_local_version: number | null;
+      snapshot_sha: string | null;
     };
     expect(row.setup_proof).toBe(1);
     expect(row.runbook_hash).toBe('hash-abc');
     expect(row.runbook_local_version).toBe(3);
+    expect(row.snapshot_sha).toBe(gitRepoHead);
   });
 
   it('setup_proof from a sprint (non-verify-setup) run is rejected with setup_proof_not_authorized, naming the actual workflow, and enqueues nothing', async () => {
@@ -5170,6 +5237,204 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(row.setup_proof).toBe(0);
     expect(row.runbook_hash).toBeNull();
     expect(row.runbook_local_version).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // WIRE-PIN CONTAINMENT (Codex round-3 finding 1). `prepareVerificationEnqueue`
+  // treats a caller-supplied pin as authoritative and SKIPS the proven-runbook
+  // lookup — semantics written for the authorized setup-proof envelope. On an
+  // ordinary request that same short-circuit is a kill switch: an invented hash
+  // suppresses the injection, the runner's CAS then reports a runbook/sha
+  // mismatch, and the mismatch env-SKIPS — which ADVANCES the lane. So the
+  // handler drops both wire fields unless setup_proof authorized them. These two
+  // tests are the MCP-to-row proof of that; the setup-proof half is unchanged
+  // and covered by the authorization tests above.
+  // -------------------------------------------------------------------------
+
+  /**
+   * A portable runbook whose build/serve deliberately DIFFER from what the
+   * caller composes below, so a successful injection is observable in the
+   * persisted `task_json` rather than merely in the pin columns.
+   */
+  const PROVEN_RUNBOOK_JSON = JSON.stringify({
+    version: 1,
+    modalities: {
+      web: {
+        build: ['pnpm run build:web'],
+        serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
+        attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+      },
+    },
+  });
+
+  /** The composer's guess at how to stand the project up — the part §1 says is never right. */
+  const GUESSED_TASK = {
+    version: 1,
+    summary: 'the app boots',
+    behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+    serve: { cmd: 'pnpm dev --port ${PORT}' },
+  };
+
+  /**
+   * Register PROVEN_RUNBOOK_JSON and flip it proven, returning the store to wire
+   * into the scheduler. The three store IO deps are faked (they are its only
+   * filesystem contact) so this stays a test about the enqueue seam; the values
+   * must simply be STABLE, since `status()` re-derives all three and demotes on
+   * any drift.
+   */
+  async function seedProvenRunbook(): Promise<{ store: VerifyRunbookStore; hash: string; version: number }> {
+    const store = new VerifyRunbookStore(dbAdapter(vdb), {
+      readPortableFile: async () => PROVEN_RUNBOOK_JSON,
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fp-1',
+    });
+    const registered = (await store.registerDraft(1, gitRepo, 'web')) as { hash: string; version: number };
+    expect(store.markProven(1, 'web', registered.hash, registered.version, '{}')).toEqual({ ok: true });
+    return { store, hash: registered.hash, version: registered.version };
+  }
+
+  function readPinRow(requestId: string): {
+    setup_proof: number;
+    runbook_hash: string | null;
+    runbook_local_version: number | null;
+    task_json: string | null;
+    snapshot_sha: string | null;
+  } {
+    return vdb
+      .prepare(
+        `SELECT setup_proof, runbook_hash, runbook_local_version, task_json, snapshot_sha
+           FROM verification_requests WHERE id = ?`,
+      )
+      .get(requestId) as ReturnType<typeof readPinRow>;
+  }
+
+  it('an ordinary request supplying BOGUS pin fields has them dropped — the engine still injects and pins the PROVEN revision', async () => {
+    const { store, hash, version } = await seedProvenRunbook();
+    initVerifyScheduler(store);
+    seedVerifyRun(vdb, 'run-vbogus', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      worktreePath: gitRepo,
+    });
+    const handler = new McpQueryHandler(dbAdapter(vdb), undefined, { verifyRunbookStore: store });
+
+    const { socket, writes } = makeSocketDouble();
+    await handler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-bogus',
+        runId: 'run-vbogus',
+        intent: 'the app boots',
+        task: GUESSED_TASK,
+        // No setup_proof — an ordinary lane inventing a pin.
+        runbookHash: 'bogus-hash-nobody-registered',
+        runbookLocalVersion: 999,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const row = readPinRow((response.data as { requestId: string }).requestId);
+    // The pin the ENGINE resolved, never the one the caller sent.
+    expect(row.runbook_hash).toBe(hash);
+    expect(row.runbook_local_version).toBe(version);
+    expect(row.setup_proof).toBe(0);
+    // …and the injection the bogus pin would have short-circuited actually ran.
+    const persisted = JSON.parse(row.task_json as string) as { build?: string[]; serve?: { cmd?: string } };
+    expect(persisted.build).toEqual(['pnpm run build:web']);
+    expect(persisted.serve?.cmd).toBe('pnpm run preview -- --port ${PORT}');
+  });
+
+  it('an ordinary request with BOGUS pin fields and NO proven record enqueues UNPINNED (the bogus hash is never stamped)', async () => {
+    // The sharpest form of the finding: with nothing to resolve, the pre-fix
+    // handler stamped the caller's string verbatim and every such request
+    // reached the runner pre-poisoned for a CAS mismatch.
+    seedVerifyRun(vdb, 'run-vbogus-nostore', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      worktreePath: gitRepo,
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-bogus-nostore',
+        runId: 'run-vbogus-nostore',
+        intent: 'the app boots',
+        task: GUESSED_TASK,
+        runbookHash: 'bogus-hash-nobody-registered',
+        runbookLocalVersion: 999,
+      },
+      socket,
+    );
+
+    const row = readPinRow((parseLastWrite(writes).data as { requestId: string }).requestId);
+    expect(row.runbook_hash).toBeNull();
+    expect(row.runbook_local_version).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // SNAPSHOT SHA (§5.5, Codex round-3 finding 2). The MCP path never captured
+  // one, so every orchestrated verification ran the runner's dirty
+  // live-worktree FALLBACK — no isolation from sibling lanes, and the
+  // fallback's build/launch_failed→skipped carve-out (a skip ADVANCES a lane)
+  // as the normal path. It now mirrors the programmatic seam exactly:
+  // capture from the run's worktree, fail-soft to null.
+  // -------------------------------------------------------------------------
+
+  it('stamps the run worktree HEAD as snapshot_sha so the request builds against a snapshot, not the live tree', async () => {
+    seedVerifyRun(vdb, 'run-vsnap', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      worktreePath: gitRepo,
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-snap',
+        runId: 'run-vsnap',
+        intent: 'the page renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const row = readPinRow((parseLastWrite(writes).data as { requestId: string }).requestId);
+    expect(row.snapshot_sha).toBe(gitRepoHead);
+  });
+
+  it('a worktree that is not a git repo → snapshot_sha NULL and the request still enqueues (fail-soft, not a lost verification)', async () => {
+    // worktreePath defaults to `nonRepoDir` — a real directory with no git
+    // metadata, so the capture fails for the reason under test.
+    seedVerifyRun(vdb, 'run-vsnap-null', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-snap-null',
+        runId: 'run-vsnap-null',
+        intent: 'the page renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const row = readPinRow((response.data as { requestId: string }).requestId);
+    expect(row.snapshot_sha).toBeNull();
   });
 
   // -------------------------------------------------------------------------

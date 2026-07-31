@@ -854,12 +854,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             runbook_hash: {
               type: 'string',
               description:
-                'Optional — the portable-runbook content hash returned by cyboflow_register_verify_runbook. Pin the revision this request must execute (verify-setup flow, paired with setup_proof + runbook_local_version). Omitted on ordinary requests: the engine then resolves and pins the project\'s PROVEN revision itself. REQUIRED when setup_proof is true: the hash must resolve to a draft this project actually registered (via cyboflow_register_verify_runbook) or the request is rejected with \'setup_proof_requires_pin\' — see setup_proof.',
+                'Optional — the portable-runbook content hash returned by cyboflow_register_verify_runbook. Pin the revision this request must execute (verify-setup flow, paired with setup_proof + runbook_local_version). MEANINGFUL ONLY INSIDE THE SETUP-PROOF ENVELOPE: without setup_proof:true this field is IGNORED — the server drops it before enqueue and the engine resolves and pins the project\'s PROVEN revision itself, so you can neither redirect an ordinary request onto another revision nor suppress the injection by pinning a hash. REQUIRED when setup_proof is true: the hash must resolve to a draft this project actually registered (via cyboflow_register_verify_runbook) or the request is rejected with \'setup_proof_requires_pin\' — see setup_proof.',
             },
             runbook_local_version: {
               type: 'number',
               description:
-                'Optional — the machine-local record CAS version returned alongside runbook_hash. Must be passed WITH runbook_hash (half a pin is ignored): together they let the runner execute exactly that revision or reject with a structured mismatch instead of improvising. REQUIRED when setup_proof is true — see setup_proof.',
+                'Optional — the machine-local record CAS version returned alongside runbook_hash. Must be passed WITH runbook_hash (half a pin is ignored): together they let the runner execute exactly that revision or reject with a structured mismatch instead of improvising. IGNORED without setup_proof:true, exactly like runbook_hash — an ordinary request carries no caller-supplied pin at all. REQUIRED when setup_proof is true — see setup_proof.',
             },
           },
           // `intent` is required for the legacy form only — a `task`-form call

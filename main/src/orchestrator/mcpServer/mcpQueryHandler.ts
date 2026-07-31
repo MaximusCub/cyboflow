@@ -135,6 +135,7 @@ import {
   VerificationScheduler,
 } from '../verify/verificationScheduler';
 import { prepareVerificationEnqueue } from '../verify/enqueueFromTask';
+import { captureSnapshotSha } from '../verify/snapshotProvisioner';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
 import { isVerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
 import {
@@ -4081,6 +4082,20 @@ export class McpQueryHandler {
    * carry a pin that resolves to a draft actually registered via
    * `cyboflow_register_verify_runbook` — see the `msg.setupProof === true`
    * block below for the two checks and their reasoning.
+   *
+   * ORDINARY REQUESTS NEVER CARRY A WIRE PIN. A caller-supplied pin is
+   * meaningful ONLY inside that authorized envelope; without `setupProof:true`
+   * the `runbookHash`/`runbookLocalVersion` wire fields are dropped before
+   * `prepareVerificationEnqueue` sees them, so the engine-resolved PROVEN
+   * revision is the only pin an ordinary request can end up with. Otherwise the
+   * pin's "authoritative, skip the lookup" semantics would let any caller
+   * suppress the injection with an invented hash and ride the resulting
+   * runbook/sha mismatch into an advancing skip (round-3 finding 1; the full
+   * argument sits at the `wirePin` parse below).
+   *
+   * SNAPSHOT SHA is captured here too, from the run's worktree, so an
+   * MCP-enqueued request gets the same lane-isolated snapshot build as a
+   * programmatically enqueued one (round-3 finding 2; see the capture below).
    */
   private async handleRequestVerification(
     msg: Extract<McpQueryMessage, { type: 'mcp-request-verification' }>,
@@ -4231,6 +4246,24 @@ export class McpQueryHandler {
     // bootstrap deadlock §3.6 exempts it from at the degrade gate. Both halves
     // must arrive together; half a pin is dropped rather than stamped, since the
     // runner's CAS would have nothing to validate against.
+    //
+    // PARSED HERE, THREADED ONLY UNDER THE SETUP-PROOF ENVELOPE (Codex round-3
+    // finding 1). `prepareVerificationEnqueue`'s rule — "a caller-supplied pin
+    // is authoritative, stamp it verbatim, skip the proven-runbook lookup" — was
+    // written for the setup flow, whose pin the block below authorizes. Handing
+    // an ORDINARY request the same short-circuit turns two optional wire fields
+    // into a silent kill switch for verification itself: any orchestrated agent
+    // sending `runbook_hash: 'bogus'` suppresses the engine's proven-revision
+    // injection, the runner's CAS then rejects the pin as a runbook/sha
+    // mismatch, and the mismatch env-SKIPS — and a skip ADVANCES the lane. No
+    // real hash is needed, which is the whole point: the attack costs a string.
+    // So the wire pin is parsed unconditionally (the authorization block needs
+    // it to validate) but reaches the engine ONLY inside the authorized
+    // setup-proof envelope; an ordinary request's pin fields are DROPPED, making
+    // the engine-resolved proven revision the only pin such a request can ever
+    // carry. Enforced at THIS seam because this is where untrusted input
+    // crosses — the shared function has an in-process caller that was never the
+    // threat model, and gating it there too would be a second belt.
     const wirePin =
       typeof msg.runbookHash === 'string' &&
       msg.runbookHash.length > 0 &&
@@ -4314,12 +4347,21 @@ export class McpQueryHandler {
       }
     }
 
+    // The ONLY pin that leaves this handler for the engine. Past the block
+    // above, `msg.setupProof === true` means the claim was authorized against
+    // the run's frozen workflow identity AND `wirePin` resolved to a registered
+    // draft — so this is exactly "a validated setup-proof pin, or nothing". An
+    // ordinary request lands on `undefined` no matter what it put on the wire,
+    // and `prepareVerificationEnqueue` then resolves the project's proven
+    // revision itself (see the PARSED HERE note above for why that matters).
+    const authorizedPin = msg.setupProof === true ? wirePin : undefined;
+
     const prepared = await prepareVerificationEnqueue({
       projectId: ctx.projectId,
       runId: msg.runId,
       type: effectiveType,
       ...(task !== undefined ? { task } : {}),
-      ...(wirePin !== undefined ? { pin: wirePin } : {}),
+      ...(authorizedPin !== undefined ? { pin: authorizedPin } : {}),
       ...(this.logger ? { logger: this.logger } : {}),
     });
     if (!prepared.ok) {
@@ -4339,6 +4381,49 @@ export class McpQueryHandler {
       input = deriveLegacyInputFromTask(task, input.taskRef);
     }
 
+    // SNAPSHOT SHA (§5.5) — captured at ENQUEUE time, mirroring step (2) of the
+    // programmatic seam (verify/enqueueFromTask.ts `enqueueTaskVerification`)
+    // exactly, because a request row's isolation posture must not depend on
+    // which of the two enqueue paths minted it (Codex round-3 finding 2). Until
+    // this landed the MCP path never stamped one, so EVERY orchestrated
+    // verification — the whole orchestrated plane, including verify-setup's own
+    // proof runs — ran the runner's dirty live-worktree FALLBACK: no clone
+    // isolation from sibling lanes still editing the shared worktree, and the
+    // fallback's build/launch_failed→skipped carve-out (which exists to keep a
+    // KNOWN-dirty tree from failing a lane on someone else's half-written file)
+    // promoted from rare degradation to the normal path — i.e. an agent
+    // reporting `build_failed` advanced its lane. Recording a sha ALWAYS
+    // snapshots, so stamping one is what closes that carve-out.
+    //
+    // FAIL-SOFT, same posture as the programmatic seam: a missing worktree row
+    // or a `git rev-parse` failure (not a repo, unborn HEAD) degrades to null —
+    // the pre-existing fallback — rather than refusing the enqueue. This is a
+    // capture, not a gate; hard-failing here would turn "cannot resolve HEAD"
+    // into a lost verification, which is strictly worse than a dirty one. The
+    // worktree LOOKUP is inside the same catch on purpose: this block sits
+    // OUTSIDE the enqueue's try, so an escaping throw here would leave the
+    // caller's socket with no reply at all — the one failure mode a
+    // fire-and-continue seam must never have.
+    let snapshotSha: string | null = null;
+    let snapshotWorktreePath: string | null = null;
+    try {
+      snapshotWorktreePath = this.resolveRunWorktree(msg.runId);
+      if (snapshotWorktreePath === null) {
+        this.logger?.warn('[Cyboflow MCP Query] request-verification: no run worktree; enqueuing without a snapshot', {
+          runId: msg.runId,
+        });
+      } else {
+        snapshotSha = await captureSnapshotSha(snapshotWorktreePath);
+      }
+    } catch (err) {
+      this.logger?.warn('[Cyboflow MCP Query] request-verification: snapshot sha capture failed', {
+        runId: msg.runId,
+        worktreePath: snapshotWorktreePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      snapshotSha = null;
+    }
+
     try {
       const requestId = VerificationScheduler.getInstance().enqueue({
         runId: msg.runId,
@@ -4347,6 +4432,7 @@ export class McpQueryHandler {
         input,
         chain,
         task,
+        snapshotSha,
         ...(msg.setupProof === true ? { setupProof: true } : {}),
         ...(prepared.pin
           ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
