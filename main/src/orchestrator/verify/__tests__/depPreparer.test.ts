@@ -324,6 +324,83 @@ describe('VerifyDepPreparer.prepare — clone, rebuild, publish', () => {
   });
 });
 
+describe('VerifyDepPreparer.prepare — GC grace window', () => {
+  it('does not reclaim an older mirror still inside the grace window, even past keep-2', async () => {
+    await withFixture(async ({ worktree, baseDir }) => {
+      const depDirs = await makeWorktree(worktree);
+      const preparer = new VerifyDepPreparer({ baseDir, exec: makeFakeExec(baseDir, []) });
+      const now = Date.now();
+
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'a\n');
+      const mapA = await preparer.prepare(worktree, depDirs);
+      const keyA = keyOf(mapA?.get(depDirs[0]) ?? '');
+      // Ranked oldest of the three below, but still well inside the 15-minute
+      // grace window — a hypothetical in-flight clone from it must survive.
+      await fsPromises.writeFile(path.join(baseDir, keyA, '.last-used'), `${now - 5 * 60 * 1000}`);
+
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'b\n');
+      const mapB = await preparer.prepare(worktree, depDirs);
+      const keyB = keyOf(mapB?.get(depDirs[0]) ?? '');
+      await fsPromises.writeFile(path.join(baseDir, keyB, '.last-used'), `${now - 2 * 60 * 1000}`);
+
+      // This 3rd key's publish is what triggers the GC pass (build → publish
+      // → gc). Keep-2 alone would rank A oldest and evict it; grace must win.
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'c\n');
+      const mapC = await preparer.prepare(worktree, depDirs);
+      const keyC = keyOf(mapC?.get(depDirs[0]) ?? '');
+
+      const remaining = (await fsPromises.readdir(baseDir)).sort();
+      expect(remaining).toEqual([keyA, keyB, keyC].sort());
+    });
+  });
+
+  it('reclaims an older mirror once its .last-used stamp is outside the grace window', async () => {
+    await withFixture(async ({ worktree, baseDir }) => {
+      const depDirs = await makeWorktree(worktree);
+      const preparer = new VerifyDepPreparer({ baseDir, exec: makeFakeExec(baseDir, []) });
+      const now = Date.now();
+
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'a\n');
+      const mapA = await preparer.prepare(worktree, depDirs);
+      const keyA = keyOf(mapA?.get(depDirs[0]) ?? '');
+      // Staged past the 15-minute grace window: no fresh clone can plausibly
+      // still be reading from this one, so keep-2 ranking applies normally.
+      await fsPromises.writeFile(path.join(baseDir, keyA, '.last-used'), `${now - 20 * 60 * 1000}`);
+
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'b\n');
+      const mapB = await preparer.prepare(worktree, depDirs);
+      const keyB = keyOf(mapB?.get(depDirs[0]) ?? '');
+
+      await fsPromises.writeFile(path.join(worktree, 'pnpm-lock.yaml'), 'c\n');
+      const mapC = await preparer.prepare(worktree, depDirs);
+      const keyC = keyOf(mapC?.get(depDirs[0]) ?? '');
+
+      const remaining = (await fsPromises.readdir(baseDir)).sort();
+      expect(remaining).toEqual([keyB, keyC].sort());
+    });
+  });
+
+  it('a reuse touches the .last-used stamp forward, refreshing the grace window', async () => {
+    await withFixture(async ({ worktree, baseDir }) => {
+      const depDirs = await makeWorktree(worktree);
+      const preparer = new VerifyDepPreparer({ baseDir, exec: makeFakeExec(baseDir, []) });
+
+      const first = await preparer.prepare(worktree, depDirs);
+      const key = keyOf(first?.get(depDirs[0]) ?? '');
+      const stampPath = path.join(baseDir, key, '.last-used');
+
+      // Stage the stamp far in the past so a stale READ (rather than a fresh
+      // write) would be visible in the assertion below.
+      await fsPromises.writeFile(stampPath, '1000');
+      const second = await preparer.prepare(worktree, depDirs);
+      expect(second?.get(depDirs[0])).toBe(first?.get(depDirs[0]));
+
+      const stamp = Number(await fsPromises.readFile(stampPath, 'utf8'));
+      expect(stamp).toBeGreaterThan(Date.now() - 5000);
+    });
+  });
+});
+
 describe('VerifyDepPreparer.prepare — every failure degrades to null', () => {
   it('no dependency dirs → null, nothing executed', async () => {
     await withFixture(async ({ worktree, baseDir }) => {

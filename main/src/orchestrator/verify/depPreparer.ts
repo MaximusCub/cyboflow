@@ -126,6 +126,41 @@ const KEEP_PREPARED_SETS = 2;
 const LAST_USED_STAMP = '.last-used';
 
 /**
+ * Grace window that protects a published mirror from GC even when the
+ * keep-N rule (see {@link KEEP_PREPARED_SETS}) would otherwise reclaim it.
+ *
+ * WHY THIS IS NEEDED. `prepare()` hands its caller bare mirror DIRECTORY
+ * PATHS, not a lease or a handle — the caller (`snapshotProvisioner`) then
+ * clones FROM those paths at its own pace, entirely outside this module's
+ * view. A GC pass runs synchronously after every publish (see `build`), so
+ * with 3+ distinct keys active at once — e.g. two live sprint branches plus a
+ * third mid-transition — the keep-2 rule alone can delete an older mirror a
+ * moment before, or DURING, a clone that is still reading from it. That clone
+ * fails soft at the `cp` layer (see FAIL-SOFT), but the caller has already
+ * committed to the prepared path by then, so the outcome is a blocking build
+ * failure on an otherwise-healthy deliverable, not a quiet fallback.
+ *
+ * A GRACE WINDOW is the cheapest mechanism that closes this, not a lease or a
+ * lockfile. An in-process refcount would need `prepare`/`release` pairing
+ * across every caller — an API change this module's callers do not have; a
+ * cross-process lease needs a lockfile protocol this module has no other use
+ * for. Time is already the LRU currency here (`.last-used`), so reusing it as
+ * a hold is zero new machinery: `touch()` already runs on both the REUSE path
+ * and the fresh BUILD-then-publish path, so any mirror this module has ever
+ * handed to a caller is unreclaimable for this long afterward — and an APFS
+ * clonefile copy (seconds) can never outlast it.
+ *
+ * RESIDUAL: a clone that somehow takes longer than the grace window was
+ * already dead on arrival at whatever caller-side deadline started it, long
+ * before 15 minutes could elapse — not a gap this module needs to close.
+ *
+ * {@link KEEP_PREPARED_SETS} is unchanged by this: grace only ADDS
+ * protection on top of the keep-2-newest rule, it never widens what GC is
+ * willing to delete once a set ages out of the window.
+ */
+const DEP_MIRROR_GC_GRACE_MS = 15 * 60 * 1000;
+
+/**
  * Marker in an UNPUBLISHED build directory's name. GC skips anything containing
  * it (another process may be mid-build) and the publish step renames it away, so
  * a directory without the marker is by definition complete.
@@ -555,7 +590,10 @@ export class VerifyDepPreparer {
   }
 
   /**
-   * LRU trim to {@link KEEP_PREPARED_SETS}, newest-first by `.last-used`. Runs
+   * LRU trim to {@link KEEP_PREPARED_SETS}, newest-first by `.last-used`, MINUS
+   * anything still inside {@link DEP_MIRROR_GC_GRACE_MS} — see that constant
+   * for why a recently-handed-out mirror must survive even when the keep-2
+   * rank alone would evict it (a caller may still be cloning from it). Runs
    * only after a successful publish — GC is maintenance, never a precondition
    * for serving a request. Unpublished ({@link TMP_MARKER}) directories are
    * skipped: another process may be mid-build inside one, and every failure path
@@ -572,7 +610,15 @@ export class VerifyDepPreparer {
         })),
       );
       stamped.sort((a, b) => b.lastUsed - a.lastUsed);
+      const now = Date.now();
       for (const victim of stamped.slice(KEEP_PREPARED_SETS)) {
+        if (now - victim.lastUsed < DEP_MIRROR_GC_GRACE_MS) {
+          // Grace window: this set was published or reused recently enough
+          // that a caller may still be mid-clone from it — see
+          // DEP_MIRROR_GC_GRACE_MS. Leave it; a later GC pass (after another
+          // publish) re-evaluates it once the window has passed.
+          continue;
+        }
         await this.removeInsideBaseDir(path.join(this.deps.baseDir, victim.name));
       }
     } catch (err) {
