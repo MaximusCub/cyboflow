@@ -100,6 +100,19 @@ vi.mock('../../TaskBatchPickerModal', () => ({
   ),
 }));
 
+// LaunchPromptModal — stubbed to a button that reports a fixed seed prompt, so
+// the wizard's Launch seed-prompt gate WIRING (open → onSubmit → runs.start({
+// seedPrompt }) → goToSession) is tested in isolation. The modal's own
+// internals (disabled-until-text, trimming, Cmd/Ctrl+Enter) are covered by its
+// own test file.
+vi.mock('../../LaunchPromptModal', () => ({
+  LaunchPromptModal: ({ onSubmit }: { onSubmit: (seedPrompt: string) => void }) => (
+    <button data-testid="mock-launch-prompt-submit" onClick={() => onSubmit('A recipe app.')}>
+      submit seed prompt
+    </button>
+  ),
+}));
+
 // IdeaPickerModal — stubbed to buttons that report a fixed idea id / batch, so
 // the wizard's idea-gate WIRING (open → onPicked → runs.start({ ideaId /
 // ideaIds }) → goToSession) is tested in isolation. Shared by the Planner AND
@@ -243,6 +256,17 @@ const VERIFY_SETUP_WORKFLOW_ROW: WorkflowRow = {
   id: 'wf-verify-setup',
   project_id: 1,
   name: 'verify-setup',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+  archived_at: null,
+};
+/** The Launch built-in row (seed-prompt-gated — the interview-driven super-planner). */
+const LAUNCH_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'launch',
   workflow_path: null,
   spec_json: '{}',
   permission_mode: 'default',
@@ -1484,6 +1508,65 @@ describe('SessionStartWizard — Ship idea gate', () => {
     );
     // Ship is idea-seeded, never batch-seeded — no taskIds threaded.
     expect(startArg).not.toHaveProperty('taskIds');
+    // The run is nested under its session and the wizard navigates INTO it.
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-ensured-001');
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Launch seed-prompt gate — the interview-driven super-planner needs a
+// free-text "what are you building?" answer before its first turn, so the CTA
+// opens LaunchPromptModal (NOT the idea picker or batch picker) and a submit
+// fires runs.start with the trimmed answer threaded as `seedPrompt`.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Launch seed-prompt gate', () => {
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([LAUNCH_WORKFLOW_ROW]);
+  });
+
+  it('opens LaunchPromptModal (not the idea/batch pickers) when Launch is launched', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The seed-prompt modal is shown — no run has launched yet (the gate is
+    // freely cancellable).
+    expect(screen.getByTestId('mock-launch-prompt-submit')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-idea-pick')).toBeNull();
+    expect(screen.queryByTestId('mock-batch-pick')).toBeNull();
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('fires runs.start with the submitted seedPrompt and navigates to the session', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-launch-prompt-submit'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0];
+    expect(startArg).toEqual(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        projectId: 1,
+        sessionId: 'session-ensured-001',
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        permissionMode: 'default',
+        seedPrompt: 'A recipe app.',
+      }),
+    );
     // The run is nested under its session and the wizard navigates INTO it.
     expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-ensured-001');

@@ -24,6 +24,7 @@ import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
+import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
@@ -134,6 +135,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   // (per-task progress renders as lanes in the run progress rail).
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
 
+  // Launch pre-launch seed-prompt gate: the interview-driven super-planner
+  // needs a free-text "what are you building?" answer before its first turn,
+  // so "Start Run" opens this modal first; the trimmed answer is threaded
+  // into runs.start.mutate({ seedPrompt }).
+  const [launchPromptOpen, setLaunchPromptOpen] = useState(false);
+
   /**
    * Synchronous in-flight latch for "Start Run". The `isStarting` STATE guard is
    * insufficient against a double-submit: two clicks fired in the same tick both
@@ -218,12 +225,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * Fire the actual runs.start mutation. `ideaSeed.ideaId` is the Planner's
    * single-select pre-launch seed idea (migration 017); `ideaSeed.ideaIds` is
    * its multi-select batch (IDEA-009) — mutually exclusive, both undefined for
-   * Sprint (and any free Planner launch). The synchronous in-flight latch flips
-   * HERE (at the real mutate), NOT on modal open, so opening the picker is
-   * freely cancellable.
+   * Sprint (and any free Planner launch). `seedPrompt` is the Launch flow's
+   * pre-launch free-text answer (LaunchPromptModal) — undefined for every
+   * other flow. The synchronous in-flight latch flips HERE (at the real
+   * mutate), NOT on modal open, so opening a gate picker/modal is freely
+   * cancellable.
    */
   const launchRun = useCallback(
-    async (workflowId: string, ideaSeed?: { ideaId?: string; ideaIds?: string[] }): Promise<void> => {
+    async (
+      workflowId: string,
+      ideaSeed?: { ideaId?: string; ideaIds?: string[] },
+      seedPrompt?: string,
+    ): Promise<void> => {
       if (startInFlightRef.current) return;
       startInFlightRef.current = true;
       setError(null);
@@ -259,6 +272,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
             : ideaSeed?.ideaId !== undefined
               ? { ideaId: ideaSeed.ideaId }
               : {}),
+          ...(seedPrompt !== undefined ? { seedPrompt } : {}),
           ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -343,10 +357,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   const handleStartRun = async () => {
     if (selectedId === null || startInFlightRef.current) return;
-    // Planner is gated behind the idea picker, Sprint behind the batch picker.
-    // Workflow `name` is the lowercase CyboflowWorkflowName seeded by
-    // WorkflowRegistry — compare to 'planner' / 'sprint'. Ship (planner ⊕ sprint
-    // in one run) is IDEA-seeded like the planner, so it shares the idea gate.
+    // Planner is gated behind the idea picker, Sprint behind the batch picker,
+    // Launch behind the seed-prompt modal. Workflow `name` is the lowercase
+    // CyboflowWorkflowName seeded by WorkflowRegistry — compare to 'planner' /
+    // 'sprint' / 'launch'. Ship (planner ⊕ sprint in one run) is IDEA-seeded
+    // like the planner, so it shares the idea gate.
     const selected = workflows.find((wf) => wf.id === selectedId);
     if (selected?.name === 'planner' || selected?.name === 'ship') {
       setError(null);
@@ -356,6 +371,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     if (selected?.name === 'sprint') {
       setError(null);
       setBatchPickerOpen(true);
+      return;
+    }
+    if (selected?.name === 'launch') {
+      setError(null);
+      setLaunchPromptOpen(true);
       return;
     }
     await launchRun(selectedId);
@@ -395,6 +415,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           await launchRun(workflowId, { ideaId: id });
         }
       })();
+    },
+    [selectedId, launchRun],
+  );
+
+  const handleLaunchPromptSubmit = useCallback(
+    (seedPrompt: string): void => {
+      setLaunchPromptOpen(false);
+      if (selectedId === null) return;
+      void launchRun(selectedId, undefined, seedPrompt);
     },
     [selectedId, launchRun],
   );
@@ -565,6 +594,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           substrate={selectedSubstrate ?? DEFAULT_SUBSTRATE}
           onClose={() => setBatchPickerOpen(false)}
           onPicked={handleBatchPicked}
+        />
+      )}
+
+      {launchPromptOpen && (
+        <LaunchPromptModal
+          open
+          onCancel={() => setLaunchPromptOpen(false)}
+          onSubmit={handleLaunchPromptSubmit}
         />
       )}
 

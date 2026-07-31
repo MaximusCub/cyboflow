@@ -151,6 +151,19 @@ describe('useLaunchWorkflow', () => {
     );
   });
 
+  it('threads seed.seedPrompt into the mutation when provided (Launch gate)', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-launch', { seedPrompt: 'A recipe app.' });
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowId: 'wf-launch', seedPrompt: 'A recipe app.' }),
+    );
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ ideaId: expect.anything() }),
+    );
+  });
+
   it('sets error and returns null when the launch fails', async () => {
     mockStartMutate.mockRejectedValueOnce(new Error('boom'));
     const { result } = renderHook(() => useLaunchWorkflow(7));

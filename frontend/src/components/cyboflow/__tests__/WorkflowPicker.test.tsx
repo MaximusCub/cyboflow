@@ -48,10 +48,11 @@ vi.mock('../../../trpc/client', () => ({
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([
-            // Custom (non-planner, non-sprint) fixtures so "Start Run" exercises
-            // the DIRECT launch path. The Planner flow is gated behind
-            // IdeaPickerModal (migration 017) and Sprint behind the batch picker
-            // (feat/parallel-sprint); both have their own describe blocks below.
+            // Custom (non-planner, non-sprint, non-launch) fixtures so "Start Run"
+            // exercises the DIRECT launch path. The Planner flow is gated behind
+            // IdeaPickerModal (migration 017), Sprint behind the batch picker
+            // (feat/parallel-sprint), and Launch behind the seed-prompt modal;
+            // each has its own describe block below.
             { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
             { id: 'wf-2', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
           ]),
@@ -1200,5 +1201,60 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     });
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
     expect(onWorkflowStarted).toHaveBeenCalledWith('run-test-001');
+  });
+});
+
+describe('WorkflowPicker — Launch seed-prompt gate', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    // A single Launch flow so "Start Run" opens the seed-prompt modal (not the
+    // direct launch path, the Planner idea gate, or the Sprint batch picker).
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-launch', project_id: 1, name: 'launch', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+    ]);
+  });
+
+  it('opens LaunchPromptModal on Start Run and does NOT launch until a prompt is submitted', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // The seed-prompt modal opened; no run started yet (freely cancellable —
+    // the in-flight latch has NOT flipped).
+    expect(await screen.findByTestId('launch-prompt-submit')).toBeInTheDocument();
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('threads the submitted seed prompt into runs.start.mutate', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    const textarea = await screen.findByLabelText('What are you trying to build?');
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: '  A recipe app that plans my week.  ' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('launch-prompt-submit'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-launch',
+      projectId: 1,
+      substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      model: 'opus',
+      seedPrompt: 'A recipe app that plans my week.',
+    });
   });
 });

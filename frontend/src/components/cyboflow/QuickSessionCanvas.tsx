@@ -15,9 +15,10 @@
  * dashed edge to an "add a workflow" node — the first-class path to promote
  * the session into a structured run. Workflow buttons
  * read the REAL catalogue (cyboflow.workflows.list → planner / sprint / ship /
- * any custom flows), never a hardcoded list; clicking one launches it onto THIS
- * session (Planner AND Ship via the idea-picker gate, Sprint via the task-batch
- * picker gate). "Browse all" opens the full WorkflowPicker.
+ * launch / any custom flows), never a hardcoded list; clicking one launches it
+ * onto THIS session (Planner AND Ship via the idea-picker gate, Sprint via the
+ * task-batch picker gate, Launch via the seed-prompt gate). "Browse all" opens
+ * the full WorkflowPicker.
  */
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { trpc } from '../../trpc/client';
@@ -33,6 +34,7 @@ import { DEFAULT_QUICK_MODEL } from './ModelSelector';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
+import { LaunchPromptModal } from './LaunchPromptModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../utils/onboarding';
 import { useOnboardingStore } from '../../stores/onboardingStore';
@@ -322,6 +324,9 @@ export function QuickSessionCanvas({
   // Sprint pre-launch task gate (parallel sprint): a sprint click opens the
   // multi-task picker first, then launches ONE seeded run with the taskIds.
   const [sprintIdForGate, setSprintIdForGate] = useState<string | null>(null);
+  // Launch pre-launch seed-prompt gate: a launch click opens the free-text
+  // "what are you building?" modal first, then launches with the seedPrompt.
+  const [launchIdForGate, setLaunchIdForGate] = useState<string | null>(null);
   // In-place add-a-workflow confirm: a chip click on an in-place session first
   // confirms the run will open in a NEW worktree-backed session, holding the
   // chosen row until the user confirms (then the normal chip flow continues).
@@ -363,10 +368,11 @@ export function QuickSessionCanvas({
   }, []);
 
   // Route a chosen workflow chip to its launch path: Planner/Ship are idea-gated,
-  // Sprint is task-batch-gated (open the matching picker); other workflows launch
-  // directly. Shared by the direct chip click and the in-place confirm's continue
-  // path — for an in-place session the launch hook is forceNew, so either way the
-  // run lands in a fresh worktree-backed session.
+  // Sprint is task-batch-gated, Launch is seed-prompt-gated (open the matching
+  // picker/modal); other workflows launch directly. Shared by the direct chip
+  // click and the in-place confirm's continue path — for an in-place session
+  // the launch hook is forceNew, so either way the run lands in a fresh
+  // worktree-backed session.
   const routeWorkflowChip = useCallback(
     (row: WorkflowRow) => {
       // Ship (planner ⊕ sprint in one run) is IDEA-seeded like the planner, so it
@@ -378,6 +384,10 @@ export function QuickSessionCanvas({
       }
       if (row.name === 'sprint') {
         setSprintIdForGate(row.id);
+        return;
+      }
+      if (row.name === 'launch') {
+        setLaunchIdForGate(row.id);
         return;
       }
       void launch(row.id);
@@ -445,6 +455,15 @@ export function QuickSessionCanvas({
       if (id !== null && taskIds.length > 0) void launch(id, { taskIds });
     },
     [sprintIdForGate, launch],
+  );
+
+  const handleLaunchPromptSubmit = useCallback(
+    (seedPrompt: string) => {
+      const id = launchIdForGate;
+      setLaunchIdForGate(null);
+      if (id !== null) void launch(id, { seedPrompt });
+    },
+    [launchIdForGate, launch],
   );
 
   const repo = projectName && projectName.length > 0 ? projectName : session.name;
@@ -1050,6 +1069,15 @@ export function QuickSessionCanvas({
           substrate={DEFAULT_SUBSTRATE}
           onClose={() => setSprintIdForGate(null)}
           onPicked={handleBatchPicked}
+        />
+      )}
+
+      {/* Launch seed-prompt gate. */}
+      {launchIdForGate !== null && (
+        <LaunchPromptModal
+          open
+          onCancel={() => setLaunchIdForGate(null)}
+          onSubmit={handleLaunchPromptSubmit}
         />
       )}
 

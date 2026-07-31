@@ -59,6 +59,11 @@
  *     Its `onSuccess` additionally calls `useDesignModeStore.enterDesignMode`
  *     (gated by `isDesignLaunchRef`, set by `launchDesign`) so the wizard
  *     lands directly in the fullscreen design surface.
+ *   - launch ('launch', the interview-driven super-planner): gated behind
+ *     {@link LaunchPromptModal} — a free-text "what are you trying to build?"
+ *     answer grounds the interview's first turn; the trimmed answer is
+ *     threaded as runs.start.mutate({ seedPrompt }), same launchRun path as
+ *     Planner/Ship.
  *
  * A synchronous in-flight latch (`startInFlightRef`) guards every launch against
  * the double-submit duplicate-run bug (mirrors WorkflowPicker).
@@ -82,6 +87,7 @@ import { DESIGN_KICKOFF_PROMPT } from '../design/designKickoff';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
 import { IdeaPickerModal } from '../IdeaPickerModal';
 import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
+import { LaunchPromptModal } from '../LaunchPromptModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
@@ -463,6 +469,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   // the batch picker → runs.start({ taskIds }), mirroring the Planner idea gate.
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
 
+  // Launch flow pre-launch seed-prompt gate. A 'launch' selection opens this
+  // modal first, holding the target workflow id; the trimmed answer is
+  // threaded into launchRun as `seedPrompt`, mirroring pendingWorkflowId above.
+  const [launchPromptOpen, setLaunchPromptOpen] = useState(false);
+  const [pendingLaunchWorkflowId, setPendingLaunchWorkflowId] = useState<string | null>(null);
+
   // Launch state.
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
@@ -716,6 +728,9 @@ export default function SessionStartWizard(): React.JSX.Element {
       // The mixed-provider retry passes the session created by the first
       // attempt. Omitting this creates and records a fresh host session.
       existingSessionId?: string,
+      // The Launch flow's pre-launch free-text answer (LaunchPromptModal).
+      // Undefined for every other flow.
+      seedPrompt?: string,
     ): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
@@ -782,6 +797,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             : ideaSeed?.ideaId !== undefined
               ? { ideaId: ideaSeed.ideaId }
               : {}),
+          ...(seedPrompt !== undefined ? { seedPrompt } : {}),
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
@@ -814,7 +830,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           // Do NOT surface a raw error — offer to retry as programmatic instead.
           setMixedProviderPrompt({
             sessionId,
-            retry: () => void launchRun(workflowId, ideaSeed, 'programmatic', sessionId ?? undefined),
+            retry: () =>
+            void launchRun(workflowId, ideaSeed, 'programmatic', sessionId ?? undefined, seedPrompt),
           });
           startInFlightRef.current = false;
           return;
@@ -1071,6 +1088,16 @@ export default function SessionStartWizard(): React.JSX.Element {
       setBatchPickerOpen(true);
       return;
     }
+    if (meta?.name === 'launch') {
+      // Gate behind the seed-prompt modal — the interview-driven super-planner
+      // needs a free-text "what are you building?" answer before its first
+      // turn. Do NOT flip the latch yet (the modal stays freely cancellable).
+      setLaunchError(null);
+      setPendingDesign(false);
+      setPendingLaunchWorkflowId(selection.workflowId);
+      setLaunchPromptOpen(true);
+      return;
+    }
     void launchRun(selection.workflowId);
   }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride, mixedProviderPrompt]);
 
@@ -1114,6 +1141,15 @@ export default function SessionStartWizard(): React.JSX.Element {
       void launchBatch(selection.workflowId, taskIds);
     },
     [selection, launchBatch],
+  );
+
+  const handleLaunchPromptSubmit = useCallback(
+    (seedPrompt: string): void => {
+      setLaunchPromptOpen(false);
+      if (pendingLaunchWorkflowId === null) return;
+      void launchRun(pendingLaunchWorkflowId, undefined, undefined, undefined, seedPrompt);
+    },
+    [pendingLaunchWorkflowId, launchRun],
   );
 
   // Mixed-provider retry prompt — confirm re-invokes the stashed thunk (the
@@ -1888,6 +1924,15 @@ export default function SessionStartWizard(): React.JSX.Element {
           substrate={effectiveSubstrate ?? DEFAULT_SUBSTRATE}
           onClose={() => setBatchPickerOpen(false)}
           onPicked={handleBatchPicked}
+        />
+      )}
+
+      {/* ── Launch seed-prompt gate ── */}
+      {launchPromptOpen && (
+        <LaunchPromptModal
+          open
+          onCancel={() => setLaunchPromptOpen(false)}
+          onSubmit={handleLaunchPromptSubmit}
         />
       )}
 

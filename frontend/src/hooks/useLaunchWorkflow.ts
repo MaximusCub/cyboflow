@@ -15,9 +15,11 @@
  *
  * `seed.ideaId` threads the Planner's single-select pre-launch seed idea
  * (migration 017); `seed.ideaIds` threads its multi-select batch (IDEA-009);
- * `seed.taskIds` threads the Sprint's pre-launch task batch. The canvas opens
- * the matching picker (IdeaPickerModal / TaskBatchPickerModal) first and MUST
- * pass the corresponding seed; other workflows launch seedless.
+ * `seed.taskIds` threads the Sprint's pre-launch task batch; `seed.seedPrompt`
+ * threads the Launch flow's pre-launch free-text answer. The canvas opens the
+ * matching picker/modal (IdeaPickerModal / TaskBatchPickerModal /
+ * LaunchPromptModal) first and MUST pass the corresponding seed; other
+ * workflows launch seedless.
  */
 import { useCallback, useRef, useState } from 'react';
 import { trpc } from '../trpc/client';
@@ -34,12 +36,14 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 /**
  * Pre-launch seed — at most one of ideaId (planner, single-select) / ideaIds
  * (planner, multi-select batch, IDEA-009 — a 1-element batch should be
- * normalized to the singular `ideaId` by the caller) / taskIds (sprint).
+ * normalized to the singular `ideaId` by the caller) / taskIds (sprint) /
+ * seedPrompt (launch).
  */
 export interface LaunchSeed {
   ideaId?: string;
   ideaIds?: string[];
   taskIds?: string[];
+  seedPrompt?: string;
 }
 
 export interface UseLaunchWorkflowResult {
@@ -159,7 +163,9 @@ export function useLaunchWorkflow(
               ? { ...base, ideaId: seed.ideaId }
               : seed?.taskIds !== undefined
                 ? { ...base, taskIds: seed.taskIds }
-                : base,
+                : seed?.seedPrompt !== undefined
+                  ? { ...base, seedPrompt: seed.seedPrompt }
+                  : base,
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         trackEvent('workflow_run_started', {

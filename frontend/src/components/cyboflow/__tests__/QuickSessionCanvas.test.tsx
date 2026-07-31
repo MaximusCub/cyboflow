@@ -79,6 +79,15 @@ vi.mock('../TaskBatchPickerModal', () => ({
     ) : null,
 }));
 
+vi.mock('../LaunchPromptModal', () => ({
+  LaunchPromptModal: (props: { open: boolean; onSubmit: (seedPrompt: string) => void }) =>
+    props.open ? (
+      <button data-testid="mock-launch-prompt-submit" onClick={() => props.onSubmit('A recipe app.')}>
+        submit seed prompt
+      </button>
+    ) : null,
+}));
+
 // Detected dynamic workflows — the store has its own unit test; here it is
 // stubbed so the canvas's init call + panel stack are observable in isolation.
 vi.mock('../../../stores/dynamicWorkflowStore', () => ({
@@ -105,6 +114,11 @@ const WORKFLOWS = [
   { id: 'wf-planner', name: 'planner', spec_json: '' },
   { id: 'wf-sprint', name: 'sprint', spec_json: '' },
 ];
+
+// Adds the Launch built-in to the base WORKFLOWS fixture — kept out of the
+// default list so the pre-existing "2 workflows" catalogue assertions above
+// stay unaffected; only the Launch-gate tests below opt into this row.
+const WORKFLOWS_WITH_LAUNCH = [...WORKFLOWS, { id: 'wf-launch', name: 'launch', spec_json: '' }];
 
 function renderCanvas(onBrowseAll = vi.fn()) {
   return render(
@@ -232,6 +246,20 @@ describe('QuickSessionCanvas', () => {
     // occupied the current one, and the busy-check's activeRunsStore re-fetch is
     // async — reuse would trip the backend's one-running-per-session guard.
     expect(mockLaunch).toHaveBeenNthCalledWith(2, 'wf-planner', { ideaId: 'idea-z' }, { forceNewSession: true });
+  });
+
+  it('routes Launch through the seed-prompt gate before launching', async () => {
+    mockListQuery.mockResolvedValue(WORKFLOWS_WITH_LAUNCH);
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-launch'));
+    fireEvent.click(screen.getByTestId('quick-session-launch-launch'));
+    // Gate opens; launch has NOT fired yet.
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(screen.getByTestId('mock-launch-prompt-submit')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-pick-idea')).not.toBeInTheDocument();
+    // Submit the seed prompt → launch with it threaded.
+    fireEvent.click(screen.getByTestId('mock-launch-prompt-submit'));
+    expect(mockLaunch).toHaveBeenCalledWith('wf-launch', { seedPrompt: 'A recipe app.' });
   });
 
   it('opens the full picker via Browse all', async () => {
