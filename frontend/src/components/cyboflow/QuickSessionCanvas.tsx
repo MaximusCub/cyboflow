@@ -10,8 +10,10 @@
  * chat / terminal panel surface stays in the bottom pane (rendered by CyboflowRoot).
  *
  * Direction "Concept C" (design handoff): a single live "session node" wired to
- * real session metrics, joined by a dashed edge to an "add a workflow" node — the
- * first-class path to promote the session into a structured run. Workflow buttons
+ * real session metrics, joined by a dashed edge to a "Summary & History" node
+ * (rolling summary + per-sitting history, expanded by default), then another
+ * dashed edge to an "add a workflow" node — the first-class path to promote
+ * the session into a structured run. Workflow buttons
  * read the REAL catalogue (cyboflow.workflows.list → planner / sprint / ship /
  * any custom flows), never a hardcoded list; clicking one launches it onto THIS
  * session (Planner AND Ship via the idea-picker gate, Sprint via the task-batch
@@ -203,6 +205,42 @@ function WorkflowCmdButton({
 }
 
 // ---------------------------------------------------------------------------
+// Dashed edge with a ＋ chip — connects consecutive resting-layout nodes.
+// Extracted so the (currently two) instances can't drift apart.
+// ---------------------------------------------------------------------------
+
+function QuickSessionEdge() {
+  return (
+    <div
+      aria-hidden
+      data-testid="quick-session-edge"
+      style={{
+        flex: '0 0 64px',
+        height: 1.4,
+        position: 'relative',
+        background:
+          'repeating-linear-gradient(90deg, var(--color-text-disabled) 0 5px, transparent 5px 10px)',
+      }}
+    >
+      <span
+        style={{
+          position: 'absolute',
+          left: '50%',
+          top: '50%',
+          transform: 'translate(-50%, -50%)',
+          background: 'var(--color-bg-primary)',
+          color: 'var(--color-text-tertiary)',
+          fontSize: 12,
+          padding: '0 3px',
+        }}
+      >
+        ＋
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // QuickSessionCanvas
 // ---------------------------------------------------------------------------
 
@@ -215,7 +253,7 @@ export function QuickSessionCanvas({
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
   const { summary: summaryPayload } = useSessionSummary(session.id);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
   // Interactive (PTY) sessions can't host a second workflow inside their live
   // REPL (descoped) — every add-a-workflow click routes to the confirm + config
   // flow that launches in a SEPARATE session instead of the fast-lane launch.
@@ -563,7 +601,8 @@ export function QuickSessionCanvas({
           </div>
         )}
 
-        {/* ── Canvas body — 24px graph-paper grid, single node → edge → add ────── */}
+        {/* ── Canvas body — 24px graph-paper grid: session node → edge →
+            summary/history node → edge → add-workflow node ─────────────────── */}
         <div
           style={{
             position: 'relative',
@@ -579,10 +618,8 @@ export function QuickSessionCanvas({
           }}
           data-testid="quick-session-canvas-body"
         >
-          {/* 1 · Session node + history card, stacked in a column so the card
-              never disturbs the edge / add-workflow node's top alignment
-              (canvas body switched to alignItems: 'flex-start' above). */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
+          {/* 1 · Session node — stats + token breakdown only (summary/history
+              moved to their own node below). */}
           <div
             style={{
               width: 300,
@@ -744,125 +781,159 @@ export function QuickSessionCanvas({
                   </span>
                 </div>
               </div>
+            </div>
+          </div>
 
-              {/* Rolling summary (session-summary-plan.md §7) — a Haiku call
-                  updates this after the session sits idle. Hidden entirely
-                  (no divider, no empty block) until a non-null summary exists
-                  and the feature is enabled. */}
-              {showSummaryBlock && (
+          {(showSummaryBlock || showHistoryCard) && (
+            <>
+              <QuickSessionEdge />
+
+              {/* 2 · Summary & History node — rolling summary (session-summary-plan.md
+                  §7, a Haiku call updates it after the session sits idle) plus the
+                  append-only per-sitting history, expanded by default. Hidden
+                  entirely (gated with its leading edge above) until either section
+                  has content. */}
+              <div
+                style={{
+                  width: 300,
+                  flexShrink: 0,
+                  background: 'var(--color-surface-primary)',
+                  border: '1.4px solid var(--color-text-primary)',
+                }}
+                data-testid="quick-session-summary-history"
+              >
                 <div
                   style={{
-                    marginTop: 12,
-                    paddingTop: 10,
-                    borderTop: '1px solid var(--color-border-primary)',
                     display: 'flex',
-                    flexDirection: 'column',
-                    gap: 4,
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    background: 'var(--color-bg-secondary)',
+                    borderBottom: '1px solid var(--color-border-primary)',
                   }}
-                  data-testid="quick-session-summary"
                 >
+                  <span style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>◷</span>
                   <span
                     style={{
-                      fontSize: 8.5,
-                      letterSpacing: '0.14em',
+                      fontSize: 9,
+                      letterSpacing: '0.16em',
                       textTransform: 'uppercase',
-                      color: 'var(--color-text-tertiary)',
+                      color: 'var(--color-text-primary)',
                       fontWeight: 700,
                     }}
                   >
-                    Summary
+                    {showHistoryCard ? 'Summary & History' : 'Summary'}
                   </span>
-                  <p style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--color-text-primary)', margin: 0 }}>
-                    {summaryText}
-                  </p>
+                  {historyEntries.length > 0 && (
+                    <span
+                      style={{
+                        marginLeft: 'auto',
+                        fontSize: 9,
+                        color: 'var(--color-text-tertiary)',
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {historyEntries.length} {historyEntries.length === 1 ? 'sitting' : 'sittings'}
+                    </span>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* History card — append-only per-sitting sentences, oldest first,
-              collapsed by default. Hidden entirely when there is no history
-              yet or the feature is disabled. */}
-          {showHistoryCard && (
-            <div
-              style={{
-                width: 300,
-                background: 'var(--color-surface-primary)',
-                border: '1px solid var(--color-border-primary)',
-                padding: '10px 12px',
-              }}
-              data-testid="quick-session-history-card"
-            >
-              <button
-                type="button"
-                data-testid="quick-session-history-toggle"
-                onClick={() => setHistoryOpen((v) => !v)}
-                style={{
-                  fontSize: 10.5,
-                  fontWeight: 700,
-                  color: 'var(--color-text-secondary)',
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                  cursor: 'pointer',
-                }}
-              >
-                {historyOpen ? '▾' : '▸'} History ({historyEntries.length})
-              </button>
-              {historyOpen && (
-                <div
-                  data-testid="quick-session-history-list"
-                  style={{
-                    marginTop: 8,
-                    maxHeight: 160,
-                    overflowY: 'auto',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 8,
-                  }}
-                >
-                  {historyEntries.map((entry) => (
-                    <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 9, color: 'var(--color-text-tertiary)' }}>
-                        {formatHistoryDate(entry.createdAt)}
+                <div style={{ padding: '13px 14px' }}>
+                  {showSummaryBlock && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 5,
+                        borderLeft: '2px solid var(--color-interactive-primary)',
+                        background: 'rgba(var(--color-interactive-rgb), 0.045)',
+                        padding: '9px 11px',
+                        margin: '2px 0 0 -2px',
+                      }}
+                      data-testid="quick-session-summary"
+                    >
+                      <span
+                        style={{
+                          fontSize: 8.5,
+                          letterSpacing: '0.14em',
+                          textTransform: 'uppercase',
+                          fontWeight: 700,
+                          color: 'var(--color-interactive-primary)',
+                        }}
+                      >
+                        Summary
                       </span>
-                      <span style={{ fontSize: 10.5, color: 'var(--color-text-primary)', lineHeight: 1.4 }}>
-                        {entry.entry}
-                      </span>
+                      <p style={{ fontSize: 11.5, lineHeight: 1.5, fontWeight: 500, color: 'var(--color-text-primary)', margin: 0 }}>
+                        {summaryText}
+                      </p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          </div>
+                  )}
 
-          {/* 2 · Dashed edge with a ＋ chip */}
-          <div
-            aria-hidden
-            style={{
-              flex: '0 0 64px',
-              height: 1.4,
-              position: 'relative',
-              background:
-                'repeating-linear-gradient(90deg, var(--color-text-disabled) 0 5px, transparent 5px 10px)',
-            }}
-          >
-            <span
-              style={{
-                position: 'absolute',
-                left: '50%',
-                top: '50%',
-                transform: 'translate(-50%, -50%)',
-                background: 'var(--color-bg-primary)',
-                color: 'var(--color-text-tertiary)',
-                fontSize: 12,
-                padding: '0 3px',
-              }}
-            >
-              ＋
-            </span>
-          </div>
+                  {showHistoryCard && (
+                    <div
+                      style={
+                        showSummaryBlock
+                          ? {
+                              marginTop: 12,
+                              paddingTop: 10,
+                              borderTop: '1px solid var(--color-border-primary)',
+                            }
+                          : undefined
+                      }
+                    >
+                      <button
+                        type="button"
+                        aria-expanded={historyOpen}
+                        data-testid="quick-session-history-toggle"
+                        onClick={() => setHistoryOpen((v) => !v)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 5,
+                          fontSize: 8.5,
+                          letterSpacing: '0.14em',
+                          textTransform: 'uppercase',
+                          fontWeight: 700,
+                          color: 'var(--color-text-tertiary)',
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {historyOpen ? '▾' : '▸'} History ({historyEntries.length})
+                      </button>
+                      {historyOpen && (
+                        <div
+                          data-testid="quick-session-history-list"
+                          style={{
+                            marginTop: 8,
+                            maxHeight: 180,
+                            overflowY: 'auto',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 7,
+                          }}
+                        >
+                          {historyEntries.map((entry) => (
+                            <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 8.5, color: 'var(--color-text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+                                {formatHistoryDate(entry.createdAt)}
+                              </span>
+                              <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', lineHeight: 1.4 }}>
+                                {entry.entry}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          <QuickSessionEdge />
 
           {/* 3 · Add-workflow node */}
           <div

@@ -380,18 +380,21 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
   });
 
-  it('hides the history card entirely when there are zero entries', () => {
+  it('shows the Summary & History node with no toggle/list and no sitting count when there are zero entries', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: { enabled: true, summary: 'State.', updatedAt: null, entries: [] },
       loading: false,
       error: null,
     });
     renderCanvas();
-    expect(screen.queryByTestId('quick-session-history-card')).not.toBeInTheDocument();
+    const node = screen.getByTestId('quick-session-summary-history');
+    expect(node).toBeInTheDocument();
     expect(screen.queryByTestId('quick-session-history-toggle')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-history-list')).not.toBeInTheDocument();
+    expect(node).not.toHaveTextContent(/sitting/);
   });
 
-  it('hides the history card when the feature is disabled, even with entries present', () => {
+  it('hides the Summary & History node entirely when the feature is disabled, even with entries present', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: {
         enabled: false,
@@ -403,10 +406,10 @@ describe('QuickSessionCanvas — session summary + history', () => {
       error: null,
     });
     renderCanvas();
-    expect(screen.queryByTestId('quick-session-history-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
   });
 
-  it('collapses by default, showing the count, and expands to list entries oldest-first', () => {
+  it('expands by default, showing the list; collapses on toggle click', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: {
         enabled: true,
@@ -423,11 +426,6 @@ describe('QuickSessionCanvas — session summary + history', () => {
     renderCanvas();
 
     const toggle = screen.getByTestId('quick-session-history-toggle');
-    expect(toggle).toHaveTextContent('▸ History (2)');
-    expect(screen.queryByTestId('quick-session-history-list')).not.toBeInTheDocument();
-
-    fireEvent.click(toggle);
-
     expect(toggle).toHaveTextContent('▾ History (2)');
     const list = screen.getByTestId('quick-session-history-list');
     // Oldest-first ordering preserved verbatim from the payload.
@@ -435,6 +433,11 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(rows.indexOf('Did A.')).toBeLessThan(rows.indexOf('Did B.'));
     expect(list).toHaveTextContent('Jan 5');
     expect(list).toHaveTextContent('Jan 6');
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveTextContent('▸ History (2)');
+    expect(screen.queryByTestId('quick-session-history-list')).not.toBeInTheDocument();
   });
 });
 
