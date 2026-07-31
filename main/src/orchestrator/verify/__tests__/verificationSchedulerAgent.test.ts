@@ -12,10 +12,14 @@ import Database from 'better-sqlite3';
 import {
   VerificationScheduler,
   ResourceLeasePool,
+  AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
+  AWAIT_TERMINAL_TIMEOUT_MESSAGE,
   VERIFY_NO_RUNBOOK_REASON,
   type OnVerdict,
 } from '../verificationScheduler';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
+import { VerifyRunbookStore } from '../runbookStore';
+import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import { Mutex } from '../../../utils/mutex';
 import { setSeamErrorSink } from '../../telemetrySink';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -39,6 +43,7 @@ function buildDb(): Database.Database {
   db.exec(`
     CREATE TABLE projects (
       id                        INTEGER PRIMARY KEY,
+      path                      TEXT,
       visual_verify_budget_calls INTEGER
     );
     CREATE TABLE workflow_runs (
@@ -76,7 +81,24 @@ function buildDb(): Database.Database {
       failure_evidence_json TEXT,
       modality              TEXT,
       preflight_json        TEXT,
-      setup_proof           INTEGER NOT NULL DEFAULT 0
+      setup_proof           INTEGER NOT NULL DEFAULT 0,
+      -- migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+      runbook_hash          TEXT,
+      runbook_local_version INTEGER
+    );
+    CREATE TABLE verify_runbook_local (
+      project_id            INTEGER NOT NULL,
+      modality              TEXT NOT NULL,
+      portable_hash         TEXT NOT NULL,
+      portable_json         TEXT NOT NULL,
+      version               INTEGER NOT NULL DEFAULT 1,
+      status                TEXT NOT NULL CHECK (status IN ('proven','unproven-draft')),
+      bindings_json         TEXT,
+      proof_json            TEXT,
+      input_hash            TEXT,
+      host_fingerprint_json TEXT,
+      updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (project_id, modality)
     );
     CREATE TABLE verify_capability_state (
       project_id               INTEGER NOT NULL,
@@ -204,7 +226,7 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
       // The composed task below has a serve step, so the §3.2 degrade gate would
       // skip it on the default 'absent' runbook status. This test is about the
       // dispatch path, so it stands in for a project phase 2 has already proven.
-      runbookStatus: () => 'proven',
+      runbookStatus: async () => 'proven',
     });
 
     scheduler.enqueue({
@@ -698,7 +720,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
 
   it("an 'unproven-draft' runbook is NOT a pass — a written config nobody proved is exactly what already failed", async () => {
     seedRun(db, 'run-draft', JSON.stringify(['agent']));
-    const { scheduler, run } = initWith({ runbookStatus: () => 'unproven-draft' });
+    const { scheduler, run } = initWith({ runbookStatus: async () => 'unproven-draft' });
     scheduler.enqueue({
       runId: 'run-draft',
       projectId: 1,
@@ -714,7 +736,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
 
   it('a PROVEN runbook lets the same task through', async () => {
     seedRun(db, 'run-proven', JSON.stringify(['agent']));
-    const { scheduler, run } = initWith({ runbookStatus: () => 'proven' });
+    const { scheduler, run } = initWith({ runbookStatus: async () => 'proven' });
     scheduler.enqueue({
       runId: 'run-proven',
       projectId: 1,
@@ -1135,5 +1157,546 @@ describe('VerificationScheduler.enqueue — modality + setup_proof stamping', ()
       (db.prepare('SELECT setup_proof AS p FROM verification_requests WHERE id = ?').get(id) as { p: number }).p;
     expect(proofOf(proofId)).toBe(1);
     expect(proofOf(laneId)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 (docs/proposals/verification-setup-flow.md §5.2 seam 3 + §5.3)
+// ---------------------------------------------------------------------------
+
+/** The portable half a proof run pins; the entry's content is irrelevant to these tests. */
+const PROOF_RUNBOOK: VerifyRunbookV1 = {
+  version: 1,
+  modalities: {
+    web: {
+      build: ['pnpm run build:web'],
+      serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
+      attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+    },
+  },
+};
+
+/** A store over the test DB with FAKE IO — the store's only filesystem contact. */
+function buildRunbookStore(dbX: Database.Database): VerifyRunbookStore {
+  return new VerifyRunbookStore(dbAdapter(dbX), {
+    readPortableFile: async () => JSON.stringify(PROOF_RUNBOOK),
+    computeInputHash: async () => 'input-1',
+    hostFingerprint: async () => 'host-1',
+  });
+}
+
+function runbookRow(dbX: Database.Database): { status: string; version: number; proof_json: string | null } {
+  return dbX
+    .prepare('SELECT status, version, proof_json FROM verify_runbook_local WHERE project_id = 1 AND modality = ?')
+    .get('web') as { status: string; version: number; proof_json: string | null };
+}
+
+describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
+  const PASS_RESULT: VerificationAgentRunResult = {
+    status: 'passed',
+    verdict: PASS_VERDICT,
+    fileNames: [],
+    deployed: true,
+    provisionMode: 'snapshot',
+    preflight: {
+      ok: true,
+      checks: [
+        { id: 'node', ok: true, detail: 'node resolved' },
+        { id: 'chromium', ok: true, detail: 'chromium resolved' },
+      ],
+    },
+  };
+
+  function initWith(
+    store: VerifyRunbookStore | undefined,
+    result: VerificationAgentRunResult = PASS_RESULT,
+  ): { scheduler: VerificationScheduler; run: ReturnType<typeof vi.fn> } {
+    const { runner, run } = stubRunner(result);
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      ...(store ? { runbookStore: store } : {}),
+    });
+    return { scheduler, run };
+  }
+
+  it('a setup_proof row that PASSES with a pin flips the record to proven and records the provenance', async () => {
+    seedRun(db, 'run-proof', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+    expect(runbookRow(db).status).toBe('unproven-draft');
+
+    const { scheduler, run } = initWith(store);
+    scheduler.enqueue({
+      runId: 'run-proof',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'prove the runbook' },
+      chain: [],
+      task: SERVE_TASK,
+      snapshotSha: 'sha-proof',
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(requestRow(db).status).toBe('passed');
+
+    const record = runbookRow(db);
+    expect(record.status).toBe('proven');
+    const proof = JSON.parse(record.proof_json ?? '{}') as {
+      sha: string;
+      portableHash: string;
+      localVersion: number;
+      preflight: { ok: boolean; checks: Array<{ id: string; ok: boolean }> };
+      verifiedAt: string;
+      requestId: string;
+    };
+    expect(proof.sha).toBe('sha-proof');
+    expect(proof.portableHash).toBe(registered.hash);
+    expect(proof.localVersion).toBe(registered.version);
+    expect(proof.preflight.ok).toBe(true);
+    expect(proof.preflight.checks.map((c) => c.id)).toEqual(['node', 'chromium']);
+    expect(typeof proof.verifiedAt).toBe('string');
+    expect(proof.requestId).toMatch(/^vr_/);
+  });
+
+  it('a CAS conflict (the record moved mid-flight) is a warn, never a verdict change', async () => {
+    seedRun(db, 'run-proof-cas', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+
+    const { scheduler } = initWith(store);
+    scheduler.enqueue({
+      runId: 'run-proof-cas',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'prove the runbook' },
+      chain: [],
+      task: SERVE_TASK,
+      setupProof: true,
+      runbookHash: registered.hash,
+      // A registerDraft landed between enqueue and terminal: the pin's version is
+      // stale, so the double-CAS declines the flip.
+      runbookLocalVersion: registered.version + 5,
+    });
+    await flushDrain();
+
+    // The verification itself still PASSED and is written as such.
+    expect(requestRow(db).status).toBe('passed');
+    // Only the promotion was declined.
+    expect(runbookRow(db).status).toBe('unproven-draft');
+    expect(runbookRow(db).proof_json).toBeNull();
+  });
+
+  it('a setup_proof pass with NO pin proves nothing (there is no record it attests to)', async () => {
+    seedRun(db, 'run-proof-nopin', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    await store.registerDraft(1, '/live/worktree', 'web');
+    const { scheduler } = initWith(store);
+    scheduler.enqueue({
+      runId: 'run-proof-nopin',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      setupProof: true,
+    });
+    await flushDrain();
+    expect(requestRow(db).status).toBe('passed');
+    expect(runbookRow(db).status).toBe('unproven-draft');
+  });
+
+  it('an ORDINARY lane pass with a pin does NOT prove the runbook (only a setup proof may)', async () => {
+    seedRun(db, 'run-lane-pass', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+    // Proven so the §3.2 gate lets the serve task through as ordinary traffic.
+    expect(store.markProven(1, 'web', registered.hash, registered.version, '{}')).toEqual({ ok: true });
+    // …then demoted, so a wrongful re-proof by the lane would be observable.
+    db.prepare(
+      "UPDATE verify_runbook_local SET status = 'unproven-draft', proof_json = NULL WHERE project_id = 1",
+    ).run();
+
+    const { runner, run } = stubRunner(PASS_RESULT);
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      runbookStore: store,
+      runbookStatus: async () => 'proven',
+    });
+    scheduler.enqueue({
+      runId: 'run-lane-pass',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(requestRow(db).status).toBe('passed');
+    expect(runbookRow(db).status).toBe('unproven-draft');
+  });
+
+  it('a FAILED setup proof leaves the draft a draft', async () => {
+    seedRun(db, 'run-proof-fail', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+    const { scheduler } = initWith(store, {
+      status: 'failed',
+      errorMessage: 'the serve command never came up',
+      fileNames: [],
+      deployed: true,
+      provisionMode: 'snapshot',
+    });
+    scheduler.enqueue({
+      runId: 'run-proof-fail',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+    expect(runbookRow(db).status).toBe('unproven-draft');
+  });
+});
+
+describe('VerificationScheduler — §5.2 seam 3 pin threading + mismatch classification', () => {
+  it('the stamped pin is handed to the runner on the request', async () => {
+    seedRun(db, 'run-pin-thread', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      runbookStatus: async () => 'proven',
+    });
+    scheduler.enqueue({
+      runId: 'run-pin-thread',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      runbookHash: 'c'.repeat(64),
+      runbookLocalVersion: 7,
+    });
+    await flushDrain();
+
+    const req = run.mock.calls[0][0] as VerificationAgentRequest;
+    expect(req.runbookHash).toBe('c'.repeat(64));
+    expect(req.runbookLocalVersion).toBe(7);
+  });
+
+  it("a runner runbookMismatch is classified 'env' with a runner-source evidence entry, and charges nothing", async () => {
+    seedRun(db, 'run-mismatch', JSON.stringify(['agent']));
+    const { runner } = stubRunner({
+      status: 'skipped',
+      deployed: false,
+      runbookMismatch: true,
+      errorMessage: 'runbook/sha mismatch — pinned runbook abc no longer resolves',
+      fileNames: [],
+    });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      runbookStatus: async () => 'proven',
+    });
+    scheduler.enqueue({
+      runId: 'run-mismatch',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      runbookHash: 'd'.repeat(64),
+      runbookLocalVersion: 1,
+    });
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('skipped');
+    expect(row.failure_class).toBe('env');
+    expect(row.error_message).toContain('runbook/sha mismatch');
+    const evidence = JSON.parse(row.failure_evidence_json ?? '[]') as Array<{ source: string; check: string }>;
+    expect(evidence).toContainEqual(
+      expect.objectContaining({ source: 'runner', check: 'runbook-mismatch' }),
+    );
+    // deployed:false ⇒ no budget charged (§3.6) — a pin rejection is free.
+    expect(row.judge_calls_used).toBe(0);
+  });
+});
+
+describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook provider', () => {
+  it('awaits a genuinely deferred provider before deciding (never treats a pending Promise as proven)', async () => {
+    seedRun(db, 'run-async-gate', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      // Resolves on a later tick — a truthy Promise object would sail through a
+      // sync `!== 'proven'` comparison and deploy an unproven project.
+      runbookStatus: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return 'absent';
+      },
+    });
+    scheduler.enqueue({
+      runId: 'run-async-gate',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(run).not.toHaveBeenCalled();
+    expect(requestRow(db).error_message).toBe(VERIFY_NO_RUNBOOK_REASON);
+  });
+
+  it('a deferred PROVEN provider lets the same task through', async () => {
+    seedRun(db, 'run-async-proven', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      runbookStatus: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return 'proven';
+      },
+    });
+    scheduler.enqueue({
+      runId: 'run-async-proven',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('VerificationScheduler — resolveProvenRunbook (the ENQUEUE-side resolver)', () => {
+  function schedulerWith(store?: VerifyRunbookStore): VerificationScheduler {
+    return VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      ...(store ? { runbookStore: store } : {}),
+    });
+  }
+
+  it('returns the entry + pin for a PROVEN record', async () => {
+    seedRun(db, 'run-resolve', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const reg = (await store.registerDraft(1, '/live/worktree', 'web')) as { hash: string; version: number };
+    expect(store.markProven(1, 'web', reg.hash, reg.version, '{}')).toEqual({ ok: true });
+
+    const revision = await schedulerWith(store).resolveProvenRunbook({
+      projectId: 1,
+      runId: 'run-resolve',
+      modality: 'web',
+    });
+    expect(revision?.hash).toBe(reg.hash);
+    expect(revision?.version).toBe(reg.version);
+    expect(revision?.entry.build).toEqual(['pnpm run build:web']);
+  });
+
+  it('returns null for an UNPROVEN record, for another modality, and with no store wired', async () => {
+    seedRun(db, 'run-resolve-2', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    await store.registerDraft(1, '/live/worktree', 'web');
+
+    const sched = schedulerWith(store);
+    expect(
+      await sched.resolveProvenRunbook({ projectId: 1, runId: 'run-resolve-2', modality: 'web' }),
+    ).toBeNull();
+    expect(
+      await sched.resolveProvenRunbook({ projectId: 1, runId: 'run-resolve-2', modality: 'cdp-app' }),
+    ).toBeNull();
+    expect(
+      await schedulerWith().resolveProvenRunbook({ projectId: 1, runId: 'run-resolve-2', modality: 'web' }),
+    ).toBeNull();
+  });
+
+  it('falls back to the PROJECT path when the run has no worktree', async () => {
+    db.prepare("UPDATE projects SET path = '/project/root' WHERE id = 1").run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, project_id, verify_chain, worktree_path, agent_provider, model)
+       VALUES ('run-noworktree', 1, ?, NULL, 'claude', 'm')`,
+    ).run(JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const probed: string[] = [];
+    const spy = vi.spyOn(store, 'status').mockImplementation(async (_p, probePath) => {
+      probed.push(probePath);
+      return 'absent';
+    });
+    await schedulerWith(store).resolveProvenRunbook({
+      projectId: 1,
+      runId: 'run-noworktree',
+      modality: 'web',
+    });
+    expect(probed).toEqual(['/project/root']);
+    spy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.2 seam 2 — the SYNCHRONOUS proof primitive.
+//
+// Rows are INSERTed directly rather than enqueued: enqueue() nudges the drain,
+// and a drain would terminalize these fixtures itself (empty chain ⇒ skipped),
+// which is precisely the state transition these tests need to control.
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — awaitTerminal (§5.2 seam 2)', () => {
+  function bareScheduler(): VerificationScheduler {
+    return VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+    });
+  }
+
+  function insertRequest(
+    id: string,
+    row: { status: string; verdictJson?: string | null; errorMessage?: string | null; failureClass?: string | null },
+  ): void {
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json,
+          verdict_json, error_message, failure_class)
+       VALUES (?, 'run-await', 1, ?, 'interactive-web-behavior', '{"intent":"x"}', '[]', ?, ?, ?)`,
+    ).run(id, row.status, row.verdictJson ?? null, row.errorMessage ?? null, row.failureClass ?? null);
+  }
+
+  it.each(['passed', 'failed', 'low_confidence', 'skipped', 'timeout'])(
+    'resolves immediately on a %s row',
+    async (status) => {
+      insertRequest(`vr-${status}`, { status });
+      const outcome = await bareScheduler().awaitTerminal(`vr-${status}`, 5_000, 5);
+      expect(outcome.status).toBe(status);
+    },
+  );
+
+  it('carries the judge feedback, the §3.1 attribution, and the error message', async () => {
+    insertRequest('vr-detail', {
+      status: 'failed',
+      verdictJson: JSON.stringify({ ...PASS_VERDICT, status: 'fail', feedback: 'the toggle never rendered' }),
+      errorMessage: 'behavior b1 failed',
+      failureClass: 'deliverable',
+    });
+    const outcome = await bareScheduler().awaitTerminal('vr-detail', 5_000, 5);
+    expect(outcome).toEqual({
+      status: 'failed',
+      errorMessage: 'behavior b1 failed',
+      failureClass: 'deliverable',
+      feedback: 'the toggle never rendered',
+    });
+  });
+
+  it('resolves as soon as a still-running row TERMINALIZES (the poll loop, not a fixed sleep)', async () => {
+    insertRequest('vr-late', { status: 'running' });
+    const pending = bareScheduler().awaitTerminal('vr-late', 5_000, 5);
+    setTimeout(() => {
+      db.prepare(
+        "UPDATE verification_requests SET status = 'passed', verdict_json = ? WHERE id = 'vr-late'",
+      ).run(JSON.stringify({ ...PASS_VERDICT, feedback: 'came up green' }));
+    }, 20);
+    const outcome = await pending;
+    expect(outcome.status).toBe('passed');
+    expect(outcome.feedback).toBe('came up green');
+  });
+
+  it("a deadline returns the request's CURRENT status — the CALLER timed out, the request did not", async () => {
+    insertRequest('vr-slow', { status: 'queued' });
+    const outcome = await bareScheduler().awaitTerminal('vr-slow', 25, 5);
+    expect(outcome.status).toBe('queued');
+    expect(outcome.errorMessage).toBe(AWAIT_TERMINAL_TIMEOUT_MESSAGE);
+    // Nothing was canceled: the row is untouched and still drainable.
+    expect(
+      (db.prepare("SELECT status AS s FROM verification_requests WHERE id = 'vr-slow'").get() as { s: string }).s,
+    ).toBe('queued');
+  });
+
+  it('an unknown request id is a skip with a concrete reason, never an infinite wait', async () => {
+    const outcome = await bareScheduler().awaitTerminal('vr-nonexistent', 5_000, 5);
+    expect(outcome).toEqual({
+      status: 'skipped',
+      errorMessage: AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
+      failureClass: null,
+      feedback: null,
+    });
+  });
+
+  it('an unparseable verdict_json degrades to no feedback rather than throwing at the awaiting flow', async () => {
+    insertRequest('vr-badverdict', { status: 'passed', verdictJson: '{not json' });
+    const outcome = await bareScheduler().awaitTerminal('vr-badverdict', 5_000, 5);
+    expect(outcome.status).toBe('passed');
+    expect(outcome.feedback).toBeNull();
   });
 });

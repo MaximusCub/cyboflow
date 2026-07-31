@@ -29,20 +29,233 @@
  */
 import { VerificationScheduler } from './verificationScheduler';
 import { captureSnapshotSha } from './snapshotProvisioner';
+import { findForbiddenTaskCommands } from './dependencyCommandGuard';
 import {
   deriveLegacyInputFromTask,
   FALLBACK_CHAINS,
   isVerificationType,
+  resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
 import type {
   VerificationTaskV1,
   VerificationType,
   VisualBackendId,
 } from '../../../../shared/types/visualVerification';
+import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { TaskEnqueueResult } from '../programmatic/types';
 
 export type { TaskEnqueueResult };
+
+// ---------------------------------------------------------------------------
+// The SHARED enqueue-time preparation (§5.2 seams 1+3, §5.3, §7.2 ENQUEUE half)
+//
+// There are exactly TWO ways a verification request is born — the MCP handler
+// (`cyboflow_request_verification`, orchestrated mode) and this module's
+// `enqueueTaskVerification` (the programmatic controller's agentless
+// visual-verify step) — and both must apply the identical rules to the composed
+// task before a row exists:
+//
+//   1. REJECT a task whose build/serve mutates dependencies (§7.2);
+//   2. INJECT the project's PROVEN runbook revision, replacing the composed
+//      build/serve/attestation and stamping the content-addressed PIN (§5.2
+//      seam 3).
+//
+// Duplicating that across the two entry points is how the two paths quietly
+// diverge — one gets a guard widened, the other does not — so it lives here,
+// once, and both call {@link prepareVerificationEnqueue}.
+// ---------------------------------------------------------------------------
+
+/**
+ * The migration-089 request-row pin: the portable half's content hash plus the
+ * machine-local record's CAS version, both stamped at enqueue so the runner can
+ * execute exactly that revision or reject (§5.2 seam 3).
+ */
+export interface RunbookPin {
+  hash: string;
+  localVersion: number;
+}
+
+/** The structured error code an enqueue rejection carries when §7.2's guard fires. */
+export const FORBIDDEN_DEP_COMMAND_ERROR = 'forbidden_dependency_command';
+
+/**
+ * Outcome of {@link prepareVerificationEnqueue}. `ok:false` means NOTHING is
+ * enqueued and the caller surfaces `error` to the composer verbatim; `ok:true`
+ * carries the task to persist (possibly runbook-merged) and the pin to stamp.
+ */
+export type PreparedVerificationEnqueue =
+  | { ok: true; task?: VerificationTaskV1; pin?: RunbookPin }
+  | { ok: false; error: string };
+
+/**
+ * Build the §7.2 rejection message. Names EVERY offending command verbatim plus
+ * the rule and its reason — a composer that gets back "invalid task" cannot fix
+ * it; one that gets back "you wrote `pnpm install`, here is why that is not
+ * allowed here, dependencies are prepared for you" recomposes correctly on the
+ * first retry.
+ */
+function forbiddenCommandError(offenders: string[], source: 'task' | 'runbook'): string {
+  const list = offenders.map((cmd) => `  - ${cmd}`).join('\n');
+  const origin =
+    source === 'runbook'
+      ? "this project's committed verification runbook"
+      : 'the composed verification task';
+  return (
+    `${FORBIDDEN_DEP_COMMAND_ERROR}: ${origin} contains dependency-mutating command(s):\n${list}\n` +
+    'A verification snapshot SHARES its node_modules with the live worktree (symlinked), so an ' +
+    'install/rebuild/browser-install inside it writes THROUGH into the tree every sibling lane is ' +
+    'building against — flipping native-module ABIs under them, invisibly to the mutation check. ' +
+    'Dependencies are prepared for you before the task runs: compose build/serve steps that only ' +
+    "build and serve (e.g. `pnpm run build`, `pnpm dev --port \\${PORT}`), never ones that install."
+  );
+}
+
+/**
+ * MERGE a proven runbook's modality entry into a composed task (§5.2 seam 3).
+ *
+ * THE SPLIT OF AUTHORITY. The runbook owns HOW THIS PROJECT IS STOOD UP —
+ * `build`, `serve`, and the `attestation` channel that proves the surface is
+ * really this deliverable. The composed task owns WHAT IS BEING CHECKED THIS
+ * TIME — `summary`, `behaviors`, `viewports`, and the lane `taskRef`. Merging
+ * along exactly that seam is the point of the whole phase: §1's diagnosis is
+ * that the agent engine "guesses per-run with no memory and guesses wrong every
+ * time" (0-for-5 in production — wrong serve form, colliding singletons, wrong
+ * ABI), and the composer's guess at build/serve is precisely the part that has
+ * never once been right. Its judgment about which behaviors to check is the part
+ * it is actually good at, and that survives untouched.
+ *
+ * REPLACE, NOT MERGE-FIELDS. An absent `build` in the runbook entry REMOVES the
+ * task's own build steps rather than leaving them: "this project needs no build
+ * step" is a positive statement the proof validated, and keeping a guessed one
+ * alongside it would re-introduce exactly the guess that was proven wrong.
+ *
+ * `target` is preserved: it is the composer's pre-live pointer and is orthogonal
+ * to standing the project up. The entry's `viewports`/`notes` are NOT merged —
+ * capture framing belongs to the request, and the notes are for humans reading
+ * the committed file.
+ */
+export function mergeRunbookIntoTask(
+  task: VerificationTaskV1,
+  entry: VerifyRunbookModalityEntry,
+): VerificationTaskV1 {
+  return {
+    version: 1,
+    summary: task.summary,
+    behaviors: task.behaviors,
+    attestation: entry.attestation,
+    ...(task.taskRef !== undefined ? { taskRef: task.taskRef } : {}),
+    ...(task.target !== undefined ? { target: task.target } : {}),
+    ...(task.modality !== undefined ? { modality: task.modality } : {}),
+    ...(task.viewports !== undefined ? { viewports: task.viewports } : {}),
+    ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
+    ...(entry.build !== undefined ? { build: entry.build } : {}),
+    ...(entry.serve !== undefined ? { serve: entry.serve } : {}),
+  };
+}
+
+/**
+ * Apply the two enqueue-time rules to a composed task, in order. Called by BOTH
+ * enqueue entry points; see this section's header for why it is shared.
+ *
+ * ORDER MATTERS. The §7.2 guard runs FIRST, on what the composer actually wrote:
+ * a task carrying `pnpm install` is rejected with that command named, before any
+ * runbook merge could quietly replace it and hide the composer's mistake (the
+ * composer would keep making it). It then runs AGAIN on the merged result,
+ * because §7.2's rule is explicitly "every composed task's build/serve steps —
+ * runbook-sourced and agent-composed alike": a runbook that smuggles an install
+ * through the merge is exactly as dangerous, and is arguably worse because it is
+ * PROVEN and would repeat on every request.
+ *
+ * A SETUP-PROOF REQUEST PINS ITS OWN DRAFT. `pin` supplied by the caller is
+ * stamped verbatim and no lookup happens: the phase-2 setup flow is trying to
+ * PROVE a revision, which by definition is not proven yet, so requiring a proven
+ * record here would be a bootstrap deadlock (the same reason §3.6 exempts it
+ * from the degrade gate). Its task was composed from that draft, so re-merging
+ * would be a no-op at best.
+ *
+ * EVERY UNHAPPY PATH IS "UNPINNED", NOT "FAILED". No store wired, no proven
+ * record, a record that declares no entry for this modality, a resolution error
+ * — all resolve to `{ ok: true, task }` with no pin. The §3.2 degrade gate then
+ * gives the honest answer downstream (skip + a setup CTA for a build/serve task;
+ * nothing at all for a degenerate pre-live one). The ONLY hard rejection here is
+ * the dependency guard, because that one is a hazard rather than a gap.
+ */
+export async function prepareVerificationEnqueue(args: {
+  projectId: number;
+  runId: string;
+  type: VerificationType;
+  /** The composed task, when the request carries one (the legacy intent-only path passes undefined). */
+  task?: VerificationTaskV1;
+  /** A caller-supplied pin — a setup-proof request pinning the draft it is proving. */
+  pin?: RunbookPin;
+  /** The tree whose portable runbook half is probed; absent ⇒ the scheduler resolves it from the run/project. */
+  probePath?: string;
+  logger?: LoggerLike;
+}): Promise<PreparedVerificationEnqueue> {
+  const { task, logger } = args;
+  if (task === undefined) return { ok: true };
+
+  // (1) §7.2 — the composer's own commands.
+  const composed = findForbiddenTaskCommands(task);
+  if (composed.length > 0) {
+    return { ok: false, error: forbiddenCommandError(composed, 'task') };
+  }
+
+  // (2) A caller-supplied pin is authoritative (setup proof) — stamp it verbatim.
+  if (args.pin !== undefined) {
+    return { ok: true, task, pin: args.pin };
+  }
+
+  // (3) §5.2 seam 3 — the proven-runbook injection.
+  const scheduler = VerificationScheduler.tryGetInstance();
+  if (scheduler === null) return { ok: true, task };
+  const modality = resolveTaskModality(args.type, task);
+  const revision = await scheduler.resolveProvenRunbook({
+    projectId: args.projectId,
+    runId: args.runId,
+    modality,
+    ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+  });
+  if (revision === null) return { ok: true, task };
+
+  const merged = mergeRunbookIntoTask(task, revision.entry);
+
+  // The stamped modality is re-derived from the PERSISTED task
+  // (`scheduler.enqueue` → `resolveTaskModality`), so a merge that changes the
+  // `serve.attach` discriminant would stamp a modality DIFFERENT from the one
+  // this runbook was resolved for — the capability ledger, the screen lease and
+  // the runner's preflight would then all key on a modality nothing was proven
+  // against. That can only happen if a record filed under modality M declares an
+  // entry inconsistent with M (a malformed runbook), so the response is to drop
+  // the injection and let the degrade gate speak, never to silently execute the
+  // inconsistency.
+  if (resolveTaskModality(args.type, merged) !== modality) {
+    logger?.warn('[prepareVerificationEnqueue] runbook entry contradicts its own modality; skipping injection', {
+      projectId: args.projectId,
+      runId: args.runId,
+      modality,
+      merged: resolveTaskModality(args.type, merged),
+      runbookHash: revision.hash,
+    });
+    return { ok: true, task };
+  }
+
+  // (4) §7.2 again, now over the runbook-sourced commands.
+  const fromRunbook = findForbiddenTaskCommands(merged);
+  if (fromRunbook.length > 0) {
+    return { ok: false, error: forbiddenCommandError(fromRunbook, 'runbook') };
+  }
+
+  logger?.debug('[prepareVerificationEnqueue] injected a proven runbook revision', {
+    projectId: args.projectId,
+    runId: args.runId,
+    modality,
+    runbookHash: revision.hash,
+    runbookLocalVersion: revision.version,
+  });
+  return { ok: true, task: merged, pin: { hash: revision.hash, localVersion: revision.version } };
+}
 
 /** Parse the stamped `verify_chain` JSON into a `VisualBackendId[]` (mirrors mcpQueryHandler). Fail-soft → []. */
 function parseStampedChain(v: unknown): VisualBackendId[] {
@@ -78,6 +291,20 @@ export interface EnqueueTaskVerificationOptions {
    * through this SAME seam instead of a parallel one.
    */
   setupProof?: boolean;
+  /**
+   * §5.2 seam 3 — a caller-supplied PIN, stamped verbatim onto the request row.
+   * The phase-2 setup flow's proof run is the caller: it is trying to PROVE a
+   * specific derived revision, so it pins that revision's own hash + CAS version
+   * rather than waiting for a proven record that by definition does not exist
+   * yet (the same bootstrap reasoning that exempts a `setupProof` request from
+   * the §3.2 degrade gate). Absent ⇒ the pin, if any, is resolved from the
+   * project's PROVEN runbook by {@link prepareVerificationEnqueue}.
+   *
+   * Both must be supplied together to have an effect — half a pin is not a pin,
+   * and the runner's validation would have nothing to CAS against.
+   */
+  runbookHash?: string;
+  runbookLocalVersion?: number;
   logger?: LoggerLike;
 }
 
@@ -86,6 +313,14 @@ export interface EnqueueTaskVerificationOptions {
  * `{ outcome: 'enqueued', requestId }` on success, or `{ outcome: 'skipped', reason }`
  * when verification is disabled/missing for the run or the scheduler is unavailable
  * (both fail-open — the caller advances the lane without parking). NEVER throws.
+ *
+ * ONE outcome is deliberately NOT fail-open: a task whose build/serve mutates
+ * dependencies (§7.2) resolves `{ outcome: 'skipped', reason: <the structured
+ * guard message> }`. Skipping is still lane-advancing (this seam has no channel
+ * to fail a lane and must not grow one), but the reason names the offending
+ * command so the loopback that follows recomposes correctly instead of the
+ * enqueue quietly writing a row that would poison every sibling lane's
+ * node_modules.
  */
 export async function enqueueTaskVerification(
   opts: EnqueueTaskVerificationOptions,
@@ -148,7 +383,46 @@ export async function enqueueTaskVerification(
   // (3) FORCE lane identity: laneTaskRef is authoritative for gate attribution, so
   // it overrides task.taskRef AND drives the derived legacy input — both persisted
   // columns then carry the SAME ref regardless of what the composing agent wrote.
-  const task: VerificationTaskV1 = { ...opts.task, taskRef: laneTaskRef };
+  const composedTask: VerificationTaskV1 = { ...opts.task, taskRef: laneTaskRef };
+
+  // (3b) The SHARED enqueue-time rules (§7.2 guard + §5.2 seam-3 injection). Runs
+  // BEFORE deriving the legacy input so `deliverable_json` is derived from the
+  // task that is actually persisted, not from the pre-merge one.
+  // Wrapped despite `prepareVerificationEnqueue` being total today: this seam's
+  // contract is NEVER THROWS (a throw here crashes a lane), and that must not
+  // depend on a collaborator two modules away staying total forever. An
+  // unexpected throw degrades to "unpinned, unvalidated" and still enqueues,
+  // which is the pre-phase-2 behavior.
+  let prepared: PreparedVerificationEnqueue;
+  try {
+    prepared = await prepareVerificationEnqueue({
+      projectId,
+      runId,
+      type,
+      task: composedTask,
+      ...(opts.runbookHash !== undefined && opts.runbookLocalVersion !== undefined
+        ? { pin: { hash: opts.runbookHash, localVersion: opts.runbookLocalVersion } }
+        : {}),
+      probePath: worktreePath,
+      ...(logger ? { logger } : {}),
+    });
+  } catch (err) {
+    logger?.warn('[enqueueTaskVerification] enqueue preparation threw; enqueuing unpinned', {
+      runId,
+      laneTaskRef,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    prepared = { ok: true, task: composedTask };
+  }
+  if (!prepared.ok) {
+    logger?.warn('[enqueueTaskVerification] composed task rejected at enqueue; skipping visual verification', {
+      runId,
+      laneTaskRef,
+      error: prepared.error,
+    });
+    return { outcome: 'skipped', reason: prepared.error };
+  }
+  const task: VerificationTaskV1 = prepared.task ?? composedTask;
   const input = deriveLegacyInputFromTask(task, laneTaskRef);
   const enqueueKey = `${runId}:${laneTaskRef}:${attempt}`;
 
@@ -170,6 +444,9 @@ export async function enqueueTaskVerification(
       snapshotSha,
       enqueueKey,
       ...(opts.setupProof === true ? { setupProof: true } : {}),
+      ...(prepared.pin
+        ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
+        : {}),
     });
     logger?.debug('[enqueueTaskVerification] enqueued lane verification', {
       runId,
@@ -178,6 +455,7 @@ export async function enqueueTaskVerification(
       attempt,
       enqueueKey,
       hasSnapshot: snapshotSha !== null,
+      runbookHash: prepared.pin?.hash ?? null,
     });
     return { outcome: 'enqueued', requestId };
   } catch (err) {

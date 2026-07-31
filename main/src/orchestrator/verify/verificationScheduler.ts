@@ -53,6 +53,7 @@ import type {
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
 import {
+  REQUEST_STATUS,
   VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
   isVerificationModality,
@@ -67,6 +68,11 @@ import type {
 import type { AgentPreflightResult } from './preflight';
 import { classifyVerificationFailure } from './failureClassifier';
 import type { VerifyCapabilityStore } from './capabilityStore';
+import type { VerifyRunbookStore } from './runbookStore';
+import type {
+  VerifyRunbookModality,
+  VerifyRunbookModalityEntry,
+} from '../../../../shared/types/verifyRunbook';
 
 // Re-exported for existing consumers — the type moved to shared so the
 // screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
@@ -944,8 +950,38 @@ export interface VerificationSchedulerDeps {
    * like `'absent'` by the gate — a merely-written config is precisely what the
    * failed `.cyboflow/verify.json` model already proved insufficient, §1);
    * `'absent'` means none exists.
+   *
+   * ASYNC (phase 2): the real answer is a CONJUNCTION re-checked on every read —
+   * the portable file at the probe path must still parse and hash to the
+   * record's hash, a freshly computed project input-hash must match, and so must
+   * the host fingerprint (§5.3 "Any component changing demotes"). Two of those
+   * three are filesystem work, so the thunk cannot be synchronous without either
+   * blocking the drain on IO or answering from a cache that is exactly what
+   * drift detection must not rely on. index.ts wires it to
+   * {@link VerifyRunbookStore.status} against the PROJECT path; the enqueue-side
+   * seam (see {@link VerificationScheduler.resolveProvenRunbook}) probes the
+   * requesting run's worktree instead.
    */
-  runbookStatus?: (projectId: number, modality: VerificationModality) => RunbookStatus;
+  runbookStatus?: (projectId: number, modality: VerificationModality) => Promise<RunbookStatus>;
+  /**
+   * The machine-local runbook record store (§5.2 seam 1 + §5.3), injected as the
+   * concrete class exactly like {@link VerificationSchedulerDeps.capabilityStore}
+   * — the scheduler needs three of its verbs and splitting them into three
+   * thunks would only obscure that they are all views of ONE record:
+   *
+   *  - `status` + `getCurrent` back {@link VerificationScheduler.resolveProvenRunbook},
+   *    the ENQUEUE-time pinned injection both enqueue entry points call (§5.2
+   *    seam 3);
+   *  - `markProven` is the ENGINE-ENFORCED proof flip (§5.3): a `setup_proof`
+   *    request that actually PASSED through the real verification path is the
+   *    only thing that may turn a draft into a proven runbook — deliberately
+   *    not something the setup agent can accomplish by asserting it.
+   *
+   * ABSENT ⇒ no request is ever pinned and no proof is ever recorded, which is
+   * byte-identical to the pre-phase-2 behavior (and what every legacy test and
+   * any pre-089 DB gets).
+   */
+  runbookStore?: VerifyRunbookStore;
   /**
    * Files the ONE non-blocking finding the §3.4 circuit breaker raises when it
    * trips. INJECTED rather than imported, for the standalone-typecheck
@@ -985,6 +1021,24 @@ export interface VerificationSchedulerDeps {
  * era) — only `'proven'` opens the gate.
  */
 export type RunbookStatus = 'proven' | 'unproven-draft' | 'absent';
+
+/**
+ * One PROVEN runbook revision, resolved at enqueue time by
+ * {@link VerificationScheduler.resolveProvenRunbook} — the content to merge into
+ * the composed task plus the two values that become the request row's PIN
+ * (migration 089 `runbook_hash` / `runbook_local_version`).
+ *
+ * `hash` and `version` travel together on purpose: the hash content-addresses
+ * the COMMITTED half (so the runner can resolve the exact revision from a
+ * snapshot whose tree predates the file entirely) while the version is the
+ * MACHINE-LOCAL record's CAS token (so a registration that swapped the record
+ * underneath an in-flight request is diagnosable rather than silent).
+ */
+export interface ProvenRunbookRevision {
+  hash: string;
+  version: number;
+  entry: VerifyRunbookModalityEntry;
+}
 
 /** The §3.4 circuit-breaker notice seam — see {@link VerificationSchedulerDeps.capabilityFinding}. */
 export type CapabilityBreakerFindingFn = (args: {
@@ -1094,6 +1148,96 @@ export function orderAgentDrainRows<T extends AgentDrainOrderRow>(
 }
 
 // ---------------------------------------------------------------------------
+// The synchronous proof primitive (§5.2 seam 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The three statuses a request can hold while it is still ALIVE — the exact set
+ * `markTerminal`'s guarded UPDATE keys on (`status IN ('queued','leased',
+ * 'running')`). Everything else in {@link RequestStatus} is terminal by
+ * construction, so deriving "terminal" from THIS set (rather than re-listing the
+ * five terminal states) means a future status added to the union cannot be
+ * silently treated as terminal by one site and non-terminal by the other.
+ */
+export const NON_TERMINAL_REQUEST_STATUSES: readonly RequestStatus[] = [
+  'queued',
+  'leased',
+  'running',
+] as const;
+
+/** Whether a request has settled (passed/failed/low_confidence/skipped/timeout). */
+export function isTerminalRequestStatus(status: RequestStatus): boolean {
+  return !NON_TERMINAL_REQUEST_STATUSES.includes(status);
+}
+
+/** Narrow a raw `status` column value to the CHECK-constrained union. */
+function isRequestStatus(value: unknown): value is RequestStatus {
+  return typeof value === 'string' && (REQUEST_STATUS as readonly string[]).includes(value);
+}
+
+/**
+ * Pull `feedback` out of a persisted `verdict_json`. Fail-soft to `null` in every
+ * degenerate case (column NULL on a skip/timeout, unparseable text, a verdict
+ * without prose) — a caller blocking on a proof needs the STATUS to be right far
+ * more than it needs the prose, and a parse hiccup must never turn a settled
+ * verdict into an exception thrown at the awaiting flow.
+ */
+function parseVerdictFeedback(verdictJson: unknown): string | null {
+  if (typeof verdictJson !== 'string' || verdictJson.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(verdictJson);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const feedback = (parsed as { feedback?: unknown }).feedback;
+    return typeof feedback === 'string' && feedback.length > 0 ? feedback : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The snapshot {@link VerificationScheduler.awaitTerminal} resolves with — the
+ * four things a caller blocking on a verdict actually needs to decide what to do
+ * next, and nothing more (the screenshots artifact + the review-queue finding
+ * already carry the rest through the ordinary delivery path).
+ *
+ * `failureClass` is the §3.1 attribution — `'env'` / `'deliverable'` /
+ * `'ambiguous'` — and it is what makes a FAILED proof actionable: it tells the
+ * setup flow whether to fix an isolation lever, fix the commands, or narrow the
+ * task. Typed as a plain `string | null` rather than the
+ * {@link VerificationFailureClass} union deliberately: it is read back off a DB
+ * column, and a value written by a NEWER binary (or hand-edited) must surface
+ * verbatim to the human rather than be narrowed away to `null` here.
+ */
+export interface AwaitTerminalOutcome {
+  status: RequestStatus;
+  errorMessage: string | null;
+  failureClass: string | null;
+  /** `verdict_json.feedback` — the judge's prose, when the outcome was judged. */
+  feedback: string | null;
+}
+
+/** How often {@link VerificationScheduler.awaitTerminal} re-reads the row. */
+export const AWAIT_TERMINAL_POLL_INTERVAL_MS = 1000;
+
+/**
+ * The `errorMessage` an {@link VerificationScheduler.awaitTerminal} deadline
+ * returns, alongside the request's CURRENT (still non-terminal) status. It is
+ * deliberately NOT a `'timeout'` status: the request itself has not timed out —
+ * it is still queued or running and will terminalize on its own schedule — only
+ * this caller stopped waiting. Reporting it as a request timeout would make the
+ * setup flow diagnose a deadline it never hit.
+ */
+export const AWAIT_TERMINAL_TIMEOUT_MESSAGE = 'await timeout';
+
+/**
+ * The `errorMessage` returned when the request id resolves to nothing at all
+ * (never enqueued, or unreadable). Paired with a `'skipped'` status because that
+ * is this scheduler's established "no verdict, and that is not a failure" state
+ * — the caller must not read it as a pass, and must not loop back on it either.
+ */
+export const AWAIT_TERMINAL_NOT_FOUND_MESSAGE = 'request not found';
+
+// ---------------------------------------------------------------------------
 // VerificationScheduler
 // ---------------------------------------------------------------------------
 
@@ -1123,7 +1267,11 @@ export class VerificationScheduler {
   private readonly queuedAgeCeilingMs: number;
   private readonly legacyKillSwitch: () => boolean;
   private readonly capabilityStore?: VerifyCapabilityStore;
-  private readonly runbookStatus: (projectId: number, modality: VerificationModality) => RunbookStatus;
+  private readonly runbookStatus: (
+    projectId: number,
+    modality: VerificationModality,
+  ) => Promise<RunbookStatus>;
+  private readonly runbookStore?: VerifyRunbookStore;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
   private readonly nativeCaptureProbe?: () => Promise<boolean>;
 
@@ -1193,9 +1341,11 @@ export class VerificationScheduler {
     this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
     this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
     this.capabilityStore = deps.capabilityStore;
-    // §3.2: no project has a proven runbook until phase 2 ships the store that
-    // could record one — 'absent' is the honest default, not a placeholder.
-    this.runbookStatus = deps.runbookStatus ?? ((): RunbookStatus => 'absent');
+    // §3.2: an UNWIRED deployment has no way to know a project proved anything —
+    // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
+    // store at index.ts; this default is what legacy tests and a pre-089 DB get.)
+    this.runbookStatus = deps.runbookStatus ?? (async (): Promise<RunbookStatus> => 'absent');
+    this.runbookStore = deps.runbookStore;
     this.capabilityFinding = deps.capabilityFinding;
     // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
     // probe ran", which the gate reads as unsupported (phase-0 behavior).
@@ -1425,6 +1575,22 @@ export class VerificationScheduler {
      * bootstrap deadlock. Defaults to false (ordinary counted lane traffic).
      */
     setupProof?: boolean;
+    /**
+     * §5.2 seam 3 — the PIN. `runbookHash` content-addresses the portable half
+     * the composed `task` was merged from; `runbookLocalVersion` is the
+     * machine-local record's CAS version at enqueue. Both are resolved by the
+     * caller's {@link VerificationScheduler.resolveProvenRunbook} (or supplied
+     * verbatim by a setup-proof request, which pins the DRAFT it is trying to
+     * prove) and written to migration 089's columns in the same INSERT as the
+     * task itself, so the row records the exact revision it must execute.
+     *
+     * Absent ⇒ NULL columns, and the runner's pin validation does not run —
+     * which is the correct posture for the degenerate pre-live tasks that
+     * bypass the §3.2 degrade gate entirely (they derive no environment, so
+     * there is no runbook for them to be pinned to).
+     */
+    runbookHash?: string | null;
+    runbookLocalVersion?: number | null;
   }): string {
     if (req.enqueueKey !== undefined) {
       const existingId = this.findLiveRequestByEnqueueKey(req.enqueueKey);
@@ -1458,26 +1624,50 @@ export class VerificationScheduler {
         req.snapshotSha ?? null,
         req.enqueueKey ?? null,
       ];
+    // The INSERT widens ONE generation at a time (089 pin → 088 gate columns →
+    // the 078 legacy list), each attempt falling back on a `prepare` failure.
+    // `prepare` throws on an unknown column BEFORE any row is written, so a
+    // fallback can never double-insert; the ladder is what lets one build serve
+    // a DB at any of the three migration levels.
+    const gateValues: [VerificationModality, number] = [modality, req.setupProof === true ? 1 : 0];
+    const pinValues: [string | null, number | null] = [
+      req.runbookHash ?? null,
+      req.runbookLocalVersion ?? null,
+    ];
     try {
       this.db
         .prepare(
           `INSERT INTO verification_requests
-             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof)
-           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof, runbook_hash, runbook_local_version)
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(...values, modality, req.setupProof === true ? 1 : 0);
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] modality/setup_proof columns unavailable; legacy enqueue', {
+        .run(...values, ...gateValues, ...pinValues);
+    } catch (pinErr) {
+      this.logger?.debug('[VerificationScheduler] runbook pin columns unavailable; enqueuing without a pin', {
         requestId: id,
-        error: err instanceof Error ? err.message : String(err),
+        error: pinErr instanceof Error ? pinErr.message : String(pinErr),
       });
-      this.db
-        .prepare(
-          `INSERT INTO verification_requests
-             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
-           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
-        )
-        .run(...values);
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO verification_requests
+               (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof)
+             VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+          )
+          .run(...values, ...gateValues);
+      } catch (err) {
+        this.logger?.debug('[VerificationScheduler] modality/setup_proof columns unavailable; legacy enqueue', {
+          requestId: id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.db
+          .prepare(
+            `INSERT INTO verification_requests
+               (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
+             VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
+          )
+          .run(...values);
+      }
     }
     this.logger?.debug('[VerificationScheduler] enqueued request', {
       requestId: id,
@@ -1488,6 +1678,8 @@ export class VerificationScheduler {
       setupProof: req.setupProof === true,
       hasTask: req.task !== undefined,
       hasEnqueueKey: req.enqueueKey !== undefined,
+      runbookHash: req.runbookHash ?? null,
+      runbookLocalVersion: req.runbookLocalVersion ?? null,
     });
     this.nudge();
     return id;
@@ -1513,6 +1705,134 @@ export class VerificationScheduler {
       )
       .get(enqueueKey) as { id: string } | undefined;
     return row?.id;
+  }
+
+  // --------------------------------------------------------------------------
+  // awaitTerminal — the SYNCHRONOUS proof primitive (§5.2 seam 2)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Block until `requestId` settles, then hand back its verdict inline
+   * (docs/proposals/verification-setup-flow.md §5.2 seam 2).
+   *
+   * WHY THIS EXISTS AT ALL. Every other consumer of this queue is
+   * fire-and-continue, and that is correct FOR THEM: a sprint lane enqueues,
+   * parks at `awaiting-verify`, and the verdict is DRIVEN onto it later by the
+   * merge gate — the lane agent's turn has already ended, so there is nobody left
+   * to hand a verdict to. The phase-2 setup flow is the first caller with the
+   * opposite shape: its whole job is "derive → PROVE BY RUNNING → diagnose →
+   * adjust → re-prove", and every one of those arrows needs the outcome of the
+   * previous step IN THE SAME TURN. Without this seam the flow's only options are
+   * to poll the DB itself (it has no DB access) or to end its turn and hope
+   * something resumes it (nothing would) — which is exactly why §5.2 names the
+   * "wait-for-verdict seam, bounded, with the verdict surfaced inline" as a thing
+   * that must be BUILT rather than assumed.
+   *
+   * POLLING THE ROW, NOT SUBSCRIBING TO THE EVENT. `verificationEvents` looks like
+   * the natural wake source, but it is a fire-once in-process emit: a request that
+   * terminalized between the caller's enqueue and its await (a fast skip — an
+   * unsupported modality, a suppressed capability, an exhausted queue-age) has
+   * ALREADY emitted, and a subscriber would then wait out the full deadline for an
+   * event that can never fire again. Boot recovery has the same shape across a
+   * restart. The ROW is the durable record of the outcome; re-reading it is
+   * correct whether the terminal happened a second ago or before this call
+   * existed, and a once-a-second read of one indexed row is not a cost worth
+   * optimizing against that.
+   *
+   * BOUNDED, AND HONEST ABOUT THE BOUND. On expiry the request's CURRENT status is
+   * returned as-is (queued/leased/running) with {@link AWAIT_TERMINAL_TIMEOUT_MESSAGE}
+   * — the caller stopped waiting, the request did not stop running, and the two
+   * must not be conflated. Nothing is canceled: the request keeps draining and its
+   * verdict still lands on the artifact + review queue through the normal delivery
+   * path, so a proof that merely outran a caller's patience is not lost.
+   *
+   * `pollIntervalMs` exists so a test can drive the loop without a real second per
+   * iteration; production callers take the default. The sleep is clamped to the
+   * remaining budget, so the deadline is honored to within one DB read rather than
+   * overshot by up to a full interval. The deadline itself is measured on the
+   * scheduler's INJECTED clock (`deps.now`) — the same one the drain ages rows on
+   * — so a test that freezes the clock freezes this deadline with it.
+   */
+  async awaitTerminal(
+    requestId: string,
+    timeoutMs: number,
+    pollIntervalMs: number = AWAIT_TERMINAL_POLL_INTERVAL_MS,
+  ): Promise<AwaitTerminalOutcome> {
+    const startedMs = this.now();
+    for (;;) {
+      const snapshot = this.readAwaitSnapshot(requestId);
+      if (snapshot === null) {
+        return {
+          status: 'skipped',
+          errorMessage: AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
+          failureClass: null,
+          feedback: null,
+        };
+      }
+      if (isTerminalRequestStatus(snapshot.status)) return snapshot;
+
+      const remainingMs = timeoutMs - (this.now() - startedMs);
+      if (remainingMs <= 0) {
+        return { ...snapshot, errorMessage: AWAIT_TERMINAL_TIMEOUT_MESSAGE };
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(pollIntervalMs, remainingMs));
+      });
+    }
+  }
+
+  /**
+   * One poll of {@link VerificationScheduler.awaitTerminal}: the request's status
+   * plus the three human-facing fields, or `null` when the id resolves to nothing
+   * (never enqueued, already reaped) or the read itself failed.
+   *
+   * The migration-088 `failure_class` is fetched through the SAME widen-then-fall-
+   * back ladder as {@link agentGateColumnsForRow} / {@link runbookPinForRow}: a
+   * pre-088 DB throws on `prepare` (before any read), and losing the STATUS to
+   * that throw would make every await on such a binary answer "not found" forever.
+   * The fallback drops only the attribution, which such a DB genuinely never had.
+   */
+  private readAwaitSnapshot(requestId: string): AwaitTerminalOutcome | null {
+    interface AwaitRow {
+      status: unknown;
+      error_message: unknown;
+      verdict_json: unknown;
+      failure_class?: unknown;
+    }
+    let row: AwaitRow | undefined;
+    try {
+      row = this.db
+        .prepare(
+          'SELECT status, error_message, verdict_json, failure_class FROM verification_requests WHERE id = ?',
+        )
+        .get(requestId) as AwaitRow | undefined;
+    } catch {
+      try {
+        row = this.db
+          .prepare('SELECT status, error_message, verdict_json FROM verification_requests WHERE id = ?')
+          .get(requestId) as AwaitRow | undefined;
+      } catch (err) {
+        this.logger?.warn('[VerificationScheduler] await snapshot read failed (fail-soft)', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      }
+    }
+    if (!row) return null;
+
+    // An unrecognized status (a hand-edited row, or one written by a newer
+    // binary) is reported as 'running': non-terminal, so the caller keeps waiting
+    // within its own deadline rather than being handed a verdict-shaped answer
+    // this scheduler cannot vouch for.
+    const status: RequestStatus = isRequestStatus(row.status) ? row.status : 'running';
+    return {
+      status,
+      errorMessage: typeof row.error_message === 'string' ? row.error_message : null,
+      failureClass:
+        typeof row.failure_class === 'string' && row.failure_class.length > 0 ? row.failure_class : null,
+      feedback: parseVerdictFeedback(row.verdict_json),
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -1920,6 +2240,98 @@ export class VerificationScheduler {
   }
 
   /**
+   * The migration-089 PIN columns for one row, in their OWN defensive query for
+   * the same reason {@link agentGateColumnsForRow} is separate: a pre-089 DB
+   * makes the widened SELECT throw, and folding these into an existing query
+   * would take `task_json` or the gate flags down with them. Fail-soft answer is
+   * "no pin", which is what every legacy row genuinely is.
+   */
+  private runbookPinForRow(id: string): { hash: string | null; version: number | null } {
+    try {
+      const row = this.db
+        .prepare('SELECT runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?')
+        .get(id) as { runbook_hash: unknown; runbook_local_version: unknown } | undefined;
+      const hash = typeof row?.runbook_hash === 'string' && row.runbook_hash.length > 0 ? row.runbook_hash : null;
+      const version = typeof row?.runbook_local_version === 'number' ? row.runbook_local_version : null;
+      return { hash, version };
+    } catch {
+      return { hash: null, version: null };
+    }
+  }
+
+  /** The project's checkout path (`projects.path`); null when unknown/unreadable. */
+  private projectPathFor(projectId: number): string | null {
+    try {
+      const row = this.db.prepare('SELECT path FROM projects WHERE id = ?').get(projectId) as
+        | { path: unknown }
+        | undefined;
+      return typeof row?.path === 'string' && row.path.trim().length > 0 ? row.path : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * §5.2 seam 3, ENQUEUE half — resolve the PROVEN runbook revision a request
+   * for this (project, modality) must be pinned to, or `null` when there is
+   * none. Public because BOTH enqueue entry points (the MCP handler and the
+   * programmatic `enqueueTaskVerification` seam) need the identical answer and
+   * the store is injected HERE, not into either of them; the shared merge +
+   * validation logic that consumes this lives in one place too
+   * (`enqueueFromTask.prepareVerificationEnqueue`).
+   *
+   * WHY THE PROBE PATH IS THE RUN'S WORKTREE FIRST. `status()` re-validates the
+   * proof against the portable file at a specific tree, and the tree that
+   * matters is the one the requesting run is actually changing — a run whose
+   * branch edited (or has not yet merged) the runbook must be judged by ITS
+   * copy, not by the project's main checkout. That is the same worktree-first
+   * ladder `verifyConfigLoader` walks, for the same reason. The project path is
+   * the fallback for a run with no worktree; with neither, there is nothing to
+   * probe and the answer is `null` (no pin ⇒ the §3.2 degrade gate decides).
+   *
+   * A null answer is NEVER an error path — it is "this request executes
+   * unpinned", which for a build/serve task means the degrade gate skips it with
+   * a setup CTA, and for a degenerate pre-live task means nothing changes at
+   * all.
+   */
+  async resolveProvenRunbook(args: {
+    projectId: number;
+    runId: string;
+    modality: VerificationModality;
+    /** The caller's own worktree, when it has one (skips the run-row lookup). */
+    probePath?: string;
+  }): Promise<ProvenRunbookRevision | null> {
+    const store = this.runbookStore;
+    if (!store) return null;
+    const probePath =
+      args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
+    if (probePath === null || probePath === undefined) return null;
+    try {
+      const status = await store.status(args.projectId, probePath, args.modality);
+      if (status !== 'proven') return null;
+      const current = store.getCurrent(args.projectId, args.modality);
+      if (current === null) return null;
+      // The cast is safe by construction: `parseVerifyRunbookV1` only ever
+      // populates keys from VERIFY_RUNBOOK_MODALITIES, so a VerificationModality
+      // outside that subset ('mobile') simply misses — the same narrowing the
+      // store's own `declaresModality` does.
+      const entry = current.runbook.modalities[args.modality as VerifyRunbookModality];
+      if (entry === undefined) return null;
+      return { hash: current.hash, version: current.version, entry };
+    } catch (err) {
+      // A resolution hiccup must never fail an enqueue: answer "unpinned" and
+      // let the gate speak.
+      this.logger?.warn('[VerificationScheduler] proven-runbook resolution failed (fail-soft)', {
+        projectId: args.projectId,
+        runId: args.runId,
+        modality: args.modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
    * The composed task the agent runs: the persisted `task_json` when present + valid
    * (dual-format contract §5.2), else a DEGENERATE task synthesized from the legacy
    * input (a bare-intent request) — `summary = intent`, no build/behaviors, `target`
@@ -2075,7 +2487,7 @@ export class VerificationScheduler {
     if (setupProof) return null;
     const derivesEnvironment =
       (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
-    if (derivesEnvironment && this.runbookStatus(row.project_id, modality) !== 'proven') {
+    if (derivesEnvironment && (await this.runbookStatus(row.project_id, modality)) !== 'proven') {
       return VERIFY_NO_RUNBOOK_REASON;
     }
     return null;
@@ -2373,6 +2785,13 @@ export class VerificationScheduler {
         return;
       }
 
+      // §5.2 seam 3 — the pin stamped at enqueue, handed to the runner so it can
+      // resolve THAT revision by hash and reject any mismatch before it
+      // provisions anything. Read here rather than in processAgentRow so a
+      // recovery/replay path that re-enters this method always re-reads the
+      // authoritative row value.
+      const pin = this.runbookPinForRow(row.id);
+
       const req: VerificationAgentRequest = {
         runId: row.run_id,
         requestId: row.id,
@@ -2380,6 +2799,8 @@ export class VerificationScheduler {
         task,
         runWorktreePath: worktreePath,
         snapshotSha,
+        ...(pin.hash !== null ? { runbookHash: pin.hash } : {}),
+        ...(pin.version !== null ? { runbookLocalVersion: pin.version } : {}),
         artifactsDir: this.artifactsDirResolver(row.run_id),
         verifyPort: servesPort ? leasedPort : null,
         verifyDriverPort: leasedPort + 1,
@@ -2437,7 +2858,7 @@ export class VerificationScheduler {
         return;
       }
 
-      await this.settleAgentTerminal(row, input, result, modality);
+      await this.settleAgentTerminal(row, input, result, modality, setupProof, snapshotSha);
     } catch (err) {
       const aborted = controller.signal.aborted;
       controller.abort();
@@ -2508,12 +2929,18 @@ export class VerificationScheduler {
    * built, served, drove, and judged); `'ambiguous'` and every timeout touch
    * NEITHER, because a signal we could not attribute must not silently suppress a
    * modality (nor silently clear a real suppression).
+   *
+   * PHASE 2 adds the ENGINE-ENFORCED PROOF (§5.3) at the end: a `setup_proof`
+   * request that reached `'passed'` while carrying a pin is the ONLY transition
+   * into a `'proven'` runbook. See {@link recordRunbookProof}.
    */
   private async settleAgentTerminal(
     row: VerificationRequestRow,
     input: VerificationRequestInput,
     result: VerificationAgentRunResult,
     modality: VerificationModality,
+    setupProof: boolean,
+    snapshotSha: string | null,
   ): Promise<void> {
     const isTerminalFailure =
       result.status === 'failed' || result.status === 'timeout' || result.status === 'skipped';
@@ -2523,10 +2950,15 @@ export class VerificationScheduler {
           runnerStatus: result.status,
           reportOutcome: result.report?.outcome ?? null,
           provisionMode: result.provisionMode ?? null,
-          // Both are future harness seams (§3.1): no instance-lock detector and no
-          // runbook contract exist yet, so neither can ever be affirmative today.
+          // A future harness seam (§3.1): no instance-lock detector exists yet.
           instanceLockContention: false,
-          runbookMismatch: false,
+          // §5.2 seam 3, now LIVE: the runner rejected execution because the
+          // pinned runbook revision could not be resolved, or resolved to
+          // content the composed task no longer matches. Harness-derived by
+          // construction (a hash lookup + a structural compare, never model
+          // prose), which is what makes it eligible for the `'env'` class — and
+          // env-class is what keeps it off the lane's retry budget.
+          runbookMismatch: result.runbookMismatch === true,
         })
       : null;
 
@@ -2562,7 +2994,104 @@ export class VerificationScheduler {
       input,
     );
 
+    // §5.3 — the proof flip runs AFTER the terminal write, exactly like the
+    // ledger feedback below and for the same reason: the verdict is the
+    // load-bearing act, and a proof-recording failure must never be able to
+    // change one that is already committed.
+    if (setupProof && status === 'passed') {
+      this.recordRunbookProof(row, modality, result, snapshotSha);
+    }
+
     await this.recordCapabilityOutcome(row, modality, result, classified?.failureClass ?? null, evidenceDetail);
+  }
+
+  /**
+   * The §5.3 ENGINE-ENFORCED PROOF: flip the pinned machine-local runbook record
+   * to `'proven'` because a `setup_proof` request just PASSED through the real
+   * verification path — detached snapshot, prepared deps, real boot, real
+   * screenshot, real attestation floor.
+   *
+   * THE WHOLE POINT IS THAT THE AGENT CANNOT DO THIS. §1's diagnosis of the
+   * `.cyboflow/verify.json` era is that a config which is merely WRITTEN earns
+   * nothing; §5's answer is "derive → PROVE by running → persist". If the setup
+   * flow could call `markProven` itself, "proven" would decay back into "an
+   * agent said so" — the exact failure mode being fixed. So the only caller is
+   * here, on the engine's own terminal path, gated on a status the engine
+   * computed.
+   *
+   * The proof provenance recorded is §5.3's list: the sha actually verified, the
+   * portable hash and local version that were pinned, a compact preflight
+   * summary (what the host looked like when it passed), the timestamp, and the
+   * request id that produced it — enough for a human reading a later demotion to
+   * see what changed.
+   *
+   * A REQUEST WITHOUT A PIN PROVES NOTHING. A setup-proof run that carried no
+   * `runbook_hash` verified *something*, but nothing content-addressed, so there
+   * is no record it could be attesting to; it is logged and dropped.
+   *
+   * CAS FAILURE IS A WARN, NEVER A VERDICT CHANGE. `markProven` matches on BOTH
+   * the hash and the version, so a `registerDraft` that landed between this
+   * run's enqueue and its terminal rejects the flip — correctly: the proof
+   * attests to content the record no longer holds. The verification itself still
+   * passed and is written as such; only the promotion is declined, and the setup
+   * flow re-proves against the newer revision.
+   */
+  private recordRunbookProof(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    result: VerificationAgentRunResult,
+    snapshotSha: string | null,
+  ): void {
+    const store = this.runbookStore;
+    if (!store) return;
+    const pin = this.runbookPinForRow(row.id);
+    if (pin.hash === null || pin.version === null) {
+      this.logger?.debug('[VerificationScheduler] setup-proof passed without a runbook pin; nothing to prove', {
+        requestId: row.id,
+        modality,
+      });
+      return;
+    }
+    try {
+      const proofJson = JSON.stringify({
+        sha: snapshotSha,
+        portableHash: pin.hash,
+        localVersion: pin.version,
+        preflight: result.preflight
+          ? {
+              ok: result.preflight.ok,
+              checks: result.preflight.checks.map((check) => ({ id: check.id, ok: check.ok })),
+            }
+          : null,
+        verifiedAt: new Date().toISOString(),
+        requestId: row.id,
+      });
+      const outcome = store.markProven(row.project_id, modality, pin.hash, pin.version, proofJson);
+      if (outcome.ok) {
+        this.logger?.info('[VerificationScheduler] setup proof recorded — runbook is now proven', {
+          requestId: row.id,
+          projectId: row.project_id,
+          modality,
+          runbookHash: pin.hash,
+          runbookLocalVersion: pin.version,
+        });
+        return;
+      }
+      this.logger?.warn('[VerificationScheduler] setup proof could not be recorded (verdict unaffected)', {
+        requestId: row.id,
+        projectId: row.project_id,
+        modality,
+        runbookHash: pin.hash,
+        runbookLocalVersion: pin.version,
+        error: outcome.error,
+      });
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] setup-proof recording threw (fail-soft)', {
+        requestId: row.id,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

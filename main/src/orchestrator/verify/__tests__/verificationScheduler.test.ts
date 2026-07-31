@@ -3386,3 +3386,37 @@ describe('VerificationScheduler — delivery outbox (§5.6)', () => {
     expect(row.d).toBe('delivered');
   });
 });
+
+// ---------------------------------------------------------------------------
+// awaitTerminal on a PRE-088 DB (§5.2 seam 2).
+//
+// This file's fixture table deliberately stops at migration 078 — no
+// `failure_class` column — which is exactly the shape an older binary (or any
+// minimal fixture) presents. The widened snapshot SELECT throws on `prepare`
+// there, and the fallback must lose only the ATTRIBUTION: losing the STATUS to
+// that throw would make every await on such a DB answer "request not found"
+// forever, which reads as a skip and would advance a setup flow past a proof it
+// never actually observed.
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — awaitTerminal on a pre-088 DB', () => {
+  it('still resolves the status + feedback, with a null failure class', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, verdict_json)
+       VALUES ('vr_pre088', 'run-1', 1, 'failed', 'static-render-snapshot', ?, '[]', 0, ?)`,
+    ).run(JSON.stringify({ intent: 'x' }), JSON.stringify({ ...PASS_VERDICT, feedback: 'nope' }));
+
+    const outcome = await sched.awaitTerminal('vr_pre088', 5_000, 5);
+    expect(outcome.status).toBe('failed');
+    expect(outcome.feedback).toBe('nope');
+    expect(outcome.failureClass).toBeNull();
+  });
+});

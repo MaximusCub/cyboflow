@@ -17,9 +17,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VerificationScheduler } from '../verificationScheduler';
-import { enqueueTaskVerification } from '../enqueueFromTask';
+import { enqueueTaskVerification, FORBIDDEN_DEP_COMMAND_ERROR } from '../enqueueFromTask';
+import { VerifyRunbookStore } from '../runbookStore';
+import { checkRunbookPin } from '../verificationAgentRunner';
+import { parseVerificationTaskV1 } from '../../../../../shared/types/visualVerification';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
+import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 
 const fakeJudge: VlmJudge = {
   judge: async () => ({
@@ -79,10 +83,57 @@ function buildDb(): Database.Database {
       -- modality stamp this seam delegates to scheduler.enqueue, and the
       -- setup-proof flag it threads through.
       modality         TEXT,
-      setup_proof      INTEGER NOT NULL DEFAULT 0
+      setup_proof      INTEGER NOT NULL DEFAULT 0,
+      -- migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+      runbook_hash          TEXT,
+      runbook_local_version INTEGER
+    );
+    CREATE TABLE verify_runbook_local (
+      project_id            INTEGER NOT NULL,
+      modality              TEXT NOT NULL,
+      portable_hash         TEXT NOT NULL,
+      portable_json         TEXT NOT NULL,
+      version               INTEGER NOT NULL DEFAULT 1,
+      status                TEXT NOT NULL CHECK (status IN ('proven','unproven-draft')),
+      bindings_json         TEXT,
+      proof_json            TEXT,
+      input_hash            TEXT,
+      host_fingerprint_json TEXT,
+      updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (project_id, modality)
     );
   `);
   return db;
+}
+
+/**
+ * A minimal portable runbook declaring the `web` modality with a build + serve
+ * form deliberately DIFFERENT from what the composer guesses below, so the merge
+ * is observable in the persisted `task_json`.
+ */
+const RUNBOOK: VerifyRunbookV1 = {
+  version: 1,
+  modalities: {
+    web: {
+      build: ['pnpm run build:web'],
+      serve: { cmd: 'pnpm run preview -- --port ${PORT}', readyWhen: { urlPath: '/', timeoutMs: 30_000 } },
+      attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+    },
+  },
+};
+
+/**
+ * A store over the in-memory DB with FAKE IO — the three injected probes are the
+ * store's only filesystem contact, so faking them keeps this suite about the
+ * enqueue seam rather than about disk. `readPortableFile` always answers the
+ * runbook above, which is what makes `status()` able to reach `'proven'`.
+ */
+function buildRunbookStore(db: Database.Database): VerifyRunbookStore {
+  return new VerifyRunbookStore(dbAdapter(db), {
+    readPortableFile: async () => JSON.stringify(RUNBOOK),
+    computeInputHash: async () => 'input-hash-1',
+    hostFingerprint: async () => 'host-fingerprint-1',
+  });
 }
 
 function seedRun(
@@ -101,13 +152,14 @@ function seedRun(
   );
 }
 
-function initScheduler(db: Database.Database): void {
+function initScheduler(db: Database.Database, runbookStore?: VerifyRunbookStore): void {
   VerificationScheduler.initialize({
     db: dbAdapter(db),
     backends: {},
     judge: fakeJudge,
     artifactsDirResolver: () => '/tmp/a',
     config: baseConfig,
+    ...(runbookStore ? { runbookStore } : {}),
   });
 }
 
@@ -319,5 +371,283 @@ describe('enqueueTaskVerification', () => {
       worktreePath: gitRepo,
     });
     expect(result).toEqual({ outcome: 'skipped', reason: 'verification-disabled' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7.2 — the ENQUEUE half of the dependency guard
+// ---------------------------------------------------------------------------
+
+describe('enqueueTaskVerification — §7.2 forbidden dependency commands', () => {
+  it('a build step that installs is REJECTED — no row is written', async () => {
+    seedRun(db, { runId: 'run-guard' });
+    initScheduler(db);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-guard',
+      task: { ...task, build: ['pnpm install --frozen-lockfile', 'pnpm run build'] },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('skipped');
+    const reason = result.outcome === 'skipped' ? result.reason : '';
+    expect(reason).toContain(FORBIDDEN_DEP_COMMAND_ERROR);
+    // The offending command is named VERBATIM so the loopback can fix it.
+    expect(reason).toContain('pnpm install --frozen-lockfile');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
+  });
+
+  it('a serve command that installs before serving is REJECTED', async () => {
+    seedRun(db, { runId: 'run-guard-2' });
+    initScheduler(db);
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-guard-2',
+      task: { ...task, serve: { cmd: 'pnpm install && pnpm dev --port ${PORT}' } },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('skipped');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
+  });
+
+  it('a clean build/serve is untouched', async () => {
+    seedRun(db, { runId: 'run-clean' });
+    initScheduler(db);
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-clean',
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('enqueued');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.2 seam 3 — pinned compose-time injection
+// ---------------------------------------------------------------------------
+
+describe('enqueueTaskVerification — §5.2 seam 3 pinned runbook injection', () => {
+  /** The composer's own (wrong) guess at how to stand the project up. */
+  const guessedTask: VerificationTaskV1 = {
+    ...task,
+    build: ['pnpm run build'],
+    serve: { cmd: 'pnpm dev --port ${PORT}' },
+    viewports: [{ width: 1280, height: 800, label: 'desktop' }],
+  };
+
+  function readPersisted(id: string): {
+    task_json: string | null;
+    runbook_hash: string | null;
+    runbook_local_version: number | null;
+    deliverable_json: string;
+  } {
+    return db
+      .prepare(
+        'SELECT task_json, runbook_hash, runbook_local_version, deliverable_json FROM verification_requests WHERE id = ?',
+      )
+      .get(id) as ReturnType<typeof readPersisted>;
+  }
+
+  it('a PROVEN runbook replaces build/serve/attestation, keeps summary/behaviors/viewports/ref, and stamps the pin', async () => {
+    seedRun(db, { runId: 'run-inject' });
+    const store = buildRunbookStore(db);
+    const registered = await store.registerDraft(1, gitRepo, 'web');
+    expect('hash' in registered).toBe(true);
+    const { hash, version } = registered as { hash: string; version: number };
+    expect(store.markProven(1, 'web', hash, version, '{}')).toEqual({ ok: true });
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-inject',
+      task: guessedTask,
+      laneTaskRef: 'TASK-042',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('enqueued');
+    const row = readPersisted(result.outcome === 'enqueued' ? result.requestId : '');
+
+    const persisted = JSON.parse(row.task_json as string) as VerificationTaskV1;
+    // REPLACED by the runbook — the composer's guess is exactly the part §1 says
+    // has never once been right.
+    expect(persisted.build).toEqual(['pnpm run build:web']);
+    expect(persisted.serve?.cmd).toBe('pnpm run preview -- --port ${PORT}');
+    expect(persisted.attestation).toEqual({ kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' });
+    // KEPT from the composed task — what is being checked this time.
+    expect(persisted.summary).toBe(task.summary);
+    expect(persisted.behaviors).toEqual(task.behaviors);
+    expect(persisted.viewports).toEqual([{ width: 1280, height: 800, label: 'desktop' }]);
+    expect(persisted.taskRef).toBe('TASK-042');
+    // The PIN — both halves, on the row the runner will read.
+    expect(row.runbook_hash).toBe(hash);
+    expect(row.runbook_local_version).toBe(version);
+  });
+
+  it('ROUND-TRIPS: the persisted task re-parses into something the runner accepts against the same pin', async () => {
+    // The load-bearing end-to-end invariant of §5.2 seam 3. The merged task is
+    // JSON-persisted, then re-parsed by `parseVerificationTaskV1` before the
+    // runner compares it to the entry `parseVerifyRunbookV1` produced. If those
+    // two validators ever rebuild build/serve/attestation differently, EVERY
+    // pinned request would self-reject at execution with a mismatch — a total,
+    // silent outage that no unit test on either parser alone would catch.
+    seedRun(db, { runId: 'run-roundtrip' });
+    const store = buildRunbookStore(db);
+    const reg = (await store.registerDraft(1, gitRepo, 'web')) as { hash: string; version: number };
+    expect(store.markProven(1, 'web', reg.hash, reg.version, '{}')).toEqual({ ok: true });
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-roundtrip',
+      task: guessedTask,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    const row = readPersisted(result.outcome === 'enqueued' ? result.requestId : '');
+
+    const reparsed = parseVerificationTaskV1(JSON.parse(row.task_json as string));
+    expect(reparsed.ok).toBe(true);
+    const record = store.getByHash(1, 'web', row.runbook_hash as string);
+    expect(record).not.toBeNull();
+    expect(
+      checkRunbookPin(record, 'web', reparsed.ok ? reparsed.task : guessedTask, row.runbook_hash as string),
+    ).toEqual({ ok: true });
+  });
+
+  it('an UNPROVEN draft injects nothing and stamps no pin (the degrade gate speaks downstream)', async () => {
+    seedRun(db, { runId: 'run-draft' });
+    const store = buildRunbookStore(db);
+    await store.registerDraft(1, gitRepo, 'web'); // registered, never proven
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-draft',
+      task: guessedTask,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('enqueued');
+    const row = readPersisted(result.outcome === 'enqueued' ? result.requestId : '');
+    expect(JSON.parse(row.task_json as string).build).toEqual(['pnpm run build']);
+    expect(row.runbook_hash).toBeNull();
+    expect(row.runbook_local_version).toBeNull();
+  });
+
+  it('NO store wired at all → unpinned, byte-identical to the pre-phase-2 enqueue', async () => {
+    seedRun(db, { runId: 'run-nostore' });
+    initScheduler(db);
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-nostore',
+      task: guessedTask,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    const row = readPersisted(result.outcome === 'enqueued' ? result.requestId : '');
+    expect(JSON.parse(row.task_json as string).serve.cmd).toBe('pnpm dev --port ${PORT}');
+    expect(row.runbook_hash).toBeNull();
+  });
+
+  it('a SETUP-PROOF request pins its OWN draft verbatim, without needing a proven record', async () => {
+    seedRun(db, { runId: 'run-proof-pin' });
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, gitRepo, 'web')) as { hash: string; version: number };
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-proof-pin',
+      // The setup flow composed this task FROM the draft, so no merge should happen.
+      task: {
+        ...task,
+        build: ['pnpm run build:web'],
+        serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
+      },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    const id = result.outcome === 'enqueued' ? result.requestId : '';
+    const row = readPersisted(id);
+    expect(row.runbook_hash).toBe(registered.hash);
+    expect(row.runbook_local_version).toBe(registered.version);
+    // Verbatim: the caller's pin is authoritative, and the draft it pins is by
+    // definition not proven yet (requiring 'proven' here would deadlock setup).
+    const flags = db
+      .prepare('SELECT setup_proof FROM verification_requests WHERE id = ?')
+      .get(id) as { setup_proof: number };
+    expect(flags.setup_proof).toBe(1);
+  });
+
+  it('the §7.2 guard still fires on a setup-proof request (a pin is not an exemption)', async () => {
+    seedRun(db, { runId: 'run-proof-guard' });
+    initScheduler(db, buildRunbookStore(db));
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-proof-guard',
+      task: { ...task, build: ['pnpm install'] },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+      setupProof: true,
+      runbookHash: 'deadbeef',
+      runbookLocalVersion: 1,
+    });
+    expect(result.outcome).toBe('skipped');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
+  });
+
+  it('a runbook that smuggles an install through the MERGE is rejected too (§7.2 covers both sources)', async () => {
+    seedRun(db, { runId: 'run-bad-runbook' });
+    const badRunbook: VerifyRunbookV1 = {
+      version: 1,
+      modalities: {
+        web: {
+          build: ['pnpm install --frozen-lockfile', 'pnpm run build'],
+          attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+        },
+      },
+    };
+    const store = new VerifyRunbookStore(dbAdapter(db), {
+      readPortableFile: async () => JSON.stringify(badRunbook),
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fingerprint-1',
+    });
+    const reg = (await store.registerDraft(1, gitRepo, 'web')) as { hash: string; version: number };
+    expect(store.markProven(1, 'web', reg.hash, reg.version, '{}')).toEqual({ ok: true });
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-bad-runbook',
+      // The COMPOSED task is clean — only the runbook is not.
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('skipped');
+    const reason = result.outcome === 'skipped' ? result.reason : '';
+    expect(reason).toContain(FORBIDDEN_DEP_COMMAND_ERROR);
+    expect(reason).toContain("committed verification runbook");
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
   });
 });

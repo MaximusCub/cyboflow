@@ -58,6 +58,12 @@ import {
   type ProvisionSnapshotOptions,
 } from './snapshotProvisioner';
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
+import type { PinnedRunbookRecord } from './runbookStore';
+import type {
+  VerifyRunbookModality,
+  VerifyRunbookModalityEntry,
+} from '../../../../shared/types/verifyRunbook';
+import { canonicalJsonStringify } from '../agentThread/specHash';
 import {
   attestFilePath,
   pidFilePath,
@@ -204,6 +210,28 @@ export interface VerificationAgentRequest {
    * amount of task-shape inspection can recover.
    */
   modality?: VerificationModality;
+  /**
+   * §5.2 seam 3 — the CONTENT-ADDRESSED runbook pin stamped on the request row
+   * at enqueue (migration 089 `runbook_hash`), when this request was composed
+   * against a proven runbook. Present ⇒ the runner resolves exactly this
+   * revision through {@link VerificationAgentRunnerDeps.resolveRunbookByHash}
+   * and refuses to execute anything else (see
+   * {@link VerificationAgentRunner.run}). Absent ⇒ no pin was taken — the
+   * degenerate pre-live shapes that derive no environment — and the check does
+   * not run.
+   */
+  runbookHash?: string;
+  /**
+   * The machine-local record's CAS version at enqueue, carried alongside
+   * {@link VerificationAgentRequest.runbookHash} as PROVENANCE. It is recorded
+   * on the rejection detail and on the §5.3 proof, but it is deliberately NOT
+   * an independent reject condition: `registerDraft` bumps the version on every
+   * re-registration, so re-registering byte-identical content would fail a
+   * version equality check while the thing that actually matters — the commands
+   * about to run — is unchanged. Content equality is the invariant; the version
+   * is how a human reconstructs which revision produced which verdict.
+   */
+  runbookLocalVersion?: number;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -247,6 +275,16 @@ export interface VerificationAgentRunResult {
    * a degraded provisioning path cannot attest to the deliverable's own health.
    */
   provisionMode?: 'snapshot' | 'fallback';
+  /**
+   * §5.2 seam 3 — this result is the PIN REJECTION: the request carried a
+   * runbook pin the runner could not resolve, or resolved to content the
+   * composed task no longer matches, so nothing was executed. The scheduler
+   * feeds this straight into the §3.1 classifier's `runbookMismatch` input,
+   * which makes the terminal `'env'`-class with a `'runner'`-source evidence
+   * entry — an ADVANCING skip that never charges the lane's retry budget,
+   * because there is no defect here to retry against.
+   */
+  runbookMismatch?: boolean;
 }
 
 /**
@@ -330,6 +368,24 @@ export interface VerificationAgentRunnerDeps {
    * treats exactly like "the channel never came up".
    */
   readAttestFile?: (artifactsDir: string) => Promise<AttestationRecord | null>;
+  /**
+   * §5.2 seam 3 — resolve the machine-local runbook record for
+   * (project, modality) by the CONTENT HASH pinned on the request row. Wired at
+   * index.ts to {@link VerifyRunbookStore.getByHash}; a `null` answer is the
+   * MISMATCH condition itself (the pinned revision no longer resolves), not a
+   * lookup to retry.
+   *
+   * ABSENT ⇒ the pin check does not run at all, rather than failing. A pin with
+   * no resolver is a WIRING gap, not evidence that the runbook drifted, and
+   * rejecting every pinned request on a deployment that simply never injected
+   * the store would be a whole-feature outage dressed up as a safety property.
+   * (index.ts always wires it; the absent case is legacy/test.)
+   */
+  resolveRunbookByHash?: (
+    projectId: number,
+    modality: VerificationModality,
+    hash: string,
+  ) => PinnedRunbookRecord | null;
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
@@ -594,6 +650,90 @@ export function resolveRequestModality(
     });
   }
   return declared;
+}
+
+// ---------------------------------------------------------------------------
+// Runbook pin validation (§5.2 seam 3 — "the runner executes exactly that
+// revision and rejects on any mismatch")
+// ---------------------------------------------------------------------------
+
+/**
+ * The prefix every pin rejection's `errorMessage` carries. Exported so the
+ * scheduler's tests and any future health-panel grouping can key on the exact
+ * string the proposal names ("structured 'runbook/sha mismatch' feedback").
+ */
+export const RUNBOOK_MISMATCH_PREFIX = 'runbook/sha mismatch';
+
+/**
+ * The three fields of a runbook modality entry that decide HOW the deliverable
+ * is stood up and how its identity is proven — i.e. everything the runner would
+ * actually EXECUTE. Compared structurally (not by reference or key order) via
+ * the same canonicalizer the portable hash is built on, so a re-serialized or
+ * re-ordered runbook compares equal while any semantic change does not.
+ *
+ * `viewports`/`notes` are deliberately outside the comparison: they are capture
+ * framing and human prose, not execution. Widening a pin to reject on them
+ * would make an editorial note in a committed file invalidate in-flight
+ * requests for no safety gain.
+ */
+function executableFingerprint(source: {
+  build?: string[];
+  serve?: { cmd: string; attach?: 'cdp'; readyWhen?: { urlPath?: string; timeoutMs?: number } };
+  attestation?: AttestationSpec;
+}): string {
+  return canonicalJsonStringify({
+    build: source.build ?? null,
+    serve: source.serve ?? null,
+    attestation: source.attestation ?? null,
+  });
+}
+
+/**
+ * Does the composed task still match the runbook revision it was pinned to?
+ *
+ * WHY THIS EXISTS AT ALL (§5.2 seam 3, the v2 correction). The verifier runs in
+ * a DETACHED snapshot at the task's sha, so the runbook is unresolvable from
+ * inside it in both directions — an uncommitted runbook is invisible there, a
+ * committed one is absent from every branch cut before it. v1 said "read it live
+ * at compose time", which breaks attribution the other way: revision-B commands
+ * executing against revision-A code yield a verdict attesting to a hybrid state
+ * NO REVISION EVER CONTAINED. So the content is pinned at enqueue and re-checked
+ * here. A verdict is a claim about a specific tree; a verdict produced by
+ * commands from a different tree is not a weaker claim, it is a false one.
+ *
+ * Returns the mismatch DETAIL rather than a bare boolean so the rejection can
+ * name what actually differs — the caller puts it on the request row, where it
+ * is the only thing a human has to work from.
+ */
+export function checkRunbookPin(
+  record: PinnedRunbookRecord | null,
+  modality: VerificationModality,
+  task: VerificationTaskV1,
+  hash: string,
+): { ok: true } | { ok: false; detail: string } {
+  if (record === null) {
+    return {
+      ok: false,
+      detail: `pinned runbook ${hash.slice(0, 12)} for modality "${modality}" no longer resolves (re-registered, deleted, or never persisted on this host)`,
+    };
+  }
+  const entry: VerifyRunbookModalityEntry | undefined =
+    record.runbook.modalities[modality as VerifyRunbookModality];
+  if (entry === undefined) {
+    return {
+      ok: false,
+      detail: `pinned runbook ${hash.slice(0, 12)} declares no "${modality}" modality`,
+    };
+  }
+  const expected = executableFingerprint(entry);
+  const actual = executableFingerprint(task);
+  if (expected !== actual) {
+    return {
+      ok: false,
+      detail: `the composed task's build/serve/attestation do not match pinned runbook ${hash.slice(0, 12)} (record v${record.version}, status "${record.status}") — expected ${expected}, task carries ${actual}`,
+    };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,6 +1239,41 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         errorMessage: failed.map((c) => c.detail).join('; '),
         fileNames: [],
       };
+    }
+
+    // (a1) §5.2 seam 3 PIN VALIDATION — after the host check, before ANY
+    // provisioning or spend. A pin that no longer resolves (or resolves to
+    // content this task does not match) means the request would execute a hybrid
+    // of two revisions, and the resulting verdict would attest to a tree that
+    // never existed. Rejecting is not a failure of the deliverable and must not
+    // be charged like one: `deployed:false` keeps the budget untouched,
+    // `runbookMismatch:true` makes the scheduler's §3.1 classification `'env'`
+    // (harness-derived: a hash lookup plus a structural compare), and an
+    // env-class terminal ADVANCES the lane without incrementing its attempt
+    // counter. The setup flow's re-proof, not the lane's implement-retry, is the
+    // fix for a drifted runbook.
+    const resolveRunbookByHash = this.deps.resolveRunbookByHash;
+    if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
+      const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
+      const pinned = checkRunbookPin(record, modality, req.task, req.runbookHash);
+      if (!pinned.ok) {
+        logger?.warn('[VerificationAgentRunner] runbook pin rejected; skipping without deploy', {
+          runId: req.runId,
+          requestId: req.requestId,
+          modality,
+          runbookHash: req.runbookHash,
+          runbookLocalVersion: req.runbookLocalVersion ?? null,
+          detail: pinned.detail,
+        });
+        return {
+          status: 'skipped',
+          deployed: false,
+          preflight,
+          runbookMismatch: true,
+          errorMessage: `${RUNBOOK_MISMATCH_PREFIX} — ${pinned.detail}`,
+          fileNames: [],
+        };
+      }
     }
 
     const resolved = this.deps.resolveVerifyAgent(req.runId);
