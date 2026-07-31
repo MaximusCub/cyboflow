@@ -849,17 +849,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             setup_proof: {
               type: 'boolean',
               description:
-                "Optional — mark this request as the verify-setup flow's PROOF run rather than ordinary lane traffic. Meaningful only for the verify-setup flow: a setup-proof run is EXEMPT from the project's lifetime verification budget (and never counted against it), drains at LOWER priority than live sprint lanes (promoted after 5 minutes so it cannot starve), may execute an UNPROVEN runbook draft (being unproven is exactly what it is trying to fix — gating it would deadlock the bootstrap), and, when it PASSES while pinned, causes the ENGINE to mark that runbook revision proven. You never mark a runbook proven yourself. Defaults to false.",
+                "Optional — mark this request as the verify-setup flow's PROOF run rather than ordinary lane traffic. VERIFY-SETUP-FLOW-ONLY, SERVER-ENFORCED: the request is rejected with error 'setup_proof_not_authorized' unless it comes from a run whose FROZEN workflow identity is 'verify-setup' — no other flow (sprint/ship/compound) can claim this, whatever it passes. It also requires a valid pin (see runbook_hash) or is rejected with 'setup_proof_requires_pin'; an unpinned setup-proof request is pure budget/gate bypass with no offsetting proof, so it is never allowed through. Authorized, a setup-proof run is EXEMPT from the project's lifetime verification budget (and never counted against it), drains at LOWER priority than live sprint lanes (promoted after 5 minutes so it cannot starve), may execute an UNPROVEN runbook draft (being unproven is exactly what it is trying to fix — gating it would deadlock the bootstrap), and, when it PASSES while pinned, causes the ENGINE to mark that runbook revision proven. You never mark a runbook proven yourself. Defaults to false.",
             },
             runbook_hash: {
               type: 'string',
               description:
-                'Optional — the portable-runbook content hash returned by cyboflow_register_verify_runbook. Pin the revision this request must execute (verify-setup flow, paired with setup_proof + runbook_local_version). Omitted on ordinary requests: the engine then resolves and pins the project\'s PROVEN revision itself.',
+                'Optional — the portable-runbook content hash returned by cyboflow_register_verify_runbook. Pin the revision this request must execute (verify-setup flow, paired with setup_proof + runbook_local_version). Omitted on ordinary requests: the engine then resolves and pins the project\'s PROVEN revision itself. REQUIRED when setup_proof is true: the hash must resolve to a draft this project actually registered (via cyboflow_register_verify_runbook) or the request is rejected with \'setup_proof_requires_pin\' — see setup_proof.',
             },
             runbook_local_version: {
               type: 'number',
               description:
-                'Optional — the machine-local record CAS version returned alongside runbook_hash. Must be passed WITH runbook_hash (half a pin is ignored): together they let the runner execute exactly that revision or reject with a structured mismatch instead of improvising.',
+                'Optional — the machine-local record CAS version returned alongside runbook_hash. Must be passed WITH runbook_hash (half a pin is ignored): together they let the runner execute exactly that revision or reject with a structured mismatch instead of improvising. REQUIRED when setup_proof is true — see setup_proof.',
             },
           },
           // `intent` is required for the legacy form only — a `task`-form call

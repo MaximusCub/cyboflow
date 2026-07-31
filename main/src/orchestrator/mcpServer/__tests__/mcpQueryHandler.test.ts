@@ -4277,23 +4277,63 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
 describe('McpQueryHandler — mcp-request-verification', () => {
   let vdb: Database.Database;
   let vHandler: McpQueryHandler;
+  let verifyStore: VerifyRunbookStore;
+
+  // Codex adversarial-review finding 4: setup_proof:true is authorized against
+  // the run's FROZEN workflow identity (resolveRunFrozenSpec's workflow_runs →
+  // workflows.name JOIN), so these tests need real `workflows` rows behind
+  // `workflow_id`, not just the bare workflow_runs row the pre-fix fixture got
+  // away with. 'wf-1' (the pre-existing default every OTHER test in this block
+  // already relies on) is deliberately named something that is NOT
+  // 'verify-setup' — an ordinary sprint-shaped run is the realistic default,
+  // and it doubles as the fixture for the "unauthorized workflow" rejection
+  // test. 'wf-verify-setup' is the one workflow identity the new gate accepts.
+  const NON_SETUP_WORKFLOW_ID = 'wf-1';
+  const VERIFY_SETUP_WORKFLOW_ID = 'wf-verify-setup';
 
   /** Seed a run with the migration-036 verify stamp applied inline. */
   function seedVerifyRun(
     db: Database.Database,
     id: string,
-    opts: { enabled: boolean; type?: string | null; chain?: string[] | null; status?: string },
+    opts: { enabled: boolean; type?: string | null; chain?: string[] | null; status?: string; workflowId?: string },
   ): void {
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json,
                                   verify_enabled, verify_type, verify_chain)
-       VALUES (?, 'wf-1', 1, '/tmp/test', ?, '{}', ?, ?, ?)`,
+       VALUES (?, ?, 1, '/tmp/test', ?, '{}', ?, ?, ?)`,
     ).run(
       id,
+      opts.workflowId ?? NON_SETUP_WORKFLOW_ID,
       opts.status ?? 'running',
       opts.enabled ? 1 : 0,
       opts.type ?? null,
       opts.chain ? JSON.stringify(opts.chain) : null,
+    );
+  }
+
+  /**
+   * Seed a resolvable machine-local runbook draft (migration 089) so a
+   * setup_proof request's pin can pass `VerifyRunbookStore.getByHash`. The
+   * content only needs to PARSE as a VerifyRunbookV1 — getByHash trusts the
+   * stored `portable_hash` column rather than recomputing it, so the test can
+   * pin an arbitrary hash string without hashing real content.
+   */
+  function seedRunbookDraft(db: Database.Database, hash: string, modality = 'web'): void {
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, version, status)
+       VALUES (1, ?, ?, ?, 3, 'unproven-draft')`,
+    ).run(
+      modality,
+      hash,
+      JSON.stringify({
+        version: 1,
+        modalities: {
+          [modality]: {
+            serve: { cmd: 'pnpm dev --port ${PORT}' },
+            attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+          },
+        },
+      }),
     );
   }
 
@@ -4354,6 +4394,17 @@ describe('McpQueryHandler — mcp-request-verification', () => {
       );
     `);
 
+    // The two workflow IDENTITIES the setup-proof authorization gate
+    // distinguishes (see the class doc-comment above) — inserted unconditionally
+    // so every test's default 'wf-1' run resolves to a real (non-setup)
+    // workflow name rather than the JOIN finding nothing.
+    vdb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'sprint', '{}')`)
+      .run(NON_SETUP_WORKFLOW_ID);
+    vdb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'verify-setup', '{}')`)
+      .run(VERIFY_SETUP_WORKFLOW_ID);
+
     VerificationScheduler._resetForTesting();
     VerificationScheduler.initialize({
       db: dbAdapter(vdb),
@@ -4370,7 +4421,16 @@ describe('McpQueryHandler — mcp-request-verification', () => {
       artifactsDirResolver: () => '/tmp/artifacts',
     });
 
-    vHandler = new McpQueryHandler(dbAdapter(vdb));
+    // Wired for the setup-proof pin-resolution tests below (getByHash reads the
+    // DB directly; these IO deps are never invoked by getByHash but the store's
+    // constructor requires them). Harmless for every other test in this block —
+    // its presence only matters when a request carries setup_proof:true.
+    verifyStore = new VerifyRunbookStore(dbAdapter(vdb), {
+      readPortableFile: async () => null,
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fp-1',
+    });
+    vHandler = new McpQueryHandler(dbAdapter(vdb), undefined, { verifyRunbookStore: verifyStore });
   });
 
   afterEach(() => {
@@ -4876,15 +4936,25 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(typeof (response.data as { requestId?: string }).requestId).toBe('string');
   });
 
-  // §3.6 + §5.2 seam 3: the verify-setup flow's proof channel through this SAME
-  // handler — the setup-proof flag plus a caller-supplied pin (the flow pins the
-  // DRAFT it is trying to prove, which by definition no lookup would find).
-  it('threads setup_proof + the runbook pin onto the enqueued row', async () => {
+  // -------------------------------------------------------------------------
+  // setup_proof AUTHORIZATION (§3.6 + §5.2 seam 3, Codex adversarial-review
+  // finding 4). setup_proof:true is a self-declared exemption from BOTH the
+  // §3.2 degrade gate and the project's verification budget, and the MCP
+  // socket is the untrusted seam it arrives over — so it is gated on (1) the
+  // run's FROZEN workflow identity actually being 'verify-setup' and (2) a
+  // pin that resolves to a draft really registered via
+  // cyboflow_register_verify_runbook. See handleRequestVerification's
+  // `msg.setupProof === true` block.
+  // -------------------------------------------------------------------------
+
+  it('setup_proof from a verify-setup-stamped run with a valid pin is authorized and threads the pin onto the enqueued row', async () => {
     seedVerifyRun(vdb, 'run-vproof', {
       enabled: true,
       type: 'interactive-web-behavior',
       chain: ['playwright'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
+    seedRunbookDraft(vdb, 'hash-abc');
 
     const { socket, writes } = makeSocketDouble();
     await vHandler.handleMessage(
@@ -4923,12 +4993,123 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(row.runbook_local_version).toBe(3);
   });
 
-  it('HALF a pin is not a pin — the hash alone is dropped rather than stamped', async () => {
+  it('setup_proof from a sprint (non-verify-setup) run is rejected with setup_proof_not_authorized, naming the actual workflow, and enqueues nothing', async () => {
+    // A valid, resolvable pin is seeded anyway — the point of this test is
+    // that the WORKFLOW check rejects first, before the pin is ever consulted;
+    // a caller cannot buy the exemption just by also holding a real pin.
+    seedVerifyRun(vdb, 'run-vproof-wrongflow', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+      // workflowId omitted ⇒ defaults to NON_SETUP_WORKFLOW_ID ('sprint').
+    });
+    seedRunbookDraft(vdb, 'hash-abc');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-proof-wrongflow',
+        runId: 'run-vproof-wrongflow',
+        intent: 'the app boots',
+        task: {
+          version: 1,
+          summary: 'the app boots',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+        setupProof: true,
+        runbookHash: 'hash-abc',
+        runbookLocalVersion: 3,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe("setup_proof_not_authorized: this run's workflow is 'sprint', not 'verify-setup' — setup_proof is verify-setup-flow-only");
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('setup_proof from a verify-setup run with NO pin is rejected with setup_proof_requires_pin and enqueues nothing', async () => {
+    seedVerifyRun(vdb, 'run-vproof-nopin', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-proof-nopin',
+        runId: 'run-vproof-nopin',
+        intent: 'the app boots',
+        task: {
+          version: 1,
+          summary: 'the app boots',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+        setupProof: true,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^setup_proof_requires_pin:/);
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('setup_proof from a verify-setup run with an UNRESOLVABLE hash is rejected with setup_proof_requires_pin and enqueues nothing', async () => {
+    seedVerifyRun(vdb, 'run-vproof-badhash', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
+    });
+    // Deliberately NOT seeding a draft for this hash — 'hash-nonexistent' never
+    // resolves through the store.
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-proof-badhash',
+        runId: 'run-vproof-badhash',
+        intent: 'the app boots',
+        task: {
+          version: 1,
+          summary: 'the app boots',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+        setupProof: true,
+        runbookHash: 'hash-nonexistent',
+        runbookLocalVersion: 1,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^setup_proof_requires_pin:/);
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('HALF a pin is not a pin — a verify-setup run supplying only the hash is rejected with setup_proof_requires_pin', async () => {
     seedVerifyRun(vdb, 'run-vhalfpin', {
       enabled: true,
       type: 'interactive-web-behavior',
       chain: ['playwright'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
     });
+    seedRunbookDraft(vdb, 'hash-abc');
 
     const { socket, writes } = makeSocketDouble();
     await vHandler.handleMessage(
@@ -4945,28 +5126,16 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         },
         setupProof: true,
         runbookHash: 'hash-abc',
+        // runbookLocalVersion deliberately omitted — half a pin is no pin.
       },
       socket,
     );
 
     const response = parseLastWrite(writes);
-    expect(response.ok).toBe(true);
-    const data = response.data as { requestId: string };
-    const row = vdb
-      .prepare(
-        'SELECT setup_proof, runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?',
-      )
-      .get(data.requestId) as {
-      setup_proof: number;
-      runbook_hash: string | null;
-      runbook_local_version: number | null;
-    };
-    // The setup-proof posture still applies (it is independent of the pin); only
-    // the unusable half-pin is dropped, so the runner's CAS has nothing to
-    // validate against rather than something it cannot resolve.
-    expect(row.setup_proof).toBe(1);
-    expect(row.runbook_hash).toBeNull();
-    expect(row.runbook_local_version).toBeNull();
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^setup_proof_requires_pin:/);
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
   });
 
   it('an ordinary request stamps no pin and no setup-proof flag', async () => {

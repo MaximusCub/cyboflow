@@ -142,6 +142,7 @@ import {
   isVerificationType,
   parseVerificationTaskV1,
   deriveLegacyInputFromTask,
+  resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
 import type {
   VerificationType,
@@ -4073,6 +4074,13 @@ export class McpQueryHandler {
    * what the ENGINE — never the flow — turns into `markProven`. The pin is
    * supplied rather than resolved for the same reason: the revision under proof
    * is by construction not yet proven, so the lookup would find nothing.
+   *
+   * `setupProof:true` is a self-declared EXEMPTION from both of those gates, so
+   * (Codex adversarial-review finding 4) it is itself gated: authorized against
+   * the run's FROZEN workflow identity (must be `verify-setup`) and required to
+   * carry a pin that resolves to a draft actually registered via
+   * `cyboflow_register_verify_runbook` — see the `msg.setupProof === true`
+   * block below for the two checks and their reasoning.
    */
   private async handleRequestVerification(
     msg: Extract<McpQueryMessage, { type: 'mcp-request-verification' }>,
@@ -4230,6 +4238,82 @@ export class McpQueryHandler {
       Number.isFinite(msg.runbookLocalVersion)
         ? { hash: msg.runbookHash, localVersion: msg.runbookLocalVersion }
         : undefined;
+
+    // SETUP-PROOF AUTHORIZATION (Codex adversarial-review finding 4). The MCP
+    // socket is the UNTRUSTED seam: any orchestrated agent's tool call — a
+    // prompt-injected one, a copy-pasted example, an ordinary sprint/ship/
+    // compound lane reaching for `setup_proof:true` because it read the
+    // verify-setup workflow prompt once — can set this flag with no
+    // authorization at all, and until this gate existed it was honored
+    // unconditionally. `setupProof:true` BYPASSES both the §3.2 "no proven
+    // runbook" degrade gate and the project's lifetime verification budget
+    // (see the SETUP PROOF paragraph in this method's doc-comment above), so
+    // an unauthorized claim is not a quota nuisance — it is a way to make
+    // every subsequent verification for the project silently free and
+    // gate-exempt. Enforced HERE, once, at the seam an untrusted caller
+    // actually crosses.
+    //
+    // IN-PROCESS ENGINE CALLERS STAY FREE. `prepareVerificationEnqueue` is
+    // shared with `enqueueTaskVerification` (verify/enqueueFromTask.ts), the
+    // programmatic controller's direct host-capability seam — but that seam
+    // takes no wire input for `setupProof`; only the socket path above threads
+    // an agent-supplied flag through at all, and the ownership guard earlier
+    // in this method already rejects any MCP call on a programmatic run
+    // outright. Gating the shared function too would be a second enforcement
+    // point for a caller that was never the threat model — "belt and
+    // suspenders, not two belts and three suspenders."
+    if (msg.setupProof === true) {
+      // (1) AUTHORIZE from the run's FROZEN workflow identity, never the
+      // agent's own say-so. resolveRunFrozenSpec is the same workflow_runs →
+      // workflows.name lookup handleReportStep uses (keyed off the
+      // (workflow_id, spec_hash) pair stamped at createRun), so a live edit to
+      // `workflows.name` mid-run can never be raced into passing this check.
+      // Only the verify-setup flow ever proves a runbook; any other workflow
+      // asking for the exemption is rejected, and the error names the run's
+      // ACTUAL workflow so a legitimate caller can see immediately why it was
+      // denied rather than guessing.
+      const frozen = resolveRunFrozenSpec(this.db, msg.runId);
+      const actualWorkflow = frozen?.workflowName ?? 'unknown';
+      if (actualWorkflow !== 'verify-setup') {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: `setup_proof_not_authorized: this run's workflow is '${actualWorkflow}', not 'verify-setup' — setup_proof is verify-setup-flow-only`,
+        });
+        return;
+      }
+
+      // (2) REQUIRE the pin. A setup_proof request with no registered draft
+      // behind it can never actually be marked proven — VerifyRunbookStore's
+      // proof flip has no record to flip — so an unpinned "proof" carries no
+      // corresponding upside; it IS the budget/gate bypass and nothing else.
+      // Require both wire halves (mirroring the `wirePin` parse above) AND
+      // that the hash resolve through the SAME store the runner later
+      // validates the pin against (§5.2 seam 3) — a hash nobody registered is
+      // not a draft, whatever the caller claims about it. `modality` is
+      // derived exactly as `prepareVerificationEnqueue` derives it below, so
+      // this check resolves the identical (project, modality) record the pin
+      // will actually be validated against.
+      const store = this.deps.verifyRunbookStore;
+      const modality = resolveTaskModality(effectiveType, task ?? null);
+      const pinned =
+        wirePin !== undefined && store !== undefined
+          ? store.getByHash(ctx.projectId, modality, wirePin.hash)
+          : null;
+      if (wirePin === undefined || store === undefined || pinned === null) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error:
+            'setup_proof_requires_pin: setup_proof requires both runbookHash and runbookLocalVersion, ' +
+            'and the hash must resolve to a draft registered via cyboflow_register_verify_runbook',
+        });
+        return;
+      }
+    }
+
     const prepared = await prepareVerificationEnqueue({
       projectId: ctx.projectId,
       runId: msg.runId,
