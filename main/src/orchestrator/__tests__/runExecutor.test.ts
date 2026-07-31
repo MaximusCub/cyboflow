@@ -3570,6 +3570,106 @@ describe('RunExecutor.getPrompt — selected-findings injection (migration 034)'
   });
 });
 
+describe('RunExecutor.getPrompt — seed-prompt injection (migration 091)', () => {
+  it('prepends a `# What you are building` block when run.seed_prompt is non-empty', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_prompt: 'Build a CLI tool for managing invoices',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/launch.md', name: 'launch' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/launch.md': { prompt: 'LAUNCH BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# What you are building')).toBe(true);
+    expect(prompt).toContain('Build a CLI tool for managing invoices');
+    // The base prompt is preserved after the injected block.
+    expect(prompt).toContain('LAUNCH BODY');
+    expect(prompt.indexOf('# What you are building')).toBeLessThan(prompt.indexOf('LAUNCH BODY'));
+  });
+
+  it('trims the seed_prompt before injecting it', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_prompt: '  Build a CLI tool  \n' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/launch.md', name: 'launch' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/launch.md': { prompt: 'LAUNCH BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('# What you are building\n\nBuild a CLI tool\n\nLAUNCH BODY');
+  });
+
+  it('returns the base prompt verbatim when the run has no seed_prompt', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no seed_prompt
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/launch.md', name: 'launch' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/launch.md': { prompt: 'LAUNCH BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('LAUNCH BODY');
+  });
+
+  it('returns the base prompt verbatim when seed_prompt is empty/whitespace-only', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_prompt: '   \n  ' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/launch.md', name: 'launch' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/launch.md': { prompt: 'LAUNCH BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('LAUNCH BODY');
+  });
+
+  it('the seed-idea branch still wins when a seed_idea_id is present alongside seed_prompt', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_prompt: 'Should not appear',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md', name: 'planner' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'My idea', summary: null, body: 'The idea body.', scope: null },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).not.toContain('# What you are building');
+    expect(prompt).not.toContain('Should not appear');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Migration 034: terminal-seam compound findings close-out.
 //

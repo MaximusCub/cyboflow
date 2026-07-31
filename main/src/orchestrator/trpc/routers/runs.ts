@@ -325,8 +325,12 @@ export interface RunLauncherLike {
    * `requestedAgentProvider` / `requestedAgentRuntime` carry the workflow's
    * run-scoped agent route. Omitted means the registry keeps the Claude default;
    * `codex-sdk` routes through the SDK substrate compatibility path.
+   * `launchOptions.seedPrompt` (migration 091) carries the Launch flow's
+   * pre-launch "what are you trying to build?" free text — written DIRECTLY to
+   * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
+   * When omitted the run is not prompt-seeded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -982,6 +986,16 @@ export const runsRouter = router({
       // workflow (the launcher enforces this). Mirrors taskIds/ideaId; NO selection
       // cap (OD-7) — a triage tray may seed any number of findings.
       findingIds: z.array(z.string().min(1)).optional(),
+      // Optional Launch flow pre-launch seed prompt (migration 091). Free-text
+      // "what are you trying to build?" grounding text collected by a frontend
+      // modal before the run starts. When supplied, it rides the trailing
+      // launchOptions bag (mirroring ideaIds) and the launcher writes it DIRECTLY
+      // to workflow_runs.seed_prompt; RunExecutor.getPrompt injects it as a
+      // `# What you are building` block ahead of the base workflow prompt. Only
+      // valid for the 'launch' workflow (the launcher enforces this, mirroring
+      // findingIds' compound-only rule and ideaIds' planner-only rule). Capped at
+      // 4000 chars — a grounding blurb, not a spec.
+      seedPrompt: z.string().trim().min(1).max(4000).optional(),
       // Optional per-run model pin (migration 037). A USER-FACING alias from the
       // Configure surface ('opus' | 'sonnet' | 'haiku' | 'auto'; legacy 'opus-250k'
       // still resolves for back-compat but is no longer offered in the picker),
@@ -1251,7 +1265,10 @@ export const runsRouter = router({
       // resolver ladder); findingIds, requestedModel, then requestedEvalEnabled
       // (migration 044) are the LAST positional args, AFTER requestedExecutionModel.
       const launchOptions =
-        input.variantId !== undefined || input.baseline || input.ideaIds !== undefined
+        input.variantId !== undefined ||
+        input.baseline ||
+        input.ideaIds !== undefined ||
+        input.seedPrompt !== undefined
           ? {
               ...(input.variantId !== undefined
                 ? { requestedVariantId: input.variantId }
@@ -1259,6 +1276,7 @@ export const runsRouter = router({
                   ? { baseline: true }
                   : {}),
               ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
+              ...(input.seedPrompt !== undefined ? { seedPrompt: input.seedPrompt } : {}),
             }
           : undefined;
       const { runId, worktreePath, branchName } = launchWithAgentSelection
@@ -1315,8 +1333,8 @@ export const runsRouter = router({
    *
    * Provenance is COPIED off the failed row so the caller does not re-thread it:
    * workflow_id, substrate, provider/runtime, execution model, model pin, and the
-   * seed params (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's
-   * task ids read back from sprint_batch_tasks). The host session's live permission
+   * seed params (task_id / seed_idea_id / seed_finding_ids / seed_prompt, plus the
+   * sprint batch's task ids read back from sprint_batch_tasks). The host session's live permission
    * mode is deliberately re-read rather than copying permission_mode_snapshot. NO
    * lineage column is added — no consumer needs a restarted_from link, so a schema
    * change would be dead weight.
@@ -1346,7 +1364,7 @@ export const runsRouter = router({
       const row = ctx.db
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
-                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, batch_id,
+                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, seed_prompt, batch_id,
                   eval_enabled, variant_id, experiment_id, agent_provider, agent_runtime,
                   execution_model
              FROM workflow_runs WHERE id = ?`,
@@ -1364,6 +1382,7 @@ export const runsRouter = router({
             seed_idea_id: string | null;
             seed_idea_ids: string | null;
             seed_finding_ids: string | null;
+            seed_prompt: string | null;
             batch_id: string | null;
             eval_enabled: number | null;
             variant_id: string | null;
@@ -1471,10 +1490,14 @@ export const runsRouter = router({
         // baseline config even if the workflow has since gained active variants
         // (restart inherits, no re-roll). ideaIds (IDEA-009 / migration 061) is
         // merged in whenever the failed run carried a multi-idea seed, so the
-        // restart re-dual-writes seed_idea_id + seed_idea_ids.
+        // restart re-dual-writes seed_idea_id + seed_idea_ids. seed_prompt
+        // (migration 091) is merged in whenever the failed run carried a Launch
+        // flow seed prompt, so the restart re-injects the same `# What you are
+        // building` grounding block.
         {
           ...(row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true }),
           ...(ideaIds !== undefined ? { ideaIds } : {}),
+          ...(row.seed_prompt ? { seedPrompt: row.seed_prompt } : {}),
         },
         row.agent_provider ?? undefined,
         row.agent_runtime ?? undefined,

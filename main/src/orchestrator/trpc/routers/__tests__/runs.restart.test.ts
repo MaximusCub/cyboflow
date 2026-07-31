@@ -39,6 +39,8 @@ describe('cyboflow.runs.restart', () => {
     db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     // Columns / tables restart touches that the shared fixture does not add.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    // Migration 091: Launch flow pre-launch seed prompt, re-threaded on restart.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
     // seed_idea_ids (migration 061) is now provided by createTestDb's
     // includeSubstrate branch (listRunsHandler projects it), so it is NOT added
     // here — a manual ADD COLUMN would collide ("duplicate column name").
@@ -248,6 +250,56 @@ describe('cyboflow.runs.restart', () => {
     // Single-idea fallback: seed_idea_id rides the positional ideaId; launchOptions
     // carries only the baseline pin (no ideaIds key).
     expect(launchMock.mock.calls[0][4]).toBe('ide_1');
+    expect(launchMock.mock.calls[0][15]).toEqual({ baseline: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // (b6) Launch flow seed-prompt recovery (migration 091): a run seeded with
+  // seed_prompt re-threads it in the trailing launchOptions bag (merged with
+  // the baseline pin) so the relaunch re-injects the same `# What you are
+  // building` grounding block.
+  // -------------------------------------------------------------------------
+  it('(b6) re-threads the seed_prompt on restart (seedPrompt in launchOptions)', async () => {
+    const { runId } = seedRun(db, { id: 'run-seedprompt-failed', status: 'failed', projectId: 1 });
+    db.prepare(
+      `UPDATE workflow_runs SET session_id = 'sess-host', seed_prompt = 'Build a CLI tool for invoices' WHERE id = ?`,
+    ).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+
+    expect(launchMock).toHaveBeenCalledOnce();
+    // The trailing launchOptions (16th, index 15) merges the baseline pin
+    // (variant NULL) with the recovered seedPrompt.
+    expect(launchMock.mock.calls[0][15]).toEqual({
+      baseline: true,
+      seedPrompt: 'Build a CLI tool for invoices',
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (b7) A restart of a run with no seed_prompt carries no seedPrompt key.
+  // -------------------------------------------------------------------------
+  it('(b7) leaves seedPrompt out of launchOptions when the failed run had none', async () => {
+    const { runId } = seedRun(db, { id: 'run-noseedprompt-failed', status: 'failed', projectId: 1 });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-host' WHERE id = ?`).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+
+    expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock.mock.calls[0][15]).toEqual({ baseline: true });
   });
 

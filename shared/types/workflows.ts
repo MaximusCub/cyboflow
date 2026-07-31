@@ -121,6 +121,12 @@ export interface WorkflowRunRow {
    *  accept multiple ideas"), JSON-encoded string array (migration 061). NULL for
    *  runs launched with a single idea / non-planner runs. Mirrors seed_finding_ids (034). */
   seed_idea_ids?: string | null;
+  /** Free-text "what are you trying to build?" grounding text seeded into a
+   *  'launch' run at launch time (migration 091). NULL for every non-launch run.
+   *  Parsed + injected by RunExecutor.getPrompt's `# What you are building` block.
+   *  Mirrors seed_idea_id (017) / seed_finding_ids (034) — a direct workflow_runs
+   *  write, no entity link. */
+  seed_prompt?: string | null;
   /** sha256 hex of the workflow's spec_json frozen at run creation (computeSpecHash; migration 026). Lets Insights bucket runs by the exact workflow revision they executed even after the workflow's spec_json is edited. NULL for historic runs / runs created before 026. */
   spec_hash?: string | null;
   /**

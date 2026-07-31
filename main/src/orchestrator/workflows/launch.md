@@ -58,8 +58,12 @@ for an epic or task, attributing each to the idea it decomposes.
 ### Phase 1 — Interview
 
 1. **interview** → delegate to `cyboflow-interview` with `MODE: INTERVIEW` and
-   the user's raw prompt (or, when the prompt is empty, say so — the agent's
-   first round then opens with the basics). The agent returns an
+   the user's own words about the project. A run launched from the UI arrives
+   with a `# What you are building` block ahead of this prompt — the answer the
+   user typed into the launch modal; pass it to the agent VERBATIM (never
+   paraphrase it) so the first questions are grounded in what they actually
+   said. When the block is absent (a headless or A/B launch), tell the agent
+   so — its first round then opens with the basics. The agent returns an
    `## Interview round` with `## Open questions` in priority order — each
    question carrying 2–4 concrete options and a `Recommended:` default.
    - **Ask ONE question at a time**: one **AskUserQuestion** call per question

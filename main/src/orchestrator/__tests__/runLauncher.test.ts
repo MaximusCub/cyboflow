@@ -72,6 +72,8 @@ function sessionHostedDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
   // Migration 061: seed_idea_ids is dual-written by the planner multi-idea path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
+  // Migration 091: seed_prompt is written by the Launch flow's pre-launch seed path.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
   db.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
@@ -1893,6 +1895,127 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
         .prepare('SELECT seed_finding_ids FROM workflow_runs WHERE id = ?')
         .get(cannedRunId) as { seed_finding_ids: string | null };
       expect(row.seed_finding_ids).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunLauncher.launch — seedPrompt (Launch flow pre-launch seed, migration 091)
+//
+// Mirrors the findingIds (compound-only) / ideaIds (planner-only) guards: the
+// multi-idea seed rides the trailing launchOptions bag (16th positional) and
+// is ONLY valid for the 'launch' workflow — the launcher guard throws before
+// createRun for any other. seed_prompt comes from sessionHostedDb().
+// ---------------------------------------------------------------------------
+describe('RunLauncher.launch seedPrompt (Launch flow pre-launch seed)', () => {
+  /** A launcher whose registry seeds a queued run row for `workflowName`. */
+  function makeSeedPromptFixture(db: Database.Database, tmpDir: string, workflowName: string) {
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/launch.md', 'default')",
+    ).run(seedWorkflowId, workflowName);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+    const sessionId = 'sess-seed-prompt';
+    seedSession(db, sessionId, cannedWorktreePath);
+
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+      ).run(cannedRunId, seedWorkflowId, 1, sid ?? null);
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+    });
+
+    const fakeRegistry = {
+      getById: (id: string) =>
+        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
+
+    const launcher = new RunLauncher(
+      adapter,
+      fakeRegistry,
+      fakeWorktree,
+      logger,
+      fakeMcpConfigWriter,
+      fakeOrchSocketProvider,
+      fakeBridgeScriptResolver,
+      fakeNodeResolver,
+    );
+
+    return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
+  }
+
+  it('stamps seed_prompt for a launch-workflow launch', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeSeedPromptFixture(db, tmpDir, 'launch');
+
+      await launcher.launch(
+        workflowId, tmpDir, undefined, undefined, undefined, sessionId,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, { seedPrompt: 'Build a CLI tool for managing invoices' },
+      );
+
+      const row = db
+        .prepare('SELECT seed_prompt FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_prompt: string | null };
+      expect(row.seed_prompt).toBe('Build a CLI tool for managing invoices');
+    });
+  });
+
+  it("rejects seedPrompt for a non-launch workflow BEFORE creating a run row", async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, createRunSpy } = makeSeedPromptFixture(db, tmpDir, 'sprint');
+
+      await expect(
+        launcher.launch(
+          workflowId, tmpDir, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, { seedPrompt: 'Build a CLI tool' },
+        ),
+      ).rejects.toThrow("seedPrompt is only valid for the 'launch' workflow");
+
+      // The guard fires before createRun — no half-created run row.
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects a whitespace-only seedPrompt BEFORE creating a run row', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, createRunSpy } = makeSeedPromptFixture(db, tmpDir, 'launch');
+
+      await expect(
+        launcher.launch(
+          workflowId, tmpDir, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, { seedPrompt: '   ' },
+        ),
+      ).rejects.toThrow('seedPrompt must be a non-empty string');
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('leaves seed_prompt null when seedPrompt is omitted (legacy path byte-identical)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeSeedPromptFixture(db, tmpDir, 'launch');
+
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
+
+      const row = db
+        .prepare('SELECT seed_prompt FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_prompt: string | null };
+      expect(row.seed_prompt).toBeNull();
     });
   });
 });

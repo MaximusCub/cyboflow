@@ -1,0 +1,24 @@
+-- Migration 091: Launch flow pre-launch seed prompt — seed_prompt on workflow_runs.
+--
+-- workflow_runs:
+--   seed_prompt  Free-text "what are you trying to build?" grounding text
+--               collected by a frontend modal before a 'launch' run starts.
+--               Mirrors seed_idea_id (017) / seed_finding_ids (034) / seed_idea_ids
+--               (061) — a direct workflow_runs write, no FK, no entity link.
+--               Launch-only; NULL for every non-launch run. RunExecutor.getPrompt
+--               reads it and, when non-empty, prepends a `# What you are building`
+--               block to the run's MAIN prompt. workflow_runs has NO write
+--               chokepoint; the seed is a post-create UPDATE, the sanctioned
+--               pattern (see runLauncher SET seed_idea_id / SET seed_finding_ids).
+--
+-- Idempotency: SQLite ADD COLUMN is NOT IF-NOT-EXISTS. Re-applying outside the
+-- production ledger throws "duplicate column name: seed_prompt"; the runner's
+-- transaction wrapper rolls the file back. Proven behavior (024/034/061).
+-- schema.sql is intentionally NOT edited: workflow_runs' prior ALTER columns
+-- (seed_idea_id/batch_id/substrate/seed_finding_ids/seed_idea_ids) are likewise
+-- absent from schema.sql, so parity stays green with zero schema edits.
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
+-- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.
+
+ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT;

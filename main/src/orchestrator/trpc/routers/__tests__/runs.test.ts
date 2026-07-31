@@ -442,6 +442,7 @@ describe('cyboflow.runs.start', () => {
   it('restarts a persisted failed Codex workflow run through codex-sdk', async () => {
     const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
     const { runId } = seedRun(db, {
       id: 'run-failed-codex',
       workflowId: 'wf-codex-restart',
@@ -926,6 +927,110 @@ describe('cyboflow.runs.start', () => {
       ).rejects.toThrow("ideaIds is only valid for the 'planner' workflow");
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock.mock.calls[0][15]).toEqual({ ideaIds: ['ide_a'] });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6f) seedPrompt supplied (Launch flow / migration 091) → forwarded in the
+  // trailing launchOptions bag (16th slot). The launcher dual-checks the
+  // launch-only rule (covered in runLauncher.test.ts, where the real launcher
+  // runs).
+  // -------------------------------------------------------------------------
+  it('(a6f) seedPrompt supplied → forwards it in the trailing launchOptions (16th slot)', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-seed-prompt',
+      worktreePath: '/tmp/wt/launch',
+      branchName: 'cyboflow/launch/seed123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-launch',
+        projectId: 1,
+        sessionId: 'sess-1',
+        seedPrompt: 'Build a CLI tool for managing invoices',
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][15]).toEqual({
+        seedPrompt: 'Build a CLI tool for managing invoices',
+      });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6g) empty-string seedPrompt → rejected at the zod boundary (`.min(1)`).
+  // -------------------------------------------------------------------------
+  it('(a6g) rejects an empty-string seedPrompt', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-launch',
+          projectId: 1,
+          sessionId: 'sess-1',
+          seedPrompt: '   ',
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6h) seedPrompt for a non-launch workflow → the launcher's launch-only
+  // guard rejects; start forwards seedPrompt and surfaces the rejection (does
+  // not swallow it). The guard itself is exercised against the REAL launcher
+  // in runLauncher.test.ts; here we assert start propagates it for the mocked
+  // launch.
+  // -------------------------------------------------------------------------
+  it('(a6h) surfaces the launcher launch-only rejection for a non-launch workflow', async () => {
+    const launchMock = vi
+      .fn()
+      .mockRejectedValue(new Error("seedPrompt is only valid for the 'launch' workflow"));
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          seedPrompt: 'Build a CLI tool',
+        }),
+      ).rejects.toThrow("seedPrompt is only valid for the 'launch' workflow");
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][15]).toEqual({ seedPrompt: 'Build a CLI tool' });
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

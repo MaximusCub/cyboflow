@@ -1480,7 +1480,10 @@ export class RunExecutor {
    *      which is invisible to the chat transcript).
    *   5. (migration 034) compound run.seed_finding_ids resolve → PREPEND a
    *      `# Selected findings` block (priority/bucket-ordered) to the MAIN prompt.
-   *   6. none → return the base prompt verbatim (zero-behavior-change floor).
+   *   6. (migration 091) run.seed_prompt is non-empty → PREPEND a
+   *      `# What you are building` block (Launch flow's pre-launch free text) to
+   *      the MAIN prompt.
+   *   7. none → return the base prompt verbatim (zero-behavior-change floor).
    *
    * @param runId    The workflow run ID — used to stash systemPromptAppend.
    * @param workflow The workflow row containing workflow_path.
@@ -1545,7 +1548,40 @@ export class RunExecutor {
       return Promise.resolve(`# Selected findings\n\n${findingsBlock}\n\n${prompt}`);
     }
 
+    // Seed-prompt injection (migration 091). When a run carries a non-empty
+    // seed_prompt (the Launch flow's pre-launch "what are you trying to build?"
+    // free text, collected by a frontend modal before launch), prepend a
+    // `# What you are building` block to the run's MAIN prompt. Checked LAST —
+    // after the nudge/resume branches (a resumed conversation already holds the
+    // block and must NOT receive it again) and after sprint/seed-idea/
+    // seed-findings (a launch run never carries a batch_id / seed_idea_id /
+    // seed_finding_ids in practice, so order is mostly academic). Fail-soft on
+    // every miss (no run row / NULL / empty / whitespace-only seed_prompt) →
+    // fall through to the base prompt unchanged.
+    const seedPromptBlock = this.buildSeedPromptBlock(runId);
+    if (seedPromptBlock) {
+      return Promise.resolve(`# What you are building\n\n${seedPromptBlock}\n\n${prompt}`);
+    }
+
     return Promise.resolve(prompt);
+  }
+
+  /**
+   * Resolve the `# What you are building` block body for a Launch run's
+   * pre-launch seed prompt (migration 091).
+   *
+   * Unlike the seed-idea / selected-findings blocks, seed_prompt is free text
+   * stored DIRECTLY on workflow_runs — no entity id to resolve, so no injected
+   * reader collaborator is needed. Returns null (so getPrompt falls through to
+   * the base prompt) when: no run row, seed_prompt is NULL, or seed_prompt is
+   * empty/whitespace-only. Otherwise returns the trimmed text.
+   */
+  private buildSeedPromptBlock(runId: string): string | null {
+    const run = this.registry.getRunById(runId);
+    const seedPrompt = run?.seed_prompt ?? null;
+    if (!seedPrompt) return null;
+    const trimmed = seedPrompt.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   /**

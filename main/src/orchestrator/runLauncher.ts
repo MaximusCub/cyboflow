@@ -332,6 +332,14 @@ export class RunLauncher {
       // compound-only findingIds guard). The singular positional `ideaId` param
       // stays valid for planner AND ship, unchanged, and leaves seed_idea_ids NULL.
       ideaIds?: string[];
+      // Launch flow pre-launch seed prompt (migration 091). When supplied, the
+      // launcher writes it DIRECTLY to workflow_runs.seed_prompt — NOT routed
+      // through any chokepoint (workflow_runs has none), exactly like ideaIds
+      // above. ONLY valid when the workflow's name === 'launch' — any other
+      // workflow throws (mirrors the compound-only findingIds guard and the
+      // planner-only ideaIds guard). RunExecutor.getPrompt reads this column to
+      // inject the `# What you are building` block.
+      seedPrompt?: string;
     },
     // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
     // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime
@@ -387,6 +395,21 @@ export class RunLauncher {
       }
       if (ideaIds.length < 1) {
         throw new Error('ideaIds must contain at least one idea id');
+      }
+    }
+
+    // Launch pre-launch seed-prompt validation (migration 091) — BEFORE createRun
+    // so an invalid request never leaves a half-created run row behind. Mirrors
+    // the compound findingIds / planner ideaIds guards: seedPrompt is ONLY valid
+    // for the 'launch' workflow. The non-empty check mirrors runs.ts's zod
+    // `.min(1)` (belt-and-suspenders for non-tRPC callers, e.g. the MCP surface).
+    const seedPrompt = launchOptions?.seedPrompt;
+    if (seedPrompt !== undefined) {
+      if (workflow.name !== 'launch') {
+        throw new Error("seedPrompt is only valid for the 'launch' workflow");
+      }
+      if (seedPrompt.trim().length < 1) {
+        throw new Error('seedPrompt must be a non-empty string');
       }
     }
 
@@ -659,6 +682,17 @@ export class RunLauncher {
         this.db
           .prepare('UPDATE workflow_runs SET seed_finding_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(JSON.stringify(findingIds), runId);
+      }
+
+      // Launch pre-launch seed prompt (migration 091). A direct workflow_runs
+      // write — NOT routed through any chokepoint (workflow_runs has none),
+      // exactly like seed_idea_id / seed_finding_ids / batch_id above.
+      // RunExecutor.getPrompt reads this column to inject the `# What you are
+      // building` block. Validated launch-only above, before createRun.
+      if (seedPrompt) {
+        this.db
+          .prepare('UPDATE workflow_runs SET seed_prompt = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(seedPrompt, runId);
       }
 
       // Native-task linkage + in-process stage derivation (migration 014).

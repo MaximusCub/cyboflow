@@ -29,6 +29,7 @@ function setupDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
   // The migration-055 verify stamp columns (verify_enabled / verify_type /
   // verify_chain) that createRun writes are provided by createTestDb's
   // includeWorkflowRunTaskColumns block above — no manual ALTER needed here.
