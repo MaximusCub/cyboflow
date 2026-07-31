@@ -13,6 +13,8 @@
  *     {@link processAmbiguous} reconciles those rows (point lookup by client
  *     key where the provider has idempotent creates, list-and-match where it
  *     does not) BEFORE any retry — a sub-issue can never be double-created.
+ *     A LIVE drain parks lost creates in that same `ambiguous` state (see the
+ *     failure taxonomy below), so the guarantee does not depend on a crash.
  *   - Only the ADAPTER CALL is wrapped in try/catch. Anything that throws
  *     AFTER a successful send (a sqlite failure while recording the outcome)
  *     propagates out of the drain with the row still `in_flight`, which is
@@ -27,6 +29,12 @@
  *   - Other 4xx (not 408/429)     -> terminal failure; a malformed/forbidden write
  *                                    will never succeed on retry.
  *   - 5xx / 408 / 429 / network   -> retry, next_attempt_at = now + min(2^attempts, 32) min.
+ *   - …the same, on a create the provider cannot make idempotent (Plane)
+ *                                 -> `ambiguous`, NEVER a blind retry. Those errors say
+ *                                    "outcome unknown", and a create that landed before
+ *                                    its response was lost would be duplicated by the
+ *                                    next POST — so the row waits for
+ *                                    {@link processAmbiguous}'s client-key lookup.
  */
 import type Database from 'better-sqlite3';
 import type { TrackerConnectionRow, TrackerOutboxRow } from '../../database/models';
@@ -233,7 +241,15 @@ async function processCreate(
       row.client_key,
     );
   } catch (err) {
-    return recordAdapterFailure(deps, connection, row, report, err);
+    return recordAdapterFailure(deps, connection, row, report, err, {
+      // A create is the one write that cannot be repeated safely. Where the
+      // provider has no idempotency key (Plane), an uncertain failure may well
+      // have committed the child before the response was lost, so the row parks
+      // as `ambiguous` and the marker lookup — not a second POST — decides.
+      // Linear's client key IS the created issue's id, so a repeat is a no-op
+      // there and the plain backoff retry stands.
+      uncertainIsAmbiguous: !adapter.capabilities.idempotentCreate,
+    });
   }
 
   adoptCreatedIssue(deps, connection, row, issue, payload.parentExternalId);
@@ -281,10 +297,12 @@ function adoptCreatedIssue(
 export type AmbiguousOutcome = 'adopted' | 'requeued' | 'unresolved' | 'failed' | 'halted';
 
 /**
- * Reconcile every `ambiguous` row for a connection — the rows
- * store.requeueInFlightAsAmbiguous produced at boot from writes whose outcome
- * is genuinely unknown. The service calls this BEFORE {@link drainOutbox} so a
- * lost create is adopted rather than repeated.
+ * Reconcile every `ambiguous` row for a connection — writes whose outcome is
+ * genuinely unknown, from either source: store.requeueInFlightAsAmbiguous
+ * produces them at boot from a crash mid-flight, and a live drain parks a
+ * non-idempotent create there when its call fails uncertainly. The service
+ * calls this BEFORE {@link drainOutbox} so a lost create is adopted rather
+ * than repeated.
  */
 export async function processAmbiguous(
   deps: OutboxDeps,
@@ -433,8 +451,21 @@ function requeue(deps: OutboxDeps, row: TrackerOutboxRow): void {
 
 /**
  * Settle a failed adapter call. Returns true when the DRAIN must stop (auth).
- * Auth failures are terminal AND pause the connection; other client errors are
- * terminal; everything else is re-queued with exponential backoff.
+ * Auth failures are terminal AND pause the connection (the request was rejected,
+ * so it provably did not land); other client errors are terminal; everything
+ * else — 5xx, 408/429, a network error with no status at all — leaves the
+ * outcome UNKNOWN and is re-queued with exponential backoff.
+ *
+ * `opts.uncertainIsAmbiguous` redirects that last arm for the one write that
+ * cannot be repeated blind (a create on a provider without idempotent creates):
+ * the row settles as `ambiguous` instead, so the client-key lookup runs before
+ * any re-POST. That ordering holds by construction — every pass runs
+ * {@link processAmbiguous} ahead of {@link drainOutbox}, and `ambiguous` is not
+ * a state {@link claimNextPending} will ever claim, so the row simply cannot be
+ * re-sent until the reconcile has spoken. The reconcile pass supplies its own
+ * cadence, which is why no backoff is stamped here. It still counts as a
+ * scheduled retry in the report: from the queue's side the write is unsettled
+ * and headed back to pending if the lookup says the create never landed.
  */
 function recordAdapterFailure(
   deps: OutboxDeps,
@@ -442,6 +473,7 @@ function recordAdapterFailure(
   row: TrackerOutboxRow,
   report: OutboxReport,
   err: unknown,
+  opts: { uncertainIsAmbiguous?: boolean } = {},
 ): boolean {
   if (err instanceof TrackerAuthError) {
     pauseConnection(deps, connection, row, report, err);
@@ -449,6 +481,11 @@ function recordAdapterFailure(
   }
   if (isTerminalApiError(err)) {
     failTerminal(deps, row, report, describeError(err));
+    return false;
+  }
+  if (opts.uncertainIsAmbiguous) {
+    resolveOutbox(deps.db, row.id, 'ambiguous', { lastError: describeError(err) });
+    report.retriesScheduled += 1;
     return false;
   }
   // `attempts` was already incremented by claimNextPending, so the first

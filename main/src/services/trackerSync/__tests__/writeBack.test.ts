@@ -15,7 +15,9 @@
  *   - two_way = 0 / paused / unlinked / epic entities ignored.
  *   - decomposition: origin 'started' + one create_sub_issue per unlinked
  *     minted task, and NO creates when mirroring is off.
- *   - close_parent only once EVERY mirrored sibling is terminal.
+ *   - close_parent only once EVERY mirrored sibling is terminal — including
+ *     when the LAST child is the one cancelled, and cancelling (not completing)
+ *     the parent of a wholly abandoned breakdown.
  *   - Won't do -> 'cancelled'.
  *   - dispose() making the listener inert.
  */
@@ -473,9 +475,13 @@ describe('writeBack — decomposition', () => {
 // ---------------------------------------------------------------------------
 
 describe('writeBack — close-parent rollup', () => {
-  function seedMirroredPair(connectionId: string, secondStage: string): void {
+  function seedMirroredPair(
+    connectionId: string,
+    secondStage: string,
+    firstStage: string = stageIds.done,
+  ): void {
     seedIdea('ide_1', 'IDEA-1');
-    seedTask('tsk_1', 'TASK-1', { ideaId: 'ide_1', stageId: stageIds.done });
+    seedTask('tsk_1', 'TASK-1', { ideaId: 'ide_1', stageId: firstStage });
     seedTask('tsk_2', 'TASK-2', { ideaId: 'ide_1', stageId: secondStage });
     upsertLink(raw, {
       connection_id: connectionId,
@@ -532,6 +538,43 @@ describe('writeBack — close-parent rollup', () => {
     listener.handleTaskChanged(event);
 
     expect(outbox().filter((r) => r.kind === 'close_parent')).toHaveLength(1);
+  });
+
+  it("closes the parent when the LAST open child is moved to Won't do", () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.wontdo);
+
+    // The cancelled child is the event: a rollup that only ran on 'completed'
+    // would leave the parent open forever.
+    makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.wontdo));
+
+    const closeRow = outbox().find((r) => r.kind === 'close_parent');
+    expect(closeRow?.external_id).toBe('ext-idea');
+    // One sibling actually got done, so the breakdown completed.
+    expect(JSON.parse(closeRow?.payload_json ?? '{}')).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it('cancels the parent when EVERY child was abandoned', () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.wontdo, stageIds.wontdo);
+
+    makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.wontdo));
+
+    const closeRow = outbox().find((r) => r.kind === 'close_parent');
+    expect(closeRow?.external_id).toBe('ext-idea');
+    // Nothing was delivered — claiming the parent as done would be a lie.
+    expect(JSON.parse(closeRow?.payload_json ?? '{}')).toEqual({ desiredGroup: 'cancelled' });
+  });
+
+  it("does NOT close the parent on a Won't-do child while a sibling is open", () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.wontdo, stageIds.inDevelopment);
+
+    makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.wontdo));
+
+    const rows = outbox();
+    expect(rows.map((r) => r.kind)).toEqual(['update_state']);
+    expect(rows[0].external_id).toBe('ext-sub-2');
   });
 
   it('does not close a parent we already wrote as completed', () => {

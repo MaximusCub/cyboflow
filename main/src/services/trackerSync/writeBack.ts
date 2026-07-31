@@ -23,11 +23,12 @@
  *      retire stamp writes 'started' to the origin issue, and — when the
  *      connection has `mirror_subissues = 1` — enqueues one `create_sub_issue`
  *      per minted task that has no link yet.
- *   3. PARENT ROLLUP. A mirrored task reaching a terminal stage checks its
- *      siblings; once every mirrored child of the same parent issue is
- *      terminal, a `close_parent` is enqueued for the parent issue (an
- *      idempotent no-op where Linear's native auto-close already fired; the
- *      sole mechanism for Plane).
+ *   3. PARENT ROLLUP. A mirrored task reaching a terminal stage — Done OR
+ *      Won't do — checks its siblings; once every mirrored child of the same
+ *      parent issue is terminal, a `close_parent` is enqueued for the parent
+ *      issue, 'completed' unless every child was abandoned, in which case the
+ *      parent is cancelled (an idempotent no-op where Linear's native
+ *      auto-close already fired; the sole mechanism for Plane).
  *
  * Every enqueue is DEDUPED against the connection's unresolved outbox rows, so
  * a burst of events (or a replayed one) can never queue the same remote write
@@ -250,7 +251,10 @@ function route(deps: WriteBackDeps, event: TaskChangedEvent): void {
     handleDecomposition(deps, linked, event.taskId, group);
   }
 
-  if (entityType === 'task' && group === 'completed') {
+  // BOTH terminal groups trigger the rollup: a breakdown whose last open story
+  // is abandoned is just as finished as one whose last story is done, and
+  // gating on 'completed' alone would leave that parent open forever.
+  if (entityType === 'task' && (group === 'completed' || group === 'cancelled')) {
     handleParentRollup(deps, linked, event, stageIds);
   }
 }
@@ -409,7 +413,15 @@ function handleDecomposition(
  * "Terminal" here is Done OR Won't do (write-back groups 'completed' /
  * 'cancelled'): a decomposition where some stories were abandoned is still
  * finished, and waiting for a cancelled child to become Done would strand the
- * parent open forever.
+ * parent open forever. The same is true of the TRIGGER — see route(): a final
+ * Won't do closes the parent exactly as a final Done does.
+ *
+ * WHICH group the parent is closed WITH follows its children:
+ *   - at least one child completed -> 'completed'. Some of the breakdown was
+ *     delivered, so the parent is done even though pieces were dropped.
+ *   - every child cancelled        -> 'cancelled'. Nothing was delivered, and
+ *     marking a wholly abandoned breakdown "Done" would claim work that never
+ *     happened (and, on a report, work that was never even attempted).
  */
 function handleParentRollup(
   deps: WriteBackDeps,
@@ -427,19 +439,20 @@ function handleParentRollup(
   );
   if (siblings.length === 0) return;
 
-  const allTerminal = siblings.every((sibling) => {
+  const groups = siblings.map((sibling) => {
     // The event's own entity is read from the event: the emit happens after
     // commit, so the DB agrees — but the event is the authoritative statement
     // of what just changed.
     const stageId =
       sibling.entity_id === event.taskId ? event.task.stage_id : readTaskStage(db, sibling.entity_id);
-    if (stageId === null) return false;
-    const group = writeBackGroupForStage(stageId, stageIds);
-    return group === 'completed' || group === 'cancelled';
+    // A stage that maps nowhere (and a row that is simply gone) is NOT terminal
+    // — it holds the parent open rather than closing it on a guess.
+    return stageId === null ? null : writeBackGroupForStage(stageId, stageIds);
   });
-  if (!allTerminal) return;
+  if (!groups.every((group) => group === 'completed' || group === 'cancelled')) return;
 
-  enqueueStateWrite(deps, linked, parentExternalId, 'completed', { kind: 'close_parent' });
+  const desiredGroup: WriteBackGroup = groups.includes('completed') ? 'completed' : 'cancelled';
+  enqueueStateWrite(deps, linked, parentExternalId, desiredGroup, { kind: 'close_parent' });
 }
 
 /** A task's current stage id, or null when the row is gone. */

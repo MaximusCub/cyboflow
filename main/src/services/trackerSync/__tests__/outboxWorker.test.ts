@@ -17,6 +17,9 @@
  *   - TrackerAuthError -> terminal failure, connection paused, drain HALTS.
  *   - a group with no provider state -> terminal failure (no retry storm).
  *   - post-send local failure leaves the row `in_flight` for boot recovery.
+ *   - a create whose outcome is UNCERTAIN on a non-idempotent provider parks as
+ *     `ambiguous` (never a second POST) and is adopted by the next reconcile;
+ *     a 4xx there is still terminal, and an idempotent provider still retries.
  *   - ambiguous recovery: Linear point-lookup (found -> adopted, missing ->
  *     pending), Plane client-key match (a same-title sibling is NOT ours), and
  *     update_state -> straight to pending.
@@ -197,6 +200,37 @@ class FakeMarkerAdapter extends FakeAdapter {
           this.markers.get(issue.externalId) === clientKey,
       ) ?? null
     );
+  }
+}
+
+/**
+ * The lost-response case: the server COMMITS the child and the caller still
+ * sees a failure (5xx, timeout, dropped connection). The created issue is
+ * recorded — marker and all — exactly as the real remote would hold it, so a
+ * blind re-POST shows up as a second child.
+ */
+class CommitThenFailAdapter extends FakeMarkerAdapter {
+  /** Thrown AFTER the child is committed; consumed on the next create. */
+  failAfterCommit: Error | null = null;
+
+  async createSubIssue(
+    parentExternalId: string,
+    draft: SubIssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.createCalls.push({ parentExternalId, draft, clientKey });
+    const issue = makeIssue(`proj-1/child-${this.createCalls.length}`, {
+      title: draft.title,
+      parentExternalId,
+    });
+    this.issues.push(issue);
+    this.markers.set(issue.externalId, clientKey);
+    if (this.failAfterCommit) {
+      const err = this.failAfterCommit;
+      this.failAfterCommit = null;
+      throw err;
+    }
+    return issue;
   }
 }
 
@@ -489,6 +523,86 @@ describe('drainOutbox — failure handling', () => {
     expect(report.sent).toBe(0);
     expect(adapter.updateCalls).toHaveLength(0);
     expect(fetchOutbox(row.id).state).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drain — uncertain creates on a non-idempotent provider
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — non-idempotent create failures', () => {
+  it('parks a create whose outcome is UNKNOWN as ambiguous instead of re-POSTing it', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    const adapter = new CommitThenFailAdapter();
+    // The classic lost create: committed server-side, 500 on the way back.
+    adapter.failAfterCommit = new TrackerApiError('plane', 'internal server error', 500);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.createCalls).toHaveLength(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('ambiguous');
+    expect(settled.last_error).toContain('internal server error');
+    // Not eligible for a blind retry: a second drain must claim nothing.
+    expect(settled.next_attempt_at).toBeNull();
+    expect(report.retriesScheduled).toBe(1);
+
+    await drainOutbox(makeDeps(adapter), connection);
+    expect(adapter.createCalls).toHaveLength(1);
+
+    // The next pass reconciles FIRST (trackerSyncService.runWriteBack calls
+    // processAmbiguous ahead of drainOutbox) and adopts the child the lost
+    // response created...
+    const recovery = await processAmbiguous(makeDeps(adapter), connection);
+    expect(recovery.created).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    expect(getLinkByEntity(raw, 'task', 'tsk_1', 'plane')?.external_id).toBe('proj-1/child-1');
+
+    // ...so the drain behind it has nothing to send and the parent holds
+    // EXACTLY ONE child.
+    const drained = await drainOutbox(makeDeps(adapter), connection);
+    expect(drained.created).toBe(0);
+    expect(adapter.createCalls).toHaveLength(1);
+    expect(adapter.issues).toHaveLength(1);
+  });
+
+  it('parks a network failure (no HTTP status) as ambiguous too', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    const adapter = new CommitThenFailAdapter();
+    adapter.failAfterCommit = new TrackerApiError('plane', 'socket hang up');
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(fetchOutbox(row.id).state).toBe('ambiguous');
+  });
+
+  it('still fails a non-idempotent create terminally on a 4xx (it provably never landed)', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    const adapter = new FakeMarkerAdapter();
+    adapter.failCreate = new TrackerApiError('plane', 'parent issue not found', 404);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.failedTerminal).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('failed');
+  });
+
+  it('keeps the plain backoff retry for a provider with idempotent creates', async () => {
+    const connection = seedConnection();
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    const adapter = new FakeAdapter();
+    adapter.failCreate = new TrackerApiError('linear', 'bad gateway', 502);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    // The client key IS the issue id there, so a repeat create cannot duplicate.
+    expect(report.retriesScheduled).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('pending');
+    expect(settled.next_attempt_at).toBe('2026-07-30 12:02:00');
   });
 });
 
