@@ -18,6 +18,13 @@
  *  - REQUEST_STATUS mirrors the CHECK domain on verification_requests.status in
  *    migration 055 (defined in P3) — a single contract split across TypeScript +
  *    SQL, exactly as the CliSubstrate / migration 013 pairing.
+ *  - VerificationFailureClass / VerificationModality (added for
+ *    docs/proposals/verification-setup-flow.md Phase 0/1) are their own
+ *    single-contract pairings: failure_class/modality on verification_requests
+ *    (migration 088, plain nullable TEXT — no SQL CHECK domain, unlike
+ *    REQUEST_STATUS, since a stricter CHECK would reject a future-added member
+ *    from an old binary's write) and VerifyCapabilityStore's ledger tables
+ *    (main/src/orchestrator/verify/capabilityStore.ts). Widen all three together.
  */
 
 /**
@@ -855,6 +862,176 @@ export function isVerificationType(v: unknown): v is VerificationType {
   );
 }
 
+// ===========================================================================
+// Verification failure classification + modality axis
+// (docs/proposals/verification-setup-flow.md §3 "Phase 0 — honest failures" /
+// §4 "Phase 1 — modality roster"). ADDITIVE ONLY — this section never touches
+// an existing export above. It is itself a "single contract split across
+// files — widen together" pairing (per this file's CONTRACT NOTES) with
+// migration 088's verification_requests.failure_class/.modality columns and
+// with VerifyCapabilityStore (main/src/orchestrator/verify/capabilityStore.ts).
+// ===========================================================================
+
+/**
+ * How a TERMINAL verification failure is attributed (§3.1). The classifier is
+ * deliberately CONSERVATIVE — `'env'` requires harness-derived PROVENANCE,
+ * never model judgment: a failed pre-deploy preflight (chromium/node/driver-cli
+ * absent), a bind-refused probe on the leased port against a pre-verified
+ * squatter, instance-lock contention detected by the runner, or an attestation
+ * channel that never came up while a squatter probe shows foreign occupancy.
+ * Everything else — including every model-authored `build_failed` /
+ * `launch_failed` without harness corroboration — is `'ambiguous'`, never
+ * `'env'`, no matter how confidently the agent's own report reads.
+ *
+ * This asymmetry is load-bearing, not cosmetic: `mergeGateLaneAdvance.ts`
+ * treats a terminal `'skipped'` status as an ADVANCE of the lane toward
+ * `integrated` — the exact same treatment a PASS gets (see its R4 handling). If
+ * a genuine deliverable regression were ever misclassified as `'env'` and
+ * routed to `skipped`, the lane would ship broken code silently instead of
+ * looping back to implement. So the failure mode of a false `'env'` is
+ * dangerous (advances the lane); the failure mode of a false `'ambiguous'` is
+ * merely annoying (stays blocking, exactly like today's undifferentiated
+ * `'failed'`). When the evidence does not clearly say `'env'`, classify
+ * `'ambiguous'` — never guess toward the dangerous side.
+ *
+ *   - `'env'`         — harness-proven environment failure (see above). Only
+ *                        these are eligible to skip (§3.2) and feed the
+ *                        per-modality circuit breaker (§3.4); only these never
+ *                        increment the lane's implement-retry budget.
+ *   - `'deliverable'` — a judged/observed failure attributable to the code
+ *                        under test. Blocks + loops back exactly like today's
+ *                        FAIL.
+ *   - `'ambiguous'`   — everything else: a failure with no harness-derived
+ *                        provenance either way. REMAINS BLOCKING — never
+ *                        downgraded to skip. Ambiguity is allowed to be
+ *                        annoying; it is not allowed to ship regressions.
+ */
+export type VerificationFailureClass = 'env' | 'deliverable' | 'ambiguous';
+
+/**
+ * The three VerificationFailureClass members, for iteration / UI (the phase-3
+ * health panel's env/deliverable/ambiguous histogram).
+ */
+export const VERIFICATION_FAILURE_CLASSES: readonly VerificationFailureClass[] = [
+  'env',
+  'deliverable',
+  'ambiguous',
+] as const;
+
+/**
+ * Runtime guard for an unknown value (a persisted request row's
+ * `failure_class` column, migration 088 — plain nullable TEXT, no SQL CHECK
+ * domain). Mirrors isVerificationType's shape.
+ */
+export function isVerificationFailureClass(v: unknown): v is VerificationFailureClass {
+  return v === 'env' || v === 'deliverable' || v === 'ambiguous';
+}
+
+/**
+ * One piece of harness-derived evidence backing a failure classification
+ * (§3.1) — the PROVENANCE the conservative `'env'` rule requires. Model-
+ * authored prose (a log excerpt, an agent's own "the port was taken" claim) is
+ * never sufficient BY ITSELF; the classifier's `'env'` verdict must point at
+ * evidence like this. Persisted as `VerificationFailureEvidence[]` on
+ * `verification_requests.failure_evidence_json` (migration 088) so the
+ * classifier's INPUTS are auditable, not just its output label.
+ */
+export interface VerificationFailureEvidence {
+  /**
+   * Which harness subsystem produced this evidence:
+   *   'preflight'     — the agent-path pre-deploy check (§3.5): chromium/node/
+   *                      driver-cli resolvable, leased port genuinely free.
+   *   'port-probe'    — a bind-refused / occupied probe on the leased port,
+   *                      distinguishing a pre-verified squatter from the
+   *                      deliverable's own (healthy) server.
+   *   'instance-lock' — Electron single-instance-lock contention detected by
+   *                      the runner (root cause (b) in the proposal's §1 table).
+   *   'attestation'   — the modality's attestation channel (§7.1) never came
+   *                      up, WITH foreign-occupancy evidence from a squatter
+   *                      probe (absent that corroboration this is `'ambiguous'`,
+   *                      not `'env'` — see VerificationFailureClass doc).
+   *   'runner'        — any other harness-internal signal (e.g. a caught
+   *                      spawn/exec failure with a recognizable OS error code).
+   *   'report'        — the agent's own VerificationReportV1 (model-authored;
+   *                      the WEAKEST source — evidence sourced ONLY from
+   *                      `'report'` should not, by itself, justify `'env'`).
+   */
+  source: 'preflight' | 'port-probe' | 'instance-lock' | 'attestation' | 'runner' | 'report';
+  /** The specific check this evidence came from, e.g. 'chromium', 'driver-cli', 'port-free'. */
+  check?: string;
+  /** Bounded human-readable detail (a log excerpt, an error code) — kept short for the health-panel histogram. */
+  detail: string;
+}
+
+/**
+ * The drive/observe modality axis (§4 roster). Orthogonal to
+ * `VerificationType` (WHAT kind of check) — this is WHICH host-capability
+ * class satisfies it, and is what the phase-0 `unsupported`/circuit-breaker
+ * state (§3.3/§3.4) and the phase-3 health panel key on
+ * (project, modality, runbook hash, host generation), never on
+ * `VerificationType` alone: two requests of the same `VerificationType` can
+ * need different modalities (a `static-render-snapshot` of an ordinary web
+ * page vs. one of cyboflow's own renderer), and one project can compose
+ * several modalities at once (§4 "Modalities compose per project").
+ *
+ *   - `'web'`          — driver launches its own headless chromium (CDP).
+ *   - `'cdp-app'`       — driver ATTACHES to the deliverable app's own CDP
+ *                          endpoint (`serve.attach === 'cdp'`) instead of
+ *                          launching one — the Electron/native-app-with-webview
+ *                          case root cause (a) in the proposal's §1 table
+ *                          exists precisely because this form was never composed.
+ *   - `'native-screen'` — Peekaboo screen capture of the real running app;
+ *                          DRIVE support is a designed prerequisite, not yet
+ *                          live (§4 footnote 2) — currently observe-only.
+ *   - `'mobile'`        — deferred (§4 scope decision); rests in the
+ *                          `unsupported` state with an explicit reason until an
+ *                          Xcode MCP lands.
+ */
+export type VerificationModality = 'web' | 'cdp-app' | 'native-screen' | 'mobile';
+
+/**
+ * The four VerificationModality members, for iteration / UI (the roster
+ * table, the phase-3 health panel).
+ */
+export const VERIFICATION_MODALITIES: readonly VerificationModality[] = [
+  'web',
+  'cdp-app',
+  'native-screen',
+  'mobile',
+] as const;
+
+/**
+ * Runtime guard for an unknown value (a persisted request row's `modality`
+ * column, migration 088 — plain nullable TEXT). Mirrors isVerificationType's
+ * shape.
+ */
+export function isVerificationModality(v: unknown): v is VerificationModality {
+  return v === 'web' || v === 'cdp-app' || v === 'native-screen' || v === 'mobile';
+}
+
+/**
+ * Map a request's `VerificationType` + composed task onto the modality axis
+ * (§4). Pure, no defaulting beyond the stated precedence:
+ *   - `'native-desktop'` → `'native-screen'` — the ONLY path FALLBACK_CHAINS
+ *     grants it (Peekaboo).
+ *   - `'mobile-flow'`    → `'mobile'` — deferred; always `unsupported` until
+ *     phase 1 ships a simulator pool.
+ *   - otherwise: `task?.serve?.attach === 'cdp'` → `'cdp-app'` (the deliverable
+ *     app itself exposes a CDP endpoint the driver attaches to); else `'web'`
+ *     (driver launches its own headless chromium). `task` is `null` for the
+ *     degenerate pre-live path (a bare intent, no composed task) — the attach
+ *     form only exists on a composed task's `serve`, so a null task always
+ *     resolves a web-shaped type to `'web'`.
+ */
+export function resolveTaskModality(
+  type: VerificationType,
+  task: Pick<VerificationTaskV1, 'serve'> | null,
+): VerificationModality {
+  if (type === 'native-desktop') return 'native-screen';
+  if (type === 'mobile-flow') return 'mobile';
+  return task?.serve?.attach === 'cdp' ? 'cdp-app' : 'web';
+}
+
 /**
  * The persisted `AppConfig.visualVerify` block (P2). Every member is OPTIONAL so
  * an absent block (the default) keeps config.json byte-identical — the
@@ -1132,4 +1309,64 @@ export interface VerificationRequestRow {
 export interface VerificationRequestListRow extends VerificationRequestRow {
   session_id: string | null;
   session_name: string | null;
+  /**
+   * §3 Phase-0/1 surfacing (verification-setup-flow.md §3.1/§3.6, migration
+   * 088). These four are PARSED/derived from the raw `failure_class` /
+   * `modality` / `setup_proof` / `failure_evidence_json` columns by the list
+   * query's row-shaping step (never re-validated on the frontend) — camelCase
+   * on purpose to mark them as derived, distinct from the raw snake_case
+   * passthrough columns above. All four are OPTIONAL (not `| null`) so a
+   * pre-088 row — the column absent entirely rather than NULL, on a DB that
+   * predates the migration — and a pre-classifier-wiring row (columns exist
+   * but were never stamped) render IDENTICALLY: the field is simply omitted,
+   * and every consumer that already guards `!== undefined` (the
+   * `VerificationTaskV1`/`ReportV1` convention this file's optional fields
+   * already use) needs no special-casing for either case.
+   *
+   *   - `failureClass`    — the classifier's verdict, validated via
+   *     {@link isVerificationFailureClass}; an out-of-domain or NULL raw value
+   *     degrades to `undefined` rather than being passed through unchecked.
+   *   - `modality`        — the resolved {@link VerificationModality} axis,
+   *     validated via {@link isVerificationModality}; same fail-soft posture.
+   *   - `setupProof`      — true when this request was a phase-2 setup/proof
+   *     run (exempt from the project's lifetime judge budget, §3.6). Always a
+   *     concrete boolean on an actual row (the DB column is `NOT NULL DEFAULT
+   *     0`) — the type stays optional only so a hand-built test fixture that
+   *     predates this field keeps compiling; a real list-query row always sets
+   *     it.
+   *   - `failureEvidence` — the {@link VerificationFailureEvidence}[] the
+   *     classifier's verdict was derived from, parsed from
+   *     `failure_evidence_json`. FAIL-SOFT: malformed JSON or a non-array/
+   *     non-evidence-shaped payload degrades to `undefined` (never a partial
+   *     or best-effort array) so the health-panel audit trail is never shown
+   *     a corrupted reconstruction.
+   */
+  failureClass?: VerificationFailureClass;
+  modality?: VerificationModality;
+  setupProof?: boolean;
+  failureEvidence?: VerificationFailureEvidence[];
+}
+
+/**
+ * Per-project verify-budget summary (§3.6 "surface budget state in the Verify
+ * Queue") — a sibling query to `cyboflow.verificationRequests.list`
+ * (`cyboflow.verificationRequests.budget`) rather than a field folded into the
+ * list response, so the list query's return type stays a flat
+ * `VerificationRequestListRow[]` (the renderer indexes it with `[number]`,
+ * `useVerificationRequests.ts`) instead of becoming `{ rows, budget }`.
+ *
+ * Mirrors the exhaustion check `VerificationScheduler.isProjectBudgetExhausted`
+ * already runs at enqueue time (`verificationScheduler.ts` — same
+ * `projects.visual_verify_budget_calls` / `SUM(judge_calls_used)` pair,
+ * migration 056) so the health-panel number and the enforcement number can
+ * never silently diverge.
+ */
+export interface VerificationBudgetSummary {
+  projectId: number;
+  /** The project's display name; `undefined` when the project row is gone (a router-integrity edge, not expected in practice). */
+  projectName?: string;
+  /** `projects.visual_verify_budget_calls`; `null` = unlimited (no cap configured). */
+  budgetCalls: number | null;
+  /** `SUM(verification_requests.judge_calls_used)` for the project's lifetime — every request, `setup_proof` included (§8 open question: exempting proof runs from this sum is undecided). */
+  usedCalls: number;
 }
