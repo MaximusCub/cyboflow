@@ -91,6 +91,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     expect(cfg.maxPerRunJudgeCalls).toBe(4);
     expect(cfg.devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
     expect(cfg.simulatorDevices).toEqual([]);
+    expect(cfg.agentSlots).toBe(2);
   });
 
   it('applies defaults per-member for a partial override (only set members replaced)', async () => {
@@ -108,6 +109,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     expect(cfg.vlmConfidenceThreshold).toBe(0.7);
     expect(cfg.devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
     expect(cfg.simulatorDevices).toEqual([]);
+    expect(cfg.agentSlots).toBe(2);
   });
 
   it('floors an empty devServerPorts array to the default pool', async () => {
@@ -142,7 +144,18 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       simulatorDevices: ['udid-A'],
       // Not overridden above → floored to the default (§5.6 queued-age ceiling).
       queuedAgeCeilingMs: 15 * 60 * 1000,
+      // Not overridden above → floored to the default (§4 roster footnote 1).
+      agentSlots: 2,
     });
+  });
+
+  it('honors an explicit agentSlots override and floors it when absent', async () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+    expect(mgr.getVisualVerifyConfig().agentSlots).toBe(2);
+
+    await mgr.updateConfig({ visualVerify: { agentSlots: 4 } });
+    expect(mgr.getVisualVerifyConfig().agentSlots).toBe(4);
   });
 
   it('returns fresh array copies (mutating the result does not leak into config or defaults)', () => {

@@ -9,7 +9,9 @@ import {
   parseVerificationTaskV1,
   normalizeVerificationReportV1,
   deriveLegacyInputFromTask,
+  isAttestationSpec,
   type VerificationTaskV1,
+  type AttestationSpec,
 } from '../../../../../shared/types/visualVerification';
 
 const VALID_TASK = {
@@ -17,6 +19,17 @@ const VALID_TASK = {
   summary: 'Check the login form renders',
   behaviors: [{ id: 'b1', description: 'Login form renders', expected: 'Form is visible on screen' }],
 };
+
+// One instance of every AttestationSpec kind (§7.1) — shared by
+// parseVerificationTaskV1's round-trip tests and the isAttestationSpec guard
+// tests below.
+const ATTESTATION_SPECS: AttestationSpec[] = [
+  { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+  { kind: 'dom-marker', selector: '[data-verify-nonce]' },
+  { kind: 'cdp-token', expression: 'window.__CYBOFLOW_BUILD_TOKEN__', expected: 'abc123' },
+  { kind: 'window-identity', titlePattern: 'MyApp — dev' },
+  { kind: 'file-identity' },
+];
 
 describe('parseVerificationTaskV1', () => {
   it('accepts a minimal valid task', () => {
@@ -166,6 +179,109 @@ describe('parseVerificationTaskV1', () => {
   it('tolerates unknown extra keys', () => {
     const result = parseVerificationTaskV1({ ...VALID_TASK, somethingElse: 'ignored' });
     expect(result.ok).toBe(true);
+  });
+
+  // --- Modality-roster widening (§4/§7.1): modality, attestation, requiresDrive ---
+
+  it('accepts and round-trips each VerificationModality member', () => {
+    for (const modality of ['web', 'cdp-app', 'native-screen', 'mobile'] as const) {
+      const result = parseVerificationTaskV1({ ...VALID_TASK, modality });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.task.modality).toBe(modality);
+    }
+  });
+
+  it('rejects an invalid modality', () => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, modality: 'desktop' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^modality:/);
+  });
+
+  it('leaves modality absent when omitted', () => {
+    const result = parseVerificationTaskV1(VALID_TASK);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect('modality' in result.task).toBe(false);
+  });
+
+  it.each(ATTESTATION_SPECS)('accepts and round-trips attestation kind "$kind"', (attestation) => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, attestation });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.task.attestation).toEqual(attestation);
+  });
+
+  it('rejects an unrecognized attestation kind', () => {
+    const result = parseVerificationTaskV1({
+      ...VALID_TASK,
+      attestation: { kind: 'magic-word', word: 'xyzzy' },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^attestation:/);
+  });
+
+  it('rejects an attestation missing its kind-specific required field', () => {
+    const result = parseVerificationTaskV1({
+      ...VALID_TASK,
+      attestation: { kind: 'http-endpoint' }, // missing urlPath
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^attestation:/);
+  });
+
+  it('rejects a non-object attestation', () => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, attestation: 'trust me' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^attestation:/);
+  });
+
+  it('accepts and round-trips a behavior with requiresDrive: true', () => {
+    const task = {
+      ...VALID_TASK,
+      behaviors: [
+        { id: 'b1', description: 'Click the button', expected: 'Modal opens', requiresDrive: true },
+      ],
+    };
+    const result = parseVerificationTaskV1(task);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.task.behaviors[0].requiresDrive).toBe(true);
+  });
+
+  it('leaves requiresDrive absent on a behavior when omitted', () => {
+    const result = parseVerificationTaskV1(VALID_TASK);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect('requiresDrive' in result.task.behaviors[0]).toBe(false);
+  });
+
+  it('rejects a non-boolean requiresDrive', () => {
+    const result = parseVerificationTaskV1({
+      ...VALID_TASK,
+      behaviors: [{ id: 'b1', description: 'x', expected: 'y', requiresDrive: 'yes' }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('behaviors[0].requiresDrive: expected boolean');
+  });
+});
+
+describe('isAttestationSpec', () => {
+  it.each(ATTESTATION_SPECS)('accepts a valid "$kind" spec', (spec) => {
+    expect(isAttestationSpec(spec)).toBe(true);
+  });
+
+  it('rejects an unrecognized kind', () => {
+    expect(isAttestationSpec({ kind: 'magic-word' })).toBe(false);
+  });
+
+  it('rejects a kind-specific field with the wrong type', () => {
+    expect(isAttestationSpec({ kind: 'http-endpoint', urlPath: 123 })).toBe(false);
+  });
+
+  it('rejects a non-object value', () => {
+    expect(isAttestationSpec('nope')).toBe(false);
+    expect(isAttestationSpec(null)).toBe(false);
+    expect(isAttestationSpec(['array'])).toBe(false);
+  });
+
+  it('tolerates unknown extra keys', () => {
+    expect(isAttestationSpec({ kind: 'file-identity', extra: 'ignored' })).toBe(true);
   });
 });
 
@@ -317,6 +433,78 @@ describe('normalizeVerificationReportV1', () => {
     const result = normalizeVerificationReportV1({ ...VALID_REPORT, outcome: 'maybe' }, EXPECTED_IDS);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/^outcome:/);
+  });
+
+  // --- Modality-roster widening (§4/§7.1): the attestation ECHO field ---
+  // (a human-display-only copy the runner never trusts as proof — see the
+  // VerificationReportV1.attestation doc).
+
+  it('accepts a report with no attestation echo (pre-widening shape)', () => {
+    const result = normalizeVerificationReportV1(VALID_REPORT, EXPECTED_IDS);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect('attestation' in result.report).toBe(false);
+  });
+
+  it('accepts and round-trips a valid attestation echo', () => {
+    const report = {
+      ...VALID_REPORT,
+      attestation: { verified: true, kind: 'cdp-token', detail: 'Runtime.evaluate matched build token' },
+    };
+    const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.report.attestation).toEqual({
+        verified: true,
+        kind: 'cdp-token',
+        detail: 'Runtime.evaluate matched build token',
+      });
+    }
+  });
+
+  it('accepts a false-verified attestation echo (the agent believed the channel failed)', () => {
+    const report = {
+      ...VALID_REPORT,
+      attestation: { verified: false, kind: 'window-identity', detail: 'title did not match' },
+    };
+    const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.report.attestation?.verified).toBe(false);
+  });
+
+  it('rejects an attestation echo with a non-boolean verified', () => {
+    const report = {
+      ...VALID_REPORT,
+      attestation: { verified: 'yes', kind: 'cdp-token', detail: 'x' },
+    };
+    const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('attestation.verified: expected boolean');
+  });
+
+  it('rejects an attestation echo with an unrecognized kind', () => {
+    const report = {
+      ...VALID_REPORT,
+      attestation: { verified: true, kind: 'vibes', detail: 'x' },
+    };
+    const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^attestation\.kind:/);
+  });
+
+  it('rejects an attestation echo with a non-string detail', () => {
+    const report = {
+      ...VALID_REPORT,
+      attestation: { verified: true, kind: 'cdp-token', detail: 42 },
+    };
+    const result = normalizeVerificationReportV1(report, EXPECTED_IDS);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('attestation.detail: expected string');
+  });
+
+  it('rejects a non-object attestation echo', () => {
+    const result = normalizeVerificationReportV1({ ...VALID_REPORT, attestation: 'trust me' }, EXPECTED_IDS);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('attestation: expected an object');
   });
 });
 

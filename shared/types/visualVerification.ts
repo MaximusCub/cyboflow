@@ -301,6 +301,16 @@ export interface VerdictV1 {
 // travel as JSON (a markdown fence in the task-verify step output; the agent's
 // `outputFormat: json_schema` result) so each ships a hand-rolled runtime
 // validator here — no external schema lib, `unknown` + narrowing only.
+//
+// WIDENED for the modality roster (docs/proposals/verification-setup-flow.md
+// §4/§7.1): both shapes gain OPTIONAL fields only — `modality`/`attestation` on
+// the task, `behaviors[].requiresDrive`, and `attestation` on the report — the
+// "widen together" pairing this file's CONTRACT NOTES calls for. This is
+// ADDITIVE ONLY (an old composed task / old report round-trips unchanged). The
+// composer/runner cross-check (declared `modality` vs `resolveTaskModality`)
+// and the request-row / `VerificationAgentRequest` side of the same widening
+// are a SEPARATE, later task — this file only widens the two JSON-fence
+// contracts plus the `AttestationSpec` shape they both reference.
 // ===========================================================================
 
 /**
@@ -339,6 +349,21 @@ export interface VerificationTaskV1 {
   };
   /** Pre-live target (degenerate path — no build/serve). */
   target?: { url?: string; htmlPath?: string };
+  /**
+   * Composer-declared modality axis (§4 roster). Optional so a task composed
+   * before this widening — or by a caller that never learned about it — keeps
+   * round-tripping unchanged; the runner cross-checks a PRESENT value against
+   * `resolveTaskModality(type, task)` rather than trusting either side alone,
+   * and falls back to the resolver's derivation when this is absent.
+   */
+  modality?: VerificationModality;
+  /**
+   * The per-modality verified-artifact-identity channel this task's proof
+   * relies on (§7.1 — see {@link AttestationSpec}'s doc for the "no
+   * attestation ⇒ no `passed`" rule this exists to serve). Optional on the
+   * wire for the same round-trip reason as `modality`.
+   */
+  attestation?: AttestationSpec;
   behaviors: Array<{
     /** Stable within the task, e.g. "b1". */
     id: string;
@@ -348,6 +373,18 @@ export interface VerificationTaskV1 {
     steps?: string[];
     /** What must be observed for PASS. */
     expected: string;
+    /**
+     * True when this behavior can only be exercised by DRIVING the surface
+     * (click/type/navigate), not merely observing it. `native-screen` is
+     * currently observe-only (§4 footnote 2 — driving is a designed
+     * prerequisite, not yet live): a `requiresDrive` behavior composed onto a
+     * `native-screen` task is deterministically `not_testable
+     * (drive-unsupported)` — task-verify composes it OUT rather than
+     * attempting it, and it must never be silently dropped either. Absent or
+     * false on every other modality, where driving is unconditionally
+     * available.
+     */
+    requiresDrive?: boolean;
   }>;
   viewports?: ViewportSpec[];
   /** Capped by scheduler config. */
@@ -378,6 +415,16 @@ export interface VerificationReportV1 {
   feedback: string;
   /** Reuses the existing VerdictV1 issue shape. */
   issues: VerdictV1['issues'];
+  /**
+   * The agent's ECHO of the attestation check it performed (§7.1), for HUMAN
+   * display only (screenshots tab / phase-3 health panel). This is NEVER the
+   * source of truth: the runner trusts only the driver-written state file it
+   * reads itself for the attestation verdict — never a model-authored claim
+   * about it, exactly like `buildLogExcerpt`/`feedback`/`issues` are
+   * corroborating narrative, not proof. Optional so a pre-widening report
+   * round-trips unchanged.
+   */
+  attestation?: { verified: boolean; kind: AttestationSpec['kind']; detail: string };
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
@@ -400,6 +447,96 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+// ===========================================================================
+// AttestationSpec — per-modality verified-artifact identity (§7.1). Declares
+// the CONCRETE channel a verification proves the surface it drove IS this
+// task's deliverable — the false-ready incident is designed in otherwise: the
+// port pool is an in-process mutex ("guards the logical slot, NOT the OS
+// socket"), the sole TCP probe historically ran at teardown only, and the
+// driver's `goto` checks HTTP status, never identity. A bare env-var nonce is
+// not observable from an arbitrary page, and PID-verified readiness is
+// insufficient (warm caches, the user's own already-running app). Per §7.1's
+// closing rule: **no attestation channel comes up ⇒ no `passed`, period** —
+// v1 of this proposal's low-confidence escape hatch is deliberately removed,
+// because it weakened that invariant.
+// ===========================================================================
+
+/**
+ * How a verification proves the surface it drove IS this task's deliverable
+ * (§7.1). `AttestationSpec` is the composed task's DECLARATION of which
+ * channel this request's proof relies on; the runner checks it as part of
+ * judging the request, never the agent's own report of it (see
+ * {@link VerificationReportV1.attestation}'s doc for that distinction).
+ *
+ * Kind → modality mapping (§7.1, §4 roster table):
+ *   - `'http-endpoint'`   — `web`: the serve step injects a route that the
+ *     driver GETs at `http://localhost:$VERIFY_PORT<urlPath>`; the response
+ *     body must contain the per-request nonce the runner minted for this
+ *     request. Requires a live, classic (non-attach) serve step.
+ *   - `'dom-marker'`      — `web`: an element's text or a `data-*` attribute
+ *     in the rendered DOM carries the nonce instead of a dedicated route —
+ *     for a deliverable that cannot add a server-side endpoint.
+ *   - `'cdp-token'`       — `cdp-app`: `Runtime.evaluate(expression)` over the
+ *     CDP session must equal `expected`, an immutable build-stamped global
+ *     the deliverable exposes. The ONLY channel that covers `serve.attach ===
+ *     'cdp'` mode, where the driver never navigates (so there is no `goto` to
+ *     check an HTTP status on) — it reads the ALREADY-RUNNING app's own
+ *     identity instead.
+ *   - `'window-identity'` — `native-screen`: the launched app's OS window
+ *     title matches `titlePattern`. The WEAKEST channel (§7.1 says so
+ *     explicitly — a window title is spoofable/coincidental in a way an
+ *     in-page nonce or a CDP-evaluated token is not) and MUST be recorded as
+ *     such on the verdict rather than treated as equal-strength evidence.
+ *   - `'file-identity'`   — the degenerate pre-live path (`target.htmlPath`):
+ *     identity BY CONSTRUCTION, because the runner itself writes/owns the
+ *     path being opened. No live process, no nonce, nothing to race.
+ *
+ * See {@link isAttestationSpec} for the runtime guard.
+ */
+export type AttestationSpec =
+  | { kind: 'http-endpoint'; urlPath: string }
+  | { kind: 'dom-marker'; selector: string }
+  | { kind: 'cdp-token'; expression: string; expected: string }
+  | { kind: 'window-identity'; titlePattern: string }
+  | { kind: 'file-identity' };
+
+/** True for one of AttestationSpec's five `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
+function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
+  return (
+    value === 'http-endpoint' ||
+    value === 'dom-marker' ||
+    value === 'cdp-token' ||
+    value === 'window-identity' ||
+    value === 'file-identity'
+  );
+}
+
+/**
+ * Runtime guard for an unknown value (a composed task's `attestation` field).
+ * Checks the `kind` discriminant first, then that kind's required fields are
+ * non-empty strings — mirrors this file's other object-shaped validators.
+ * Unknown extra keys are tolerated (forward compat, same posture as
+ * {@link parseVerificationTaskV1}); a wrong TYPE for a known field, or an
+ * unrecognized `kind`, fails the guard.
+ */
+export function isAttestationSpec(v: unknown): v is AttestationSpec {
+  if (!isRecord(v)) return false;
+  const kind = v.kind;
+  if (!isAttestationKind(kind)) return false;
+  switch (kind) {
+    case 'http-endpoint':
+      return isNonEmptyString(v.urlPath);
+    case 'dom-marker':
+      return isNonEmptyString(v.selector);
+    case 'cdp-token':
+      return isNonEmptyString(v.expression) && isNonEmptyString(v.expected);
+    case 'window-identity':
+      return isNonEmptyString(v.titlePattern);
+    case 'file-identity':
+      return true;
+  }
+}
+
 /**
  * Strict runtime validator for a `VerificationTaskV1` fence payload (§5.1
  * contract). Rejects on the FIRST structural problem, naming the offending
@@ -410,6 +547,12 @@ function isStringArray(value: unknown): value is string[] {
  * Behavior ids must be unique within the task. Unknown extra keys anywhere in
  * the payload are tolerated (forward compat) — this validator only checks the
  * fields it knows about.
+ *
+ * Modality-roster widening (§4/§7.1, all OPTIONAL — absence is tolerated):
+ * `modality`, when present, must be a valid {@link VerificationModality}
+ * member; `attestation`, when present, must satisfy
+ * {@link isAttestationSpec} (an unrecognized `kind` is rejected); each
+ * behavior's `requiresDrive`, when present, must be a boolean.
  */
 export function parseVerificationTaskV1(
   value: unknown,
@@ -482,6 +625,29 @@ export function parseVerificationTaskV1(
     };
   }
 
+  let modality: VerificationTaskV1['modality'];
+  if (value.modality !== undefined) {
+    if (!isVerificationModality(value.modality)) {
+      return { ok: false, error: 'modality: expected one of web|cdp-app|native-screen|mobile' };
+    }
+    modality = value.modality;
+  }
+
+  let attestation: VerificationTaskV1['attestation'];
+  if (value.attestation !== undefined) {
+    if (!isAttestationSpec(value.attestation)) {
+      const kind = isRecord(value.attestation) ? value.attestation.kind : undefined;
+      return {
+        ok: false,
+        error:
+          kind !== undefined
+            ? `attestation: malformed or unrecognized spec for kind "${String(kind)}"`
+            : 'attestation: expected an object with a valid "kind"',
+      };
+    }
+    attestation = value.attestation;
+  }
+
   if (!Array.isArray(value.behaviors)) return { ok: false, error: 'behaviors: expected an array' };
   const seenBehaviorIds = new Set<string>();
   const behaviors: VerificationTaskV1['behaviors'] = [];
@@ -503,11 +669,15 @@ export function parseVerificationTaskV1(
     if (item.steps !== undefined && !isStringArray(item.steps)) {
       return { ok: false, error: `${path}.steps: expected an array of strings` };
     }
+    if (item.requiresDrive !== undefined && typeof item.requiresDrive !== 'boolean') {
+      return { ok: false, error: `${path}.requiresDrive: expected boolean` };
+    }
     behaviors.push({
       id: item.id,
       description: item.description,
       expected: item.expected,
       ...(item.steps !== undefined ? { steps: item.steps } : {}),
+      ...(item.requiresDrive !== undefined ? { requiresDrive: item.requiresDrive } : {}),
     });
   }
 
@@ -553,6 +723,8 @@ export function parseVerificationTaskV1(
     ...(build !== undefined ? { build } : {}),
     ...(serve !== undefined ? { serve } : {}),
     ...(target !== undefined ? { target } : {}),
+    ...(modality !== undefined ? { modality } : {}),
+    ...(attestation !== undefined ? { attestation } : {}),
     ...(viewports !== undefined ? { viewports } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   };
@@ -573,6 +745,13 @@ export function parseVerificationTaskV1(
  * `outcome: 'pass'` alongside any `behaviors[].result === 'fail'` is coerced
  * to `outcome: 'fail'` with `coerced: true` — the structured per-behavior
  * verdict, not the agent's self-reported outcome, drives the merge gate.
+ *
+ * Modality-roster widening (§4/§7.1): `attestation`, when present, is
+ * validated tolerantly — shape-checked (`verified` boolean, `kind` one of
+ * {@link AttestationSpec}'s five members, `detail` a string) but never
+ * treated as proof. Per {@link VerificationReportV1.attestation}'s doc, this
+ * is the agent's HUMAN-facing echo only; the runner's actual attestation
+ * verdict comes from the driver-written state file, never this field.
  */
 export function normalizeVerificationReportV1(
   value: unknown,
@@ -682,6 +861,24 @@ export function normalizeVerificationReportV1(
     });
   }
 
+  let attestation: VerificationReportV1['attestation'];
+  if (value.attestation !== undefined) {
+    if (!isRecord(value.attestation)) return { ok: false, error: 'attestation: expected an object' };
+    const att = value.attestation;
+    if (typeof att.verified !== 'boolean') {
+      return { ok: false, error: 'attestation.verified: expected boolean' };
+    }
+    if (!isAttestationKind(att.kind)) {
+      return {
+        ok: false,
+        error:
+          'attestation.kind: expected one of http-endpoint|dom-marker|cdp-token|window-identity|file-identity',
+      };
+    }
+    if (typeof att.detail !== 'string') return { ok: false, error: 'attestation.detail: expected string' };
+    attestation = { verified: att.verified, kind: att.kind, detail: att.detail };
+  }
+
   let coerced = false;
   if (outcome === 'pass' && anyBehaviorFailed) {
     outcome = 'fail';
@@ -697,6 +894,7 @@ export function normalizeVerificationReportV1(
     confidence,
     feedback,
     issues,
+    ...(attestation !== undefined ? { attestation } : {}),
   };
   return { ok: true, report, coerced };
 }
@@ -1072,6 +1270,18 @@ export interface VisualVerifyConfig {
    * Default 15 min ({@link DEFAULT_QUEUED_AGE_CEILING_MS}).
    */
   queuedAgeCeilingMs?: number;
+  /**
+   * The BOUNDED web/cdp agent-slot count a verify-agent work item consumes
+   * (§4 roster table + footnote 1) — the scheduler work item that REPLACES
+   * today's count-1 `VERIFY_AGENT_LEASE`, which serializes EVERY agent
+   * verification behind a single global lease regardless of modality.
+   * `native-screen` requests additionally serialize on the separate, still
+   * count-1 `VERIFY_SCREEN_LEASE` (screen exclusivity is a product policy —
+   * §4 "Screen exclusivity is a product policy, not just a lease" — not
+   * merely a resource lease); `agentSlots` governs ONLY the web/cdp pool, and
+   * has no bearing on the screen lease's count. Default 2.
+   */
+  agentSlots?: number;
 }
 
 /**
@@ -1087,6 +1297,7 @@ export interface ResolvedVisualVerifyConfig {
   devServerPorts: number[];
   simulatorDevices: string[];
   queuedAgeCeilingMs: number;
+  agentSlots: number;
 }
 
 /**
@@ -1120,6 +1331,17 @@ export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [29260, 29262, 29264,
 export const DEFAULT_QUEUED_AGE_CEILING_MS = 15 * 60 * 1000;
 
 /**
+ * The default bounded web/cdp agent-slot count (§4 footnote 1) — 2 concurrent
+ * agent verifications may run at once against the shared web/cdp pool once the
+ * scheduler work item lands, up from today's hard count-1 `VERIFY_AGENT_LEASE`.
+ * Deliberately modest: each slot is a full SDK deploy (build/serve/drive/judge)
+ * competing for the same host CPU/network the user's own dev work needs, and
+ * `native-screen` never draws from this pool at all (it has its own, separate
+ * count-1 `VERIFY_SCREEN_LEASE`).
+ */
+export const DEFAULT_VERIFY_AGENT_SLOTS = 2;
+
+/**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
  * persisted block is absent. `enabled` floors to false (master switch OFF by
  * default); the rest mirror the design doc (#7). Kept here so the contract +
@@ -1133,6 +1355,7 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   devServerPorts: [...DEFAULT_VERIFY_DEV_PORTS],
   simulatorDevices: [],
   queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
+  agentSlots: DEFAULT_VERIFY_AGENT_SLOTS,
 };
 
 // ===========================================================================

@@ -572,6 +572,7 @@ export class ConfigManager extends EventEmitter {
         ? [...vv.simulatorDevices]
         : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
       queuedAgeCeilingMs: vv?.queuedAgeCeilingMs ?? VISUAL_VERIFY_DEFAULTS.queuedAgeCeilingMs,
+      agentSlots: vv?.agentSlots ?? VISUAL_VERIFY_DEFAULTS.agentSlots,
     };
   }
 
