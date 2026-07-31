@@ -32,6 +32,10 @@
  *   - echo suppression: an unresolved outbox row halts the batch and the
  *     cursor never advances past the blocked issue (by external_id AND by the
  *     create path's client_key).
+ *   - inbound changes never echo back OUTBOUND: the real writeBack listener is
+ *     subscribed to the real taskChangeEvents (the way TrackerSyncService wires
+ *     it) and must stay silent for provider-authored stage moves while still
+ *     firing for local ones.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -39,8 +43,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseService } from '../../../database/database';
-import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
+import { TASK_ALL_CHANNEL, TaskChangeRouter, taskChangeEvents } from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
+import type { TaskChangedEvent } from '../../../../../shared/types/tasks';
 import type {
   TrackerIssue,
   TrackerSourceNarrow,
@@ -50,7 +55,7 @@ import type {
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type { TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
-import type { TrackerConflictRow, TrackerConnectionRow } from '../../../database/models';
+import type { TrackerConflictRow, TrackerConnectionRow, TrackerOutboxRow } from '../../../database/models';
 import {
   insertConnection,
   getConnection,
@@ -58,6 +63,7 @@ import {
   enqueueOutbox,
   type NewConnectionRow,
 } from '../store';
+import { createWriteBackListener, type WriteBackListener } from '../writeBack';
 import {
   runInboundSync,
   runDeletionSweep,
@@ -1069,5 +1075,172 @@ describe('runInboundSync — echo suppression', () => {
     expect(resumed.haltedOnOutbox).toBeUndefined();
     expect(resumed.imported).toBe(1);
     expect(reload().cursor_external_id).toBe('ext-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound changes must not echo back OUTBOUND
+// ---------------------------------------------------------------------------
+
+/**
+ * TaskChangedEvent carries no actor/origin, so writeBack.ts routes a
+ * provider-authored stage move exactly like a local one. These tests wire the
+ * REAL listener onto the REAL emitter the way TrackerSyncService.start does —
+ * which is also the only way an inbound-triggered enqueue is observable, since
+ * the listener runs INLINE on TaskChangeRouter's post-commit emit.
+ */
+describe('runInboundSync — inbound changes do not echo back outbound', () => {
+  /** STATES plus a SECOND completed-group state, to catch a state-specific overwrite. */
+  const TWO_DONE_STATES: TrackerState[] = [
+    ...STATES,
+    { id: 'st-released', name: 'Released', color: null, group: 'completed' },
+  ];
+
+  let listener: WriteBackListener | null = null;
+  let handler: ((event: TaskChangedEvent) => void) | null = null;
+
+  function subscribeWriteBack(): void {
+    const built = createWriteBackListener({ db: raw, nowIso: () => '2026-07-30 12:00:00' });
+    const fn = (event: TaskChangedEvent): void => built.handleTaskChanged(event);
+    taskChangeEvents.on(TASK_ALL_CHANNEL, fn);
+    listener = built;
+    handler = fn;
+  }
+
+  afterEach(() => {
+    if (handler !== null) taskChangeEvents.off(TASK_ALL_CHANNEL, handler);
+    listener?.dispose();
+    listener = null;
+    handler = null;
+  });
+
+  /** Every outbox row, settled or not — "zero enqueued" must mean zero. */
+  function outboxRows(): TrackerOutboxRow[] {
+    return raw.prepare('SELECT * FROM tracker_outbox ORDER BY id ASC').all() as TrackerOutboxRow[];
+  }
+
+  it('queues nothing for an inbound move to Done', async () => {
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(deps, reload());
+
+    expect(report.updated).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it("queues nothing for an inbound move to Won't do", async () => {
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    adapter.issues = [makeIssue({ stateId: 'st-canceled', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(deps, reload());
+
+    expect(ideas()[0].stage_id).toBe(STAGE.wontdo);
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it('does not overwrite the provider’s own completed state when the remote moves to a SECOND done state', async () => {
+    adapter.states = TWO_DONE_STATES;
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    // 'Released' is in the completed group but is NOT the state outbound would
+    // pick (pickWriteBackState takes the FIRST of the group, 'st-done'), so an
+    // echoed write-back here would drag the issue off the user's own state.
+    adapter.issues = [makeIssue({ stateId: 'st-released', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(deps, reload());
+
+    expect(report.updated).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it('queues nothing for a fresh import that lands on a mapped terminal stage', async () => {
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue({ stateId: 'st-done' })];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.imported).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it('still enqueues for a genuinely LOCAL stage move', async () => {
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideas()[0].id,
+      stageId: STAGE.done,
+    });
+
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(rows[0].external_id).toBe('ext-1');
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it('still enqueues a LOCAL move away from the stage an inbound pass just applied', async () => {
+    // The stamp records where the REMOTE is, so it must suppress only the echo
+    // — a later local decision to park the idea is a real write-back.
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(deps, reload());
+    expect(outboxRows()).toEqual([]);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideas()[0].id,
+      stageId: STAGE.wontdo,
+    });
+
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'cancelled' });
+  });
+
+  it('re-arms the write-back once the remote leaves the terminal group', async () => {
+    // A stale stamp must not wedge outbound: after the remote moves back to a
+    // group no local stage demands, a local move to Done is a real write again.
+    const connection = makeConnection();
+    subscribeWriteBack();
+    adapter.issues = [makeIssue({ stateId: 'st-done' })];
+    await runInboundSync(deps, connection);
+    expect(outboxRows()).toEqual([]);
+
+    adapter.issues = [makeIssue({ stateId: 'st-backlog', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(deps, reload());
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
+    expect(outboxRows()).toEqual([]);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideas()[0].id,
+      stageId: STAGE.done,
+    });
+
+    expect(outboxRows()).toHaveLength(1);
   });
 });

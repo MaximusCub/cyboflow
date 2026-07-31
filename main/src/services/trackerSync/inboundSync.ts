@@ -25,10 +25,24 @@
  * mid-batch replays at most the overlap — the same guarantee the doc's
  * transaction wording intends.
  *
- * ECHO SUPPRESSION. An issue referenced by an UNRESOLVED outbox row is one of
- * our own in-flight writes. The batch STOPS at it (it is not applied and the
- * cursor is not advanced past it), so a half-created sub-issue can never be
- * re-imported as a fresh idea — the proposal's hard correctness requirement.
+ * ECHO SUPPRESSION, INBOUND SIDE. An issue referenced by an UNRESOLVED outbox
+ * row is one of our own in-flight writes. The batch STOPS at it (it is not
+ * applied and the cursor is not advanced past it), so a half-created sub-issue
+ * can never be re-imported as a fresh idea — the proposal's hard correctness
+ * requirement.
+ *
+ * ECHO SUPPRESSION, OUTBOUND SIDE. The other direction needs its own seam:
+ * TaskChangedEvent carries no actor/origin, so writeBack.ts's listener — which
+ * runs INLINE on TaskChangeRouter's post-commit emit — cannot tell a
+ * provider-authored stage move from a local one and would queue a state write
+ * straight back at the issue we just read it from. Its dedupe key is the link
+ * baseline's `lastWrittenGroup`, which this module reads as "the canonical
+ * group the REMOTE issue is already known to be at": every stage move made in
+ * response to a remote state stamps that group FIRST (see
+ * {@link stampRemoteGroup}), so the listener recognizes the move as already
+ * satisfied. Remote-wins then holds on the state VALUE too — an inbound move to
+ * a second completed/cancelled state keeps the provider's own state instead of
+ * being overwritten with the group's first one.
  *
  * IMPORT RECOVERY. An import is two writes (create the idea, then write the
  * link) that cannot share a transaction, so a crash between them would leave a
@@ -55,6 +69,7 @@ import type {
   TrackerMappingTarget,
   TrackerProvider,
   TrackerSourceSelection,
+  TrackerStateGroup,
   TrackerStateMapping,
 } from '../../../../shared/types/trackerSync';
 import {
@@ -76,6 +91,7 @@ import {
   resolveStageIds,
   type TrackerStageIds,
 } from './stateMapping';
+import { isWriteBackGroup, parseJsonObject, type WriteBackGroup } from './writeBack';
 
 // ---------------------------------------------------------------------------
 // Dependencies + public shapes
@@ -471,12 +487,64 @@ interface SyncContext {
   connection: TrackerConnectionRow;
   stageIds: TrackerStageIds;
   mapping: TrackerStateMapping;
+  /** stateId -> the provider state's CANONICAL group (the write-back stamp's input). */
+  stateGroups: Record<string, TrackerStateGroup>;
   report: InboundSyncReport;
 }
 
 /** The mapping target for an issue's state; an unmapped state never imports. */
 function targetFor(ctx: SyncContext, issue: TrackerIssue): TrackerMappingTarget {
   return ctx.mapping[issue.stateId] ?? 'dont';
+}
+
+/**
+ * The canonical group the remote issue is in, narrowed to the three a local
+ * stage can ever demand. Null for triage/backlog/unstarted (no stage writes
+ * those back, so there is nothing to suppress) and for a state the provider no
+ * longer lists.
+ */
+function remoteWriteBackGroup(ctx: SyncContext, issue: TrackerIssue): WriteBackGroup | null {
+  const group = ctx.stateGroups[issue.stateId];
+  return isWriteBackGroup(group) ? group : null;
+}
+
+/**
+ * Record where the REMOTE issue stands in `baseline_json.lastWrittenGroup` —
+ * the key writeBack.ts's inline listener dedupes against (see the module
+ * header's OUTBOUND ECHO SUPPRESSION note). Called BEFORE the applyChange that
+ * moves a linked entity in response to a remote state, because the listener
+ * fires synchronously inside that call: a stamp written afterwards is too late
+ * and the echo is already queued.
+ *
+ * The failure shape is deliberately safe. If the stamp lands and applyChange
+ * then fails, the blob claims only that the remote is at that group — which is
+ * TRUE, independently of whether we managed to mirror it locally; the next pass
+ * replays the move against an unchanged baseline. `lastWrittenAt` is left
+ * alone: it timestamps OUR writes, and this is an observation of theirs.
+ *
+ * A group of null CLEARS the key rather than leaving a stale one behind — once
+ * the remote leaves the terminal groups, a later local move to Done/Won't do is
+ * a genuine write-back and must not be suppressed.
+ *
+ * Returns the blob it wrote (or the input, unchanged, when there was nothing to
+ * say) so the caller keeps composing on top of it: the in-memory link row goes
+ * stale the moment this lands.
+ */
+function stampRemoteGroup(
+  ctx: SyncContext,
+  link: EntityExternalLinkRow,
+  baselineJson: string | null,
+  group: WriteBackGroup | null,
+): string | null {
+  const blob = parseJsonObject(baselineJson);
+  const current = isWriteBackGroup(blob.lastWrittenGroup) ? blob.lastWrittenGroup : null;
+  if (current === group) return baselineJson;
+
+  if (group === null) delete blob.lastWrittenGroup;
+  else blob.lastWrittenGroup = group;
+  const next = JSON.stringify(blob);
+  updateBaseline(ctx.db, link.id, next);
+  return next;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +592,9 @@ export async function runInboundSync(
 
   const blocked = collectBlockedExternalIds(db, connection.id);
 
+  const stateGroups: Record<string, TrackerStateGroup> = {};
+  for (const state of states) stateGroups[state.id] = state.group;
+
   const ctx: SyncContext = {
     db,
     router,
@@ -531,6 +602,7 @@ export async function runInboundSync(
     connection,
     stageIds,
     mapping,
+    stateGroups,
     report,
   };
 
@@ -686,7 +758,12 @@ async function importIssueAsIdea(
 
   // The link goes in IMMEDIATELY after the create: it is what stops the issue
   // from being re-imported at all, so the marker-based recovery above only ever
-  // has to cover the gap between these two statements.
+  // has to cover the gap between these two statements. Its baseline is seeded
+  // WITH the remote-group stamp, because the placement below is the first event
+  // the write-back listener can see for this entity — an issue imported
+  // straight onto Done/Won't do would otherwise echo its own state back.
+  const group = remoteWriteBackGroup(ctx, issue);
+  const snapshot = snapshotOf(issue);
   upsertLink(db, {
     connection_id: connection.id,
     entity_type: 'idea',
@@ -696,7 +773,7 @@ async function importIssueAsIdea(
     external_identifier: issue.identifier,
     external_url: issue.url,
     external_parent_id: issue.parentExternalId,
-    baseline_json: JSON.stringify(snapshotOf(issue)),
+    baseline_json: JSON.stringify(group === null ? snapshot : { ...snapshot, lastWrittenGroup: group }),
   });
 
   // A fresh idea lands in the board's Idea column, so a target that already
@@ -750,6 +827,9 @@ async function mergeLinkedIssue(
 ): Promise<void> {
   const { db, connection, report } = ctx;
   const localBody = splitBody(local.body);
+  // Tracks the link's baseline blob across the echo-suppression stamp below,
+  // which writes it BEFORE applyChange and so leaves `link` stale.
+  let baselineJson = link.baseline_json;
 
   const fields: TaskFieldChanges = {};
   let stageMove: string | undefined;
@@ -832,6 +912,11 @@ async function mergeLinkedIssue(
   }
 
   if (Object.keys(fields).length > 0 || stageMove !== undefined) {
+    // The stage move is ours to mirror, not to announce back — stamp where the
+    // remote stands before the write-back listener sees the event.
+    if (stageMove !== undefined) {
+      baselineJson = stampRemoteGroup(ctx, link, baselineJson, remoteWriteBackGroup(ctx, issue));
+    }
     await ctx.router.applyChange(connection.project_id, {
       actor: connection.provider,
       entityType: link.entity_type,
@@ -842,7 +927,7 @@ async function mergeLinkedIssue(
     report.updated++;
   }
 
-  updateBaseline(db, link.id, composeBaselineJson(link.baseline_json, snapshotOf(issue)));
+  updateBaseline(db, link.id, composeBaselineJson(baselineJson, snapshotOf(issue)));
 }
 
 /** File an Auto-mode override as a conflict row that is immediately resolved. */
