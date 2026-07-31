@@ -68,6 +68,16 @@ export interface EnqueueTaskVerificationOptions {
   attempt: number;
   /** The run worktree the snapshot sha is captured from (§5.5). */
   worktreePath: string;
+  /**
+   * §3.6 (docs/proposals/verification-setup-flow.md) — mark this as a phase-2
+   * SETUP/PROOF request rather than ordinary lane traffic: exempt from the
+   * project's lifetime verification budget, never counted against it, and exempt
+   * from the §3.2 "no proven runbook" degrade gate (proving the runbook is how a
+   * project stops being unproven). Defaults to false; no caller in phase 0 sets
+   * it — the channel exists so the phase-2 setup flow can enqueue its proof run
+   * through this SAME seam instead of a parallel one.
+   */
+  setupProof?: boolean;
   logger?: LoggerLike;
 }
 
@@ -146,6 +156,10 @@ export async function enqueueTaskVerification(
   // uninitialized scheduler or a transient enqueue error is a fail-open SKIP, never
   // a thrown lane crash.
   try {
+    // The modality stamp is NOT set here: this seam delegates to
+    // scheduler.enqueue, which resolves + stamps it from (type, task) at the
+    // single INSERT — one derivation site, so a lane enqueue and an MCP enqueue
+    // can never disagree about a request's modality.
     const requestId = VerificationScheduler.getInstance().enqueue({
       runId,
       projectId,
@@ -155,6 +169,7 @@ export async function enqueueTaskVerification(
       task,
       snapshotSha,
       enqueueKey,
+      ...(opts.setupProof === true ? { setupProof: true } : {}),
     });
     logger?.debug('[enqueueTaskVerification] enqueued lane verification', {
       runId,

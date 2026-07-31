@@ -27,12 +27,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createVerdictDelivery } from '../verify/verdictDelivery';
+import { createVerdictDelivery, createCapabilityBreakerFinding } from '../verify/verdictDelivery';
+import { VERIFY_NO_RUNBOOK_REASON } from '../verify/verificationScheduler';
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { SprintLaneStore } from '../sprintLaneStore';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import type { VerdictV1 } from '../../../../shared/types/visualVerification';
+import type {
+  VerdictV1,
+  VerificationFailureEvidence,
+} from '../../../../shared/types/visualVerification';
 import type { ScreenshotsArtifactPayload } from '../../../../shared/types/artifacts';
 
 const MIG_DIR = join(__dirname, '..', '..', 'database', 'migrations');
@@ -46,6 +50,10 @@ const MIGRATIONS = [
   '055_visual_verification.sql',
   '078_verification_agent_requests.sql',
   '085_review_item_audience.sql',
+  // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3): the
+  // failure_class / failure_evidence_json columns this delivery renders, plus the
+  // capability-ledger tables the §3.4 breaker notice is raised alongside.
+  '088_verify_failure_classes.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -677,6 +685,10 @@ const SPRINT_MIGRATIONS = [
   '055_visual_verification.sql',
   '078_verification_agent_requests.sql',
   '085_review_item_audience.sql',
+  // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3): the
+  // failure_class / failure_evidence_json columns this delivery renders, plus the
+  // capability-ledger tables the §3.4 breaker notice is raised alongside.
+  '088_verify_failure_classes.sql',
 ];
 
 function buildSprintDb(): Database.Database {
@@ -1304,5 +1316,265 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     expect(f).toHaveLength(1);
     expect(f[0].attempt).toBe(1);
     expect(f[0].requestId).toBe('vr_bad');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 0 — §3.1 classification rendering + §3.4 breaker notice
+// (docs/proposals/verification-setup-flow.md)
+// ---------------------------------------------------------------------------
+
+/** Seed a terminal request row carrying the migration-088 classification columns. */
+function seedClassifiedRequest(
+  db: Database.Database,
+  opts: {
+    id: string;
+    runId: string;
+    status: string;
+    errorMessage?: string | null;
+    failureClass?: string | null;
+    evidence?: VerificationFailureEvidence[];
+  },
+): void {
+  db.prepare(
+    `INSERT INTO verification_requests
+       (id, run_id, project_id, status, verify_type, deliverable_json, error_message, failure_class, failure_evidence_json, modality)
+     VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, ?, ?, ?, 'web')`,
+  ).run(
+    opts.id,
+    opts.runId,
+    opts.status,
+    JSON.stringify({ intent: 'x' }),
+    opts.errorMessage ?? null,
+    opts.failureClass ?? null,
+    opts.evidence ? JSON.stringify(opts.evidence) : null,
+  );
+}
+
+function bodyOf(db: Database.Database, runId: string): string {
+  const rows = db
+    .prepare(`SELECT body FROM review_items WHERE run_id = ? AND source = 'visual-verify'`)
+    .all(runId) as Array<{ body: string }>;
+  expect(rows).toHaveLength(1);
+  return rows[0].body;
+}
+
+describe('verdictDelivery — §3.1 classification in the non-blocking finding body', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = buildDb();
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    ArtifactRouter.initialize(dbAdapter(db));
+    ReviewItemRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    db.close();
+  });
+
+  it("an ENV skip renders the attribution AND the harness evidence lines", async () => {
+    seedRun(db, 'run-c1');
+    seedClassifiedRequest(db, {
+      id: 'vr_c1',
+      runId: 'run-c1',
+      status: 'skipped',
+      errorMessage: 'environment failure (harness-verified), not the deliverable: port 29260 is occupied',
+      failureClass: 'env',
+      evidence: [
+        { source: 'port-probe', check: 'port-free', detail: 'port 29260 is occupied — a connect probe succeeded (squatter)' },
+      ],
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_c1',
+      runId: 'run-c1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+    });
+
+    const body = bodyOf(db, 'run-c1');
+    expect(body).toContain('Attributed to: environment (harness-verified)');
+    expect(body).toContain('did NOT charge the lane a retry');
+    expect(body).toContain('Harness evidence:');
+    expect(body).toContain('[port-probe/port-free]');
+    expect(body).toContain('squatter');
+  });
+
+  it("an AMBIGUOUS timeout renders the attribution but NO evidence block (there is no harness proof to show)", async () => {
+    seedRun(db, 'run-c2');
+    seedClassifiedRequest(db, {
+      id: 'vr_c2',
+      runId: 'run-c2',
+      status: 'timeout',
+      errorMessage: 'request timed out',
+      failureClass: 'ambiguous',
+      evidence: [{ source: 'runner', check: 'runner-status', detail: 'runnerStatus=timeout' }],
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_c2',
+      runId: 'run-c2',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'timeout',
+      verdict: undefined,
+      fileNames: [],
+    });
+
+    const body = bodyOf(db, 'run-c2');
+    expect(body).toContain('Attributed to: ambiguous');
+    expect(body).not.toContain('Harness evidence:');
+  });
+
+  it('the §3.2 degrade reason adds the setup CTA; an ordinary skip reason does not', async () => {
+    seedRun(db, 'run-c3');
+    seedClassifiedRequest(db, {
+      id: 'vr_c3',
+      runId: 'run-c3',
+      status: 'skipped',
+      errorMessage: VERIFY_NO_RUNBOOK_REASON,
+      failureClass: 'env',
+      evidence: [{ source: 'runner', check: 'pre-lease-gate', detail: VERIFY_NO_RUNBOOK_REASON }],
+    });
+    seedRun(db, 'run-c4');
+    seedClassifiedRequest(db, {
+      id: 'vr_c4',
+      runId: 'run-c4',
+      status: 'skipped',
+      errorMessage: 'no healthy backend available',
+      failureClass: 'env',
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    for (const [requestId, runId] of [['vr_c3', 'run-c3'], ['vr_c4', 'run-c4']]) {
+      await deliver({
+        requestId,
+        runId,
+        projectId: 1,
+        type: 'static-render-snapshot',
+        status: 'skipped',
+        verdict: undefined,
+        fileNames: [],
+      });
+    }
+
+    expect(bodyOf(db, 'run-c3')).toContain('Run verification setup for this project');
+    expect(bodyOf(db, 'run-c4')).not.toContain('Run verification setup for this project');
+  });
+
+  it('a row with NO classification (legacy path / pre-088) renders the pre-phase-0 body unchanged', async () => {
+    seedRun(db, 'run-c5');
+    seedClassifiedRequest(db, {
+      id: 'vr_c5',
+      runId: 'run-c5',
+      status: 'skipped',
+      errorMessage: 'no healthy backend available',
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_c5',
+      runId: 'run-c5',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+    });
+    const body = bodyOf(db, 'run-c5');
+    expect(body).toContain('Reason: no healthy backend available');
+    expect(body).not.toContain('Attributed to:');
+  });
+});
+
+describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = buildDb();
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    ArtifactRouter.initialize(dbAdapter(db));
+    ReviewItemRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    db.close();
+  });
+
+  it('files ONE non-blocking human finding naming the modality, the reason, and how it recovers', async () => {
+    seedRun(db, 'run-brk', 'tsk_1');
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_1', 1, 'TASK-100', 'T', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+
+    const file = createCapabilityBreakerFinding({ db: dbAdapter(db) });
+    await file({
+      projectId: 1,
+      runId: 'run-brk',
+      modality: 'web',
+      reason: 'chromium not resolved (absent)',
+    });
+
+    const findings = findingRows(db, 'run-brk');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].source).toBe('visual-verify');
+    expect(findings[0].blocking).toBe(0);
+    expect(findings[0].audience).toBe('human');
+    expect(findings[0].severity).toBe('warning');
+    expect(findings[0].title).toContain('auto-paused for web');
+    // Soft-links to the run's task like every other visual-verify finding.
+    expect(findings[0].entity_type).toBe('task');
+    expect(findings[0].entity_id).toBe('tsk_1');
+
+    const body = bodyOf(db, 'run-brk');
+    expect(body).toContain('chromium not resolved (absent)');
+    expect(body).toContain('clears itself');
+  });
+
+  it('is FAIL-SOFT: a router failure never throws back into the settled verdict path', async () => {
+    const errors: string[] = [];
+    const file = createCapabilityBreakerFinding({
+      db: dbAdapter(db),
+      logger: {
+        info: () => {},
+        warn: () => {},
+        debug: () => {},
+        error: (msg: string) => void errors.push(msg),
+      },
+    });
+    // projectId 999 does not exist → the router's FK/lookup path fails.
+    await expect(
+      file({ projectId: 999, runId: 'nope', modality: 'web', reason: 'boom' }),
+    ).resolves.toBeUndefined();
+    expect(errors.length).toBeGreaterThan(0);
   });
 });

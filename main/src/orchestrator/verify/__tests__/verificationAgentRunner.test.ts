@@ -128,6 +128,11 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     provision,
     checkSnapshotMutated: async () => false,
     fileExists: async () => true,
+    // §3.5 preflight probes — a HEALTHY host by default, so every pre-existing
+    // test still reaches the deploy. The real defaults (driverCore's chromium
+    // resolution / an always-free port) would drag playwright into this suite.
+    resolveChromium: async () => '/opt/chromium',
+    portFreeProbe: async () => true,
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
     stopDriver,
     reapBrowser: vi.fn(),
@@ -478,7 +483,9 @@ describe('VerificationAgentRunner.run', () => {
   });
 
   it('skips when a reported screenshot does not exist in the artifacts dir', async () => {
-    const { runner } = makeRunner({ fileExists: async () => false });
+    // Path-aware: the driver CLI must stay PRESENT, or the §3.5 preflight would
+    // short-circuit this request before the screenshot check is ever reached.
+    const { runner } = makeRunner({ fileExists: async (p: string) => !p.endsWith('s.png') });
     const result = await runner.run(makeReq());
     expect(result.status).toBe('skipped');
     expect(result.errorMessage).toContain('not found');
@@ -680,5 +687,88 @@ describe('VerificationAgentRunner.run', () => {
     const result = await runner.run(makeReq());
     expect(result.status).toBe('passed'); // unaffected by the write failure
     expect(writeTranscript).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.5 pre-deploy preflight (docs/proposals/verification-setup-flow.md)
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner.run — §3.5 preflight', () => {
+  it('an absent chromium short-circuits BEFORE any deploy: skipped, deployed:false, no SDK query, no snapshot', async () => {
+    const { runner, query, dispose } = makeRunner({ resolveChromium: async () => null });
+    const result = await runner.run(makeReq());
+
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(result.errorMessage).toContain('chromium not resolved');
+    expect(result.fileNames).toEqual([]);
+    // The whole point: nothing expensive ran.
+    expect(query).not.toHaveBeenCalled();
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('carries the preflight result (every check + its detail) so the classifier has harness evidence', async () => {
+    const { runner } = makeRunner({ resolveChromium: async () => null });
+    const result = await runner.run(makeReq());
+
+    expect(result.preflight?.ok).toBe(false);
+    const failed = (result.preflight?.checks ?? []).filter((c) => !c.ok);
+    expect(failed.map((c) => c.id)).toEqual(['chromium']);
+    // Passing checks are recorded too — the audit trail is the WHOLE preflight.
+    expect((result.preflight?.checks ?? []).some((c) => c.id === 'node' && c.ok)).toBe(true);
+  });
+
+  it('an occupied leased port fails preflight (the §1(e) false-ready evidence source)', async () => {
+    const { runner, query } = makeRunner({ portFreeProbe: async () => false });
+    const result = await runner.run(makeReq({ task: makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}' } }) }));
+
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    const failedIds = (result.preflight?.checks ?? []).filter((c) => !c.ok).map((c) => c.id);
+    expect(failedIds).toContain('port-free');
+    expect(failedIds).toContain('driver-port-free');
+  });
+
+  it('a healthy host deploys as before and reports deployed:true + the passing preflight + provisionMode', async () => {
+    const { runner, query } = makeRunner();
+    const result = await runner.run(makeReq());
+
+    expect(result.status).toBe('passed');
+    expect(result.deployed).toBe(true);
+    expect(result.provisionMode).toBe('snapshot');
+    expect(result.preflight?.ok).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('a genuinely pre-deploy exit (unresolvable agent) reports deployed:false so it is never budget-charged', async () => {
+    const { runner, query } = makeRunner({ resolveVerifyAgent: () => undefined });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('a query that THREW is still deployed:true — that session spent tokens', async () => {
+    const { runner } = makeRunner({
+      query: async () => {
+        throw new VerificationAgentQueryError('agent boom', null);
+      },
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(true);
+    expect(result.provisionMode).toBe('snapshot');
+  });
+
+  it('CDP-attach mode skips the chromium check entirely (the driver attaches, it never launches one)', async () => {
+    const { runner, query } = makeRunner({ resolveChromium: async () => null });
+    const result = await runner.run(
+      makeReq({ task: makeTask({ serve: { cmd: 'electron . --remote-debugging-port=$VERIFY_DRIVER_PORT', attach: 'cdp' } }) }),
+    );
+    expect(result.status).toBe('passed');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect((result.preflight?.checks ?? []).some((c) => c.id === 'chromium')).toBe(false);
   });
 });

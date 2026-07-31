@@ -40,6 +40,9 @@ import type {
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationBackendRegistry,
+  VerificationFailureClass,
+  VerificationFailureEvidence,
+  VerificationModality,
   VerificationReportV1,
   VerificationRequestInput,
   VerificationTaskV1,
@@ -52,9 +55,18 @@ import type {
 import {
   VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
+  isVerificationModality,
   parseVerificationTaskV1,
+  resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
-import type { VerificationAgentRunnerLike, VerificationAgentRequest } from './verificationAgentRunner';
+import type {
+  VerificationAgentRunnerLike,
+  VerificationAgentRequest,
+  VerificationAgentRunResult,
+} from './verificationAgentRunner';
+import type { AgentPreflightResult } from './preflight';
+import { classifyVerificationFailure } from './failureClassifier';
+import type { VerifyCapabilityStore } from './capabilityStore';
 
 // Re-exported for existing consumers — the type moved to shared so the
 // screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
@@ -106,6 +118,36 @@ export interface VerificationTerminalEvent {
 
 /** The single-display capture lease (Peekaboo / native-desktop). Count-1. */
 export const VERIFY_SCREEN_LEASE = 'verify:screen';
+
+// ---------------------------------------------------------------------------
+// Phase-0 gate vocabulary (docs/proposals/verification-setup-flow.md §3.2/§3.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Modalities the AGENT engine has no executable path for, with the reason a
+ * human sees on the skip (§3.3). Until phase 1 ships the roster these land here
+ * with an explicit statement instead of today's deploy-and-fail-organically: the
+ * agent path never consults `verify_type` (dispatch keys solely on the run's
+ * chain stamp) and `VerificationAgentRequest` carries no type field, so a
+ * `native-desktop` / `mobile-flow` request is otherwise deployed as if it were a
+ * web check and burns the full deadline before failing incomprehensibly.
+ *
+ * A modality ABSENT from this map is supported. Typed as a partial record so
+ * adding a member to the shared union makes this a compile-visible decision.
+ */
+const UNSUPPORTED_MODALITY_REASONS: Partial<Record<VerificationModality, string>> = {
+  'native-screen': 'native-screen capture/drive not yet wired on the agent path (proposal §4)',
+  mobile: 'deferred — pending Xcode MCP',
+};
+
+/**
+ * The §3.2 degrade-path skip reason. Exported because verdictDelivery matches on
+ * it to attach the setup CTA to the non-blocking finding — this is the ONE skip
+ * reason a human can act on directly, and phase 2 will turn that CTA into a real
+ * launch affordance for the verification-setup flow.
+ */
+export const VERIFY_NO_RUNBOOK_REASON =
+  'no proven verification runbook for this project (run verification setup)';
 
 /**
  * The verification-AGENT deployment lease (redesign §5.4). Count-1: only ONE agent
@@ -512,6 +554,29 @@ export interface TerminalExtra {
    * written here.
    */
   report?: VerificationReportV1;
+  /**
+   * The §3.1 conservative classifier's verdict for a terminal FAILURE
+   * (docs/proposals/verification-setup-flow.md), persisted to migration 088's
+   * `failure_class`. Absent on a pass and on every legacy-path terminal (the
+   * column stays NULL, exactly as for a pre-088 row).
+   */
+  failureClass?: VerificationFailureClass;
+  /**
+   * The harness-derived evidence the {@link TerminalExtra.failureClass} verdict
+   * rests on, persisted to `failure_evidence_json`. §3.1's auditable invariant:
+   * an `'env'` verdict — the only class that converts a lane-blocking FAIL into
+   * an advancing SKIP — must always point at a harness source here, never at
+   * model prose, so a misclassification is inspectable after the fact rather
+   * than being an unfalsifiable label.
+   */
+  failureEvidence?: VerificationFailureEvidence[];
+  /**
+   * The §3.5 pre-deploy preflight result, persisted to `preflight_json`. Written
+   * on EVERY agent terminal (not just failures) so the phase-3 health panel can
+   * distinguish "the host was fine and the check still failed" from "the host
+   * could never have run it".
+   */
+  preflight?: AgentPreflightResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,7 +871,59 @@ export interface VerificationSchedulerDeps {
    * too, not just future runs redirected).
    */
   legacyKillSwitch?: () => boolean;
+  /**
+   * The §3.3/§3.4 per-(project, modality) capability ledger — the `unsupported`
+   * mark and the K-consecutive-env-failure circuit breaker
+   * (docs/proposals/verification-setup-flow.md). Consulted BEFORE any lease is
+   * acquired (a suppressed modality never deploys) and fed AFTER every terminal
+   * (an env-class failure counts toward the breaker; a pass or a
+   * deliverable-attributed failure resets it). Absent ⇒ no suppression is ever
+   * active and no outcome is recorded — byte-identical to the pre-phase-0
+   * behavior, which is what every legacy test and any pre-088 DB gets.
+   */
+  capabilityStore?: VerifyCapabilityStore;
+  /**
+   * §3.2 degrade path — whether this (project, modality) has a PROVEN
+   * verification runbook. The phase-2 setup flow ("derive → prove → persist")
+   * owns the real store; until it lands the default answers `'absent'` for every
+   * project, which is the honest answer: no project has ever proven one, because
+   * the concept does not exist yet.
+   *
+   * CONTRACT for the phase-2 replacement: `'proven'` means a runbook was
+   * test-executed end-to-end through the real verification path on THIS host;
+   * `'unproven-draft'` means one was derived but never proved (treated exactly
+   * like `'absent'` by the gate — a merely-written config is precisely what the
+   * failed `.cyboflow/verify.json` model already proved insufficient, §1);
+   * `'absent'` means none exists.
+   */
+  runbookStatus?: (projectId: number, modality: VerificationModality) => RunbookStatus;
+  /**
+   * Files the ONE non-blocking finding the §3.4 circuit breaker raises when it
+   * trips. INJECTED rather than imported, for the standalone-typecheck
+   * invariant: the concrete implementation is verdictDelivery's
+   * `createCapabilityBreakerFinding`, which owns the ReviewItemRouter chokepoint
+   * — this module never touches a router. Absent ⇒ the breaker still suppresses,
+   * it just does so silently.
+   */
+  capabilityFinding?: CapabilityBreakerFindingFn;
 }
+
+/**
+ * §3.2 runbook state for one (project, modality). `'unproven-draft'` is
+ * deliberately NOT a pass: the proposal's whole thesis is that a written config
+ * nobody proved is what already failed once (§1, the `.cyboflow/verify.json`
+ * era) — only `'proven'` opens the gate.
+ */
+export type RunbookStatus = 'proven' | 'unproven-draft' | 'absent';
+
+/** The §3.4 circuit-breaker notice seam — see {@link VerificationSchedulerDeps.capabilityFinding}. */
+export type CapabilityBreakerFindingFn = (args: {
+  projectId: number;
+  runId: string;
+  modality: VerificationModality;
+  /** The env-failure reason that tripped the breaker (the last terminal's evidence). */
+  reason: string;
+}) => void | Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Row shape
@@ -856,6 +973,9 @@ export class VerificationScheduler {
   private readonly portFreeProbe: (port: number) => Promise<boolean>;
   private readonly queuedAgeCeilingMs: number;
   private readonly legacyKillSwitch: () => boolean;
+  private readonly capabilityStore?: VerifyCapabilityStore;
+  private readonly runbookStatus: (projectId: number, modality: VerificationModality) => RunbookStatus;
+  private readonly capabilityFinding?: CapabilityBreakerFindingFn;
 
   /**
    * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
@@ -922,6 +1042,11 @@ export class VerificationScheduler {
     this.portFreeProbe = deps.portFreeProbe ?? (async () => true);
     this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
     this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
+    this.capabilityStore = deps.capabilityStore;
+    // §3.2: no project has a proven runbook until phase 2 ships the store that
+    // could record one — 'absent' is the honest default, not a placeholder.
+    this.runbookStatus = deps.runbookStatus ?? ((): RunbookStatus => 'absent');
+    this.capabilityFinding = deps.capabilityFinding;
   }
 
   // --------------------------------------------------------------------------
@@ -1135,6 +1260,18 @@ export class VerificationScheduler {
     snapshotSha?: string | null;
     /** Idempotency key (§5.3), caller-opaque — convention `${runId}:${taskRef}:${attempt}`. Absent ⇒ no dedup. */
     enqueueKey?: string;
+    /**
+     * §3.6 — this request is a phase-2 SETUP/PROOF run ("test-execute the derived
+     * runbook"), not ordinary lane traffic. Stamped to migration 088's
+     * `setup_proof` and load-bearing in three places: the project's lifetime
+     * verification budget is BYPASSED for it (a proof run must never silently
+     * fail-open to 'skipped' because lane traffic exhausted the budget first), it
+     * never increments `judge_calls_used`, and it is EXEMPT from the §3.2 degrade
+     * gate — proving the runbook is precisely how a project stops being
+     * "unproven", so gating it on already having a proven runbook would be a
+     * bootstrap deadlock. Defaults to false (ordinary counted lane traffic).
+     */
+    setupProof?: boolean;
   }): string {
     if (req.enqueueKey !== undefined) {
       const existingId = this.findLiveRequestByEnqueueKey(req.enqueueKey);
@@ -1149,13 +1286,15 @@ export class VerificationScheduler {
     }
 
     const id = `vr_${randomUUID().replace(/-/g, '')}`;
-    this.db
-      .prepare(
-        `INSERT INTO verification_requests
-           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
-      )
-      .run(
+    // The §4 modality axis is resolved and STAMPED here, at enqueue, from the
+    // (type, task) pair — the drain must not have to re-derive it, and the
+    // capability ledger (§3.3/§3.4) is keyed on it. A pre-088 DB has neither
+    // column, so the widened INSERT is attempted first and falls back to the
+    // legacy column list on a `prepare` failure (which happens BEFORE any row is
+    // written — the fallback can never double-insert).
+    const modality = resolveTaskModality(req.type, req.task ?? null);
+    const values: [string, string, number, VerificationType, string, string, string | null, string | null, string | null] =
+      [
         id,
         req.runId,
         req.projectId,
@@ -1165,12 +1304,35 @@ export class VerificationScheduler {
         req.task !== undefined ? JSON.stringify(req.task) : null,
         req.snapshotSha ?? null,
         req.enqueueKey ?? null,
-      );
+      ];
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO verification_requests
+             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof)
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+        )
+        .run(...values, modality, req.setupProof === true ? 1 : 0);
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] modality/setup_proof columns unavailable; legacy enqueue', {
+        requestId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.db
+        .prepare(
+          `INSERT INTO verification_requests
+             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
+        )
+        .run(...values);
+    }
     this.logger?.debug('[VerificationScheduler] enqueued request', {
       requestId: id,
       runId: req.runId,
       type: req.type,
       chain: req.chain,
+      modality,
+      setupProof: req.setupProof === true,
       hasTask: req.task !== undefined,
       hasEnqueueKey: req.enqueueKey !== undefined,
     });
@@ -1570,6 +1732,31 @@ export class VerificationScheduler {
   }
 
   /**
+   * The migration-088 gate columns, read in their OWN defensive query rather
+   * than folded into {@link agentColumnsForRow}: on a pre-088 DB the widened
+   * SELECT throws, and losing `task_json` to that throw would silently degrade
+   * every agent row to the synthesized bare-intent task. Fail-soft answers are
+   * the pre-phase-0 posture — no stamped modality (the caller re-derives it) and
+   * not a setup-proof run (counted, gated, exactly as today).
+   */
+  private agentGateColumnsForRow(id: string): {
+    modality: VerificationModality | null;
+    setupProof: boolean;
+  } {
+    try {
+      const row = this.db
+        .prepare('SELECT modality, setup_proof FROM verification_requests WHERE id = ?')
+        .get(id) as { modality: unknown; setup_proof: unknown } | undefined;
+      return {
+        modality: isVerificationModality(row?.modality) ? row.modality : null,
+        setupProof: row?.setup_proof === 1 || row?.setup_proof === true,
+      };
+    } catch {
+      return { modality: null, setupProof: false };
+    }
+  }
+
+  /**
    * The composed task the agent runs: the persisted `task_json` when present + valid
    * (dual-format contract §5.2), else a DEGENERATE task synthesized from the legacy
    * input (a bare-intent request) — `summary = intent`, no build/behaviors, `target`
@@ -1620,6 +1807,70 @@ export class VerificationScheduler {
   }
 
   /**
+   * The three PRE-LEASE gates of phase 0
+   * (docs/proposals/verification-setup-flow.md §3.2/§3.3/§3.4), evaluated in
+   * precedence order. Returns the skip REASON when the request must not run, or
+   * `null` to let it proceed. Pure w.r.t. the request row (it only reads the
+   * capability ledger + the injected runbook-status thunk).
+   *
+   *  1. UNSUPPORTED MODALITY (§3.3). `native-screen` and `mobile` have no
+   *     executable path on the agent engine — the agent path never consults
+   *     `verify_type` at all (dispatch keys solely on the run's chain stamp), so
+   *     today a `native-desktop`/`mobile-flow` request is deployed and left to
+   *     fail organically ten minutes later with an unhelpful message. This states
+   *     the fact up front AND records it in the ledger, so the next request for
+   *     the same (project, modality) short-circuits at gate 2 without even
+   *     re-deriving it.
+   *
+   *  2. ACTIVE SUPPRESSION (§3.3/§3.4). The ledger says this (project, modality)
+   *     is `'unsupported'` or breaker-`'suppressed'` AND the mark has not
+   *     self-refreshed (TTL / host-generation — see VerifyCapabilityStore).
+   *
+   *  3. DEGRADE PATH (§3.2). The request needs an ENVIRONMENT derived for it —
+   *     it has a build step or a serve step — and this project has no PROVEN
+   *     runbook for the modality. This deliberately RETIRES per-run guessing for
+   *     build/serve tasks: §1's whole diagnosis is that the agent engine "guesses
+   *     per-run with no memory and guesses wrong every time" (0-for-5 in
+   *     production; wrong serve form, colliding singletons, wrong ABI, blown
+   *     deadline), so continuing to guess buys nothing but a burned deadline and
+   *     a lane charged for someone else's port. A DEGENERATE task — a bare
+   *     pre-live `target` with no build and no serve — is exempt: pointing a
+   *     driver at an already-live URL derives no environment at all, and it is
+   *     the ONLY shape that has ever actually passed in production. A
+   *     `setup_proof` row is exempt too (§3.6): proving the runbook is how a
+   *     project stops being unproven, so gating it would deadlock the bootstrap.
+   */
+  private evaluateAgentGates(
+    row: VerificationRequestRow,
+    task: VerificationTaskV1,
+    modality: VerificationModality,
+    setupProof: boolean,
+  ): string | null {
+    // (1) Modalities with no executable path on the agent engine (§3.3).
+    const unsupportedDetail = UNSUPPORTED_MODALITY_REASONS[modality];
+    if (unsupportedDetail !== undefined) {
+      const reason = `unsupported modality '${modality}': ${unsupportedDetail}`;
+      this.capabilityStore?.markUnsupported(row.project_id, modality, reason);
+      return reason;
+    }
+
+    // (2) An ACTIVE ledger suppression (§3.3 self-refreshing mark / §3.4 breaker).
+    const suppression = this.capabilityStore?.getActiveSuppression(row.project_id, modality) ?? null;
+    if (suppression !== null) {
+      return `verification suppressed for ${modality}: ${suppression.reason}`;
+    }
+
+    // (3) The §3.2 degrade path.
+    if (setupProof) return null;
+    const derivesEnvironment =
+      (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
+    if (derivesEnvironment && this.runbookStatus(row.project_id, modality) !== 'proven') {
+      return VERIFY_NO_RUNBOOK_REASON;
+    }
+    return null;
+  }
+
+  /**
    * Agent-engine sibling of processRow (§5.4). Acquires the count-1 `verify:agent`
    * deployment lease + one pooled port (always — the bundled driver needs a CDP
    * port even for a non-serving task; VERIFY_PORT is exported only when the task
@@ -1644,6 +1895,33 @@ export class VerificationScheduler {
     }
 
     const task = this.taskForAgentRow(row.id, input);
+
+    // (0) The phase-0 PRE-LEASE gates (docs/proposals/verification-setup-flow.md
+    // §3.2/§3.3/§3.4). Each resolves the row terminal 'skipped' with a concrete
+    // reason + `failure_class='env'`, BEFORE any lease, budget, snapshot, or SDK
+    // deploy is touched — an honest "this could not run, here is exactly why"
+    // instead of the deploy-and-fail-organically the agent path does today.
+    const gate = this.agentGateColumnsForRow(row.id);
+    const modality =
+      gate.modality ?? resolveTaskModality(row.verify_type as VerificationType, task);
+    const gateSkip = this.evaluateAgentGates(row, task, modality, gate.setupProof);
+    if (gateSkip !== null) {
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        {
+          error: gateSkip,
+          captureOrigin: 'agent',
+          failureClass: 'env',
+          failureEvidence: [{ source: 'runner', check: 'pre-lease-gate', detail: gateSkip }],
+        },
+        undefined,
+        [],
+        input,
+      );
+      return { work: null };
+    }
+
     const servesPort = this.taskImpliesServer(task);
 
     // (1) The count-1 agent-deployment lease. Held ⇒ leave 'queued' (retry next drain).
@@ -1691,7 +1969,18 @@ export class VerificationScheduler {
 
     const { snapshotSha } = this.agentColumnsForRow(row.id);
     return {
-      work: this.runAgentChosen(row, input, task, agentLease, portLease, leasedPort, servesPort, snapshotSha),
+      work: this.runAgentChosen(
+        row,
+        input,
+        task,
+        agentLease,
+        portLease,
+        leasedPort,
+        servesPort,
+        snapshotSha,
+        modality,
+        gate.setupProof,
+      ),
     };
   }
 
@@ -1727,6 +2016,13 @@ export class VerificationScheduler {
    * agent + batch leases in finally, and RELEASES-OR-QUARANTINES the port lease based
    * on a teardown port probe (§5.4 step 6). Outcome→status is the runner's (§5.7);
    * an abort/deadline is a 'timeout', an unexpected throw a fail-open 'skipped'.
+   *
+   * PHASE 0 (docs/proposals/verification-setup-flow.md) adds three things here,
+   * all AROUND the unchanged deploy: the budget is bypassed + never charged for a
+   * `setup_proof` row and is charged only for a runner result that actually
+   * DEPLOYED (§3.6); the terminal is run through the conservative §3.1 classifier
+   * and persisted with its evidence; and the (project, modality) capability
+   * ledger is fed the classified outcome (§3.4 breaker).
    */
   private async runAgentChosen(
     row: VerificationRequestRow,
@@ -1737,6 +2033,8 @@ export class VerificationScheduler {
     leasedPort: number,
     servesPort: boolean,
     snapshotSha: string | null,
+    modality: VerificationModality,
+    setupProof: boolean,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
@@ -1758,7 +2056,11 @@ export class VerificationScheduler {
     try {
       // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
       // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
-      if (this.isProjectBudgetExhausted(row.project_id)) {
+      // §3.6: a SETUP/PROOF run BYPASSES the gate entirely — the budget counts
+      // ordinary lane traffic, and a proof run silently fail-opening to 'skipped'
+      // because lane traffic spent the budget first would make the phase-2 setup
+      // flow unable to prove anything on exactly the projects that need it most.
+      if (!setupProof && this.isProjectBudgetExhausted(row.project_id)) {
         await this.markTerminalAndDeliver(
           row,
           'skipped',
@@ -1798,10 +2100,6 @@ export class VerificationScheduler {
         return;
       }
 
-      // Count this deployment against the budget BEFORE deploying (mirrors the VLM
-      // path's pre-call increment).
-      this.incrementJudgeCallsUsed(row.id);
-
       const req: VerificationAgentRequest = {
         runId: row.run_id,
         requestId: row.id,
@@ -1827,11 +2125,31 @@ export class VerificationScheduler {
         'agent',
         this.logger,
       );
+
+      // §3.6 BUDGET ORDERING CHANGE (was: a pre-deploy increment mirroring the
+      // VLM path). The counter is now bumped AFTER the runner returns and ONLY
+      // when a session was actually deployed, because the §3.5 preflight
+      // deliberately returns without deploying — charging it would spend a
+      // project's lifetime budget on requests that never cost a token, and on a
+      // misconfigured host that is EVERY request until the budget silently
+      // fail-opens the whole project to 'skipped'. A `setup_proof` row is never
+      // counted at all (it bypassed the gate above; counting it would let proof
+      // runs exhaust the lane budget). The accepted cost of the reorder: a crash
+      // in the window between the deploy and this line undercounts by one —
+      // strictly better than charging for undeployed work.
+      if (result.deployed && !setupProof) {
+        this.incrementJudgeCallsUsed(row.id);
+      }
+
       if (controller.signal.aborted) {
         await this.markTerminalAndDeliver(
           row,
           'timeout',
-          { error: timedOut ? 'request timed out' : 'aborted', captureOrigin: 'agent' },
+          {
+            error: timedOut ? 'request timed out' : 'aborted',
+            captureOrigin: 'agent',
+            ...(result.preflight ? { preflight: result.preflight } : {}),
+          },
           undefined,
           result.fileNames,
           input,
@@ -1839,19 +2157,7 @@ export class VerificationScheduler {
         return;
       }
 
-      await this.markTerminalAndDeliver(
-        row,
-        result.status,
-        {
-          captureOrigin: 'agent',
-          ...(result.verdict ? { verdict: result.verdict } : {}),
-          ...(result.report ? { report: result.report } : {}),
-          ...(result.errorMessage ? { error: result.errorMessage } : {}),
-        },
-        result.verdict,
-        result.fileNames,
-        input,
-      );
+      await this.settleAgentTerminal(row, input, result, modality);
     } catch (err) {
       const aborted = controller.signal.aborted;
       controller.abort();
@@ -1861,6 +2167,18 @@ export class VerificationScheduler {
         aborted,
         error: message,
       });
+      // §3.6 companion to the deployed-conditional increment above, for the one
+      // path that never yields a `result`: a DEADLINE expiry (raceWithAbort
+      // rejects, so the runner's own `deployed` flag is unobservable). The
+      // deadline is minutes long while the §3.5 preflight settles in well under a
+      // second, so by the time `timedOut` fires the runner was past its pre-deploy
+      // gate and an SDK session was (almost certainly) spent — charge it, exactly
+      // as the old pre-deploy increment did. A NON-deadline abort (a cancelForRun
+      // sweep) stays uncharged: it can fire at any point, including before the
+      // deploy, and an unknowable charge should favor the project's budget.
+      if (timedOut && !setupProof) {
+        this.incrementJudgeCallsUsed(row.id);
+      }
       await this.markTerminalAndDeliver(
         row,
         aborted ? 'timeout' : 'skipped',
@@ -1877,6 +2195,130 @@ export class VerificationScheduler {
       }
       await this.releaseOrQuarantinePort(portLease, leasedPort);
       agentLease.release();
+    }
+  }
+
+  /**
+   * Settle ONE agent runner result: classify it (§3.1), write the terminal with
+   * its classification + evidence + preflight, then feed the (project, modality)
+   * capability ledger (§3.4).
+   *
+   * THE CONVERSION AND ITS ONE GUARD RAIL. A `'failed'` whose classification is
+   * `'env'` is CONVERTED to `'skipped'`, because a merge-gate FAIL charges the
+   * lane's implement-retry budget and sends an agent to "fix" working code
+   * because a port was taken. The conversion is safe ONLY because
+   * `classifyVerificationFailure` reaches `'env'` exclusively on HARNESS-derived
+   * evidence — a failed preflight check, a squatter port probe, instance-lock
+   * contention. It never converts on model prose: a `build_failed` the agent
+   * wrote with no harness corroboration stays `'ambiguous'` and stays BLOCKING.
+   * That asymmetry is the whole §3.1 argument — `skipped` ADVANCES the lane
+   * (mergeGateLaneAdvance), so a deliverable defect misclassified as env ships
+   * broken code silently, while a false `'ambiguous'` is merely annoying.
+   *
+   * LEDGER FEEDBACK runs AFTER the terminal write (never before — the write is
+   * cancel-guarded and is the load-bearing act): an env-class terminal counts
+   * toward the §3.4 breaker; a pass or a DELIVERABLE-attributed failure is a
+   * healthy outcome that resets it (the environment demonstrably worked — it
+   * built, served, drove, and judged); `'ambiguous'` and every timeout touch
+   * NEITHER, because a signal we could not attribute must not silently suppress a
+   * modality (nor silently clear a real suppression).
+   */
+  private async settleAgentTerminal(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    result: VerificationAgentRunResult,
+    modality: VerificationModality,
+  ): Promise<void> {
+    const isTerminalFailure =
+      result.status === 'failed' || result.status === 'timeout' || result.status === 'skipped';
+    const classified = isTerminalFailure
+      ? classifyVerificationFailure({
+          preflight: result.preflight ?? null,
+          runnerStatus: result.status,
+          reportOutcome: result.report?.outcome ?? null,
+          provisionMode: result.provisionMode ?? null,
+          // Both are future harness seams (§3.1): no instance-lock detector and no
+          // runbook contract exist yet, so neither can ever be affirmative today.
+          instanceLockContention: false,
+          runbookMismatch: false,
+        })
+      : null;
+
+    const converted = result.status === 'failed' && classified?.failureClass === 'env';
+    const status: RequestStatus = converted ? 'skipped' : result.status;
+    const evidenceDetail = classified?.evidence.map((e) => e.detail).join('; ') ?? '';
+    const errorMessage = converted
+      ? `environment failure (harness-verified), not the deliverable: ${evidenceDetail}`
+      : result.errorMessage;
+    if (converted) {
+      this.logger?.warn('[VerificationScheduler] env-class failure converted to skip (§3.1)', {
+        requestId: row.id,
+        modality,
+        evidence: evidenceDetail,
+      });
+    }
+
+    await this.markTerminalAndDeliver(
+      row,
+      status,
+      {
+        captureOrigin: 'agent',
+        ...(result.verdict ? { verdict: result.verdict } : {}),
+        ...(result.report ? { report: result.report } : {}),
+        ...(errorMessage ? { error: errorMessage } : {}),
+        ...(classified
+          ? { failureClass: classified.failureClass, failureEvidence: classified.evidence }
+          : {}),
+        ...(result.preflight ? { preflight: result.preflight } : {}),
+      },
+      result.verdict,
+      result.fileNames,
+      input,
+    );
+
+    await this.recordCapabilityOutcome(row, modality, result, classified?.failureClass ?? null, evidenceDetail);
+  }
+
+  /**
+   * The §3.4 circuit-breaker feed. K consecutive env-class failures for a
+   * (project, modality) auto-demote it to skip; the trip files ONE non-blocking
+   * finding through the injected seam so a human learns the modality went quiet
+   * instead of discovering it months later in the request table. Fail-soft
+   * throughout — a ledger or finding hiccup must never change a verdict that is
+   * already committed.
+   */
+  private async recordCapabilityOutcome(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    result: VerificationAgentRunResult,
+    failureClass: VerificationFailureClass | null,
+    evidenceDetail: string,
+  ): Promise<void> {
+    const store = this.capabilityStore;
+    if (!store) return;
+    try {
+      if (failureClass === 'env') {
+        const reason = evidenceDetail.length > 0 ? evidenceDetail : (result.errorMessage ?? 'environment failure');
+        const { tripped } = store.recordEnvFailure(row.project_id, modality, reason);
+        if (tripped && this.capabilityFinding) {
+          await this.capabilityFinding({
+            projectId: row.project_id,
+            runId: row.run_id,
+            modality,
+            reason,
+          });
+        }
+        return;
+      }
+      if (result.status === 'passed' || (result.status === 'failed' && failureClass === 'deliverable')) {
+        store.recordHealthyOutcome(row.project_id, modality);
+      }
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] capability-ledger feedback failed (fail-soft)', {
+        requestId: row.id,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -3087,6 +3529,27 @@ export class VerificationScheduler {
     status: RequestStatus,
     extra: TerminalExtra = {},
   ): number {
+    // The migration-088 classification columns are written in the SAME guarded
+    // write as the status, so a health-panel audit can never observe a terminal
+    // row whose verdict and its evidence disagree. FAIL-SOFT (mirrors
+    // agentColumnsForRow): a pre-088 DB — every minimal test fixture, and any
+    // binary rolled back below the migration — throws on `prepare`, BEFORE any
+    // row is touched, so falling through to the legacy write below is safe and
+    // byte-identical to the pre-phase-0 behavior.
+    const hasClassification =
+      extra.failureClass !== undefined ||
+      extra.failureEvidence !== undefined ||
+      extra.preflight !== undefined;
+    if (hasClassification) {
+      try {
+        return this.markTerminalWithClassification(id, status, extra);
+      } catch (err) {
+        this.logger?.debug('[VerificationScheduler] classification columns unavailable; writing legacy terminal', {
+          requestId: id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     return this.db
       .prepare(
         `UPDATE verification_requests
@@ -3109,6 +3572,45 @@ export class VerificationScheduler {
         // untouched (always NULL there); an agent row writes its normalized report.
         extra.report ? JSON.stringify(extra.report) : null,
         extra.error ?? null,
+        new Date().toISOString(),
+        id,
+      ).changes;
+  }
+
+  /**
+   * The migration-088 widening of {@link markTerminal}: the identical guarded
+   * UPDATE plus `failure_class` / `failure_evidence_json` / `preflight_json`
+   * (docs/proposals/verification-setup-flow.md §3.1 — "The classifier's inputs
+   * and verdict are persisted on the request row so the health panel can show the
+   * env/deliverable/ambiguous histogram and misclassification can be audited").
+   * Throws on a pre-088 DB; {@link markTerminal} owns that fallback.
+   */
+  private markTerminalWithClassification(id: string, status: RequestStatus, extra: TerminalExtra): number {
+    return this.db
+      .prepare(
+        `UPDATE verification_requests
+            SET status = ?,
+                current_backend = COALESCE(?, current_backend),
+                verdict_json = ?,
+                report_json = COALESCE(?, report_json),
+                error_message = ?,
+                failure_class = ?,
+                failure_evidence_json = ?,
+                preflight_json = ?,
+                delivery_state = 'pending',
+                attempt = attempt + 1,
+                ended_at = ?
+          WHERE id = ? AND status IN ('queued', 'leased', 'running')`,
+      )
+      .run(
+        status,
+        extra.backend ?? null,
+        extra.verdict ? JSON.stringify(extra.verdict) : null,
+        extra.report ? JSON.stringify(extra.report) : null,
+        extra.error ?? null,
+        extra.failureClass ?? null,
+        extra.failureEvidence ? JSON.stringify(extra.failureEvidence) : null,
+        extra.preflight ? JSON.stringify(extra.preflight) : null,
         new Date().toISOString(),
         id,
       ).changes;

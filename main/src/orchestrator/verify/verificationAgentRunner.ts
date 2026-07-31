@@ -52,7 +52,8 @@ import {
   type SnapshotProvision,
   type ProvisionSnapshotOptions,
 } from './snapshotProvisioner';
-import { pidFilePath } from './driver/driverCore';
+import { runAgentPreflight, type AgentPreflightResult } from './preflight';
+import { pidFilePath, probeChromiumExecutable } from './driver/driverCore';
 
 const execFileAsync = promisify(execFile);
 
@@ -197,6 +198,34 @@ export interface VerificationAgentRunResult {
   errorMessage?: string;
   /** The screenshot fileNames for the artifact payload. */
   fileNames: string[];
+  /**
+   * Whether an SDK agent session was ACTUALLY deployed for this request
+   * (docs/proposals/verification-setup-flow.md §3.6, budget accounting). REQUIRED
+   * — the scheduler charges `judge_calls_used` off THIS flag rather than off
+   * "we got as far as calling the runner", so the §3.5 pre-deploy preflight (and
+   * the other genuinely pre-deploy exits: an unresolvable agent, a failed
+   * snapshot provision, an abort before deploy) cannot burn a project's lifetime
+   * verification budget on work that never spent a token. `true` from the moment
+   * the query seam is invoked — INCLUDING a query that then threw, since that
+   * session was deployed and did consume budget.
+   */
+  deployed: boolean;
+  /**
+   * The §3.5 pre-deploy preflight result, when preflight ran (it always does on
+   * this path today). The scheduler persists it to `preflight_json` and feeds it
+   * to the §3.1 classifier as the EVIDENCE BASE for an `'env'` verdict — a
+   * failure with no failed preflight check has no harness-derived provenance and
+   * stays conservatively `'ambiguous'` (blocking).
+   */
+  preflight?: AgentPreflightResult;
+  /**
+   * How the code under test was provisioned: `'snapshot'` (the normal detached
+   * worktree at the recorded sha) or `'fallback'` (the dirty live worktree).
+   * Absent when provisioning never started. The §3.1 classifier reads this: only
+   * a JUDGED `'snapshot'`-mode failure may be classified `'deliverable'`, because
+   * a degraded provisioning path cannot attest to the deliverable's own health.
+   */
+  provisionMode?: 'snapshot' | 'fallback';
 }
 
 /**
@@ -233,6 +262,25 @@ export interface VerificationAgentRunnerDeps {
   driverCliPath: string;
   logger?: LoggerLike;
   // -- seams (real defaults; faked in tests) --
+  /**
+   * §3.5 preflight probe: resolve a launchable chromium binary, or `null` when
+   * none is installed. Defaults to the driver's OWN resolution
+   * (`driverCore.probeChromiumExecutable`, LAZILY imported so this module keeps
+   * its no-playwright-at-module-scope posture) — deliberately the same function
+   * the driver's launch fallback calls, so the preflight verdict and the driver's
+   * later behavior can never disagree.
+   */
+  resolveChromium?: () => Promise<string | null>;
+  /**
+   * §3.5 preflight probe: `true` when nothing is listening on `port`. The REAL
+   * implementation is injected from index.ts — the very same TCP connect probe
+   * the scheduler's agent teardown uses to decide release-vs-quarantine, so
+   * "occupied" means the identical thing at both ends of a request. Defaults to
+   * always-free, which makes the check a harmless no-op under test and on any
+   * deployment wired without a net probe (fail-open: an unprobed port must never
+   * be affirmative evidence of a squatter).
+   */
+  portFreeProbe?: (port: number) => Promise<boolean>;
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
@@ -447,6 +495,10 @@ export function mapReportToResult(
   model: string,
 ): VerificationAgentRunResult {
   const fileNames = report.screenshots.map((s) => s.fileName);
+  // Every outcome mapped here came back FROM a deployed session, so it is
+  // budget-charged (§3.6) and carries its provisioning mode for the §3.1
+  // classifier's `'deliverable'` gate (snapshot-only).
+  const provenance = { deployed: true, provisionMode: mode } as const;
   const verdictOf = (status: VerdictV1['status']): VerdictV1 => ({
     status,
     confidence: report.confidence,
@@ -467,15 +519,16 @@ export function mapReportToResult(
         errorMessage: `unattributable shared-worktree ${report.outcome}: ${excerpt}`,
         report,
         fileNames,
+        ...provenance,
       };
     }
     // In the snapshot, a deliverable that cannot build from its own committed state
     // is a smoke FAIL — verdict-less, error_message carries the build log excerpt.
-    return { status: 'failed', errorMessage: excerpt, report, fileNames };
+    return { status: 'failed', errorMessage: excerpt, report, fileNames, ...provenance };
   }
 
   if (report.outcome === 'fail') {
-    return { status: 'failed', verdict: verdictOf('fail'), report, fileNames };
+    return { status: 'failed', verdict: verdictOf('fail'), report, fileNames, ...provenance };
   }
 
   // outcome === 'pass'
@@ -486,14 +539,15 @@ export function mapReportToResult(
       report,
       fileNames,
       errorMessage: 'verifier modified tracked sources in the snapshot',
+      ...provenance,
     };
   }
   const anyNotTestable = report.behaviors.some((b) => b.result === 'not_testable');
   const anyFail = report.behaviors.some((b) => b.result === 'fail');
   if (anyNotTestable && !anyFail) {
-    return { status: 'low_confidence', verdict: verdictOf('low_confidence'), report, fileNames };
+    return { status: 'low_confidence', verdict: verdictOf('low_confidence'), report, fileNames, ...provenance };
   }
-  return { status: 'passed', verdict: verdictOf('pass'), report, fileNames };
+  return { status: 'passed', verdict: verdictOf('pass'), report, fileNames, ...provenance };
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +571,17 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
     return false;
   }
 };
+
+/**
+ * §3.5 default chromium probe — driverCore's OWN resolver, so the preflight
+ * verdict and the driver's later launch behavior can never disagree. driverCore
+ * is already a static import here (`pidFilePath`) and is itself
+ * no-playwright-at-module-scope: it `await import('playwright')` INSIDE the
+ * resolver, so a packaged build that pruned the devDependency soft-fails to
+ * `null` ("chromium absent") at call time instead of MODULE_NOT_FOUND-crashing
+ * this module's import.
+ */
+const defaultResolveChromium = (): Promise<string | null> => probeChromiumExecutable();
 
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
   try {
@@ -620,6 +685,38 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   }
 
   /**
+   * The §3.5 PRE-DEPLOY gate (docs/proposals/verification-setup-flow.md). Runs
+   * FIRST — before agent resolution, before snapshot provisioning, before the SDK
+   * deploy — because everything after it is expensive: a missing chromium today
+   * only surfaces at driver-launch time, inside a deployed session, after the
+   * scheduler already charged the project's verification budget and built a
+   * detached worktree. Every probe is delegated to an injectable dep so this
+   * module stays fs/net/playwright-free at module scope.
+   *
+   * The leased-port argument mirrors what the scheduler leased: `req.verifyPort`
+   * when the task implies a server it must BIND, else the slot the driver port
+   * was derived from (`verifyDriverPort - 1`) — the scheduler always leases the
+   * pair (p, p+1), so that arithmetic recovers the pool slot for a non-serving
+   * task without widening {@link VerificationAgentRequest}.
+   */
+  private async preflight(req: VerificationAgentRequest): Promise<AgentPreflightResult> {
+    return runAgentPreflight(
+      {
+        resolveNode: this.deps.resolveNode,
+        resolveChromium: this.deps.resolveChromium ?? defaultResolveChromium,
+        fileExists: this.deps.fileExists ?? defaultFileExists,
+        portFreeProbe: this.deps.portFreeProbe ?? (async () => true),
+      },
+      {
+        task: req.task,
+        driverCliPath: this.deps.driverCliPath,
+        leasedPort: req.verifyPort ?? req.verifyDriverPort - 1,
+        driverPort: req.verifyDriverPort,
+      },
+    );
+  }
+
+  /**
    * Deploy the agent for one request and return the mapped verdict. NEVER throws
    * for an ordinary failure — every infra/agent error maps to a fail-open
    * `skipped` (or `timeout` on abort) so a verification problem can never wedge a
@@ -629,10 +726,34 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   async run(req: VerificationAgentRequest): Promise<VerificationAgentRunResult> {
     const logger = this.deps.logger;
 
+    // (a0) §3.5 preflight — the cheap host check, BEFORE any spend. A failure
+    // returns immediately with NO snapshot and NO deploy; `deployed:false` tells
+    // the scheduler not to charge the budget, and the carried `preflight` is the
+    // harness-derived evidence the §3.1 classifier needs to call the resulting
+    // terminal `'env'` (an advancing skip) rather than a lane-blocking FAIL.
+    const preflight = await this.preflight(req);
+    if (!preflight.ok) {
+      const failed = preflight.checks.filter((c) => !c.ok);
+      logger?.warn('[VerificationAgentRunner] preflight failed; skipping without deploy', {
+        runId: req.runId,
+        requestId: req.requestId,
+        failedChecks: failed.map((c) => c.id),
+      });
+      return {
+        status: 'skipped',
+        deployed: false,
+        preflight,
+        errorMessage: failed.map((c) => c.detail).join('; '),
+        fileNames: [],
+      };
+    }
+
     const resolved = this.deps.resolveVerifyAgent(req.runId);
     if (!resolved) {
       return {
         status: 'skipped',
+        deployed: false,
+        preflight,
         errorMessage: 'visual-verify agent not resolvable for this run',
         fileNames: [],
       };
@@ -667,6 +788,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;
     let env: Record<string, string> | null = null;
+    // Hoisted out of the try so the outer catch can report the provisioning mode
+    // it failed under (the §3.1 classifier's `'deliverable'` gate is
+    // snapshot-only, so an unknown mode must stay `undefined`, never guessed).
+    let mode: 'snapshot' | 'fallback' | null = null;
 
     try {
       // (b) Provision — ALWAYS snapshot when a sha is present; the live-worktree
@@ -679,7 +804,6 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // contains this lane's deliverable; an uncommitted lane diff fails closed in
       // the snapshot with "not present in build" feedback instead (§5.5 amended).
       let cwd: string;
-      let mode: 'snapshot' | 'fallback';
       if (req.snapshotSha !== null) {
         const provision = this.deps.provision ?? provisionSnapshot;
         try {
@@ -691,8 +815,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         } catch (err) {
           if (err instanceof SnapshotProvisionError) {
             // bad_sha / worktree_add_failed — the fail-open infra bucket (§5.5).
+            // Nothing was deployed, so nothing is charged (§3.6).
             return {
               status: 'skipped',
+              deployed: false,
+              preflight,
               errorMessage: `snapshot provisioning failed (${err.code})`,
               fileNames: [],
             };
@@ -724,12 +851,22 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       };
 
       if (controller.signal.aborted) {
-        return { status: 'timeout', errorMessage: 'aborted before deploy', fileNames: [] };
+        return {
+          status: 'timeout',
+          deployed: false,
+          preflight,
+          provisionMode: mode,
+          errorMessage: 'aborted before deploy',
+          fileNames: [],
+        };
       }
 
       // (c) Deploy ONE structured session on the resolved provider's query seam,
       // with the provider-matched harness contract appended to the agent prompt.
       const systemPrompt = `${resolved.agent.systemPrompt}\n\n${verifyHarnessContract(provider)}`;
+      // From HERE on the session is deployed and has spent tokens — every exit
+      // below is budget-charged (§3.6), including a query that threw.
+      const deployedProvenance = { deployed: true, preflight, provisionMode: mode } as const;
       let raw: unknown;
       try {
         const outcome = await queryFn({
@@ -752,7 +889,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           await this.writeTranscriptFailSoft(req, err.transcript, logger);
         }
         if (controller.signal.aborted) {
-          return { status: 'timeout', errorMessage: 'deadline exceeded during deploy', fileNames: [] };
+          return {
+            status: 'timeout',
+            errorMessage: 'deadline exceeded during deploy',
+            fileNames: [],
+            ...deployedProvenance,
+          };
         }
         // A query-INTERNAL deadline expiry is a real timeout, not an infra skip
         // (adversarial-review fix): report it as the terminal `timeout` status.
@@ -764,18 +906,28 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         emitSeamError('verify-agent-deploy-failed', err instanceof Error ? err : new Error(message), {
           agentKey: 'visual-verify',
         });
-        return { status: 'skipped', errorMessage: `agent deploy error: ${message}`, fileNames: [] };
+        return {
+          status: 'skipped',
+          errorMessage: `agent deploy error: ${message}`,
+          fileNames: [],
+          ...deployedProvenance,
+        };
       }
 
       if (controller.signal.aborted) {
-        return { status: 'timeout', errorMessage: 'deadline exceeded', fileNames: [] };
+        return { status: 'timeout', errorMessage: 'deadline exceeded', fileNames: [], ...deployedProvenance };
       }
 
       // (d) Validate the report harness-side (never trust the model verbatim).
       const expectedIds = req.task.behaviors.map((b) => b.id);
       const normalized = normalizeVerificationReportV1(raw, expectedIds);
       if (!normalized.ok) {
-        return { status: 'skipped', errorMessage: `invalid report: ${normalized.error}`, fileNames: [] };
+        return {
+          status: 'skipped',
+          errorMessage: `invalid report: ${normalized.error}`,
+          fileNames: [],
+          ...deployedProvenance,
+        };
       }
       const report = normalized.report;
 
@@ -788,6 +940,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             status: 'skipped',
             errorMessage: `report screenshot "${shot.fileName}" must be a bare filename`,
             fileNames: [],
+            ...deployedProvenance,
           };
         }
         if (!(await fileExists(join(req.artifactsDir, shot.fileName)))) {
@@ -795,6 +948,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             status: 'skipped',
             errorMessage: `report screenshot "${shot.fileName}" not found in artifacts dir`,
             fileNames: [],
+            ...deployedProvenance,
           };
         }
       }
@@ -807,17 +961,38 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         mutated = await checkMutated(snapshot.worktreePath);
       }
 
-      return mapReportToResult(report, mode, mutated, verdictModel);
+      // mapReportToResult already stamps deployed:true + provisionMode; the
+      // preflight rides along so the scheduler persists it on EVERY terminal.
+      return { ...mapReportToResult(report, mode, mutated, verdictModel), preflight };
     } catch (err) {
+      // The outer catch can fire before OR after the deploy; `deployedProvenance`
+      // is not in scope here, so budget attribution falls back to the honest
+      // "unknown ⇒ do not charge" answer (deployed:false). Under-charging by one
+      // on a rare unexpected throw is preferable to charging a request that may
+      // never have reached the SDK at all (§3.6).
       if (controller.signal.aborted) {
-        return { status: 'timeout', errorMessage: 'deadline exceeded', fileNames: [] };
+        return {
+          status: 'timeout',
+          deployed: false,
+          preflight,
+          ...(mode !== null ? { provisionMode: mode } : {}),
+          errorMessage: 'deadline exceeded',
+          fileNames: [],
+        };
       }
       const message = err instanceof Error ? err.message : String(err);
       logger?.error('[VerificationAgentRunner] unexpected error', { runId: req.runId, error: message });
       emitSeamError('verify-agent-error', err instanceof Error ? err : new Error(message), {
         agentKey: 'visual-verify',
       });
-      return { status: 'skipped', errorMessage: `agent runner error: ${message}`, fileNames: [] };
+      return {
+        status: 'skipped',
+        deployed: false,
+        preflight,
+        ...(mode !== null ? { provisionMode: mode } : {}),
+        errorMessage: `agent runner error: ${message}`,
+        fileNames: [],
+      };
     } finally {
       // (f) Teardown — ALWAYS, abort-safe, best-effort. Stop the browser via the
       // driver, independently reap its pid, dispose the snapshot. The scheduler

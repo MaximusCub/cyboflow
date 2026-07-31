@@ -50,15 +50,21 @@ import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { applyMergeGateVerdict, isMergeGateBlocking, resolveLaneAttempts } from './mergeGateLaneAdvance';
 import type { DatabaseLike, LoggerLike } from '../types';
-import type { OnVerdict } from './verificationScheduler';
+import type { CapabilityBreakerFindingFn, OnVerdict } from './verificationScheduler';
+import { VERIFY_NO_RUNBOOK_REASON } from './verificationScheduler';
 import type {
   CaptureOrigin,
   VerdictV1,
+  VerificationFailureClass,
+  VerificationFailureEvidence,
   VerificationReportV1,
   VerificationRequestInput,
   VerificationTaskV1,
 } from '../../../../shared/types/visualVerification';
-import { parseVerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import {
+  isVerificationFailureClass,
+  parseVerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 import type { TaskVerificationReportEntry } from '../../../../shared/types/artifacts';
 import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
 import { existsSync } from 'node:fs';
@@ -135,6 +141,78 @@ function readRequestColumns(db: DatabaseLike, requestId: string, logger?: Logger
     });
     return { reportJson: null, taskJson: null, enqueueKey: null, errorMessage: null };
   }
+}
+
+/** The §3.1 classification a terminal row carries (migration 088), as the finding body renders it. */
+interface DeliveredClassification {
+  failureClass: VerificationFailureClass | null;
+  evidence: VerificationFailureEvidence[];
+}
+
+/**
+ * Read the migration-088 classification columns
+ * (docs/proposals/verification-setup-flow.md §3.1) in their OWN query, kept
+ * separate from {@link readRequestColumns} on purpose: a pre-088 DB throws on
+ * these columns, and folding them into the main read would take `report_json` /
+ * `error_message` down with them and silently degrade every finding body to the
+ * legacy generic text. Fail-soft ⇒ "no classification", which renders exactly
+ * the pre-phase-0 body.
+ */
+function readClassification(db: DatabaseLike, requestId: string, logger?: LoggerLike): DeliveredClassification {
+  try {
+    const row = db
+      .prepare(
+        `SELECT failure_class AS failureClass, failure_evidence_json AS evidenceJson
+           FROM verification_requests WHERE id = ?`,
+      )
+      .get(requestId) as { failureClass?: unknown; evidenceJson?: unknown } | undefined;
+    const failureClass = isVerificationFailureClass(row?.failureClass) ? row.failureClass : null;
+    let evidence: VerificationFailureEvidence[] = [];
+    if (typeof row?.evidenceJson === 'string' && row.evidenceJson.length > 0) {
+      const parsed: unknown = JSON.parse(row.evidenceJson);
+      if (Array.isArray(parsed)) {
+        evidence = parsed.filter(
+          (e): e is VerificationFailureEvidence =>
+            e !== null && typeof e === 'object' && typeof (e as { detail?: unknown }).detail === 'string',
+        );
+      }
+    }
+    return { failureClass, evidence };
+  } catch (err) {
+    logger?.debug('[verdictDelivery] could not read failure classification (fail-soft)', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { failureClass: null, evidence: [] };
+  }
+}
+
+/**
+ * Render the §3.1 classification section of a non-blocking (skip/timeout)
+ * finding body: the verdict label, plus — for an `'env'` verdict only — the
+ * harness evidence lines it rests on. The evidence is what makes an `'env'`
+ * skip AUDITABLE rather than an unfalsifiable label: `'env'` is the one class
+ * that ADVANCES the lane, so a reader must be able to check the harness's work
+ * (§3.1 "misclassification can be audited"). Returns an empty array when the row
+ * carries no classification (a legacy path terminal, or a pre-088 DB).
+ */
+function renderClassification(classification: DeliveredClassification): string[] {
+  const { failureClass, evidence } = classification;
+  if (failureClass === null) return [];
+  const label: Record<VerificationFailureClass, string> = {
+    env: 'environment (harness-verified) — this did NOT charge the lane a retry',
+    deliverable: 'the deliverable under test',
+    ambiguous: 'ambiguous — no harness evidence either way',
+  };
+  const parts = [`Attributed to: ${label[failureClass]}`];
+  if (failureClass === 'env' && evidence.length > 0) {
+    parts.push(
+      ['Harness evidence:', ...evidence.map((e) => `- [${e.source}${e.check ? `/${e.check}` : ''}] ${e.detail}`)].join(
+        '\n',
+      ),
+    );
+  }
+  return parts;
 }
 
 /** Parse persisted report_json into a VerificationReportV1; null on absent/malformed. */
@@ -255,8 +333,11 @@ function buildFindingText(args: {
   report: VerificationReportV1 | null;
   task: VerificationTaskV1 | null;
   errorMessage: string | null;
+  /** The §3.1 classification persisted on the row (migration 088); absent-by-default for a legacy terminal. */
+  classification?: DeliveredClassification;
 }): { title: string; body: string } {
   const { status, verdict, report, task, errorMessage } = args;
+  const classification = args.classification ?? { failureClass: null, evidence: [] };
 
   // ---- build/launch failure (verdict-less FAIL; report.outcome or error_message) ----
   const buildFailed = report?.outcome === 'build_failed' || report?.outcome === 'launch_failed';
@@ -277,15 +358,26 @@ function buildFindingText(args: {
       'Visual verification timed out before producing a verdict (the deployment never became ready, build/serve/drive/judge exceeded the deadline, or the request was orphaned by a process restart). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or re-run verification.',
     ];
     if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+    parts.push(...renderClassification(classification));
     return { title: 'Visual verification did not run (timed out)', body: parts.join('\n\n') };
   }
 
   // ---- skipped: advance-with-visibility (missing precondition) ----
   if (status === 'skipped') {
     const parts = [
-      'Visual verification did not run (a missing precondition — an unhealthy or absent backend/agent engine, no capable rung for this deliverable, an exhausted budget, a queued-age deadline, or an unparseable deliverable — prevented it). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or fix the environment and re-run verification.',
+      'Visual verification did not run (a missing precondition — an unhealthy or absent backend/agent engine, no capable rung for this deliverable, an exhausted budget, a queued-age deadline, a suppressed or unsupported modality, or an unparseable deliverable — prevented it). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or fix the environment and re-run verification.',
     ];
     if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+    parts.push(...renderClassification(classification));
+    // The §3.2 degrade path is the ONE skip reason with a direct human remedy —
+    // everything else above is "the harness could not", this one is "the project
+    // was never set up". Phase 2 turns this sentence into a launch affordance for
+    // the verification-setup flow; the wording stays generic until then.
+    if (errorMessage === VERIFY_NO_RUNBOOK_REASON) {
+      parts.push(
+        'Run verification setup for this project to enable visual verification. Until a verification runbook has been derived AND proven by an actual run, requests that need the deliverable built or served are skipped rather than guessed at.',
+      );
+    }
     return { title: 'Visual verification did not run (skipped)', body: parts.join('\n\n') };
   }
 
@@ -682,6 +774,7 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         report,
         task,
         errorMessage: cols.errorMessage,
+        classification: readClassification(db, requestId, logger),
       });
       const body = appendProvenance(baseBody, captureOrigin, diagnostics);
       const findingPayload: FindingPayload = {
@@ -736,5 +829,73 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
       });
     }
     return allOk;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §3.4 circuit-breaker notice
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the {@link CapabilityBreakerFindingFn} the VerificationScheduler calls
+ * when the §3.4 circuit breaker TRIPS — K consecutive env-class failures for one
+ * (project, modality) auto-demote it to skip
+ * (docs/proposals/verification-setup-flow.md §3.4).
+ *
+ * It lives HERE, not in the scheduler, for the same reason the verdict delivery
+ * does: the scheduler is standalone-typecheck-clean and never touches a router,
+ * so the ReviewItemRouter chokepoint is reached only through an injected seam
+ * (main/src/index.ts wires this factory into `capabilityFinding`).
+ *
+ * Deliberately rides the EXISTING visual-verify finding seam — same
+ * `source: 'visual-verify'`, same `category: 'visual-regression'`, same
+ * `audience: 'human'` — and adds no new finding category. It is NON-BLOCKING by
+ * construction: an auto-paused modality must be visible, never a gate. The body
+ * states how it recovers, because a suppression a human cannot see the end of is
+ * indistinguishable from a permanent outage: the mark self-refreshes on the
+ * VerifyCapabilityStore TTL and on any host-capability-generation bump (a probe
+ * anywhere observing a changed host fact), and a single healthy outcome clears
+ * the counter.
+ *
+ * FAIL-SOFT: a router error is logged and swallowed. The suppression itself is
+ * already committed in the ledger; failing to announce it must never propagate
+ * back into a verdict path that has already settled.
+ */
+export function createCapabilityBreakerFinding(deps: {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+}): CapabilityBreakerFindingFn {
+  const { db, logger } = deps;
+  return async ({ projectId, runId, modality, reason }) => {
+    try {
+      const taskId = resolveRunTaskId(db, runId, logger);
+      const body = [
+        `Visual verification for the \`${modality}\` modality has been AUTO-PAUSED for this project after repeated environment failures. Requests for this modality now resolve 'skipped' immediately instead of deploying a verification agent that cannot succeed — lanes keep advancing, but no visual check runs.`,
+        `Last environment failure: ${reason}`,
+        'This clears itself: the pause expires on a timer, and it is dropped immediately whenever the host capability picture changes (a chromium install, a permission grant, a toolchain change). A single successful verification also resets the failure counter. Fix the underlying environment problem and the next request re-attempts normally — no manual reset needed.',
+      ].join('\n\n');
+      await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: `Visual verification auto-paused for ${modality} after repeated environment failures`,
+        body,
+        blocking: false,
+        audience: 'human',
+        severity: 'warning',
+        source: 'visual-verify',
+        entityType: taskId ? 'task' : null,
+        entityId: taskId ?? null,
+        runId,
+        payload: { kind: 'finding', category: 'visual-regression' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      logger?.error('[verdictDelivery] capability-breaker finding failed (fail-soft)', {
+        projectId,
+        runId,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 }

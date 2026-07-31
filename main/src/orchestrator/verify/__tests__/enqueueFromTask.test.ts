@@ -73,7 +73,12 @@ function buildDb(): Database.Database {
       report_json      TEXT,
       delivery_state   TEXT,
       snapshot_sha     TEXT,
-      enqueue_key      TEXT
+      enqueue_key      TEXT,
+      -- migration 088 (docs/proposals/verification-setup-flow.md §3/§3.6): the
+      -- modality stamp this seam delegates to scheduler.enqueue, and the
+      -- setup-proof flag it threads through.
+      modality         TEXT,
+      setup_proof      INTEGER NOT NULL DEFAULT 0
     );
   `);
   return db;
@@ -210,6 +215,42 @@ describe('enqueueTaskVerification', () => {
     // Chain = FALLBACK_CHAINS[type] ∩ stamped chain, in FALLBACK order.
     expect(JSON.parse(row.chain_json as string)).toEqual(['capturePage', 'peekaboo']);
     expect(row.verify_type).toBe('static-render-snapshot');
+  });
+
+  it('threads setupProof through to setup_proof, and lets scheduler.enqueue own the modality stamp (§3.6)', async () => {
+    seedRun(db, { runId: 'run-proof' });
+    initScheduler(db);
+
+    const proof = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-proof',
+      task,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+      setupProof: true,
+    });
+    const lane = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-proof',
+      task,
+      laneTaskRef: 'TASK-002',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(proof.outcome).toBe('enqueued');
+    expect(lane.outcome).toBe('enqueued');
+    const flags = (id: string): { setup_proof: number; modality: string | null } =>
+      db
+        .prepare('SELECT setup_proof, modality FROM verification_requests WHERE id = ?')
+        .get(id) as { setup_proof: number; modality: string | null };
+
+    expect(flags(proof.outcome === 'enqueued' ? proof.requestId : '').setup_proof).toBe(1);
+    expect(flags(lane.outcome === 'enqueued' ? lane.requestId : '').setup_proof).toBe(0);
+    // The task has no attach:'cdp' serve, so both resolve to the web modality —
+    // derived ONCE, inside scheduler.enqueue, not duplicated in this seam.
+    expect(flags(lane.outcome === 'enqueued' ? lane.requestId : '').modality).toBe('web');
   });
 
   it('a sha-capture failure (non-git worktree) → null snapshot_sha but STILL enqueues', async () => {

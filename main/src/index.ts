@@ -108,8 +108,13 @@ import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
-import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
+import {
+  createVerdictDelivery,
+  createCapabilityBreakerFinding,
+} from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
+import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
+import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
@@ -1758,6 +1763,13 @@ async function initializeServices(): Promise<boolean> {
     claudeDefaultModel: DEFAULT_JUDGE_MODEL,
     resolveNode: findNodeExecutable,
     driverCliPath: verifyDriverCliPath,
+    // §3.5 pre-deploy preflight probes (verification-setup-flow.md). Chromium
+    // resolution is the driver's OWN, so preflight and the driver's later launch
+    // can never disagree; the port probe is literally the same TCP connect the
+    // scheduler's teardown uses below (declared after this block — referenced
+    // through a closure so it is resolved at CALL time, not construction time).
+    resolveChromium: probeChromiumExecutable,
+    portFreeProbe: (port: number) => verifyPortFreeProbe(port),
     logger: cyboflowLogger,
   });
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
@@ -1821,6 +1833,15 @@ async function initializeServices(): Promise<boolean> {
     // decides release-vs-quarantine at agent teardown.
     agentRunner: verificationAgentRunner,
     portFreeProbe: verifyPortFreeProbe,
+    // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3):
+    // the per-(project, modality) capability ledger backing the `unsupported`
+    // mark + the K-consecutive-env-failure circuit breaker, and the non-blocking
+    // finding its trip raises (through verdictDelivery, which owns the
+    // ReviewItemRouter chokepoint — the scheduler never touches a router).
+    // `runbookStatus` is deliberately NOT wired: phase 2 owns the runbook store,
+    // and the scheduler's 'absent' default is the honest answer until it lands.
+    capabilityStore: new VerifyCapabilityStore(cyboflowDb, cyboflowLogger),
+    capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).

@@ -459,6 +459,29 @@ async function defaultResolveChromiumExecutable(): Promise<string | null> {
   }
 }
 
+/**
+ * The SAME chromium resolution the driver's launch fallback uses, exported so
+ * the agent-path PREFLIGHT (docs/proposals/verification-setup-flow.md §3.5,
+ * `../preflight.ts`) can answer "is a launchable chromium present on this host?"
+ * BEFORE a budget increment + snapshot provisioning + a full SDK deploy — today
+ * a missing chromium only surfaces here, at driver-launch time, deep inside the
+ * deployed agent's session (the §1 "launch_failed" bucket).
+ *
+ * Resolution must go through THIS function rather than a re-implementation, so
+ * the preflight verdict and the driver's own behavior can never disagree: a
+ * preflight that says "present" while the driver then fails to resolve one would
+ * classify a genuine env failure as `'ambiguous'`, and the reverse would skip a
+ * lane on a host that could actually have run the check.
+ *
+ * `null` means AFFIRMATIVELY absent (playwright resolved no path, or the
+ * resolved path does not exist); a resolution error is swallowed to `null` by
+ * the delegate, which the preflight's chromium check treats as absent — the one
+ * place its fail-open rule is bounded by the delegate's own catch.
+ */
+export function probeChromiumExecutable(): Promise<string | null> {
+  return defaultResolveChromiumExecutable();
+}
+
 async function defaultSpawnDetachedChromium(args: {
   executablePath: string;
   port: number;
