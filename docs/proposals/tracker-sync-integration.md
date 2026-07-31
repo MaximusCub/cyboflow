@@ -24,19 +24,30 @@ Two-way sync between cyboflow's backlog and external issue trackers. Issues impo
 
 ## UX
 
-Follow the prototype's three views and six wizard steps (Connect · Source · Tasks · States · Reconcile · Review), with these deviations:
+Follow the prototype's three views, extended to seven wizard steps (Connect · Project · Source · Tasks · States · Reconcile · Review), with these deviations:
 
 - **Step 0 (Connect)** — replace the OAuth authorize animation with a paste-your-key card (Linear: API key; Plane: API key + base URL, defaulting to `https://api.plane.so`). Keep the scopes card as documentation of what we read/write. Key is validated with a live `viewer`/workspace probe before Continue enables.
-- **Step 2 (Tasks)** — ship the **Toggle** layout only; drop the prototype's layout switch.
-- **Step 3 (States)** — ship the **Table** layout only; drop the switch. Below the two-way toggle, add the **sub-issue mirroring toggle** (visible only when two-way is on) and the **conflict mode** selector (Auto / Manual).
-- **Step 1 (Source)** — hierarchy comes from the adapter: Linear = team → whole team / project / view / cycle; Plane = project → whole project / cycle / module.
-- **Catalog** — two rows (Linear, Plane). Drop the `preview connected state →` prototype affordance.
-- **Connected view** — as designed; Sync-settings card gains rows for conflict mode and mirroring; the log gains conflict/mirror lines.
+- **Step 1 (Project)** — added post-prototype: pick the TARGET cyboflow project explicitly (seeded from the active project, marked "Active"). One connection = one cyboflow project × one tracker source; the reconcile preview and the persisted connection both follow this choice.
+- **Step 3 (Tasks)** — ship the **Toggle** layout only; drop the prototype's layout switch.
+- **Step 4 (States)** — ship the **Table** layout only; drop the switch. Below the mapping table sit the **three direction-mode rows** (see Direction modes below), the **sub-issue mirroring toggle**, and the **conflict mode** selector (Auto / Manual) — all always visible.
+- **Step 2 (Source)** — hierarchy comes from the adapter: Linear = team → whole team / project / view / cycle; Plane = project → whole project / cycle / module.
+- **Catalog** — two rows (Linear, Plane). Drop the `preview connected state →` prototype affordance. Each provider row lists connections ACROSS all cyboflow projects (project chip + honest status — paused renders as a warning); Connect stays available while the active project lacks a connection for that provider.
+- **Connected view** — as designed; Sync-settings card gains the three direction-mode rows plus conflict mode and mirroring; the log gains conflict/mirror/held-direction lines.
+
+## Direction modes (supersedes the single two-way toggle)
+
+The original `two_way` boolean conflated three independent directions; it is retired (column kept, permanently unread — migration 094) in favour of three per-connection modes, each `'auto' | 'manual'` (`TrackerDirectionMode`):
+
+- **`status_sync_mode`** — status flow for LINKED items, BOTH directions: outbound stage write-back and inbound remote-state application.
+- **`pull_mode`** — importing NEW remote issues as ideas.
+- **`push_mode`** — an idea created locally after the connection exists gets a TOP-LEVEL issue created in the connection's source container (Linear: idempotent client-supplied id; Plane: `cyboflow-sync` marker paragraph for crash recovery). The draft is composed at drain time, not enqueue time. Skips: provider-authored creates, already-linked ideas, import-provenance bodies, experiment-sandbox rows.
+
+`'auto'` runs on the 5-minute tick + live entity events; `'manual'` DEFERS that direction until an explicit "Sync now" — intents still enqueue durably (modes gate the DRAIN, never the enqueue), and a deferred inbound application HOLDS the cursor so nothing is silently dropped. "Sync now" and the connect-time initial pass always run every direction. Backfill for pre-094 rows: status per old `two_way`, pull auto, push **manual** (net-new behaviour must not surprise-write into a shared workspace).
 
 ## Data model
 
 - **Entity-scoped external links.** `task_external_links` (mig 014, dormant, task-only) generalizes to link **ideas and tasks**: `entity_type`, `entity_id`, `provider` (`linear` | `plane`), `external_id`, `external_url`, `external_parent_id`, `synced_cursor`, `baseline_json`, plus connection id. `baseline_json` stores the last-synced field snapshot for three-way merge.
-- **Connections table.** One row per provider connection: provider, workspace/instance identity, base URL (Plane), selected source, selection mode, state mapping, two-way + mirroring + conflict-mode flags, cursor/timestamps. **Secrets are not stored in this table** — see Auth.
+- **Connections table.** One row per provider connection: provider, workspace/instance identity, base URL (Plane), selected source, selection mode, state mapping, the three direction modes + mirroring + conflict-mode flags, cursor/timestamps. **Secrets are not stored in this table** — see Auth.
 - **Migration numbering**: several in-flight worktrees claim 090–092; take the next free number at implementation time (≈093).
 - All entity writes go through `TaskChangeRouter.applyChange` with a provider actor. `'linear'` is already reserved in the `TaskActor` union; add `'plane'` (or generalize to `tracker:<provider>`), and remove the defensive `actor === 'linear'` → `agent:unknown` fallback in `mcpQueryHandler`.
 
@@ -127,7 +138,7 @@ Where the build refined the design above — the spec stands, these are the delt
 - **Reconcile links** are created with a null baseline — the first inbound pass adopts the issue's current snapshot without applying anything; the wizard carries the issue's identifier + URL so the ref chip lands at connect time.
 - **Connected-view edit shortcuts are v1-read-only** for source/selection/mapping (changing them means re-running the wizard); direction, mirroring, and conflict mode toggle live via `updateSettings`. Deep-links would require a credential re-prompt since keys never return to the renderer.
 - **Plane flags for the live smoke**: docs are mid-rename `/issues/` → `/work-items/` (adapter uses `/issues/`; one-line segment swap if a real instance disagrees); assignees need `expand=assignees`; the workspace slug is part of credentials.
-- **Local-delete flow (shipped, staged-ruling design)**: archiving/deleting a linked entity from the board's card menu interposes a two-choice dialog — "Keep in <provider>" or "Cancel in <provider>" — that only STAGES the ruling (10-minute in-memory TTL, mutates nothing). The real delete/archive event consumes it server-side: cascade members inherit the root's ruling (cancel enqueues before each orphan), an inbound-applied archive never stages so provider actors can't trigger it, and a zombie sweep orphans any link whose entity vanished without an event. Backing out of the final confirm leaves everything untouched. The cancel choice deliberately bypasses `two_way` gating: it is a direct per-issue instruction, not the automatic stream. Known residual: an unlinked epic with linked mirrored children cleans their links on cascade but offers no cancel/keep prompt for them.
+- **Local-delete flow (shipped, staged-ruling design)**: archiving/deleting a linked entity from the board's card menu interposes a two-choice dialog — "Keep in <provider>" or "Cancel in <provider>" — that only STAGES the ruling (10-minute in-memory TTL, mutates nothing). The real delete/archive event consumes it server-side: cascade members inherit the root's ruling (cancel enqueues before each orphan), an inbound-applied archive never stages so provider actors can't trigger it, and a zombie sweep orphans any link whose entity vanished without an event. Backing out of the final confirm leaves everything untouched. The cancel choice enqueues like any other write — a direct per-issue instruction recorded as durable intent, drained under the status direction's mode. Known residual: an unlinked epic with linked mirrored children cleans their links on cascade but offers no cancel/keep prompt for them.
 
 ## V2 (explicitly out of v1 scope)
 
