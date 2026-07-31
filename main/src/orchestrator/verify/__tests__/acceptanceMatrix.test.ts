@@ -21,7 +21,7 @@
  * ({@link prepareVerificationEnqueue}) over a migration-backed in-memory DB. Only
  * the OUTSIDE WORLD is faked, and only at the seams the modules already inject
  * for exactly this purpose: the SDK query, the chromium/port/screen probes, the
- * driver-written attestation file, and (for the two dependency rows) the `cp`
+ * harness's §7.1 identity probe, and (for the two dependency rows) the `cp`
  * that builds a mirror. Nothing between `enqueue()` and the persisted terminal
  * row is a stub — which is the only way a row can be evidence about the SYSTEM
  * rather than about one module's opinion of its neighbours.
@@ -56,13 +56,14 @@ import {
   VerificationAgentRunner,
   ATTESTATION_MISSING_MESSAGE,
   ATTESTATION_UNCAPPED_MESSAGE,
-  type AttestationRecord,
+  RUNBOOK_MISMATCH_PREFIX,
   type VerificationAgentRunnerDeps,
   type ResolvedVerifyAgent,
 } from '../verificationAgentRunner';
+import type { HarnessAttestationResult } from '../harnessAttestation';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
 import { VerifyRunbookStore, type VerifyRunbookStoreDeps } from '../runbookStore';
-import { VerifyDepPreparer, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
 import { captureSnapshotSha, provisionSnapshot, type SnapshotProvision } from '../snapshotProvisioner';
 import { prepareVerificationEnqueue } from '../enqueueFromTask';
 import { decideMergeGate, isMergeGateBlocking } from '../mergeGateLaneAdvance';
@@ -353,8 +354,33 @@ interface RunnerWorld {
   occupiedPorts: Set<number>;
   /** What the (faked) SDK session returns as its structured report. */
   report: VerificationReportV1;
-  /** The DRIVER-written attestation record; `null` = the attest step never produced one. */
-  attest: AttestationRecord | null;
+  /**
+   * A RAW structured-output override, boxed so `null` is expressible: the
+   * gate-integrity rows need the session to return something that is NOT a
+   * valid report (prose, a truncated object, nothing at all), which
+   * {@link RunnerWorld.report}'s type cannot say. Absent ⇒ `report` is returned.
+   */
+  structuredOverride: { value: unknown } | null;
+  /**
+   * When set, the SDK seam THROWS this instead of returning — a transport-level
+   * failure of the deployed session (a reset, a 5xx, a closed stream). Distinct
+   * from a bad report on purpose: the exception comes from the harness's own SDK
+   * layer, so model content cannot manufacture it.
+   */
+  queryError: Error | null;
+  /**
+   * The runner's `fileExists` probe; `null` = everything exists. A row that
+   * makes a specific basename absent is injecting the PHANTOM-SCREENSHOT fault
+   * — a report citing evidence no driver ever wrote.
+   */
+  fileExists: ((absPath: string) => Promise<boolean>) | null;
+  /**
+   * What the HARNESS's own §7.1 identity probe concludes about the live
+   * surface. This is a probe RESULT, not a file the agent could have written:
+   * the runner performs the attestation itself, post-session and pre-teardown,
+   * so nothing under VERIFY_ARTIFACTS_DIR can influence it.
+   */
+  attest: HarnessAttestationResult;
   /** `nativeCaptureProbe` for the runner's preflight; `null` = not wired (check omitted). */
   nativeCapture: (() => Promise<boolean>) | null;
   /** Provisioning seam; `null` = the fake in-memory snapshot below. */
@@ -375,7 +401,10 @@ function makeWorld(overrides: Partial<RunnerWorld> = {}): RunnerWorld {
     chromium: '/opt/chromium',
     occupiedPorts: new Set<number>(),
     report: passReport(),
-    attest: { ok: true, kind: 'http-endpoint', detail: 'endpoint echoed this request nonce' },
+    structuredOverride: null,
+    queryError: null,
+    fileExists: null,
+    attest: { verified: true, kind: 'http-endpoint', detail: 'endpoint echoed this request nonce' },
     nativeCapture: null,
     provision: null,
     resolveRunbookByHash: null,
@@ -422,8 +451,14 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
   });
   const deps: VerificationAgentRunnerDeps = {
     query: async (args) => {
+      // Recorded BEFORE the throw: a session that then failed in transport was
+      // still deployed, and §3.6's budget claim is about deployment, not success.
       world.deploys.push(args.prompt);
-      return { structured: world.report, transcript: null };
+      if (world.queryError !== null) throw world.queryError;
+      return {
+        structured: world.structuredOverride !== null ? world.structuredOverride.value : world.report,
+        transcript: null,
+      };
     },
     resolveVerifyAgent: () => resolvedAgent,
     resolveClaudeAlias: (alias) => `claude-${alias}-resolved`,
@@ -432,13 +467,14 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
     driverCliPath: '/app/driverCli.js',
     provision: world.provision ?? fakeProvision,
     checkSnapshotMutated: async () => false,
-    fileExists: async () => true,
+    fileExists: world.fileExists ?? (async () => true),
     resolveChromium: async () => world.chromium,
     portFreeProbe: async (port) => !world.occupiedPorts.has(port),
-    readAttestFile: async () => world.attest,
+    attest: async () => world.attest,
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
     stopDriver: async () => {},
     reapBrowser: () => {},
+    reapServe: () => {},
     writeTranscript: async () => {},
     ...(world.nativeCapture ? { nativeCaptureProbe: world.nativeCapture } : {}),
     ...(world.resolveRunbookByHash ? { resolveRunbookByHash: world.resolveRunbookByHash } : {}),
@@ -471,15 +507,18 @@ function initScheduler(
     capabilityFinding?: VerificationSchedulerDeps['capabilityFinding'];
     nativeCaptureProbe?: () => Promise<boolean>;
     probePath?: string;
+    /** A REAL artifacts dir, for the one row that writes a file into it and proves the harness ignores it. */
+    artifactsDir?: string;
   },
 ): VerificationScheduler {
   const runbookStore = opts.runbookStore;
   const probePath = opts.probePath ?? LIVE_WORKTREE;
+  const artifactsDir = opts.artifactsDir ?? '/artifacts';
   return VerificationScheduler.initialize({
     db: dbAdapter(dbX),
     backends: {},
     judge: fakeJudge,
-    artifactsDirResolver: () => '/artifacts',
+    artifactsDirResolver: () => artifactsDir,
     config: CONFIG,
     leasePool: new ResourceLeasePool(new Mutex()),
     agentRunner: makeRunner(opts.world),
@@ -509,9 +548,16 @@ async function enqueueThroughSeam(
     runId: string;
     type?: VerificationType;
     task: VerificationTaskV1;
+    /** An EXPLICIT `null` means "the sha capture failed" (⇒ the dirty-worktree fallback); omitted means the default sha. */
     snapshotSha?: string | null;
     setupProof?: boolean;
     probePath?: string;
+    /**
+     * A CALLER-SUPPLIED pin, stamped verbatim (the setup flow pinning the draft
+     * it is proving, §5.2). Bypasses the proven-runbook resolution + merge, so a
+     * row using it must compose a task that already matches the runbook entry.
+     */
+    pin?: { hash: string; localVersion: number };
   },
 ): Promise<string> {
   const type: VerificationType = args.type ?? 'interactive-web-behavior';
@@ -520,6 +566,7 @@ async function enqueueThroughSeam(
     runId: args.runId,
     type,
     task: args.task,
+    ...(args.pin !== undefined ? { pin: args.pin } : {}),
     ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
   });
   if (!prepared.ok) throw new Error(`enqueue preparation rejected the task: ${prepared.error}`);
@@ -531,7 +578,9 @@ async function enqueueThroughSeam(
     input: { intent: task.summary, taskRef: task.taskRef ?? 'TASK-1' },
     chain: [],
     task,
-    snapshotSha: args.snapshotSha ?? 'sha-matrix',
+    // `?? ` would swallow an EXPLICIT null (the fallback-mode rows), so the two
+    // absent-ish cases are distinguished here rather than collapsed.
+    snapshotSha: args.snapshotSha === undefined ? 'sha-matrix' : args.snapshotSha,
     ...(args.setupProof === true ? { setupProof: true } : {}),
     ...(prepared.pin
       ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
@@ -605,20 +654,21 @@ async function initDepFixtureRepo(dir: string): Promise<void> {
 }
 
 /**
- * A `DepExec` that performs the copy for real (so the preparer's own existence
+ * A `DepExec` that shells out to the REAL `cp` (so the preparer's own existence
  * checks run against real directories, and the published mirror is a real tree
- * the symlink can point at) and records every invocation. The Electron ABI
+ * the snapshot can clone from) and records every invocation. The Electron ABI
  * rebuild is a recorded no-op — §7.2 puts it here on purpose, and the two rows
  * below assert WHERE it happens, never that it works.
+ *
+ * Real `cp` rather than `fsPromises.cp`: the latter REWRITES a relative symlink
+ * into an absolute path back into the source tree, which is the §7.2 finding-6
+ * breakage in miniature. A mirror built that way would make these rows assert
+ * against a fixture the production path never produces.
  */
 function recordingDepExec(calls: Array<{ cmd: string; args: string[] }>): DepExec {
-  return async (cmd, args) => {
+  return async (cmd, args, opts) => {
     calls.push({ cmd, args: [...args] });
-    if (cmd === 'cp') {
-      await fsPromises.cp(args[1], args[2], { recursive: true });
-      return { code: 0, out: '' };
-    }
-    return { code: 0, out: '' };
+    return cmd === 'cp' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' };
   };
 }
 
@@ -649,24 +699,42 @@ afterEach(() => {
 //
 // §5.4: "cold deps (fresh prepared-set build) → green within deadline" and
 // "warm deps → green". The observable that matters is not merely 'passed': it
-// is WHERE the snapshot's node_modules points. §7.2's hazard is that the link
-// resolves to the LIVE worktree, so anything the verification writes lands in
-// the tree every sibling lane builds against. A green run whose link still
-// pointed at the live tree would satisfy a naive assertion and prove nothing.
+// is WHAT the snapshot's node_modules IS. Until the §7.2 review it was a
+// SYMLINK, so anything the verification wrote landed in whatever the link
+// pointed at — the live worktree every sibling lane builds against, or (after
+// the preparer landed) the shared cache. It is now a CLONE into the snapshot,
+// and these rows assert that end state the only way that means anything: write
+// into it and prove the write reached neither the worktree nor the cache. A
+// green run over an aliased tree would satisfy a naive assertion and prove
+// nothing.
 // ===========================================================================
 
 describe('§5.4 matrix — dependency preparation', () => {
+  /** What one provisioned snapshot looked like, read BEFORE the runner disposed it. */
+  interface SnapshotDepProbe {
+    /** Whether the snapshot's node_modules was an alias of something else (must be false). */
+    isSymlink: boolean;
+    /** The mirror-sourced marker the clone carried in. */
+    marker: string;
+    /** Absolute path of the file this probe wrote INTO the snapshot's dep dir. */
+    writtenPath: string;
+  }
+
+  /** The file name a probe writes into the snapshot, standing in for anything a build step does. */
+  const SNAPSHOT_WRITE = 'written-by-verification.txt';
+
   /**
    * Runs one full verification against a REAL git repo + a REAL prepared-set
-   * cache, with only `cp`/the ABI rebuild faked. Returns the terminal status,
-   * the symlink target the snapshot got, and every exec the preparer performed.
+   * cache, with only the ABI rebuild faked (the `cp` is real — see
+   * {@link recordingDepExec}). Returns the terminal status, one probe per
+   * snapshot provisioned, and every exec the preparer performed.
    */
   async function runAgainstRealRepo(ctx: {
     repo: string;
     cacheDir: string;
     execCalls: Array<{ cmd: string; args: string[] }>;
     runId: string;
-  }): Promise<{ status: string; linkTargets: string[] }> {
+  }): Promise<{ status: string; probes: SnapshotDepProbe[] }> {
     const io = makeRunbookIo(ctx.repo);
     const store = makeRunbookStore(db, io);
     await proveModality(store, 'web', ctx.repo);
@@ -675,14 +743,24 @@ describe('§5.4 matrix — dependency preparation', () => {
       baseDir: ctx.cacheDir,
       exec: recordingDepExec(ctx.execCalls),
     });
-    const linkTargets: string[] = [];
+    const probes: SnapshotDepProbe[] = [];
     const world = makeWorld({
       // The REAL provisioner: a real detached worktree, real dependency-dir
-      // discovery, real symlink creation — wrapped only to read the link back
-      // BEFORE `dispose()` removes the tree in the runner's finally block.
+      // discovery, real cloning — wrapped only to inspect and write into the
+      // snapshot BEFORE `dispose()` removes the tree in the runner's finally
+      // block. The write is the point: it is what a `pnpm install`, a
+      // hand-edited module, or a build artifact would do from inside the agent's
+      // Bash session, performed here where the assertions can see where it lands.
       provision: async (opts) => {
         const provision = await provisionSnapshot({ ...opts, depPreparer: preparer });
-        linkTargets.push(await fsPromises.readlink(path.join(provision.worktreePath, 'node_modules')));
+        const depDir = path.join(provision.worktreePath, 'node_modules');
+        const writtenPath = path.join(depDir, SNAPSHOT_WRITE);
+        await fsPromises.writeFile(writtenPath, 'from inside the verification\n');
+        probes.push({
+          isSymlink: (await fsPromises.lstat(depDir)).isSymbolicLink(),
+          marker: await fsPromises.readFile(path.join(depDir, 'marker.txt'), 'utf8'),
+          writtenPath,
+        });
         return provision;
       },
       resolveRunbookByHash: (projectId, modality, hash) => store.getByHash(projectId, modality, hash),
@@ -698,10 +776,25 @@ describe('§5.4 matrix — dependency preparation', () => {
       probePath: ctx.repo,
     });
     const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
-    return { status: outcome.status, linkTargets };
+    return { status: outcome.status, probes };
   }
 
-  it('COLD: the preparer builds a fresh mirror, the snapshot links THAT (not the live tree), and the run is green', async () => {
+  /** Every published prepared set under the cache root (the fixtures build exactly one). */
+  async function publishedSets(cacheDir: string): Promise<string[]> {
+    const entries = await fsPromises.readdir(cacheDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => path.join(cacheDir, e.name));
+  }
+
+  async function exists(target: string): Promise<boolean> {
+    try {
+      await fsPromises.lstat(target);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it('COLD: the preparer builds a fresh mirror, the snapshot gets its OWN clone of it, and the run is green', async () => {
     await withTempDir('matrix-cold-deps-', async (root) => {
       const repo = path.join(root, 'repo');
       await fsPromises.mkdir(repo, { recursive: true });
@@ -709,7 +802,7 @@ describe('§5.4 matrix — dependency preparation', () => {
       const cacheDir = path.join(root, 'verify-deps');
       const execCalls: Array<{ cmd: string; args: string[] }> = [];
 
-      const { status, linkTargets } = await runAgainstRealRepo({
+      const { status, probes } = await runAgainstRealRepo({
         repo,
         cacheDir,
         execCalls,
@@ -718,22 +811,29 @@ describe('§5.4 matrix — dependency preparation', () => {
 
       expect(status).toBe('passed');
 
-      // A mirror was BUILT (cold): the clone ran at least once.
+      // A mirror was BUILT (cold): the preparer's clone ran at least once.
       expect(execCalls.filter((c) => c.cmd === 'cp').length).toBeGreaterThan(0);
+      const sets = await publishedSets(cacheDir);
+      expect(sets).toHaveLength(1);
+      expect(await exists(path.join(sets[0], 'node_modules', 'marker.txt'))).toBe(true);
 
-      // …and the snapshot's node_modules resolves INTO the cache, not into the
-      // live worktree. This is the §7.2 write-through hazard, closed.
-      expect(linkTargets).toHaveLength(1);
-      expect(linkTargets[0].startsWith(path.resolve(cacheDir) + path.sep)).toBe(true);
-      expect(linkTargets[0].endsWith(path.join('node_modules'))).toBe(true);
-      expect(linkTargets[0]).not.toBe(path.join(repo, 'node_modules'));
+      // The snapshot's node_modules is the mirror's CONTENT in the snapshot's
+      // OWN directory — carrying the prepared tree in, aliasing nothing out.
+      expect(probes).toHaveLength(1);
+      expect(probes[0].isSymlink).toBe(false);
+      expect(probes[0].marker).toBe('live-tree\n');
 
-      // The mirror really is a materialized tree (not a dangling link).
-      expect(await fsPromises.readFile(path.join(linkTargets[0], 'marker.txt'), 'utf8')).toBe('live-tree\n');
+      // …so the write taken from inside the snapshot reached neither the shared
+      // worktree nor the shared cache. This is the §7.2 hazard, closed — and
+      // closed on the path a regex over build commands could never have covered,
+      // because this write never was a command.
+      expect(await exists(probes[0].writtenPath)).toBe(false); // gone with the snapshot
+      expect(await exists(path.join(repo, 'node_modules', SNAPSHOT_WRITE))).toBe(false);
+      expect(await exists(path.join(sets[0], 'node_modules', SNAPSHOT_WRITE))).toBe(false);
     });
   }, 60_000);
 
-  it('WARM: a second verification reuses the published set — no re-clone, same mirror, still green', async () => {
+  it('WARM: a second verification reuses the published set — no re-clone by the preparer, a fresh snapshot copy, still green', async () => {
     await withTempDir('matrix-warm-deps-', async (root) => {
       const repo = path.join(root, 'repo');
       await fsPromises.mkdir(repo, { recursive: true });
@@ -752,9 +852,20 @@ describe('§5.4 matrix — dependency preparation', () => {
       const second = await runAgainstRealRepo({ repo, cacheDir, execCalls, runId: 'run-warm-2' });
 
       expect(second.status).toBe('passed');
-      // The whole point: the published set was ADOPTED, not rebuilt.
+      // The whole point of the cache: the published set was ADOPTED, not rebuilt.
       expect(execCalls.filter((c) => c.cmd === 'cp').length).toBe(clonesAfterCold);
-      expect(second.linkTargets).toEqual(first.linkTargets);
+
+      // And the warm path is no less isolated than the cold one: the second
+      // snapshot got its own clone of the SAME mirror, and the first run's write
+      // is nowhere in it — a shared set stays pristine across reuses precisely
+      // because nothing ever writes into it through a snapshot.
+      expect(second.probes).toHaveLength(1);
+      expect(second.probes[0].isSymlink).toBe(false);
+      expect(second.probes[0].marker).toBe('live-tree\n');
+      const sets = await publishedSets(cacheDir);
+      expect(sets).toHaveLength(1);
+      expect(await exists(path.join(sets[0], 'node_modules', SNAPSHOT_WRITE))).toBe(false);
+      expect(await exists(path.join(repo, 'node_modules', SNAPSHOT_WRITE))).toBe(false);
     });
   }, 60_000);
 });
@@ -929,7 +1040,7 @@ describe('§5.4 matrix — injected deliverable regression', () => {
   it("a JUDGED snapshot-mode fail stays FAILED, is attributed 'deliverable', and loops the lane back", async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
-    await proveModality(store, 'web');
+    const proven = await proveModality(store, 'web');
 
     // The broken-renderer commit: the environment is fine (preflight all green,
     // real snapshot mode) and the agent DROVE the behavior and judged it failed.
@@ -962,7 +1073,10 @@ describe('§5.4 matrix — injected deliverable regression', () => {
 
     // The environment demonstrably worked (it built, served, drove and judged),
     // so this RESETS the breaker rather than counting toward it (§3.4).
-    expect(healthy).toHaveBeenCalledWith(1, 'web');
+    // …under THIS runbook revision's ledger key, not a shared '' bucket: an
+    // obsolete revision's env failures must not suppress a newly proven one
+    // (Codex finding 7).
+    expect(healthy).toHaveBeenCalledWith(1, 'web', proven.hash);
 
     // §5.4: "lane loops back" — and it is BLOCKING, unlike every env skip above.
     const action = decideMergeGate({ status: 'failed', currentAttempts: 1 });
@@ -1113,18 +1227,31 @@ describe('§5.4 matrix — runbook drift demotes a proven record', () => {
 });
 
 // ===========================================================================
-// Row 10 — attestation channel absent
+// Row 10 — attestation: the HARNESS probes, and nothing else counts
+//
+// §5.4's row is "attestation channel absent ⇒ no `passed`". Phase 2 originally
+// satisfied it by READING `<artifactsDir>/.driver/attest.json`, which the
+// adversarial review then holed: the agent has Bash and owns
+// VERIFY_ARTIFACTS_DIR, so one redirect forged a perfect record for a channel
+// that never ran, and the nonce could not help because the nonce is exported
+// into the agent's own environment. The contract these rows now pin is the
+// corrected one — the runner performs the probe itself against the live surface
+// after the session ends — so the observable is the same and the reason it
+// holds is different.
 // ===========================================================================
 
-describe('§5.4 matrix — attestation channel absent (§7.1: no attestation ⇒ no passed)', () => {
-  it('a DECLARED channel whose driver record never appeared downgrades the pass to a BLOCKING failure', async () => {
+describe('§5.4 matrix — attestation (§7.1: no attestation ⇒ no passed)', () => {
+  it('a DECLARED channel the harness could not verify downgrades the pass to a BLOCKING failure', async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
     await proveModality(store, 'web');
 
-    // The agent reports a clean pass; the driver wrote no attest record, so the
-    // harness cannot prove the surface it drove was this deliverable.
-    const world = makeWorld({ attest: null });
+    // The agent reports a clean pass; the harness asks the live surface for this
+    // request's nonce and does not get it, so it cannot prove the thing that was
+    // driven is this deliverable.
+    const world = makeWorld({
+      attest: { verified: false, kind: 'http-endpoint', detail: 'endpoint body carried no nonce' },
+    });
     seedRun(db, 'run-no-attest');
     const scheduler = initScheduler(db, { world, runbookStore: store });
 
@@ -1140,6 +1267,50 @@ describe('§5.4 matrix — attestation channel absent (§7.1: no attestation ⇒
     // lane on a verification that proved nothing.
     expect(readRow(db, requestId).failure_class).toBe('ambiguous');
     expect(isMergeGateBlocking(decideMergeGate({ status: 'failed', currentAttempts: 1 }))).toBe(true);
+  });
+
+  it('a PERFECT forged attest.json sitting in the real artifacts dir buys the agent NOTHING', async () => {
+    await withTempDir('matrix-forged-attest-', async (artifactsDir) => {
+      const io = makeRunbookIo();
+      const store = makeRunbookStore(db, io);
+      await proveModality(store, 'web');
+
+      // Exactly what one Bash redirect inside the deployed session produces —
+      // written for real, in the real artifacts dir, in the exact shape the
+      // phase-2 runner used to accept as proof.
+      await fsPromises.mkdir(path.join(artifactsDir, '.driver'), { recursive: true });
+      await fsPromises.writeFile(
+        path.join(artifactsDir, '.driver', 'attest.json'),
+        JSON.stringify({
+          ok: true,
+          kind: 'http-endpoint',
+          detail: 'endpoint returned this request nonce',
+          at: new Date().toISOString(),
+        }),
+        'utf8',
+      );
+
+      const world = makeWorld({
+        attest: { verified: false, kind: 'http-endpoint', detail: 'endpoint body carried no nonce' },
+      });
+      seedRun(db, 'run-forged-attest');
+      const scheduler = initScheduler(db, { world, runbookStore: store, artifactsDir });
+
+      const requestId = await enqueueThroughSeam(scheduler, {
+        runId: 'run-forged-attest',
+        task: composedTask(),
+      });
+      const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+      // The file is still there and still perfect — and the terminal is a
+      // blocking failure anyway, because no code path reads it.
+      expect(
+        JSON.parse(await fsPromises.readFile(path.join(artifactsDir, '.driver', 'attest.json'), 'utf8')),
+      ).toMatchObject({ ok: true });
+      expect(outcome.status).toBe('failed');
+      expect(readRow(db, requestId).error_message).toContain(ATTESTATION_MISSING_MESSAGE);
+      expect(isMergeGateBlocking(decideMergeGate({ status: 'failed', currentAttempts: 1 }))).toBe(true);
+    });
   });
 
   it('a task that never DECLARED a channel is capped at low_confidence — advisory, never passed', async () => {
@@ -1205,7 +1376,7 @@ describe('§5.4 matrix — native-screen (observe-only contract)', () => {
     // the model's word for it.
     const world = makeWorld({
       nativeCapture: async () => true,
-      attest: { ok: true, kind: 'window-identity', detail: 'window title matched "Cyboflow"' },
+      attest: { verified: true, kind: 'window-identity', detail: 'window title matched "Cyboflow"' },
       report: passReport({
         behaviors: [
           { id: 'b1', result: 'pass', evidence: { screenshots: ['s.png'], notes: 'clicked the menu' } },
@@ -1297,4 +1468,404 @@ describe('§5.4 matrix — native-screen (observe-only contract)', () => {
   it.todo(
     'explicit per-run consent gate is honored and any user input aborts the drive (§4 — blocked: native drive is a designed prerequisite, not yet implemented)',
   );
+});
+
+// ===========================================================================
+// Rows 12-14 — GATE INTEGRITY (Codex adversarial review, finding 1)
+//
+// Every row above injects a fault in the WORLD. These inject it in the AGENT,
+// which is the one adversary the harness cannot probe: the model is the only
+// participant that can author a claim about work it did not do. §3.1's rule is
+// that `skipped` ADVANCES the lane, so a status the model can talk its way into
+// is a status the model can use to ship its own unverified code.
+//
+// The pre-existing "ambiguous stays blocking" test asserted this against a
+// runner result that was ALREADY marked `'failed'` — i.e. it tested the
+// scheduler's handling of a status the runner had to produce for the test to
+// mean anything. These rows drive the REAL runner (a fake SDK session, real
+// validation, real mapping) into the REAL scheduler, so the runner→scheduler
+// MAPPING is what is under test rather than assumed.
+// ===========================================================================
+
+describe('§3.1 gate integrity — a deployed session cannot advance a lane on garbage', () => {
+  it('a structurally INVALID report is a BLOCKING failure, never an advancing skip', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // The session drains cleanly and returns prose instead of the schema it was
+    // handed verbatim in the harness contract. Historically this mapped to
+    // `skipped` — the lane advanced, integrated, and nothing was ever verified.
+    const world = makeWorld({
+      structuredOverride: { value: 'I ran the build and it all looked fine to me.' },
+    });
+    seedRun(db, 'run-garbage');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, { runId: 'run-garbage', task: composedTask() });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1); // the session really ran — this is not a skip-before-deploy
+    expect(outcome.status).toBe('failed');
+    const row = readRow(db, requestId);
+    expect(row.error_message).toContain('invalid structured report');
+
+    // Attribution stays honest: no harness evidence and no judged report means
+    // 'ambiguous', which is BLOCKING — never 'deliverable' (nothing was judged)
+    // and never 'env' (nothing corroborated an environment fault).
+    expect(row.failure_class).toBe('ambiguous');
+    const action = decideMergeGate({ status: outcome.status, currentAttempts: 1 });
+    expect(action).toEqual({ kind: 'loopback-implement', nextAttempt: 2 });
+    expect(isMergeGateBlocking(action)).toBe(true);
+  });
+
+  it('a session that drained with NO structured output at all is the same blocking failure', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    const world = makeWorld({ structuredOverride: { value: null } });
+    seedRun(db, 'run-silent');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, { runId: 'run-silent', task: composedTask() });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(outcome.status).toBe('failed');
+    expect(readRow(db, requestId).error_message).toContain('invalid structured report');
+    expect(isMergeGateBlocking(decideMergeGate({ status: outcome.status, currentAttempts: 1 }))).toBe(true);
+  });
+
+  it('a PASS whose evidence cites a screenshot no driver ever wrote is a BLOCKING failure', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // The fabricated-evidence attack: a clean gallery (every file real) plus a
+    // behavior citing proof that does not exist. Validating only the gallery
+    // leaves the actual EVIDENCE claim standing and advances the lane on it.
+    const world = makeWorld({
+      report: passReport({
+        behaviors: [
+          {
+            id: 'b1',
+            result: 'pass',
+            evidence: { screenshots: ['s.png', 'login-success.png'], notes: 'the toggle rendered' },
+          },
+        ],
+      }),
+      fileExists: async (absPath) => !absPath.endsWith('login-success.png'),
+    });
+    seedRun(db, 'run-phantom');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, { runId: 'run-phantom', task: composedTask() });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1);
+    expect(outcome.status).toBe('failed');
+    const row = readRow(db, requestId);
+    expect(row.error_message).toContain('login-success.png');
+    expect(row.failure_class).toBe('ambiguous');
+    expect(isMergeGateBlocking(decideMergeGate({ status: outcome.status, currentAttempts: 1 }))).toBe(true);
+  });
+
+  it('a TRANSPORT failure of the deployed session STAYS an advancing skip (the harness-observed carve-out)', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // The SDK layer threw — our code raised, no structured output ever existed,
+    // and nothing was claimed about the deliverable either way. Blocking here
+    // would turn every API outage into a lane-blocking FAIL that loops implement
+    // agents against code the harness never examined.
+    const world = makeWorld({ queryError: new Error('stream closed: ECONNRESET') });
+    seedRun(db, 'run-transport');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, { runId: 'run-transport', task: composedTask() });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1);
+    expect(outcome.status).toBe('skipped');
+    const row = readRow(db, requestId);
+    expect(row.error_message).toContain('agent deploy error');
+    // NOTE: this is the one advancing skip that is NOT env-classified. The §3.1
+    // classifier keys 'env' on harness EVIDENCE (a failed check, a squatter
+    // probe), and a transport error produces none; the runner instead flags the
+    // result so the gate-integrity guard exempts it explicitly rather than the
+    // scheduler guessing from an error string.
+    expect(row.failure_class).toBe('ambiguous');
+    // The lane advances with ZERO attempt increment…
+    expect(decideMergeGate({ status: outcome.status, currentAttempts: 1 })).toEqual({
+      kind: 'advance-integrated',
+    });
+    // …but the project's verification BUDGET is charged, because that session
+    // was deployed and did spend tokens (§3.6 — the budget counts deployments,
+    // not verdicts).
+    expect(row.judge_calls_used).toBe(1);
+  });
+
+  it('an UNATTRIBUTABLE build failure in the dirty shared worktree STAYS an advancing skip (§5.7)', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // No sha was captured at enqueue ⇒ the runner falls back to the LIVE
+    // worktree, which carries every sibling lane's half-finished edits. A build
+    // failure there genuinely cannot be charged to this lane's deliverable.
+    const world = makeWorld({
+      report: passReport({
+        behaviors: [],
+        screenshots: [],
+        outcome: 'build_failed',
+        buildLogExcerpt: 'ERR_MODULE_NOT_FOUND: ../sibling-lane/half-written.ts',
+      }),
+    });
+    seedRun(db, 'run-fallback-build');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-fallback-build',
+      task: composedTask(),
+      snapshotSha: null,
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1);
+    expect(outcome.status).toBe('skipped');
+    expect(readRow(db, requestId).error_message).toContain('unattributable shared-worktree build_failed');
+    expect(decideMergeGate({ status: outcome.status, currentAttempts: 1 })).toEqual({
+      kind: 'advance-integrated',
+    });
+  });
+
+  it('the SAME build failure in a SNAPSHOT is blocking — the carve-out is about provenance, not the outcome', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    const world = makeWorld({
+      report: passReport({
+        behaviors: [],
+        screenshots: [],
+        outcome: 'build_failed',
+        buildLogExcerpt: 'tsc: 3 errors',
+      }),
+    });
+    seedRun(db, 'run-snapshot-build');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-snapshot-build',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(outcome.status).toBe('failed');
+    expect(isMergeGateBlocking(decideMergeGate({ status: outcome.status, currentAttempts: 1 }))).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Rows 15-16 — the PIN validates the RECORD, not just its content
+// (Codex adversarial review, finding 3)
+//
+// A content hash answers "are these the same commands". It cannot answer "is
+// this revision still the one this request is entitled to run" — that is the
+// record's STATUS (ordinary traffic) and its VERSION (a setup proof), and both
+// can move between an enqueue and the deployment it triggers.
+// ===========================================================================
+
+describe('§5.2 seam 3 — the pin checks the record, not only its content', () => {
+  it('an ORDINARY request refuses a revision that was DEMOTED between enqueue and deploy', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // The demotion lands mid-flight: the request pinned a PROVEN revision at
+    // enqueue, and by the time the runner resolves the hash the store has
+    // write-through-demoted it (ROW 8 covers the store side; what this pins is
+    // that the RUNNER refuses to execute what it resolves as no-longer-proven —
+    // a content-only compare cannot see it, because a demotion changes the row's
+    // status and never its content address).
+    const world = makeWorld({
+      resolveRunbookByHash: (projectId, modality, hash) => {
+        const record = store.getByHash(projectId, modality, hash);
+        return record === null ? null : { ...record, status: 'unproven-draft' };
+      },
+    });
+    seedRun(db, 'run-demoted-pin');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-demoted-pin',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    const row = readRow(db, requestId);
+    expect(outcome.status).toBe('skipped');
+    expect(row.error_message).toContain(RUNBOOK_MISMATCH_PREFIX);
+    expect(row.error_message).toContain('not proven');
+
+    // Env-class and FREE: host/state drift is not a defect the lane could fix by
+    // retrying, so nothing deploys, nothing is charged, and the lane advances.
+    expect(row.failure_class).toBe('env');
+    expect(world.deploys).toHaveLength(0);
+    expect(row.judge_calls_used).toBe(0);
+    expect(decideMergeGate({ status: outcome.status, currentAttempts: 1 })).toEqual({
+      kind: 'advance-integrated',
+    });
+  });
+
+  it('a SETUP-PROOF request refuses a record that was RE-REGISTERED after it was pinned', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+
+    // The setup flow derives a draft (v1) and enqueues a proof pinned to it —
+    // then something re-derives (v2). The CONTENT is byte-identical, so the hash
+    // still resolves and the fingerprint compare passes: version equality is the
+    // ONLY thing standing between this run and a proof recorded against a
+    // revision it never actually attested to.
+    const first = await store.registerDraft(1, LIVE_WORKTREE, 'web');
+    if ('error' in first) throw new Error(`registerDraft failed: ${first.error}`);
+    const second = await store.registerDraft(1, LIVE_WORKTREE, 'web');
+    if ('error' in second) throw new Error(`registerDraft failed: ${second.error}`);
+    expect(second.hash).toBe(first.hash);
+    expect(second.version).toBeGreaterThan(first.version);
+
+    const world = makeWorld({
+      resolveRunbookByHash: (projectId, modality, hash) => store.getByHash(projectId, modality, hash),
+    });
+    seedRun(db, 'run-stale-proof');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-stale-proof',
+      // A caller-supplied pin is stamped verbatim WITHOUT the runbook merge, so
+      // the composed task must already carry the entry's own commands — else the
+      // content compare would reject first and this row would prove nothing.
+      task: composedTask({
+        build: ['pnpm run build:web'],
+        serve: { cmd: 'pnpm run preview -- --port ${PORT}', readyWhen: { urlPath: '/' } },
+        attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+      }),
+      setupProof: true,
+      pin: { hash: first.hash, localVersion: first.version },
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    const row = readRow(db, requestId);
+    expect(outcome.status).toBe('skipped');
+    expect(row.error_message).toContain(RUNBOOK_MISMATCH_PREFIX);
+    expect(row.error_message).toContain('setup-proof request pinned');
+    expect(row.failure_class).toBe('env');
+    expect(world.deploys).toHaveLength(0);
+
+    // And nothing was promoted: a proof that never ran cannot make a record proven.
+    expect(runbookRecord(db)?.status).toBe('unproven-draft');
+  });
+
+  it('a SETUP-PROOF request against its OWN current draft deploys and proves it (the bootstrap still works)', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    const draft = await store.registerDraft(1, LIVE_WORKTREE, 'web');
+    if ('error' in draft) throw new Error(`registerDraft failed: ${draft.error}`);
+
+    // The proven-status requirement added for ordinary traffic must NOT reach
+    // here: an 'unproven-draft' record is exactly what a proof run exists to
+    // execute, and requiring 'proven' would deadlock phase 2's bootstrap.
+    const world = makeWorld({
+      resolveRunbookByHash: (projectId, modality, hash) => store.getByHash(projectId, modality, hash),
+    });
+    seedRun(db, 'run-good-proof');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-good-proof',
+      task: composedTask({
+        build: ['pnpm run build:web'],
+        serve: { cmd: 'pnpm run preview -- --port ${PORT}', readyWhen: { urlPath: '/' } },
+        attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+      }),
+      setupProof: true,
+      pin: { hash: draft.hash, localVersion: draft.version },
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(outcome.status).toBe('passed');
+    expect(world.deploys).toHaveLength(1);
+    expect(runbookRecord(db)?.status).toBe('proven');
+  });
+});
+
+// ===========================================================================
+// Row 17 — the capability ledger is keyed by RUNBOOK REVISION
+// (Codex adversarial review, finding 7)
+//
+// The ledger's claim is "standing this deliverable up FAILS on this host", and
+// what "standing it up" means is the runbook's commands. Pooling every revision
+// into one bucket makes a dead revision's failures suppress its own fix for the
+// rest of the 24h TTL — i.e. the setup flow's derive→prove→persist loop would be
+// unable to clear a suppression it just fixed.
+// ===========================================================================
+
+describe('§3.4 capability ledger — suppression is keyed by runbook revision', () => {
+  it("an obsolete revision's env failures never suppress the revision that FIXED them", async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    const revA = await proveModality(store, 'web');
+
+    // Revision A trips the breaker on this host (K consecutive env failures).
+    const world = makeWorld({ chromium: null });
+    const capability = new VerifyCapabilityStore(dbAdapter(db));
+    seedRun(db, 'run-ledger');
+    const scheduler = initScheduler(db, { world, runbookStore: store, capabilityStore: capability });
+
+    for (let i = 0; i < CAPABILITY_BREAKER_THRESHOLD; i++) {
+      const id = await enqueueThroughSeam(scheduler, { runId: 'run-ledger', task: composedTask() });
+      await scheduler.awaitTerminal(id, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+      expect(readRow(db, id).runbook_hash).toBe(revA.hash);
+    }
+    expect(capability.getActiveSuppression(1, 'web', revA.hash)).not.toBeNull();
+
+    // THE FIX: a new revision (different serve command), re-derived and re-proven
+    // — and a host that now has a chromium.
+    const fixed = baseRunbook();
+    fixed.modalities.web = {
+      build: ['pnpm run build:web'],
+      serve: { cmd: 'pnpm run preview -- --port ${PORT} --host 127.0.0.1', readyWhen: { urlPath: '/' } },
+      attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+    };
+    io.files.set(LIVE_WORKTREE, JSON.stringify(fixed));
+    const revB = await proveModality(store, 'web');
+    expect(revB.hash).not.toBe(revA.hash);
+    world.chromium = '/opt/chromium';
+
+    const fixedId = await enqueueThroughSeam(scheduler, { runId: 'run-ledger', task: composedTask() });
+    const outcome = await scheduler.awaitTerminal(fixedId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    // Revision B is NOT suppressed by revision A's history: it deploys and passes.
+    expect(readRow(db, fixedId).runbook_hash).toBe(revB.hash);
+    expect(outcome.status).toBe('passed');
+    expect(world.deploys).toHaveLength(1);
+    expect(capability.getActiveSuppression(1, 'web', revB.hash)).toBeNull();
+
+    // …and B's healthy outcome did not reach into A's bucket either: the
+    // suppression on the revision that actually failed still stands, so a
+    // request that somehow re-pins A is still short-circuited.
+    expect(capability.getActiveSuppression(1, 'web', revA.hash)).not.toBeNull();
+    const buckets = db
+      .prepare(
+        `SELECT runbook_hash, status, consecutive_env_failures AS fails
+           FROM verify_capability_state WHERE project_id = 1 AND modality = 'web'`,
+      )
+      .all() as Array<{ runbook_hash: string; status: string; fails: number }>;
+    const bucketA = buckets.find((b) => b.runbook_hash === revA.hash);
+    expect(bucketA?.status).toBe('suppressed');
+    expect(bucketA?.fails).toBeGreaterThanOrEqual(CAPABILITY_BREAKER_THRESHOLD);
+    // B either has no row at all (nothing to reset) or a clean one — never A's counter.
+    expect(buckets.find((b) => b.runbook_hash === revB.hash)?.fails ?? 0).toBe(0);
+  });
 });

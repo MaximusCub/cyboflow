@@ -15,6 +15,7 @@ import {
   AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
   AWAIT_TERMINAL_TIMEOUT_MESSAGE,
   VERIFY_NO_RUNBOOK_REASON,
+  VERIFY_UNPROVEN_SKIP_BLOCKED,
   type OnVerdict,
 } from '../verificationScheduler';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
@@ -611,7 +612,16 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     expect(row.error_message).toContain('not yet wired');
     expect(row.failure_class).toBe('env');
     expect(JSON.parse(row.failure_evidence_json ?? '[]')).toHaveLength(1);
-    expect(markUnsupported).toHaveBeenCalledWith(1, 'native-screen', expect.stringContaining('unsupported modality'));
+    // The 4th argument is the ledger's runbook-hash key: '' for this UNPINNED
+    // row (no proven runbook), never omitted — the ledger is keyed
+    // (project, modality, runbook_hash) and an omitted key silently pools every
+    // revision into one bucket (Codex finding 7).
+    expect(markUnsupported).toHaveBeenCalledWith(
+      1,
+      'native-screen',
+      expect.stringContaining('unsupported modality'),
+      '',
+    );
   });
 
   it("a mobile-flow request skips with the 'deferred — pending Xcode MCP' reason", async () => {
@@ -990,7 +1000,8 @@ describe('VerificationScheduler — §3.1 classification + §3.4 capability feed
     const row = requestRow(db);
     expect(row.status).toBe('failed'); // NOT converted — the deliverable is what broke
     expect(row.failure_class).toBe('deliverable');
-    expect(healthy).toHaveBeenCalledWith(1, 'web');
+    // …keyed by the ledger's third component (this row is unpinned ⇒ '').
+    expect(healthy).toHaveBeenCalledWith(1, 'web', '');
   });
 
   it("a model-authored build_failed with NO harness corroboration stays 'ambiguous' AND stays failed", async () => {
@@ -1028,6 +1039,143 @@ describe('VerificationScheduler — §3.1 classification + §3.4 capability feed
     // Ambiguity touches NEITHER side of the ledger.
     expect(envFailure).not.toHaveBeenCalled();
     expect(healthy).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // §3.1 GATE INTEGRITY — the CHOKEPOINT backstop (Codex finding 1).
+  //
+  // The runner is where statuses are meant to be right; these rows drive the
+  // scheduler with hand-built results the runner does not currently produce,
+  // which is exactly the point of a backstop: it must hold for a runner path
+  // that regresses or for a new one written without the merge gate in mind.
+  // (The runner→scheduler MAPPING itself is covered end-to-end, with a real
+  // runner and a fake SDK session, in acceptanceMatrix.test.ts.)
+  // -------------------------------------------------------------------------
+
+  it("a DEPLOYED 'skipped' that nothing corroborated is BLOCKED from advancing (converted to failed)", async () => {
+    seedRun(db, 'run-unproven-skip', JSON.stringify(['agent']));
+    const store = new VerifyCapabilityStore(dbAdapter(db));
+    const envFailure = vi.spyOn(store, 'recordEnvFailure');
+    const healthy = vi.spyOn(store, 'recordHealthyOutcome');
+    const { scheduler } = initWith(
+      {
+        // A session that deployed, produced no report, and asked to be skipped —
+        // i.e. an ADVANCE on a verification that never happened. Nothing here is
+        // harness-corroborated (the preflight is green), so it classifies
+        // 'ambiguous' and must not be allowed to advance the lane.
+        status: 'skipped',
+        fileNames: [],
+        deployed: true,
+        provisionMode: 'snapshot',
+        errorMessage: 'the agent could not decide',
+        preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+      },
+      { store },
+    );
+    enqueueOne(scheduler, 'run-unproven-skip');
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('failed');
+    expect(row.failure_class).toBe('ambiguous');
+    // The conversion changes the STATUS and keeps the evidence: the runner's own
+    // message is still the tail of what a human reads.
+    expect(row.error_message).toContain(VERIFY_UNPROVEN_SKIP_BLOCKED);
+    expect(row.error_message).toContain('the agent could not decide');
+    // Still ambiguous ⇒ still touches NEITHER side of the ledger.
+    expect(envFailure).not.toHaveBeenCalled();
+    expect(healthy).not.toHaveBeenCalled();
+  });
+
+  it('a TRANSPORT-flagged skip is exempt — an API outage must not block a lane', async () => {
+    seedRun(db, 'run-transport-skip', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      status: 'skipped',
+      fileNames: [],
+      deployed: true,
+      transportFailure: true,
+      provisionMode: 'snapshot',
+      errorMessage: 'agent deploy error: stream closed',
+      preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+    });
+    enqueueOne(scheduler, 'run-transport-skip');
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('skipped');
+    expect(row.error_message).toBe('agent deploy error: stream closed');
+    expect(row.error_message).not.toContain(VERIFY_UNPROVEN_SKIP_BLOCKED);
+  });
+
+  it('the §5.7 dirty-fallback build failure is exempt — attribution there is genuinely unprovable', async () => {
+    seedRun(db, 'run-fallback-skip', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      status: 'skipped',
+      fileNames: [],
+      deployed: true,
+      provisionMode: 'fallback',
+      errorMessage: 'unattributable shared-worktree build_failed: boom',
+      report: {
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'build_failed',
+        buildLogExcerpt: 'boom',
+        confidence: 0.4,
+        feedback: 'could not build',
+        issues: [],
+      },
+      preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+    });
+    enqueueOne(scheduler, 'run-fallback-skip');
+    await flushDrain();
+
+    expect(requestRow(db).status).toBe('skipped');
+  });
+
+  it('the SAME shape in SNAPSHOT mode is NOT exempt — the carve-out is about provenance', async () => {
+    seedRun(db, 'run-snapshot-skip', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      status: 'skipped',
+      fileNames: [],
+      deployed: true,
+      provisionMode: 'snapshot',
+      errorMessage: 'build_failed: boom',
+      report: {
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'build_failed',
+        buildLogExcerpt: 'boom',
+        confidence: 0.4,
+        feedback: 'could not build',
+        issues: [],
+      },
+      preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+    });
+    enqueueOne(scheduler, 'run-snapshot-skip');
+    await flushDrain();
+
+    expect(requestRow(db).status).toBe('failed');
+  });
+
+  it('a PRE-DEPLOY skip is untouched — the guard is about DEPLOYED sessions only', async () => {
+    seedRun(db, 'run-predeploy-skip', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      // The §3.5 preflight exit: nothing ran, nothing was claimed, and the failed
+      // check is harness evidence that makes it env-class anyway.
+      status: 'skipped',
+      fileNames: [],
+      deployed: false,
+      errorMessage: 'chromium not resolved',
+      preflight: PREFLIGHT_FAIL,
+    });
+    enqueueOne(scheduler, 'run-predeploy-skip');
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('skipped');
+    expect(row.failure_class).toBe('env');
   });
 
   it("a timeout persists 'ambiguous' and is never converted", async () => {

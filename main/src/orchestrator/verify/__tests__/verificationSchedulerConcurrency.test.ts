@@ -475,6 +475,8 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
       1,
       'native-screen',
       expect.stringContaining('Screen Recording'),
+      // The ledger's runbook-hash key — '' for this unpinned row (Codex finding 7).
+      '',
     );
     // The gate runs BEFORE any lease — a host that cannot capture never holds the
     // screen (nor a deployment slot) even momentarily.

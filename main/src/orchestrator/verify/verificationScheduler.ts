@@ -178,6 +178,16 @@ export const VERIFY_NO_RUNBOOK_REASON =
   'no proven verification runbook for this project (run verification setup)';
 
 /**
+ * The prefix stamped on a terminal the §3.1 GATE-INTEGRITY guard blocked — a
+ * DEPLOYED session whose skip nothing corroborated (see
+ * {@link VerificationScheduler.isUnprovenAdvancingSkip}). Exported so tests and
+ * any future health-panel grouping can key on the exact string rather than
+ * re-deriving it; the original runner message is appended after it, because the
+ * conversion changes the STATUS and must never destroy the evidence.
+ */
+export const VERIFY_UNPROVEN_SKIP_BLOCKED = 'unverified result blocked (§3.1 gate integrity)';
+
+/**
  * SUPERSEDED by the {@link verifyAgentSlot} pool (§4 footnote ¹). This was the
  * single count-1 lease that serialized EVERY agent verification app-wide
  * regardless of modality; the roster's concurrency column ("parallel, port
@@ -2259,6 +2269,35 @@ export class VerificationScheduler {
     }
   }
 
+  /**
+   * The capability ledger's THIRD key component for one request:
+   * `verify_capability_state` is keyed `(project_id, modality, runbook_hash)`
+   * (migration 088), and this resolves the `runbook_hash` half from the row's
+   * own §5.2 pin.
+   *
+   * WHY THE HASH IS PART OF THE KEY AT ALL, stated once here for every ledger
+   * call site (the gates' `getActiveSuppression`/`markUnsupported`, and
+   * `recordCapabilityOutcome`'s `recordEnvFailure`/`recordHealthyOutcome`). The
+   * ledger's claims are all of the form "standing this project's `web`
+   * deliverable up FAILS ON THIS HOST" — and what "standing it up" MEANS is the
+   * runbook's build/serve commands. A revision whose dev script was broken
+   * earns three env failures and a 24h suppression; the fix is a new revision
+   * with different commands, re-derived and re-proven. Keying the counter on
+   * (project, modality) ALONE would let the dead revision's failures suppress
+   * the fixed one for the rest of the TTL — the ledger would be punishing a
+   * project for commands nothing runs any more, and phase 2's whole
+   * derive→prove→persist loop would be unable to clear it.
+   *
+   * `''` — migration 088's column default — is the genuinely-UNPINNED bucket:
+   * degenerate pre-live requests that derive no environment, and every legacy
+   * row from before 089. It is a real key, not a fallback for "we could not be
+   * bothered to look": those requests share a capability story precisely
+   * because none of them runs project-authored commands.
+   */
+  private capabilityRunbookKey(requestId: string): string {
+    return this.runbookPinForRow(requestId).hash ?? '';
+  }
+
   /** The project's checkout path (`projects.path`); null when unknown/unreadable. */
   private projectPathFor(projectId: number): string | null {
     try {
@@ -2467,18 +2506,21 @@ export class VerificationScheduler {
     task: VerificationTaskV1,
     modality: VerificationModality,
     setupProof: boolean,
+    /** This row's ledger key — see {@link capabilityRunbookKey}. */
+    runbookHash: string,
   ): Promise<string | null> {
     // (1) Modalities with no executable path on the agent engine (§3.3), plus the
     // probe-conditional native-screen lane (§4).
     const unsupportedDetail = await this.unsupportedModalityDetail(modality);
     if (unsupportedDetail !== null) {
       const reason = `unsupported modality '${modality}': ${unsupportedDetail}`;
-      this.capabilityStore?.markUnsupported(row.project_id, modality, reason);
+      this.capabilityStore?.markUnsupported(row.project_id, modality, reason, runbookHash);
       return reason;
     }
 
     // (2) An ACTIVE ledger suppression (§3.3 self-refreshing mark / §3.4 breaker).
-    const suppression = this.capabilityStore?.getActiveSuppression(row.project_id, modality) ?? null;
+    const suppression =
+      this.capabilityStore?.getActiveSuppression(row.project_id, modality, runbookHash) ?? null;
     if (suppression !== null) {
       return `verification suppressed for ${modality}: ${suppression.reason}`;
     }
@@ -2546,7 +2588,13 @@ export class VerificationScheduler {
     const gate = this.agentGateColumnsForRow(row.id);
     const modality =
       gate.modality ?? resolveTaskModality(row.verify_type as VerificationType, task);
-    const gateSkip = await this.evaluateAgentGates(row, task, modality, gate.setupProof);
+    const gateSkip = await this.evaluateAgentGates(
+      row,
+      task,
+      modality,
+      gate.setupProof,
+      this.capabilityRunbookKey(row.id),
+    );
     if (gateSkip !== null) {
       await this.markTerminalAndDeliver(
         row,
@@ -2801,6 +2849,13 @@ export class VerificationScheduler {
         snapshotSha,
         ...(pin.hash !== null ? { runbookHash: pin.hash } : {}),
         ...(pin.version !== null ? { runbookLocalVersion: pin.version } : {}),
+        // §5.3 — which half of the runner's pin check applies. A proof run may
+        // legitimately execute an 'unproven-draft' record (proving it is the
+        // point) but must pin to the EXACT version it was enqueued against;
+        // ordinary traffic is the mirror image. Only the scheduler holds this
+        // bit (the `setup_proof` column), so it must be handed over rather than
+        // guessed from the task.
+        ...(setupProof ? { setupProof: true } : {}),
         artifactsDir: this.artifactsDirResolver(row.run_id),
         verifyPort: servesPort ? leasedPort : null,
         verifyDriverPort: leasedPort + 1,
@@ -2922,6 +2977,19 @@ export class VerificationScheduler {
    * (mergeGateLaneAdvance), so a deliverable defect misclassified as env ships
    * broken code silently, while a false `'ambiguous'` is merely annoying.
    *
+   * THE MIRROR CONVERSION, AND WHY IT IS HERE AND NOWHERE ELSE. The rule above
+   * has a dual that used to go unenforced: a `'skipped'` that came back from a
+   * session which ACTUALLY DEPLOYED and whose failure nothing could attribute
+   * (`'ambiguous'`) is a lane ADVANCING on a verification that produced no
+   * verdict — the same silent-ship hazard as a misclassified `'env'`, arriving
+   * from the other direction. Such a result is converted to `'failed'` (see
+   * {@link isUnprovenAdvancingSkip} for the two carve-outs). This is the ONE
+   * chokepoint for that invariant: every agent terminal in the engine funnels
+   * through this method, so a future runner path that forgets the rule is caught
+   * without scattering the same check across every return site. The runner still
+   * maps its own statuses honestly at source — this is a backstop, and a warn
+   * log fires whenever it has anything to do.
+   *
    * LEDGER FEEDBACK runs AFTER the terminal write (never before — the write is
    * cancel-guarded and is the load-bearing act): an env-class terminal counts
    * toward the §3.4 breaker; a pass or a DELIVERABLE-attributed failure is a
@@ -2963,17 +3031,41 @@ export class VerificationScheduler {
       : null;
 
     const converted = result.status === 'failed' && classified?.failureClass === 'env';
-    const status: RequestStatus = converted ? 'skipped' : result.status;
+    // The MIRROR conversion (§3.1 gate integrity), evaluated only when the
+    // env conversion did not fire — the two are mutually exclusive by
+    // construction (one keys on 'failed'+env, the other on 'skipped'+ambiguous)
+    // and stating it here keeps that a fact rather than an accident.
+    const blocked = !converted && this.isUnprovenAdvancingSkip(result, classified?.failureClass ?? null);
+    const status: RequestStatus = converted ? 'skipped' : blocked ? 'failed' : result.status;
     const evidenceDetail = classified?.evidence.map((e) => e.detail).join('; ') ?? '';
     const errorMessage = converted
       ? `environment failure (harness-verified), not the deliverable: ${evidenceDetail}`
-      : result.errorMessage;
+      : blocked
+        ? `${VERIFY_UNPROVEN_SKIP_BLOCKED}: ${result.errorMessage ?? 'the deployed session produced no corroborated verdict'}`
+        : result.errorMessage;
     if (converted) {
       this.logger?.warn('[VerificationScheduler] env-class failure converted to skip (§3.1)', {
         requestId: row.id,
         modality,
         evidence: evidenceDetail,
       });
+    }
+    if (blocked) {
+      // Expected to be RARE — the runner maps its own statuses accurately at
+      // source, so reaching here means either a runner path that regressed or a
+      // new one that never considered the merge gate. Logged at warn with the
+      // whole shape of the result so the answer to "which path did this" is in
+      // the log rather than in a bisect.
+      this.logger?.warn(
+        '[VerificationScheduler] deployed-but-unverified skip blocked from advancing the lane (§3.1)',
+        {
+          requestId: row.id,
+          modality,
+          provisionMode: result.provisionMode ?? null,
+          reportOutcome: result.report?.outcome ?? null,
+          runnerError: result.errorMessage ?? null,
+        },
+      );
     }
 
     await this.markTerminalAndDeliver(
@@ -3002,7 +3094,59 @@ export class VerificationScheduler {
       this.recordRunbookProof(row, modality, result, snapshotSha);
     }
 
-    await this.recordCapabilityOutcome(row, modality, result, classified?.failureClass ?? null, evidenceDetail);
+    await this.recordCapabilityOutcome(
+      row,
+      modality,
+      result,
+      classified?.failureClass ?? null,
+      evidenceDetail,
+      this.capabilityRunbookKey(row.id),
+    );
+  }
+
+  /**
+   * §3.1 GATE INTEGRITY — is this an advancing skip that NOTHING corroborated?
+   * True for a result that (a) actually DEPLOYED an SDK session, (b) came back
+   * `'skipped'`, and (c) classified `'ambiguous'`; the caller converts those to
+   * a blocking `'failed'`.
+   *
+   * The three conditions together describe the one dangerous shape: a session
+   * ran, produced no attributable failure, and would nonetheless ADVANCE the
+   * lane at the merge gate (mergeGateLaneAdvance). Every SAFE skip is excluded
+   * by construction rather than by exception — a pre-deploy skip is
+   * `deployed:false` (preflight, pin rejection, unresolvable agent, failed
+   * provisioning), and a harness-corroborated one classifies `'env'`, which the
+   * classifier only ever reaches on harness-derived evidence.
+   *
+   * TWO CARVE-OUTS, both documented rather than inferred:
+   *
+   *  1. A TRANSPORT failure ({@link VerificationAgentRunResult.transportFailure})
+   *     — the SDK layer threw before any structured output existed. The
+   *     exception is harness-observed, so model content cannot manufacture it,
+   *     and blocking would turn every API outage into a lane-blocking FAIL that
+   *     loops implement agents against code the harness never examined.
+   *  2. The §5.7 UNATTRIBUTABLE FALLBACK — a `build_failed`/`launch_failed`
+   *     reported while provisioning ran in the DIRTY live worktree. That skip is
+   *     the proposal's explicit carve-out: in a worktree carrying every sibling
+   *     lane's half-finished edits, a build failure genuinely cannot be charged
+   *     to this lane's deliverable, so it fails open on purpose. The pairing is
+   *     load-bearing — the same outcomes in SNAPSHOT mode are a blocking
+   *     `'failed'` (mapReportToResult) and must stay one.
+   */
+  private isUnprovenAdvancingSkip(
+    result: VerificationAgentRunResult,
+    failureClass: VerificationFailureClass | null,
+  ): boolean {
+    if (!result.deployed || result.status !== 'skipped' || failureClass !== 'ambiguous') return false;
+    if (result.transportFailure === true) return false;
+    const outcome = result.report?.outcome;
+    if (
+      result.provisionMode === 'fallback' &&
+      (outcome === 'build_failed' || outcome === 'launch_failed')
+    ) {
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -3108,13 +3252,15 @@ export class VerificationScheduler {
     result: VerificationAgentRunResult,
     failureClass: VerificationFailureClass | null,
     evidenceDetail: string,
+    /** This row's ledger key — see {@link capabilityRunbookKey}. */
+    runbookHash: string,
   ): Promise<void> {
     const store = this.capabilityStore;
     if (!store) return;
     try {
       if (failureClass === 'env') {
         const reason = evidenceDetail.length > 0 ? evidenceDetail : (result.errorMessage ?? 'environment failure');
-        const { tripped } = store.recordEnvFailure(row.project_id, modality, reason);
+        const { tripped } = store.recordEnvFailure(row.project_id, modality, reason, runbookHash);
         if (tripped && this.capabilityFinding) {
           await this.capabilityFinding({
             projectId: row.project_id,
@@ -3126,7 +3272,7 @@ export class VerificationScheduler {
         return;
       }
       if (result.status === 'passed' || (result.status === 'failed' && failureClass === 'deliverable')) {
-        store.recordHealthyOutcome(row.project_id, modality);
+        store.recordHealthyOutcome(row.project_id, modality, runbookHash);
       }
     } catch (err) {
       this.logger?.warn('[VerificationScheduler] capability-ledger feedback failed (fail-soft)', {
