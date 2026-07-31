@@ -24,7 +24,11 @@
  *   - selection_mode 'assignee' and 'manual' filtering of fresh imports.
  *   - remote archive: local archive + orphaned link in Auto, open conflict in
  *     Manual.
- *   - deletion sweep in both conflict modes.
+ *   - import crash recovery: a pass killed between the create and the link
+ *     write adopts the half-imported idea instead of duplicating it.
+ *   - deletion sweep in both conflict modes, including the scope-exit case —
+ *     an issue absent from the SCOPED id listing but still alive on the point
+ *     lookup is out of scope, not deleted.
  *   - echo suppression: an unresolved outbox row halts the batch and the
  *     cursor never advances past the blocked issue (by external_id AND by the
  *     create path's client_key).
@@ -57,9 +61,11 @@ import {
 import {
   runInboundSync,
   runDeletionSweep,
+  type EntityWriteRouter,
   type InboundSyncDeps,
   type TrackerBaseline,
 } from '../inboundSync';
+import type { TaskChange } from '../../../orchestrator/taskChangeRouter';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -100,6 +106,13 @@ class FakeAdapter implements TrackerAdapter {
   states: TrackerState[] = STATES;
   /** Overrides the deletion sweep's id set; null = derive it from `issues`. */
   remoteIds: string[] | null = null;
+  /**
+   * The selection-INDEPENDENT point-lookup table behind getIssue. Deliberately
+   * NOT backed by `issues`: an id absent here reads as hard-deleted, which is
+   * what the sweep's deletion tests mean, while a scope-exit test puts the
+   * still-alive issue in here and out of `remoteIds`.
+   */
+  issuesById = new Map<string, TrackerIssue>();
   /** Every `sinceIso` listIssues was called with, in order. */
   sinceCalls: Array<string | undefined> = [];
 
@@ -122,14 +135,40 @@ class FakeAdapter implements TrackerAdapter {
   async listIssueIds(): Promise<string[]> {
     return this.remoteIds ?? this.issues.map((i) => i.externalId);
   }
-  async getIssue(): Promise<TrackerIssue | null> {
-    throw new Error('not used');
+  async getIssue(externalId: string): Promise<TrackerIssue | null> {
+    return this.issuesById.get(externalId) ?? null;
   }
   async createSubIssue(): Promise<TrackerIssue> {
     throw new Error('not used');
   }
   async updateIssueState(): Promise<void> {
     throw new Error('not used');
+  }
+}
+
+/**
+ * A real TaskChangeRouter behind a kill switch, so a test can end the pass at
+ * either of the import's two un-transacted seams: right AFTER the create
+ * commits (the create -> link window the provenance marker exists to recover)
+ * and INSTEAD of the follow-up stage move (the link -> placement window).
+ */
+class CrashingRouter implements EntityWriteRouter {
+  /** Throw once the create has already landed in sqlite. */
+  crashAfterCreate = false;
+  /** Throw before a stage move is applied. */
+  crashOnStageMove = false;
+
+  constructor(private readonly inner: TaskChangeRouter) {}
+
+  async applyChange(projectId: number, change: TaskChange): Promise<{ taskId: string }> {
+    if (this.crashOnStageMove && change.taskId !== undefined && change.stageId !== undefined) {
+      throw new Error('simulated crash: stage move');
+    }
+    const result = await this.inner.applyChange(projectId, change);
+    if (this.crashAfterCreate && change.taskId === undefined) {
+      throw new Error('simulated crash: after create');
+    }
+    return result;
   }
 }
 
@@ -252,7 +291,8 @@ describe('runInboundSync — fresh import', () => {
     const [idea] = ideas();
     expect(idea.title).toBe('Ship the tracker sync');
     expect(idea.body).toContain('Two-way sync with Linear.');
-    expect(idea.body).toContain('<!-- cyboflow:tracker -->');
+    // The marker carries (provider, externalId) — the import's recovery key.
+    expect(idea.body).toContain('<!-- cyboflow:tracker linear:ext-1 -->');
     expect(idea.body).toContain('CORE-142');
     expect(idea.body).toContain('https://linear.app/acme/issue/CORE-142');
     // 'backlog' maps to the Idea stage, so no follow-up move.
@@ -324,6 +364,92 @@ describe('runInboundSync — fresh import', () => {
     const after = reload();
     expect(after.cursor_updated_at).toBe('2026-07-30T10:00:02.000Z');
     expect(after.cursor_external_id).toBe('ext-c');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Import crash recovery
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — import crash recovery', () => {
+  it('adopts a half-imported idea instead of importing the issue a second time', async () => {
+    const connection = makeConnection();
+    const crashing = new CrashingRouter(router);
+    const crashDeps: InboundSyncDeps = { ...deps, router: crashing };
+    adapter.issues = [makeIssue({ stateId: 'st-progress' })];
+
+    // Killed after the idea commits but before the link is written.
+    crashing.crashAfterCreate = true;
+    await expect(runInboundSync(crashDeps, connection)).rejects.toThrow('simulated crash');
+
+    // A durable idea nothing points at, and a cursor that never advanced — so
+    // the next pass sees the same unlinked issue all over again.
+    const [orphan] = ideas();
+    expect(ideas()).toHaveLength(1);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+    expect(reload().cursor_updated_at).toBeNull();
+
+    crashing.crashAfterCreate = false;
+    const report = await runInboundSync(crashDeps, reload());
+
+    // Adopted, not duplicated.
+    expect(report.imported).toBe(1);
+    const rows = ideas();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(orphan.id);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.entity_id).toBe(orphan.id);
+    expect(baselineOf('ext-1').stateId).toBe('st-progress');
+    // The placement the crash skipped is made on the adopt pass.
+    expect(rows[0].stage_id).toBe(STAGE.ready);
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it('does not adopt an idea whose marker belongs to a DIFFERENT issue', async () => {
+    const connection = makeConnection();
+    const crashing = new CrashingRouter(router);
+    const crashDeps: InboundSyncDeps = { ...deps, router: crashing };
+    adapter.issues = [makeIssue({ externalId: 'ext-1', title: 'First' })];
+
+    crashing.crashAfterCreate = true;
+    await expect(runInboundSync(crashDeps, connection)).rejects.toThrow('simulated crash');
+
+    // A different issue must get its own idea, not the orphaned one.
+    crashing.crashAfterCreate = false;
+    adapter.issues = [makeIssue({ externalId: 'ext-2', identifier: 'CORE-143', title: 'Second' })];
+    const report = await runInboundSync(crashDeps, reload());
+
+    expect(report.imported).toBe(1);
+    const rows = ideas();
+    expect(rows).toHaveLength(2);
+    const link = getLinkByExternal(raw, 'conn-1', 'ext-2');
+    expect(rows.find((row) => row.id === link?.entity_id)?.title).toBe('Second');
+    // The orphan is still an orphan; only ITS issue may adopt it.
+    expect(rows.some((row) => row.title === 'First')).toBe(true);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+  });
+
+  it('never re-imports after a crash between the link write and the stage move', async () => {
+    const connection = makeConnection();
+    const crashing = new CrashingRouter(router);
+    const crashDeps: InboundSyncDeps = { ...deps, router: crashing };
+    adapter.issues = [makeIssue({ stateId: 'st-progress' })];
+
+    crashing.crashOnStageMove = true;
+    await expect(runInboundSync(crashDeps, connection)).rejects.toThrow('simulated crash');
+
+    // The link is already durable, so the issue is no longer importable at all.
+    expect(ideas()).toHaveLength(1);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).not.toBeNull();
+
+    crashing.crashOnStageMove = false;
+    const report = await runInboundSync(crashDeps, reload());
+
+    expect(report.imported).toBe(0);
+    expect(ideas()).toHaveLength(1);
+    // The residual cost of two writes that cannot share a transaction: the
+    // entity is linked and syncable, but the placement this window skipped is
+    // not re-derived (the remote state has not changed since the baseline).
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
   });
 });
 
@@ -404,7 +530,7 @@ describe('runInboundSync — three-way merge', () => {
     expect(idea.title).toBe('Ship tracker sync (v1)');
     expect(idea.body).toContain('Linear AND Plane.');
     // The provenance footer survives a description replacement.
-    expect(idea.body).toContain('<!-- cyboflow:tracker -->');
+    expect(idea.body).toContain('<!-- cyboflow:tracker linear:ext-1 -->');
     expect(idea.body).not.toContain('Two-way sync with Linear.');
 
     expect(baselineOf('ext-1')).toEqual({
@@ -733,6 +859,7 @@ describe('runDeletionSweep', () => {
     adapter.issues = [makeIssue()];
     await runInboundSync(deps, connection);
 
+    // Gone from the scoped listing AND from the point lookup — a real deletion.
     adapter.remoteIds = [];
     const sweep = await runDeletionSweep(deps, reload());
 
@@ -753,6 +880,7 @@ describe('runDeletionSweep', () => {
     adapter.issues = [makeIssue()];
     await runInboundSync(deps, connection);
 
+    // Gone from the scoped listing AND from the point lookup — a real deletion.
     adapter.remoteIds = [];
     const sweep = await runDeletionSweep(deps, reload());
 
@@ -775,8 +903,96 @@ describe('runDeletionSweep', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0 });
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 0 });
     expect(ideas()[0].archived_at).toBeNull();
+  });
+
+  it('archives locally when the point lookup shows the issue was ARCHIVED remotely', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    // Archived issues drop out of the scoped listing but still resolve.
+    adapter.remoteIds = [];
+    adapter.issuesById.set('ext-1', makeIssue({ archivedAt: '2026-07-29T09:00:00.000Z' }));
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 0 });
+    expect(ideas()[0].archived_at).not.toBeNull();
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).not.toBeNull();
+    expect(JSON.parse(conflicts()[0].payload_json ?? '{}')).toMatchObject({
+      reason: 'archived',
+      archivedAt: '2026-07-29T09:00:00.000Z',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deletion sweep — scope exit is NOT deletion
+// ---------------------------------------------------------------------------
+
+describe('runDeletionSweep — an issue that left the configured scope', () => {
+  /** Import ext-1, then move it out of the scoped listing while it stays alive. */
+  async function importThenMoveOutOfScope(connection: TrackerConnectionRow): Promise<void> {
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    adapter.remoteIds = [];
+    adapter.issuesById.set('ext-1', makeIssue());
+  }
+
+  it('AUTO: leaves the entity and the link exactly as they are', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    await importThenMoveOutOfScope(connection);
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1 });
+    expect(ideas()[0].archived_at).toBeNull();
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
+    expect(conflicts()).toHaveLength(0);
+
+    // Still linked and still syncable: a later remote edit merges as normal.
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(deps, reload());
+    expect(report.updated).toBe(1);
+    expect(ideas()[0].title).toBe('Remote title');
+  });
+
+  it('MANUAL: does not open a remote_deleted conflict', async () => {
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    await importThenMoveOutOfScope(connection);
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1 });
+    expect(conflicts()).toHaveLength(0);
+    expect(ideas()[0].archived_at).toBeNull();
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
+  });
+
+  it('reports every out-of-scope link and still handles a genuinely deleted one', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    adapter.issues = [
+      makeIssue({ externalId: 'ext-1', title: 'Moved' }),
+      makeIssue({ externalId: 'ext-2', identifier: 'CORE-143', title: 'Deleted', updatedAt: '2026-07-30T10:00:01.000Z' }),
+    ];
+    await runInboundSync(deps, connection);
+
+    // Both vanish from the scoped listing; only ext-1 still resolves.
+    adapter.remoteIds = [];
+    adapter.issuesById.set('ext-1', makeIssue({ externalId: 'ext-1', title: 'Moved' }));
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 1 });
+    const moved = getLinkByExternal(raw, 'conn-1', 'ext-1');
+    const deleted = getLinkByExternal(raw, 'conn-1', 'ext-2');
+    expect(moved?.orphaned_at).toBeNull();
+    expect(deleted?.orphaned_at).not.toBeNull();
+    const rows = ideas();
+    expect(rows.find((row) => row.id === moved?.entity_id)?.archived_at).toBeNull();
+    expect(rows.find((row) => row.id === deleted?.entity_id)?.archived_at).not.toBeNull();
   });
 });
 

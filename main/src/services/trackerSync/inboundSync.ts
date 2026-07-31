@@ -30,6 +30,17 @@
  * cursor is not advanced past it), so a half-created sub-issue can never be
  * re-imported as a fresh idea — the proposal's hard correctness requirement.
  *
+ * IMPORT RECOVERY. An import is two writes (create the idea, then write the
+ * link) that cannot share a transaction, so a crash between them would leave a
+ * durable idea nothing points at — and the next pass, still seeing an unlinked
+ * issue behind the cursor, would import it AGAIN. The provenance footer is the
+ * recovery key: it carries the issue's `(provider, externalId)` and lands in
+ * the SAME write as the idea, so the next pass finds the half-imported idea by
+ * its marker and ADOPTS it instead of creating a duplicate. The link is also
+ * written immediately after the create (before the stage move) so the window
+ * is as narrow as two un-transacted writes allow; a crash inside it costs at
+ * most the follow-up placement, which the adopt path repairs.
+ *
  * ERRORS. A per-issue failure (a rejected applyChange — active runs, a
  * forbidden stage, a vanished entity) propagates out of runInboundSync. That
  * is intentional: the cursor has not advanced past the failing item, so the
@@ -48,6 +59,7 @@ import type {
 } from '../../../../shared/types/trackerSync';
 import {
   advanceCursor,
+  getLinkByEntity,
   getLinkByExternal,
   hasOpenConflictForLink,
   insertConflict,
@@ -136,10 +148,16 @@ export interface InboundSyncReport {
 
 /** {@link runDeletionSweep}'s counters — folded into an InboundSyncReport by the caller. */
 export interface InboundSweepReport {
-  /** Links whose remote issue vanished and were archived locally (Auto mode). */
+  /** Links whose remote issue vanished or was archived and were archived locally (Auto mode). */
   sweepArchived: number;
-  /** Vanished-issue conflict rows opened for the user (Manual mode). */
+  /** Vanished/archived-issue conflict rows opened for the user (Manual mode). */
   conflictsOpened: number;
+  /**
+   * Links absent from the scoped id listing whose issue is still ALIVE remotely
+   * — moved out of the connection's project/cycle/module. Nothing was done to
+   * them; the count exists so the sync log can say so.
+   */
+  outOfScope: number;
 }
 
 /** The connection is not configured well enough to sync (bad/absent source_json). */
@@ -163,16 +181,28 @@ export const OVERLAP_WINDOW_MS = 10 * 60 * 1000;
 
 const PROVIDER_LABEL: Record<TrackerProvider, string> = { linear: 'Linear', plane: 'Plane' };
 
-/** Machine-recognizable marker so the footer can be split back off a body. */
-const PROVENANCE_MARKER = '<!-- cyboflow:tracker -->';
+/** Machine-recognizable marker prefix so the footer can be split back off a body. */
+const PROVENANCE_MARKER_PREFIX = '<!-- cyboflow:tracker';
 /** The markdown rule the footer block opens with. */
 const FOOTER_FENCE = '---\n';
-/** The exact substring that identifies a footer block inside a stored body. */
-const FOOTER_START = FOOTER_FENCE + PROVENANCE_MARKER;
+/** The substring that identifies a footer block inside a stored body. */
+const FOOTER_START = FOOTER_FENCE + PROVENANCE_MARKER_PREFIX;
+
+/**
+ * The marker an imported idea's footer opens with. It embeds the issue's
+ * `(provider, externalId)` because this is the IMPORT'S RECOVERY KEY (see the
+ * module header): the marker is written in the same statement as the idea, so
+ * it is the only durable trace of an import whose link write never happened.
+ * {@link findAdoptableIdea} reads it back.
+ */
+function provenanceMarker(provider: TrackerProvider, externalId: string): string {
+  return `${PROVENANCE_MARKER_PREFIX} ${provider}:${externalId} -->`;
+}
 
 /** The provenance block appended to an imported idea's body (issue ref + URL). */
 function buildProvenanceFooter(provider: TrackerProvider, issue: TrackerIssue): string {
-  return `${PROVENANCE_MARKER}\nImported from ${PROVIDER_LABEL[provider]} · [${issue.identifier}](${issue.url})`;
+  const marker = provenanceMarker(provider, issue.externalId);
+  return `${marker}\nImported from ${PROVIDER_LABEL[provider]} · [${issue.identifier}](${issue.url})`;
 }
 
 /**
@@ -394,6 +424,42 @@ function readLocalEntity(
   return row ?? null;
 }
 
+/** Escape the LIKE metacharacters in a literal substring (paired with `ESCAPE '\'`). */
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * The half-imported idea an interrupted {@link importIssueAsIdea} left behind,
+ * or null. Matches on the provenance marker the create wrote INTO the body (see
+ * the module header's IMPORT RECOVERY note) — a plain read-only SELECT, like
+ * {@link readLocalEntity}; the chokepoint rule governs WRITES.
+ *
+ * Two candidates are refused rather than adopted:
+ *  - an ARCHIVED idea — a user who archived a half-imported idea should not
+ *    have it silently resurrected as this issue's entity;
+ *  - an idea that ALREADY carries a link for this provider — it belongs to
+ *    another connection, and adopting it would repoint that connection's link.
+ */
+function findAdoptableIdea(
+  db: Database.Database,
+  projectId: number,
+  provider: TrackerProvider,
+  marker: string,
+): { id: string; stageId: string } | null {
+  const rows = db
+    .prepare(
+      `SELECT id, stage_id AS stageId
+         FROM ideas
+        WHERE project_id = ?
+          AND archived_at IS NULL
+          AND body LIKE ? ESCAPE '\\'
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(projectId, `%${escapeLikeLiteral(marker)}%`) as Array<{ id: string; stageId: string }>;
+  return rows.find((row) => getLinkByEntity(db, 'idea', row.id, provider) === null) ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Per-pass context
 // ---------------------------------------------------------------------------
@@ -587,6 +653,13 @@ function passesSelectionFilter(connection: TrackerConnectionRow, issue: TrackerI
  * agent-driven smart import is V2). The body carries the remote description
  * plus a provenance footer, and the mapped stage is applied as a follow-up
  * move so the import reads as "created, then placed" in the entity event log.
+ *
+ * CRASH-IDEMPOTENT (module header, IMPORT RECOVERY). The three writes cannot
+ * share a transaction, so the order is chosen to make every interruption
+ * recoverable: create (which durably stamps the recovery marker into the body),
+ * then the link, then the placement. A crash after the create is repaired on
+ * the next pass by adopting the marked idea instead of creating a second one;
+ * a crash after the link leaves an ordinary linked entity the merge path owns.
  */
 async function importIssueAsIdea(
   ctx: SyncContext,
@@ -594,28 +667,30 @@ async function importIssueAsIdea(
   target: TrackerMappingTarget,
 ): Promise<void> {
   const { db, connection, report } = ctx;
-  const body = joinBody(issue.description, buildProvenanceFooter(connection.provider, issue));
 
-  const created = await ctx.router.applyChange(connection.project_id, {
-    actor: connection.provider,
-    entityType: 'idea',
-    fields: { title: issue.title, body },
-  });
+  const marker = provenanceMarker(connection.provider, issue.externalId);
+  const adopted = findAdoptableIdea(db, connection.project_id, connection.provider, marker);
 
-  const stageId = mappingTargetToStageId(target, ctx.stageIds);
-  if (stageId !== null && target !== 'idea') {
-    await ctx.router.applyChange(connection.project_id, {
+  let entityId: string;
+  if (adopted !== null) {
+    entityId = adopted.id;
+  } else {
+    const body = joinBody(issue.description, buildProvenanceFooter(connection.provider, issue));
+    const created = await ctx.router.applyChange(connection.project_id, {
       actor: connection.provider,
       entityType: 'idea',
-      taskId: created.taskId,
-      stageId,
+      fields: { title: issue.title, body },
     });
+    entityId = created.taskId;
   }
 
+  // The link goes in IMMEDIATELY after the create: it is what stops the issue
+  // from being re-imported at all, so the marker-based recovery above only ever
+  // has to cover the gap between these two statements.
   upsertLink(db, {
     connection_id: connection.id,
     entity_type: 'idea',
-    entity_id: created.taskId,
+    entity_id: entityId,
     provider: connection.provider,
     external_id: issue.externalId,
     external_identifier: issue.identifier,
@@ -623,6 +698,20 @@ async function importIssueAsIdea(
     external_parent_id: issue.parentExternalId,
     baseline_json: JSON.stringify(snapshotOf(issue)),
   });
+
+  // A fresh idea lands in the board's Idea column, so a target that already
+  // matches files no move. On the adopt path the comparison is against the
+  // idea's CURRENT stage, which is how a placement the crash skipped gets made.
+  const stageBefore = adopted?.stageId ?? ctx.stageIds.idea;
+  const stageId = mappingTargetToStageId(target, ctx.stageIds);
+  if (stageId !== null && stageId !== stageBefore) {
+    await ctx.router.applyChange(connection.project_id, {
+      actor: connection.provider,
+      entityType: 'idea',
+      taskId: entityId,
+      stageId,
+    });
+  }
 
   report.imported++;
 }
@@ -838,11 +927,23 @@ async function applyRemoteArchive(
  * failure semantics" #3). The incremental path only ever sees issues that
  * still exist, so a deleted issue is invisible to it; this compares the
  * provider's full id set for the connection's source against the connection's
- * ACTIVE links and treats every vanished id as a deletion event.
+ * ACTIVE links.
  *
- * Auto mode archives the local entity in place and orphans the link; Manual
- * mode opens a `remote_deleted` conflict. A link that already has an open
- * conflict is left alone so repeated sweeps do not pile up duplicate rows.
+ * ABSENCE IS NOT DELETION. `listIssueIds` is SCOPED to the connection's
+ * configured project/cycle/module, so an issue moved out of that scope — an
+ * everyday tracker reorganization — is just as absent as a deleted one. Every
+ * absent id therefore gets a selection-INDEPENDENT point lookup
+ * ({@link TrackerAdapter.getIssue}) before anything is done to the entity:
+ * null means genuinely gone, an `archivedAt` stamp means remotely archived,
+ * and a live issue means out of scope — left linked, syncable and untouched,
+ * counted only so the log can mention it. A lookup that THROWS (transport /
+ * auth) aborts the sweep rather than guessing: nothing has been done to that
+ * link yet, so the next sweep simply retries it.
+ *
+ * For the two real cases: Auto mode archives the local entity in place and
+ * orphans the link; Manual mode opens a `remote_deleted` conflict. A link that
+ * already has an open conflict is left alone so repeated sweeps do not pile up
+ * duplicate rows.
  *
  * Exported separately from {@link runInboundSync}: it costs a full id listing,
  * so the service layer decides the cadence (every Nth poll, and every manual
@@ -853,7 +954,7 @@ export async function runDeletionSweep(
   connection: TrackerConnectionRow,
 ): Promise<InboundSweepReport> {
   const { db, adapter, router } = deps;
-  const sweep: InboundSweepReport = { sweepArchived: 0, conflictsOpened: 0 };
+  const sweep: InboundSweepReport = { sweepArchived: 0, conflictsOpened: 0, outOfScope: 0 };
 
   const selection = parseSourceSelection(connection);
   const remoteIds = new Set(await adapter.listIssueIds(selection));
@@ -862,10 +963,19 @@ export async function runDeletionSweep(
     if (remoteIds.has(link.external_id)) continue;
     if (hasOpenConflictForLink(db, link.id)) continue;
 
+    // Absent from the scoped listing — confirm what that actually means before
+    // touching anything (see the "ABSENCE IS NOT DELETION" note above).
+    const remote = await adapter.getIssue(link.external_id);
+    if (remote !== null && remote.archivedAt === null) {
+      sweep.outOfScope++;
+      continue;
+    }
+
     const payload = JSON.stringify({
       externalId: link.external_id,
       identifier: link.external_identifier,
-      reason: 'deleted',
+      reason: remote === null ? 'deleted' : 'archived',
+      archivedAt: remote?.archivedAt ?? null,
       detectedAt: deps.nowIso(),
     });
 
