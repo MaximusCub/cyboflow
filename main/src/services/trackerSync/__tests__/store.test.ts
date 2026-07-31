@@ -22,6 +22,9 @@
  *   - resolveOutbox's failed->pending retry re-queue vs. a terminal failed.
  *   - requeueInFlightAsAmbiguous (boot-time crash recovery).
  *   - listLinks' activeOnly filtering.
+ *   - listActiveLinksWithoutEntity / hasActiveLinkedDescendant: the two queries
+ *     that reach past the tracker tables into ideas/epics/tasks, so a hard
+ *     delete's zombie links are findable and its cascade is knowable up front.
  *   - resolveConflict's state/resolved_at stamping.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -45,6 +48,8 @@ import {
   updateBaseline,
   markOrphaned,
   listLinksByParentExternal,
+  listActiveLinksWithoutEntity,
+  hasActiveLinkedDescendant,
   enqueueOutbox,
   claimNextPending,
   resolveOutbox,
@@ -102,6 +107,53 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     last_sync_log_json: null,
     ...overrides,
   };
+}
+
+/**
+ * Seed a real backlog entity for project 1 (the default board is seeded lazily
+ * — the link queries that reach into ideas/epics/tasks are the only cases that
+ * need one). Direct SQL, mirroring the outbox tests' reason for bypassing a
+ * chokepoint: these tests are about the SQL, not about entity semantics.
+ */
+function seedEntity(
+  type: 'idea' | 'epic' | 'task',
+  id: string,
+  lineage: { originatingIdeaId?: string; parentEpicId?: string } = {},
+): void {
+  svc.seedDefaultBoard(1);
+  const board = 'board-1-default';
+  const stage = 'stage-board-1-default-1';
+  if (type === 'idea') {
+    raw
+      .prepare(
+        'INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id) VALUES (?, 1, ?, ?, ?, ?)',
+      )
+      .run(id, `IDEA-${id}`, `Title ${id}`, board, stage);
+    return;
+  }
+  if (type === 'epic') {
+    raw
+      .prepare(
+        `INSERT INTO epics (id, project_id, ref, title, board_id, stage_id, originating_idea_id)
+         VALUES (?, 1, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, `EPIC-${id}`, `Title ${id}`, board, stage, lineage.originatingIdeaId ?? null);
+    return;
+  }
+  raw
+    .prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, originating_idea_id, parent_epic_id)
+       VALUES (?, 1, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      `TASK-${id}`,
+      `Title ${id}`,
+      board,
+      stage,
+      lineage.originatingIdeaId ?? null,
+      lineage.parentEpicId ?? null,
+    );
 }
 
 /** Seed a connection row through the store and return its id. */
@@ -355,6 +407,93 @@ describe('trackerSync store — links', () => {
 
     const children = listLinksByParentExternal(raw, connId, 'LIN-PARENT');
     expect(children.map((c) => c.entity_id).sort()).toEqual(['task-child-1', 'task-child-2']);
+  });
+
+  it('listActiveLinksWithoutEntity finds only the links whose entity is really gone', () => {
+    const connId = seedConnection();
+    raw.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj 2', '/tmp/p2');
+    const otherConnId = seedConnection({ id: 'conn-2', project_id: 2 });
+    seedEntity('idea', 'ide_live');
+
+    // Live entity -> not a zombie.
+    upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'ide_live',
+      provider: 'linear',
+      external_id: 'LIN-LIVE',
+    });
+    // Deleted entity -> exactly what a hard delete's cascade leaves behind.
+    const zombie = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'tsk_deleted',
+      provider: 'linear',
+      external_id: 'LIN-ZOMBIE',
+    });
+    // Deleted entity, but the link is ALREADY orphaned -> nothing left to do.
+    const settled = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'epic',
+      entity_id: 'epc_deleted',
+      provider: 'linear',
+      external_id: 'LIN-SETTLED',
+    });
+    markOrphaned(raw, settled.id);
+    // Another project's zombie -> out of scope for this project's sweep.
+    upsertLink(raw, {
+      connection_id: otherConnId,
+      entity_type: 'task',
+      entity_id: 'tsk_elsewhere',
+      provider: 'linear',
+      external_id: 'LIN-ELSEWHERE',
+    });
+
+    expect(listActiveLinksWithoutEntity(raw, 1).map((l) => l.id)).toEqual([zombie.id]);
+    expect(listActiveLinksWithoutEntity(raw, 2).map((l) => l.external_id)).toEqual([
+      'LIN-ELSEWHERE',
+    ]);
+  });
+
+  it('hasActiveLinkedDescendant mirrors the delete cascade an idea/epic takes with it', () => {
+    const connId = seedConnection();
+    seedEntity('idea', 'ide_1');
+    seedEntity('epic', 'epc_1', { originatingIdeaId: 'ide_1' });
+    seedEntity('task', 'tsk_1', { originatingIdeaId: 'ide_1', parentEpicId: 'epc_1' });
+    seedEntity('task', 'tsk_direct', { originatingIdeaId: 'ide_1' });
+
+    // Nothing under either root is linked yet.
+    expect(hasActiveLinkedDescendant(raw, 'idea', 'ide_1')).toBe(false);
+    expect(hasActiveLinkedDescendant(raw, 'epic', 'epc_1')).toBe(false);
+
+    // A task reachable ONLY through the epic counts for both roots.
+    const viaEpic = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+    });
+    expect(hasActiveLinkedDescendant(raw, 'idea', 'ide_1')).toBe(true);
+    expect(hasActiveLinkedDescendant(raw, 'epic', 'epc_1')).toBe(true);
+    // A task never has a cascade of its own.
+    expect(hasActiveLinkedDescendant(raw, 'task', 'tsk_1')).toBe(false);
+
+    // Orphaned links do not count — there is nothing left to rule on.
+    markOrphaned(raw, viaEpic.id);
+    expect(hasActiveLinkedDescendant(raw, 'idea', 'ide_1')).toBe(false);
+    expect(hasActiveLinkedDescendant(raw, 'epic', 'epc_1')).toBe(false);
+
+    // A small idea's DIRECT task (no epic in between) counts for the idea only.
+    upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'tsk_direct',
+      provider: 'linear',
+      external_id: 'LIN-2',
+    });
+    expect(hasActiveLinkedDescendant(raw, 'idea', 'ide_1')).toBe(true);
+    expect(hasActiveLinkedDescendant(raw, 'epic', 'epc_1')).toBe(false);
   });
 });
 

@@ -23,7 +23,8 @@
  *     updateConnectionSettings / advanceCursor / storeSecret / readSecret /
  *     clearSecret.
  *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
- *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal.
+ *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal /
+ *     listActiveLinksWithoutEntity / hasActiveLinkedDescendant.
  *   - Outbox: enqueueOutbox / claimNextPending / resolveOutbox /
  *     listUnresolvedOutbox / findOutboxByClientKey / requeueInFlightAsAmbiguous.
  *   - Conflicts: insertConflict / getConflict / listOpenConflicts /
@@ -369,6 +370,97 @@ export function listLinksByParentExternal(
         ORDER BY created_at ASC, id ASC`,
     )
     .all(connectionId, parentExternalId) as EntityExternalLinkRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Links x entities
+//
+// The only two queries here that reach past the four tracker tables into the
+// native entity tables (ideas/epics/tasks). They live in this module anyway
+// because they are still fundamentally LINK queries — "which links does this
+// entity's removal affect?" — and splitting the JOIN's two halves across two
+// files would hide the tracker side of it.
+//
+// `entity_external_links` deliberately has NO entity foreign key: the entity
+// lives in one of three tables, so there is nothing single to point at. Sqlite
+// therefore cannot cascade a deleted entity into its link, which is exactly the
+// gap these two close.
+// ---------------------------------------------------------------------------
+
+/**
+ * Active links whose ENTITY ROW NO LONGER EXISTS — the zombie links a hard
+ * delete leaves behind (its cascade removes rows from ideas/epics/tasks and
+ * nothing touches the link table). Left alone they are unreachable forever: the
+ * inbound poller finds the link, finds no entity, and skips it every pass.
+ *
+ * Scoped to one project through the link's connection, oldest-first like every
+ * other listing here.
+ */
+export function listActiveLinksWithoutEntity(
+  db: Database.Database,
+  projectId: number,
+): EntityExternalLinkRow[] {
+  return db
+    .prepare(
+      `SELECT l.* FROM entity_external_links l
+         JOIN tracker_connections c ON c.id = l.connection_id
+         LEFT JOIN ideas i ON l.entity_type = 'idea' AND i.id = l.entity_id
+         LEFT JOIN epics e ON l.entity_type = 'epic' AND e.id = l.entity_id
+         LEFT JOIN tasks t ON l.entity_type = 'task' AND t.id = l.entity_id
+        WHERE c.project_id = ?
+          AND l.orphaned_at IS NULL
+          AND i.id IS NULL AND e.id IS NULL AND t.id IS NULL
+        ORDER BY l.created_at ASC, l.id ASC`,
+    )
+    .all(projectId) as EntityExternalLinkRow[];
+}
+
+/**
+ * True when hard-deleting `entityId` would ALSO remove at least one other
+ * entity that is itself linked and live. Mirrors TaskChangeRouter's
+ * `collectDeleteCascade` exactly — an idea claims its epics, its direct tasks
+ * AND its epics' tasks; an epic claims its child tasks; a task claims nothing —
+ * so the removal dialog can tell the user their ruling covers synced children
+ * too before they commit to it.
+ */
+export function hasActiveLinkedDescendant(
+  db: Database.Database,
+  entityType: EntityExternalLinkRow['entity_type'],
+  entityId: string,
+): boolean {
+  if (entityType === 'task') return false;
+
+  if (entityType === 'epic') {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM entity_external_links l
+           JOIN tasks t ON t.id = l.entity_id
+          WHERE l.entity_type = 'task' AND l.orphaned_at IS NULL AND t.parent_epic_id = ?
+          LIMIT 1`,
+      )
+      .get(entityId);
+    return row !== undefined;
+  }
+
+  const row = db
+    .prepare(
+      `SELECT 1 FROM entity_external_links l
+        WHERE l.orphaned_at IS NULL
+          AND (
+            (l.entity_type = 'epic'
+              AND EXISTS (SELECT 1 FROM epics e
+                           WHERE e.id = l.entity_id AND e.originating_idea_id = ?))
+            OR (l.entity_type = 'task'
+              AND EXISTS (SELECT 1 FROM tasks t
+                           WHERE t.id = l.entity_id
+                             AND (t.originating_idea_id = ?
+                                  OR t.parent_epic_id IN
+                                       (SELECT id FROM epics WHERE originating_idea_id = ?))))
+          )
+        LIMIT 1`,
+    )
+    .get(entityId, entityId, entityId);
+  return row !== undefined;
 }
 
 // ---------------------------------------------------------------------------

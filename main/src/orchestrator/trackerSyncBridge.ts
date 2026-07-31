@@ -101,15 +101,38 @@ export interface TrackerSyncFacade {
   ): Promise<TrackerEntityLinkRef | null>;
 
   /**
-   * The LOCAL-DELETE ruling: the user is deleting/archiving a linked entity and
-   * has said what should happen to the tracker issue. Both answers drop the
-   * link; `cancelRemote` additionally queues the write that moves the issue into
-   * the tracker's cancelled group. NEVER a remote hard delete — see the design
-   * doc's "Deletes" row.
+   * True when hard-deleting this entity would also remove other SYNCED entities
+   * (an idea's epics/tasks, an epic's tasks) — the removal dialog says the one
+   * ruling covers those children too.
+   */
+  hasLinkedDescendants(entityType: TrackerEntityType, entityId: string): Promise<boolean>;
+
+  /**
+   * COLLECT the local-removal ruling: the user is deleting/archiving a linked
+   * entity and has said what should happen to the tracker issue ('keep' vs
+   * `cancelRemote`). NOTHING is mutated here — no link is dropped and no remote
+   * write is queued — because the ordinary delete/archive confirm still stands
+   * behind this dialog and may be dismissed.
+   *
+   * The ruling is applied by the committed entity write itself (and by the
+   * cascade it takes with it), so backing out of that confirm leaves the entity,
+   * its link and the tracker issue exactly as they were; the unused ruling
+   * expires. NEVER a remote hard delete — see the design doc's "Deletes" row.
+   */
+  stageUnlinkRuling(
+    entityType: TrackerEntityType,
+    entityId: string,
+    opts: { cancelRemote: boolean },
+  ): Promise<void>;
+
+  /**
+   * Apply the ruling DIRECTLY (drop the link now; `cancelRemote` also queues the
+   * cancelled-group write). The board's delete path uses
+   * {@link TrackerSyncFacade.stageUnlinkRuling} instead — this remains for
+   * callers with no confirm dialog left to dismiss.
    *
    * `unlinked: false` means the entity had no live link (the renderer's
-   * linkForEntity read was stale, or nothing was ever synced); the caller
-   * proceeds with its delete either way.
+   * linkForEntity read was stale, or nothing was ever synced).
    */
   unlinkEntity(
     entityType: TrackerEntityType,

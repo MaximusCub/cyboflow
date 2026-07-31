@@ -12,7 +12,9 @@
  *   conflicts                     : query        -> TrackerConflictSummary[]
  *   resolveConflict               : mutation     -> void
  *   linkForEntity                 : query        -> TrackerEntityLinkRef | null
- *   unlinkEntity                  : mutation     -> { unlinked } (the local-delete ruling)
+ *   hasLinkedDescendants          : query        -> boolean (does the delete cascade hit synced children?)
+ *   stageUnlinkRuling             : mutation     -> { ok } (COLLECT the local-removal ruling; mutates nothing)
+ *   unlinkEntity                  : mutation     -> { unlinked } (apply a ruling directly)
  *   onTrackerChanged              : subscription -> TrackerChangedEvent
  *
  * Every procedure is a THIN 1:1 wrapper over the TrackerSyncFacade wired at boot
@@ -432,11 +434,51 @@ export const trackerRouter = router({
     }),
 
   /**
-   * The local-delete ruling the backlog's delete/archive path collects when the
-   * entity is linked: drop the link, and — with `cancelRemote` — queue the write
-   * that cancels the issue in the tracker first. Never a remote hard delete.
-   * `unlinked: false` means there was no live link (a stale read); the caller
-   * deletes either way.
+   * Would deleting this entity also remove OTHER synced entities? (An idea's
+   * epics/tasks, an epic's tasks.) The removal dialog's copy needs it to say the
+   * ruling covers those children too.
+   */
+  hasLinkedDescendants: protectedProcedure
+    .input(z.object({ entityType: entityTypeSchema, entityId: z.string().min(1) }))
+    .query(async ({ input }): Promise<boolean> => {
+      try {
+        return await getTrackerSyncFacade().hasLinkedDescendants(input.entityType, input.entityId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * COLLECT the local-removal ruling the backlog's delete/archive path asks for
+   * when the entity is linked ('keep the issue' vs `cancelRemote`). Mutates
+   * NOTHING: the confirm dialog behind it may still be dismissed, and the ruling
+   * is applied by the committed delete/archive itself (children included).
+   */
+  stageUnlinkRuling: protectedProcedure
+    .input(
+      z.object({
+        entityType: entityTypeSchema,
+        entityId: z.string().min(1),
+        cancelRemote: z.boolean(),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ ok: true }> => {
+      try {
+        await getTrackerSyncFacade().stageUnlinkRuling(input.entityType, input.entityId, {
+          cancelRemote: input.cancelRemote,
+        });
+        return { ok: true };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Apply the ruling DIRECTLY — drop the link, and with `cancelRemote` queue the
+   * write that cancels the issue in the tracker first. Never a remote hard
+   * delete. `unlinked: false` means there was no live link (a stale read). The
+   * board's delete path stages instead; this is for callers with no confirm
+   * dialog left to dismiss.
    */
   unlinkEntity: protectedProcedure
     .input(

@@ -125,6 +125,43 @@ export interface TrackerBaseline {
 }
 
 /**
+ * `tracker_conflicts.payload_json` for a field conflict.
+ *
+ * A STAGE conflict additionally records the REMOTE side's RAW state, because
+ * its `remote_value` is the MAPPED board stage id — enough to apply the remote
+ * side, not enough to advance a link's baseline. When the user later accepts
+ * the LOCAL side, trackerSyncService reads these two keys back and stamps
+ * `stateId` / `lastWrittenGroup`, so the next pass reads the remote as
+ * UNCHANGED instead of re-opening the conflict that was just settled. Content
+ * fields need nothing extra: their `remote_value` IS the remote value.
+ */
+export interface TrackerConflictPayload {
+  externalId: string;
+  mode: 'manual' | 'auto';
+  detectedAt: string;
+  /** STAGE conflicts only: the provider state id the remote issue was at. */
+  remoteStateId?: string;
+  /** STAGE conflicts only: that state's write-back group, null when it has none. */
+  remoteGroup?: WriteBackGroup | null;
+}
+
+/**
+ * The remote state a STAGE conflict recorded, or null when the row carries none
+ * — a content-field conflict, or a stage row written before this key existed.
+ * `group` is null when the remote's state belongs to no write-back group.
+ */
+export function readConflictRemoteState(
+  payloadJson: string | null,
+): { stateId: string; group: WriteBackGroup | null } | null {
+  const payload = parseJsonObject(payloadJson);
+  if (typeof payload.remoteStateId !== 'string' || payload.remoteStateId.length === 0) return null;
+  return {
+    stateId: payload.remoteStateId,
+    group: isWriteBackGroup(payload.remoteGroup) ? payload.remoteGroup : null,
+  };
+}
+
+/**
  * `tracker_connections.selection_json` — the wizard's Step 2 choice, read here
  * for inbound filtering. Kept main-side for now: no renderer surface consumes
  * it yet, so it does not need to cross IPC (promote it to
@@ -801,6 +838,28 @@ interface FieldConflict {
 }
 
 /**
+ * Compose a field conflict's `payload_json`. See {@link TrackerConflictPayload}
+ * for why a STAGE row carries the remote's raw state on top of the common keys.
+ */
+function conflictPayloadJson(
+  ctx: SyncContext,
+  issue: TrackerIssue,
+  conflict: FieldConflict,
+  mode: 'manual' | 'auto',
+): string {
+  const payload: TrackerConflictPayload = {
+    externalId: issue.externalId,
+    mode,
+    detectedAt: ctx.nowIso(),
+  };
+  if (conflict.field === 'stage') {
+    payload.remoteStateId = issue.stateId;
+    payload.remoteGroup = remoteWriteBackGroup(ctx, issue);
+  }
+  return JSON.stringify(payload);
+}
+
+/**
  * THREE-WAY MERGE of a linked issue against its baseline, per field
  * (title, description, remote state → local stage).
  *
@@ -888,11 +947,7 @@ async function mergeLinkedIssue(
         field: conflict.field,
         local_value: conflict.localValue,
         remote_value: conflict.remoteValue,
-        payload_json: JSON.stringify({
-          externalId: issue.externalId,
-          mode: 'manual',
-          detectedAt: ctx.nowIso(),
-        }),
+        payload_json: conflictPayloadJson(ctx, issue, conflict, 'manual'),
       });
       report.conflictsOpened++;
     }
@@ -945,11 +1000,7 @@ function recordAutoResolution(
     field: conflict.field,
     local_value: conflict.localValue,
     remote_value: conflict.remoteValue,
-    payload_json: JSON.stringify({
-      externalId: issue.externalId,
-      mode: 'auto',
-      detectedAt: ctx.nowIso(),
-    }),
+    payload_json: conflictPayloadJson(ctx, issue, conflict, 'auto'),
   });
   resolveConflict(ctx.db, row.id, resolution);
   ctx.report.autoResolved++;

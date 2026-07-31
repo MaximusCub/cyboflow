@@ -19,6 +19,9 @@
  *     conflict row records the override.
  *   - both-changed content field, MANUAL: an OPEN conflict row, nothing
  *     applied, baseline unchanged, and the next pass skips the item.
+ *   - conflict payloads: a STAGE row carries the remote's RAW state id and
+ *     write-back group (its `remote_value` is only the mapped board stage), so
+ *     accepting the LOCAL side later has something true to stamp.
  *   - both-changed STAGE, AUTO: local wins (nothing applied) and the override
  *     is recorded as 'auto-local'.
  *   - selection_mode 'assignee' and 'manual' filtering of fresh imports.
@@ -70,6 +73,7 @@ import {
   type EntityWriteRouter,
   type InboundSyncDeps,
   type TrackerBaseline,
+  type TrackerConflictPayload,
 } from '../inboundSync';
 import type { TaskChange } from '../../../orchestrator/taskChangeRouter';
 
@@ -658,6 +662,59 @@ describe('runInboundSync — three-way merge', () => {
     expect(conflicts()).toHaveLength(1);
     expect(ideas()[0].title).toBe('Local title');
     expect(baselineOf('ext-1').title).toBe('Ship the tracker sync');
+  });
+
+  it('MANUAL: a STAGE conflict records the remote RAW state, a content one its remote value', async () => {
+    // `remote_value` on a stage row is the MAPPED board stage, which cannot
+    // advance a baseline — so the row also carries the provider state id and its
+    // write-back group, which is what trackerSyncService stamps when the user
+    // accepts the LOCAL side. Content fields need nothing extra.
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection, makeIssue());
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, stageId: STAGE.wontdo });
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, fields: { title: 'Local title' } });
+    adapter.issues = [
+      makeIssue({ title: 'Remote title', stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+
+    await runInboundSync(deps, reload());
+
+    const byField = new Map(conflicts().map((row) => [row.field, row]));
+    const stage = byField.get('stage');
+    expect(stage?.remote_value).toBe(STAGE.done);
+    expect(JSON.parse(stage?.payload_json ?? '{}') as TrackerConflictPayload).toEqual({
+      externalId: 'ext-1',
+      mode: 'manual',
+      detectedAt: '2026-07-30T12:00:00.000Z',
+      remoteStateId: 'st-done',
+      remoteGroup: 'completed',
+    });
+
+    const title = byField.get('title');
+    expect(title?.remote_value).toBe('Remote title');
+    expect(JSON.parse(title?.payload_json ?? '{}') as TrackerConflictPayload).toEqual({
+      externalId: 'ext-1',
+      mode: 'manual',
+      detectedAt: '2026-07-30T12:00:00.000Z',
+    });
+  });
+
+  it('MANUAL: a stage conflict on a state with NO write-back group records a null group', async () => {
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection, makeIssue({ stateId: 'st-done' }));
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, stageId: STAGE.wontdo });
+    // 'unstarted' maps to Ready for development, which writes nothing back.
+    adapter.issues = [makeIssue({ stateId: 'st-todo', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    await runInboundSync(deps, reload());
+
+    const [conflict] = conflicts();
+    expect(conflict.field).toBe('stage');
+    const payload = JSON.parse(conflict.payload_json ?? '{}') as TrackerConflictPayload;
+    expect(payload.remoteStateId).toBe('st-todo');
+    expect(payload.remoteGroup).toBeNull();
   });
 
   it('MANUAL: a non-conflicting remote-only change still flows', async () => {

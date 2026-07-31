@@ -17,11 +17,18 @@
  *
  * THE TRACKER RULING. Archive and Delete are the app's user-initiated removal
  * chokepoint (every board surface funnels its ⋯ menu through here), so this is
- * also where the tracker-sync local-delete prompt lives: the click first asks
+ * also where the tracker-sync local-removal prompt lives: the click first asks
  * `tracker.linkForEntity`, and a LINKED entity gets {@link TrackerUnlinkDialog}
  * — keep the issue as it is, or cancel it in the tracker — before the ordinary
  * confirm dialog opens. An unlinked entity (the overwhelmingly common case) is
  * unchanged apart from that one query.
+ *
+ * The ruling dialog only RECORDS the answer; it is applied by the delete/archive
+ * the confirm dialog then performs. So the two dialogs compose the obvious way:
+ * dismissing either one leaves the entity, its link and the tracker issue
+ * exactly as they were. A linked idea/epic additionally asks
+ * `tracker.hasLinkedDescendants` so the ruling dialog can say the answer covers
+ * the synced children the delete cascade takes with it.
  *
  * When `onReorder` is wired (Kanban board cards only), the menu also exposes
  * "Move up" / "Move down" / "Move to top" — the keyboard / single-pointer
@@ -93,6 +100,8 @@ export function CardActionsMenu({
    */
   const [parkedIntent, setParkedIntent] = useState<DestructiveIntent | null>(null);
   const [trackerLink, setTrackerLink] = useState<TrackerEntityLinkRef | null>(null);
+  /** Does the delete cascade take synced children with it? Ideas/epics only. */
+  const [trackerChildren, setTrackerChildren] = useState(false);
 
   // Prefer the task's own board; the fallback narrows to the task's PROJECT
   // before picking a default — the store now holds boards for ALL projects, and
@@ -161,15 +170,32 @@ export function CardActionsMenu({
       openConfirm(intent);
       return;
     }
+    // Only a DELETE cascades, and only an idea/epic has anything under it — a
+    // task never pays for this second query.
+    let children = false;
+    if (intent === 'delete' && task.type !== 'task') {
+      try {
+        children = await trpc.cyboflow.tracker.hasLinkedDescendants.query({
+          entityType: task.type,
+          entityId: task.id,
+        });
+      } catch {
+        // Same fail-soft stance as the link lookup: a missing sentence in the
+        // dialog copy must never be able to block a local delete.
+        children = false;
+      }
+    }
     setTrackerLink(link);
+    setTrackerChildren(children);
     setParkedIntent(intent);
   };
 
-  /** The ruling landed and the link is gone — carry on with what was clicked. */
+  /** The ruling is recorded — carry on to the confirm for what was clicked. */
   const handleUnlinkResolved = (): void => {
     const intent = parkedIntent;
     setParkedIntent(null);
     setTrackerLink(null);
+    setTrackerChildren(false);
     if (intent !== null) openConfirm(intent);
   };
 
@@ -289,12 +315,14 @@ export function CardActionsMenu({
           entityRef={task.ref}
           action={parkedIntent}
           link={trackerLink}
+          hasLinkedDescendants={trackerChildren}
           isOpen
           onClose={() => {
             // Dismissed without a ruling: the destructive action is abandoned
             // too, so nothing is deleted and the link stays live.
             setParkedIntent(null);
             setTrackerLink(null);
+            setTrackerChildren(false);
           }}
           onResolved={handleUnlinkResolved}
         />

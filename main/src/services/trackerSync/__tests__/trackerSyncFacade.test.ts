@@ -25,10 +25,20 @@
  *   - resolveConflictChoice: all four branches (field remote / field local /
  *     remote_deleted remote / remote_deleted local), plus the description
  *     branch's provenance-footer preservation.
+ *   - resolveConflictChoice ACROSS a following inbound pass: a ruling that does
+ *     not advance the link's baseline re-opens the same conflict forever, so
+ *     title/description/one-way-stage local rulings (and the remote ones) are
+ *     each driven through a real second pass with the remote unchanged.
  *   - disconnect: status + the cleared secret + delisting.
- *   - unlinkEntity: the local-delete ruling — 'keep' orphans with an empty
+ *   - unlinkEntity: the ruling applied DIRECTLY — 'keep' orphans with an empty
  *     outbox, 'cancel' queues exactly one deduped cancelled-group write, an
  *     unlinked entity reports { unlinked: false }.
+ *   - stageUnlinkRuling: the STAGED ruling the board's delete path uses —
+ *     staging alone mutates nothing, the committed delete/archive applies it,
+ *     an abandoned one expires, a consumed one is not reused, a delete cascade
+ *     orphans its children's links (with or without a ruling) and those children
+ *     inherit the root's answer, and an archive with no ruling is left entirely
+ *     alone (that is inbound sync's link to manage).
  *   - reconcilePreview: which entities are candidates and how a title matches.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -81,9 +91,10 @@ import type {
 } from '../../../../../shared/types/trackerSync';
 import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
 import { TrackerAuthError } from '../errors';
-import type { EntityWriteRouter } from '../inboundSync';
+import { joinBody, splitBody, type EntityWriteRouter } from '../inboundSync';
 import {
   getConnection,
+  getLinkByExternal,
   insertConflict,
   insertConnection,
   readSecret,
@@ -203,6 +214,11 @@ let factoryCalls: Array<{ connection: TrackerConnectionRow; secret: string }>;
 /** Every TrackerChangedEvent broadcast on the project channel. */
 let broadcasts: TrackerChangedEvent[];
 let onBroadcast: (event: TrackerChangedEvent) => void;
+/**
+ * The service's injected clock, as a MUTABLE fixture: the staged-ruling TTL
+ * reads it, so an expiry case advances this instead of waiting.
+ */
+let now: string;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-trackersync-facade-'));
@@ -221,10 +237,11 @@ beforeEach(() => {
     broadcasts.push(event);
   };
   trackerSyncEvents.on(trackerProjectChannel(PROJECT_ID), onBroadcast);
+  now = '2026-07-30T12:00:00.000Z';
   service = new TrackerSyncService({
     db: raw,
     router,
-    nowIso: () => '2026-07-30T12:00:00.000Z',
+    nowIso: () => now,
     adapterFactory: (connection, secret) => {
       factoryCalls.push({ connection, secret });
       return adapter;
@@ -267,8 +284,15 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
 
 /** Create an entity through the REAL chokepoint and return its id. */
 async function createEntity(
-  entityType: 'idea' | 'task',
-  fields: { title: string; body?: string | null; stageId?: string },
+  entityType: 'idea' | 'epic' | 'task',
+  fields: {
+    title: string;
+    body?: string | null;
+    stageId?: string;
+    /** Lineage, so a case can build a real idea -> epic -> task delete cascade. */
+    parentEpicId?: string;
+    originatingIdeaId?: string;
+  },
 ): Promise<string> {
   const { taskId } = await router.applyChange(PROJECT_ID, {
     actor: 'user',
@@ -276,6 +300,10 @@ async function createEntity(
     title: fields.title,
     body: fields.body ?? null,
     ...(fields.stageId !== undefined ? { initialStageId: fields.stageId } : {}),
+    ...(fields.parentEpicId !== undefined ? { parentEpicId: fields.parentEpicId } : {}),
+    ...(fields.originatingIdeaId !== undefined
+      ? { originatingIdeaId: fields.originatingIdeaId }
+      : {}),
   });
   return taskId;
 }
@@ -296,6 +324,27 @@ function readIdea(id: string): EntityRow {
 
 function conflictRow(id: number): TrackerConflictRow {
   return raw.prepare('SELECT * FROM tracker_conflicts WHERE id = ?').get(id) as TrackerConflictRow;
+}
+
+/** Every conflict row for the connection, oldest first. */
+function allConflicts(): TrackerConflictRow[] {
+  return raw
+    .prepare('SELECT * FROM tracker_conflicts ORDER BY id ASC')
+    .all() as TrackerConflictRow[];
+}
+
+/** The one idea a real inbound pass imported (rowid = true insertion order). */
+function importedIdeaId(): string {
+  const rows = raw.prepare('SELECT id FROM ideas ORDER BY rowid ASC').all() as Array<{ id: string }>;
+  if (rows.length !== 1) throw new Error(`expected exactly one imported idea, got ${rows.length}`);
+  return rows[0].id;
+}
+
+/** A link's `baseline_json`, parsed. */
+function baselineOf(externalId: string): Record<string, unknown> {
+  const link = getLinkByExternal(raw, CONN_ID, externalId);
+  if (!link) throw new Error(`no link for ${externalId}`);
+  return JSON.parse(link.baseline_json ?? '{}') as Record<string, unknown>;
 }
 
 function linkRow(id: number): EntityExternalLinkRow {
@@ -815,6 +864,223 @@ describe('TrackerSyncService conflict resolution', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Conflicts — the pass AFTER the ruling
+// ---------------------------------------------------------------------------
+
+/**
+ * A ruling has to SURVIVE the next inbound pass. These drive the whole loop
+ * through the real engine — a pass that imports the issue, a local edit, a pass
+ * that opens the conflict, the ruling, then ANOTHER pass with the remote
+ * unchanged — because the defect they cover is invisible to any test that stops
+ * at the ruling: accepting the LOCAL side left the link's baseline on the
+ * PRE-conflict snapshot, so the next pass still read both sides as changed and
+ * re-opened the conflict the user had just settled, every pass, forever.
+ */
+describe('TrackerSyncService conflict resolution — the pass AFTER the ruling', () => {
+  /** A remote touch (a comment, a label) that carries the SAME merge-relevant fields. */
+  const TOUCHED = '2026-07-30T11:00:00.000Z';
+  const TOUCHED_AGAIN = '2026-07-30T12:30:00.000Z';
+
+  /**
+   * Import an issue through a REAL pass, apply `localEdit`, then run a second
+   * pass with `remote` overlaid — which is what opens the conflict in manual
+   * mode. Returns the imported idea and the single open conflict.
+   */
+  async function openConflict(
+    remote: Partial<TrackerIssue>,
+    localEdit: (ideaId: string) => Promise<unknown>,
+    connection: Partial<NewConnectionRow> = {},
+    imported: Partial<TrackerIssue> = {},
+  ): Promise<{ ideaId: string; conflictId: number }> {
+    makeConnection({ conflict_mode: 'manual', ...connection });
+    adapter.issues = [makeIssue(imported)];
+    await service.syncConnection(CONN_ID);
+
+    const ideaId = importedIdeaId();
+    await localEdit(ideaId);
+
+    adapter.issues = [makeIssue({ updatedAt: TOUCHED, ...remote })];
+    await service.syncConnection(CONN_ID);
+
+    const opened = allConflicts();
+    expect(opened).toHaveLength(1);
+    expect(opened[0].state).toBe('open');
+    return { ideaId, conflictId: opened[0].id };
+  }
+
+  const editTitle =
+    (title: string) =>
+    (ideaId: string): Promise<{ taskId: string }> =>
+      router.applyChange(PROJECT_ID, {
+        actor: 'user',
+        entityType: 'idea',
+        taskId: ideaId,
+        fields: { title },
+      });
+
+  /** Rewrite the remote-owned HALF of the body, leaving the provenance footer. */
+  const editDescription =
+    (description: string) =>
+    async (ideaId: string): Promise<void> => {
+      const { footer } = splitBody(readIdea(ideaId).body);
+      await router.applyChange(PROJECT_ID, {
+        actor: 'user',
+        entityType: 'idea',
+        taskId: ideaId,
+        fields: { body: joinBody(description, footer) },
+      });
+    };
+
+  const moveStage =
+    (stageId: string) =>
+    (ideaId: string): Promise<{ taskId: string }> =>
+      router.applyChange(PROJECT_ID, {
+        actor: 'user',
+        entityType: 'idea',
+        taskId: ideaId,
+        stageId,
+      });
+
+  it("title + 'local': the next pass re-opens nothing and the local title stands", async () => {
+    const { ideaId, conflictId } = await openConflict({ title: 'Remote title' }, editTitle('Local title'));
+
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    // The SAME remote title, re-delivered behind a bumped updatedAt — any remote
+    // touch does that, and the merge sees the issue again.
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: TOUCHED_AGAIN })];
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(pass.error).toBeNull();
+    expect(allConflicts()).toHaveLength(1);
+    expect(allConflicts()[0].state).toBe('resolved');
+    expect(readIdea(ideaId).title).toBe('Local title');
+  });
+
+  it("description + 'local': the next pass re-opens nothing and the local body stands", async () => {
+    const { ideaId, conflictId } = await openConflict(
+      { description: 'Remote description' },
+      editDescription('Local description'),
+    );
+
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    adapter.issues = [makeIssue({ description: 'Remote description', updatedAt: TOUCHED_AGAIN })];
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(pass.error).toBeNull();
+    expect(allConflicts()).toHaveLength(1);
+    expect(allConflicts()[0].state).toBe('resolved');
+    const body = readIdea(ideaId).body ?? '';
+    expect(body).toContain('Local description');
+    expect(body).not.toContain('Remote description');
+    // The footer the import wrote is still there — the local half was kept whole.
+    expect(body).toContain('<!-- cyboflow:tracker linear:ext-1 -->');
+  });
+
+  it("stage + 'local': the next pass re-opens nothing on a ONE-WAY connection", async () => {
+    // two_way off means there is no convergence write-back to paper over a
+    // baseline that never moved, so the baseline stamp is the ONLY thing that
+    // can end the loop.
+    const { ideaId, conflictId } = await openConflict(
+      { stateId: 'state-progress' },
+      moveStage(STAGE.done),
+      { two_way: 0 },
+    );
+    expect(conflictRow(conflictId).field).toBe('stage');
+
+    await service.resolveConflictChoice(conflictId, 'local');
+    expect(outboxRows()).toEqual([]);
+
+    adapter.issues = [makeIssue({ stateId: 'state-progress', updatedAt: TOUCHED_AGAIN })];
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(pass.error).toBeNull();
+    expect(allConflicts()).toHaveLength(1);
+    expect(allConflicts()[0].state).toBe('resolved');
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.done);
+    // The stamp says what is TRUE: the remote is at that state, in that group.
+    expect(baselineOf('ext-1').stateId).toBe('state-progress');
+    expect(baselineOf('ext-1').lastWrittenGroup).toBe('started');
+  });
+
+  it("stage + 'local' clears a STALE write-back stamp and still queues the convergence write", async () => {
+    // Imported from a started state, so the link's baseline carries
+    // lastWrittenGroup='started'. The remote has since dropped back to Backlog,
+    // which belongs to no write-back group — the stamp must REMOVE the key, or a
+    // later genuine local move to In development would be deduped away against
+    // a group the remote no longer sits in.
+    const { conflictId } = await openConflict(
+      { stateId: 'state-backlog' },
+      moveStage(STAGE.done),
+      { two_way: 1 },
+      { stateId: 'state-progress' },
+    );
+    expect(baselineOf('ext-1').lastWrittenGroup).toBe('started');
+
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    expect(baselineOf('ext-1')).not.toHaveProperty('lastWrittenGroup');
+    expect(baselineOf('ext-1').stateId).toBe('state-backlog');
+    // Two-way is on, so the tracker is still asked to converge onto our stage.
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect((JSON.parse(rows[0].payload_json) as UpdateStatePayload).desiredGroup).toBe('completed');
+  });
+
+  it('a LATER genuine remote edit still conflicts after a local ruling', async () => {
+    const { conflictId } = await openConflict({ title: 'Remote title' }, editTitle('Local title'));
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    adapter.issues = [makeIssue({ title: 'Remote title, revised', updatedAt: TOUCHED_AGAIN })];
+    await service.syncConnection(CONN_ID);
+
+    const rows = allConflicts();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].state).toBe('open');
+    expect(rows[1].field).toBe('title');
+    expect(rows[1].local_value).toBe('Local title');
+    expect(rows[1].remote_value).toBe('Remote title, revised');
+  });
+
+  it("stage + 'remote': the next pass refreshes the whole baseline by itself", async () => {
+    // The stage branch of applyRemoteFieldValue deliberately stamps nothing
+    // (`remote_value` is a board stage, not a provider state) and leans on the
+    // merge to refresh the baseline once the entity agrees with the remote.
+    // Proven here rather than assumed.
+    const { ideaId, conflictId } = await openConflict(
+      { stateId: 'state-progress' },
+      moveStage(STAGE.done),
+    );
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.ready);
+
+    adapter.issues = [makeIssue({ stateId: 'state-progress', updatedAt: TOUCHED_AGAIN })];
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(pass.error).toBeNull();
+    expect(allConflicts()).toHaveLength(1);
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.ready);
+    expect(baselineOf('ext-1').stateId).toBe('state-progress');
+  });
+
+  it("title + 'remote': the next pass re-opens nothing either", async () => {
+    const { ideaId, conflictId } = await openConflict({ title: 'Remote title' }, editTitle('Local title'));
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+    expect(readIdea(ideaId).title).toBe('Remote title');
+
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: TOUCHED_AGAIN })];
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(pass.error).toBeNull();
+    expect(allConflicts()).toHaveLength(1);
+    expect(readIdea(ideaId).title).toBe('Remote title');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // reconcilePreview + linkForEntity
 // ---------------------------------------------------------------------------
 
@@ -1021,5 +1287,255 @@ describe('TrackerSyncService.unlinkEntity', () => {
     expect(linkRow(planeLink.id).orphaned_at).not.toBeNull();
     expect(outboxRows()).toHaveLength(1);
     expect(outboxRows(planeConnection.id)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stageUnlinkRuling — the STAGED local-removal ruling
+//
+// The whole point of the staging design: the dialog collects the answer and the
+// COMMITTED delete/archive applies it, so a user who backs out of the confirm
+// dialog behind it has mutated nothing. `service.start()` is what subscribes the
+// consumption half to the entity-change broadcast, so every case here starts it.
+// ---------------------------------------------------------------------------
+
+describe('TrackerSyncService staged local-removal ruling', () => {
+  /** A linked idea on the default connection, ready to be removed locally. */
+  async function seedLinkedIdea(
+    overrides: Partial<UpsertLinkInput> = {},
+  ): Promise<{ ideaId: string; link: EntityExternalLinkRow }> {
+    const ideaId = await createEntity('idea', { title: 'Linked idea' });
+    const link = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-1',
+      external_identifier: 'CORE-142',
+      ...overrides,
+    });
+    return { ideaId, link };
+  }
+
+  /** The desired group of every outbox row, oldest first. */
+  function queuedGroups(connectionId = CONN_ID): Array<string | undefined> {
+    return outboxRows(connectionId).map(
+      (row) => (JSON.parse(row.payload_json) as UpdateStatePayload).desiredGroup,
+    );
+  }
+
+  it('stages WITHOUT mutating anything — no orphan, no outbox row, no broadcast', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+    broadcasts.length = 0;
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+
+    // The user is still looking at the delete confirm and may dismiss it.
+    expect(linkRow(link.id).orphaned_at).toBeNull();
+    expect(outboxRows()).toEqual([]);
+    expect(broadcasts).toEqual([]);
+    await expect(service.linkForEntity('idea', ideaId)).resolves.not.toBeNull();
+  });
+
+  it('applies the ruling only once the delete actually commits', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    expect(queuedGroups()).toEqual(['cancelled']);
+    expect(outboxRows()[0].external_id).toBe('ext-1');
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('a ruling the user backed out of expires instead of surprising a later delete', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    // The confirm was dismissed; much later the idea is deleted for other reasons.
+    now = '2026-07-30T12:11:00.000Z';
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    // The link still has to go (its entity is gone) — but nothing was cancelled.
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('consumes the ruling — a second removal of the same id does not re-apply it', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+    expect(queuedGroups()).toEqual(['cancelled']);
+
+    // Re-created under the same id with a fresh link, deleted again: the ruling
+    // was spent by the first delete, so this one only unlinks.
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(ideaId, PROJECT_ID, 'IDEA-999', 'Back again', 'board-1-default', STAGE.idea);
+    const relinked = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-2',
+    });
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    expect(queuedGroups()).toEqual(['cancelled']);
+    expect(linkRow(relinked.id).orphaned_at).not.toBeNull();
+  });
+
+  it('orphans a CASCADED child link even with no ruling anywhere (no zombie links)', async () => {
+    makeConnection();
+    service.start();
+    const ideaId = await createEntity('idea', { title: 'Parent idea' });
+    const epicId = await createEntity('epic', {
+      title: 'Parent epic',
+      originatingIdeaId: ideaId,
+    });
+    const taskId = await createEntity('task', {
+      title: 'Mirrored child',
+      parentEpicId: epicId,
+      originatingIdeaId: ideaId,
+    });
+    const childLink = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'task',
+      entity_id: taskId,
+      provider: 'linear',
+      external_id: 'ext-child',
+      external_parent_id: 'ext-1',
+    });
+
+    // The epic itself is unlinked, so the dialog never even opened — the child
+    // link is exactly the one the old design stranded.
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: epicId });
+
+    expect(linkRow(childLink.id).orphaned_at).not.toBeNull();
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it("cascade members inherit the ROOT's ruling: root + child are cancelled, then orphaned", async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+    const epicId = await createEntity('epic', { title: 'Epic', originatingIdeaId: ideaId });
+    const childId = await createEntity('task', {
+      title: 'Mirrored child',
+      parentEpicId: epicId,
+      originatingIdeaId: ideaId,
+    });
+    const childLink = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'task',
+      entity_id: childId,
+      provider: 'linear',
+      external_id: 'ext-child',
+      external_parent_id: 'ext-1',
+    });
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    // Both issues were told to cancel BEFORE their links were orphaned — an
+    // enqueue after the orphan would have had no live link to read.
+    expect(queuedGroups()).toEqual(['cancelled', 'cancelled']);
+    expect(outboxRows().map((row) => row.external_id).sort()).toEqual(['ext-1', 'ext-child']);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(linkRow(childLink.id).orphaned_at).not.toBeNull();
+  });
+
+  it("'keep' on the root unlinks the whole cascade and queues nothing", async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+    const childId = await createEntity('task', {
+      title: 'Mirrored child',
+      originatingIdeaId: ideaId,
+    });
+    const childLink = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'task',
+      entity_id: childId,
+      provider: 'linear',
+      external_id: 'ext-child',
+    });
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: false });
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(linkRow(childLink.id).orphaned_at).not.toBeNull();
+  });
+
+  it('an ARCHIVE with a staged ruling applies it', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyChange(PROJECT_ID, { actor: 'user', taskId: ideaId, archived: true });
+
+    expect(queuedGroups()).toEqual(['cancelled']);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('an archive with NO staged ruling leaves the link completely alone', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    // The shape an inbound remote-archive apply takes: the provider is the actor
+    // and no dialog ever staged anything, so the inbound half keeps owning the
+    // link (it archives locally and orphans on its own terms).
+    await router.applyChange(PROJECT_ID, { actor: 'linear', taskId: ideaId, archived: true });
+
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).toBeNull();
+    await expect(service.linkForEntity('idea', ideaId)).resolves.not.toBeNull();
+  });
+
+  it('reports whether a delete cascade will take synced children with it', async () => {
+    makeConnection();
+    const ideaId = await createEntity('idea', { title: 'Parent idea' });
+    const epicId = await createEntity('epic', { title: 'Epic', originatingIdeaId: ideaId });
+    const childId = await createEntity('task', {
+      title: 'Child',
+      parentEpicId: epicId,
+      originatingIdeaId: ideaId,
+    });
+
+    await expect(service.hasLinkedDescendants('idea', ideaId)).resolves.toBe(false);
+
+    const childLink = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'task',
+      entity_id: childId,
+      provider: 'linear',
+      external_id: 'ext-child',
+    });
+
+    // Reachable from the idea (via its epic) AND from the epic itself.
+    await expect(service.hasLinkedDescendants('idea', ideaId)).resolves.toBe(true);
+    await expect(service.hasLinkedDescendants('epic', epicId)).resolves.toBe(true);
+    // A task has no cascade of its own, and an orphaned child does not count.
+    await expect(service.hasLinkedDescendants('task', childId)).resolves.toBe(false);
+    raw.prepare(`UPDATE entity_external_links SET orphaned_at = datetime('now') WHERE id = ?`).run(
+      childLink.id,
+    );
+    await expect(service.hasLinkedDescendants('idea', ideaId)).resolves.toBe(false);
   });
 });

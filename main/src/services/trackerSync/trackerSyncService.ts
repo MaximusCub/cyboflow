@@ -41,6 +41,15 @@
  * column while the pass is in flight, and from that moment the pass abandons its
  * remaining phases and persists NOTHING. See {@link TrackerSyncService.runPass}.
  *
+ * LOCAL REMOVAL. Deleting or archiving a linked entity is the one flow where the
+ * user rules on the tracker issue directly ("keep it" / "cancel it"). The dialog
+ * only COLLECTS that ruling (stageUnlinkRuling) — it is applied by the entity
+ * event the committed delete/archive emits, so a user who backs out of the
+ * confirm dialog behind it has changed nothing at all. The same handler is what
+ * keeps a cascade honest: a hard delete removes rows from three entity tables
+ * and `entity_external_links` has no foreign key into any of them, so every
+ * affected link is orphaned here or nowhere.
+ *
  * WRITE-BACK LATENCY. The entity-event listener only ENQUEUES; without a nudge
  * the row would sit until the next 5-minute poll, which reads as "cyboflow
  * didn't update my tracker". So an event that leaves a pending row arms a 2s
@@ -65,7 +74,7 @@ import type {
   TrackerConflictRow,
   TrackerConnectionRow,
 } from '../../database/models';
-import type { TaskChangedEvent } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, TaskChangedEvent } from '../../../../shared/types/tasks';
 import type {
   TrackerConflictChoice,
   TrackerConflictSummary,
@@ -106,7 +115,9 @@ import {
   getConnection,
   getLinkByEntity,
   getLinkById,
+  hasActiveLinkedDescendant,
   insertConnection,
+  listActiveLinksWithoutEntity,
   listConnections,
   listLinks,
   listOpenConflicts,
@@ -122,6 +133,7 @@ import {
 } from './store';
 import {
   joinBody,
+  readConflictRemoteState,
   runDeletionSweep,
   runInboundSync,
   splitBody,
@@ -165,6 +177,16 @@ export const SWEEP_EVERY_N_PASSES = 12;
 
 /** Cap on a connection's stored pass log, so debounced drains cannot grow it unbounded. */
 const MAX_LOG_ENTRIES = 60;
+
+/**
+ * How long a STAGED local-removal ruling stays consumable
+ * ({@link TrackerSyncService.stageUnlinkRuling}). The ruling is collected in a
+ * dialog that immediately opens the delete/archive confirm, so a consumed one
+ * is milliseconds old; this window only has to survive a user reading that
+ * confirm. Anything older was ABANDONED — the user backed out — and must never
+ * be applied to some later, unrelated removal.
+ */
+export const UNLINK_RULING_TTL_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -270,6 +292,23 @@ export function defaultAdapterFactory(
 }
 
 // ---------------------------------------------------------------------------
+// Staged local-removal rulings
+// ---------------------------------------------------------------------------
+
+/** One collected-but-not-yet-consumed local-removal ruling. */
+interface StagedUnlinkRuling {
+  /** The user's answer: cancel the tracker issue, or leave it exactly as it is. */
+  cancelRemote: boolean;
+  /** When it was collected (ms), for the {@link UNLINK_RULING_TTL_MS} expiry. */
+  stagedAt: number;
+}
+
+/** The staged-ruling map's key. */
+function rulingKey(entityType: TrackerEntityType, entityId: string): string {
+  return `${entityType}:${entityId}`;
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -298,6 +337,22 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
   /** Armed write-back debounce timers, per connection. */
   private readonly drainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Local-removal rulings the delete/archive dialog has COLLECTED but whose
+   * entity has not been removed yet, keyed `entityType:entityId`
+   * ({@link rulingKey}).
+   *
+   * DELIBERATELY IN-MEMORY, and deliberately not durable. A ruling exists only
+   * for the milliseconds between the dialog's button and the confirm dialog's
+   * mutation, in ONE app session — it is never read by another process and
+   * never survives a quit usefully. Persisting it would be strictly worse: an
+   * unconsumed ruling (the user backed out of the confirm) would then outlive
+   * the session and silently cancel someone's issue the next time that entity
+   * was deleted, weeks later. Expiry ({@link UNLINK_RULING_TTL_MS}) covers the
+   * same abandonment within a session.
+   */
+  private readonly stagedRulings = new Map<string, StagedUnlinkRuling>();
 
   constructor(deps: TrackerSyncServiceDeps) {
     this.db = deps.db;
@@ -349,6 +404,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
     for (const timer of this.drainTimers.values()) clearTimeout(timer);
     this.drainTimers.clear();
+    // A ruling is only ever consumed by an entity event, and we are about to
+    // stop listening for those — keeping one would just be a stale answer to a
+    // question a future session never asked.
+    this.stagedRulings.clear();
     if (this.subscription !== null) {
       taskChangeEvents.off(TASK_ALL_CHANNEL, this.subscription);
       this.subscription = null;
@@ -617,11 +676,16 @@ export class TrackerSyncService implements TrackerSyncFacade {
   // -------------------------------------------------------------------------
 
   /**
-   * Entity-event handler. The listener does the translation (and never throws —
-   * this runs inline on TaskChangeRouter's post-commit emit); we only add the
-   * latency nudge on top.
+   * Entity-event handler. The listener does the stage/mirroring translation (and
+   * never throws — this runs inline on TaskChangeRouter's post-commit emit); we
+   * add the local-REMOVAL half and the latency nudge on top.
+   *
+   * Removal runs FIRST: a ruling that orphans the link must land before the
+   * listener looks at the same event, or an archive would still stream a stage
+   * write-back for an entity the user just took out of the sync.
    */
   private handleTaskChanged(event: TaskChangedEvent): void {
+    this.handleLocalRemoval(event);
     this.listener?.handleTaskChanged(event);
     this.scheduleWriteBackDrain(event.projectId);
   }
@@ -1220,7 +1284,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * for a STAGE conflict only — queues the write-back that makes the tracker
    * converge onto our stage. Title/description have no outbound path in v1 (the
    * adapter seam writes state, not content), so accepting the local side of one
-   * is purely a "stop asking me" ruling.
+   * is purely a "stop asking me" ruling. Either way the link's BASELINE has to
+   * move, or the ruling does not stick — see {@link acceptLocalFieldValue}.
    */
   private async resolveFieldConflict(
     connection: TrackerConnectionRow,
@@ -1233,10 +1298,63 @@ export class TrackerSyncService implements TrackerSyncFacade {
       resolveConflict(this.db, conflict.id, 'manual-remote');
       return;
     }
-    if (conflict.field === 'stage' && link !== null) {
-      this.enqueueStageWriteBack(connection, link, conflict.local_value);
-    }
+    if (link !== null) this.acceptLocalFieldValue(connection, conflict, link);
     resolveConflict(this.db, conflict.id, 'manual-local');
+  }
+
+  /**
+   * Accept the LOCAL side of a field conflict. The entity already HOLDS the
+   * value being kept, so all the work is in the baseline — and skipping it is
+   * what made this ruling not stick: the baseline still held the PRE-conflict
+   * snapshot, so the next inbound pass saw both sides changed and re-opened the
+   * very conflict the user had just settled, forever.
+   *
+   * Advancing the conflicting field to the REMOTE's value ends that loop. The
+   * baseline means "where the remote stood when we last looked", and the remote
+   * genuinely IS at that value, so the stamp is TRUE: the next pass reads
+   * remote-unchanged + local-changed and lets the local value win silently,
+   * while a LATER genuine remote edit still diverges from the stamp and
+   * conflicts again — which is the whole point of keeping a baseline.
+   */
+  private acceptLocalFieldValue(
+    connection: TrackerConnectionRow,
+    conflict: TrackerConflictRow,
+    link: EntityExternalLinkRow,
+  ): void {
+    if (conflict.field === 'stage') {
+      // `remote_value` here is the MAPPED board stage, so the raw state comes
+      // off the payload the conflict recorded (inboundSync's
+      // TrackerConflictPayload). A row written without it — a pre-existing one
+      // — simply keeps the old recur-forever shape rather than stamping a state
+      // id we would have to invent. The convergence write-back below is a
+      // two-way-only affordance, so on a ONE-WAY connection this stamp is the
+      // only thing standing between the user and the same prompt every pass.
+      const remote = readConflictRemoteState(conflict.payload_json);
+      if (remote !== null) {
+        this.stampBaseline(link, {
+          stateId: remote.stateId,
+          // Mirrors inboundSync's stampRemoteGroup: a null group CLEARS the key
+          // rather than leaving a stale one that would suppress a later, genuine
+          // local write-back.
+          lastWrittenGroup: remote.group ?? undefined,
+        });
+      }
+      this.enqueueStageWriteBack(connection, link, conflict.local_value);
+      return;
+    }
+
+    if (conflict.field === 'title') {
+      // A title conflict always carries the remote's title; a null would only
+      // corrupt the baseline into unparseability, so it is left alone.
+      if (conflict.remote_value !== null) this.stampBaseline(link, { title: conflict.remote_value });
+      return;
+    }
+
+    if (conflict.field === 'description') {
+      // null is a legitimate remote description ("this issue has no body"), so
+      // it is stamped as-is rather than guarded away.
+      this.stampBaseline(link, { description: conflict.remote_value });
+    }
   }
 
   /** Write one conflict's `remote_value` onto the linked entity, per field. */
@@ -1255,11 +1373,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
     } as const;
 
     if (conflict.field === 'stage') {
-      // `remote_value` on a stage conflict is the MAPPED board stage id, not the
-      // tracker's state id — so there is nothing to stamp back into the
-      // baseline's `stateId` here. Harmless: the entity now agrees with the
-      // remote, so the next pass's three-way merge sees no divergence and
-      // refreshes the whole baseline itself.
+      // `remote_value` on a stage conflict is the MAPPED board stage id, not
+      // the tracker's state id. The conflict's payload does carry the raw state
+      // (acceptLocalFieldValue stamps it), but this side has no need of it: the
+      // entity now AGREES with the remote, so the next pass's three-way merge
+      // sees no divergence and refreshes the whole baseline itself. Covered by a
+      // repeat-pass test rather than assumed.
       if (remote === null) return;
       await this.router.applyChange(connection.project_id, { ...base, stageId: remote });
       return;
@@ -1289,7 +1408,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
   /**
    * Merge `patch` into a link's `baseline_json` without disturbing the other
    * half's keys (the outbound worker stamps its own `lastWrittenGroup` /
-   * `lastWrittenAt` onto the same blob).
+   * `lastWrittenAt` onto the same blob). A patch value of `undefined` REMOVES
+   * its key — JSON.stringify drops undefined members — which is how the stage
+   * branch clears a `lastWrittenGroup` the remote has moved out of.
    */
   private stampBaseline(link: EntityExternalLinkRow, patch: Record<string, unknown>): void {
     updateBaseline(
@@ -1348,7 +1469,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   // -------------------------------------------------------------------------
-  // Entity link lookup + the local-delete ruling
+  // Entity link lookup + the local-removal ruling
+  //
+  // THE ORDER THIS FEATURE RUNS IN. The dialog in front of a delete/archive only
+  // COLLECTS the user's answer (stageUnlinkRuling); nothing is mutated there,
+  // because the user still has the ordinary confirm dialog to back out of. The
+  // ruling is CONSUMED by handleLocalRemoval when the entity write actually
+  // lands — so backing out of the confirm leaves the link live, the issue
+  // untouched, and the abandoned ruling expiring on its own.
   // -------------------------------------------------------------------------
 
   /**
@@ -1374,18 +1502,92 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
-   * The LOCAL-DELETE ruling (design doc → "Deletes"): the entity is about to be
-   * deleted or archived locally and the user has said what should happen to the
-   * tracker issue. Both answers ORPHAN the link — the entity is going away, so
-   * there is nothing left to sync — and `cancelRemote` additionally queues the
-   * state write that moves the issue into the tracker's cancelled group. There
-   * is no remote hard-delete on this path, ever: the worst we ever do to someone
-   * else's tracker is cancel an issue.
+   * True when hard-deleting this entity would ALSO remove at least one OTHER
+   * synced entity (an idea's epics/tasks, an epic's tasks). The removal dialog
+   * asks so its copy can say the one ruling covers those children too — which is
+   * exactly what {@link handleLocalRemoval} then does.
+   *
+   * Deliberately its own call rather than a field on {@link linkForEntity}'s
+   * result: that shape is the "open in Linear" chip's data, and a cascade
+   * question has no business being answered on every read of it.
+   */
+  async hasLinkedDescendants(entityType: TrackerEntityType, entityId: string): Promise<boolean> {
+    return hasActiveLinkedDescendant(this.db, entityType, entityId);
+  }
+
+  /**
+   * COLLECT the local-removal ruling (design doc → "Deletes") without applying
+   * any part of it. The user is about to be shown the ordinary delete/archive
+   * confirm and may still back out; nothing here touches a link, a connection or
+   * the outbox.
+   *
+   * The ruling is consumed by {@link handleLocalRemoval} when the entity write
+   * actually commits, and by nothing else — an abandoned one simply expires
+   * ({@link UNLINK_RULING_TTL_MS}). Re-staging for the same entity overwrites:
+   * the newest answer is the one the user is looking at.
+   */
+  async stageUnlinkRuling(
+    entityType: TrackerEntityType,
+    entityId: string,
+    opts: { cancelRemote: boolean },
+  ): Promise<void> {
+    this.pruneStaleRulings();
+    this.stagedRulings.set(rulingKey(entityType, entityId), {
+      cancelRemote: opts.cancelRemote,
+      stagedAt: this.rulingNowMs(),
+    });
+  }
+
+  /**
+   * The LOCAL-DELETE ruling applied DIRECTLY, without the staging step. Both
+   * answers ORPHAN the link — the entity is going away, so there is nothing left
+   * to sync — and `cancelRemote` additionally queues the state write that moves
+   * the issue into the tracker's cancelled group. There is no remote hard-delete
+   * on this path, ever: the worst we ever do to someone else's tracker is cancel
+   * an issue.
    *
    * EVERY live link is dropped, not just the first provider's: an entity that is
    * about to disappear must not leave a live link pointing at it from the other
-   * tracker. `unlinked: false` therefore means "nothing was linked" — the caller
-   * (the renderer's delete path) proceeds with its own delete regardless.
+   * tracker. `unlinked: false` therefore means "nothing was linked".
+   *
+   * NOT the board's delete path any more — that one stages a ruling and lets the
+   * committed delete consume it, so a cancelled confirm mutates nothing. This
+   * stays for the callers that have already committed to dropping a link with no
+   * confirm behind them (and as the direct-application core the removal handler
+   * shares).
+   */
+  async unlinkEntity(
+    entityType: TrackerEntityType,
+    entityId: string,
+    opts: { cancelRemote: boolean },
+  ): Promise<{ unlinked: boolean }> {
+    const links = this.liveLinksForEntity(entityType, entityId);
+    for (const link of links) this.dropLink(link, opts.cancelRemote);
+    return { unlinked: links.length > 0 };
+  }
+
+  /** Every LIVE (non-orphaned) link an entity has, one per provider at most. */
+  private liveLinksForEntity(
+    entityType: TrackerEntityType,
+    entityId: string,
+  ): EntityExternalLinkRow[] {
+    const links: EntityExternalLinkRow[] = [];
+    for (const provider of LINK_PROVIDERS) {
+      const link = getLinkByEntity(this.db, entityType, entityId, provider);
+      if (link === null || link.orphaned_at !== null) continue;
+      links.push(link);
+    }
+    return links;
+  }
+
+  /**
+   * Orphan ONE link, first queueing the cancelled-group write when the ruling
+   * asked for it.
+   *
+   * ORDER IS LOAD-BEARING: the enqueue reads the LIVE link (it needs the
+   * external id, and the dedup scan is against rows for that issue), and a
+   * half-applied ruling — orphaned but never cancelled — is exactly the outcome
+   * the user asked us to avoid.
    *
    * `two_way` is NOT consulted for the cancel. That flag governs the AUTOMATIC
    * write-back — whether stage moves stream out on their own — whereas this is a
@@ -1393,37 +1595,125 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * dialog that named it. A disconnected connection is skipped instead: its
    * stored key is gone, so the row could never drain.
    */
-  async unlinkEntity(
-    entityType: TrackerEntityType,
-    entityId: string,
-    opts: { cancelRemote: boolean },
-  ): Promise<{ unlinked: boolean }> {
-    let unlinked = false;
-    for (const provider of LINK_PROVIDERS) {
-      const link = getLinkByEntity(this.db, entityType, entityId, provider);
-      if (link === null || link.orphaned_at !== null) continue;
-      const connection = getConnection(this.db, link.connection_id);
+  private dropLink(link: EntityExternalLinkRow, cancelRemote: boolean): void {
+    const connection = getConnection(this.db, link.connection_id);
 
-      if (opts.cancelRemote && connection !== null && connection.status !== 'disconnected') {
-        // Queue BEFORE orphaning: the row carries the external id, and a
-        // half-applied unlink (orphaned, never cancelled) is the outcome the
-        // user explicitly asked us to avoid.
-        if (this.enqueueGroupWriteBack(connection, link, 'cancelled')) {
-          // Same 2s nudge a stage move gets — without it the cancel would sit
-          // until the next 5-minute poll, long after the entity is gone.
-          this.armDrainTimer(connection.id);
-        }
-      }
-
-      markOrphaned(this.db, link.id);
-      unlinked = true;
-      if (connection !== null) {
-        // 'connection' (not 'sync'): the connected view's linked-item counts are
-        // what changed, and no pass ran.
-        this.emitTrackerChange(connection.project_id, connection.id, 'connection');
+    if (cancelRemote && connection !== null && connection.status !== 'disconnected') {
+      if (this.enqueueGroupWriteBack(connection, link, 'cancelled')) {
+        // Same 2s nudge a stage move gets — without it the cancel would sit
+        // until the next 5-minute poll, long after the entity is gone.
+        this.armDrainTimer(connection.id);
       }
     }
-    return { unlinked };
+
+    markOrphaned(this.db, link.id);
+    if (connection !== null) {
+      // 'connection' (not 'sync'): the connected view's linked-item counts are
+      // what changed, and no pass ran.
+      this.emitTrackerChange(connection.project_id, connection.id, 'connection');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Consuming a staged ruling
+  // -------------------------------------------------------------------------
+
+  /**
+   * The CONSUMPTION half of {@link stageUnlinkRuling}, driven by the committed
+   * entity write itself. Two triggers:
+   *
+   *   DELETE. The entity's rows are already gone, so its links MUST be orphaned
+   *   whether or not a ruling was staged — `entity_external_links` has no entity
+   *   foreign key, so nothing else ever will, and a link to a nonexistent entity
+   *   is a zombie the inbound poller skips forever (it finds the link, finds no
+   *   local entity, and moves on every single pass).
+   *
+   *   ARCHIVE. Only ever acted on WITH a staged ruling. An archive is not a
+   *   removal in itself — inbound sync archives entities on the tracker's behalf
+   *   and manages those links itself — so the ruling's presence is precisely
+   *   what distinguishes "the user chose this in the removal dialog" from "the
+   *   provider did this to us". An inbound apply never stages one.
+   *
+   * CASCADE MEMBERS INHERIT THE ROOT'S RULING (and the dialog says so). The
+   * router emits one 'deleted' event per cascade entity, CHILDREN FIRST — and it
+   * has already deleted every row by then, so the only place a child's lineage
+   * still exists is the pre-delete snapshot on its own event. Hence the
+   * parent-epic / originating-idea lookups rather than a DB walk.
+   *
+   * Never throws: this runs inline on TaskChangeRouter's post-commit emit, where
+   * a throw would surface as a failed backlog write.
+   */
+  private handleLocalRemoval(event: TaskChangedEvent): void {
+    try {
+      const deleted = event.action === 'deleted';
+      const archived = event.task.archived_at !== null;
+      if (!deleted && !archived) return;
+
+      this.pruneStaleRulings();
+      const key = rulingKey(event.task.type, event.taskId);
+      const own = this.stagedRulings.get(key) ?? null;
+      // Inheritance is a DELETE-only affair: the archive toggle changes exactly
+      // one row, so an archived epic's children are still on the board.
+      const ruling = own ?? (deleted ? this.inheritedRuling(event.task) : null);
+      if (!deleted && ruling === null) return;
+
+      for (const link of this.liveLinksForEntity(event.task.type, event.taskId)) {
+        this.dropLink(link, ruling?.cancelRemote === true);
+      }
+
+      if (own !== null) this.stagedRulings.delete(key);
+
+      // The zombie sweep can only run once NO ruling is still waiting to be
+      // consumed. Sweeping mid-cascade would orphan a sibling's link before that
+      // sibling's own event arrived to apply the root's ruling to it — turning a
+      // "cancel these in Linear" into a silent unlink.
+      if (deleted && this.stagedRulings.size === 0) {
+        this.sweepZombieLinks(event.projectId, ruling);
+      }
+    } catch (err) {
+      this.logger?.error('[trackerSync] applying the local-removal ruling failed', {
+        taskId: event.taskId,
+        error: describeError(err),
+      });
+    }
+  }
+
+  /** The ruling staged on this entity's delete-cascade ROOT, or null. */
+  private inheritedRuling(task: BacklogTaskItem): StagedUnlinkRuling | null {
+    if (task.parent_epic_id !== null) {
+      const viaEpic = this.stagedRulings.get(rulingKey('epic', task.parent_epic_id));
+      if (viaEpic !== undefined) return viaEpic;
+    }
+    if (task.originating_idea_id !== null) {
+      const viaIdea = this.stagedRulings.get(rulingKey('idea', task.originating_idea_id));
+      if (viaIdea !== undefined) return viaIdea;
+    }
+    return null;
+  }
+
+  /**
+   * Orphan every link in the project whose entity no longer exists, applying
+   * `ruling` to each. The SAFETY NET behind the per-entity handling above: a
+   * cascade member whose snapshot could not be built broadcasts no event at all,
+   * and its link would otherwise be stranded live forever.
+   */
+  private sweepZombieLinks(projectId: number, ruling: StagedUnlinkRuling | null): void {
+    for (const link of listActiveLinksWithoutEntity(this.db, projectId)) {
+      this.dropLink(link, ruling?.cancelRemote === true);
+    }
+  }
+
+  /** Drop rulings past {@link UNLINK_RULING_TTL_MS} — the user backed out of the confirm. */
+  private pruneStaleRulings(): void {
+    const now = this.rulingNowMs();
+    for (const [key, ruling] of this.stagedRulings) {
+      if (now - ruling.stagedAt >= UNLINK_RULING_TTL_MS) this.stagedRulings.delete(key);
+    }
+  }
+
+  /** The ruling clock — the service's injected `nowIso`, so tests own it. */
+  private rulingNowMs(): number {
+    return parseTimestamp(this.nowIso()) ?? Date.now();
   }
 }
 

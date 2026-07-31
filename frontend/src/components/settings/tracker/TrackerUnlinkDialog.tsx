@@ -1,5 +1,5 @@
 /**
- * TrackerUnlinkDialog — the local-delete ruling from
+ * TrackerUnlinkDialog — the local-removal ruling from
  * docs/proposals/tracker-sync-integration.md ("Deletes"): deleting or archiving
  * a LINKED backlog entity asks what should happen to the tracker issue before
  * the local delete runs. Exactly two answers, both of which drop the link:
@@ -11,14 +11,19 @@
  * We never hard-delete on the remote side, so "cancel" is deliberately the
  * strongest option offered.
  *
- * Both answers call `cyboflow.tracker.unlinkEntity` and then hand control back
- * through `onResolved`, which is where the caller runs the delete/archive the
- * user originally asked for. The unlink is therefore applied at the moment of
- * the ruling: backing out of the confirm dialog behind this one leaves the
- * entity in place but no longer synced (re-link it from the wizard's Reconcile
- * step) — the alternative, deferring the unlink, would leave a live link
- * pointing at an entity that no longer exists whenever the delete succeeded and
- * the follow-up call did not.
+ * THIS DIALOG ONLY COLLECTS THE ANSWER. Both buttons call
+ * `cyboflow.tracker.stageUnlinkRuling`, which mutates NOTHING — it records the
+ * ruling in the main process — and then hand control back through `onResolved`,
+ * where the caller opens the ordinary archive/delete confirm. The ruling is
+ * applied by that confirm's entity write when it commits, so backing out of it
+ * leaves the entity, its link and the tracker issue all untouched and the unused
+ * ruling simply expires. (The previous design unlinked here, up front: a user
+ * who then cancelled the confirm kept the entity but had already lost the link
+ * and possibly cancelled the remote issue.)
+ *
+ * `hasLinkedDescendants` says the delete will cascade into other synced entities
+ * (an idea's epics/tasks, an epic's tasks); they inherit this same ruling, so
+ * the copy says so before the user picks.
  *
  * Pure (no store reads) so it unit-tests with only the tRPC client mocked, and
  * mirrors the Backlog confirm dialogs' Modal/Header/Body/Footer shape.
@@ -43,10 +48,15 @@ interface TrackerUnlinkDialogProps {
   action: 'delete' | 'archive';
   /** The live link, as read by `tracker.linkForEntity` on the delete intent. */
   link: TrackerEntityLinkRef;
+  /**
+   * The delete will also remove synced CHILDREN (`tracker.hasLinkedDescendants`).
+   * Only ever true for an idea/epic delete; the ruling covers them too.
+   */
+  hasLinkedDescendants?: boolean;
   isOpen: boolean;
   /** Dismissed without a ruling — the caller aborts the delete/archive too. */
   onClose: () => void;
-  /** The ruling landed (the link is gone); the caller proceeds with its delete. */
+  /** The ruling is recorded; the caller opens its ordinary confirm dialog. */
   onResolved: () => void;
 }
 
@@ -56,6 +66,7 @@ export function TrackerUnlinkDialog({
   entityRef,
   action,
   link,
+  hasLinkedDescendants = false,
   isOpen,
   onClose,
   onResolved,
@@ -73,13 +84,16 @@ export function TrackerUnlinkDialog({
   const issueLabel = link.externalIdentifier ?? 'the linked issue';
   const entityLabel = entityType === 'idea' ? 'idea' : entityType === 'epic' ? 'epic' : 'task';
   const actionLabel = action === 'archive' ? 'Archiving' : 'Deleting';
+  // Children only ever go with a DELETE — archiving an idea leaves its epics and
+  // tasks on the board, so the ruling has nothing to inherit it.
+  const rulesChildren = action === 'delete' && hasLinkedDescendants;
 
   const rule = async (cancelRemote: boolean): Promise<void> => {
     if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      await trpc.cyboflow.tracker.unlinkEntity.mutate({ entityType, entityId, cancelRemote });
+      await trpc.cyboflow.tracker.stageUnlinkRuling.mutate({ entityType, entityId, cancelRemote });
       onResolved();
     } catch (err: unknown) {
       // Never fall through to the delete on a failed ruling: the user asked for
@@ -106,8 +120,15 @@ export function TrackerUnlinkDialog({
             {providerName} — cyboflow never deletes issues in your tracker. Choose what happens to
             it:
           </p>
+          {rulesChildren && (
+            <p className="text-xs text-text-tertiary" data-testid="tracker-unlink-children-note">
+              This {entityLabel}&apos;s synced sub-items are deleted with it, and your choice
+              applies to their issues too.
+            </p>
+          )}
           <p className="text-xs text-text-tertiary">
-            Either way the {entityLabel} stops syncing with {providerName}.
+            Either way the {entityLabel} stops syncing with {providerName}. Nothing happens until
+            you confirm the {action} on the next step.
           </p>
           {error && (
             <p className="text-xs text-status-error" role="alert">
