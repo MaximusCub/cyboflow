@@ -451,13 +451,17 @@ export function pidFilePath(artifactsDir: string): string {
  * detached process-GROUP leader it started. Exported so the runner's teardown
  * reaper and this writer resolve the path through one function.
  *
- * TRUST NOTE, since this file lives in agent-writable space: it is a CLEANUP
- * AID, never an input to any gate. A forged or edited `serve.pid` can only
- * break the agent's OWN teardown (the harness kills the wrong pid, or none) —
- * it cannot make an unattested surface look attested, because identity is
- * decided by a live probe (`../harnessAttestation.ts`), not by anything on
- * disk. That is the distinction that makes this file safe to keep here and
- * `attest.json` unsafe to keep trusting.
+ * TRUST NOTE, since this file lives in agent-writable space: its contents are a
+ * CLAIM, never evidence. Two consumers read it — the runner's teardown reaper
+ * and §7.1's serve-identity binding — and NEITHER believes it on its own. The
+ * reaper only kills what it names (a forged pid makes the harness reap the wrong
+ * thing or nothing, harming the agent's own environment and leaking a port the
+ * scheduler quarantines). The binding uses it only as the value the KERNEL's
+ * answers must agree with: it asks the OS which process group owns the probed
+ * port and what the recorded leader is running, so a forged pid can only make
+ * the binding FAIL. That asymmetry — a lie here costs the liar, never the gate —
+ * is what makes this file safe to keep in agent space and `attest.json` unsafe
+ * to keep trusting.
  */
 export function servePidFilePath(artifactsDir: string): string {
   return join(artifactsDir, DRIVER_STATE_DIR, SERVE_PID_FILE_NAME);
@@ -799,23 +803,72 @@ async function executeCommand(
  * A spawn failure is a plain non-zero exit with the error on stderr: the agent
  * sees its serve step fail and reports `launch_failed`, which is the honest
  * outcome and the one the harness contract already asks for.
+ *
+ * REPLACE SEMANTICS — AT MOST ONE LIVE SERVE PER REQUEST. `serve` is naturally
+ * called more than once (a first attempt binds the wrong port, a build fix needs
+ * a restart), and this used to simply OVERWRITE `serve.pid`. That leaked the
+ * earlier process group entirely: the runner's teardown reaper reads one pid, so
+ * every superseded server survived the request holding a leased port, which the
+ * scheduler's teardown probe then QUARANTINED — a slow drain of the port pool
+ * caused by nothing worse than an agent retrying. So a live recorded group is
+ * SIGKILLed before the new one starts.
+ *
+ * It also closes the same leak from the other end: if the new pid cannot be
+ * recorded, the just-spawned group is killed rather than left running with no
+ * durable record of its existence. A serve nobody can reap is strictly worse
+ * than a serve that never started — the agent can retry the second one.
+ *
+ * (Both halves matter to §7.1's serve-identity binding too: it asks the kernel
+ * who owns the probed port and requires that owner to be in the RECORDED group,
+ * so a stale survivor still holding the port is exactly the shape that would
+ * make an honest verification unprovable.)
  */
 async function serveCommand(
   command: Extract<DriverCommand, { kind: 'serve' }>,
   artifactsDir: string,
   deps: DriverDeps,
 ): Promise<number> {
+  const pidPath = servePidFilePath(artifactsDir);
+
+  // (1) Replace: kill whatever an earlier `serve` in THIS request left running.
+  // Guarded on the leader being alive, mirroring the runner's own reaper — the
+  // group id is the leader's pid, so killing `-pid` after the leader has exited
+  // could in principle reach a recycled, unrelated group.
+  try {
+    const previous = await deps.readPidFile(pidPath);
+    if (previous !== null && deps.isProcessAlive(previous)) {
+      deps.killPid(-previous, 'SIGKILL');
+      deps.stdout(`ok: replaced the previous serve (killed process group ${previous})`);
+    }
+  } catch {
+    // An unreadable pid file means there is nothing this command can reap; the
+    // spawn below is still the right next step.
+  }
+
+  // (2) Spawn.
+  const logPath = serveLogPath(artifactsDir);
+  let pid: number;
   try {
     await deps.ensureDir(join(artifactsDir, DRIVER_STATE_DIR));
-    const logPath = serveLogPath(artifactsDir);
-    const { pid } = await deps.spawnDetachedShell({ command: command.command, logPath });
-    await deps.writePidFile(servePidFilePath(artifactsDir), pid);
-    deps.stdout(`ok: serve started (process group ${pid}); output: ${logPath}`);
-    return 0;
+    ({ pid } = await deps.spawnDetachedShell({ command: command.command, logPath }));
   } catch (err) {
     deps.stderr(`serve failed to start: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
+
+  // (3) Record — or undo. Never an orphan without a durable record.
+  try {
+    await deps.writePidFile(pidPath, pid);
+  } catch (err) {
+    deps.killPid(-pid, 'SIGKILL');
+    deps.stderr(
+      `serve started (process group ${pid}) but its pid file could not be written (${err instanceof Error ? err.message : String(err)}); the group was killed rather than left running untracked`,
+    );
+    return 1;
+  }
+
+  deps.stdout(`ok: serve started (process group ${pid}); output: ${logPath}`);
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

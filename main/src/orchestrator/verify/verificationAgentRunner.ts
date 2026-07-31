@@ -29,7 +29,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access, readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -313,10 +313,10 @@ export interface VerificationAgentRunResult {
    */
   runbookMismatch?: boolean;
   /**
-   * This `'skipped'` came from a TRANSPORT-LEVEL failure of the deployed session
-   * — the SDK layer threw (a {@link VerificationAgentQueryError}, a socket
-   * reset, a 5xx) before any structured output existed — rather than from
-   * anything the agent said.
+   * This `'skipped'` came from a CONNECT-LEVEL transport failure of the deployed
+   * session — the SDK layer threw (a {@link VerificationAgentQueryError}, a
+   * socket reset, a 5xx) before the session produced ANY transcript — rather
+   * than from anything the agent said.
    *
    * It exists for ONE consumer: the scheduler's §3.1 gate-integrity guard
    * (`settleAgentTerminal`), which converts a deployed-but-unexplained
@@ -327,6 +327,15 @@ export interface VerificationAgentRunResult {
    * OUR code, so no amount of model content can manufacture it — so the runner
    * states it explicitly rather than leaving the scheduler to infer it from an
    * error string.
+   *
+   * NARROWED TO AN EMPTY SESSION (round-3 finding 4). "Our code raised it" is
+   * not by itself enough to make the flag safe, because the agent can REACH our
+   * code: it holds `Bash`, and a session that kills its own SDK process (or
+   * wedges it until the deadline fires) produces exactly this exception. The
+   * flag therefore requires the session to have accumulated NOTHING — no
+   * transcript at all — which is the shape only a genuine connect-level failure
+   * has. See {@link TRANSPORT_MID_SESSION_MESSAGE} for what happens to the
+   * mid-session case and why.
    */
   transportFailure?: boolean;
 }
@@ -422,6 +431,43 @@ export interface VerificationAgentRunnerDeps {
     spec: AttestationSpec,
     args: { verifyPort: number | null; driverPort: number; nonce: string },
   ) => Promise<HarnessAttestationResult>;
+  /**
+   * §7.1 SERVE-IDENTITY BINDING, probe 0 of 3: read the pid the driver's
+   * `serve` command recorded for the detached process-GROUP leader it started
+   * (`<artifactsDir>/.driver/serve.pid`). `null` when the file is absent or
+   * unparseable.
+   *
+   * This is a CLAIM, not evidence — the file sits in agent-writable space. It
+   * is the only thing the two KERNEL probes below can be checked against, which
+   * is the whole design: a forged value cannot change who the kernel says owns
+   * the port, so a forgery can only make the binding FAIL. See
+   * {@link checkServeIdentityBinding}.
+   */
+  readServePid?: (artifactsDir: string) => Promise<number | null>;
+  /**
+   * §7.1 SERVE-IDENTITY BINDING, probe 1 of 3 (KERNEL TRUTH): which pid is
+   * LISTENING on `port` (real default: `lsof -ti tcp:<port> -sTCP:LISTEN`), or
+   * `null` when nothing is listening / the probe could not answer.
+   *
+   * `null` FAILS the binding rather than skipping it. That is the opposite of
+   * this file's usual fail-open default, and deliberately so: the binding only
+   * ever runs on the PASS path of a task that declared a port-mediated
+   * attestation channel, so "we could not see who owns the port" is precisely
+   * the unproven-identity case §7.1 refuses to let through.
+   */
+  listeningPidForPort?: (port: number) => Promise<number | null>;
+  /**
+   * §7.1 SERVE-IDENTITY BINDING, probe 2 of 3 (KERNEL TRUTH): one process's
+   * group id and command line (real default: `ps -o pgid=,command= -p <pid>`),
+   * or `null` when the pid is gone.
+   *
+   * ONE probe rather than the two `ps` invocations the review described, because
+   * both facts come from one `ps` row and the binding needs a different fact from
+   * each of two DIFFERENT pids — the port's listener (its group) and the recorded
+   * leader (its command line). Splitting it per-field would double the process
+   * spawns without narrowing anything.
+   */
+  processInfo?: (pid: number) => Promise<{ pgid: number; command: string } | null>;
   /**
    * §5.2 seam 3 — resolve the machine-local runbook record for
    * (project, modality) by the CONTENT HASH pinned on the request row. Wired at
@@ -521,6 +567,15 @@ STARTING THE SERVE/APP — AND LEAVING IT RUNNING:
   the harness. You then poll readiness exactly as before; its output is captured at
   "$VERIFY_ARTIFACTS_DIR/.driver/serve.log" (tail that for a launch_failed excerpt).
   Do NOT background the command yourself with & or nohup.
+- THE SERVE COMMAND MUST BE THE TASK'S, EXACTLY. Pass the task's serve.cmd string
+  verbatim; substituting \${PORT} with the value of $VERIFY_PORT is the ONLY edit
+  allowed. The harness binds the port that answers the attestation to the process
+  group this command started, and reads that group's command line back from the OS:
+  a substitute command, a wrapper script, a hand-rolled background job, a serve
+  started outside "$VERIFY_DRIVER" serve, or a second serve replacing the first all
+  fail identity binding, and an unbound surface FAILS the task exactly like an
+  unattested one. Serving something else that echoes the nonce proves nothing —
+  the nonce is in YOUR environment, so anything you start can repeat it.
 - WHEN YOU FINISH, LEAVE EVERYTHING RUNNING. Do not kill the serve, do not kill the
   app, do not run "$VERIFY_DRIVER" stop. The harness verifies the surface's identity
   against the LIVE app after you finish, then tears everything down itself. A surface
@@ -888,6 +943,44 @@ export const ATTESTATION_MISSING_MESSAGE =
 /** Explanatory note attached when a pass is capped for having no attestation channel at all. */
 export const ATTESTATION_UNCAPPED_MESSAGE = 'no attestation channel — pass capped at low_confidence';
 
+/**
+ * The prefix every serve-identity binding failure carries into the attestation
+ * detail (and thence the terminal `error_message`). Exported so tests and any
+ * future health-panel grouping key on ONE string rather than re-spelling it.
+ */
+export const SERVE_BINDING_FAILED_PREFIX = 'serve-identity binding failed';
+
+/**
+ * The terminal message for a transport failure that hit MID-SESSION (round-3
+ * finding 4). Exported for the same reason as the prefixes above.
+ *
+ * THE ACCEPTED COST, stated where it will be read. A genuine Anthropic API
+ * outage that lands after the agent has already been working now BLOCKS a lane
+ * instead of advancing it. That is deliberate and it is §3.1's own rule:
+ * "ambiguity is allowed to be annoying; it is not allowed to ship regressions."
+ * A mid-session throw is genuinely ambiguous — the agent holds `Bash`, so it can
+ * kill its own SDK process or wedge it past the deadline, and from outside those
+ * are indistinguishable from an upstream reset. Treating them all as transport
+ * handed the model a one-line route to an advancing skip.
+ *
+ * The empty-transcript case keeps the carve-out that actually mattered: an API
+ * outage storm fails every session before it produces a single message, and
+ * those still skip rather than looping implement agents against code the harness
+ * never examined.
+ *
+ * THIS ALSO CATCHES THE QUERY'S OWN DEADLINE, deliberately. When the SDK layer's
+ * internal timeout fires before the scheduler's abort does (the two are both 10
+ * minutes, and a task may declare a longer one), the throw arrives here rather
+ * than on the `'timeout'` path — and a session that burned its whole deadline
+ * with a transcript behind it is the same ambiguity: an agent can stall itself
+ * on purpose. Routing it back to an advancing outcome would reopen the hole
+ * through a different door. The scheduler-abort `'timeout'` still advances, per
+ * its own long-standing "timeout == environment failure" posture
+ * (mergeGateLaneAdvance); that asymmetry is noted rather than papered over.
+ */
+export const TRANSPORT_MID_SESSION_MESSAGE =
+  'the deployed session failed mid-transport after it had already started working — an upstream outage and an agent-induced failure are indistinguishable here, so this blocks rather than advancing the lane';
+
 /** What the floor decided about a PASS report's identity proof. */
 export type AttestationFloorOutcome =
   /** The declared channel was probed and matched (or is true by construction). */
@@ -917,6 +1010,243 @@ export function effectiveAttestationSpec(task: VerificationTaskV1): AttestationS
     (task.build === undefined || task.build.length === 0) &&
     task.serve === undefined;
   return degenerate ? { kind: 'file-identity' } : null;
+}
+
+// ---------------------------------------------------------------------------
+// Serve-identity binding (§7.1 — round-3 finding 3: bind the PROBED SURFACE to
+// the PINNED serve command, using kernel truth)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of the three bindings failed. Named on the unverified detail (and
+ * therefore on the terminal `error_message`) because "the attestation did not
+ * verify" is unactionable while "the port is held by a group your serve command
+ * never started" tells a human exactly what to look at.
+ */
+export type ServeBindingFailure = 'serve-pid' | 'port-owner' | 'command';
+
+/** The verdict of {@link checkServeIdentityBinding}. */
+export type ServeBindingResult =
+  | { bound: true; detail: string }
+  | { bound: false; failure: ServeBindingFailure; detail: string };
+
+/** The three probes {@link checkServeIdentityBinding} needs, in one bag (all injected). */
+export interface ServeBindingProbes {
+  readServePid: (artifactsDir: string) => Promise<number | null>;
+  listeningPidForPort: (port: number) => Promise<number | null>;
+  processInfo: (pid: number) => Promise<{ pgid: number; command: string } | null>;
+}
+
+/**
+ * The attestation channels whose evidence arrives over a SOCKET, and are
+ * therefore bindable to a port owner. `window-identity` is excluded on purpose:
+ * a window title is not reached through a port, a native app under
+ * `native-screen` need never bind the leased one, and binding it would fail
+ * every honest native pass while closing nothing (its weakness is already
+ * recorded on the verdict as "the weakest channel"). `file-identity` is excluded
+ * because there is no live process at all.
+ */
+const PORT_MEDIATED_CHANNELS: ReadonlySet<AttestationSpec['kind']> = new Set([
+  'http-endpoint',
+  'dom-marker',
+  'cdp-token',
+]);
+
+/** Bound a value echoed into a binding detail so a long command line cannot bloat the terminal message. */
+function truncateDetail(value: string, max = 200): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/**
+ * Does the serve-identity binding APPLY to this request, and if so, against
+ * which port? Returns `null` when it does not — which is the whole "degenerate
+ * shapes are untouched" rule, stated once:
+ *
+ *  - no serve command ⇒ nothing was started, so there is no group to bind (the
+ *    degenerate `target.htmlPath` / already-live `target.url` shapes);
+ *  - a non-port-mediated channel ⇒ see {@link PORT_MEDIATED_CHANNELS}.
+ *
+ * WHICH PORT. In CDP-attach mode the serve command launches the APP, and the
+ * app's own DevTools endpoint on the driver port is what every attestation probe
+ * talks to — so the driver port is the surface. Otherwise the deliverable is
+ * served on `VERIFY_PORT` and the driver's chromium (a process the DRIVER
+ * spawned, in its own group) sits on the driver port; binding that one would
+ * assert a relationship that was never supposed to hold, so the verify port is
+ * the surface even for the two CDP-evaluated channels — the page they read was
+ * loaded from it.
+ *
+ * `portLever` is carried separately because it answers a different question:
+ * what `${PORT}` in the PINNED command resolves to. In attach mode those two
+ * ports differ, and substituting the driver port into the pinned template would
+ * manufacture a command line nobody ever ran.
+ */
+export function serveBindingTarget(
+  task: VerificationTaskV1,
+  spec: AttestationSpec,
+  ports: { verifyPort: number | null; driverPort: number },
+): { serveCmd: string; probedPort: number | null; portLever: number | null } | null {
+  const serveCmd = task.serve?.cmd;
+  if (typeof serveCmd !== 'string' || serveCmd.trim().length === 0) return null;
+  if (!PORT_MEDIATED_CHANNELS.has(spec.kind)) return null;
+  const attach = task.serve?.attach === 'cdp';
+  return {
+    serveCmd: serveCmd.trim(),
+    probedPort: attach ? ports.driverPort : ports.verifyPort,
+    portLever: ports.verifyPort,
+  };
+}
+
+/**
+ * Does `leaderCommand` carry the task's pinned serve command?
+ *
+ * TWO ACCEPTED SPELLINGS, ONE COMMAND. The pinned `serve.cmd` is a lever
+ * TEMPLATE (`pnpm dev --port ${PORT}` — §5.3 forbids persisting resolved values),
+ * while the harness contract asks the agent to substitute `${PORT}` with the
+ * leased port before handing the string to the driver. Both the template and its
+ * substituted form are therefore the SAME command, differing only in who did the
+ * substitution, and rejecting either would fail honest runs for a spelling.
+ * Nothing else is normalized: a different command, a wrapper, or a `$VERIFY_PORT`
+ * spelling the contract does not sanction all fail.
+ *
+ * CONTAINS, not equals, because the leader is `sh -c '<cmd>'` — the recorded
+ * command line always carries a prefix this function must tolerate. The residual
+ * that buys is honest and worth stating: an agent that starts
+ * `sh -c 'echo <pinned cmd>; <something else>'` satisfies this check, and only
+ * the port-owner binding then stands between it and a forged surface. Closing
+ * that would require the driver to resolve the task's pinned command itself,
+ * which it has no access to; the binding is a floor raise, not a proof of
+ * execution.
+ */
+function serveCommandMatches(leaderCommand: string, serveCmd: string, portLever: number | null): boolean {
+  if (leaderCommand.includes(serveCmd)) return true;
+  if (portLever === null) return false;
+  const resolved = serveCmd.replace(/\$\{PORT\}|\$PORT\b/g, String(portLever));
+  return resolved !== serveCmd && leaderCommand.includes(resolved);
+}
+
+/**
+ * BIND THE PROBED SURFACE TO THE PINNED SERVE COMMAND (round-3 finding 3).
+ *
+ * THE HOLE THIS CLOSES. Moving attestation harness-side (`harnessAttestation.ts`)
+ * proved that SOMETHING on the probed port knows this request's nonce. It did not
+ * prove that something is the deliverable, and the gap is reachable: the driver's
+ * `serve` command runs WHATEVER string the agent passes, and the agent holds
+ * `VERIFY_ATTEST_NONCE` in its own environment. One `serve 'python3 -m http.server
+ * ... <a page echoing $VERIFY_ATTEST_NONCE>'` produces a surface the harness then
+ * attests, honestly, as carrying the nonce — a green verdict about a page the
+ * deliverable never rendered. The nonce authenticates a SECRET, and the agent is
+ * inside the trust boundary of that secret.
+ *
+ * WHY KERNEL TRUTH IS THE ONLY WAY OUT. Every artifact the agent could show us —
+ * a log, a pid file, an attest record — is writable by the same Bash that would
+ * be doing the forging. What the agent cannot author is the OS's own answer to
+ * "who holds this socket" and "what is that process running". So the binding
+ * spends two `exec`s on exactly those two questions and trusts nothing else:
+ *
+ *  1. `.driver/serve.pid` — the CLAIM. Read first, believed about nothing. A
+ *     forged value can only make step 2 fail (the kernel will name a different
+ *     group), which is the safe direction; that asymmetry is why the file may
+ *     keep living in agent-writable space at all.
+ *  2. PORT-OWNER BINDING. The pid the kernel says is LISTENING on the probed
+ *     port must be in the process GROUP the pid file names. The driver spawns
+ *     `serve` detached, so the leader's pgid equals its pid and every child it
+ *     forks inherits it — which is what makes a group the right unit (a dev
+ *     server is a shell wrapping a node wrapping a bundler, and the listener is
+ *     usually the grandchild). A fake responder cannot be in that group without
+ *     having been started by that command, and it cannot own the port the real
+ *     serve holds.
+ *  3. COMMAND BINDING. The recorded leader's command line must carry the task's
+ *     pinned `serve.cmd` (which `checkRunbookPin` already tied to the proven
+ *     runbook upstream). Step 2 alone proves the port belongs to the group the
+ *     driver recorded; this proves that group is running the command the task
+ *     declared, rather than whatever else the agent asked the driver to start.
+ *
+ * NEVER THROWS. Every probe rejection folds into a `bound: false` for the same
+ * reason `performHarnessAttestation` never throws: an escaping error would land
+ * in the runner's outer catch, which returns a fail-open `'skipped'` — the lane
+ * ADVANCING on precisely the unproven pass this function exists to block. An
+ * unanswerable probe is an unbound surface, not an exception.
+ */
+export async function checkServeIdentityBinding(args: {
+  artifactsDir: string;
+  serveCmd: string;
+  probedPort: number | null;
+  portLever: number | null;
+  probes: ServeBindingProbes;
+}): Promise<ServeBindingResult> {
+  const { artifactsDir, serveCmd, probedPort, portLever, probes } = args;
+
+  const recorded = await safeProbe(() => probes.readServePid(artifactsDir));
+  if (recorded === null || !Number.isFinite(recorded) || recorded <= 1) {
+    return {
+      bound: false,
+      failure: 'serve-pid',
+      detail:
+        'the driver recorded no serve process (.driver/serve.pid is absent or unusable) — the deliverable was not started through `"$VERIFY_DRIVER" serve`, so there is no process group the probed surface can be bound to',
+    };
+  }
+
+  if (probedPort === null) {
+    return {
+      bound: false,
+      failure: 'port-owner',
+      detail:
+        'no server port was leased for this request, so the surface the attestation probed cannot be tied to an owner — the task declared a port-mediated channel its own shape cannot support',
+    };
+  }
+  const listener = await safeProbe(() => probes.listeningPidForPort(probedPort));
+  if (listener === null) {
+    return {
+      bound: false,
+      failure: 'port-owner',
+      detail: `nothing could be resolved as the listener on port ${probedPort} — the surface that answered the attestation has no owner this harness can verify`,
+    };
+  }
+  const listenerInfo = await safeProbe(() => probes.processInfo(listener));
+  if (listenerInfo === null) {
+    return {
+      bound: false,
+      failure: 'port-owner',
+      detail: `pid ${listener} holds port ${probedPort} but the OS reported nothing about it (already exited?), so it cannot be tied to the recorded serve group ${recorded}`,
+    };
+  }
+  if (listenerInfo.pgid !== recorded) {
+    return {
+      bound: false,
+      failure: 'port-owner',
+      detail: `port ${probedPort} is held by pid ${listener} in process group ${listenerInfo.pgid}, but the driver started this task's serve as group ${recorded} — the surface that answered the attestation is NOT the process this task's serve command started`,
+    };
+  }
+
+  const leader = await safeProbe(() => probes.processInfo(recorded));
+  if (leader === null) {
+    return {
+      bound: false,
+      failure: 'command',
+      detail: `the recorded serve leader (pid ${recorded}) is gone, so the command it was started with cannot be read back`,
+    };
+  }
+  if (!serveCommandMatches(leader.command, serveCmd, portLever)) {
+    return {
+      bound: false,
+      failure: 'command',
+      detail: `the serve group's leader (pid ${recorded}) is running "${truncateDetail(leader.command)}", which does not carry this task's pinned serve command "${truncateDetail(serveCmd)}" — a substitute or a wrapper was started instead of the deliverable`,
+    };
+  }
+
+  return {
+    bound: true,
+    detail: `port ${probedPort} is held by process group ${recorded}, whose leader runs this task's pinned serve command`,
+  };
+}
+
+/** Run one binding probe, folding ANY rejection into `null` (see {@link checkServeIdentityBinding}). */
+async function safeProbe<T>(fn: () => Promise<T | null>): Promise<T | null> {
+  try {
+    return await fn();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1200,6 +1530,76 @@ const buildHarnessAttestationDeps = (
   };
 };
 
+/** How long either kernel probe may run before it counts as unanswerable (⇒ an unbound surface). */
+const BINDING_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Default {@link VerificationAgentRunnerDeps.readServePid} — the CLAIM half of
+ * the binding. Async (unlike {@link defaultReapServe}'s sync read) because it
+ * runs on the verdict path, where blocking the loop on a filesystem that may be
+ * a network mount buys nothing.
+ */
+const defaultReadServePid = async (artifactsDir: string): Promise<number | null> => {
+  try {
+    const raw = await readFile(servePidFilePath(artifactsDir), 'utf8');
+    const pid = Number.parseInt(raw.trim(), 10);
+    return Number.isFinite(pid) && pid > 1 ? pid : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Default {@link VerificationAgentRunnerDeps.listeningPidForPort} — `lsof -ti
+ * tcp:<port> -sTCP:LISTEN`, i.e. the kernel's own answer to "who holds this
+ * socket".
+ *
+ * `-t` prints one bare pid per line. A socket with SEVERAL listed pids is a
+ * pre-forking server whose workers inherited the listening fd — they share the
+ * master's process group, so the FIRST line answers the group question for all
+ * of them. Taking the first is also the strict reading: if the lines ever
+ * disagreed about the group, the binding fails, which is the safe direction.
+ */
+const defaultListeningPidForPort = async (port: number): Promise<number | null> => {
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
+      timeout: BINDING_PROBE_TIMEOUT_MS,
+    });
+    const first = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
+    if (first === undefined) return null;
+    const pid = Number.parseInt(first, 10);
+    return Number.isFinite(pid) && pid > 1 ? pid : null;
+  } catch {
+    // lsof exits 1 when nothing matches, and may be absent entirely — both are
+    // "no owner this harness can verify", which FAILS the binding upstream.
+    return null;
+  }
+};
+
+/**
+ * Default {@link VerificationAgentRunnerDeps.processInfo} — `ps -o pgid=,command=
+ * -p <pid>`. The `=` suffixes suppress headers, so a live pid yields exactly one
+ * line: the group id, whitespace, then the full command line (which may itself
+ * contain whitespace — hence the non-greedy leading capture and a `.*` tail
+ * rather than a split).
+ */
+const defaultProcessInfo = async (pid: number): Promise<{ pgid: number; command: string } | null> => {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'pgid=,command=', '-p', String(pid)], {
+      timeout: BINDING_PROBE_TIMEOUT_MS,
+    });
+    const line = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
+    if (line === undefined) return null;
+    const match = /^(\d+)\s+(.*)$/.exec(line);
+    if (!match) return null;
+    const pgid = Number.parseInt(match[1], 10);
+    return Number.isFinite(pgid) ? { pgid, command: match[2] } : null;
+  } catch {
+    // `ps` exits 1 for a pid that no longer exists — "gone", not "broken".
+    return null;
+  }
+};
+
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
   try {
     await access(absPath);
@@ -1272,15 +1672,17 @@ const defaultReapBrowser = (artifactsDir: string): void => {
  * unit that matters: a dev server is a shell wrapping a node wrapping a bundler,
  * and killing only the leader orphans the children that actually hold the port.
  *
- * THE PID FILE IS A CLEANUP AID, NOT A TRUST INPUT — and the distinction is the
- * whole reason serve moved into the driver. `.driver/serve.pid` sits in
- * agent-writable space, so its contents are exactly as forgeable as
- * `attest.json` was. The difference is what a forgery BUYS: a bogus pid makes
- * the harness kill the wrong thing or nothing at all, which harms the agent's
- * own environment and leaks a port the scheduler's probe will quarantine. It
- * cannot make an unproven surface look proven, because identity is decided by a
- * live probe that reads nothing off disk. That is why this file may live here
- * and the attestation record may not.
+ * THE PID FILE IS A CLAIM, NOT A TRUST INPUT — and the distinction is the whole
+ * reason serve moved into the driver. `.driver/serve.pid` sits in agent-writable
+ * space, so its contents are exactly as forgeable as `attest.json` was. The
+ * difference is what a forgery BUYS. Here: a bogus pid makes the harness kill
+ * the wrong thing or nothing at all, which harms the agent's own environment and
+ * leaks a port the scheduler's probe will quarantine. In
+ * {@link checkServeIdentityBinding}, the only other reader: a bogus pid is
+ * compared against what the KERNEL says owns the probed port, so it can only
+ * make the binding fail. Neither reader can be talked into calling an unproven
+ * surface proven, which is why this file may live here and the attestation
+ * record may not.
  */
 const defaultReapServe = (artifactsDir: string): void => {
   try {
@@ -1326,6 +1728,50 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         ...args,
         deps: buildHarnessAttestationDeps(peekabooBin, logger),
       });
+  }
+
+  /**
+   * §7.1 serve-identity binding for ONE request: resolve whether it applies
+   * ({@link serveBindingTarget}) and, when it does, run
+   * {@link checkServeIdentityBinding} against the injected probes. Returns
+   * `null` when the binding does not apply at all — the degenerate and
+   * non-port-mediated shapes, which are untouched by design.
+   *
+   * A FAILURE IS LOGGED HERE rather than only at the floor, because this is the
+   * only place that still knows WHICH binding failed as structured data; by the
+   * time it reaches the terminal it is a sentence inside an error message.
+   */
+  private async bindServeIdentity(
+    req: VerificationAgentRequest,
+    spec: AttestationSpec,
+    logger: LoggerLike | undefined,
+  ): Promise<ServeBindingResult | null> {
+    const target = serveBindingTarget(req.task, spec, {
+      verifyPort: req.verifyPort,
+      driverPort: req.verifyDriverPort,
+    });
+    if (target === null) return null;
+    const result = await checkServeIdentityBinding({
+      artifactsDir: req.artifactsDir,
+      serveCmd: target.serveCmd,
+      probedPort: target.probedPort,
+      portLever: target.portLever,
+      probes: {
+        readServePid: this.deps.readServePid ?? defaultReadServePid,
+        listeningPidForPort: this.deps.listeningPidForPort ?? defaultListeningPidForPort,
+        processInfo: this.deps.processInfo ?? defaultProcessInfo,
+      },
+    });
+    if (!result.bound) {
+      logger?.warn('[VerificationAgentRunner] serve-identity binding failed; the surface is unproven', {
+        runId: req.runId,
+        requestId: req.requestId,
+        failure: result.failure,
+        probedPort: target.probedPort,
+        detail: result.detail,
+      });
+    }
+    return result;
   }
 
   /**
@@ -1686,8 +2132,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         await this.writeTranscriptFailSoft(req, outcome.transcript, logger);
         raw = outcome.structured;
       } catch (err) {
+        // The accumulated transcript is the ONE fact that separates a connect-
+        // level failure from a mid-session one; captured before anything else so
+        // both the fail-soft write and the classification below read the same
+        // value. A non-{@link VerificationAgentQueryError} throw carries none,
+        // which reads as "empty" — correct, since only the production query
+        // (which always wraps) can have been mid-session at all.
+        const transcript = err instanceof VerificationAgentQueryError ? err.transcript : null;
         if (err instanceof VerificationAgentQueryError) {
-          await this.writeTranscriptFailSoft(req, err.transcript, logger);
+          await this.writeTranscriptFailSoft(req, transcript, logger);
         }
         if (controller.signal.aborted) {
           return {
@@ -1707,24 +2160,43 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         emitSeamError('verify-agent-deploy-failed', err instanceof Error ? err : new Error(message), {
           agentKey: 'visual-verify',
         });
-        // THE ONE DEPLOYED SKIP THAT IS NOT A HOLE (§3.1). Everything else the
-        // agent can produce after a deploy now maps to a blocking status — an
-        // unparseable report, a phantom screenshot, an unattested pass — because
-        // `skipped` ADVANCES the lane and a model must never be able to author
-        // its own advance. This path is different in kind: the exception was
-        // raised by OUR SDK layer (a transport reset, a 5xx, a stream that
-        // closed), so it is HARNESS-OBSERVED and model CONTENT cannot shape it.
-        // No report exists to have been judged, and nothing about the
-        // deliverable has been claimed either way.
+        // THE ONE DEPLOYED SKIP THAT IS NOT A HOLE (§3.1) — AND ONLY WHEN THE
+        // SESSION NEVER SPOKE. Everything else the agent can produce after a
+        // deploy maps to a blocking status: an unparseable report, a phantom
+        // screenshot, an unattested pass. `skipped` ADVANCES the lane, so a model
+        // must never be able to author its own advance.
         //
-        // Blocking on it would be actively harmful: every Anthropic API hiccup
-        // would become a lane-blocking FAIL that sends an implement agent to
-        // "fix" code the harness never even looked at — the §3.1 failure mode
-        // this whole classification exists to avoid, just with a different
-        // trigger. So it stays a fail-open skip, flagged
-        // ({@link VerificationAgentRunResult.transportFailure}) so the
-        // scheduler's gate-integrity guard can tell it apart from a skip the
-        // agent talked its way into.
+        // "Our SDK layer raised it" was the original argument for exempting this
+        // path, and round-3 finding 4 showed it does not hold on its own: the
+        // agent has `Bash`, so it can kill its own SDK process — or simply wedge
+        // until the deadline — and every one of those arrives here as an
+        // exception OUR code threw. Harness-observed is not the same as
+        // model-independent once the model can reach the harness.
+        //
+        // What the model CANNOT fake is a session that produced nothing at all.
+        // An EMPTY transcript means the failure happened before the agent got a
+        // turn — a genuine connect-level failure — and that is the case worth
+        // failing open for: an API outage storm otherwise turns every lane into a
+        // blocking FAIL that sends an implement agent to "fix" code the harness
+        // never looked at, which is the §3.1 failure mode this classification
+        // exists to avoid. A NON-EMPTY transcript means the agent was alive and
+        // working when the transport died, so the outage and the self-inflicted
+        // kill are indistinguishable — ambiguous, and §3.1 keeps ambiguity
+        // blocking (see {@link TRANSPORT_MID_SESSION_MESSAGE} for the accepted
+        // cost).
+        if (typeof transcript === 'string' && transcript.trim().length > 0) {
+          logger?.warn('[VerificationAgentRunner] mid-session transport failure; blocking (§3.1)', {
+            runId: req.runId,
+            requestId: req.requestId,
+            transcriptChars: transcript.length,
+          });
+          return {
+            status: 'failed',
+            errorMessage: `${TRANSPORT_MID_SESSION_MESSAGE}: ${message}`,
+            fileNames: [],
+            ...deployedProvenance,
+          };
+        }
         return {
           status: 'skipped',
           transportFailure: true,
@@ -1827,25 +2299,42 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // true by construction and "no spec" has nothing to ask.
         let probe: HarnessAttestationResult | null = null;
         if (spec !== null && spec.kind !== 'file-identity') {
-          const attest = this.deps.attest ?? this.defaultAttest(logger);
-          try {
-            probe = await attest(spec, {
-              verifyPort: req.verifyPort,
-              driverPort: req.verifyDriverPort,
-              nonce: attestNonce,
-            });
-          } catch (err) {
-            // performHarnessAttestation never throws by contract; this catch is
-            // the one cheap backstop for a mis-wired injection, and it exists
-            // because the alternative is catastrophic in the wrong direction —
-            // an escaping throw lands in the outer catch, which returns a
-            // fail-open `skipped`, i.e. the lane ADVANCES on the exact unproven
-            // pass this floor exists to block. Unverified is the safe reading.
+          // (d2a) SERVE-IDENTITY BINDING — a PRECONDITION of the channel probe,
+          // not a second opinion on it. The nonce proves a surface knows this
+          // request's secret; the agent knows that secret too and chooses what
+          // the driver serves, so "the surface answered" and "the surface is the
+          // deliverable" are different claims. Binding answers the second one
+          // from kernel truth. Run FIRST so a failure short-circuits the probe:
+          // there is nothing to learn from interrogating a surface we have
+          // already established was not started by this task's serve command.
+          const binding = await this.bindServeIdentity(req, spec, logger);
+          if (binding !== null && !binding.bound) {
             probe = {
               verified: false,
               kind: spec.kind,
-              detail: `the harness attestation probe threw: ${err instanceof Error ? err.message : String(err)}`,
+              detail: `${SERVE_BINDING_FAILED_PREFIX} [${binding.failure}]: ${binding.detail}`,
             };
+          } else {
+            const attest = this.deps.attest ?? this.defaultAttest(logger);
+            try {
+              probe = await attest(spec, {
+                verifyPort: req.verifyPort,
+                driverPort: req.verifyDriverPort,
+                nonce: attestNonce,
+              });
+            } catch (err) {
+              // performHarnessAttestation never throws by contract; this catch is
+              // the one cheap backstop for a mis-wired injection, and it exists
+              // because the alternative is catastrophic in the wrong direction —
+              // an escaping throw lands in the outer catch, which returns a
+              // fail-open `skipped`, i.e. the lane ADVANCES on the exact unproven
+              // pass this floor exists to block. Unverified is the safe reading.
+              probe = {
+                verified: false,
+                kind: spec.kind,
+                detail: `the harness attestation probe threw: ${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
           }
         }
         floor = evaluateAttestationFloor(spec, probe);

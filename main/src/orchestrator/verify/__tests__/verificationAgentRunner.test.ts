@@ -21,9 +21,13 @@ import {
   evaluateAttestationFloor,
   coerceDriveUnsupportedBehaviors,
   checkRunbookPin,
+  checkServeIdentityBinding,
+  serveBindingTarget,
   ATTESTATION_MISSING_MESSAGE,
   ATTESTATION_UNCAPPED_MESSAGE,
   RUNBOOK_MISMATCH_PREFIX,
+  SERVE_BINDING_FAILED_PREFIX,
+  TRANSPORT_MID_SESSION_MESSAGE,
   VERIFY_HARNESS_CONTRACT,
   type VerificationAgentRunnerDeps,
   type VerificationAgentRequest,
@@ -109,6 +113,37 @@ function makeReq(overrides: Partial<VerificationAgentRequest> = {}): Verificatio
   };
 }
 
+// ---------------------------------------------------------------------------
+// §7.1 serve-identity binding — the fake "kernel"
+// ---------------------------------------------------------------------------
+
+/** The detached process-GROUP leader the driver's `serve` recorded, in the fakes below. */
+const SERVE_LEADER_PID = 4242;
+/** A CHILD of that leader (the node the shell forked) — what actually holds the port. */
+const SERVE_CHILD_PID = 4243;
+
+/**
+ * The three binding probes describing a HEALTHY serve of `serveCmd`: the driver
+ * recorded the leader, a child of that leader holds the probed port, and the
+ * leader's command line is `sh -c <serveCmd>` exactly as the driver spawns it.
+ *
+ * Opt-in rather than default, because {@link makeRunner}'s default world is "no
+ * serve was ever started through the driver" — which is the truth for the many
+ * fixtures whose task has no `serve` at all, and the SAFE answer for any test
+ * that adds one without saying what the OS should report.
+ */
+function servedBy(serveCmd: string, overrides: Partial<VerificationAgentRunnerDeps> = {}): Partial<VerificationAgentRunnerDeps> {
+  return {
+    readServePid: async () => SERVE_LEADER_PID,
+    listeningPidForPort: async () => SERVE_CHILD_PID,
+    processInfo: async (pid) =>
+      pid === SERVE_CHILD_PID
+        ? { pgid: SERVE_LEADER_PID, command: 'node /snap/node_modules/.bin/vite' }
+        : { pgid: SERVE_LEADER_PID, command: `sh -c ${serveCmd}` },
+    ...overrides,
+  };
+}
+
 /** Build a runner with fake deps; returns the runner + the spies tests assert on. */
 function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   runner: VerificationAgentRunner;
@@ -168,6 +203,13 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     reapServe,
     writeTranscript,
     attest,
+    // §7.1 serve-identity binding: NOTHING was served through the driver. Faked
+    // (rather than left to the real lsof/ps defaults) so this suite spawns no
+    // processes; a task that declares a serve therefore fails the binding unless
+    // the test opts into {@link servedBy}.
+    readServePid: async () => null,
+    listeningPidForPort: async () => null,
+    processInfo: async () => null,
     ...overrides,
   };
   return {
@@ -732,7 +774,7 @@ describe('VerificationAgentRunner.run', () => {
     expect(writeTranscript).not.toHaveBeenCalled();
   });
 
-  it('writes the partial transcript from a thrown VerificationAgentQueryError, and still maps to the usual skipped/timeout result', async () => {
+  it('writes the partial transcript from a thrown VerificationAgentQueryError (which, being mid-session, blocks)', async () => {
     const { runner, writeTranscript } = makeRunner({
       query: async () => {
         throw new VerificationAgentQueryError('agent boom', 'partial transcript up to the failure');
@@ -740,7 +782,10 @@ describe('VerificationAgentRunner.run', () => {
     });
     const req = makeReq({ requestId: 'vr-transcript-2', artifactsDir: '/artifacts' });
     const result = await runner.run(req);
-    expect(result.status).toBe('skipped');
+    // The transcript's PRESENCE is what makes this a mid-session failure (see
+    // the transport-narrowing suite); what this test is about is that the
+    // partial transcript reaches disk on the throwing path either way.
+    expect(result.status).toBe('failed');
     expect(result.errorMessage).toContain('agent boom');
     expect(writeTranscript).toHaveBeenCalledTimes(1);
     expect(writeTranscript).toHaveBeenCalledWith(
@@ -880,9 +925,10 @@ describe('VerificationAgentRunner.run — §3.5 preflight', () => {
   });
 
   it('CDP-attach mode skips the chromium check entirely (the driver attaches, it never launches one)', async () => {
-    const { runner, query } = makeRunner({ resolveChromium: async () => null });
+    const attachCmd = 'electron . --remote-debugging-port=$VERIFY_DRIVER_PORT';
+    const { runner, query } = makeRunner({ resolveChromium: async () => null, ...servedBy(attachCmd) });
     const result = await runner.run(
-      makeReq({ task: makeTask({ serve: { cmd: 'electron . --remote-debugging-port=$VERIFY_DRIVER_PORT', attach: 'cdp' } }) }),
+      makeReq({ task: makeTask({ serve: { cmd: attachCmd, attach: 'cdp' } }) }),
     );
     expect(result.status).toBe('passed');
     expect(query).toHaveBeenCalledTimes(1);
@@ -1510,7 +1556,10 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
   };
 
   it('a MATCHING pin deploys normally', async () => {
-    const { runner, query } = makeRunner({ resolveRunbookByHash: () => resolved });
+    const { runner, query } = makeRunner({
+      resolveRunbookByHash: () => resolved,
+      ...servedBy(entry.serve.cmd),
+    });
     const result = await runner.run(
       makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }),
     );
@@ -1563,7 +1612,7 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
   });
 
   it('a pin with NO resolver wired → the check does not run (a wiring gap is not drift)', async () => {
-    const { runner } = makeRunner();
+    const { runner } = makeRunner(servedBy(entry.serve.cmd));
     const result = await runner.run(
       makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }),
     );
@@ -1593,6 +1642,7 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
   it('a SETUP-PROOF request deploys against that same demoted record (the bootstrap is not blocked)', async () => {
     const { runner, query } = makeRunner({
       resolveRunbookByHash: () => ({ ...resolved, status: 'unproven-draft' }),
+      ...servedBy(entry.serve.cmd),
     });
     const result = await runner.run(
       makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2, setupProof: true }),
@@ -1612,5 +1662,327 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
     expect(result.runbookMismatch).toBe(true);
     expect(result.errorMessage).toContain('setup-proof request pinned');
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7.1 SERVE-IDENTITY BINDING (round-3 finding 3)
+//
+// Harness-side attestation proves that SOMETHING on the probed port knows this
+// request's nonce. It cannot prove that something is the deliverable: the driver
+// runs whatever serve command the agent hands it, and the agent holds the nonce
+// in its own environment, so a fake page echoing it attests honestly and means
+// nothing. The binding closes that by asking the OS two questions the agent
+// cannot author — who owns this socket, and what is that group running.
+// ---------------------------------------------------------------------------
+
+describe('serveBindingTarget — when the binding applies, and against which port', () => {
+  const httpSpec = { kind: 'http-endpoint' as const, urlPath: '/__cyboflow_verify__' };
+  const ports = { verifyPort: 29260, driverPort: 29261 };
+
+  it('binds a plain web serve to the VERIFY port', () => {
+    const task = makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}' } });
+    expect(serveBindingTarget(task, httpSpec, ports)).toEqual({
+      serveCmd: 'pnpm dev --port ${PORT}',
+      probedPort: 29260,
+      portLever: 29260,
+    });
+  });
+
+  it('binds an attach:cdp serve to the DRIVER port — the app itself is the endpoint', () => {
+    const task = makeTask({ serve: { cmd: 'electron . --remote-debugging-port=${PORT}', attach: 'cdp' } });
+    // …while the ${PORT} lever still resolves to VERIFY_PORT: substituting the
+    // driver port into the pinned template would manufacture a command line
+    // nobody ever ran.
+    expect(serveBindingTarget(task, { kind: 'cdp-token', expression: 'x', expected: 'y' }, ports)).toEqual({
+      serveCmd: 'electron . --remote-debugging-port=${PORT}',
+      probedPort: 29261,
+      portLever: 29260,
+    });
+  });
+
+  it('does NOT apply to a task with no serve — there is no group to bind', () => {
+    expect(serveBindingTarget(makeTask({ target: { url: 'http://127.0.0.1:29260' } }), httpSpec, ports)).toBeNull();
+  });
+
+  it('does NOT apply to window-identity — a window title is not reached through a port', () => {
+    const task = makeTask({ serve: { cmd: 'electron .' } });
+    expect(
+      serveBindingTarget(task, { kind: 'window-identity', titlePattern: 'Cyboflow' }, ports),
+    ).toBeNull();
+  });
+
+  it('does NOT apply to file-identity — there is no live process at all', () => {
+    const task = makeTask({ serve: { cmd: 'pnpm dev' } });
+    expect(serveBindingTarget(task, { kind: 'file-identity' }, ports)).toBeNull();
+  });
+});
+
+describe('checkServeIdentityBinding', () => {
+  const SERVE_CMD = 'pnpm run preview -- --port ${PORT}';
+  const PORT = 29260;
+
+  /** A fake kernel: `listeners` maps port→pid, `processes` maps pid→(group, command). */
+  function probes(world: {
+    servePid?: number | null;
+    listeners?: Record<number, number>;
+    processes?: Record<number, { pgid: number; command: string }>;
+  }) {
+    return {
+      readServePid: async () => world.servePid ?? null,
+      listeningPidForPort: async (port: number) => world.listeners?.[port] ?? null,
+      processInfo: async (pid: number) => world.processes?.[pid] ?? null,
+    };
+  }
+
+  const run = (world: Parameters<typeof probes>[0], overrides: { serveCmd?: string; probedPort?: number | null } = {}) =>
+    checkServeIdentityBinding({
+      artifactsDir: '/artifacts',
+      serveCmd: overrides.serveCmd ?? SERVE_CMD,
+      probedPort: overrides.probedPort === undefined ? PORT : overrides.probedPort,
+      portLever: PORT,
+      probes: probes(world),
+    });
+
+  it('BINDS when the listener is in the recorded group and the leader runs the pinned command', async () => {
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 4243 },
+      processes: {
+        4243: { pgid: 4242, command: 'node .bin/vite' },
+        4242: { pgid: 4242, command: `sh -c ${SERVE_CMD}` },
+      },
+    });
+    expect(result.bound).toBe(true);
+  });
+
+  it('BINDS when the leader is itself the listener (a single-process server)', async () => {
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 4242 },
+      processes: { 4242: { pgid: 4242, command: `sh -c ${SERVE_CMD}` } },
+    });
+    expect(result.bound).toBe(true);
+  });
+
+  it('BINDS when the agent substituted ${PORT} before handing the command to the driver', async () => {
+    // The contract asks for exactly that substitution, so the leader's command
+    // line carries the resolved port while the PIN carries the template. Same
+    // command; rejecting it would fail honest runs over a spelling.
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 4242 },
+      processes: { 4242: { pgid: 4242, command: `sh -c pnpm run preview -- --port ${PORT}` } },
+    });
+    expect(result.bound).toBe(true);
+  });
+
+  it('a FOREIGN listener fails port-owner — the surface is not what this task started', async () => {
+    const result = await run({
+      servePid: 4242,
+      // Something else (the user's own dev server) holds the port; its group is
+      // its own. This is the exact §1(e) false-ready shape.
+      listeners: { [PORT]: 9001 },
+      processes: {
+        9001: { pgid: 9001, command: 'node /elsewhere/vite' },
+        4242: { pgid: 4242, command: `sh -c ${SERVE_CMD}` },
+      },
+    });
+    expect(result).toMatchObject({ bound: false, failure: 'port-owner' });
+    expect(result.detail).toContain('process group 9001');
+  });
+
+  it('a SUBSTITUTED command fails command binding — the group is ours, the deliverable is not', async () => {
+    // The forgery the finding names: the agent serves its own page (which will
+    // happily echo the nonce it holds) through the driver, so the pid file and
+    // the port owner agree. Only the command line gives it away.
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 4242 },
+      processes: {
+        4242: { pgid: 4242, command: 'sh -c python3 -m http.server 29260 --directory /tmp/fake' },
+      },
+    });
+    expect(result).toMatchObject({ bound: false, failure: 'command' });
+    expect(result.detail).toContain('substitute');
+  });
+
+  it('a MISSING pid file fails serve-pid — nothing was started through the driver', async () => {
+    const result = await run({ servePid: null, listeners: { [PORT]: 4242 } });
+    expect(result).toMatchObject({ bound: false, failure: 'serve-pid' });
+  });
+
+  it('a FORGED pid file buys nothing: the named process matches, but does not own the port', async () => {
+    // The agent points serve.pid at a real process whose command line satisfies
+    // the command binding (its OWN driver-started decoy), while the port is held
+    // by something else entirely. The kernel's answer to "who owns the socket"
+    // is the one thing the forgery cannot move.
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 9001 },
+      processes: {
+        4242: { pgid: 4242, command: `sh -c ${SERVE_CMD}` },
+        9001: { pgid: 9001, command: 'sh -c python3 -m http.server 29260' },
+      },
+    });
+    expect(result).toMatchObject({ bound: false, failure: 'port-owner' });
+  });
+
+  it('NOTHING listening fails port-owner (an unanswerable probe is an unbound surface)', async () => {
+    const result = await run({ servePid: 4242, listeners: {} });
+    expect(result).toMatchObject({ bound: false, failure: 'port-owner' });
+    expect(result.detail).toContain('nothing could be resolved as the listener');
+  });
+
+  it('a dead leader fails command binding — its command line cannot be read back', async () => {
+    const result = await run({
+      servePid: 4242,
+      listeners: { [PORT]: 4243 },
+      processes: { 4243: { pgid: 4242, command: 'node .bin/vite' } },
+    });
+    expect(result).toMatchObject({ bound: false, failure: 'command' });
+  });
+
+  it('NO leased port fails port-owner — the task declared a channel its shape cannot support', async () => {
+    const result = await run({ servePid: 4242 }, { probedPort: null });
+    expect(result).toMatchObject({ bound: false, failure: 'port-owner' });
+  });
+
+  it('a THROWING probe is an unbound surface, never an exception', async () => {
+    // An escaping throw would land in the runner's outer catch, which returns a
+    // fail-open `skipped` — the lane ADVANCING on exactly the unproven pass this
+    // binding exists to block.
+    const result = await checkServeIdentityBinding({
+      artifactsDir: '/artifacts',
+      serveCmd: SERVE_CMD,
+      probedPort: PORT,
+      portLever: PORT,
+      probes: {
+        readServePid: async () => 4242,
+        listeningPidForPort: async () => {
+          throw new Error('lsof: command not found');
+        },
+        processInfo: async () => null,
+      },
+    });
+    expect(result).toMatchObject({ bound: false, failure: 'port-owner' });
+  });
+});
+
+describe('VerificationAgentRunner.run — the binding gates the pass', () => {
+  const SERVE_CMD = 'pnpm run preview -- --port ${PORT}';
+  const servedTask = makeTask({ serve: { cmd: SERVE_CMD } });
+
+  it('a bound surface is probed as before and passes', async () => {
+    const { runner, attest } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(makeReq({ task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(attest).toHaveBeenCalledTimes(1);
+  });
+
+  it('an UNBOUND surface is a BLOCKING failure, and the channel is never even asked', async () => {
+    // The agent served something the driver never recorded. Short-circuiting the
+    // probe is the point: there is nothing to learn from interrogating a surface
+    // already known not to be this task's.
+    const { runner, attest } = makeRunner({ readServePid: async () => null });
+    const result = await runner.run(makeReq({ task: servedTask }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain(SERVE_BINDING_FAILED_PREFIX);
+    expect(result.errorMessage).toContain('serve-pid');
+    expect(attest).not.toHaveBeenCalled();
+  });
+
+  it('a fake surface that ECHOES the nonce still fails — the whole point of the finding', async () => {
+    // `attest` is wired to VERIFY, i.e. the harness genuinely read this request's
+    // nonce back off the port. Before the binding that was a green pass; now the
+    // command line of the group holding that port decides.
+    const { runner, attest } = makeRunner(
+      servedBy(SERVE_CMD, {
+        processInfo: async () => ({ pgid: 4242, command: 'sh -c python3 -m http.server 29260' }),
+      }),
+    );
+    const result = await runner.run(makeReq({ task: servedTask }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('[command]');
+    expect(attest).not.toHaveBeenCalled();
+  });
+
+  it('a task with NO serve never consults the probes (degenerate shapes are untouched)', async () => {
+    const readServePid = vi.fn(async () => null);
+    const { runner, attest } = makeRunner({ readServePid });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect(readServePid).not.toHaveBeenCalled();
+    expect(attest).toHaveBeenCalledTimes(1);
+  });
+
+  it('a bound surface whose CHANNEL then disagrees still fails (the binding is a precondition, not a substitute)', async () => {
+    const { runner } = makeRunner({
+      ...servedBy(SERVE_CMD),
+      attest: vi.fn(async () => ({
+        verified: false,
+        kind: 'http-endpoint' as const,
+        detail: 'the body does not carry this request nonce',
+      })),
+    });
+    const result = await runner.run(makeReq({ task: servedTask }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('does not carry this request nonce');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.1 transport narrowing (round-3 finding 4)
+//
+// `transportFailure` exempts a deployed skip from the scheduler's gate-integrity
+// guard. "Our SDK layer raised it" is not enough to earn that exemption, because
+// the agent holds Bash and can reach our SDK layer. An EMPTY session cannot be
+// staged; a mid-session failure can.
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner.run — transport failures, narrowed by session emptiness', () => {
+  const throwing = (transcript: string | null) => async (): Promise<never> => {
+    throw new VerificationAgentQueryError('stream closed: ECONNRESET', transcript);
+  };
+
+  it('an EMPTY transcript keeps the advancing-skip carve-out (a genuine connect-level failure)', async () => {
+    const { runner } = makeRunner({ query: throwing(null) });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.transportFailure).toBe(true);
+    expect(result.deployed).toBe(true);
+  });
+
+  it('a WHITESPACE-ONLY transcript is still empty — the agent never spoke', async () => {
+    const { runner } = makeRunner({ query: throwing('\n  \t\n') });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.transportFailure).toBe(true);
+  });
+
+  it('a MID-SESSION transport failure BLOCKS: the agent was alive and could have induced it', async () => {
+    const { runner } = makeRunner({ query: throwing('## Bash\n$ pnpm run build\n…') });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.deployed).toBe(true);
+    // No flag: the scheduler's guard must not be told to exempt this.
+    expect(result.transportFailure).toBeUndefined();
+    expect(result.errorMessage).toContain(TRANSPORT_MID_SESSION_MESSAGE);
+    // The underlying error is still on the record for a human triaging an outage.
+    expect(result.errorMessage).toContain('ECONNRESET');
+  });
+
+  it('a non-VerificationAgentQueryError throw carries no transcript and stays an advancing skip', async () => {
+    // Only the production query wraps, and only a wrapped throw can have been
+    // mid-session at all; anything else is a seam that failed before the session.
+    const { runner } = makeRunner({
+      query: async () => {
+        throw new Error('boom');
+      },
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.transportFailure).toBe(true);
   });
 });

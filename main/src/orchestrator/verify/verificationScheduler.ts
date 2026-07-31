@@ -3120,11 +3120,16 @@ export class VerificationScheduler {
    *
    * TWO CARVE-OUTS, both documented rather than inferred:
    *
-   *  1. A TRANSPORT failure ({@link VerificationAgentRunResult.transportFailure})
-   *     — the SDK layer threw before any structured output existed. The
-   *     exception is harness-observed, so model content cannot manufacture it,
-   *     and blocking would turn every API outage into a lane-blocking FAIL that
-   *     loops implement agents against code the harness never examined.
+   *  1. A CONNECT-LEVEL TRANSPORT failure
+   *     ({@link VerificationAgentRunResult.transportFailure}) — the SDK layer
+   *     threw and the session had accumulated NO transcript, so the agent never
+   *     got a turn. Blocking would turn every API outage into a lane-blocking
+   *     FAIL that loops implement agents against code the harness never
+   *     examined. The runner narrows the flag to that empty-session shape on
+   *     purpose (round-3 finding 4): "our code raised it" was not enough, since
+   *     an agent holding `Bash` can kill its own SDK process, and every
+   *     MID-SESSION transport failure is now mapped to a blocking `'failed'` at
+   *     source rather than arriving here wearing this flag.
    *  2. The §5.7 UNATTRIBUTABLE FALLBACK — a `build_failed`/`launch_failed`
    *     reported while provisioning ran in the DIRTY live worktree. That skip is
    *     the proposal's explicit carve-out: in a worktree carrying every sibling
@@ -3169,6 +3174,17 @@ export class VerificationScheduler {
    * request id that produced it — enough for a human reading a later demotion to
    * see what changed.
    *
+   * A PROOF FROM THE DIRTY FALLBACK PROVES NOTHING EITHER (round-3 finding 2).
+   * A NULL `snapshot_sha` means the sha capture failed and the runner executed
+   * in the live shared worktree — every sibling lane's half-finished edits
+   * included. §5.3 is explicit that "proof runs in the verifier's environment
+   * class (detached snapshot + prepared deps) ... a proof obtained in
+   * environment X asserted about environment Y is not a proof", and the
+   * provenance blob has nowhere to record a sha that does not exist. Promotion
+   * is refused and the record stays a draft: the setup flow re-proves once a sha
+   * can be captured, which is a bad day rather than a runbook wearing a green
+   * badge it never earned.
+   *
    * A REQUEST WITHOUT A PIN PROVES NOTHING. A setup-proof run that carried no
    * `runbook_hash` verified *something*, but nothing content-addressed, so there
    * is no record it could be attesting to; it is logged and dropped.
@@ -3188,6 +3204,18 @@ export class VerificationScheduler {
   ): void {
     const store = this.runbookStore;
     if (!store) return;
+    if (snapshotSha === null) {
+      this.logger?.warn(
+        '[VerificationScheduler] setup proof refused: it ran in the dirty-worktree fallback (§5.3), so the record stays a draft',
+        {
+          requestId: row.id,
+          projectId: row.project_id,
+          modality,
+          provisionMode: result.provisionMode ?? null,
+        },
+      );
+      return;
+    }
     const pin = this.runbookPinForRow(row.id);
     if (pin.hash === null || pin.version === null) {
       this.logger?.debug('[VerificationScheduler] setup-proof passed without a runbook pin; nothing to prove', {

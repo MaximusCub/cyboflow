@@ -1111,6 +1111,75 @@ describe('runDriverCommand — serve', () => {
     expect(stderrLines.join('\n')).toContain('no pid assigned');
     expect(deps.writePidFile).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle (round-3 finding 6): serve is called more than once in a real
+  // session — a first attempt binds the wrong port, a build fix needs a restart.
+  // Overwriting serve.pid leaked the earlier group entirely: the reaper reads
+  // ONE pid, so every superseded server outlived the request still holding a
+  // leased port, which the scheduler's teardown probe then quarantined.
+  // -------------------------------------------------------------------------
+
+  it('REPLACES a still-live previous serve: the old group is SIGKILLed before the new one starts', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      readPidFile: vi.fn(async () => 4200),
+      isProcessAlive: vi.fn(() => true),
+    });
+
+    expect(await runDriverCommand(['serve', 'pnpm dev --port 29260'], ENV, deps)).toBe(0);
+
+    expect(deps.readPidFile).toHaveBeenCalledWith(servePidFilePath(ENV.VERIFY_ARTIFACTS_DIR));
+    // NEGATIVE pid = the whole process group, which is the unit that matters:
+    // killing only the leader orphans the children actually holding the port.
+    expect(deps.killPid).toHaveBeenCalledWith(-4200, 'SIGKILL');
+    // …and the replacement still started and was recorded.
+    expect(calls.shells).toHaveLength(1);
+    expect(deps.writePidFile).toHaveBeenCalledWith(servePidFilePath(ENV.VERIFY_ARTIFACTS_DIR), 5150);
+  });
+
+  it('does NOT kill a recorded group that is already gone (a recycled pid is not ours to signal)', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      readPidFile: vi.fn(async () => 4200),
+      isProcessAlive: vi.fn(() => false),
+    });
+    expect(await runDriverCommand(['serve', 'pnpm dev'], ENV, deps)).toBe(0);
+    expect(deps.killPid).not.toHaveBeenCalled();
+    expect(calls.shells).toHaveLength(1);
+  });
+
+  it('an unreadable previous pid file is not fatal — there is simply nothing to replace', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      readPidFile: vi.fn(async () => {
+        throw new Error('EACCES');
+      }),
+    });
+    expect(await runDriverCommand(['serve', 'pnpm dev'], ENV, deps)).toBe(0);
+    expect(calls.shells).toHaveLength(1);
+  });
+
+  it('kills the JUST-SPAWNED group and exits non-zero when its pid cannot be recorded', async () => {
+    // A serve nobody can reap is strictly worse than a serve that never started:
+    // the agent can retry the second one, while the first outlives the request
+    // holding the leased port with no durable record of its existence.
+    const calls = freshCalls();
+    const stderrLines: string[] = [];
+    const deps = makeDeps(calls, {
+      writePidFile: vi.fn(async () => {
+        throw new Error('ENOSPC');
+      }),
+      stderr: (l) => stderrLines.push(l),
+    });
+
+    expect(await runDriverCommand(['serve', 'pnpm dev'], ENV, deps)).toBe(1);
+
+    expect(calls.shells).toHaveLength(1);
+    expect(deps.killPid).toHaveBeenCalledWith(-5150, 'SIGKILL');
+    expect(stderrLines.join('\n')).toContain('ENOSPC');
+    expect(stderrLines.join('\n')).toContain('killed rather than left running untracked');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1435,6 +1435,9 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
       input: { intent: 'prove the runbook' },
       chain: [],
       task: SERVE_TASK,
+      // A real sha, so the §5.3 environment-class guard is satisfied and the CAS
+      // is genuinely what declines this flip (see the sha-null test below).
+      snapshotSha: 'sha-proof-cas',
       setupProof: true,
       runbookHash: registered.hash,
       // A registerDraft landed between enqueue and terminal: the pin's version is
@@ -1462,11 +1465,50 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
       input: { intent: 'x' },
       chain: [],
       task: SERVE_TASK,
+      // Present so the ABSENCE OF A PIN is the only thing refusing this proof.
+      snapshotSha: 'sha-proof-nopin',
       setupProof: true,
     });
     await flushDrain();
     expect(requestRow(db).status).toBe('passed');
     expect(runbookRow(db).status).toBe('unproven-draft');
+  });
+
+  it('a setup_proof pass from the DIRTY-WORKTREE FALLBACK proves nothing — the record stays a draft', async () => {
+    // §5.3: "proof runs in the verifier's environment class (detached snapshot +
+    // prepared deps) ... a proof obtained in environment X asserted about
+    // environment Y is not a proof". A NULL snapshot_sha means the sha capture
+    // failed and the runner executed in the live shared worktree, carrying every
+    // sibling lane's half-finished edits — precisely the environment class §5.3
+    // rejects, and one the provenance blob has no sha to record.
+    seedRun(db, 'run-proof-dirty', JSON.stringify(['agent']));
+    const store = buildRunbookStore(db);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+
+    const { scheduler } = initWith(store, { ...PASS_RESULT, provisionMode: 'fallback' });
+    scheduler.enqueue({
+      runId: 'run-proof-dirty',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'prove the runbook' },
+      chain: [],
+      task: SERVE_TASK,
+      // The sha capture failed ⇒ the runner fell back to the live worktree.
+      snapshotSha: null,
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+
+    // The verification itself still PASSED and is written as such — only the
+    // promotion is refused, exactly like the CAS-conflict case.
+    expect(requestRow(db).status).toBe('passed');
+    expect(runbookRow(db).status).toBe('unproven-draft');
+    expect(runbookRow(db).proof_json).toBeNull();
   });
 
   it('an ORDINARY lane pass with a pin does NOT prove the runbook (only a setup proof may)', async () => {

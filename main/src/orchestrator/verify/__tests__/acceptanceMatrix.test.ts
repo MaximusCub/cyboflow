@@ -54,9 +54,11 @@ import {
 } from '../verificationScheduler';
 import {
   VerificationAgentRunner,
+  VerificationAgentQueryError,
   ATTESTATION_MISSING_MESSAGE,
   ATTESTATION_UNCAPPED_MESSAGE,
   RUNBOOK_MISMATCH_PREFIX,
+  TRANSPORT_MID_SESSION_MESSAGE,
   type VerificationAgentRunnerDeps,
   type ResolvedVerifyAgent,
 } from '../verificationAgentRunner';
@@ -394,6 +396,71 @@ interface RunnerWorld {
    * scheduler declined to charge", and §3.6 is a claim about both.
    */
   deploys: string[];
+  /**
+   * §7.1 SERVE-IDENTITY BINDING: how the deployed session's serve step behaves,
+   * as the KERNEL would report it. `'none'` is an honest serve of the composed
+   * task's own command; the other three are the forgeries the binding exists to
+   * catch. Injected as a fault knob rather than as three probe overrides so a row
+   * names the SCENARIO ("the agent served a decoy") instead of restating the
+   * fake's plumbing.
+   */
+  serveFault: 'none' | 'no-pid-file' | 'foreign-listener' | 'substituted-command';
+  /**
+   * What the fake session actually started, filled in BY the fake session from
+   * the task it was handed (see {@link recordFakeServe}) — which is the honest
+   * shape, since in production the agent is the one who runs the serve command
+   * and the harness only ever learns about it afterwards, from the OS. `null`
+   * when the composed task has no serve at all (the degenerate rows), which is
+   * exactly when the runner must not consult the probes.
+   */
+  serve: { leaderPid: number; listenerPid: number; port: number; leaderCommand: string } | null;
+}
+
+/** The detached process-GROUP leader the driver's `serve` records, in the fake kernel below. */
+const SERVE_LEADER_PID = 7100;
+/** A child of that leader (the node the shell forked) — what actually holds the port. */
+const SERVE_LISTENER_PID = 7101;
+/** A listener belonging to something else entirely: its own group, its own command. */
+const FOREIGN_LISTENER_PID = 9001;
+
+/**
+ * Recover the composed task from the prompt the runner handed the session —
+ * `composeVerifyUserPrompt` embeds it as a ```json fence. Parsing it back is how
+ * the fake session learns which serve command it is supposed to have started,
+ * and it matters that the source is the PROMPT rather than the row's input: the
+ * enqueue seam MERGES the proven runbook's commands over task-verify's guess, so
+ * the command the agent runs is knowable only from what it was actually given.
+ */
+function taskFromPrompt(prompt: string): VerificationTaskV1 | null {
+  const fence = /```json\n([\s\S]*?)\n```/.exec(prompt);
+  if (!fence) return null;
+  try {
+    return JSON.parse(fence[1]) as VerificationTaskV1;
+  } catch {
+    return null;
+  }
+}
+
+/** The fake session "starts the serve", recording what the kernel would then report. */
+function recordFakeServe(world: RunnerWorld, prompt: string): void {
+  const serve = taskFromPrompt(prompt)?.serve;
+  const cmd = serve?.cmd;
+  const attach = serve?.attach === 'cdp';
+  if (typeof cmd !== 'string' || cmd.trim().length === 0) {
+    world.serve = null;
+    return;
+  }
+  world.serve = {
+    leaderPid: SERVE_LEADER_PID,
+    listenerPid: world.serveFault === 'foreign-listener' ? FOREIGN_LISTENER_PID : SERVE_LISTENER_PID,
+    // In attach mode the app IS the CDP endpoint on the driver port; otherwise
+    // the deliverable is served on the leased one.
+    port: attach ? DRIVER_PORT : LEASED_PORT,
+    leaderCommand:
+      world.serveFault === 'substituted-command'
+        ? 'sh -c python3 -m http.server 29260 --directory /tmp/decoy'
+        : `sh -c ${cmd}`,
+  };
 }
 
 function makeWorld(overrides: Partial<RunnerWorld> = {}): RunnerWorld {
@@ -409,6 +476,8 @@ function makeWorld(overrides: Partial<RunnerWorld> = {}): RunnerWorld {
     provision: null,
     resolveRunbookByHash: null,
     deploys: [],
+    serveFault: 'none',
+    serve: null,
     ...overrides,
   };
 }
@@ -454,6 +523,9 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
       // Recorded BEFORE the throw: a session that then failed in transport was
       // still deployed, and §3.6's budget claim is about deployment, not success.
       world.deploys.push(args.prompt);
+      // …and the session brings the deliverable up, which is what the §7.1
+      // binding will later interrogate the kernel about.
+      recordFakeServe(world, args.prompt);
       if (world.queryError !== null) throw world.queryError;
       return {
         structured: world.structuredOverride !== null ? world.structuredOverride.value : world.report,
@@ -471,6 +543,22 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
     resolveChromium: async () => world.chromium,
     portFreeProbe: async (port) => !world.occupiedPorts.has(port),
     attest: async () => world.attest,
+    // §7.1 serve-identity binding — the FAKE KERNEL. These three answer the only
+    // questions the binding trusts (who owns the socket, what is that process),
+    // and they are faked here because they are the outside world, not because the
+    // binding is: every decision it makes runs unmodified above them.
+    readServePid: async () =>
+      world.serve !== null && world.serveFault !== 'no-pid-file' ? world.serve.leaderPid : null,
+    listeningPidForPort: async (port) =>
+      world.serve !== null && port === world.serve.port ? world.serve.listenerPid : null,
+    processInfo: async (pid) => {
+      const serve = world.serve;
+      if (serve === null) return null;
+      if (pid === serve.leaderPid) return { pgid: serve.leaderPid, command: serve.leaderCommand };
+      if (pid === SERVE_LISTENER_PID) return { pgid: serve.leaderPid, command: 'node .bin/vite' };
+      if (pid === FOREIGN_LISTENER_PID) return { pgid: FOREIGN_LISTENER_PID, command: 'node /elsewhere/vite' };
+      return null;
+    },
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
     stopDriver: async () => {},
     reapBrowser: () => {},
@@ -1313,6 +1401,82 @@ describe('§5.4 matrix — attestation (§7.1: no attestation ⇒ no passed)', (
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Round-3 finding 3: a VERIFIED channel is not enough on its own.
+  //
+  // The three rows above all turn on whether the harness's probe came back
+  // verified. These three hold the probe at VERIFIED and vary only what the
+  // KERNEL says about the surface that answered it — which is the gap the
+  // nonce could never close, because the agent holds the nonce and chooses what
+  // the driver serves.
+  // -------------------------------------------------------------------------
+
+  it('a DECOY served through the driver fails even though the harness read the nonce back', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // `attest` VERIFIES: the harness genuinely GET'd the port and got this
+    // request's nonce. The agent simply served something else that knew it —
+    // which it does, because the nonce is exported into its own environment.
+    const world = makeWorld({ serveFault: 'substituted-command' });
+    seedRun(db, 'run-decoy-serve');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-decoy-serve',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1);
+    expect(outcome.status).toBe('failed');
+    const row = readRow(db, requestId);
+    expect(row.error_message).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(row.error_message).toContain('[command]');
+    expect(isMergeGateBlocking(decideMergeGate({ status: 'failed', currentAttempts: 1 }))).toBe(true);
+  });
+
+  it("a FOREIGN process holding the port fails the binding — the §1(e) false-ready incident, caught", async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // The pinned serve really did start; something else (a stale vite from an
+    // unrelated worktree — §1(e), observed live) is what answers on the port.
+    const world = makeWorld({ serveFault: 'foreign-listener' });
+    seedRun(db, 'run-foreign-listener');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-foreign-listener',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(outcome.status).toBe('failed');
+    expect(readRow(db, requestId).error_message).toContain('[port-owner]');
+  });
+
+  it('a serve the driver never recorded fails the binding (started outside "$VERIFY_DRIVER serve")', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    const world = makeWorld({ serveFault: 'no-pid-file' });
+    seedRun(db, 'run-unrecorded-serve');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-unrecorded-serve',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(outcome.status).toBe('failed');
+    expect(readRow(db, requestId).error_message).toContain('[serve-pid]');
+  });
+
   it('a task that never DECLARED a channel is capped at low_confidence — advisory, never passed', async () => {
     // No proven runbook in this DB, so nothing injects an attestation: the bare
     // pre-live `target.url` shape, which is exactly the case §7.1 softens rather
@@ -1570,15 +1734,16 @@ describe('§3.1 gate integrity — a deployed session cannot advance a lane on g
     expect(isMergeGateBlocking(decideMergeGate({ status: outcome.status, currentAttempts: 1 }))).toBe(true);
   });
 
-  it('a TRANSPORT failure of the deployed session STAYS an advancing skip (the harness-observed carve-out)', async () => {
+  it('a CONNECT-LEVEL transport failure STAYS an advancing skip (the empty-session carve-out)', async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
     await proveModality(store, 'web');
 
-    // The SDK layer threw — our code raised, no structured output ever existed,
-    // and nothing was claimed about the deliverable either way. Blocking here
-    // would turn every API outage into a lane-blocking FAIL that loops implement
-    // agents against code the harness never examined.
+    // The SDK layer threw before the session produced a single message: our code
+    // raised, no structured output ever existed, and nothing was claimed about
+    // the deliverable either way. Blocking here would turn every API outage into
+    // a lane-blocking FAIL that loops implement agents against code the harness
+    // never examined.
     const world = makeWorld({ queryError: new Error('stream closed: ECONNRESET') });
     seedRun(db, 'run-transport');
     const scheduler = initScheduler(db, { world, runbookStore: store });
@@ -1604,6 +1769,37 @@ describe('§3.1 gate integrity — a deployed session cannot advance a lane on g
     // was deployed and did spend tokens (§3.6 — the budget counts deployments,
     // not verdicts).
     expect(row.judge_calls_used).toBe(1);
+  });
+
+  it('a MID-SESSION transport failure BLOCKS — the agent was alive and could have induced it', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+
+    // Same exception class, one difference: the session had already accumulated
+    // a transcript, so the agent was working when the transport died. An agent
+    // holding Bash can kill its own SDK process, and from out here that is
+    // indistinguishable from an upstream reset — §3.1 keeps ambiguity blocking
+    // (round-3 finding 4).
+    const world = makeWorld({
+      queryError: new VerificationAgentQueryError(
+        'stream closed: ECONNRESET',
+        '## Bash\n$ pnpm run build\n(exit 0)\n',
+      ),
+    });
+    seedRun(db, 'run-transport-mid');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-transport-mid',
+      task: composedTask(),
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    expect(world.deploys).toHaveLength(1);
+    expect(outcome.status).toBe('failed');
+    expect(readRow(db, requestId).error_message).toContain(TRANSPORT_MID_SESSION_MESSAGE);
+    expect(isMergeGateBlocking(decideMergeGate({ status: 'failed', currentAttempts: 1 }))).toBe(true);
   });
 
   it('an UNATTRIBUTABLE build failure in the dirty shared worktree STAYS an advancing skip (§5.7)', async () => {
