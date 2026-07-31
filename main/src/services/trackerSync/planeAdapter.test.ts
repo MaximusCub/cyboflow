@@ -365,6 +365,34 @@ describe('PlaneAdapter.createSubIssue', () => {
     expect(postCall?.body).toHaveProperty('description_html', `<p>cyboflow-sync: ${CLIENT_KEY}</p>`);
     expect(issue.description).toBeNull();
   });
+
+  it('createIssue files into the selection PROJECT with no parent, marker included', async () => {
+    const { fetchImpl, calls } = createFetch({ parent: null });
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issue = await adapter.createIssue(
+      // The narrow is a READ filter; a create targets the project only.
+      { containerId: 'proj1', narrowId: 'cycle-3', narrowKind: 'cycle' },
+      { title: 'Pushed idea', description: 'the idea body', stateId: 'state9' },
+      CLIENT_KEY
+    );
+
+    const postCall = calls.find((c) => c.method === 'POST');
+    expect(postCall?.url).toContain('/projects/proj1/work-items/');
+    expect(postCall?.body).toMatchObject({ name: 'Pushed idea', state: 'state9' });
+    // No `parent` key at all — that is what makes it top-level.
+    expect(postCall?.body).not.toHaveProperty('parent');
+    // The recovery marker is UNCONDITIONAL here too: it is the only thing that
+    // can identify a top-level create whose response was lost.
+    expect(postCall?.body).toHaveProperty(
+      'description_html',
+      `<p>the idea body</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`
+    );
+
+    expect(issue.externalId).toBe('proj1/child1');
+    expect(issue.parentExternalId).toBeNull();
+    expect(issue.description).toBe('the idea body');
+  });
 });
 
 describe('PlaneAdapter marker stripping on read', () => {
@@ -538,7 +566,7 @@ describe('PlaneAdapter recovery-marker surfacing', () => {
   });
 });
 
-describe('PlaneAdapter.findSubIssueByClientKey', () => {
+describe('PlaneAdapter.findIssueByClientKey', () => {
   const childBase = {
     sequence_id: 1,
     state: 's1',
@@ -580,7 +608,7 @@ describe('PlaneAdapter.findSubIssueByClientKey', () => {
     ]);
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
 
-    const found = await adapter.findSubIssueByClientKey('proj1/parentIss', CLIENT_KEY);
+    const found = await adapter.findIssueByClientKey({ containerId: 'proj1', parentExternalId: 'proj1/parentIss' }, CLIENT_KEY);
 
     expect(found?.externalId).toBe('proj1/ours');
     expect(found?.description).toBe('mine');
@@ -600,7 +628,7 @@ describe('PlaneAdapter.findSubIssueByClientKey', () => {
     ]);
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
 
-    await expect(adapter.findSubIssueByClientKey('proj1/parentIss', CLIENT_KEY)).resolves.toBeNull();
+    await expect(adapter.findIssueByClientKey({ containerId: 'proj1', parentExternalId: 'proj1/parentIss' }, CLIENT_KEY)).resolves.toBeNull();
   });
 
   it('falls back to the detail endpoint when the list payload carries no description', async () => {
@@ -616,10 +644,44 @@ describe('PlaneAdapter.findSubIssueByClientKey', () => {
     );
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
 
-    const found = await adapter.findSubIssueByClientKey('proj1/parentIss', CLIENT_KEY);
+    const found = await adapter.findIssueByClientKey({ containerId: 'proj1', parentExternalId: 'proj1/parentIss' }, CLIENT_KEY);
 
     expect(found?.externalId).toBe('proj1/ours');
     expect(calls.some((c) => c.url.includes('/projects/proj1/work-items/ours/'))).toBe(true);
+  });
+
+  it('with NO parent, searches the whole container — the top-level push form', async () => {
+    const { fetchImpl } = listFetch([
+      // A top-level issue somebody else filed, same title.
+      { ...childBase, id: 'theirs', name: 'Pushed idea', parent: null, description_html: '<p>theirs</p>' },
+      {
+        ...childBase,
+        id: 'ours',
+        name: 'Pushed idea',
+        parent: null,
+        description_html: `<p>mine</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`,
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const found = await adapter.findIssueByClientKey(
+      { containerId: 'proj1', parentExternalId: null },
+      CLIENT_KEY
+    );
+
+    expect(found?.externalId).toBe('proj1/ours');
+    expect(found?.parentExternalId).toBeNull();
+  });
+
+  it('throws rather than answering "not there" when it has neither a parent nor a container', async () => {
+    const { fetchImpl } = listFetch([]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    // A null answer would read as "the create never landed" and license a
+    // retry that could duplicate a live issue.
+    await expect(
+      adapter.findIssueByClientKey({ containerId: null, parentExternalId: null }, CLIENT_KEY)
+    ).rejects.toBeInstanceOf(TrackerApiError);
   });
 });
 

@@ -33,16 +33,17 @@ export interface TrackerAdapterCapabilities {
   /** Accepts a non-default API origin (Plane self-hosted). */
   selfHostedBaseUrl: boolean;
   /**
-   * `createSubIssue` can pass `clientKey` as the provider-side id (Linear's
-   * issueCreate accepts a client-supplied issue id), making creates natively
-   * idempotent: outbox recovery is `getIssue(clientKey)`. Where false (Plane)
-   * the outbox reconciles ambiguous creates by listing the parent's
-   * sub-issues and matching the pending record before any retry.
+   * `createSubIssue` / `createIssue` can pass `clientKey` as the provider-side
+   * id (Linear's issueCreate accepts a client-supplied issue id), making creates
+   * natively idempotent: outbox recovery is `getIssue(clientKey)`. Where false
+   * (Plane) the outbox reconciles ambiguous creates by listing the candidate
+   * issues and matching the pending record's marker before any retry.
    */
   idempotentCreate: boolean;
 }
 
-export interface SubIssueDraft {
+/** The fields a create carries, for BOTH `createSubIssue` and `createIssue`. */
+export interface IssueDraft {
   title: string;
   /** Markdown; adapters convert to the provider-native rich format. */
   description?: string;
@@ -85,7 +86,26 @@ export interface TrackerAdapter {
    */
   createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
+    clientKey: string
+  ): Promise<TrackerIssue>;
+
+  /**
+   * Create a TOP-LEVEL issue in the connection's source container — the PUSH
+   * direction: a cyboflow idea filed locally gets its own tracker issue, with
+   * no parent to hang it under.
+   *
+   * Same draft/clientKey/return contract as {@link TrackerAdapter.createSubIssue};
+   * only the placement differs, so `selection` (the connection's persisted
+   * Step-1 source choice) stands in for the parent. Adapters read `containerId`
+   * from it — Linear's team, Plane's project — since that is the level a
+   * provider actually files an issue against; the narrow (view/cycle/module) is
+   * a READ filter and deliberately not a create target, because membership in
+   * one is a separate write both providers model separately.
+   */
+  createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
     clientKey: string
   ): Promise<TrackerIssue>;
 

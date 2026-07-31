@@ -45,7 +45,7 @@ import type {
   TrackerAdapter,
   TrackerAdapterCapabilities,
   FetchLike,
-  SubIssueDraft,
+  IssueDraft,
 } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
 
@@ -60,7 +60,7 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   // Plane has no client-supplied issue id on create, so the create itself is
   // not idempotent. Authorship is recovered instead from the marker paragraph
   // every create stamps into the description — see SYNC_MARKER_PREFIX and
-  // {@link PlaneAdapter.findSubIssueByClientKey}.
+  // {@link PlaneAdapter.findIssueByClientKey}.
   idempotentCreate: false,
 };
 
@@ -323,19 +323,52 @@ export class PlaneAdapter implements TrackerAdapter {
 
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     // Plane has no idempotency key on create (capabilities.idempotentCreate
     // = false), so the key is carried in the description instead: EVERY create
     // ends with the SYNC_MARKER_PREFIX paragraph, which is what makes
-    // findSubIssueByClientKey's "no child carries it" answer conclusive.
+    // findIssueByClientKey's "no child carries it" answer conclusive.
     clientKey: string
   ): Promise<TrackerIssue> {
     const { projectId, issueId: parentIssueId } = splitExternalId(parentExternalId);
+    return this.postWorkItem(projectId, parentIssueId, draft, clientKey);
+  }
+
+  /**
+   * Top-level create (the PUSH direction): a work item in the selection's
+   * PROJECT with no parent. Carries the same unconditional recovery marker as
+   * `createSubIssue` — Plane still has no idempotency key, so a top-level
+   * create that commits and loses its response is recovered by exactly the same
+   * marker lookup ({@link PlaneAdapter.findIssueByClientKey}), which is only
+   * conclusive because EVERY create writes the marker.
+   *
+   * The narrow (cycle/module) is deliberately not applied: Plane models cycle
+   * and module membership as separate link endpoints, not as a field on create,
+   * so honouring it would be a second write with its own failure mode on a path
+   * whose whole correctness argument rests on being one POST.
+   */
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string
+  ): Promise<TrackerIssue> {
+    return this.postWorkItem(selection.containerId, null, draft, clientKey);
+  }
+
+  /** The shared create POST behind both create paths; `parentIssueId` null = top-level. */
+  private async postWorkItem(
+    projectId: string,
+    parentIssueId: string | null,
+    draft: IssueDraft,
+    clientKey: string
+  ): Promise<TrackerIssue> {
     const body: Record<string, unknown> = {
       name: draft.title,
       description_html: toCreateDescriptionHtml(draft.description, clientKey),
-      parent: parentIssueId,
     };
+    if (parentIssueId !== null) {
+      body.parent = parentIssueId;
+    }
     if (draft.stateId !== undefined) {
       body.state = draft.stateId;
     }
@@ -358,26 +391,39 @@ export class PlaneAdapter implements TrackerAdapter {
   }
 
   /**
-   * Ambiguous-create recovery (see the outbox worker): the child of
-   * `parentExternalId` that carries `clientKey` in its SYNC_MARKER_PREFIX
-   * paragraph, or null when no child carries it — which, because every create
-   * sends the marker, PROVES the create never landed and a retry is safe.
+   * Ambiguous-create recovery (see the outbox worker): the issue in
+   * `scope.containerId` that carries `clientKey` in its SYNC_MARKER_PREFIX
+   * paragraph, or null when none carries it — which, because every create sends
+   * the marker, PROVES the create never landed and a retry is safe.
    *
-   * Title is deliberately NOT a criterion: a parent routinely holds two
-   * children with the same title, and adopting the wrong one would silently
-   * redirect every later write-back onto an unrelated issue.
+   * `scope.parentExternalId` narrows the search to one parent's children (a
+   * mirrored `create_sub_issue`); null searches the whole project (a top-level
+   * `create_issue`, which has no parent to key on). BOTH forms match on the
+   * client key alone — title is deliberately NOT a criterion, because a project
+   * routinely holds two issues with the same title and adopting the wrong one
+   * would silently redirect every later write-back onto an unrelated issue.
    *
    * Not part of `TrackerAdapter`: the marker is stripped from every description
    * this adapter returns, so the match cannot be performed by the sync core
    * over a mapped `TrackerIssue` — it has to read the raw payload here.
    */
-  async findSubIssueByClientKey(
-    parentExternalId: string,
+  async findIssueByClientKey(
+    scope: { containerId: string | null; parentExternalId: string | null },
     clientKey: string
   ): Promise<TrackerIssue | null> {
-    const { projectId, issueId: parentIssueId } = splitExternalId(parentExternalId);
-    // Parent-scoped by construction: a Plane sub-issue always lives in its
-    // parent's project, so the project issue list is the whole search space.
+    // Project-scoped by construction: a Plane sub-issue always lives in its
+    // parent's project (which its composite external id carries), and a
+    // top-level create lands in the selection's own project — so the project
+    // issue list is the whole search space either way.
+    const parent = scope.parentExternalId === null ? null : splitExternalId(scope.parentExternalId);
+    const projectId = parent?.projectId ?? scope.containerId;
+    if (projectId === null) {
+      throw new TrackerApiError(
+        PROVIDER,
+        'client-key recovery needs either a parent issue or a source project'
+      );
+    }
+    const parentIssueId = parent?.issueId ?? null;
     const raw = await this.paginateAllWorkItems<PlaneIssueWire>(
       projectId,
       // Same expansion listIssues uses, so an adopted issue maps identically to
@@ -386,7 +432,7 @@ export class PlaneAdapter implements TrackerAdapter {
     );
     const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
     for (const candidate of raw) {
-      if (candidate.parent !== parentIssueId) continue;
+      if (parentIssueId !== null && candidate.parent !== parentIssueId) continue;
       // Documented choice: Plane's list payload does not reliably carry any
       // description field, and the marker lives only in the description — so a
       // candidate that arrived without one is re-fetched from the detail
@@ -707,7 +753,7 @@ function carriesSyncMarker(raw: PlaneIssueWire, marker: string): boolean {
   );
 }
 
-/** False when the endpoint returned no description field at all — see findSubIssueByClientKey. */
+/** False when the endpoint returned no description field at all — see findIssueByClientKey. */
 function hasDescriptionPayload(raw: PlaneIssueWire): boolean {
   return (
     typeof raw.description_html === 'string' ||
@@ -743,7 +789,7 @@ function deriveInitials(name: string): string {
 
 /**
  * Description html for a create: the draft body, then the recovery marker as
- * its own paragraph. The marker is UNCONDITIONAL — findSubIssueByClientKey
+ * its own paragraph. The marker is UNCONDITIONAL — findIssueByClientKey
  * reads "no child carries it" as proof the create never landed, which only
  * holds if every create carries it, empty-bodied ones included.
  */

@@ -12,7 +12,10 @@
  * Covers, per the task brief:
  *   - stage-change enqueue (Done -> 'completed') + dedup on a repeated event.
  *   - the last-written-group baseline stamp suppressing a re-enqueue.
- *   - two_way = 0 / paused / unlinked / epic entities ignored.
+ *   - paused / unlinked / epic entities ignored, and a MANUAL direction still
+ *     enqueuing (the mode gates the drain, never the intent).
+ *   - the IDEA PUSH trigger: a locally-created idea enqueues one create_issue
+ *     per active connection, and each of its four skips.
  *   - decomposition: origin 'started' + one create_sub_issue per unlinked
  *     minted task, and NO creates when mirroring is off.
  *   - close_parent only once EVERY mirrored sibling is terminal — including
@@ -78,7 +81,9 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     selection_mode: 'all',
     selection_json: JSON.stringify({ containerId: 'team-1', narrowId: 'all', narrowKind: 'all' }),
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -259,18 +264,8 @@ describe('writeBack — stage moves', () => {
     expect(outbox()).toHaveLength(0);
   });
 
-  it('ignores an unlinked entity, a two_way=0 connection, and a paused connection', () => {
-    // (a) linked but two_way off
-    const twoWayOff = seedConnection({ id: 'conn-off', two_way: 0 });
-    seedIdea('ide_1', 'IDEA-1', stageIds.done);
-    upsertLink(raw, {
-      connection_id: twoWayOff,
-      entity_type: 'idea',
-      entity_id: 'ide_1',
-      provider: 'linear',
-      external_id: 'ext-1',
-    });
-    // (b) linked but the connection is paused
+  it('ignores an unlinked entity and a paused connection', () => {
+    // (a) linked but the connection is paused
     const paused = seedConnection({ id: 'conn-paused', status: 'paused' });
     seedIdea('ide_2', 'IDEA-2', stageIds.done);
     upsertLink(raw, {
@@ -280,16 +275,37 @@ describe('writeBack — stage moves', () => {
       provider: 'plane',
       external_id: 'ext-2',
     });
-    // (c) not linked at all
+    // (b) not linked at all
     seedIdea('ide_3', 'IDEA-3', stageIds.done);
 
     const listener = makeListener();
-    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
     listener.handleTaskChanged(makeEvent('ide_2', 'idea', stageIds.done));
     listener.handleTaskChanged(makeEvent('ide_3', 'idea', stageIds.done));
 
-    expect(outbox('conn-off')).toHaveLength(0);
     expect(outbox('conn-paused')).toHaveLength(0);
+  });
+
+  it('still enqueues on a MANUAL status connection — the mode gates the drain, not the intent', () => {
+    // The old `two_way = 0` suppressed the enqueue outright, which lost the
+    // stage move for good. A manual direction must instead DELAY it: the row
+    // lands durably here and waits for a "Sync now" to claim it.
+    const held = seedConnection({ id: 'conn-held', status_sync_mode: 'manual' });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: held,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+    const rows = outbox('conn-held');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(rows[0].state).toBe('pending');
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'completed' });
   });
 
   it('ignores an orphaned link and a deleted-action event', () => {
@@ -590,5 +606,126 @@ describe('writeBack — close-parent rollup', () => {
     makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.done));
 
     expect(outbox().filter((r) => r.kind === 'close_parent')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trigger 4 — the idea push
+// ---------------------------------------------------------------------------
+
+describe('writeBack — idea push (create_issue)', () => {
+  /** The 'created' event a freshly-filed idea produces. */
+  function createdEvent(id: string, overrides: Partial<BacklogTaskItem> = {}, actor?: 'user' | 'linear' | 'plane' | 'orchestrator'): TaskChangedEvent {
+    const event = makeEvent(id, 'idea', stageIds.idea, overrides, 'created');
+    return actor === undefined ? event : { ...event, actor };
+  }
+
+  it('enqueues one create_issue per active connection, with a client key and no external id', () => {
+    seedConnection({ id: 'conn-1', provider: 'linear' });
+    seedConnection({ id: 'conn-2', provider: 'plane' });
+    seedIdea('ide_1', 'IDEA-1');
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+
+    for (const connectionId of ['conn-1', 'conn-2']) {
+      const rows = outbox(connectionId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].kind).toBe('create_issue');
+      expect(rows[0].entity_type).toBe('idea');
+      expect(rows[0].entity_id).toBe('ide_1');
+      // No remote issue exists yet — that is what the row is FOR.
+      expect(rows[0].external_id).toBeNull();
+      // The idempotency key the worker hands the adapter.
+      expect(rows[0].client_key).toMatch(/^[0-9a-f-]{36}$/);
+      // The draft is composed at DRAIN time, so nothing is snapshotted here.
+      expect(rows[0].payload_json).toBe('{}');
+    }
+  });
+
+  it('skips a PROVIDER-authored create — the inbound import must not push its own issue back', () => {
+    seedConnection();
+    seedIdea('ide_1', 'IDEA-1');
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', {}, 'linear'));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips an idea that ALREADY carries a link for that provider', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1');
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips a body carrying the tracker-import provenance marker, even unattributed', () => {
+    seedConnection();
+    seedIdea('ide_1', 'IDEA-1');
+
+    // No `actor` at all — a hand-built broadcast. The marker is the backstop.
+    makeListener().handleTaskChanged(
+      createdEvent('ide_1', {
+        body: 'Imported body\n\n---\n<!-- cyboflow:tracker linear:ext-9 -->\nImported from Linear',
+      }),
+    );
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips an A/B experiment sandbox idea', () => {
+    seedConnection();
+    seedIdea('ide_1', 'IDEA-1');
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', { experiment_id: 'exp-1' }, 'user'));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips a paused connection and dedupes a replayed create event', () => {
+    seedConnection({ id: 'conn-paused', status: 'paused' });
+    const active = seedConnection({ id: 'conn-active' });
+    seedIdea('ide_1', 'IDEA-1');
+
+    const listener = makeListener();
+    listener.handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+    listener.handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+
+    expect(outbox('conn-paused')).toHaveLength(0);
+    expect(outbox(active)).toHaveLength(1);
+  });
+
+  it('queues on a PUSH-MANUAL connection too — the drain is where the hold lives', () => {
+    seedConnection({ push_mode: 'manual' });
+    seedIdea('ide_1', 'IDEA-1');
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('create_issue');
+    expect(rows[0].state).toBe('pending');
+  });
+
+  it('does not push on a stage move or on a non-idea create', () => {
+    seedConnection();
+    seedIdea('ide_1', 'IDEA-1');
+    seedTask('tsk_1', 'TASK-1');
+
+    const listener = makeListener();
+    // An UPDATE to an existing idea is not a filing.
+    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.idea, {}, 'stageMoved'));
+    // A task create is the mirroring path's business, not the push's.
+    listener.handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.idea, {}, 'created'));
+
+    expect(outbox()).toHaveLength(0);
   });
 });

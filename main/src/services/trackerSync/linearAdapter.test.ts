@@ -15,7 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { LinearAdapter } from './linearAdapter';
 import { TrackerAuthError } from './errors';
-import type { FetchLike, SubIssueDraft } from './adapterTypes';
+import type { FetchLike, IssueDraft } from './adapterTypes';
 
 interface RecordedCall {
   url: string;
@@ -224,7 +224,7 @@ describe('LinearAdapter.createSubIssue', () => {
       },
     ]);
     const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
-    const draft: SubIssueDraft = { title: 'Sub issue', description: 'desc', stateId: 'state-todo' };
+    const draft: IssueDraft = { title: 'Sub issue', description: 'desc', stateId: 'state-todo' };
 
     const created = await adapter.createSubIssue('parent-1', draft, 'client-key-123');
 
@@ -241,6 +241,62 @@ describe('LinearAdapter.createSubIssue', () => {
       description: 'desc',
       stateId: 'state-todo',
     });
+  });
+});
+
+describe('LinearAdapter.createIssue', () => {
+  it('files a TOP-LEVEL issue against the selection team, with no parent and the client key as its id', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      // ONE call: no parent to resolve a team from — the selection IS the team.
+      {
+        status: 200,
+        body: {
+          data: {
+            issueCreate: {
+              success: true,
+              issue: issueNode({ id: 'client-key-push', identifier: 'COR-9' }),
+            },
+          },
+        },
+      },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    const created = await adapter.createIssue(
+      { containerId: 'team-1', narrowId: 'cycle-3', narrowKind: 'cycle' },
+      { title: 'Pushed idea', description: 'body', stateId: 'state-todo' },
+      'client-key-push',
+    );
+
+    expect(created.externalId).toBe('client-key-push');
+    expect(created.parentExternalId).toBeNull();
+    expect(calls).toHaveLength(1);
+
+    const input = (parseBody(calls[0]).variables ?? {}).input as Record<string, unknown>;
+    expect(input).toMatchObject({
+      id: 'client-key-push',
+      teamId: 'team-1',
+      title: 'Pushed idea',
+      description: 'body',
+      stateId: 'state-todo',
+    });
+    // No parent — that is what makes it top-level.
+    expect(input.parentId).toBeUndefined();
+  });
+
+  it('throws when issueCreate reports failure', async () => {
+    const { fetchImpl } = createFetchMock([
+      { status: 200, body: { data: { issueCreate: { success: false, issue: null } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(
+      adapter.createIssue(
+        { containerId: 'team-1', narrowId: 'all', narrowKind: 'all' },
+        { title: 'Pushed idea' },
+        'client-key-push',
+      ),
+    ).rejects.toThrow(/issueCreate reported failure/);
   });
 });
 

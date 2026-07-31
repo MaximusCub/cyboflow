@@ -11,8 +11,18 @@
  * durable local record BEFORE it is attempted, which is what makes echo
  * suppression and crash recovery possible.
  *
- * Three write-back triggers, all gated on "the entity is linked AND its
- * connection is active with two_way = 1":
+ * NOTHING HERE IS GATED ON A DIRECTION MODE. An enqueue is a durable statement
+ * of INTENT, and 'manual' means "hold this direction until the user asks", not
+ * "throw the intent away" — so the modes gate the DRAIN (outboxWorker's
+ * `allowedKinds`, chosen by trackerSyncService.runPass) and this module records
+ * every intent unconditionally. A connection whose status sync is manual still
+ * accumulates its stage writes and emits them, in order, on the next "Sync now".
+ * The one flag still read here is `mirror_subissues`, which is a scope choice
+ * ("do sub-issues exist at all"), not a cadence.
+ *
+ * Four write-back triggers. The first three need "the entity is linked AND its
+ * connection is active"; the fourth is the only one that fires for an UNLINKED
+ * entity:
  *
  *   1. STAGE MOVES. The entity's stage maps to a write-back group
  *      ('started' / 'completed' / 'cancelled' — `Ready for development`
@@ -29,6 +39,12 @@
  *      issue, 'completed' unless every child was abandoned, in which case the
  *      parent is cancelled (an idempotent no-op where Linear's native
  *      auto-close already fired; the sole mechanism for Plane).
+ *   4. IDEA PUSH. An idea CREATED locally in a connected project enqueues a
+ *      `create_issue` — a top-level issue in the connection's source container.
+ *      Three skips keep it from filing an issue for something that already has
+ *      one: a provider-authored create (the inbound import's own event), an
+ *      idea that already carries a link for that provider, and a body carrying
+ *      the tracker-import provenance marker (the unattributed-event backstop).
  *
  * Every enqueue is DEDUPED against the connection's unresolved outbox rows, so
  * a burst of events (or a replayed one) can never queue the same remote write
@@ -48,10 +64,12 @@ import {
   getConnection,
   getLinkByEntity,
   getLinkByExternal,
+  listConnections,
   listLinksByParentExternal,
   listUnresolvedOutbox,
 } from './store';
 import { resolveStageIds, stageIdToWriteBackGroup, type TrackerStageIds } from './stateMapping';
+import { carriesTrackerProvenance } from './provenance';
 
 // ---------------------------------------------------------------------------
 // Payload shapes
@@ -76,6 +94,19 @@ export interface CreateSubIssuePayload {
   title: string;
   description: string | null;
 }
+
+/**
+ * `payload_json` for the `create_issue` outbox kind: EMPTY, deliberately.
+ *
+ * Unlike a mirrored sub-issue — whose draft is snapshotted here because the
+ * decomposition event is the only moment those tasks are known to be fresh — a
+ * pushed idea's draft is composed by the WORKER at drain time, from the idea's
+ * current title/body/stage. A push can sit queued for a while (the whole point
+ * of push_mode 'manual'), and filing the title the idea had when it was first
+ * typed, rather than the one it has when the issue is actually created, is a
+ * worse first impression than the extra read costs.
+ */
+export const CREATE_ISSUE_PAYLOAD_JSON = '{}';
 
 /**
  * The write-back marker the outbox worker stamps onto a link's
@@ -217,7 +248,9 @@ function resolveLinked(
     if (!link || link.orphaned_at !== null) continue;
     const connection = getConnection(db, link.connection_id);
     if (!connection) continue;
-    if (connection.status !== 'active' || connection.two_way !== 1) continue;
+    // Status only — no direction mode. See the file header: a held direction
+    // still records its intent; only the drain waits.
+    if (connection.status !== 'active') continue;
     return { link, connection };
   }
   return null;
@@ -233,6 +266,12 @@ function route(deps: WriteBackDeps, event: TaskChangedEvent): void {
   // Epics are never linked to an issue: imports land as ideas, and mirroring
   // creates sub-issues for TASKS only.
   if (entityType !== 'idea' && entityType !== 'task') return;
+
+  // Trigger 4 runs on its own, BEFORE the linked lookup, because it is the one
+  // trigger whose subject is an UNLINKED entity.
+  if (entityType === 'idea' && event.action === 'created') {
+    handleIdeaPush(deps, event);
+  }
 
   const linked = resolveLinked(deps.db, entityType, event.taskId);
   if (!linked) return;
@@ -461,4 +500,68 @@ function readTaskStage(db: Database.Database, taskId: string): string | null {
     | { stage_id: string }
     | undefined;
   return row?.stage_id ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger 4 — push a locally-created idea out as a top-level issue
+// ---------------------------------------------------------------------------
+
+/**
+ * The PROVIDER actors. A create authored by one of these is the inbound
+ * import's own write landing locally — pushing it back out would file a second
+ * issue for the issue we just imported.
+ */
+const PROVIDER_ACTORS: ReadonlySet<string> = new Set<string>(PROVIDERS);
+
+/**
+ * An idea was just created locally: enqueue a `create_issue` for every active
+ * connection in its project that should carry it.
+ *
+ * FOUR REASONS TO SKIP, and each one covers a case the others cannot:
+ *   1. PROVIDER ECHO — `actor` is 'linear'/'plane', so this create IS an
+ *      inbound import. Precise, but `actor` is optional on the event.
+ *   2. ALREADY LINKED — the idea already has a link for this connection's
+ *      provider (a Reconcile-step link, a previous push that landed). Whatever
+ *      created it, it is already represented in that tracker.
+ *   3. IMPORT PROVENANCE — the body carries the import marker. The backstop
+ *      under (1) for an unattributed event.
+ *   4. AN EXPERIMENT SANDBOX ROW — an A/B sandbox idea is a local artifact of a
+ *      comparison run, not a piece of work anyone tracks, and filing one into a
+ *      shared workspace is noise nobody asked for.
+ *
+ * Plus the ordinary dedupe: an unresolved `create_issue` already queued for
+ * this idea means a replayed event adds nothing.
+ *
+ * `mirror_subissues` is deliberately NOT consulted — it scopes the DECOMPOSITION
+ * fan-out (whether an idea's tasks become children), which is a different
+ * question from whether the idea itself is represented at all.
+ */
+function handleIdeaPush(deps: WriteBackDeps, event: TaskChangedEvent): void {
+  const { db } = deps;
+  if (event.actor !== undefined && PROVIDER_ACTORS.has(event.actor)) return;
+  if ((event.task.experiment_id ?? null) !== null) return;
+  if (carriesTrackerProvenance(event.task.body)) return;
+
+  for (const connection of listConnections(db, event.projectId)) {
+    if (connection.status !== 'active') continue;
+    if (getLinkByEntity(db, 'idea', event.taskId, connection.provider) !== null) continue;
+
+    const duplicate = listUnresolvedOutbox(db, connection.id).some(
+      (row) => row.kind === 'create_issue' && row.entity_id === event.taskId,
+    );
+    if (duplicate) continue;
+
+    enqueueOutbox(db, {
+      connection_id: connection.id,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: event.taskId,
+      // No remote issue yet — that is the whole point of the row.
+      external_id: null,
+      // The idempotency key: Linear uses it as the created issue's id; Plane
+      // stamps it into the description so a lost create can be found again.
+      client_key: randomUUID(),
+      payload_json: CREATE_ISSUE_PAYLOAD_JSON,
+    });
+  }
 }

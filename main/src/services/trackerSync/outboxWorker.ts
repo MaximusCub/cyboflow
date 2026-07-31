@@ -39,7 +39,7 @@
 import type Database from 'better-sqlite3';
 import type { TrackerConnectionRow, TrackerOutboxRow } from '../../database/models';
 import type { TrackerIssue, TrackerSourceSelection, TrackerState } from '../../../../shared/types/trackerSync';
-import type { TrackerAdapter } from './adapterTypes';
+import type { IssueDraft, TrackerAdapter } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
 import {
   claimNextPending,
@@ -57,7 +57,8 @@ import {
   type WriteBackBaselineStamp,
   type WriteBackGroup,
 } from './writeBack';
-import { pickWriteBackState } from './stateMapping';
+import { pickWriteBackState, resolveStageIds, stageIdToWriteBackGroup } from './stateMapping';
+import { splitBody } from './inboundSync';
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -79,7 +80,7 @@ export interface OutboxDeps {
 export interface OutboxReport {
   /** `update_state` / `close_parent` rows successfully written to the tracker. */
   sent: number;
-  /** Sub-issues created (including ones ADOPTED by ambiguous recovery). */
+  /** Issues created — mirrored children AND pushed ideas, including ones ADOPTED by ambiguous recovery. */
   created: number;
   /** Rows that will never be retried (auth, 4xx, unresolvable state, malformed payload). */
   failedTerminal: number;
@@ -139,19 +140,26 @@ function addMinutes(base: string, minutes: number): string {
  * Drain every eligible pending row for one connection, oldest first, until the
  * queue is empty (or an auth failure pauses the connection).
  *
+ * `allowedKinds` is the DIRECTION-MODE gate (migration 094): the caller passes
+ * the kinds whose direction is running this pass, and every other row is simply
+ * not claimed — it stays `pending`, in order, until a pass whose filter includes
+ * it comes along. Omitting the argument drains everything. An EMPTY array is a
+ * legitimate "every direction is held" and drains nothing.
+ *
  * The provider's state list is fetched at most ONCE per drain and shared by
  * every state write in it.
  */
 export async function drainOutbox(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
+  allowedKinds?: readonly TrackerOutboxRow['kind'][],
 ): Promise<OutboxReport> {
   const report = emptyReport();
   const adapter = deps.adapterFor(connection);
   const states = new StateCache(adapter, connection);
 
   for (;;) {
-    const row = claimNextPending(deps.db, connection.id, toSqliteUtc(deps.nowIso()));
+    const row = claimNextPending(deps.db, connection.id, toSqliteUtc(deps.nowIso()), allowedKinds);
     if (!row) break;
     const halted = await processRow(deps, connection, adapter, states, row, report);
     if (halted) break;
@@ -173,6 +181,9 @@ async function processRow(
 ): Promise<boolean> {
   if (row.kind === 'create_sub_issue') {
     return await processCreate(deps, connection, adapter, row, report);
+  }
+  if (row.kind === 'create_issue') {
+    return await processPush(deps, connection, adapter, states, row, report);
   }
   return await processStateWrite(deps, connection, adapter, states, row, report);
 }
@@ -283,6 +294,164 @@ function adoptCreatedIssue(
 }
 
 // ---------------------------------------------------------------------------
+// create_issue — the PUSH direction
+// ---------------------------------------------------------------------------
+
+/** The idea columns a pushed draft is composed from. */
+interface PushableIdea {
+  title: string;
+  body: string | null;
+  stage_id: string;
+  archived_at: string | null;
+}
+
+/**
+ * `create_issue`: file the idea as a TOP-LEVEL issue in the connection's source
+ * container, then link it.
+ *
+ * THE DRAFT IS COMPOSED HERE, not at enqueue time (see
+ * writeBack.CREATE_ISSUE_PAYLOAD_JSON): a push can wait a long time when
+ * `push_mode` is 'manual', and the tracker should receive the idea as it stands
+ * when the user asks for the sync, not as it was first typed.
+ *
+ * AN IDEA THAT NO LONGER EXISTS — hard-deleted, or archived while the push
+ * waited — settles the row DONE with no remote write. The user's last statement
+ * about that idea was "take it away", and honouring a stale intent by filing it
+ * into a shared workspace is the one outcome nobody can undo from here.
+ */
+async function processPush(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  states: StateCache,
+  row: TrackerOutboxRow,
+  report: OutboxReport,
+): Promise<boolean> {
+  if (row.entity_id === null || row.client_key === null) {
+    failTerminal(deps, row, report, 'malformed row: entity_id / client_key missing');
+    return false;
+  }
+  const selection = parseSelection(connection);
+  if (selection === null) {
+    failTerminal(deps, row, report, 'connection has no source selected to create an issue in');
+    return false;
+  }
+
+  const idea = readPushableIdea(deps.db, row.entity_id);
+  if (idea === null || idea.archived_at !== null) {
+    // Settled, not failed: there is nothing left to push and nothing went wrong.
+    resolveOutbox(deps.db, row.id, 'done');
+    return false;
+  }
+
+  let draft: IssueDraft;
+  let providerStates: TrackerState[];
+  try {
+    providerStates = await states.load();
+    draft = composePushDraft(deps, connection, idea, providerStates);
+  } catch (err) {
+    // Covers the state fetch AND the local board-stage resolution; neither has
+    // sent anything, so an ordinary backoff retry is safe.
+    return recordAdapterFailure(deps, connection, row, report, err);
+  }
+
+  let issue: TrackerIssue;
+  try {
+    issue = await adapter.createIssue(selection, draft, row.client_key);
+  } catch (err) {
+    return recordAdapterFailure(deps, connection, row, report, err, {
+      // Identical reasoning to a sub-issue create: where the provider has no
+      // idempotency key (Plane) an uncertain failure may already have filed the
+      // issue, so the marker lookup — not a second POST — decides.
+      uncertainIsAmbiguous: !adapter.capabilities.idempotentCreate,
+    });
+  }
+
+  adoptPushedIssue(deps, connection, row, issue, groupOfState(providerStates, issue.stateId));
+  report.created += 1;
+  return false;
+}
+
+/**
+ * The draft for a pushed idea: its CURRENT title and description, with the
+ * provenance footer split off (an idea that carries one is not pushed at all —
+ * this is belt-and-braces so a marker can never reach a remote body), plus the
+ * provider state its board stage implies.
+ *
+ * INITIAL STATE. The idea's stage maps to a write-back group exactly as a stage
+ * MOVE would (In development → started, Done → completed, Won't do →
+ * cancelled); every other stage means "filed, not started", which is the
+ * `backlog` group. A workspace with no state in the resolved group leaves
+ * `stateId` unset and takes the provider's own default — for a create that is a
+ * reasonable answer, unlike a state WRITE where the state is the entire point.
+ */
+function composePushDraft(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  idea: PushableIdea,
+  states: TrackerState[],
+): IssueDraft {
+  const stageIds = resolveStageIds(deps.db, connection.project_id);
+  const group = stageIdToWriteBackGroup(idea.stage_id, stageIds) ?? 'backlog';
+  const state = pickWriteBackState(states, group);
+  const { description } = splitBody(idea.body);
+  return {
+    title: idea.title,
+    description: description ?? undefined,
+    stateId: state?.id,
+  };
+}
+
+/**
+ * Record a pushed issue: link the idea to it, seed the baseline from the issue
+ * as created, and settle the row. Post-send bookkeeping — never inside a catch.
+ *
+ * `group` is the group the issue ACTUALLY landed in (read back off its own
+ * `stateId`, not off what we asked for), stamped as `lastWrittenGroup` so a
+ * later local move to that same stage recognizes the tracker as already there
+ * and queues nothing. A group outside the three write-back ones — the ordinary
+ * case, a freshly-filed idea in `backlog` — stamps NOTHING, because a stale key
+ * there would suppress the first genuine Done/Won't-do write-back.
+ */
+function adoptPushedIssue(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  row: TrackerOutboxRow,
+  issue: TrackerIssue,
+  group: WriteBackGroup | null,
+): void {
+  const snapshot = baselineSnapshot(issue);
+  upsertLink(deps.db, {
+    connection_id: connection.id,
+    entity_type: 'idea',
+    entity_id: row.entity_id as string,
+    provider: connection.provider,
+    external_id: issue.externalId,
+    external_identifier: issue.identifier,
+    external_url: issue.url,
+    external_parent_id: issue.parentExternalId,
+    baseline_json: JSON.stringify(
+      group === null ? snapshot : { ...snapshot, lastWrittenGroup: group },
+    ),
+  });
+  resolveOutbox(deps.db, row.id, 'done');
+}
+
+/** An idea's pushable columns, or null when the row is gone. */
+function readPushableIdea(db: Database.Database, ideaId: string): PushableIdea | null {
+  const row = db
+    .prepare('SELECT title, body, stage_id, archived_at FROM ideas WHERE id = ?')
+    .get(ideaId) as PushableIdea | undefined;
+  return row ?? null;
+}
+
+/** The write-back group a provider state belongs to, or null when it has none. */
+function groupOfState(states: TrackerState[], stateId: string): WriteBackGroup | null {
+  const group = states.find((state) => state.id === stateId)?.group;
+  return group === 'started' || group === 'completed' || group === 'cancelled' ? group : null;
+}
+
+// ---------------------------------------------------------------------------
 // Ambiguous recovery
 // ---------------------------------------------------------------------------
 
@@ -350,15 +519,28 @@ export async function resolveAmbiguous(
   connection: TrackerConnectionRow,
   row: TrackerOutboxRow,
 ): Promise<AmbiguousOutcome> {
-  if (row.kind !== 'create_sub_issue') {
+  if (row.kind !== 'create_sub_issue' && row.kind !== 'create_issue') {
     requeue(deps, row);
     return 'requeued';
   }
 
-  const payload = readCreatePayload(row);
-  if (payload === null || row.entity_id === null || row.client_key === null) {
+  // A sub-issue create carries its parent in the payload; a push carries no
+  // payload at all and is scoped by the connection's own source selection.
+  const payload = row.kind === 'create_sub_issue' ? readCreatePayload(row) : null;
+  const selection = row.kind === 'create_issue' ? parseSelection(connection) : null;
+  if (row.entity_id === null || row.client_key === null) {
+    resolveOutbox(deps.db, row.id, 'failed', { lastError: 'malformed row: entity_id / client_key missing' });
+    return 'failed';
+  }
+  if (row.kind === 'create_sub_issue' && payload === null) {
     resolveOutbox(deps.db, row.id, 'failed', {
-      lastError: 'malformed payload: parentExternalId / entity_id / client_key missing',
+      lastError: 'malformed payload: parentExternalId missing',
+    });
+    return 'failed';
+  }
+  if (row.kind === 'create_issue' && selection === null) {
+    resolveOutbox(deps.db, row.id, 'failed', {
+      lastError: 'connection has no source selected to search for the created issue in',
     });
     return 'failed';
   }
@@ -369,7 +551,13 @@ export async function resolveAmbiguous(
   try {
     found = adapter.capabilities.idempotentCreate
       ? await adapter.getIssue(clientKey)
-      : await findByClientKey(adapter, connection, payload, clientKey);
+      : await findByClientKey(adapter, connection, clientKey, {
+          // A sub-issue lives in its parent's container, so the parent both
+          // scopes and constrains the search; a top-level push is scoped by the
+          // selection's container with NO parent constraint.
+          containerId: selection?.containerId ?? null,
+          parentExternalId: payload?.parentExternalId ?? null,
+        });
   } catch (err) {
     if (err instanceof TrackerAuthError) {
       resolveOutbox(deps.db, row.id, 'failed', { lastError: describeError(err) });
@@ -386,7 +574,16 @@ export async function resolveAmbiguous(
     return 'requeued';
   }
 
-  adoptCreatedIssue(deps, connection, row, found, payload.parentExternalId);
+  if (payload !== null) {
+    adoptCreatedIssue(deps, connection, row, found, payload.parentExternalId);
+  } else {
+    // No `lastWrittenGroup` stamp on this path, deliberately: reading the
+    // issue's group back would cost a state-list round trip on a rare recovery,
+    // and its only effect is suppressing ONE redundant (idempotent) state write
+    // the next time this idea moves. The sub-issue adopt path makes the same
+    // trade.
+    adoptPushedIssue(deps, connection, row, found, null);
+  }
   return 'adopted';
 }
 
@@ -401,32 +598,42 @@ export async function resolveAmbiguous(
  * match cannot be done here over a mapped `TrackerIssue`.
  */
 interface ClientKeyRecoverableAdapter {
-  findSubIssueByClientKey(parentExternalId: string, clientKey: string): Promise<TrackerIssue | null>;
+  findIssueByClientKey(
+    scope: { containerId: string | null; parentExternalId: string | null },
+    clientKey: string,
+  ): Promise<TrackerIssue | null>;
 }
 
 function supportsClientKeyRecovery(
   adapter: TrackerAdapter,
 ): adapter is TrackerAdapter & ClientKeyRecoverableAdapter {
   const candidate = adapter as Partial<ClientKeyRecoverableAdapter>;
-  return typeof candidate.findSubIssueByClientKey === 'function';
+  return typeof candidate.findIssueByClientKey === 'function';
 }
 
 /**
- * Match the parent's children on the row's CLIENT KEY, never on the title: a
- * parent routinely holds two children with the same title, and adopting the
- * wrong one would link the task to an unrelated issue and point every later
- * write-back at it. Because the adapter stamps the key into every create, "no
- * child carries it" means our create never landed and the retry is safe.
+ * Match the candidate issues on the row's CLIENT KEY, never on the title: a
+ * container routinely holds two issues with the same title, and adopting the
+ * wrong one would link the entity to an unrelated issue and point every later
+ * write-back at it. Because the adapter stamps the key into every create, "none
+ * carries it" means our create never landed and the retry is safe.
+ *
+ * `scope.parentExternalId` narrows a mirrored sub-issue to one parent's
+ * children; a top-level push passes null and searches the container instead.
+ * Exactly one of the two is always present, and the ADAPTER decides which it
+ * needs: a sub-issue's container is implicit in its parent's external id, which
+ * only the adapter may parse (`TrackerIssue.externalId` is adapter-opaque by
+ * contract).
  *
  * Throws when the adapter cannot match by client key at all — "cannot look it
  * up" must NOT read as "it isn't there", or the retry would duplicate the
- * sub-issue.
+ * issue.
  */
 async function findByClientKey(
   adapter: TrackerAdapter,
   connection: TrackerConnectionRow,
-  payload: CreateSubIssuePayload,
   clientKey: string,
+  scope: { containerId: string | null; parentExternalId: string | null },
 ): Promise<TrackerIssue | null> {
   if (!supportsClientKeyRecovery(adapter)) {
     throw new TrackerApiError(
@@ -434,7 +641,7 @@ async function findByClientKey(
       'adapter has neither idempotent creates nor client-key recovery',
     );
   }
-  return await adapter.findSubIssueByClientKey(payload.parentExternalId, clientKey);
+  return await adapter.findIssueByClientKey(scope, clientKey);
 }
 
 /** Put a row back in the pending queue, eligible immediately. */

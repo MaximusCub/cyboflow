@@ -30,7 +30,7 @@ import type {
   TrackerStateGroup,
   TrackerIssue,
 } from '../../../../shared/types/trackerSync';
-import type { TrackerAdapter, TrackerAdapterCapabilities, FetchLike, SubIssueDraft } from './adapterTypes';
+import type { TrackerAdapter, TrackerAdapterCapabilities, FetchLike, IssueDraft } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
 
 const LINEAR_API_URL = 'https://api.linear.app/graphql';
@@ -153,7 +153,7 @@ interface GetIssueTeamResponse {
   issue: { team: { id: string } } | null;
 }
 
-interface CreateSubIssueResponse {
+interface CreateIssueResponse {
   issueCreate: { success: boolean; issue: LinearIssueNode | null };
 }
 
@@ -175,7 +175,8 @@ interface LinearIssueFilter {
 interface LinearIssueCreateInput {
   id: string;
   teamId: string;
-  parentId: string;
+  /** Omitted on a top-level create (`createIssue`); set on a mirrored sub-issue. */
+  parentId?: string;
   title: string;
   description?: string;
   stateId?: string;
@@ -335,8 +336,9 @@ const GET_ISSUE_TEAM_QUERY = `
   }
 `;
 
-const CREATE_SUB_ISSUE_MUTATION = `
-  mutation CreateSubIssue($input: IssueCreateInput!) {
+/** Shared by createSubIssue and createIssue — the placement lives in the input. */
+const CREATE_ISSUE_MUTATION = `
+  mutation CreateIssue($input: IssueCreateInput!) {
     issueCreate(input: $input) {
       success
       issue {
@@ -607,7 +609,7 @@ export class LinearAdapter implements TrackerAdapter {
     return issue ? mapIssueNode(issue) : null;
   }
 
-  async createSubIssue(parentExternalId: string, draft: SubIssueDraft, clientKey: string): Promise<TrackerIssue> {
+  async createSubIssue(parentExternalId: string, draft: IssueDraft, clientKey: string): Promise<TrackerIssue> {
     const { data, errors, status } = await this.execute<GetIssueTeamResponse>(GET_ISSUE_TEAM_QUERY, {
       id: parentExternalId,
     });
@@ -634,7 +636,33 @@ export class LinearAdapter implements TrackerAdapter {
       description: draft.description,
       stateId: draft.stateId,
     };
-    const created = await this.request<CreateSubIssueResponse>(CREATE_SUB_ISSUE_MUTATION, { input });
+    return this.issueCreate(input);
+  }
+
+  /**
+   * Top-level create (the PUSH direction). No parent lookup is needed — a
+   * Linear issue is filed against a TEAM, which is exactly what the source
+   * selection's `containerId` is — so this is the create mutation and nothing
+   * else. The client-supplied id keeps it idempotent, same as the sub-issue
+   * path: a repeat POST with the same id is a no-op rather than a second issue.
+   */
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string
+  ): Promise<TrackerIssue> {
+    return this.issueCreate({
+      id: clientKey,
+      teamId: selection.containerId,
+      title: draft.title,
+      description: draft.description,
+      stateId: draft.stateId,
+    });
+  }
+
+  /** The shared `issueCreate` call + failure check behind both create paths. */
+  private async issueCreate(input: LinearIssueCreateInput): Promise<TrackerIssue> {
+    const created = await this.request<CreateIssueResponse>(CREATE_ISSUE_MUTATION, { input });
     if (!created.issueCreate.success || !created.issueCreate.issue) {
       throw new TrackerApiError('linear', 'issueCreate reported failure', null);
     }

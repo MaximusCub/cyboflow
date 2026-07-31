@@ -40,7 +40,7 @@ import type {
   TrackerState,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
 import { TrackerApiError, TrackerAuthError } from '../errors';
 import {
   enqueueOutbox,
@@ -52,6 +52,7 @@ import {
   type NewConnectionRow,
 } from '../store';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps } from '../outboxWorker';
+import { resolveStageIds } from '../stateMapping';
 import type { CreateSubIssuePayload, UpdateStatePayload } from '../writeBack';
 
 const PROJECT_ID = 1;
@@ -91,9 +92,12 @@ interface UpdateCall {
   stateId: string;
 }
 interface CreateCall {
-  parentExternalId: string;
-  draft: SubIssueDraft;
+  /** Null on a top-level `createIssue` (the push direction). */
+  parentExternalId: string | null;
+  draft: IssueDraft;
   clientKey: string;
+  /** The source container a top-level create was filed into; null on a sub-issue. */
+  containerId?: string | null;
 }
 
 /** Scriptable TrackerAdapter: records every call, throws whatever a test queues. */
@@ -147,12 +151,31 @@ class FakeAdapter implements TrackerAdapter {
   }
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     clientKey: string,
   ): Promise<TrackerIssue> {
     this.createCalls.push({ parentExternalId, draft, clientKey });
     if (this.failCreate) throw this.takeFailure('failCreate');
     return makeIssue(clientKey, { title: draft.title, parentExternalId });
+  }
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.createCalls.push({
+      parentExternalId: null,
+      containerId: selection.containerId,
+      draft,
+      clientKey,
+    });
+    if (this.failCreate) throw this.takeFailure('failCreate');
+    return makeIssue(clientKey, {
+      title: draft.title,
+      // The provider settles the state: an omitted draft state takes its
+      // default, exactly as a real create would.
+      stateId: draft.stateId ?? 'state-backlog',
+    });
   }
   async updateIssueState(externalId: string, stateId: string): Promise<void> {
     this.updateCalls.push({ externalId, stateId });
@@ -186,17 +209,24 @@ class FakeMarkerAdapter extends FakeAdapter {
   /** externalId -> the client key stamped into that issue's description. */
   readonly markers = new Map<string, string>();
   clientKeyLookups = 0;
+  /** Every scope a recovery lookup was made with, so a test can assert the shape. */
+  readonly clientKeyScopes: Array<{ containerId: string | null; parentExternalId: string | null }> =
+    [];
 
-  async findSubIssueByClientKey(
-    parentExternalId: string,
+  async findIssueByClientKey(
+    scope: { containerId: string | null; parentExternalId: string | null },
     clientKey: string,
   ): Promise<TrackerIssue | null> {
     this.clientKeyLookups += 1;
+    this.clientKeyScopes.push(scope);
     if (this.failLookup) throw this.takeFailure('failLookup');
     return (
       this.issues.find(
         (issue) =>
-          issue.parentExternalId === parentExternalId &&
+          // A null parent means "search the whole container" — the top-level
+          // push's shape — so the parent is only compared when one is given.
+          (scope.parentExternalId === null ||
+            issue.parentExternalId === scope.parentExternalId) &&
           this.markers.get(issue.externalId) === clientKey,
       ) ?? null
     );
@@ -215,13 +245,37 @@ class CommitThenFailAdapter extends FakeMarkerAdapter {
 
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     clientKey: string,
   ): Promise<TrackerIssue> {
     this.createCalls.push({ parentExternalId, draft, clientKey });
+    return this.commit(draft, clientKey, parentExternalId);
+  }
+
+  /** Same lost-response shape for the TOP-LEVEL push: committed, then thrown. */
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.createCalls.push({
+      parentExternalId: null,
+      containerId: selection.containerId,
+      draft,
+      clientKey,
+    });
+    return this.commit(draft, clientKey, null);
+  }
+
+  private commit(
+    draft: IssueDraft,
+    clientKey: string,
+    parentExternalId: string | null,
+  ): TrackerIssue {
     const issue = makeIssue(`proj-1/child-${this.createCalls.length}`, {
       title: draft.title,
       parentExternalId,
+      stateId: draft.stateId ?? 'state-backlog',
     });
     this.issues.push(issue);
     this.markers.set(issue.externalId, clientKey);
@@ -273,7 +327,9 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     selection_mode: 'all',
     selection_json: null,
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -419,6 +475,153 @@ describe('drainOutbox — sub-issue creation', () => {
       stateId: 'state-backlog',
       title: 'Task TASK-1',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drain — the PUSH direction (create_issue)
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — top-level issue creation (push)', () => {
+  /** A real board + idea row: the push draft is composed from them at drain time. */
+  function seedIdea(
+    id: string,
+    opts: { title?: string; body?: string | null; stage?: 'idea' | 'done'; archived?: boolean } = {},
+  ): void {
+    svc.seedDefaultBoard(PROJECT_ID);
+    const stageIds = resolveStageIds(raw, PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, summary, body, board_id, stage_id, archived_at)
+         VALUES (?, ?, 'IDEA-1', ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        PROJECT_ID,
+        opts.title ?? 'Ship the push direction',
+        opts.body ?? null,
+        `board-${PROJECT_ID}-default`,
+        opts.stage === 'done' ? stageIds.done : stageIds.idea,
+        opts.archived === true ? '2026-07-30 11:00:00' : null,
+      );
+  }
+
+  function enqueuePush(connectionId: string, entityId: string, clientKey: string): TrackerOutboxRow {
+    return enqueueOutbox(raw, {
+      connection_id: connectionId,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: entityId,
+      client_key: clientKey,
+      // Empty BY DESIGN — the draft is composed at drain time.
+      payload_json: '{}',
+    });
+  }
+
+  it('composes the draft from the idea AT DRAIN TIME, files it in the source container, and links it', async () => {
+    const connection = seedConnection();
+    seedIdea('ide_1', {
+      title: 'Ship the push direction',
+      // A provenance footer must never reach a remote body, even though an idea
+      // carrying one is not pushed in the first place.
+      body: 'The local description.\n\n---\n<!-- cyboflow:tracker linear:ext-9 -->\nImported from Linear',
+    });
+    const row = enqueuePush(connection.id, 'ide_1', 'client-key-push');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.createCalls).toEqual([
+      {
+        parentExternalId: null,
+        containerId: SELECTION.containerId,
+        draft: {
+          title: 'Ship the push direction',
+          description: 'The local description.',
+          // Stage 'Idea' maps to no write-back group, so the create falls back
+          // to the BACKLOG-group state.
+          stateId: 'state-backlog',
+        },
+        clientKey: 'client-key-push',
+      },
+    ]);
+    expect(report.created).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
+
+    const link = getLinkByEntity(raw, 'idea', 'ide_1', 'linear');
+    expect(link?.external_id).toBe('client-key-push');
+    expect(link?.external_parent_id).toBeNull();
+    const baseline = JSON.parse(link?.baseline_json ?? '{}') as Record<string, unknown>;
+    expect(baseline).toMatchObject({ stateId: 'state-backlog', title: 'Ship the push direction' });
+    // Backlog is not a write-back group, so no stamp — a stale one would
+    // suppress the first genuine Done/Won't-do write-back.
+    expect(baseline).not.toHaveProperty('lastWrittenGroup');
+  });
+
+  it("stamps lastWrittenGroup with the group the issue ACTUALLY landed in", async () => {
+    const connection = seedConnection();
+    seedIdea('ide_1', { stage: 'done' });
+    enqueuePush(connection.id, 'ide_1', 'client-key-done');
+    const adapter = new FakeAdapter();
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.createCalls[0].draft.stateId).toBe('state-done');
+    const link = getLinkByEntity(raw, 'idea', 'ide_1', 'linear');
+    expect(JSON.parse(link?.baseline_json ?? '{}')).toMatchObject({
+      stateId: 'state-done',
+      lastWrittenGroup: 'completed',
+    });
+  });
+
+  it('settles a push whose idea was deleted or archived, WITHOUT a remote write', async () => {
+    const connection = seedConnection();
+    // (a) hard-deleted: no row at all.
+    const gone = enqueuePush(connection.id, 'ide_gone', 'client-key-gone');
+    // (b) archived while the push waited.
+    seedIdea('ide_archived', { archived: true });
+    const archived = enqueuePush(connection.id, 'ide_archived', 'client-key-archived');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.createCalls).toEqual([]);
+    expect(report.created).toBe(0);
+    expect(report.failedTerminal).toBe(0);
+    for (const row of [gone, archived]) expect(fetchOutbox(row.id).state).toBe('done');
+    expect(getLinkByEntity(raw, 'idea', 'ide_archived', 'linear')).toBeNull();
+  });
+
+  it('leaves a push row untouched when the drain does not own the push direction', async () => {
+    const connection = seedConnection();
+    seedIdea('ide_1');
+    const push = enqueuePush(connection.id, 'ide_1', 'client-key-held');
+    const state = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection, ['update_state', 'close_parent']);
+
+    expect(adapter.createCalls).toEqual([]);
+    expect(report.sent).toBe(1);
+    expect(fetchOutbox(state.id).state).toBe('done');
+    // Held, not consumed: still pending, still attempt 0.
+    expect(fetchOutbox(push.id).state).toBe('pending');
+    expect(fetchOutbox(push.id).attempts).toBe(0);
+  });
+
+  it('parks an uncertain push as ambiguous on a provider without idempotent creates', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    seedIdea('ide_1');
+    const row = enqueuePush(connection.id, 'ide_1', 'client-key-lost');
+    const adapter = new CommitThenFailAdapter();
+    adapter.failAfterCommit = new TrackerApiError('plane', 'gateway timeout', 504);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    // NOT a blind retry: the issue may well exist remotely already.
+    expect(fetchOutbox(row.id).state).toBe('ambiguous');
+    expect(report.retriesScheduled).toBe(1);
+    expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')).toBeNull();
   });
 });
 
@@ -658,6 +861,77 @@ describe('processAmbiguous', () => {
     const drainReport = await drainOutbox(makeDeps(adapter), connection);
     expect(drainReport.created).toBe(1);
     expect(adapter.createCalls).toHaveLength(1);
+  });
+
+  it('adopts an ambiguous TOP-LEVEL push by its marker, searching the container with no parent', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      client_key: 'client-key-push',
+      payload_json: '{}',
+    });
+    makeAmbiguous(row.id, connection.id);
+
+    const adapter = new FakeMarkerAdapter();
+    adapter.issues = [
+      // A same-title top-level issue somebody else filed. Listed first, so a
+      // title match would take it.
+      makeIssue('proj-1/theirs', { title: 'Ship the push direction', parentExternalId: null }),
+      makeIssue('proj-1/ours', { title: 'Ship the push direction', parentExternalId: null }),
+    ];
+    adapter.markers.set('proj-1/ours', 'client-key-push');
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(report.created).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    // Linked back to the ORIGINATING idea — the whole point of the row.
+    expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')?.external_id).toBe('proj-1/ours');
+    // Scoped by the connection's source container, with NO parent constraint:
+    // a top-level issue has no parent to key on.
+    expect(adapter.clientKeyScopes).toEqual([
+      { containerId: SELECTION.containerId, parentExternalId: null },
+    ]);
+  });
+
+  it('returns a PROVABLY-UNSENT top-level push to pending, and the drain then creates it once', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    svc.seedDefaultBoard(PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id)
+         VALUES ('ide_1', ?, 'IDEA-1', 'Ship the push direction', ?, ?)`,
+      )
+      .run(PROJECT_ID, `board-${PROJECT_ID}-default`, resolveStageIds(raw, PROJECT_ID).idea);
+    const row = enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      client_key: 'client-key-push',
+      payload_json: '{}',
+    });
+    makeAmbiguous(row.id, connection.id);
+
+    // Nothing in the container carries our key, and every create writes one —
+    // so the create PROVABLY never landed and a retry cannot duplicate it.
+    const adapter = new FakeMarkerAdapter();
+    adapter.issues = [makeIssue('proj-1/unrelated', { title: 'Something else' })];
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(report.created).toBe(0);
+    expect(report.ambiguousResolved).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('pending');
+    expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')).toBeNull();
+
+    const drainReport = await drainOutbox(makeDeps(adapter), connection);
+    expect(drainReport.created).toBe(1);
+    expect(adapter.createCalls).toHaveLength(1);
+    expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')).not.toBeNull();
   });
 
   it('adopts the Plane child carrying the row CLIENT KEY, not the same-title sibling', async () => {
