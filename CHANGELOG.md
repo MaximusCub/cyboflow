@@ -6,6 +6,27 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.34] — 2026-07-30
+
+### Added
+
+- **Per-provider access toggles**: enable/disable each AI provider from Settings → Integrations and the onboarding Connect step, persisted to `AppConfig`. Provider access is enforced at the launch seams and at the SDK/CLI call level, every runtime picker is gated on it, and a provider-disabled send is explained with a link to Settings (the framing clears once the toggle returns).
+- **Design comment-mode & feedback outbox**: a comment-mode capture channel (serializer injection, frozen-DOM sanitizer, nonce-CSP comment frame + inspector rail with element-anchored drafts) feeding a guarded design-feedback outbox pipeline — a `sendDesignBatch` tRPC seam, chokepoint primitives, boot recovery, the `cyboflow_design_ack_feedback` tool, and a revision-turn contract.
+- **Ad-hoc session evals**: a `cyboflow_run_eval` MCP tool that publishes its verdict as an `eval-report` session artifact (rendered with the sprint-end ScoreSummary), plus an Efficiency & Economy dimension in the code-review eval rubric (v1.2).
+- **Background sub-agent reports**: a background sub-agent's final report now renders in the chat.
+- **Codex runtime for visual verification**: the visual-verification agent can run on Codex, with its runtime controls unlocked in the agent editors.
+- First-party download counter at `dl.cyboflow.com` (Tier 1).
+
+### Fixed
+
+- Sub-agent narration no longer leaks into the parent chat; background tasks are attributed correctly, failures are never swallowed, and the `task_*` schemas are hardened.
+- The codex-pty lane resolves the bundled Codex binary and probes CLI availability with the environment the spawn actually uses.
+- Orch-socket handling: never unlink a socket another instance rebound, skip `close()` when the path was rebound, and report MCP health as failed when the socket path is lost.
+- The opus alias is pinned to `claude-opus-5[1m]` to restore the 1M window, and both window forms of a pinned model are excluded from the picker catalog.
+- A refused PTY resume is explained (with an offer to resume anyway) and a refused turn no longer leaves the chat stuck "thinking".
+- The schema-version gate runs before binding shared state.
+- R2 upload robustness: single-connection and optional fresh-connection (`R2_UPLOAD_NO_KEEPALIVE`) modes survive proxy resets.
+
 ## [0.1.33] — 2026-07-29
 
 ### Added
