@@ -36,6 +36,11 @@
  * logged into the pass log and left active: the next tick retries, and the
  * outbox's own backoff handles per-write retry.
  *
+ * STATUS GUARDS. A pass only ever runs for an ACTIVE connection, and it re-reads
+ * that status at every phase boundary — `disconnect` (or a pause) flips the
+ * column while the pass is in flight, and from that moment the pass abandons its
+ * remaining phases and persists NOTHING. See {@link TrackerSyncService.runPass}.
+ *
  * WRITE-BACK LATENCY. The entity-event listener only ENQUEUES; without a nudge
  * the row would sit until the next 5-minute poll, which reads as "cyboflow
  * didn't update my tracker". So an event that leaves a pending row arms a 2s
@@ -200,6 +205,14 @@ export class TrackerCredentialsError extends Error {
     super(message);
     this.name = 'TrackerCredentialsError';
   }
+}
+
+/** What {@link TrackerSyncService.runWriteBack} did with phases 1+2. */
+interface WriteBackOutcome {
+  /** The connection ended up `paused` — an auth failure inside the worker. */
+  paused: boolean;
+  /** The connection stopped being active between the two phases (see runPass). */
+  abandoned: boolean;
 }
 
 export interface TrackerSyncServiceDeps {
@@ -451,6 +464,28 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return started;
   }
 
+  /**
+   * ONE pass, guarded at every phase boundary.
+   *
+   * A pass is only ever legitimate for an ACTIVE connection. `tick` already
+   * filters, but "Sync now" (and the fire-and-forget pass `connect` kicks) can
+   * arrive against a row the user paused or disconnected in the meantime — hence
+   * the entry check.
+   *
+   * ABANDONING. The status is then RE-READ between phases, because `disconnect`
+   * flips that column while a pass is in flight. Once it is no longer active the
+   * pass stops where it stands and persists NOTHING — no `last_sync_at`, no log,
+   * no broadcast. The phase already in flight still finishes (nothing can
+   * un-send an HTTP request), but its outcome can no longer be followed by
+   * another local write, remote write, or cursor advance. What that leaves
+   * behind — a settled outbox row, a moved cursor, an un-swept deletion — is
+   * exactly the shape a crash mid-pass leaves, which boot recovery
+   * ({@link recoverInFlightWrites}) and the next pass already reconcile.
+   *
+   * The one status change that does NOT abandon is this pass's own auth pause:
+   * it must still write the '⚠ authorization failed' line the connected view
+   * renders as a re-connect prompt.
+   */
   private async runPass(connectionId: string, force: boolean): Promise<TrackerSyncPassResult> {
     const entries: TrackerSyncLogEntry[] = [];
     const connection = getConnection(this.db, connectionId);
@@ -464,6 +499,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
         error: 'connection not found',
       };
     }
+    if (connection.status !== 'active') return inactiveResult(connectionId, connection.status);
 
     // Counted BEFORE the work so a failing pass still advances the sweep clock.
     const passIndex = this.passCounts.get(connectionId) ?? 0;
@@ -478,9 +514,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
     try {
       const adapter = this.buildAdapter(connection);
-      paused = await this.runWriteBack(connection, adapter, entries);
+      const writeBack = await this.runWriteBack(connection, adapter, entries);
+      if (writeBack.abandoned) return abandonedResult(connectionId, entries);
+      paused = writeBack.paused;
 
       if (!paused) {
+        if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
         entries.push({ marker: '▸', line: 'GET issues' });
         const inbound = await runInboundSync(
           { db: this.db, adapter, router: this.router, nowIso: this.nowIso },
@@ -490,6 +529,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
         conflictsTouched += inbound.conflictsOpened + inbound.autoResolved;
 
         if (sweepDue) {
+          if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
           entries.push({ marker: '▸', line: 'GET issue ids' });
           const sweep = await runDeletionSweep(
             { db: this.db, adapter, router: this.router, nowIso: this.nowIso },
@@ -516,6 +556,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
       }
     }
 
+    // The last boundary — a disconnect that landed during the final phase must
+    // not have its log and poll-clock stamp written out from under it. `paused`
+    // is this pass's own doing, so it is not an abandon.
+    if (!paused && !this.isStillActive(connectionId)) {
+      return abandonedResult(connectionId, entries);
+    }
+
     entries.push(
       paused
         ? { marker: '⚠', line: 'connection paused — reconnect to resume' }
@@ -535,20 +582,33 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
-   * Phases 1+2 — reconcile ambiguous writes, then drain the queue. Returns true
-   * when the connection ended up paused (the worker pauses it itself on an auth
-   * failure; the pass then skips inbound rather than repeating the failure).
+   * Phases 1+2 — reconcile ambiguous writes, then drain the queue, with the
+   * phase boundary between them guarded exactly like the later ones (see
+   * {@link runPass}): a disconnect during the reconcile round-trip must not be
+   * followed by a fresh burst of remote writes. An auth pause is this pass's own
+   * doing, so it reports `paused`, never `abandoned`.
    */
   private async runWriteBack(
     connection: TrackerConnectionRow,
     adapter: TrackerAdapter,
     entries: TrackerSyncLogEntry[],
-  ): Promise<boolean> {
+  ): Promise<WriteBackOutcome> {
     const deps: OutboxDeps = { db: this.db, adapterFor: () => adapter, nowIso: this.nowIso };
     const ambiguous = await processAmbiguous(deps, connection);
-    const drained = ambiguous.authPaused ? null : await drainOutbox(deps, connection);
+    const abandoned = !ambiguous.authPaused && !this.isStillActive(connection.id);
+    const drained = ambiguous.authPaused || abandoned ? null : await drainOutbox(deps, connection);
     appendWriteBackLines(entries, ambiguous, drained);
-    return ambiguous.authPaused || drained?.authPaused === true;
+    return { paused: ambiguous.authPaused || drained?.authPaused === true, abandoned };
+  }
+
+  /**
+   * Phase-boundary guard: is the connection STILL active as PERSISTED right
+   * now? Deliberately a re-read rather than the row captured at the start of the
+   * pass — `disconnect` (and the auth-pause path) write that column while a pass
+   * is in flight, and the captured row would never see it.
+   */
+  private isStillActive(connectionId: string): boolean {
+    return getConnection(this.db, connectionId)?.status === 'active';
   }
 
   // -------------------------------------------------------------------------
@@ -637,12 +697,18 @@ export class TrackerSyncService implements TrackerSyncFacade {
           error: 'connection not found',
         };
       }
+      // Same guard as a full pass: a drain armed just before the user paused or
+      // disconnected must not run — it would find no stored key and pause a row
+      // that is already retired.
+      if (connection.status !== 'active') return inactiveResult(connectionId, connection.status);
 
       let paused = false;
       let error: string | null = null;
       try {
         const adapter = this.buildAdapter(connection);
-        paused = await this.runWriteBack(connection, adapter, entries);
+        const writeBack = await this.runWriteBack(connection, adapter, entries);
+        if (writeBack.abandoned) return abandonedResult(connectionId, entries);
+        paused = writeBack.paused;
       } catch (err) {
         error = describeError(err);
         if (isCredentialFailure(err)) {
@@ -654,6 +720,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
           entries.push({ marker: '⚠', line: `write-back failed · ${error}` });
           this.logger?.error('[trackerSync] write-back drain failed', { connectionId, error });
         }
+      }
+
+      // Same last boundary as a full pass: a drain whose connection was retired
+      // under it appends nothing to the log it no longer owns.
+      if (!paused && !this.isStillActive(connectionId)) {
+        return abandonedResult(connectionId, entries);
       }
 
       // A drain that had nothing to say leaves the last pass's log alone.
@@ -855,32 +927,27 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * Persist a connection from the wizard's Review step and start syncing it.
    *
    * ORDER IS DELIBERATE:
-   *   1. Probe the key live. The wizard validated it in Step 0, but the row's
-   *      identity columns — and Plane's addressing slug — come from the LIVE
-   *      identity, not from anything the renderer typed.
-   *   2. Encrypt the key (a safeStorage failure must not leave a half-built
-   *      connection behind).
-   *   3. Apply the DISCARD decisions, which touch no tracker table: doing them
-   *      before anything is persisted means a rejected archive (an active run on
-   *      a task) aborts the whole connect with nothing written.
-   *   4. Insert the row + secret, then the LINK decisions (fail-soft per link —
-   *      one colliding external id must not sink an otherwise-good connection).
-   *   5. Kick the first pass fire-and-forget: the wizard closes on the mutation's
+   *   1. Probe the key live, then encrypt it. The wizard validated it in Step 0,
+   *      but the row's identity columns — and Plane's addressing slug — come
+   *      from the LIVE identity, not from anything the renderer typed; and a
+   *      safeStorage refusal must be known before anything is written.
+   *   2. Insert the row + store the secret. This pair is the DURABLE ANCHOR:
+   *      up to here nothing entity-visible has happened, so a failure — a
+   *      constraint, a crash, an unusable keychain — leaves genuinely nothing
+   *      behind and `connect` rejects with no half-built state.
+   *   3. THEN the reconcile decisions (discards, then links), FAIL-SOFT per row.
+   *      Each row is an independent user decision, so a rejected archive (an
+   *      active run on a task) or a colliding external id is logged and skipped:
+   *      it must neither sink the connection the user just authorized nor stop
+   *      the rows after it. Running these BEFORE the anchor is what used to make
+   *      a rejection destructive — the earlier discards were already committed,
+   *      and connect then failed with no connection to show for them.
+   *   4. Kick the first pass fire-and-forget: the wizard closes on the mutation's
    *      return, and the first pass is a full network round-trip.
    */
   async connect(payload: TrackerConnectPayload): Promise<{ connectionId: string }> {
     const identity = await this.adapterForCredentials(payload.credentials).validateCredentials();
     const cipher = encryptTrackerSecret(payload.credentials.apiKey);
-
-    for (const decision of payload.reconcile) {
-      if (decision.action !== 'discard') continue;
-      await this.router.applyChange(payload.projectId, {
-        actor: 'user',
-        entityType: decision.entityType,
-        taskId: decision.entityId,
-        archived: true,
-      });
-    }
 
     const connectionId = `trk_${randomUUID()}`;
     insertConnection(this.db, {
@@ -913,6 +980,26 @@ export class TrackerSyncService implements TrackerSyncFacade {
       last_sync_log_json: null,
     });
     storeSecret(this.db, connectionId, cipher);
+
+    // Past the anchor: every reconcile row from here is applied on its own, and
+    // a failure is logged and skipped rather than thrown.
+    for (const decision of payload.reconcile) {
+      if (decision.action !== 'discard') continue;
+      try {
+        await this.router.applyChange(payload.projectId, {
+          actor: 'user',
+          entityType: decision.entityType,
+          taskId: decision.entityId,
+          archived: true,
+        });
+      } catch (err) {
+        this.logger?.error('[trackerSync] reconcile discard failed', {
+          connectionId,
+          entityId: decision.entityId,
+          error: describeError(err),
+        });
+      }
+    }
 
     for (const decision of payload.reconcile) {
       if (decision.action !== 'link') continue;
@@ -1023,17 +1110,26 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * The armed write-back drain is disarmed as part of this: it would otherwise
    * fire two seconds later, find no stored key, and PAUSE the connection —
    * flipping the row straight back off 'disconnected'.
+   *
+   * STOPPING AN IN-FLIGHT PASS. Disconnect does not cancel a running pass, it
+   * DEFUSES it — which is why `status` is written FIRST, before the secret and
+   * the timer. That column is what every phase boundary in {@link runPass}
+   * re-reads, so an adapter call already in flight finishes (nothing can un-send
+   * an HTTP request) but no later phase starts, and the pass persists neither
+   * `last_sync_at` nor its log. Cancelling mid-phase instead would buy nothing:
+   * what an abandoned pass leaves behind is exactly the crash case boot recovery
+   * already reconciles.
    */
   async disconnect(connectionId: string): Promise<void> {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) return;
     updateConnectionSettings(this.db, connectionId, { status: 'disconnected' });
-    clearSecret(this.db, connectionId);
     const timer = this.drainTimers.get(connectionId);
     if (timer !== undefined) {
       clearTimeout(timer);
       this.drainTimers.delete(connectionId);
     }
+    clearSecret(this.db, connectionId);
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
   }
 
@@ -1263,6 +1359,48 @@ export class TrackerSyncService implements TrackerSyncFacade {
 }
 
 // ---------------------------------------------------------------------------
+// Not-run pass results
+// ---------------------------------------------------------------------------
+
+/**
+ * A pass/drain that never started because the connection is not active. Same
+ * "nothing ran, nothing persisted" contract as the unknown-connection result.
+ */
+function inactiveResult(
+  connectionId: string,
+  status: TrackerConnectionRow['status'],
+): TrackerSyncPassResult {
+  return {
+    connectionId,
+    ran: false,
+    swept: false,
+    paused: status === 'paused',
+    entries: [],
+    error: `connection is ${status}`,
+  };
+}
+
+/**
+ * A pass that stopped at a phase boundary because the connection stopped being
+ * active mid-flight (see the abandon note on {@link TrackerSyncService.runPass}).
+ * `entries` is what it had composed so far — returned for the caller's benefit,
+ * NOT persisted: an abandoned pass writes nothing.
+ */
+function abandonedResult(
+  connectionId: string,
+  entries: TrackerSyncLogEntry[],
+): TrackerSyncPassResult {
+  return {
+    connectionId,
+    ran: false,
+    swept: false,
+    paused: false,
+    entries,
+    error: 'connection is no longer active',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Log composition
 // ---------------------------------------------------------------------------
 
@@ -1317,6 +1455,9 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
 function appendSweepLines(entries: TrackerSyncLogEntry[], sweep: InboundSweepReport): void {
   if (sweep.sweepArchived > 0) {
     entries.push({ marker: '·', line: `swept ${plural(sweep.sweepArchived, 'deleted issue')}` });
+  }
+  if (sweep.outOfScope > 0) {
+    entries.push({ marker: '·', line: `${plural(sweep.outOfScope, 'issue')} out of scope · left linked` });
   }
   if (sweep.conflictsOpened > 0) {
     entries.push({ marker: '✎', line: `conflicts ${sweep.conflictsOpened}` });

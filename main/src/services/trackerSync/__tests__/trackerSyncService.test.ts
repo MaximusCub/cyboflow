@@ -21,6 +21,8 @@
  *   - phase order (ambiguous -> outbox drain -> inbound -> sweep), observed
  *     through the adapter's call log.
  *   - an auth failure pauses the connection and the loop survives it.
+ *   - the status guards: a pass never starts for a non-active connection, and a
+ *     disconnect landing mid-pass abandons every later phase without persisting.
  *   - the composed sync log lands in last_sync_log_json with the connected-view
  *     markers.
  *   - the per-connection mutex coalesces concurrent syncConnection calls.
@@ -129,6 +131,12 @@ class FakeAdapter implements TrackerAdapter {
   failListIssues: Error | null = null;
   /** When set, listIssues blocks on this promise (mutex / coalescing test). */
   gate: Promise<void> | null = null;
+  /**
+   * When set, updateIssueState blocks on this promise. A second gate rather
+   * than a shared one because the mid-pass abandon tests need to hold the pass
+   * at a SPECIFIC phase boundary (the drain, not the inbound fetch).
+   */
+  updateStateGate: Promise<void> | null = null;
 
   readonly updateCalls: Array<{ externalId: string; stateId: string }> = [];
 
@@ -172,6 +180,7 @@ class FakeAdapter implements TrackerAdapter {
   }
   async updateIssueState(externalId: string, stateId: string): Promise<void> {
     this.calls.push('updateIssueState');
+    if (this.updateStateGate !== null) await this.updateStateGate;
     this.updateCalls.push({ externalId, stateId });
   }
 
@@ -523,6 +532,99 @@ describe('TrackerSyncService failure policy', () => {
       entries: [],
       error: 'connection not found',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status guards
+// ---------------------------------------------------------------------------
+
+/** A promise a test releases by hand — used to hold a pass at one phase. */
+function openGate(): { promise: Promise<void>; release: () => void } {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+describe('TrackerSyncService status guards', () => {
+  it('does not run a pass for a connection that is no longer active', async () => {
+    makeConnection();
+    service.start();
+    await service.disconnect(CONN_ID);
+
+    const result = await service.syncNow(CONN_ID);
+
+    expect(result.ran).toBe(false);
+    expect(result.error).toBe('connection is disconnected');
+    // Nothing reached the provider, and the disconnected row is untouched — in
+    // particular it is NOT flipped to 'paused' by a doomed adapter build.
+    expect(adapter.calls).toHaveLength(0);
+    const row = getConnection(raw, CONN_ID);
+    expect(row?.status).toBe('disconnected');
+    expect(row?.last_sync_at).toBeNull();
+    expect(row?.last_sync_log_json).toBeNull();
+  });
+
+  it('abandons the pass before the sweep when the connection is disconnected during inbound', async () => {
+    makeConnection();
+    adapter.issues = [makeIssue()];
+    const gate = openGate();
+    adapter.gate = gate.promise;
+    service.start();
+
+    const pass = service.syncConnection(CONN_ID);
+    // Hold the pass inside the inbound fetch, then disconnect underneath it.
+    await vi.waitFor(() => {
+      expect(adapter.calls).toContain('listIssues');
+    });
+    await service.disconnect(CONN_ID);
+    gate.release();
+    const result = await pass;
+
+    expect(result.ran).toBe(false);
+    expect(result.error).toBe('connection is no longer active');
+    // The in-flight fetch finished; the NEXT phase (the deletion sweep, which
+    // this first pass would otherwise always run) never started.
+    expect(adapter.calls).not.toContain('listIssueIds');
+    expect(result.swept).toBe(false);
+    // Nothing about the abandoned pass was persisted: no poll-clock stamp, no
+    // log, and the user's disconnect stands.
+    const row = getConnection(raw, CONN_ID);
+    expect(row?.status).toBe('disconnected');
+    expect(row?.last_sync_at).toBeNull();
+    expect(row?.last_sync_log_json).toBeNull();
+  });
+
+  it('abandons the pass before inbound when the connection is disconnected during the drain', async () => {
+    makeConnection();
+    adapter.issues = [makeIssue()];
+    enqueueOutbox(raw, {
+      connection_id: CONN_ID,
+      kind: 'update_state',
+      external_id: 'ext-1',
+      payload_json: JSON.stringify({ desiredGroup: 'completed' } satisfies UpdateStatePayload),
+    });
+    const gate = openGate();
+    adapter.updateStateGate = gate.promise;
+    service.start();
+
+    const pass = service.syncConnection(CONN_ID);
+    await vi.waitFor(() => {
+      expect(adapter.calls).toContain('updateIssueState');
+    });
+    await service.disconnect(CONN_ID);
+    gate.release();
+    const result = await pass;
+
+    expect(result.ran).toBe(false);
+    // The remote write already in flight settled (nothing can un-send it), but
+    // inbound — the next phase — never fetched.
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    expect(outboxRows()[0].state).toBe('done');
+    expect(adapter.calls).not.toContain('listIssues');
+    expect(getConnection(raw, CONN_ID)?.last_sync_at).toBeNull();
   });
 });
 

@@ -16,7 +16,10 @@
  *   - wizardValidate: adapter passthrough, built from the PASTED key, and
  *     nothing persisted (no connection row, no secret).
  *   - connect: row + encrypted secret + reconcile links/discards + the
- *     fire-and-forget first pass, plus the 'connection' broadcast.
+ *     fire-and-forget first pass, plus the 'connection' broadcast — and the
+ *     ordering that makes it safe: nothing is written when the credential probe
+ *     fails, and a reconcile row rejected AFTER the row+secret anchor is logged
+ *     and skipped rather than sinking the connection.
  *   - connections(): the summary's counts, source label, mapping and
  *     defensively-parsed log.
  *   - resolveConflictChoice: all four branches (field remote / field local /
@@ -75,6 +78,7 @@ import type {
 } from '../../../../../shared/types/trackerSync';
 import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
 import { TrackerAuthError } from '../errors';
+import type { EntityWriteRouter } from '../inboundSync';
 import {
   getConnection,
   insertConflict,
@@ -443,20 +447,78 @@ describe('TrackerSyncService.connect', () => {
     expect(broadcasts.some((e) => e.kind === 'sync')).toBe(true);
   });
 
-  it('aborts without persisting anything when a reconcile discard is rejected', async () => {
-    // The discards run BEFORE anything is written, so a chokepoint rejection
-    // (here: a vanished entity) fails the whole connect with no half-built
-    // connection row left behind.
+  it('writes nothing at all when the live credential probe fails', async () => {
+    // The probe precedes the durable anchor (row + secret), which itself
+    // precedes every reconcile decision — so a bad key leaves no connection row
+    // AND no archived entity behind.
+    const discardId = await createEntity('idea', { title: 'Discard me' });
+    adapter.failValidate = new TrackerAuthError('linear', 'invalid API key', 401);
+
     await expect(
       service.connect(
         connectPayload({
-          reconcile: [{ entityType: 'task', entityId: 'tsk_gone', action: 'discard' }],
+          reconcile: [{ entityType: 'idea', entityId: discardId, action: 'discard' }],
         }),
       ),
-    ).rejects.toMatchObject({ code: 'not_found' });
+    ).rejects.toBeInstanceOf(TrackerAuthError);
 
     const rows = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
     expect(rows.n).toBe(0);
+    expect(readIdea(discardId).archived_at).toBeNull();
+  });
+
+  it('keeps the connection when one reconcile discard is rejected, and applies the rest', async () => {
+    // The regression: discards used to be committed BEFORE the connection row
+    // existed, so a rejection midway through archived the earlier entities and
+    // then failed the connect — user data mutated, nothing to sync it with.
+    const first = await createEntity('idea', { title: 'Discard one' });
+    const rejected = await createEntity('idea', { title: 'Discard two' });
+    const third = await createEntity('idea', { title: 'Discard three' });
+
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    // A chokepoint that refuses exactly one of the three archives (an active run
+    // on the entity is the real-world shape of this rejection).
+    const guarded: EntityWriteRouter = {
+      applyChange: async (projectId, change) => {
+        if (change.taskId === rejected) throw new Error('an active run holds this entity');
+        return router.applyChange(projectId, change);
+      },
+    };
+    const guardedService = new TrackerSyncService({
+      db: raw,
+      router: guarded,
+      nowIso: () => '2026-07-30T12:00:00.000Z',
+      adapterFactory: () => adapter,
+      logger,
+    });
+
+    const { connectionId } = await guardedService.connect(
+      connectPayload({
+        reconcile: [
+          { entityType: 'idea', entityId: first, action: 'discard' },
+          { entityType: 'idea', entityId: rejected, action: 'discard' },
+          { entityType: 'idea', entityId: third, action: 'discard' },
+        ],
+      }),
+    );
+
+    // The connection the user just authorized survives, key included.
+    expect(getConnection(raw, connectionId)?.status).toBe('active');
+    expect((readSecret(raw, connectionId) as Buffer).toString('utf-8')).toBe(API_KEY);
+
+    // Every OTHER decision still landed — one rejected row does not halt the loop.
+    expect(readIdea(first).archived_at).not.toBeNull();
+    expect(readIdea(rejected).archived_at).toBeNull();
+    expect(readIdea(third).archived_at).not.toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(
+      '[trackerSync] reconcile discard failed',
+      expect.objectContaining({ connectionId, entityId: rejected }),
+    );
+
+    // And the connection is live: the fire-and-forget first pass runs.
+    await vi.waitFor(() => {
+      expect(getConnection(raw, connectionId)?.last_sync_at).not.toBeNull();
+    });
   });
 });
 
