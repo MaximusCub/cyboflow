@@ -3,13 +3,15 @@
  *
  * Same harness as IntegrationsSettings.test.tsx (render the real component over
  * a module mock of its dependency), with every `cyboflow.tracker.wizard*` probe
- * stubbed so the six steps can be walked without a provider.
+ * stubbed so the seven steps can be walked without a provider.
  *
  * Coverage: the Step-0 gate (no forward navigation before a successful
- * validate); the two Step-2 footer guards (by-assignee with nobody picked,
- * manual with nothing ticked); the Step-3 mapping table seeded from the
- * canonical state groups; the Step-4 defaults (a row with a suggestion starts on
- * Link, everything else on Keep); and the payload `connect` finally receives.
+ * validate); the Step-1 target-project picker (seeded from the active project,
+ * a retarget threads through reconcile + connect); the two Step-3 footer guards
+ * (by-assignee with nobody picked, manual with nothing ticked); the Step-4
+ * mapping table seeded from the canonical state groups; the Step-5 defaults (a
+ * row with a suggestion starts on Link, everything else on Keep); and the
+ * payload `connect` finally receives.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -38,9 +40,15 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
+// The Step-1 project list comes over IPC, not tRPC — same module-mock pattern.
+vi.mock('../../../utils/api', () => ({
+  API: { projects: { getAll: vi.fn() } },
+}));
+
 // Imported after the mock so vi.mock hoisting is in effect.
 import { TrackerWizardModal } from './TrackerWizardModal';
 import { trpc } from '../../../trpc/client';
+import { API } from '../../../utils/api';
 
 const mockValidate = vi.mocked(trpc.cyboflow.tracker.wizardValidate.mutate);
 const mockContainers = vi.mocked(trpc.cyboflow.tracker.wizardContainers.mutate);
@@ -49,10 +57,30 @@ const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
 const mockReconcile = vi.mocked(trpc.cyboflow.tracker.reconcilePreview.mutate);
 const mockConnect = vi.mocked(trpc.cyboflow.tracker.connect.mutate);
+const mockProjectsGetAll = vi.mocked(API.projects.getAll);
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+const PROJECTS = [
+  {
+    id: 7,
+    name: 'Cyboflow',
+    path: '/dev/cyboflow',
+    active: true,
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+  },
+  {
+    id: 9,
+    name: 'Website',
+    path: '/dev/website',
+    active: false,
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+  },
+];
 
 const TREE: TrackerSourceTree = {
   containerLabel: 'Team',
@@ -144,6 +172,7 @@ beforeEach(() => {
   mockStates.mockResolvedValue(STATES);
   mockReconcile.mockResolvedValue(RECONCILE);
   mockConnect.mockResolvedValue({ connectionId: 'conn-1' });
+  mockProjectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
 });
 
 // ---------------------------------------------------------------------------
@@ -170,16 +199,19 @@ async function authorize(): Promise<void> {
 }
 
 /**
- * Walk forward `count` steps from Step 0 through the Continue/Review button,
- * settling on the rail's `aria-current` rather than the button itself (the
- * clicked node is unmounted mid-transition and keeps its stale attributes).
+ * Walk forward `count` steps (from step `from`) through the Continue/Review
+ * button, settling on the rail's `aria-current` rather than the button itself
+ * (the clicked node is unmounted mid-transition and keeps its stale attributes).
  */
-async function advance(count: number): Promise<void> {
+async function advance(count: number, from = 0): Promise<void> {
   for (let i = 0; i < count; i += 1) {
     const label = screen.queryByRole('button', { name: 'Continue' }) !== null ? 'Continue' : 'Review';
     fireEvent.click(screen.getByRole('button', { name: label }));
     await waitFor(() =>
-      expect(screen.getByTestId(`tracker-step-${i + 1}`)).toHaveAttribute('aria-current', 'step'),
+      expect(screen.getByTestId(`tracker-step-${from + i + 1}`)).toHaveAttribute(
+        'aria-current',
+        'step',
+      ),
     );
   }
 }
@@ -188,7 +220,7 @@ describe('TrackerWizardModal — Step 0 gate', () => {
   it('locks every later step until the key validates', async () => {
     renderWizard();
 
-    for (const index of [1, 2, 3, 4, 5]) {
+    for (const index of [1, 2, 3, 4, 5, 6]) {
       expect(screen.getByTestId(`tracker-step-${index}`)).toBeDisabled();
     }
     // Nothing to authorize with yet.
@@ -204,6 +236,13 @@ describe('TrackerWizardModal — Step 0 gate', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Authorize' }));
     expect(await screen.findByText('Authorized as J. Kesteva')).toBeInTheDocument();
     expect(screen.getByText('workspace Acme')).toBeInTheDocument();
+
+    // The card's Continue lands on the local Project step — no provider probe.
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(
+      await screen.findByText('Which cyboflow project does this sync into?'),
+    ).toBeInTheDocument();
+    expect(mockContainers).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(await screen.findByText(/Pick a team/)).toBeInTheDocument();
@@ -236,11 +275,37 @@ describe('TrackerWizardModal — Step 0 gate', () => {
   });
 });
 
-describe('TrackerWizardModal — Step 2 guards', () => {
+describe('TrackerWizardModal — Step 1 target project', () => {
+  it('seeds the active project and threads a retarget through reconcile + connect', async () => {
+    renderWizard();
+    await authorize();
+    await advance(1); // → Project
+
+    // Seeded from the active project, with its row marked.
+    const active = await screen.findByRole('button', { name: /Cyboflow/ });
+    expect(active).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: /Website/ }));
+    expect(screen.getByRole('button', { name: /Website/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    await advance(5, 1); // → Source → Tasks → States → Reconcile → Review
+    expect(mockReconcile).toHaveBeenCalledWith({ projectId: 9, issues: ISSUES });
+    expect(screen.getByText('Website')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenCalledWith(expect.objectContaining({ projectId: 9 }));
+  });
+});
+
+describe('TrackerWizardModal — Step 3 guards', () => {
   it('blocks by-assignee with nobody picked and manual with nothing ticked', async () => {
     renderWizard();
     await authorize();
-    await advance(2); // → Source → Tasks
+    await advance(3); // → Project → Source → Tasks
 
     expect(await screen.findByText('Which issues come in?')).toBeInTheDocument();
     // "All tasks" imports everything, so Continue is live.
@@ -259,11 +324,11 @@ describe('TrackerWizardModal — Step 2 guards', () => {
   });
 });
 
-describe('TrackerWizardModal — Step 3 mapping', () => {
+describe('TrackerWizardModal — Step 4 mapping', () => {
   it('seeds each tracker state from its canonical group', async () => {
     renderWizard();
     await authorize();
-    await advance(3); // → Source → Tasks → States
+    await advance(4); // → Project → Source → Tasks → States
 
     expect(await screen.findByText('Map Linear states to cyboflow')).toBeInTheDocument();
     const seeded: Record<string, string> = {
@@ -282,7 +347,7 @@ describe('TrackerWizardModal — Step 3 mapping', () => {
   it('reveals mirroring + conflict mode only while two-way sync is on', async () => {
     renderWizard();
     await authorize();
-    await advance(3);
+    await advance(4);
 
     await screen.findByText('Map Linear states to cyboflow');
     expect(
@@ -299,11 +364,11 @@ describe('TrackerWizardModal — Step 3 mapping', () => {
   });
 });
 
-describe('TrackerWizardModal — Step 4 reconcile', () => {
+describe('TrackerWizardModal — Step 5 reconcile', () => {
   it('defaults a suggested row to Link and everything else to Keep', async () => {
     renderWizard();
     await authorize();
-    await advance(4); // → Source → Tasks → States → Reconcile
+    await advance(5); // → Project → Source → Tasks → States → Reconcile
 
     expect(await screen.findByText('Your existing cyboflow backlog')).toBeInTheDocument();
     expect(mockReconcile).toHaveBeenCalledWith({ projectId: 7, issues: ISSUES });
@@ -327,7 +392,7 @@ describe('TrackerWizardModal — Step 4 reconcile', () => {
   it('hands the review step and connect the accumulated decisions', async () => {
     renderWizard();
     await authorize();
-    await advance(5); // → … → Review
+    await advance(6); // → … → Review
 
     expect(await screen.findByText('Review the connection')).toBeInTheDocument();
     expect(screen.getByText('Core · Whole team · all open issues')).toBeInTheDocument();

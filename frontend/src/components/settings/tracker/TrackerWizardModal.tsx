@@ -1,6 +1,6 @@
 /**
- * TrackerWizardModal — the six-step connect wizard for a Linear/Plane tracker
- * connection (Connect · Source · Tasks · States · Reconcile · Review).
+ * TrackerWizardModal — the seven-step connect wizard for a Linear/Plane tracker
+ * connection (Connect · Project · Source · Tasks · States · Reconcile · Review).
  *
  * Rendered as a `size="full"` Modal nested inside the Settings modal (the
  * WorkflowEditorModal pattern); Modal's cross-portal guards make the nesting
@@ -9,17 +9,20 @@
  * store would only add ceremony.
  *
  * Data flow, one probe per forward step (each is a MUTATION: every call carries
- * the API key and hits the provider live, so nothing here may be cached):
+ * the API key and hits the provider live, so nothing here may be cached —
+ * except Step 1, which is a local project-list read, not a provider call):
  *
  *   Step 0  wizardValidate   -> the "Authorized as …" identity card
- *   Step 1  wizardContainers + wizardNarrows -> team/project + its narrows
- *   Step 2  wizardIssues     -> the issue set the three modes filter
- *   Step 3  wizardStates     -> the mapping table, seeded from canonical groups
- *   Step 4  reconcilePreview -> pre-existing backlog rows + suggested matches
- *   Step 5  connect          -> persists the connection, then the parent refreshes
+ *   Step 1  (local)          -> pick the target cyboflow project
+ *   Step 2  wizardContainers + wizardNarrows -> team/project + its narrows
+ *   Step 3  wizardIssues     -> the issue set the three modes filter
+ *   Step 4  wizardStates     -> the mapping table, seeded from canonical groups
+ *   Step 5  reconcilePreview -> pre-existing backlog rows + suggested matches
+ *   Step 6  connect          -> persists the connection, then the parent refreshes
  *
- * Moving BACK never re-fetches; changing the source (or the Step-2 selection)
- * invalidates exactly the downstream steps that depend on it.
+ * Moving BACK never re-fetches; changing the source (or the Step-3 selection,
+ * or the target project) invalidates exactly the downstream steps that depend
+ * on it.
  *
  * The API key lives in this component's state and leaves only inside the
  * `credentials` field of the calls above — nothing ever reads it back.
@@ -30,6 +33,8 @@ import { trpc } from '../../../trpc/client';
 import { Modal } from '../../ui/Modal';
 import { Button } from '../../ui/Button';
 import { cn } from '../../../utils/cn';
+import { API } from '../../../utils/api';
+import type { Project } from '../../../types/project';
 import type {
   TrackerConflictMode,
   TrackerCredentialsInput,
@@ -60,14 +65,15 @@ import {
 // Step vocabulary
 // ---------------------------------------------------------------------------
 
-const STEP_LABELS = ['Connect', 'Source', 'Tasks', 'States', 'Reconcile', 'Review'] as const;
+const STEP_LABELS = ['Connect', 'Project', 'Source', 'Tasks', 'States', 'Reconcile', 'Review'] as const;
 const STEP_EYEBROWS = [
   'Step 01 · Authorize',
-  'Step 02 · Source',
-  'Step 03 · Selection',
-  'Step 04 · Mapping',
-  'Step 05 · Reconcile',
-  'Step 06 · Confirm',
+  'Step 02 · Project',
+  'Step 03 · Source',
+  'Step 04 · Selection',
+  'Step 05 · Mapping',
+  'Step 06 · Reconcile',
+  'Step 07 · Confirm',
 ] as const;
 const LAST_STEP = STEP_LABELS.length - 1;
 
@@ -130,20 +136,24 @@ export function TrackerWizardModal({
   const [authError, setAuthError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<TrackerWorkspaceIdentity | null>(null);
 
-  // ── Step 1 · source ───────────────────────────────────────────────────────
+  // ── Step 1 · target project ───────────────────────────────────────────────
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [targetProjectId, setTargetProjectId] = useState(projectId);
+
+  // ── Step 2 · source ───────────────────────────────────────────────────────
   const [sourceTree, setSourceTree] = useState<TrackerSourceTree | null>(null);
   const [containerId, setContainerId] = useState<string | null>(null);
   const [narrows, setNarrows] = useState<TrackerSourceNarrow[]>([]);
   const [narrowId, setNarrowId] = useState<string | null>(null);
 
-  // ── Step 2 · selection ────────────────────────────────────────────────────
+  // ── Step 3 · selection ────────────────────────────────────────────────────
   const [issues, setIssues] = useState<TrackerIssue[]>([]);
   const [issuesLoaded, setIssuesLoaded] = useState(false);
   const [mode, setMode] = useState<TrackerSelectionMode>('all');
   const [assignees, setAssignees] = useState<Record<string, boolean>>({});
   const [manual, setManual] = useState<Record<string, boolean>>({});
 
-  // ── Step 3 · mapping + direction ──────────────────────────────────────────
+  // ── Step 4 · mapping + direction ──────────────────────────────────────────
   const [states, setStates] = useState<TrackerState[]>([]);
   const [statesLoaded, setStatesLoaded] = useState(false);
   const [mapping, setMapping] = useState<TrackerStateMapping>({});
@@ -151,13 +161,13 @@ export function TrackerWizardModal({
   const [mirrorSubissues, setMirrorSubissues] = useState(true);
   const [conflictMode, setConflictMode] = useState<TrackerConflictMode>('auto');
 
-  // ── Step 4 · reconcile ────────────────────────────────────────────────────
+  // ── Step 5 · reconcile ────────────────────────────────────────────────────
   const [reconcileItems, setReconcileItems] = useState<TrackerReconcileItem[]>([]);
   const [reconcileLoaded, setReconcileLoaded] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, ReconcileAction>>({});
   const [linkTargets, setLinkTargets] = useState<Record<string, string>>({});
 
-  // ── Step 5 · submit ───────────────────────────────────────────────────────
+  // ── Step 6 · submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
 
   // -------------------------------------------------------------------------
@@ -176,6 +186,12 @@ export function TrackerWizardModal({
       ...(meta.needsWorkspaceSlug && trimmedSlug.length > 0 ? { workspaceSlug: trimmedSlug } : {}),
     };
   }, [provider, apiKey, baseUrl, workspaceSlug, meta.defaultBaseUrl, meta.needsWorkspaceSlug]);
+
+  const targetProject = useMemo(
+    () => projects.find((p) => p.id === targetProjectId) ?? null,
+    [projects, targetProjectId],
+  );
+  const targetProjectName = targetProject?.name ?? `Project ${targetProjectId}`;
 
   const container = useMemo(
     () => sourceTree?.containers.find((c) => c.id === containerId) ?? null,
@@ -271,14 +287,14 @@ export function TrackerWizardModal({
   );
 
   /**
-   * Footer guards. Step 1 cannot advance without a resolved source (there is
-   * nothing to probe), and Step 2's two selection modes cannot advance while
+   * Footer guards. Step 2 cannot advance without a resolved source (there is
+   * nothing to probe), and Step 3's two selection modes cannot advance while
    * they resolve to an empty set.
    */
   const nextBlocked =
-    (step === 1 && selection === null) ||
-    (step === 2 && mode === 'assignee' && selectedAssigneeIds.length === 0) ||
-    (step === 2 && mode === 'manual' && includedIssues.length === 0);
+    (step === 2 && selection === null) ||
+    (step === 3 && mode === 'assignee' && selectedAssigneeIds.length === 0) ||
+    (step === 3 && mode === 'manual' && includedIssues.length === 0);
 
   // -------------------------------------------------------------------------
   // Invalidation — a changed upstream answer drops exactly what depended on it
@@ -291,6 +307,24 @@ export function TrackerWizardModal({
     setAuthError(null);
     setMaxStep(0);
   }, [apiKey, baseUrl, workspaceSlug]);
+
+  // The Step-1 project list is a local read, loaded once per open. A failed
+  // load leaves the list empty and the wizard on the seeded active project.
+  useEffect(() => {
+    if (!isOpen) return;
+    void API.projects
+      .getAll()
+      .then((res) => {
+        if (res.success && Array.isArray(res.data)) setProjects(res.data);
+      })
+      .catch(() => setProjects([]));
+  }, [isOpen]);
+
+  // Reconcile previews the CHOSEN project's backlog, so a retarget drops it.
+  useEffect(() => {
+    setReconcileLoaded(false);
+    setMaxStep((m) => Math.min(m, 4));
+  }, [targetProjectId]);
 
   // A different source means different issues, states and reconcile matches.
   useEffect(() => {
@@ -305,14 +339,14 @@ export function TrackerWizardModal({
     setReconcileLoaded(false);
     setDecisions({});
     setLinkTargets({});
-    setMaxStep((m) => Math.min(m, 1));
+    setMaxStep((m) => Math.min(m, 2));
   }, [containerId, narrowId]);
 
   // The reconcile suggestions are computed against the INCLUDED issue set, so a
-  // changed Step-2 answer invalidates Step 4 (but nothing else).
+  // changed Step-3 answer invalidates Step 5 (but nothing else).
   useEffect(() => {
     setReconcileLoaded(false);
-    setMaxStep((m) => Math.min(m, 3));
+    setMaxStep((m) => Math.min(m, 4));
   }, [mode, assignees, manual]);
 
   // -------------------------------------------------------------------------
@@ -363,7 +397,7 @@ export function TrackerWizardModal({
   const ensureReconcile = async (): Promise<void> => {
     if (reconcileLoaded) return;
     const rows = await trpc.cyboflow.tracker.reconcilePreview.mutate({
-      projectId,
+      projectId: targetProjectId,
       issues: includedIssues,
     });
     setReconcileItems(rows);
@@ -416,16 +450,16 @@ export function TrackerWizardModal({
 
     setLoading(true);
     try {
-      if (target >= 1) await ensureContainers();
-      if (target >= 2) {
+      if (target >= 2) await ensureContainers();
+      if (target >= 3) {
         if (selection === null) throw new Error('Pick a source before continuing.');
         await ensureIssues(selection);
       }
-      if (target >= 3) {
+      if (target >= 4) {
         if (selection === null) throw new Error('Pick a source before continuing.');
         await ensureStates(selection);
       }
-      if (target >= 4) await ensureReconcile();
+      if (target >= 5) await ensureReconcile();
       setStep(target);
       setMaxStep((m) => Math.max(m, target));
     } catch (err) {
@@ -457,7 +491,7 @@ export function TrackerWizardModal({
     setStepError(null);
     try {
       await trpc.cyboflow.tracker.connect.mutate({
-        projectId,
+        projectId: targetProjectId,
         credentials,
         source: selection,
         sourceLabel,
@@ -609,12 +643,68 @@ export function TrackerWizardModal({
     </div>
   );
 
+  const renderProject = (): React.JSX.Element => (
+    <div className="space-y-5">
+      <div>
+        <Eyebrow>{STEP_EYEBROWS[1]}</Eyebrow>
+        <h3 className="mt-1.5 text-lg font-bold text-text-primary">
+          Which cyboflow project does this sync into?
+        </h3>
+        <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-secondary">
+          Imported {meta.name} issues land in this project&apos;s backlog, and only this
+          project&apos;s items sync back. One connection maps one cyboflow project to one{' '}
+          {meta.name} source — connect again from another project for more mappings.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        {projects.map((p) => {
+          const selected = p.id === targetProjectId;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => setTargetProjectId(p.id)}
+              className={cn(
+                CARD,
+                'flex w-full items-center gap-3 px-3 py-2 text-left transition-colors duration-[120ms]',
+                selected ? 'border-interactive' : 'hover:border-border-emphasized',
+              )}
+            >
+              <span
+                className={cn(
+                  'h-2.5 w-2.5 flex-shrink-0 rounded-full border',
+                  selected ? 'border-interactive bg-interactive' : 'border-border-primary',
+                )}
+              />
+              <span className="text-xs font-bold text-text-primary">{p.name}</span>
+              {p.id === projectId && (
+                <span className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+                  Active
+                </span>
+              )}
+              <span className="ml-auto min-w-0 truncate text-[11px] text-text-tertiary">
+                {p.path}
+              </span>
+            </button>
+          );
+        })}
+        {projects.length === 0 && (
+          <p className={cn(CARD, 'px-3 py-4 text-xs text-text-tertiary')}>
+            Project list unavailable — the connection will use the currently active project.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   const renderSource = (): React.JSX.Element => {
     const containerLabel = sourceTree?.containerLabel ?? 'Source';
     return (
       <div className="space-y-5">
         <div>
-          <Eyebrow>{STEP_EYEBROWS[1]}</Eyebrow>
+          <Eyebrow>{STEP_EYEBROWS[2]}</Eyebrow>
           <h3 className="mt-1.5 text-lg font-bold text-text-primary">
             Pick a {containerLabel.toLowerCase()}, then narrow it down
           </h3>
@@ -709,7 +799,7 @@ export function TrackerWizardModal({
     return (
       <div className="space-y-4">
         <div>
-          <Eyebrow>{STEP_EYEBROWS[2]}</Eyebrow>
+          <Eyebrow>{STEP_EYEBROWS[3]}</Eyebrow>
           <h3 className="mt-1.5 text-lg font-bold text-text-primary">Which issues come in?</h3>
         </div>
 
@@ -841,7 +931,7 @@ export function TrackerWizardModal({
   const renderStates = (): React.JSX.Element => (
     <div className="space-y-4">
       <div>
-        <Eyebrow>{STEP_EYEBROWS[3]}</Eyebrow>
+        <Eyebrow>{STEP_EYEBROWS[4]}</Eyebrow>
         <h3 className="mt-1.5 text-lg font-bold text-text-primary">
           Map {meta.name} states to cyboflow
         </h3>
@@ -969,7 +1059,7 @@ export function TrackerWizardModal({
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <Eyebrow>{STEP_EYEBROWS[4]}</Eyebrow>
+            <Eyebrow>{STEP_EYEBROWS[5]}</Eyebrow>
             <h3 className="mt-1.5 text-lg font-bold text-text-primary">
               Your existing cyboflow backlog
             </h3>
@@ -1100,6 +1190,11 @@ export function TrackerWizardModal({
           : `${includedIssues.length} hand-picked issues`;
 
     const cards: { label: string; value: string; detail: string }[] = [
+      {
+        label: 'Cyboflow project',
+        value: targetProjectName,
+        detail: 'Issues import into this backlog',
+      },
       { label: 'Source', value: sourceLabel, detail: meta.name },
       {
         label: 'Selection',
@@ -1128,7 +1223,7 @@ export function TrackerWizardModal({
     return (
       <div className="space-y-4">
         <div>
-          <Eyebrow>{STEP_EYEBROWS[5]}</Eyebrow>
+          <Eyebrow>{STEP_EYEBROWS[6]}</Eyebrow>
           <h3 className="mt-1.5 text-lg font-bold text-text-primary">Review the connection</h3>
           <p className="mt-1.5 text-xs text-text-secondary">
             {includedIssues.length} issues will import as ideas now. Ongoing changes sync every 5
@@ -1173,6 +1268,7 @@ export function TrackerWizardModal({
 
   const stepBodies = [
     renderConnect,
+    renderProject,
     renderSource,
     renderTasks,
     renderStates,
@@ -1268,7 +1364,7 @@ export function TrackerWizardModal({
           </div>
         </div>
 
-        {/* ── Footer nav (steps 1–5; Step 0 advances from its own card) ───── */}
+        {/* ── Footer nav (steps 1–6; Step 0 advances from its own card) ───── */}
         {step > 0 && (
           <div className="flex flex-shrink-0 items-center justify-between gap-3 border-t border-dashed border-border-primary bg-bg-primary px-6 py-3">
             <Button
