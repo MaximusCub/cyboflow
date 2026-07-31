@@ -32,6 +32,7 @@ import {
   reviewItemChangeEvents,
   reviewItemProjectChannel,
 } from '../reviewItemRouter';
+import type { ReviewActor } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { countPendingBlockingReviewItems } from '../reviewItemListing';
 import type { DatabaseLike } from '../types';
@@ -78,7 +79,7 @@ async function createFinding(
   opts: {
     projectId?: number;
     title?: string;
-    actor?: 'user' | 'orchestrator' | `agent:${string}` | 'linear';
+    actor?: ReviewActor;
     payload?: { kind: 'finding'; category?: string; suggestedFix?: string; proposedTarget?: 'backlog' | 'docs' | 'prompt' | 'fix' };
   } = {},
 ): Promise<string> {

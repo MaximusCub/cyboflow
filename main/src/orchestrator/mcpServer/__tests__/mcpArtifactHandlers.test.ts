@@ -11,10 +11,15 @@
  * Reachability note (documented as a deviation): the run-context guard
  * (resolveReviewItemRunContext) resolves projectId + a valid `agent:<label>`
  * actor from the SAME run the router then re-reads, so the router's own
- * `run_not_found` and `wrong_project` codes — and the `actor === 'linear'`
- * coercion — are structurally UNREACHABLE via this handler (the ctx guard fires
- * first / the actor is never 'linear'). Only not_found / invalid_atype /
+ * `run_not_found` and `wrong_project` codes are structurally UNREACHABLE via
+ * this handler (the ctx guard fires first). Only not_found / invalid_atype /
  * already_committed are reachable, and are covered below.
+ *
+ * (The handler used to defensively coerce a `ctx.actor === 'linear'` case to
+ * 'agent:unknown' before assigning to ArtifactActor. That branch was always
+ * dead — resolveReviewItemRunContext's return type is now declared as the
+ * narrower `agent:${string}` it actually produces, so the coercion was
+ * removed rather than widened to also cover 'plane'.)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
@@ -539,9 +544,9 @@ describe('McpQueryHandler artifact handlers', () => {
       const row = artifactRow(db, data.artifactId);
       expect(row).toMatchObject({ run_id: 'quick-1', atype: 'idea-spec', label: 'quick chat artifact' });
       // NULL current_step_id (no flow steps drive a quick session) resolves to
-      // the 'unknown' label, i.e. the same 'agent:unknown' fallback the
-      // handler's ctx.actor === 'linear' coercion produces for any run lacking
-      // step context — not a quick-session-specific code path.
+      // the 'unknown' label inside resolveReviewItemRunContext, i.e. the same
+      // 'agent:unknown' any run lacking step context gets — not a
+      // quick-session-specific code path.
       expect(artifactEventActor(db, data.artifactId)).toBe('agent:unknown');
     });
 

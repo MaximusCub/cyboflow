@@ -194,7 +194,7 @@ export interface TaskFieldChanges {
   sortOrder?: number | null;
 }
 
-export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear';
+export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear' | 'plane';
 
 export interface TaskChange {
   actor: TaskActor;

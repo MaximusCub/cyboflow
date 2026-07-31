@@ -104,7 +104,7 @@ import { isAcceptEditsAutoApprovable } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
-import type { ReviewActor, ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
+import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
@@ -3043,10 +3043,19 @@ export class McpQueryHandler {
    *     run_not_active.
    * Actor derivation mirrors TaskChangeRouter.resolveAgentLabel
    * (agent:<snapshot[step] | step | 'unknown'>).
+   *
+   * The returned actor is typed as the narrower `` `agent:${string}` `` (NOT the
+   * full ReviewActor union it is a subtype of) because the body below only ever
+   * constructs `agent:${label}` — a review item minted through THIS run-context
+   * seam is always agent-authored, never 'user', 'linear', or 'plane' (a tracker
+   * sync writes through TaskChangeRouter/ReviewItemRouter directly with its own
+   * provider actor, not through a workflow run's step context). Declaring the
+   * true, narrower return type lets callers that need an even narrower actor
+   * type (e.g. ArtifactActor) assign `ctx.actor` directly with no coercion.
    */
   private resolveReviewItemRunContext(
     runId: string,
-  ): { ok: true; projectId: number; actor: ReviewActor } | { ok: false; error: string } {
+  ): { ok: true; projectId: number; actor: `agent:${string}` } | { ok: false; error: string } {
     if (runId === 'orchestrator') {
       return { ok: false, error: 'finding_requires_real_run' };
     }
@@ -3096,7 +3105,7 @@ export class McpQueryHandler {
       label = currentStepId;
     }
 
-    const actor: ReviewActor = `agent:${label}`;
+    const actor: `agent:${string}` = `agent:${label}`;
     return { ok: true, projectId, actor };
   }
 
@@ -3371,7 +3380,10 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
       return;
     }
-    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    // ctx.actor is `agent:${string}` (see resolveReviewItemRunContext) — a
+    // strict subtype of ArtifactActor, so no 'linear'/'plane' coercion is
+    // needed here: a review-item run-context actor is always agent-authored.
+    const actor: ArtifactActor = ctx.actor;
     // Design Mode v0 (design-mode.md "Idea-bound artifact + read path"): stamp
     // source_ref AND session_id SERVER-SIDE from the session's validated
     // design_idea_id (NEVER from the agent payload) — source_ref makes the
@@ -3519,7 +3531,10 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
       return;
     }
-    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    // ctx.actor is `agent:${string}` (see resolveReviewItemRunContext) — a
+    // strict subtype of ArtifactActor, so no 'linear'/'plane' coercion is
+    // needed here: a review-item run-context actor is always agent-authored.
+    const actor: ArtifactActor = ctx.actor;
     try {
       // The tool's optional `payload_json` ("store a final payload alongside the
       // commit") is applied as a SEPARATE `update` FIRST — commit itself is
