@@ -2,24 +2,28 @@
  * TrackerIntegrationSection — the issue-tracker catalog inside
  * Settings → Integrations, rendered below the Claude/Codex provider rows.
  *
- * Exactly two rows (Linear, Plane): a row is either "Not connected" with a
- * Connect button that opens the wizard, or "Connected" with a Manage button
- * that opens the connected view. Both sub-surfaces are `size="full"` Modals
- * rendered as CHILDREN of this section (and therefore of the Settings modal) —
- * the nested-modal pattern Modal.tsx documents.
+ * Exactly two provider rows (Linear, Plane). A connection is project-scoped and
+ * the wizard can target ANY cyboflow project, so each row lists EVERY project's
+ * connection for that provider (project chip + status + Manage) — not just the
+ * active project's. The Connect button stays visible while the ACTIVE project
+ * has no connection for that provider (it seeds the wizard's Project step).
  *
- * Connections are read for the ACTIVE project (a tracker connection is
- * project-scoped) and re-read on every `onTrackerChanged` notification: the
- * event is a signal, not a patch, so the handler always re-queries rather than
- * mutating a card from the payload.
+ * Connections are read across all projects and re-read on every
+ * `onTrackerChanged` notification (one subscription per project): the event is
+ * a signal, not a patch, so the handler always re-queries rather than mutating
+ * a card from the payload.
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link2 } from 'lucide-react';
 import { trpc } from '../../../trpc/client';
+import { API } from '../../../utils/api';
 import { Button } from '../../ui/Button';
 import { SettingsSection } from '../../ui/SettingsSection';
 import { useNavigationStore } from '../../../stores/navigationStore';
+import { cn } from '../../../utils/cn';
+import type { Project } from '../../../types/project';
 import type {
+  TrackerConnectionStatus,
   TrackerConnectionSummary,
   TrackerProvider,
 } from '../../../../../shared/types/trackerSync';
@@ -28,9 +32,28 @@ import { TRACKER_PROVIDERS } from './trackerVocabulary';
 import { TrackerWizardModal } from './TrackerWizardModal';
 import { TrackerConnectedView } from './TrackerConnectedView';
 
+/** Honest per-status presentation — paused is a warning, never a green dot. */
+const STATUS_META: Record<
+  TrackerConnectionStatus,
+  { label: string; dotClass: string; textClass: string }
+> = {
+  active: { label: 'Connected', dotClass: 'bg-status-success', textClass: 'text-status-success' },
+  paused: {
+    label: 'Paused — check credentials',
+    dotClass: 'bg-status-warning',
+    textClass: 'text-status-warning',
+  },
+  disconnected: {
+    label: 'Disconnected',
+    dotClass: 'bg-text-tertiary',
+    textClass: 'text-text-tertiary',
+  },
+};
+
 export function TrackerIntegrationSection(): React.JSX.Element {
   const activeProjectId = useNavigationStore((s) => s.activeProjectId);
 
+  const [projects, setProjects] = useState<Project[]>([]);
   const [connections, setConnections] = useState<TrackerConnectionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   /** Which sub-modal is open: the wizard for a provider, or one connection's manage view. */
@@ -38,39 +61,71 @@ export function TrackerIntegrationSection(): React.JSX.Element {
   const [manageConnectionId, setManageConnectionId] = useState<string | null>(null);
 
   const refresh = useCallback((): void => {
-    if (activeProjectId === null) {
-      setConnections([]);
-      return;
-    }
-    void trpc.cyboflow.tracker.connections
-      .query({ projectId: activeProjectId })
-      .then((rows) => {
-        setConnections(rows);
+    void (async () => {
+      try {
+        let projectRows: Project[] = [];
+        try {
+          const res = await API.projects.getAll();
+          if (res.success && Array.isArray(res.data)) projectRows = res.data;
+        } catch {
+          projectRows = [];
+        }
+        // Keep the array identity stable when nothing changed, so the
+        // per-project subscription effect below does not churn on every event.
+        setProjects((prev) =>
+          prev.length === projectRows.length &&
+          prev.every((p, i) => p.id === projectRows[i].id && p.name === projectRows[i].name)
+            ? prev
+            : projectRows,
+        );
+        const ids =
+          projectRows.length > 0
+            ? projectRows.map((p) => p.id)
+            : activeProjectId !== null
+              ? [activeProjectId]
+              : [];
+        const rows = await Promise.all(
+          ids.map((id) => trpc.cyboflow.tracker.connections.query({ projectId: id })),
+        );
+        setConnections(rows.flat());
         setError(null);
-      })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    })();
   }, [activeProjectId]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  // Live refresh. The onData payload type is AppRouter-inferred — do not annotate it.
+  // Live refresh, one subscription per known project. The onData payload type
+  // is AppRouter-inferred — do not annotate it.
   useEffect(() => {
-    if (activeProjectId === null) return;
-    const sub = trpc.cyboflow.tracker.onTrackerChanged.subscribe(
-      { projectId: activeProjectId },
-      { onData: () => refresh() },
+    const ids =
+      projects.length > 0
+        ? projects.map((p) => p.id)
+        : activeProjectId !== null
+          ? [activeProjectId]
+          : [];
+    const subs = ids.map((id) =>
+      trpc.cyboflow.tracker.onTrackerChanged.subscribe(
+        { projectId: id },
+        { onData: () => refresh() },
+      ),
     );
-    return () => sub.unsubscribe();
-  }, [activeProjectId, refresh]);
+    return () => subs.forEach((sub) => sub.unsubscribe());
+  }, [projects, activeProjectId, refresh]);
+
+  const projectName = (id: number): string =>
+    projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
 
   const managed = connections.find((c) => c.id === manageConnectionId) ?? null;
 
   return (
     <SettingsSection
       title="Issue trackers"
-      description="Two-way sync between this project's backlog and an external tracker."
+      description="Two-way sync between a project's backlog and an external tracker."
       icon={<Link2 className="h-4 w-4" />}
       className="ml-0"
     >
@@ -88,9 +143,12 @@ export function TrackerIntegrationSection(): React.JSX.Element {
 
       <div className="divide-y divide-border-primary overflow-hidden rounded-none border border-border-primary bg-surface-primary">
         {TRACKER_PROVIDERS.map((meta) => {
-          const connection = connections.find((c) => c.provider === meta.provider) ?? null;
+          const providerConnections = connections.filter((c) => c.provider === meta.provider);
+          const activeConnected =
+            activeProjectId !== null &&
+            providerConnections.some((c) => c.projectId === activeProjectId);
           return (
-            <div key={meta.provider} className="flex items-center gap-3 px-4 py-4">
+            <div key={meta.provider} className="flex items-start gap-3 px-4 py-4">
               <ProviderTile mark={meta.mark} />
               <div className="min-w-0 flex-1">
                 <h4 className="text-sm font-semibold text-text-primary">{meta.name}</h4>
@@ -99,16 +157,41 @@ export function TrackerIntegrationSection(): React.JSX.Element {
                 </p>
               </div>
 
-              <div className="flex flex-shrink-0 items-center gap-3">
-                {connection === null ? (
+              <div className="flex flex-shrink-0 flex-col items-end gap-2">
+                {providerConnections.length === 0 && (
                   <span className="text-xs text-text-tertiary">Not connected</span>
-                ) : (
-                  <span className="flex items-center gap-2 text-xs font-semibold text-status-success">
-                    <span className="h-2 w-2 flex-shrink-0 rounded-full bg-status-success" />
-                    Connected
-                  </span>
                 )}
-                {connection === null ? (
+                {providerConnections.map((connection) => {
+                  const status = STATUS_META[connection.status];
+                  return (
+                    <div key={connection.id} className="flex items-center gap-2">
+                      <span className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+                        {projectName(connection.projectId)}
+                      </span>
+                      <span
+                        className={cn(
+                          'flex items-center gap-2 text-xs font-semibold',
+                          status.textClass,
+                        )}
+                      >
+                        <span
+                          className={cn('h-2 w-2 flex-shrink-0 rounded-full', status.dotClass)}
+                        />
+                        {status.label}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="rounded-none"
+                        onClick={() => setManageConnectionId(connection.id)}
+                      >
+                        Manage
+                      </Button>
+                    </div>
+                  );
+                })}
+                {!activeConnected && (
                   <Button
                     type="button"
                     variant="primary"
@@ -118,16 +201,6 @@ export function TrackerIntegrationSection(): React.JSX.Element {
                     onClick={() => setWizardProvider(meta.provider)}
                   >
                     Connect
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="rounded-none"
-                    onClick={() => setManageConnectionId(connection.id)}
-                  >
-                    Manage
                   </Button>
                 )}
               </div>

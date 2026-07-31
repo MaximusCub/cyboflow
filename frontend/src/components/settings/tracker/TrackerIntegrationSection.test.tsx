@@ -2,13 +2,14 @@
  * TrackerIntegrationSection — catalog tests.
  *
  * Harness mirrors IntegrationsSettings.test.tsx: render the real component over
- * a module mock of its one dependency (here the tRPC client rather than the IPC
- * API facade), then assert on what the user sees.
+ * module mocks of its dependencies (the tRPC client + the IPC API facade), then
+ * assert on what the user sees.
  *
- * Coverage: exactly two rows regardless of what came back; a provider with a
- * connection renders Connected + Manage while its sibling renders Not connected
- * + Connect; no active project disables Connect and never queries; the live
- * subscription re-reads on a change event.
+ * Coverage: exactly two rows regardless of what came back; connections are
+ * listed ACROSS projects with a project chip (a connection on a non-active
+ * project must not render as "Not connected"); paused renders as a warning, not
+ * green; Connect stays while the active project lacks a connection; no active
+ * project disables Connect; the live subscription re-reads on a change event.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -27,13 +28,39 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
+// The project list comes over IPC, not tRPC — same module-mock pattern.
+vi.mock('../../../utils/api', () => ({
+  API: { projects: { getAll: vi.fn() } },
+}));
+
 // Imported after the mock so vi.mock hoisting is in effect.
 import { TrackerIntegrationSection } from './TrackerIntegrationSection';
 import { trpc } from '../../../trpc/client';
+import { API } from '../../../utils/api';
 import { useNavigationStore } from '../../../stores/navigationStore';
 
 const mockConnections = vi.mocked(trpc.cyboflow.tracker.connections.query);
 const mockSubscribe = vi.mocked(trpc.cyboflow.tracker.onTrackerChanged.subscribe);
+const mockProjectsGetAll = vi.mocked(API.projects.getAll);
+
+const PROJECTS = [
+  {
+    id: 7,
+    name: 'Cyboflow',
+    path: '/dev/cyboflow',
+    active: true,
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+  },
+  {
+    id: 9,
+    name: 'Website',
+    path: '/dev/website',
+    active: false,
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+  },
+];
 
 function makeConnection(
   overrides: Partial<TrackerConnectionSummary> = {},
@@ -60,10 +87,18 @@ function makeConnection(
   };
 }
 
+/** Route the per-project connections query: rows are returned by project id. */
+function stubConnections(byProject: Record<number, TrackerConnectionSummary[]>): void {
+  mockConnections.mockImplementation(({ projectId }) =>
+    Promise.resolve(byProject[projectId] ?? []),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockConnections.mockResolvedValue([]);
   mockSubscribe.mockReturnValue({ unsubscribe: vi.fn() });
+  mockProjectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
   useNavigationStore.setState({ activeProjectId: 7 });
 });
 
@@ -80,34 +115,60 @@ describe('TrackerIntegrationSection', () => {
   });
 
   it('shows Connected + Manage for a connected provider and leaves its sibling connectable', async () => {
-    mockConnections.mockResolvedValue([makeConnection()]);
+    stubConnections({ 7: [makeConnection()] });
     render(<TrackerIntegrationSection />);
 
     expect(await screen.findByText('Connected')).toBeInTheDocument();
+    expect(screen.getByText('Cyboflow')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
-    // Plane is still the one connectable row.
+    // Plane is still the one connectable row: Linear's active project is taken.
     expect(screen.getByText('Not connected')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(1);
   });
 
-  it('queries the ACTIVE project and re-reads when a tracker change arrives', async () => {
+  it('lists a connection on a NON-active project with its project chip', async () => {
+    // The user's own trap: Plane connected to project 9 while viewing project 7.
+    stubConnections({ 9: [makeConnection({ id: 'conn-9', projectId: 9, provider: 'plane' })] });
+    render(<TrackerIntegrationSection />);
+
+    expect(await screen.findByText('Connected')).toBeInTheDocument();
+    expect(screen.getByText('Website')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
+    // The ACTIVE project still has no Plane connection, so both rows keep Connect.
+    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(2);
+  });
+
+  it('renders a paused connection as a warning, never green', async () => {
+    stubConnections({ 7: [makeConnection({ status: 'paused' })] });
+    render(<TrackerIntegrationSection />);
+
+    expect(await screen.findByText('Paused — check credentials')).toBeInTheDocument();
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument();
+  });
+
+  it('queries every project and re-reads when a tracker change arrives', async () => {
     render(<TrackerIntegrationSection />);
 
     await waitFor(() => expect(mockConnections).toHaveBeenCalledWith({ projectId: 7 }));
-    expect(mockSubscribe).toHaveBeenCalledWith({ projectId: 7 }, expect.anything());
+    await waitFor(() => expect(mockConnections).toHaveBeenCalledWith({ projectId: 9 }));
+    await waitFor(() =>
+      expect(mockSubscribe).toHaveBeenCalledWith({ projectId: 9 }, expect.anything()),
+    );
 
     // Fire the subscription's onData the way the router would.
+    const before = mockConnections.mock.calls.length;
     const handlers = mockSubscribe.mock.calls[0][1];
     handlers.onData?.({ projectId: 7, connectionId: 'conn-1', kind: 'sync' });
-    await waitFor(() => expect(mockConnections).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockConnections.mock.calls.length).toBeGreaterThan(before));
   });
 
-  it('never queries and cannot connect without an active project', async () => {
+  it('cannot connect without an active project', async () => {
     useNavigationStore.setState({ activeProjectId: null });
     render(<TrackerIntegrationSection />);
 
-    expect(await screen.findByText('Select a project to connect an issue tracker.')).toBeInTheDocument();
-    expect(mockConnections).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText('Select a project to connect an issue tracker.'),
+    ).toBeInTheDocument();
     for (const button of screen.getAllByRole('button', { name: 'Connect' })) {
       expect(button).toBeDisabled();
     }
