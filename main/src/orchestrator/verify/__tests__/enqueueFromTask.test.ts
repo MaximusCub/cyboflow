@@ -41,6 +41,7 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   devServerPorts: [5173],
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
+  agentSlots: 2,
 };
 
 function buildDb(): Database.Database {

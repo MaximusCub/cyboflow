@@ -134,11 +134,33 @@ export const VERIFY_SCREEN_LEASE = 'verify:screen';
  *
  * A modality ABSENT from this map is supported. Typed as a partial record so
  * adding a member to the shared union makes this a compile-visible decision.
+ *
+ * `native-screen` is now CONDITIONALLY unsupported: its entry is the answer for
+ * a deployment with NO {@link VerificationSchedulerDeps.nativeCaptureProbe}
+ * wired (the phase-0 posture — an unprobed host cannot be assumed capable), and
+ * the probe overrides it when it answers true. `mobile` is unconditional.
  */
 const UNSUPPORTED_MODALITY_REASONS: Partial<Record<VerificationModality, string>> = {
   'native-screen': 'native-screen capture/drive not yet wired on the agent path (proposal §4)',
   mobile: 'deferred — pending Xcode MCP',
 };
+
+/**
+ * The detail a `native-screen` skip carries when a capability probe WAS wired
+ * and answered FALSE — i.e. this host was asked and said no. The skip is
+ * structurally identical to the probe-less one above (same
+ * `unsupported modality '<m>': <detail>` shape, same `markUnsupported` ledger
+ * write, same `env` failure class, same evidence row); only the DETAIL differs,
+ * and it differs on purpose: "not yet wired" is a statement about cyboflow that
+ * a user can do nothing about, whereas the grant pair is the one native-screen
+ * failure a human can actually fix (grant Screen Recording + Accessibility, or
+ * install the binary). The probe (`peekabooBackend.healthCheck`) collapses
+ * binary-absent and grant-declined into a single boolean by design — it never
+ * throws and never distinguishes — so this names both halves rather than
+ * guessing which one bit.
+ */
+const NATIVE_CAPTURE_UNAVAILABLE_DETAIL =
+  'this host cannot capture the screen — the peekaboo binary is missing, or one of the two required macOS TCC grants (Screen Recording + Accessibility) is not held';
 
 /**
  * The §3.2 degrade-path skip reason. Exported because verdictDelivery matches on
@@ -150,13 +172,40 @@ export const VERIFY_NO_RUNBOOK_REASON =
   'no proven verification runbook for this project (run verification setup)';
 
 /**
- * The verification-AGENT deployment lease (redesign §5.4). Count-1: only ONE agent
- * verification is deployed at a time app-wide — an agent deployment is far heavier
- * than a single capture (it builds, serves, and drives a UI), so it is serialized
- * exactly like the single-display screen lease. Composed over the SAME shared mutex
- * as the port/screen leases, so it interlocks app-wide.
+ * SUPERSEDED by the {@link verifyAgentSlot} pool (§4 footnote ¹). This was the
+ * single count-1 lease that serialized EVERY agent verification app-wide
+ * regardless of modality; the roster's concurrency column ("parallel, port
+ * lease" for `web`/`cdp-app`, "exclusive" only for `native-screen`) is exactly
+ * what that lease made unimplementable. Kept EXPORTED and unused-by-the-drain
+ * on purpose: the name is a stable identifier a still-running older client (or
+ * an external holder on the shared mutex) may be holding, and deleting it would
+ * silently turn such a hold into a no-op rather than a compile error. Nothing in
+ * the scheduler acquires it any more — see {@link verifyAgentSlot}.
+ *
+ * @deprecated Use {@link verifyAgentSlot} — the bounded N-slot pool.
  */
 export const VERIFY_AGENT_LEASE = 'verify:agent';
+
+/**
+ * Build the lease name for agent-deployment slot `index` (§4 footnote ¹ — the
+ * budgeted scheduler work item). The bounded web/cdp pool is emulated the same
+ * way the port pool is: N DISTINCT count-1 leases over the SHARED mutex, probed
+ * in order by `tryAcquireOneOf`, so two requests in ONE drain pass take slot 0
+ * and slot 1 and run concurrently while the (N+1)th finds every slot held and
+ * stays 'queued' — the lane never blocks, exactly as before.
+ *
+ * Slot COUNT comes from `ResolvedVisualVerifyConfig.agentSlots` (default 2) and
+ * is deliberately DECOUPLED from `SPRINT_BATCH_CAP` (§5.4): a verification slot
+ * is a full SDK deploy competing with the user's own dev work for host
+ * CPU/network, so it must be sizeable independently of how many sprint lanes
+ * fan out. `native-screen` requests draw a slot from this pool too — they are
+ * agent deployments like any other — and ADDITIONALLY serialize on the separate
+ * count-1 {@link VERIFY_SCREEN_LEASE}; `agentSlots` governs only how many agent
+ * deployments may be in flight, never how many may touch the one screen.
+ */
+export function verifyAgentSlot(index: number): string {
+  return `verify:agent:${index}`;
+}
 
 /** Build the per-port lease name for one dev-server port. */
 export function verifyPortLease(port: number): string {
@@ -906,6 +955,27 @@ export interface VerificationSchedulerDeps {
    * it just does so silently.
    */
   capabilityFinding?: CapabilityBreakerFindingFn;
+  /**
+   * §4 roster — whether this host can capture the screen at all, the ONE gate
+   * that decides whether a `native-screen` request is deployable. The intended
+   * (and index.ts-wired) implementation is the retired capture backend's
+   * `peekabooBackend.healthCheck()`: binary-on-PATH AND both macOS TCC grants,
+   * never-throws, exactly as §4 "Driver additions for native-screen" prescribes
+   * ("the retired peekabooBackend.healthCheck() (both-grants probe,
+   * never-throws) is reused as the live grant probe").
+   *
+   * ABSENT ⇒ the phase-0 behavior is preserved verbatim: every `native-screen`
+   * request is skipped as unsupported without asking. That default is the honest
+   * one — an unprobed host is not evidence of a capable host, and the whole
+   * point of §3 is to stop deploying on hope. Answering TRUE lets the request
+   * proceed as an OBSERVE-ONLY verification; nothing here makes it drivable
+   * (the runner's behavior coercion and the driver's refusal enforce that —
+   * §4 fn.²).
+   *
+   * Injected as a plain thunk (mirrors `portFreeProbe`/`now`) so this module
+   * keeps the standalone-typecheck invariant and never imports a service.
+   */
+  nativeCaptureProbe?: () => Promise<boolean>;
 }
 
 /**
@@ -945,6 +1015,85 @@ interface VerificationRequestRow {
 }
 
 // ---------------------------------------------------------------------------
+// Drain priority (§5.4 groundwork — "setup runs at lower priority")
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a `setup_proof` row may sit behind lane traffic before it is
+ * PROMOTED to lane priority. Five minutes is the anti-starvation half of §5.4's
+ * "setup proofs run at lower priority": without it a project with continuous
+ * lane traffic could never prove a runbook — and it is precisely the projects
+ * with the most lane traffic that most need one. Sized well under the 15-minute
+ * `queuedAgeCeilingMs` so a promoted proof still has a real window to lease
+ * before the age ceiling would terminalize it.
+ */
+export const SETUP_PROOF_PROMOTION_MS = 5 * 60 * 1000;
+
+/** The two fields drain ordering keys on, plus the migration-088 setup-proof flag. */
+export interface AgentDrainOrderRow {
+  id: string;
+  /** ISO enqueue time — the promotion clock's anchor. */
+  enqueued_at: string;
+  /**
+   * Migration-088 `setup_proof`, read through the scheduler's DEFENSIVE
+   * per-row query (fail-soft `false` on a pre-088 DB), never through the drain
+   * SELECT — see {@link orderAgentDrainRows}.
+   */
+  setupProof: boolean;
+}
+
+/**
+ * Order one drain pass's queued rows into the §5.4 priority classes. PURE (no
+ * DB, no clock of its own — `nowMs` is passed in) so the policy is unit-testable
+ * on its own, which is the whole reason it is a free function rather than a
+ * private method.
+ *
+ * TWO classes, not a general priority queue:
+ *   0. LANE requests (`setup_proof = 0`) — a live sprint lane is parked at
+ *      awaiting-verify behind each one.
+ *   1. SETUP-PROOF requests (`setup_proof = 1`) — nobody is blocked on them;
+ *      §5.4 says they must not out-contend live lanes.
+ * …with one exception: a setup proof older than {@link SETUP_PROOF_PROMOTION_MS}
+ * is promoted INTO class 0 (anti-starvation).
+ *
+ * WHY NOT IN SQL. The drain SELECT is deliberately left untouched: it must keep
+ * working against a pre-088 DB that has no `setup_proof` column at all, and an
+ * `ORDER BY setup_proof` there would throw for every legacy row rather than
+ * degrade. Ordering in JS off a fail-soft per-row read means a legacy row simply
+ * reports `setupProof: false`, lands in class 0, and drains in the exact FIFO
+ * order it always did.
+ *
+ * STABILITY. Within a class the caller's order is preserved verbatim (the
+ * comparator falls back to the original index), so the SQL's
+ * `ORDER BY enqueued_at, id` remains the FIFO source of truth and this helper
+ * only ever moves rows BETWEEN classes.
+ *
+ * A starved setup proof is not silently lost either way: the §5.6 queued-age
+ * ceiling still expires it through the normal delivery path, so the worst case
+ * of a mis-sized pool is a visible 'skipped' with a concrete reason, never a row
+ * that sits forever. Pool sizing itself stays decoupled from `SPRINT_BATCH_CAP`
+ * (see {@link verifyAgentSlot}).
+ */
+export function orderAgentDrainRows<T extends AgentDrainOrderRow>(
+  rows: readonly T[],
+  nowMs: number,
+): T[] {
+  const priorityClass = (row: T): 0 | 1 => {
+    if (!row.setupProof) return 0;
+    const enqueuedMs = Date.parse(row.enqueued_at);
+    // An unparseable enqueued_at cannot be aged, so it is NOT promoted — the same
+    // conservative posture expireOverAgeQueued takes with the same column (a
+    // clock/parse glitch must not silently reprioritize the backlog).
+    if (!Number.isFinite(enqueuedMs)) return 1;
+    return nowMs - enqueuedMs >= SETUP_PROOF_PROMOTION_MS ? 0 : 1;
+  };
+  return rows
+    .map((row, index) => ({ row, index, cls: priorityClass(row) }))
+    .sort((a, b) => (a.cls !== b.cls ? a.cls - b.cls : a.index - b.index))
+    .map((entry) => entry.row);
+}
+
+// ---------------------------------------------------------------------------
 // VerificationScheduler
 // ---------------------------------------------------------------------------
 
@@ -976,6 +1125,7 @@ export class VerificationScheduler {
   private readonly capabilityStore?: VerifyCapabilityStore;
   private readonly runbookStatus: (projectId: number, modality: VerificationModality) => RunbookStatus;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
+  private readonly nativeCaptureProbe?: () => Promise<boolean>;
 
   /**
    * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
@@ -1047,6 +1197,9 @@ export class VerificationScheduler {
     // could record one — 'absent' is the honest default, not a placeholder.
     this.runbookStatus = deps.runbookStatus ?? ((): RunbookStatus => 'absent');
     this.capabilityFinding = deps.capabilityFinding;
+    // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
+    // probe ran", which the gate reads as unsupported (phase-0 behavior).
+    this.nativeCaptureProbe = deps.nativeCaptureProbe;
   }
 
   // --------------------------------------------------------------------------
@@ -1431,7 +1584,17 @@ export class VerificationScheduler {
     // rows through the normal delivery path. Expired rows drop out of selectQueued.
     await this.expireOverAgeQueued();
 
-    const rows = this.selectQueued();
+    // §5.4 priority classes, applied to the FIFO SELECT rather than folded into
+    // it (the SQL must keep working on a pre-088 DB — see orderAgentDrainRows).
+    // The setup-proof flag is read per row through the same fail-soft query the
+    // agent gates use, so a legacy row reports false and keeps its FIFO slot.
+    const rows = orderAgentDrainRows(
+      this.selectQueued().map((row) => ({
+        ...row,
+        setupProof: this.agentGateColumnsForRow(row.id).setupProof,
+      })),
+      this.now(),
+    );
     const inFlight: Array<Promise<void>> = [];
     for (const row of rows) {
       // processRow resolves to a { work } HOLDER (never the bare work promise) —
@@ -1807,20 +1970,67 @@ export class VerificationScheduler {
   }
 
   /**
+   * The unsupported-modality DETAIL for `modality`, or `null` when the agent
+   * engine can run it on this host. Split out of {@link evaluateAgentGates}
+   * because `native-screen` alone is answered by a host PROBE rather than by a
+   * static table (§4), and folding an await into the gate's precedence chain
+   * would obscure that only ONE of the three gates does I/O.
+   *
+   * `mobile` and any future table entry are unconditional. `native-screen`:
+   * no probe wired ⇒ the table's phase-0 detail (unprobed is not capable);
+   * probe true ⇒ null (proceed, observe-only); probe false or throwing ⇒
+   * {@link NATIVE_CAPTURE_UNAVAILABLE_DETAIL}.
+   */
+  private async unsupportedModalityDetail(modality: VerificationModality): Promise<string | null> {
+    const tableDetail = UNSUPPORTED_MODALITY_REASONS[modality];
+    if (tableDetail === undefined) return null;
+    if (modality !== 'native-screen' || !this.nativeCaptureProbe) return tableDetail;
+    try {
+      const capable = await this.nativeCaptureProbe();
+      return capable ? null : NATIVE_CAPTURE_UNAVAILABLE_DETAIL;
+    } catch (err) {
+      // The injected probe's contract is never-throws; a throw is a broken probe,
+      // and a broken probe must FAIL CLOSED — native-screen is the one modality
+      // whose deployment moves the user's real screen.
+      this.logger?.warn('[VerificationScheduler] native capture probe threw; treating host as incapable', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return NATIVE_CAPTURE_UNAVAILABLE_DETAIL;
+    }
+  }
+
+  /**
    * The three PRE-LEASE gates of phase 0
    * (docs/proposals/verification-setup-flow.md §3.2/§3.3/§3.4), evaluated in
    * precedence order. Returns the skip REASON when the request must not run, or
-   * `null` to let it proceed. Pure w.r.t. the request row (it only reads the
-   * capability ledger + the injected runbook-status thunk).
+   * `null` to let it proceed. It never MUTATES the request row (it reads the
+   * capability ledger, the injected runbook-status thunk, and — for
+   * `native-screen` only — the injected host-capability probe; the sole write is
+   * the ledger's `markUnsupported`).
    *
-   *  1. UNSUPPORTED MODALITY (§3.3). `native-screen` and `mobile` have no
-   *     executable path on the agent engine — the agent path never consults
-   *     `verify_type` at all (dispatch keys solely on the run's chain stamp), so
-   *     today a `native-desktop`/`mobile-flow` request is deployed and left to
-   *     fail organically ten minutes later with an unhelpful message. This states
-   *     the fact up front AND records it in the ledger, so the next request for
-   *     the same (project, modality) short-circuits at gate 2 without even
-   *     re-deriving it.
+   *  1. UNSUPPORTED MODALITY (§3.3/§4). `mobile` has no executable path on the
+   *     agent engine — the agent path never consults `verify_type` at all
+   *     (dispatch keys solely on the run's chain stamp), so a `mobile-flow`
+   *     request would otherwise be deployed and left to fail organically ten
+   *     minutes later with an unhelpful message. This states the fact up front
+   *     AND records it in the ledger, so the next request for the same
+   *     (project, modality) short-circuits at gate 2 without even re-deriving it.
+   *
+   *     `native-screen` is no longer a HARD skip: phase 1 gave it an executable
+   *     observe-only path (driver `native-screenshot`/`attest window`, the
+   *     runner's drive-unsupported coercion), so the question became a HOST
+   *     question — can this machine capture the screen at all — and it is
+   *     answered by the injected {@link VerificationSchedulerDeps.nativeCaptureProbe}
+   *     (§4: the retired `peekabooBackend.healthCheck()` both-grants probe).
+   *     True ⇒ proceed; false ⇒ the same unsupported skip carrying the
+   *     actionable grant-pair detail; ABSENT ⇒ the phase-0 answer unchanged
+   *     (unprobed is not capable). A probe that throws is treated as false —
+   *     the contract says never-throws, and a broken probe must not fail OPEN
+   *     onto the user's live screen.
+   *
+   *     This gate is why the method is async: the probe is I/O (it shells the
+   *     peekaboo binary), and it must run BEFORE any lease is taken so a
+   *     capability-less host never holds the screen lease even momentarily.
    *
    *  2. ACTIVE SUPPRESSION (§3.3/§3.4). The ledger says this (project, modality)
    *     is `'unsupported'` or breaker-`'suppressed'` AND the mark has not
@@ -1840,15 +2050,16 @@ export class VerificationScheduler {
    *     `setup_proof` row is exempt too (§3.6): proving the runbook is how a
    *     project stops being unproven, so gating it would deadlock the bootstrap.
    */
-  private evaluateAgentGates(
+  private async evaluateAgentGates(
     row: VerificationRequestRow,
     task: VerificationTaskV1,
     modality: VerificationModality,
     setupProof: boolean,
-  ): string | null {
-    // (1) Modalities with no executable path on the agent engine (§3.3).
-    const unsupportedDetail = UNSUPPORTED_MODALITY_REASONS[modality];
-    if (unsupportedDetail !== undefined) {
+  ): Promise<string | null> {
+    // (1) Modalities with no executable path on the agent engine (§3.3), plus the
+    // probe-conditional native-screen lane (§4).
+    const unsupportedDetail = await this.unsupportedModalityDetail(modality);
+    if (unsupportedDetail !== null) {
       const reason = `unsupported modality '${modality}': ${unsupportedDetail}`;
       this.capabilityStore?.markUnsupported(row.project_id, modality, reason);
       return reason;
@@ -1871,12 +2082,31 @@ export class VerificationScheduler {
   }
 
   /**
-   * Agent-engine sibling of processRow (§5.4). Acquires the count-1 `verify:agent`
-   * deployment lease + one pooled port (always — the bundled driver needs a CDP
-   * port even for a non-serving task; VERIFY_PORT is exported only when the task
-   * implies a server), transitions the row leased→running, and detaches the
-   * deployment work. Leaves the row 'queued' (LANE never blocks) when a lease is
-   * held, and resolves 'skipped' (fail-open) when the runner is not configured.
+   * Agent-engine sibling of processRow (§5.4/§4). Acquires, in order: ONE
+   * {@link verifyAgentSlot} from the bounded pool, the count-1
+   * {@link VERIFY_SCREEN_LEASE} when (and only when) the row's modality is
+   * `native-screen`, and one pooled port (always — the bundled driver needs a
+   * CDP port even for a non-serving task; VERIFY_PORT is exported only when the
+   * task implies a server). Then transitions the row leased→running and detaches
+   * the deployment work. Leaves the row 'queued' (LANE never blocks) when ANY of
+   * those is held, and resolves 'skipped' (fail-open) when the runner is not
+   * configured.
+   *
+   * LEASE ORDER IS DELIBERATE: slot → screen → port, cheapest-to-reacquire last,
+   * with every earlier lease released on a later miss. The screen lease sits
+   * INSIDE the slot so a native-screen request can never hold the one screen
+   * while waiting for a deployment slot; and because the pool probes are
+   * non-blocking, an unlucky interleaving costs a requeue, never a deadlock.
+   *
+   * SIMPLIFICATION worth naming: the PORT lease is taken for EVERY modality,
+   * `native-screen` included, even though a native app is not served over a
+   * leased port. `VERIFY_DRIVER_PORT` is part of the runner's env contract
+   * unconditionally (verificationAgentRunner exports it on every deploy), so
+   * making the port lease modality-conditional would mean either handing the
+   * driver an unleased port or forking that contract — both worse than one
+   * extra pooled port held by a native run. The cost is bounded: the port pool
+   * (5 by default) is larger than the agent pool (2 by default), so a
+   * native-screen run can never starve a web run of ports.
    */
   private async processAgentRow(
     row: VerificationRequestRow,
@@ -1904,7 +2134,7 @@ export class VerificationScheduler {
     const gate = this.agentGateColumnsForRow(row.id);
     const modality =
       gate.modality ?? resolveTaskModality(row.verify_type as VerificationType, task);
-    const gateSkip = this.evaluateAgentGates(row, task, modality, gate.setupProof);
+    const gateSkip = await this.evaluateAgentGates(row, task, modality, gate.setupProof);
     if (gateSkip !== null) {
       await this.markTerminalAndDeliver(
         row,
@@ -1924,17 +2154,38 @@ export class VerificationScheduler {
 
     const servesPort = this.taskImpliesServer(task);
 
-    // (1) The count-1 agent-deployment lease. Held ⇒ leave 'queued' (retry next drain).
-    const agentLease = await this.leasePool.tryAcquire(VERIFY_AGENT_LEASE);
+    // (1) ONE agent-deployment slot from the bounded pool (§4 fn.¹). Every slot
+    // held ⇒ leave 'queued' (retry next drain) — the lane is never held.
+    const agentLease = await this.leasePool.tryAcquireOneOf(this.agentSlotNames());
     if (!agentLease) {
-      this.logger?.debug('[VerificationScheduler] no free agent slot; leaving queued', { requestId: row.id });
+      this.logger?.debug('[VerificationScheduler] no free agent slot; leaving queued', {
+        requestId: row.id,
+        slots: this.agentSlotCount(),
+      });
       return { work: null };
     }
-    // (2) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP).
+    // (2) SCREEN EXCLUSIVITY (§4). A native-screen deployment observes the one
+    // real display, so it additionally takes the count-1 screen lease — the SAME
+    // named lease the legacy Peekaboo backend uses, over the SAME shared mutex,
+    // so a native agent run and a legacy native capture can never overlap either.
+    // Non-native modalities take nothing here and stay fully parallel.
+    let screenLease: LeaseHandle | null = null;
+    if (modality === 'native-screen') {
+      screenLease = await this.leasePool.tryAcquire(VERIFY_SCREEN_LEASE);
+      if (!screenLease) {
+        agentLease.release();
+        this.logger?.debug('[VerificationScheduler] screen lease held; leaving native-screen row queued', {
+          requestId: row.id,
+        });
+        return { work: null };
+      }
+    }
+    // (3) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP).
     const portLease = await this.leasePool.tryAcquireOneOf(
       this.config.devServerPorts.map(verifyPortLease),
     );
     if (!portLease) {
+      screenLease?.release();
       agentLease.release();
       this.logger?.debug('[VerificationScheduler] no free verify port; leaving queued', { requestId: row.id });
       return { work: null };
@@ -1942,6 +2193,7 @@ export class VerificationScheduler {
     const leasedPort = this.portFromLease(portLease.name);
     if (leasedPort === null) {
       portLease.release();
+      screenLease?.release();
       agentLease.release();
       await this.markTerminalAndDeliver(
         row,
@@ -1959,6 +2211,7 @@ export class VerificationScheduler {
     const leasedChanges = this.markAgentLeased(row.id);
     if (leasedChanges === 0) {
       portLease.release();
+      screenLease?.release();
       agentLease.release();
       this.logger?.debug('[VerificationScheduler] agent row no longer queued at lease time; releasing', {
         requestId: row.id,
@@ -1974,6 +2227,7 @@ export class VerificationScheduler {
         input,
         task,
         agentLease,
+        screenLease,
         portLease,
         leasedPort,
         servesPort,
@@ -1982,6 +2236,23 @@ export class VerificationScheduler {
         gate.setupProof,
       ),
     };
+  }
+
+  /**
+   * The configured agent-slot count, floored at 1. A persisted `agentSlots` of 0
+   * (or a negative) would otherwise make {@link agentSlotNames} empty, and an
+   * empty candidate list makes `tryAcquireOneOf` return null FOREVER: every agent
+   * request would sit 'queued' until the §5.6 age ceiling swept it — a silent,
+   * whole-feature outage from one bad config value. ConfigManager does not clamp
+   * this, so the clamp lives here, at the single point of use.
+   */
+  private agentSlotCount(): number {
+    return Math.max(1, Math.floor(this.config.agentSlots));
+  }
+
+  /** The bounded agent-slot pool's candidate lease names, probed in index order. */
+  private agentSlotNames(): string[] {
+    return Array.from({ length: this.agentSlotCount() }, (_, i) => verifyAgentSlot(i));
   }
 
   /** queued → leased for an agent row (no VisualBackendId; current_backend left untouched). */
@@ -2029,6 +2300,8 @@ export class VerificationScheduler {
     input: VerificationRequestInput,
     task: VerificationTaskV1,
     agentLease: LeaseHandle,
+    /** The count-1 screen lease for a `native-screen` row; null for every other modality (§4). */
+    screenLease: LeaseHandle | null,
     portLease: LeaseHandle,
     leasedPort: number,
     servesPort: boolean,
@@ -2114,6 +2387,13 @@ export class VerificationScheduler {
         // deadline matches this method's abort timer — a task-supplied timeoutMs
         // above the query default is honored instead of silently cut to 10 min.
         timeoutMs: this.agentDeadlineMs(task),
+        // §4 — the SAME modality the pre-lease gates and the screen-lease decision
+        // used, handed to the runner rather than re-derived there. Only the
+        // scheduler can know it (it owns `verify_type` and the stamped column,
+        // neither of which the runner sees), and a second derivation from the task
+        // shape alone could disagree with the one that just decided whether this
+        // request may touch the screen at all.
+        modality,
         signal: controller.signal,
       };
 
@@ -2194,6 +2474,12 @@ export class VerificationScheduler {
         batchLease.release();
       }
       await this.releaseOrQuarantinePort(portLease, leasedPort);
+      // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
+      // port (which a leaked dev server can keep genuinely occupied past
+      // teardown), the display is not a resource this deployment can leave dirty
+      // — the observe-only native path spawns no long-lived screen owner. Held
+      // for the whole deployment, released here in the same chain as the rest.
+      screenLease?.release();
       agentLease.release();
     }
   }

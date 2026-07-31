@@ -1770,6 +1770,11 @@ async function initializeServices(): Promise<boolean> {
     // through a closure so it is resolved at CALL time, not construction time).
     resolveChromium: probeChromiumExecutable,
     portFreeProbe: (port: number) => verifyPortFreeProbe(port),
+    // The same never-throws two-grant Peekaboo probe the scheduler's native-screen
+    // gate uses (§4) — wired here too so the runner's own §3.5 'native-capture'
+    // preflight check actually runs on a native-screen deployment (the gate and
+    // the preflight must agree on the same evidence source).
+    nativeCaptureProbe: () => peekabooBackend.healthCheck(),
     logger: cyboflowLogger,
   });
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
@@ -1842,6 +1847,15 @@ async function initializeServices(): Promise<boolean> {
     // and the scheduler's 'absent' default is the honest answer until it lands.
     capabilityStore: new VerifyCapabilityStore(cyboflowDb, cyboflowLogger),
     capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
+    // Phase 1 modality roster (§4): the live grant probe that decides whether a
+    // `native-screen` request may deploy at all. Reuses the capture backend's
+    // healthCheck verbatim, exactly as the proposal prescribes ("the retired
+    // peekabooBackend.healthCheck() (both-grants probe, never-throws) is reused
+    // as the live grant probe") — binary-on-PATH AND both macOS TCC grants, and
+    // it never throws, so the scheduler's gate gets a plain boolean. Bound to the
+    // SAME backend instance registered above, so the agent path and the legacy
+    // capture path can never disagree about this host's screen capability.
+    nativeCaptureProbe: () => peekabooBackend.healthCheck(),
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).

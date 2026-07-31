@@ -417,6 +417,7 @@ describe('VerificationScheduler', () => {
         devServerPorts: [],
         simulatorDevices: [],
         queuedAgeCeilingMs: 15 * 60 * 1000,
+        agentSlots: 2,
       },
       leasePool: new ResourceLeasePool(new Mutex()),
     });

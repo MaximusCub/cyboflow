@@ -141,6 +141,7 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   devServerPorts: [5173, 3000],
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
+  agentSlots: 2,
 };
 
 /** Insert one queued request and return its id. */
