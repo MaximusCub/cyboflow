@@ -166,7 +166,9 @@ export function TrackerWizardModal({
 
   const credentials = useMemo<TrackerCredentialsInput>(() => {
     const trimmedBase = baseUrl.trim();
-    const trimmedSlug = workspaceSlug.trim();
+    // Plane workspace slugs are lowercase URL slugs; users naturally type the
+    // display name ("BahiaVentures"), and the API 404s on a case mismatch.
+    const trimmedSlug = workspaceSlug.trim().toLowerCase();
     return {
       provider,
       apiKey: apiKey.trim(),
