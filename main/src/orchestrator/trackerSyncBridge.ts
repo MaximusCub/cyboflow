@@ -99,6 +99,23 @@ export interface TrackerSyncFacade {
     entityType: TrackerEntityType,
     entityId: string,
   ): Promise<TrackerEntityLinkRef | null>;
+
+  /**
+   * The LOCAL-DELETE ruling: the user is deleting/archiving a linked entity and
+   * has said what should happen to the tracker issue. Both answers drop the
+   * link; `cancelRemote` additionally queues the write that moves the issue into
+   * the tracker's cancelled group. NEVER a remote hard delete — see the design
+   * doc's "Deletes" row.
+   *
+   * `unlinked: false` means the entity had no live link (the renderer's
+   * linkForEntity read was stale, or nothing was ever synced); the caller
+   * proceeds with its delete either way.
+   */
+  unlinkEntity(
+    entityType: TrackerEntityType,
+    entityId: string,
+    opts: { cancelRemote: boolean },
+  ): Promise<{ unlinked: boolean }>;
 }
 
 // ---------------------------------------------------------------------------

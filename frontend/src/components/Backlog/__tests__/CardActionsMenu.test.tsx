@@ -9,6 +9,11 @@
  * run; Archive/Delete open their confirm dialogs; the component renders nothing
  * without a board.
  *
+ * The tracker-sync local-delete ruling: Archive/Delete first ask
+ * tracker.linkForEntity, an UNLINKED item goes straight to its confirm dialog,
+ * a LINKED one gets TrackerUnlinkDialog first (and only reaches the confirm
+ * dialog once a ruling landed), and a failing lookup never blocks the delete.
+ *
  * Reorder items (WCAG 2.5.7): Move up / Move down / Move to top appear only
  * when `onReorder` is wired, fire it with the right direction, and disable per
  * first/last-card position (canMoveUp / canMoveDown).
@@ -30,11 +35,15 @@ vi.mock('../../../stores/backlogStore', () => {
   return { useBacklogStore };
 });
 
-const { mockSetStage, mockArchive, mockDelete } = vi.hoisted(() => ({
-  mockSetStage: vi.fn(),
-  mockArchive: vi.fn(),
-  mockDelete: vi.fn(),
-}));
+const { mockSetStage, mockArchive, mockDelete, mockLinkForEntity, mockUnlinkEntity } = vi.hoisted(
+  () => ({
+    mockSetStage: vi.fn(),
+    mockArchive: vi.fn(),
+    mockDelete: vi.fn(),
+    mockLinkForEntity: vi.fn(),
+    mockUnlinkEntity: vi.fn(),
+  }),
+);
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -43,6 +52,10 @@ vi.mock('../../../trpc/client', () => ({
         setStage: { mutate: mockSetStage },
         archive: { mutate: mockArchive },
         delete: { mutate: mockDelete },
+      },
+      tracker: {
+        linkForEntity: { query: mockLinkForEntity },
+        unlinkEntity: { mutate: mockUnlinkEntity },
       },
     },
   },
@@ -109,6 +122,9 @@ beforeEach(() => {
   mockSetStage.mockReset().mockResolvedValue({ taskId: 'tsk_1' });
   mockArchive.mockReset().mockResolvedValue({ taskId: 'tsk_1' });
   mockDelete.mockReset().mockResolvedValue({ taskId: 'tsk_1' });
+  // The overwhelmingly common case: nothing on this board is tracker-synced.
+  mockLinkForEntity.mockReset().mockResolvedValue(null);
+  mockUnlinkEntity.mockReset().mockResolvedValue({ unlinked: true });
 });
 
 describe('CardActionsMenu', () => {
@@ -188,19 +204,109 @@ describe('CardActionsMenu', () => {
     expect(screen.getByText('Delete').closest('button')).toBeDisabled();
   });
 
-  it('opens the archive confirm dialog from the Archive item', () => {
+  it('opens the archive confirm dialog from the Archive item', async () => {
     render(<CardActionsMenu task={makeTask()} />);
     fireEvent.click(screen.getByTestId('task-actions-trigger'));
     fireEvent.click(screen.getByText('Archive'));
-    expect(screen.getByTestId('archive-confirm-dialog')).toBeInTheDocument();
+    expect(await screen.findByTestId('archive-confirm-dialog')).toBeInTheDocument();
   });
 
-  it('opens the delete confirm dialog from the Delete item', () => {
+  it('opens the delete confirm dialog from the Delete item', async () => {
     render(<CardActionsMenu task={makeTask()} />);
     fireEvent.click(screen.getByTestId('task-actions-trigger'));
     fireEvent.click(screen.getByText('Delete'));
-    expect(screen.getByTestId('delete-confirm-dialog')).toBeInTheDocument();
+    expect(await screen.findByTestId('delete-confirm-dialog')).toBeInTheDocument();
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  describe('tracker local-delete ruling', () => {
+    const LINK = {
+      provider: 'linear' as const,
+      externalIdentifier: 'CORE-142',
+      externalUrl: 'https://linear.app/acme/issue/CORE-142',
+    };
+
+    it('asks for the link on the CLICK, and an unlinked item deletes with no extra dialog', async () => {
+      render(<CardActionsMenu task={makeTask()} />);
+      // Nothing is asked while the card just sits there.
+      expect(mockLinkForEntity).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Delete'));
+
+      expect(await screen.findByTestId('delete-confirm-dialog')).toBeInTheDocument();
+      expect(screen.queryByTestId('tracker-unlink-dialog')).not.toBeInTheDocument();
+      expect(mockLinkForEntity).toHaveBeenCalledTimes(1);
+      expect(mockLinkForEntity).toHaveBeenCalledWith({ entityType: 'task', entityId: 'tsk_1' });
+      expect(mockUnlinkEntity).not.toHaveBeenCalled();
+    });
+
+    it('a LINKED item gets the ruling first; "Keep" unlinks and then opens the delete confirm', async () => {
+      mockLinkForEntity.mockResolvedValue(LINK);
+      render(<CardActionsMenu task={makeTask()} />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Delete'));
+
+      expect(await screen.findByTestId('tracker-unlink-dialog')).toBeInTheDocument();
+      // The destructive confirm is NOT open yet — the ruling comes first.
+      expect(screen.queryByTestId('delete-confirm-dialog')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('tracker-unlink-keep'));
+      await waitFor(() => expect(mockUnlinkEntity).toHaveBeenCalledTimes(1));
+      expect(mockUnlinkEntity).toHaveBeenCalledWith({
+        entityType: 'task',
+        entityId: 'tsk_1',
+        cancelRemote: false,
+      });
+      expect(await screen.findByTestId('delete-confirm-dialog')).toBeInTheDocument();
+      expect(screen.queryByTestId('tracker-unlink-dialog')).not.toBeInTheDocument();
+    });
+
+    it('"Cancel in <provider>" rules with cancelRemote and then opens the archive confirm', async () => {
+      mockLinkForEntity.mockResolvedValue(LINK);
+      render(<CardActionsMenu task={makeTask({ type: 'idea', id: 'ide_9' })} />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Archive'));
+
+      expect(await screen.findByTestId('tracker-unlink-dialog')).toBeInTheDocument();
+      expect(mockLinkForEntity).toHaveBeenCalledWith({ entityType: 'idea', entityId: 'ide_9' });
+
+      fireEvent.click(screen.getByTestId('tracker-unlink-cancel-remote'));
+      await waitFor(() => expect(mockUnlinkEntity).toHaveBeenCalledTimes(1));
+      expect(mockUnlinkEntity).toHaveBeenCalledWith({
+        entityType: 'idea',
+        entityId: 'ide_9',
+        cancelRemote: true,
+      });
+      expect(await screen.findByTestId('archive-confirm-dialog')).toBeInTheDocument();
+    });
+
+    it('dismissing the ruling abandons the delete entirely', async () => {
+      mockLinkForEntity.mockResolvedValue(LINK);
+      render(<CardActionsMenu task={makeTask()} />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Delete'));
+      expect(await screen.findByTestId('tracker-unlink-dialog')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText('Cancel'));
+
+      await waitFor(() =>
+        expect(screen.queryByTestId('tracker-unlink-dialog')).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByTestId('delete-confirm-dialog')).not.toBeInTheDocument();
+      expect(mockUnlinkEntity).not.toHaveBeenCalled();
+      expect(mockDelete).not.toHaveBeenCalled();
+    });
+
+    it('a failing link lookup never blocks the delete', async () => {
+      mockLinkForEntity.mockRejectedValue(new Error('PRECONDITION_FAILED'));
+      render(<CardActionsMenu task={makeTask()} />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Delete'));
+
+      expect(await screen.findByTestId('delete-confirm-dialog')).toBeInTheDocument();
+      expect(screen.queryByTestId('tracker-unlink-dialog')).not.toBeInTheDocument();
+    });
   });
 
   describe('reorder items (WCAG 2.5.7 alternative to drag)', () => {

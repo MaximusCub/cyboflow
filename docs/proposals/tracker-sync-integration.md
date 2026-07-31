@@ -127,7 +127,7 @@ Where the build refined the design above — the spec stands, these are the delt
 - **Reconcile links** are created with a null baseline — the first inbound pass adopts the issue's current snapshot without applying anything; the wizard carries the issue's identifier + URL so the ref chip lands at connect time.
 - **Connected-view edit shortcuts are v1-read-only** for source/selection/mapping (changing them means re-running the wizard); direction, mirroring, and conflict mode toggle live via `updateSettings`. Deep-links would require a credential re-prompt since keys never return to the renderer.
 - **Plane flags for the live smoke**: docs are mid-rename `/issues/` → `/work-items/` (adapter uses `/issues/`; one-line segment swap if a real instance disagrees); assignees need `expand=assignees`; the workspace slug is part of credentials.
-- **Open TODO**: the local-delete prompt (what happens to the tracker issue when a linked entity is deleted locally) is not yet wired into the backlog's delete path; `linkForEntity` exists on the router for exactly that affordance.
+- **Local-delete flow (shipped)**: archiving/deleting a linked entity from the board's card menu first checks `linkForEntity` and, when linked, interposes a two-choice dialog per the settled ruling — "Keep in <provider>" (unlink only) or "Cancel in <provider>" (`unlinkEntity` with an outbox-backed cancelled-state write) — then proceeds with the normal confirm. The unlink lands before the delete so a landed delete can never leave a live link behind. The cancel choice deliberately bypasses `two_way` gating: it is a direct per-issue instruction, not the automatic stream.
 
 ## V2 (explicitly out of v1 scope)
 

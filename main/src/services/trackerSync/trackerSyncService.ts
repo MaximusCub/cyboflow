@@ -137,6 +137,7 @@ import {
   readDesiredGroup,
   writeBackGroupForStage,
   type UpdateStatePayload,
+  type WriteBackGroup,
   type WriteBackListener,
 } from './writeBack';
 
@@ -1313,13 +1314,27 @@ export class TrackerSyncService implements TrackerSyncFacade {
     if (stageId === null || connection.two_way !== 1) return;
     const group = writeBackGroupForStage(stageId, resolveStageIds(this.db, connection.project_id));
     if (group === null) return;
+    this.enqueueGroupWriteBack(connection, link, group);
+  }
+
+  /**
+   * Queue ONE state write for a link's issue, deduped against the connection's
+   * unresolved queue exactly the way writeBack.ts's own enqueue does — `kind` is
+   * deliberately NOT part of the key, because update_state and close_parent move
+   * the same issue to the same group. Returns true when a row was written.
+   */
+  private enqueueGroupWriteBack(
+    connection: TrackerConnectionRow,
+    link: EntityExternalLinkRow,
+    group: WriteBackGroup,
+  ): boolean {
     const duplicate = listUnresolvedOutbox(this.db, connection.id).some(
       (row) =>
         row.external_id === link.external_id &&
         (row.kind === 'update_state' || row.kind === 'close_parent') &&
         readDesiredGroup(row.payload_json) === group,
     );
-    if (duplicate) return;
+    if (duplicate) return false;
     const payload: UpdateStatePayload = { desiredGroup: group };
     enqueueOutbox(this.db, {
       connection_id: connection.id,
@@ -1329,10 +1344,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
       external_id: link.external_id,
       payload_json: JSON.stringify(payload),
     });
+    return true;
   }
 
   // -------------------------------------------------------------------------
-  // Entity link lookup
+  // Entity link lookup + the local-delete ruling
   // -------------------------------------------------------------------------
 
   /**
@@ -1355,6 +1371,59 @@ export class TrackerSyncService implements TrackerSyncFacade {
       };
     }
     return null;
+  }
+
+  /**
+   * The LOCAL-DELETE ruling (design doc → "Deletes"): the entity is about to be
+   * deleted or archived locally and the user has said what should happen to the
+   * tracker issue. Both answers ORPHAN the link — the entity is going away, so
+   * there is nothing left to sync — and `cancelRemote` additionally queues the
+   * state write that moves the issue into the tracker's cancelled group. There
+   * is no remote hard-delete on this path, ever: the worst we ever do to someone
+   * else's tracker is cancel an issue.
+   *
+   * EVERY live link is dropped, not just the first provider's: an entity that is
+   * about to disappear must not leave a live link pointing at it from the other
+   * tracker. `unlinked: false` therefore means "nothing was linked" — the caller
+   * (the renderer's delete path) proceeds with its own delete regardless.
+   *
+   * `two_way` is NOT consulted for the cancel. That flag governs the AUTOMATIC
+   * write-back — whether stage moves stream out on their own — whereas this is a
+   * direct instruction about the one issue in front of the user, answered in a
+   * dialog that named it. A disconnected connection is skipped instead: its
+   * stored key is gone, so the row could never drain.
+   */
+  async unlinkEntity(
+    entityType: TrackerEntityType,
+    entityId: string,
+    opts: { cancelRemote: boolean },
+  ): Promise<{ unlinked: boolean }> {
+    let unlinked = false;
+    for (const provider of LINK_PROVIDERS) {
+      const link = getLinkByEntity(this.db, entityType, entityId, provider);
+      if (link === null || link.orphaned_at !== null) continue;
+      const connection = getConnection(this.db, link.connection_id);
+
+      if (opts.cancelRemote && connection !== null && connection.status !== 'disconnected') {
+        // Queue BEFORE orphaning: the row carries the external id, and a
+        // half-applied unlink (orphaned, never cancelled) is the outcome the
+        // user explicitly asked us to avoid.
+        if (this.enqueueGroupWriteBack(connection, link, 'cancelled')) {
+          // Same 2s nudge a stage move gets — without it the cancel would sit
+          // until the next 5-minute poll, long after the entity is gone.
+          this.armDrainTimer(connection.id);
+        }
+      }
+
+      markOrphaned(this.db, link.id);
+      unlinked = true;
+      if (connection !== null) {
+        // 'connection' (not 'sync'): the connected view's linked-item counts are
+        // what changed, and no pass ran.
+        this.emitTrackerChange(connection.project_id, connection.id, 'connection');
+      }
+    }
+    return { unlinked };
   }
 }
 

@@ -26,6 +26,9 @@
  *     remote_deleted remote / remote_deleted local), plus the description
  *     branch's provenance-footer preservation.
  *   - disconnect: status + the cleared secret + delisting.
+ *   - unlinkEntity: the local-delete ruling — 'keep' orphans with an empty
+ *     outbox, 'cancel' queues exactly one deduped cancelled-group write, an
+ *     unlinked entity reports { unlinked: false }.
  *   - reconcilePreview: which entities are candidates and how a title matches.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -86,6 +89,7 @@ import {
   readSecret,
   upsertLink,
   type NewConnectionRow,
+  type UpsertLinkInput,
 } from '../store';
 import type { UpdateStatePayload } from '../writeBack';
 import { TrackerSyncService } from '../trackerSyncService';
@@ -873,5 +877,149 @@ describe('TrackerSyncService.reconcilePreview', () => {
       link.id,
     );
     await expect(service.linkForEntity('idea', ideaId)).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unlinkEntity — the local-delete ruling
+// ---------------------------------------------------------------------------
+
+describe('TrackerSyncService.unlinkEntity', () => {
+  /** A linked idea on the default connection, ready to be deleted locally. */
+  async function seedLinkedIdea(
+    overrides: Partial<UpsertLinkInput> = {},
+  ): Promise<{ ideaId: string; link: EntityExternalLinkRow }> {
+    const ideaId = await createEntity('idea', { title: 'Linked idea' });
+    const link = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-1',
+      external_identifier: 'CORE-142',
+      external_url: 'https://linear.app/acme/issue/CORE-142',
+      ...overrides,
+    });
+    return { ideaId, link };
+  }
+
+  it("'keep in the tracker' orphans the link and writes NOTHING to the outbox", async () => {
+    makeConnection();
+    const { ideaId, link } = await seedLinkedIdea();
+    broadcasts.length = 0;
+
+    await expect(service.unlinkEntity('idea', ideaId, { cancelRemote: false })).resolves.toEqual({
+      unlinked: true,
+    });
+
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(outboxRows()).toEqual([]);
+    // The link is gone as far as every read model is concerned.
+    await expect(service.linkForEntity('idea', ideaId)).resolves.toBeNull();
+    expect(broadcasts).toEqual([
+      { projectId: PROJECT_ID, connectionId: CONN_ID, kind: 'connection' },
+    ]);
+  });
+
+  it("'cancel in the tracker' queues exactly one cancelled-group write and orphans the link", async () => {
+    makeConnection();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await expect(service.unlinkEntity('idea', ideaId, { cancelRemote: true })).resolves.toEqual({
+      unlinked: true,
+    });
+
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(rows[0].external_id).toBe('ext-1');
+    expect(rows[0].entity_type).toBe('idea');
+    expect(rows[0].entity_id).toBe(ideaId);
+    expect((JSON.parse(rows[0].payload_json) as UpdateStatePayload).desiredGroup).toBe('cancelled');
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('dedupes against an unresolved row already carrying the cancel', async () => {
+    makeConnection();
+    const { ideaId } = await seedLinkedIdea();
+
+    await service.unlinkEntity('idea', ideaId, { cancelRemote: true });
+    // The link is orphaned now, so a second ruling is a no-op — but re-linking
+    // and ruling again must still not double-queue the same intent.
+    upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+    await service.unlinkEntity('idea', ideaId, { cancelRemote: true });
+
+    expect(outboxRows()).toHaveLength(1);
+  });
+
+  it('reports { unlinked: false } for an unlinked or already-orphaned entity, queueing nothing', async () => {
+    makeConnection();
+    const { ideaId, link } = await seedLinkedIdea();
+    raw.prepare(`UPDATE entity_external_links SET orphaned_at = datetime('now') WHERE id = ?`).run(
+      link.id,
+    );
+    broadcasts.length = 0;
+
+    await expect(service.unlinkEntity('idea', ideaId, { cancelRemote: true })).resolves.toEqual({
+      unlinked: false,
+    });
+    await expect(
+      service.unlinkEntity('idea', 'ide_missing', { cancelRemote: true }),
+    ).resolves.toEqual({ unlinked: false });
+
+    expect(outboxRows()).toEqual([]);
+    expect(broadcasts).toEqual([]);
+  });
+
+  it('cancels even on a one-way connection — the ruling is about THIS issue, not the sync policy', async () => {
+    makeConnection({ two_way: 0 });
+    const { ideaId } = await seedLinkedIdea();
+
+    await service.unlinkEntity('idea', ideaId, { cancelRemote: true });
+
+    expect(outboxRows()).toHaveLength(1);
+    expect((JSON.parse(outboxRows()[0].payload_json) as UpdateStatePayload).desiredGroup).toBe(
+      'cancelled',
+    );
+  });
+
+  it('skips the cancel on a disconnected connection (its key is gone) but still unlinks', async () => {
+    makeConnection({ status: 'disconnected' });
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await expect(service.unlinkEntity('idea', ideaId, { cancelRemote: true })).resolves.toEqual({
+      unlinked: true,
+    });
+
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('drops the entity\'s links in EVERY provider so nothing is left pointing at it', async () => {
+    makeConnection();
+    const planeConnection = makeConnection({ id: 'conn-plane', provider: 'plane' });
+    const { ideaId, link } = await seedLinkedIdea();
+    const planeLink = upsertLink(raw, {
+      connection_id: planeConnection.id,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'plane',
+      external_id: 'ext-plane-1',
+    });
+
+    await expect(service.unlinkEntity('idea', ideaId, { cancelRemote: true })).resolves.toEqual({
+      unlinked: true,
+    });
+
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(linkRow(planeLink.id).orphaned_at).not.toBeNull();
+    expect(outboxRows()).toHaveLength(1);
+    expect(outboxRows(planeConnection.id)).toHaveLength(1);
   });
 });

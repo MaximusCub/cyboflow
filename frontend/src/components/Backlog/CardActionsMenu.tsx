@@ -15,6 +15,14 @@
  * guarded. `isArchived` reads the `archived_at` stamp — archiving no longer
  * moves the item to a terminal stage.
  *
+ * THE TRACKER RULING. Archive and Delete are the app's user-initiated removal
+ * chokepoint (every board surface funnels its ⋯ menu through here), so this is
+ * also where the tracker-sync local-delete prompt lives: the click first asks
+ * `tracker.linkForEntity`, and a LINKED entity gets {@link TrackerUnlinkDialog}
+ * — keep the issue as it is, or cancel it in the tracker — before the ordinary
+ * confirm dialog opens. An unlinked entity (the overwhelmingly common case) is
+ * unchanged apart from that one query.
+ *
  * When `onReorder` is wired (Kanban board cards only), the menu also exposes
  * "Move up" / "Move down" / "Move to top" — the keyboard / single-pointer
  * alternative to drag-reorder (WCAG 2.5.7), driving the SAME reorder core as
@@ -39,10 +47,15 @@ import { pickDefaultBoard, friendlyStageError } from './backlogSelectors';
 import { StageChangeDialog } from './StageChangeDialog';
 import { ArchiveConfirmDialog } from './ArchiveConfirmDialog';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
+import { TrackerUnlinkDialog } from '../settings/tracker/TrackerUnlinkDialog';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import type { TrackerEntityLinkRef } from '../../../../shared/types/trackerSync';
 
 /** Context-menu reorder direction (translated to a post-move index upstream). */
 export type ReorderDirection = 'up' | 'down' | 'top';
+
+/** The two actions that remove a card from the board and so need the tracker ruling. */
+type DestructiveIntent = 'archive' | 'delete';
 
 interface CardActionsMenuProps {
   task: BacklogTaskItem;
@@ -73,6 +86,13 @@ export function CardActionsMenu({
   // Dialog-less Unarchive surfaces failures inline next to the trigger.
   const [actionError, setActionError] = useState<string | null>(null);
   const [unarchiving, setUnarchiving] = useState(false);
+  /**
+   * The tracker ruling in front of the confirm dialog: which destructive intent
+   * is parked, and the link it is parked on. Both are null in the ordinary case
+   * — an entity that is not synced to any tracker never sees this step.
+   */
+  const [parkedIntent, setParkedIntent] = useState<DestructiveIntent | null>(null);
+  const [trackerLink, setTrackerLink] = useState<TrackerEntityLinkRef | null>(null);
 
   // Prefer the task's own board; the fallback narrows to the task's PROJECT
   // before picking a default — the store now holds boards for ALL projects, and
@@ -108,6 +128,49 @@ export function CardActionsMenu({
     } finally {
       setUnarchiving(false);
     }
+  };
+
+  const openConfirm = (intent: DestructiveIntent): void => {
+    if (intent === 'archive') setArchiveOpen(true);
+    else setDeleteOpen(true);
+  };
+
+  /**
+   * Archive / Delete INTENT. Before the confirm dialog, ask whether this entity
+   * is linked to a tracker — a linked one owes the user the design's ruling
+   * (leave the issue alone, or cancel it) rather than silently stranding it.
+   *
+   * ON INTENT, never on render: the query fires from the menu click, so the
+   * common unlinked card pays exactly one round trip at the moment it is being
+   * deleted and nothing at all while it just sits on the board. A FAILING query
+   * (no tracker wired, main mid-restart) falls through to the normal confirm —
+   * the sync feature must never be able to block a local delete.
+   */
+  const beginDestructive = async (intent: DestructiveIntent): Promise<void> => {
+    setActionError(null);
+    let link: TrackerEntityLinkRef | null = null;
+    try {
+      link = await trpc.cyboflow.tracker.linkForEntity.query({
+        entityType: task.type,
+        entityId: task.id,
+      });
+    } catch {
+      link = null;
+    }
+    if (link === null) {
+      openConfirm(intent);
+      return;
+    }
+    setTrackerLink(link);
+    setParkedIntent(intent);
+  };
+
+  /** The ruling landed and the link is gone — carry on with what was clicked. */
+  const handleUnlinkResolved = (): void => {
+    const intent = parkedIntent;
+    setParkedIntent(null);
+    setTrackerLink(null);
+    if (intent !== null) openConfirm(intent);
   };
 
   const items: DropdownItem[] = [];
@@ -165,7 +228,7 @@ export function CardActionsMenu({
       variant: 'warning',
       disabled: hasActiveRun,
       ...(runHint ? { description: runHint } : {}),
-      onClick: () => setArchiveOpen(true),
+      onClick: () => void beginDestructive('archive'),
     });
   }
   items.push({
@@ -175,7 +238,7 @@ export function CardActionsMenu({
     variant: 'danger',
     disabled: hasActiveRun,
     ...(runHint ? { description: runHint } : {}),
-    onClick: () => setDeleteOpen(true),
+    onClick: () => void beginDestructive('delete'),
   });
 
   return (
@@ -219,6 +282,23 @@ export function CardActionsMenu({
         isOpen={deleteOpen}
         onClose={() => setDeleteOpen(false)}
       />
+      {trackerLink !== null && parkedIntent !== null && (
+        <TrackerUnlinkDialog
+          entityType={task.type}
+          entityId={task.id}
+          entityRef={task.ref}
+          action={parkedIntent}
+          link={trackerLink}
+          isOpen
+          onClose={() => {
+            // Dismissed without a ruling: the destructive action is abandoned
+            // too, so nothing is deleted and the link stays live.
+            setParkedIntent(null);
+            setTrackerLink(null);
+          }}
+          onResolved={handleUnlinkResolved}
+        />
+      )}
     </span>
   );
 }

@@ -12,6 +12,7 @@
  *   conflicts                     : query        -> TrackerConflictSummary[]
  *   resolveConflict               : mutation     -> void
  *   linkForEntity                 : query        -> TrackerEntityLinkRef | null
+ *   unlinkEntity                  : mutation     -> { unlinked } (the local-delete ruling)
  *   onTrackerChanged              : subscription -> TrackerChangedEvent
  *
  * Every procedure is a THIN 1:1 wrapper over the TrackerSyncFacade wired at boot
@@ -425,6 +426,31 @@ export const trackerRouter = router({
     .query(async ({ input }): Promise<TrackerEntityLinkRef | null> => {
       try {
         return await getTrackerSyncFacade().linkForEntity(input.entityType, input.entityId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * The local-delete ruling the backlog's delete/archive path collects when the
+   * entity is linked: drop the link, and — with `cancelRemote` — queue the write
+   * that cancels the issue in the tracker first. Never a remote hard delete.
+   * `unlinked: false` means there was no live link (a stale read); the caller
+   * deletes either way.
+   */
+  unlinkEntity: protectedProcedure
+    .input(
+      z.object({
+        entityType: entityTypeSchema,
+        entityId: z.string().min(1),
+        cancelRemote: z.boolean(),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ unlinked: boolean }> => {
+      try {
+        return await getTrackerSyncFacade().unlinkEntity(input.entityType, input.entityId, {
+          cancelRemote: input.cancelRemote,
+        });
       } catch (err) {
         rethrowAsTRPCError(err);
       }
