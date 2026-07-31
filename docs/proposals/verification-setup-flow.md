@@ -481,6 +481,18 @@ Generated from the phase-1 roster; nearly invisible for most users.
 
 - v1 (2026-07-30): initial proposal from the four-phase synthesis
   (recon workflow + adversarial critique).
+- v3 (2026-07-31): Codex adversarial review of the IMPLEMENTATION branch —
+  7 findings (2 critical / 5 high), all fixed (`4ffd6dbb..aabb1379`):
+  gate-integrity chokepoint (deployed+ambiguous skips now block; transport +
+  fallback carve-outs typed and documented); attestation moved HARNESS-SIDE
+  (the agent-writable attest.json was forgeable and is no longer read; the
+  runner probes the live surface itself and owns serve teardown via the new
+  driver `serve` command); pin validation requires proven status (ordinary) /
+  exact draft version (setup); setup_proof authorized from the run's frozen
+  workflow identity + a resolvable pin; dependency dirs are CLONED into
+  snapshots (APFS clonefile) instead of symlinked — write-through dead in
+  both paths, pnpm workspace links resolve, the §7.2 regex demoted to
+  diagnostics; capability ledger keyed by pinned runbook hash.
 - v2 (2026-07-30): folded all 11 Codex adversarial-review findings —
   conservative three-way failure classifier (skip requires harness-derived
   proof); per-modality `unsupported` with TTL/generation re-probe; pinned
