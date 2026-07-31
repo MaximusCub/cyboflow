@@ -21,7 +21,7 @@
  *  - VerificationFailureClass / VerificationModality (added for
  *    docs/proposals/verification-setup-flow.md Phase 0/1) are their own
  *    single-contract pairings: failure_class/modality on verification_requests
- *    (migration 088, plain nullable TEXT — no SQL CHECK domain, unlike
+ *    (migration 095, plain nullable TEXT — no SQL CHECK domain, unlike
  *    REQUEST_STATUS, since a stricter CHECK would reject a future-added member
  *    from an old binary's write) and VerifyCapabilityStore's ledger tables
  *    (main/src/orchestrator/verify/capabilityStore.ts). Widen all three together.
@@ -1066,7 +1066,7 @@ export function isVerificationType(v: unknown): v is VerificationType {
 // §4 "Phase 1 — modality roster"). ADDITIVE ONLY — this section never touches
 // an existing export above. It is itself a "single contract split across
 // files — widen together" pairing (per this file's CONTRACT NOTES) with
-// migration 088's verification_requests.failure_class/.modality columns and
+// migration 095's verification_requests.failure_class/.modality columns and
 // with VerifyCapabilityStore (main/src/orchestrator/verify/capabilityStore.ts).
 // ===========================================================================
 
@@ -1118,7 +1118,7 @@ export const VERIFICATION_FAILURE_CLASSES: readonly VerificationFailureClass[] =
 
 /**
  * Runtime guard for an unknown value (a persisted request row's
- * `failure_class` column, migration 088 — plain nullable TEXT, no SQL CHECK
+ * `failure_class` column, migration 095 — plain nullable TEXT, no SQL CHECK
  * domain). Mirrors isVerificationType's shape.
  */
 export function isVerificationFailureClass(v: unknown): v is VerificationFailureClass {
@@ -1131,7 +1131,7 @@ export function isVerificationFailureClass(v: unknown): v is VerificationFailure
  * authored prose (a log excerpt, an agent's own "the port was taken" claim) is
  * never sufficient BY ITSELF; the classifier's `'env'` verdict must point at
  * evidence like this. Persisted as `VerificationFailureEvidence[]` on
- * `verification_requests.failure_evidence_json` (migration 088) so the
+ * `verification_requests.failure_evidence_json` (migration 095) so the
  * classifier's INPUTS are auditable, not just its output label.
  */
 export interface VerificationFailureEvidence {
@@ -1200,7 +1200,7 @@ export const VERIFICATION_MODALITIES: readonly VerificationModality[] = [
 
 /**
  * Runtime guard for an unknown value (a persisted request row's `modality`
- * column, migration 088 — plain nullable TEXT). Mirrors isVerificationType's
+ * column, migration 095 — plain nullable TEXT). Mirrors isVerificationType's
  * shape.
  */
 export function isVerificationModality(v: unknown): v is VerificationModality {
@@ -1534,12 +1534,12 @@ export interface VerificationRequestListRow extends VerificationRequestRow {
   session_name: string | null;
   /**
    * §3 Phase-0/1 surfacing (verification-setup-flow.md §3.1/§3.6, migration
-   * 088). These four are PARSED/derived from the raw `failure_class` /
+   * 095). These four are PARSED/derived from the raw `failure_class` /
    * `modality` / `setup_proof` / `failure_evidence_json` columns by the list
    * query's row-shaping step (never re-validated on the frontend) — camelCase
    * on purpose to mark them as derived, distinct from the raw snake_case
    * passthrough columns above. All four are OPTIONAL (not `| null`) so a
-   * pre-088 row — the column absent entirely rather than NULL, on a DB that
+   * pre-095 row — the column absent entirely rather than NULL, on a DB that
    * predates the migration — and a pre-classifier-wiring row (columns exist
    * but were never stamped) render IDENTICALLY: the field is simply omitted,
    * and every consumer that already guards `!== undefined` (the

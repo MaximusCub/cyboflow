@@ -53,7 +53,7 @@ const MIGRATIONS = [
   // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3): the
   // failure_class / failure_evidence_json columns this delivery renders, plus the
   // capability-ledger tables the §3.4 breaker notice is raised alongside.
-  '088_verify_failure_classes.sql',
+  '095_verify_failure_classes.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -688,7 +688,7 @@ const SPRINT_MIGRATIONS = [
   // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3): the
   // failure_class / failure_evidence_json columns this delivery renders, plus the
   // capability-ledger tables the §3.4 breaker notice is raised alongside.
-  '088_verify_failure_classes.sql',
+  '095_verify_failure_classes.sql',
 ];
 
 function buildSprintDb(): Database.Database {
@@ -1324,7 +1324,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
 // (docs/proposals/verification-setup-flow.md)
 // ---------------------------------------------------------------------------
 
-/** Seed a terminal request row carrying the migration-088 classification columns. */
+/** Seed a terminal request row carrying the migration-095 classification columns. */
 function seedClassifiedRequest(
   db: Database.Database,
   opts: {
@@ -1482,7 +1482,7 @@ describe('verdictDelivery — §3.1 classification in the non-blocking finding b
     expect(bodyOf(db, 'run-c4')).not.toContain('Run verification setup for this project');
   });
 
-  it('a row with NO classification (legacy path / pre-088) renders the pre-phase-0 body unchanged', async () => {
+  it('a row with NO classification (legacy path / pre-095) renders the pre-phase-0 body unchanged', async () => {
     seedRun(db, 'run-c5');
     seedClassifiedRequest(db, {
       id: 'vr_c5',

@@ -218,7 +218,7 @@ export function sessionLabel(req: VerificationRequest): string {
 // ---------------------------------------------------------------------------
 // Failure-class chip + budget line
 // (docs/proposals/verification-setup-flow.md §3.1 "Attribution split" / §3.6
-// "surface budget state in the Verify Queue"; migration 088.)
+// "surface budget state in the Verify Queue"; migration 095.)
 // ---------------------------------------------------------------------------
 
 /**

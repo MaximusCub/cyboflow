@@ -80,7 +80,7 @@ function rowEqual(a: VerificationRequest, b: VerificationRequest): boolean {
     // row in practice, but compared anyway so a renamed session repaints its pill.
     a.session_id === b.session_id &&
     a.session_name === b.session_name &&
-    // Migration-088 derived fields (verification-setup-flow.md §3.1/§3.6) — the
+    // Migration-095 derived fields (verification-setup-flow.md §3.1/§3.6) — the
     // failure-class chip + evidence list. `failureEvidence` is compared via
     // JSON.stringify (small bounded array; a plain === would always see a
     // fresh array reference from a fresh JSON.parse on every poll and never

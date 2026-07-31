@@ -3,16 +3,16 @@
  * capability ledger backing the phase-0 per-modality `unsupported` mark and
  * K-consecutive-env-failure circuit breaker (docs/proposals/
  * verification-setup-flow.md §3.3/§3.4). Against a migration-backed in-memory
- * DB (006 → 011 → 014 → 015 → 016 → 055 → 056 → 088, mirroring
+ * DB (006 → 011 → 014 → 015 → 016 → 055 → 056 → 095, mirroring
  * migration078.test.ts's THROUGH_056 chain extended through the new file) so
  * the two new tables (verify_capability_state / verify_host_state) come from
- * the REAL migration 088, not a hand-rolled schema — proving the migration file
+ * the REAL migration 095, not a hand-rolled schema — proving the migration file
  * itself is what these tests exercise.
  *
  * Covers: sub-threshold recording, the trip transition, healthy-outcome
  * clearing, TTL expiry, host-generation-bump expiry, the unsupported mark
  * (independent of the breaker, survives a healthy outcome), runbook-hash
- * keying, and fail-soft behavior against a pre-088 DB missing the ledger
+ * keying, and fail-soft behavior against a pre-095 DB missing the ledger
  * tables entirely.
  */
 import { describe, it, expect } from 'vitest';
@@ -28,7 +28,7 @@ import {
 const MIG_DIR = join(__dirname, '..', '..', '..', 'database', 'migrations');
 
 // Mirrors migration078.test.ts's THROUGH_056 constant — the minimal chain that
-// stands up workflow_runs + verification_requests (which 088 ALTERs).
+// stands up workflow_runs + verification_requests (which 095 ALTERs).
 const THROUGH_056 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
@@ -57,16 +57,16 @@ function seedProject(db: Database.Database): void {
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
 }
 
-/** Full chain through 088 — the "you get it for free from real migrations" DB. */
+/** Full chain through 095 — the "you get it for free from real migrations" DB. */
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_056, '088_verify_failure_classes.sql']);
+  apply(db, [...THROUGH_056, '095_verify_failure_classes.sql']);
   return db;
 }
 
-/** Same chain WITHOUT 088 — proves fail-soft behavior on a pre-088 DB. */
-function buildPre088Db(): Database.Database {
+/** Same chain WITHOUT 095 — proves fail-soft behavior on a pre-095 DB. */
+function buildPre095Db(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
   apply(db, THROUGH_056);
@@ -74,7 +74,7 @@ function buildPre088Db(): Database.Database {
 }
 
 describe('VerifyCapabilityStore', () => {
-  it('migration 088 creates verify_capability_state and verify_host_state', () => {
+  it('migration 095 creates verify_capability_state and verify_host_state', () => {
     const db = buildDb();
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('verify_capability_state', 'verify_host_state')")
@@ -222,8 +222,8 @@ describe('VerifyCapabilityStore', () => {
     db.close();
   });
 
-  it('fails soft to nulls / zero / no-throw against a pre-088 DB missing the ledger tables', () => {
-    const db = buildPre088Db();
+  it('fails soft to nulls / zero / no-throw against a pre-095 DB missing the ledger tables', () => {
+    const db = buildPre095Db();
     const store = new VerifyCapabilityStore(db);
 
     expect(() => store.getActiveSuppression(1, 'web')).not.toThrow();

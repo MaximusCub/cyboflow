@@ -621,9 +621,9 @@ export interface TerminalExtra {
   report?: VerificationReportV1;
   /**
    * The §3.1 conservative classifier's verdict for a terminal FAILURE
-   * (docs/proposals/verification-setup-flow.md), persisted to migration 088's
+   * (docs/proposals/verification-setup-flow.md), persisted to migration 095's
    * `failure_class`. Absent on a pass and on every legacy-path terminal (the
-   * column stays NULL, exactly as for a pre-088 row).
+   * column stays NULL, exactly as for a pre-095 row).
    */
   failureClass?: VerificationFailureClass;
   /**
@@ -944,7 +944,7 @@ export interface VerificationSchedulerDeps {
    * (an env-class failure counts toward the breaker; a pass or a
    * deliverable-attributed failure resets it). Absent ⇒ no suppression is ever
    * active and no outcome is recorded — byte-identical to the pre-phase-0
-   * behavior, which is what every legacy test and any pre-088 DB gets.
+   * behavior, which is what every legacy test and any pre-095 DB gets.
    */
   capabilityStore?: VerifyCapabilityStore;
   /**
@@ -989,7 +989,7 @@ export interface VerificationSchedulerDeps {
    *
    * ABSENT ⇒ no request is ever pinned and no proof is ever recorded, which is
    * byte-identical to the pre-phase-2 behavior (and what every legacy test and
-   * any pre-089 DB gets).
+   * any pre-096 DB gets).
    */
   runbookStore?: VerifyRunbookStore;
   /**
@@ -1036,7 +1036,7 @@ export type RunbookStatus = 'proven' | 'unproven-draft' | 'absent';
  * One PROVEN runbook revision, resolved at enqueue time by
  * {@link VerificationScheduler.resolveProvenRunbook} — the content to merge into
  * the composed task plus the two values that become the request row's PIN
- * (migration 089 `runbook_hash` / `runbook_local_version`).
+ * (migration 096 `runbook_hash` / `runbook_local_version`).
  *
  * `hash` and `version` travel together on purpose: the hash content-addresses
  * the COMMITTED half (so the runner can resolve the exact revision from a
@@ -1093,14 +1093,14 @@ interface VerificationRequestRow {
  */
 export const SETUP_PROOF_PROMOTION_MS = 5 * 60 * 1000;
 
-/** The two fields drain ordering keys on, plus the migration-088 setup-proof flag. */
+/** The two fields drain ordering keys on, plus the migration-095 setup-proof flag. */
 export interface AgentDrainOrderRow {
   id: string;
   /** ISO enqueue time — the promotion clock's anchor. */
   enqueued_at: string;
   /**
-   * Migration-088 `setup_proof`, read through the scheduler's DEFENSIVE
-   * per-row query (fail-soft `false` on a pre-088 DB), never through the drain
+   * Migration-095 `setup_proof`, read through the scheduler's DEFENSIVE
+   * per-row query (fail-soft `false` on a pre-095 DB), never through the drain
    * SELECT — see {@link orderAgentDrainRows}.
    */
   setupProof: boolean;
@@ -1121,7 +1121,7 @@ export interface AgentDrainOrderRow {
  * is promoted INTO class 0 (anti-starvation).
  *
  * WHY NOT IN SQL. The drain SELECT is deliberately left untouched: it must keep
- * working against a pre-088 DB that has no `setup_proof` column at all, and an
+ * working against a pre-095 DB that has no `setup_proof` column at all, and an
  * `ORDER BY setup_proof` there would throw for every legacy row rather than
  * degrade. Ordering in JS off a fail-soft per-row read means a legacy row simply
  * reports `setupProof: false`, lands in class 0, and drains in the exact FIFO
@@ -1353,7 +1353,7 @@ export class VerificationScheduler {
     this.capabilityStore = deps.capabilityStore;
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
-    // store at index.ts; this default is what legacy tests and a pre-089 DB get.)
+    // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
     this.runbookStatus = deps.runbookStatus ?? (async (): Promise<RunbookStatus> => 'absent');
     this.runbookStore = deps.runbookStore;
     this.capabilityFinding = deps.capabilityFinding;
@@ -1575,7 +1575,7 @@ export class VerificationScheduler {
     enqueueKey?: string;
     /**
      * §3.6 — this request is a phase-2 SETUP/PROOF run ("test-execute the derived
-     * runbook"), not ordinary lane traffic. Stamped to migration 088's
+     * runbook"), not ordinary lane traffic. Stamped to migration 095's
      * `setup_proof` and load-bearing in three places: the project's lifetime
      * verification budget is BYPASSED for it (a proof run must never silently
      * fail-open to 'skipped' because lane traffic exhausted the budget first), it
@@ -1591,7 +1591,7 @@ export class VerificationScheduler {
      * machine-local record's CAS version at enqueue. Both are resolved by the
      * caller's {@link VerificationScheduler.resolveProvenRunbook} (or supplied
      * verbatim by a setup-proof request, which pins the DRAFT it is trying to
-     * prove) and written to migration 089's columns in the same INSERT as the
+     * prove) and written to migration 096's columns in the same INSERT as the
      * task itself, so the row records the exact revision it must execute.
      *
      * Absent ⇒ NULL columns, and the runner's pin validation does not run —
@@ -1617,7 +1617,7 @@ export class VerificationScheduler {
     const id = `vr_${randomUUID().replace(/-/g, '')}`;
     // The §4 modality axis is resolved and STAMPED here, at enqueue, from the
     // (type, task) pair — the drain must not have to re-derive it, and the
-    // capability ledger (§3.3/§3.4) is keyed on it. A pre-088 DB has neither
+    // capability ledger (§3.3/§3.4) is keyed on it. A pre-095 DB has neither
     // column, so the widened INSERT is attempted first and falls back to the
     // legacy column list on a `prepare` failure (which happens BEFORE any row is
     // written — the fallback can never double-insert).
@@ -1634,7 +1634,7 @@ export class VerificationScheduler {
         req.snapshotSha ?? null,
         req.enqueueKey ?? null,
       ];
-    // The INSERT widens ONE generation at a time (089 pin → 088 gate columns →
+    // The INSERT widens ONE generation at a time (096 pin → 095 gate columns →
     // the 078 legacy list), each attempt falling back on a `prepare` failure.
     // `prepare` throws on an unknown column BEFORE any row is written, so a
     // fallback can never double-insert; the ladder is what lets one build serve
@@ -1796,9 +1796,9 @@ export class VerificationScheduler {
    * plus the three human-facing fields, or `null` when the id resolves to nothing
    * (never enqueued, already reaped) or the read itself failed.
    *
-   * The migration-088 `failure_class` is fetched through the SAME widen-then-fall-
+   * The migration-095 `failure_class` is fetched through the SAME widen-then-fall-
    * back ladder as {@link agentGateColumnsForRow} / {@link runbookPinForRow}: a
-   * pre-088 DB throws on `prepare` (before any read), and losing the STATUS to
+   * pre-095 DB throws on `prepare` (before any read), and losing the STATUS to
    * that throw would make every await on such a binary answer "not found" forever.
    * The fallback drops only the attribution, which such a DB genuinely never had.
    */
@@ -1915,7 +1915,7 @@ export class VerificationScheduler {
     await this.expireOverAgeQueued();
 
     // §5.4 priority classes, applied to the FIFO SELECT rather than folded into
-    // it (the SQL must keep working on a pre-088 DB — see orderAgentDrainRows).
+    // it (the SQL must keep working on a pre-095 DB — see orderAgentDrainRows).
     // The setup-proof flag is read per row through the same fail-soft query the
     // agent gates use, so a legacy row reports false and keeps its FIFO slot.
     const rows = orderAgentDrainRows(
@@ -2225,8 +2225,8 @@ export class VerificationScheduler {
   }
 
   /**
-   * The migration-088 gate columns, read in their OWN defensive query rather
-   * than folded into {@link agentColumnsForRow}: on a pre-088 DB the widened
+   * The migration-095 gate columns, read in their OWN defensive query rather
+   * than folded into {@link agentColumnsForRow}: on a pre-095 DB the widened
    * SELECT throws, and losing `task_json` to that throw would silently degrade
    * every agent row to the synthesized bare-intent task. Fail-soft answers are
    * the pre-phase-0 posture — no stamped modality (the caller re-derives it) and
@@ -2250,8 +2250,8 @@ export class VerificationScheduler {
   }
 
   /**
-   * The migration-089 PIN columns for one row, in their OWN defensive query for
-   * the same reason {@link agentGateColumnsForRow} is separate: a pre-089 DB
+   * The migration-096 PIN columns for one row, in their OWN defensive query for
+   * the same reason {@link agentGateColumnsForRow} is separate: a pre-096 DB
    * makes the widened SELECT throw, and folding these into an existing query
    * would take `task_json` or the gate flags down with them. Fail-soft answer is
    * "no pin", which is what every legacy row genuinely is.
@@ -2272,7 +2272,7 @@ export class VerificationScheduler {
   /**
    * The capability ledger's THIRD key component for one request:
    * `verify_capability_state` is keyed `(project_id, modality, runbook_hash)`
-   * (migration 088), and this resolves the `runbook_hash` half from the row's
+   * (migration 095), and this resolves the `runbook_hash` half from the row's
    * own §5.2 pin.
    *
    * WHY THE HASH IS PART OF THE KEY AT ALL, stated once here for every ledger
@@ -2288,9 +2288,9 @@ export class VerificationScheduler {
    * project for commands nothing runs any more, and phase 2's whole
    * derive→prove→persist loop would be unable to clear it.
    *
-   * `''` — migration 088's column default — is the genuinely-UNPINNED bucket:
+   * `''` — migration 095's column default — is the genuinely-UNPINNED bucket:
    * degenerate pre-live requests that derive no environment, and every legacy
-   * row from before 089. It is a real key, not a fallback for "we could not be
+   * row from before 096. It is a real key, not a fallback for "we could not be
    * bothered to look": those requests share a capability story precisely
    * because none of them runs project-authored commands.
    */
@@ -4518,10 +4518,10 @@ export class VerificationScheduler {
     status: RequestStatus,
     extra: TerminalExtra = {},
   ): number {
-    // The migration-088 classification columns are written in the SAME guarded
+    // The migration-095 classification columns are written in the SAME guarded
     // write as the status, so a health-panel audit can never observe a terminal
     // row whose verdict and its evidence disagree. FAIL-SOFT (mirrors
-    // agentColumnsForRow): a pre-088 DB — every minimal test fixture, and any
+    // agentColumnsForRow): a pre-095 DB — every minimal test fixture, and any
     // binary rolled back below the migration — throws on `prepare`, BEFORE any
     // row is touched, so falling through to the legacy write below is safe and
     // byte-identical to the pre-phase-0 behavior.
@@ -4567,12 +4567,12 @@ export class VerificationScheduler {
   }
 
   /**
-   * The migration-088 widening of {@link markTerminal}: the identical guarded
+   * The migration-095 widening of {@link markTerminal}: the identical guarded
    * UPDATE plus `failure_class` / `failure_evidence_json` / `preflight_json`
    * (docs/proposals/verification-setup-flow.md §3.1 — "The classifier's inputs
    * and verdict are persisted on the request row so the health panel can show the
    * env/deliverable/ambiguous histogram and misclassification can be audited").
-   * Throws on a pre-088 DB; {@link markTerminal} owns that fallback.
+   * Throws on a pre-095 DB; {@link markTerminal} owns that fallback.
    */
   private markTerminalWithClassification(id: string, status: RequestStatus, extra: TerminalExtra): number {
     return this.db

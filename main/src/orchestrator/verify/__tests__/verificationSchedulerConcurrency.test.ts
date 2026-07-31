@@ -78,7 +78,7 @@ function buildDb(): Database.Database {
       snapshot_sha     TEXT,
       enqueue_key      TEXT,
       judge_calls_used INTEGER NOT NULL DEFAULT 0,
-      -- migration 088 (docs/proposals/verification-setup-flow.md §3)
+      -- migration 095 (docs/proposals/verification-setup-flow.md §3)
       failure_class         TEXT,
       failure_evidence_json TEXT,
       modality              TEXT,

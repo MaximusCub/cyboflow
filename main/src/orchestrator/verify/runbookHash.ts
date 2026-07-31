@@ -59,9 +59,9 @@ export function canonicalRunbookJson(runbook: VerifyRunbookV1): string {
 /**
  * The portable half's content hash — sha256 hex over
  * {@link canonicalRunbookJson}. This exact value is what
- * `verification_requests.runbook_hash` pins (migration 089), what
+ * `verification_requests.runbook_hash` pins (migration 096), what
  * `verify_runbook_local.portable_hash` CAS-keys the machine-local record
- * against, and what `verify_capability_state.runbook_hash` (migration 088)
+ * against, and what `verify_capability_state.runbook_hash` (migration 095)
  * scopes the per-modality capability ledger by — one identity, three tables.
  */
 export function runbookPortableHash(runbook: VerifyRunbookV1): string {

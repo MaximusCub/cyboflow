@@ -222,7 +222,7 @@ export interface VerificationAgentRequest {
   modality?: VerificationModality;
   /**
    * §5.2 seam 3 — the CONTENT-ADDRESSED runbook pin stamped on the request row
-   * at enqueue (migration 089 `runbook_hash`), when this request was composed
+   * at enqueue (migration 096 `runbook_hash`), when this request was composed
    * against a proven runbook. Present ⇒ the runner resolves exactly this
    * revision through {@link VerificationAgentRunnerDeps.resolveRunbookByHash}
    * and refuses to execute anything else (see
@@ -1998,7 +1998,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let verdictModel: string;
     if (provider === 'codex') {
       if (!this.deps.codexQuery) {
-        return { status: 'skipped', errorMessage: 'codex verify runtime not wired', fileNames: [] };
+        // PRE-deploy: no session was ever opened, so this skip is not budget-charged
+        // (§3.6 "unknown ⇒ do not charge" does not even apply — we know it never ran).
+        return {
+          status: 'skipped',
+          deployed: false,
+          preflight,
+          errorMessage: 'codex verify runtime not wired',
+          fileNames: [],
+        };
       }
       queryFn = this.deps.codexQuery;
       // May be undefined — the Codex query resolves the account default in that case.
@@ -2153,7 +2161,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // A query-INTERNAL deadline expiry is a real timeout, not an infra skip
         // (adversarial-review fix): report it as the terminal `timeout` status.
         if (err instanceof VerificationAgentQueryError && err.timedOut) {
-          return { status: 'timeout', errorMessage: err.message, fileNames: [] };
+          return { status: 'timeout', errorMessage: err.message, fileNames: [], ...deployedProvenance };
         }
         const message = err instanceof Error ? err.message : String(err);
         logger?.warn('[VerificationAgentRunner] agent query failed', { runId: req.runId, error: message });

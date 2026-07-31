@@ -12,7 +12,7 @@
  *   - list   : query -> VerificationRequestListRow[] (a project's verify requests,
  *              optionally narrowed by runId + status), newest-enqueued first, each
  *              enriched with its ORIGIN SESSION (run → session LEFT JOIN) for the
- *              panel's per-card session pill, and — additively, migration 088 —
+ *              panel's per-card session pill, and — additively, migration 095 —
  *              the classifier's `failureClass`/`modality`/`setupProof`/
  *              `failureEvidence` (docs/proposals/verification-setup-flow.md §3.1/
  *              §3.6). See {@link shapeRow}.
@@ -93,13 +93,13 @@ interface VerificationRequestDbRow {
   // list query). Both NULL when the run has no session row.
   session_id: string | null;
   session_name: string | null;
-  // Migration-088 columns (verification-setup-flow.md §3.1/§3.6) — `undefined`
-  // (not `null`) on a pre-088 DB, since `SELECT vr.*` simply omits a column
-  // that does not exist yet; `null` on a post-088 row the classifier never
+  // Migration-095 columns (verification-setup-flow.md §3.1/§3.6) — `undefined`
+  // (not `null`) on a pre-095 DB, since `SELECT vr.*` simply omits a column
+  // that does not exist yet; `null` on a post-095 row the classifier never
   // stamped (failure_class/modality/failure_evidence_json — all nullable TEXT,
   // no CHECK domain per the migration's own note) or a non-terminal/passed row.
   // `setup_proof` alone is `NOT NULL DEFAULT 0`, so it is a plain `number` on
-  // every post-088 row and only `undefined` pre-088.
+  // every post-095 row and only `undefined` pre-095.
   failure_class: string | null | undefined;
   failure_evidence_json: string | null | undefined;
   modality: string | null | undefined;
@@ -168,13 +168,13 @@ function shapeRow(r: VerificationRequestDbRow): VerificationRequestListRow {
     // declared null so the renderer's pill fallback has one shape to test.
     session_id: r.session_id ?? null,
     session_name: r.session_name ?? null,
-    // Migration-088 derived fields (§3.1/§3.6) — see the VerificationRequestListRow
+    // Migration-095 derived fields (§3.1/§3.6) — see the VerificationRequestListRow
     // doc for why these are OPTIONAL/camelCase rather than the raw-passthrough
     // `| null` convention above: each one FAIL-SOFT's to `undefined`, never
     // passing an unvalidated raw value through.
     failureClass: isVerificationFailureClass(r.failure_class) ? r.failure_class : undefined,
     modality: isVerificationModality(r.modality) ? r.modality : undefined,
-    // `=== 1` (not a bare truthiness check) — `undefined` (pre-088 column absent)
+    // `=== 1` (not a bare truthiness check) — `undefined` (pre-095 column absent)
     // must resolve to `false` exactly like `0` does, never to `undefined` itself:
     // setupProof is a concrete boolean on every row the type declares it on.
     setupProof: r.setup_proof === 1,

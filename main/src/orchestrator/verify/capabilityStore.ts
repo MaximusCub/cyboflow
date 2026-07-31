@@ -2,7 +2,7 @@
  * VerifyCapabilityStore — the per-(project, modality, runbook) capability
  * ledger backing the phase-0 `unsupported` mark and K-consecutive-env-failure
  * circuit breaker (docs/proposals/verification-setup-flow.md §3.3/§3.4),
- * persisted on migration 088's `verify_capability_state` / `verify_host_state`
+ * persisted on migration 095's `verify_capability_state` / `verify_host_state`
  * tables.
  *
  * TWO MECHANISMS SHARE ONE ROW SHAPE, distinguished by `status`:
@@ -42,7 +42,7 @@
  * VerificationModality type — no 'electron' / 'better-sqlite3' / 'fs' import.
  *
  * FAIL-SOFT BY DESIGN: every method catches its own SQL errors (a missing
- * table on a pre-088 DB, a locked file, a malformed row) and degrades to the
+ * table on a pre-095 DB, a locked file, a malformed row) and degrades to the
  * "no suppression / nothing recorded" answer rather than throwing — mirrors
  * the defensive reads throughout verificationScheduler.ts (e.g.
  * `agentColumnsForRow`). A capability-ledger hiccup must never abort a
@@ -99,7 +99,7 @@ export class VerifyCapabilityStore {
    * `'suppressed'`/`'unsupported'` but has SELF-REFRESHED per the class doc
    * (TTL elapsed, or the host generation moved on). `runbookHash` defaults to
    * `''` — the pre-runbook (phase-0) world where no portable runbook exists
-   * yet, matching migration 088's column default.
+   * yet, matching migration 095's column default.
    */
   getActiveSuppression(
     projectId: number,

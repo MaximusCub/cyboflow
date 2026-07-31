@@ -2,9 +2,9 @@
  * Unit tests for VerifyRunbookStore — the machine-local half of the runbook
  * contract (docs/proposals/verification-setup-flow.md §5.2 seam 1 + §5.3),
  * against a migration-backed in-memory DB (006 → 011 → 014 → 015 → 016 → 055 →
- * 056 → 088 → 089, extending capabilityStore.test.ts's chain through the new
+ * 056 → 095 → 096, extending capabilityStore.test.ts's chain through the new
  * file) so `verify_runbook_local` and the two `verification_requests` pin
- * columns come from the REAL migration 089, not a hand-rolled schema.
+ * columns come from the REAL migration 096, not a hand-rolled schema.
  *
  * The suite is organized around the store's ONE non-obvious invariant:
  * `'proven'` is a conjunction re-checked on every read, and the four ways it
@@ -37,8 +37,8 @@ import {
 const MIG_DIR = join(__dirname, '..', '..', '..', 'database', 'migrations');
 
 // Mirrors capabilityStore.test.ts's chain — the minimal set that stands up
-// workflow_runs + verification_requests (which 089 ALTERs).
-const THROUGH_088 = [
+// workflow_runs + verification_requests (which 096 ALTERs).
+const THROUGH_095 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
@@ -46,7 +46,7 @@ const THROUGH_088 = [
   '016_review_items.sql',
   '055_visual_verification.sql',
   '056_visual_verify_budget.sql',
-  '088_verify_failure_classes.sql',
+  '095_verify_failure_classes.sql',
 ];
 
 function apply(db: Database.Database, files: string[]): void {
@@ -67,19 +67,19 @@ function seedProject(db: Database.Database): void {
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
 }
 
-/** Full chain through 089 — the "you get it for free from real migrations" DB. */
+/** Full chain through 096 — the "you get it for free from real migrations" DB. */
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_088, '089_verify_runbook_local.sql']);
+  apply(db, [...THROUGH_095, '096_verify_runbook_local.sql']);
   return db;
 }
 
-/** Same chain WITHOUT 089 — proves fail-soft behavior on a pre-089 DB. */
-function buildPre089Db(): Database.Database {
+/** Same chain WITHOUT 096 — proves fail-soft behavior on a pre-096 DB. */
+function buildPre096Db(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, THROUGH_088);
+  apply(db, THROUGH_095);
   return db;
 }
 
@@ -150,7 +150,7 @@ async function proveWeb(h: Harness): Promise<{ hash: string; version: number }> 
   return registered;
 }
 
-describe('migration 089', () => {
+describe('migration 096', () => {
   it('creates verify_runbook_local and adds the two verification_requests pin columns', () => {
     const db = buildDb();
     const table = db
@@ -513,9 +513,9 @@ describe('VerifyRunbookStore.registerDraft rejections', () => {
   });
 });
 
-describe('VerifyRunbookStore fail-soft on a pre-089 DB', () => {
+describe('VerifyRunbookStore fail-soft on a pre-096 DB', () => {
   it('degrades to absent / errors / null without throwing when the table is missing', async () => {
-    const h = makeHarness(buildPre089Db());
+    const h = makeHarness(buildPre096Db());
 
     await expect(h.store.status(1, WORKTREE, 'web')).resolves.toBe('absent');
 

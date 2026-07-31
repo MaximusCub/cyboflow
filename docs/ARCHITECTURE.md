@@ -171,10 +171,10 @@ implemented) sits on top of the agent engine: failures are classified
 harness-derived evidence and converts a blocking FAIL into a lane-advancing
 skip; everything model-authored stays blocking), a pre-deploy preflight
 (`preflight.ts`) + per-(project, modality) capability ledger with a circuit
-breaker (`capabilityStore.ts`, migration 088) stop repeat environment burns,
+breaker (`capabilityStore.ts`, migration 095) stop repeat environment burns,
 and build/serve tasks only run against a **proven runbook**
 (`.cyboflow/verify-runbook.json` portable half + `verify_runbook_local`
-machine-local record, `runbookStore.ts`/`runbookHash.ts`, migration 089 —
+machine-local record, `runbookStore.ts`/`runbookHash.ts`, migration 096 —
 content-addressed pin stamped at enqueue, validated by the runner, proven by
 an engine-observed passing setup run). Requests resolve a **modality**
 (`web | cdp-app | native-screen | mobile`) driving slot-pool concurrency

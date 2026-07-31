@@ -101,15 +101,15 @@ const MIG_DIR = path.join(__dirname, '..', '..', '..', 'database', 'migrations')
  * verification queue + per-project budget (055/056), the run's agent-provider
  * stamp (062), the agent-engine request columns `task_json`/`report_json`/
  * `delivery_state`/`snapshot_sha`/`enqueue_key` (078), the phase-0 failure-class
- * + modality + `setup_proof` columns (088), and the phase-2 runbook record +
- * request PIN (089).
+ * + modality + `setup_proof` columns (095), and the phase-2 runbook record +
+ * request PIN (096).
  *
  * Hand-rolling this schema (as the older scheduler suites do) is fine for a
  * module test and WRONG here: half of what this file asserts is that a column
  * added by a migration is actually read by the code that claims to read it, and
  * a hand-rolled table is a place where that can silently be true in the test and
- * false in production. The chain is also the cheapest available proof that 088
- * and 089 apply cleanly on top of the real 078 shape.
+ * false in production. The chain is also the cheapest available proof that 095
+ * and 096 apply cleanly on top of the real 078 shape.
  */
 const MIGRATION_CHAIN = [
   '006_cyboflow_schema.sql',
@@ -122,8 +122,8 @@ const MIGRATION_CHAIN = [
   '056_visual_verify_budget.sql',
   '062_workflow_run_agent_provider.sql',
   '078_verification_agent_requests.sql',
-  '088_verify_failure_classes.sql',
-  '089_verify_runbook_local.sql',
+  '095_verify_failure_classes.sql',
+  '096_verify_runbook_local.sql',
 ] as const;
 
 /**
@@ -712,7 +712,7 @@ function preflightOf(row: TerminalRow): { ok: boolean; checks: Array<{ id: strin
     : (JSON.parse(row.preflight_json) as { ok: boolean; checks: Array<{ id: string; ok: boolean }> });
 }
 
-/** Runbook record state, read straight from migration 089's table. */
+/** Runbook record state, read straight from migration 096's table. */
 function runbookRecord(dbX: Database.Database, modality = 'web'): { status: string; version: number } | undefined {
   return dbX
     .prepare('SELECT status, version FROM verify_runbook_local WHERE project_id = 1 AND modality = ?')

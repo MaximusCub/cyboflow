@@ -1,4 +1,4 @@
--- Migration 088: verification failure classification + capability ledger
+-- Migration 095: verification failure classification + capability ledger
 -- (docs/proposals/verification-setup-flow.md §3 "Phase 0 — honest failures").
 --
 -- The verification-agent redesign (migration 078) gave every terminal request a
@@ -22,7 +22,7 @@
 --                           env-conversion ('env'), and 'timeout' rows
 --                           ('ambiguous'). NULL on passed rows, on skips that
 --                           predate classification (legacy path), and on every
---                           pre-088 row. NEVER 'env' without harness-derived
+--                           pre-095 row. NEVER 'env' without harness-derived
 --                           provenance (see failure_evidence_json); everything
 --                           else defaults conservative ('ambiguous', blocking).
 --   failure_evidence_json — the VerificationFailureEvidence[] the classifier's
@@ -33,20 +33,20 @@
 --   modality              — the VerificationModality (shared type) this request
 --                           resolved to (resolveTaskModality), stamped at
 --                           enqueue — the key the phase-0/phase-1 capability
---                           ledger below is keyed on. NULL for a pre-088 row
+--                           ledger below is keyed on. NULL for a pre-095 row
 --                           (the modality axis did not exist yet).
 --   preflight_json        — the agent-path pre-deploy preflight result (§3.5:
 --                           chromium/node/driver-cli resolvable, leased port
 --                           genuinely free), captured before any budget
 --                           increment or snapshot provisioning. NULL when no
---                           preflight ran (legacy path, or a pre-088 row).
+--                           preflight ran (legacy path, or a pre-095 row).
 --   setup_proof           — 0/1, NOT NULL DEFAULT 0. Marks a phase-2 setup/proof
 --                           run (the setup flow's "test-execute the runbook"
 --                           step) as EXEMPT from the project's lifetime judge
 --                           budget (§3.6 / projects.visual_verify_budget_calls) —
 --                           a proof run must never silently fail-open to
 --                           'skipped' because ordinary lane traffic exhausted the
---                           budget first. Every pre-088 row and every ordinary
+--                           budget first. Every pre-095 row and every ordinary
 --                           lane request defaults to 0 (counted, unchanged
 --                           behavior).
 --

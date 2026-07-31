@@ -143,16 +143,16 @@ function readRequestColumns(db: DatabaseLike, requestId: string, logger?: Logger
   }
 }
 
-/** The §3.1 classification a terminal row carries (migration 088), as the finding body renders it. */
+/** The §3.1 classification a terminal row carries (migration 095), as the finding body renders it. */
 interface DeliveredClassification {
   failureClass: VerificationFailureClass | null;
   evidence: VerificationFailureEvidence[];
 }
 
 /**
- * Read the migration-088 classification columns
+ * Read the migration-095 classification columns
  * (docs/proposals/verification-setup-flow.md §3.1) in their OWN query, kept
- * separate from {@link readRequestColumns} on purpose: a pre-088 DB throws on
+ * separate from {@link readRequestColumns} on purpose: a pre-095 DB throws on
  * these columns, and folding them into the main read would take `report_json` /
  * `error_message` down with them and silently degrade every finding body to the
  * legacy generic text. Fail-soft ⇒ "no classification", which renders exactly
@@ -194,7 +194,7 @@ function readClassification(db: DatabaseLike, requestId: string, logger?: Logger
  * skip AUDITABLE rather than an unfalsifiable label: `'env'` is the one class
  * that ADVANCES the lane, so a reader must be able to check the harness's work
  * (§3.1 "misclassification can be audited"). Returns an empty array when the row
- * carries no classification (a legacy path terminal, or a pre-088 DB).
+ * carries no classification (a legacy path terminal, or a pre-095 DB).
  */
 function renderClassification(classification: DeliveredClassification): string[] {
   const { failureClass, evidence } = classification;
@@ -333,7 +333,7 @@ function buildFindingText(args: {
   report: VerificationReportV1 | null;
   task: VerificationTaskV1 | null;
   errorMessage: string | null;
-  /** The §3.1 classification persisted on the row (migration 088); absent-by-default for a legacy terminal. */
+  /** The §3.1 classification persisted on the row (migration 095); absent-by-default for a legacy terminal. */
   classification?: DeliveredClassification;
 }): { title: string; body: string } {
   const { status, verdict, report, task, errorMessage } = args;

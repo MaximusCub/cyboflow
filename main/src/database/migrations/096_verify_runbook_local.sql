@@ -1,8 +1,8 @@
--- Migration 089: the verification runbook's MACHINE-LOCAL half + the per-request
+-- Migration 096: the verification runbook's MACHINE-LOCAL half + the per-request
 -- runbook pin (docs/proposals/verification-setup-flow.md §5.2 seam 1/seam 3 +
 -- §5.3 "Runbook contract").
 --
--- Migration 088 opened the honest-failure channel (classification + the
+-- Migration 095 opened the honest-failure channel (classification + the
 -- capability ledger) and left one thing structurally missing: there is no
 -- runbook. `verifyConfigLoader.ts` is the SOLE reader of `.cyboflow/verify.json`
 -- and there is no writer anywhere, no MCP tool, and no project-row columns for
@@ -32,7 +32,7 @@
 -- Two parts:
 --
 -- (1) Two ADDITIVE nullable columns on verification_requests (migration 055,
---     widened by 078 and 088) — the §5.2 seam-3 PIN. The verifier runs in a
+--     widened by 078 and 095) — the §5.2 seam-3 PIN. The verifier runs in a
 --     detached snapshot at the task's sha, so the runbook can be neither read
 --     from inside the snapshot (a committed runbook is absent from every branch
 --     cut before it) nor read live at execution time (revision-B commands
@@ -45,7 +45,7 @@
 --                           (runbookHash.ts runbookPortableHash: sha256 over a
 --                           canonical, recursively key-sorted serialization, so
 --                           reformatting the committed file never re-keys it).
---                           NULL on every pre-089 row and on every request
+--                           NULL on every pre-096 row and on every request
 --                           enqueued without a proven runbook (the degrade path
 --                           skips those before they ever deploy).
 --   runbook_local_version — the machine-local record's CAS version at enqueue.
@@ -58,7 +58,7 @@
 --                           than improvising against live state.
 --
 -- (2) verify_runbook_local — the machine-local half itself, one row per
---     (project, modality). Sibling in every respect to 088's
+--     (project, modality). Sibling in every respect to 095's
 --     verify_capability_state, including its integrity posture: NO foreign key.
 --     project_id is a plain integer handle, matching the router-enforced (not
 --     DB-enforced) posture `projects.visual_verify_budget_calls` and the
@@ -99,7 +99,7 @@
 -- NOTE: No `IF NOT EXISTS` on the ALTERs — SQLite does not support it there, and
 -- one ADD COLUMN per statement is required. Re-running raises 'duplicate column
 -- name: ...', the idempotency signal runFileBasedMigrations() keys off of (same
--- mechanism 055/078/088 rely on). The CREATE TABLE uses `IF NOT EXISTS`, which
+-- mechanism 055/078/095 rely on). The CREATE TABLE uses `IF NOT EXISTS`, which
 -- SQLite DOES support — a natural no-op on re-run.
 --
 -- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in

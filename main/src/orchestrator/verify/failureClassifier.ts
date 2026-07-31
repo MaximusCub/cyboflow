@@ -6,7 +6,7 @@
  * own report outcome, a few harness-detected booleans) and returns a
  * classification + the evidence backing it. No DB, no side effects — the
  * caller (the runner / verdict-delivery path) persists the verdict on the
- * request row (`failure_class` / `failure_evidence_json`, migration 088).
+ * request row (`failure_class` / `failure_evidence_json`, migration 095).
  *
  * WHY CONSERVATIVE (read before touching precedence): today a snapshot-mode
  * `build_failed`/`launch_failed` maps to `status:'failed'` — a merge-gate

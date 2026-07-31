@@ -3,8 +3,8 @@
  *
  * Exercises the live verificationRequestsRouter.list/.budget procedures via
  * createCaller, using an in-memory SQLite DB built from projects + migrations
- * 006/011/014/015/016/019/055/056(/088) (so workflow_runs + verification_requests
- * + judge_calls_used + the migration-088 failure-classification columns all
+ * 006/011/014/015/016/019/055/056(/095) (so workflow_runs + verification_requests
+ * + judge_calls_used + the migration-095 failure-classification columns all
  * exist), the shared dbAdapter fixture, and a real DatabaseLike — mirroring the
  * verificationScheduler test's DB harness.
  *
@@ -18,10 +18,10 @@
  *  7. an empty projectId result returns [].
  *  8. zod rejects projectId 0 / negative + an out-of-domain status.
  *  9. PRECONDITION_FAILED when ctx.db is missing.
- *  10. migration-088 surfacing (verification-setup-flow.md §3.1/§3.6):
+ *  10. migration-095 surfacing (verification-setup-flow.md §3.1/§3.6):
  *      failureClass/modality parse valid values and fail-soft on invalid ones;
  *      failureEvidence parses/fail-softs off failure_evidence_json;
- *      setupProof reflects the raw 0/1 flag; a pre-088 DB (columns absent
+ *      setupProof reflects the raw 0/1 flag; a pre-095 DB (columns absent
  *      entirely) renders every new field exactly as today (undefined/false).
  *  11. budget: sums judge_calls_used per project, reads
  *      visual_verify_budget_calls (null = unlimited), zod validation, and
@@ -39,11 +39,11 @@ import type { DatabaseLike } from '../../../types';
 import type { RequestStatus } from '../../../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
-// Test DB: projects + 006 + 011 + 014 + 015 + 016 + 019 + 055 + 056 (+ 088).
+// Test DB: projects + 006 + 011 + 014 + 015 + 016 + 019 + 055 + 056 (+ 095).
 // ---------------------------------------------------------------------------
 
 const MIG_DIR = join(__dirname, '..', '..', '..', '..', 'database', 'migrations');
-const MIGRATIONS_PRE_088 = [
+const MIGRATIONS_PRE_095 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
@@ -56,9 +56,9 @@ const MIGRATIONS_PRE_088 = [
   '056_visual_verify_budget.sql',
 ];
 // The default migration set every test builds against, UNLESS it explicitly
-// wants a pre-088 DB (the "absent columns render exactly as today" case) —
-// those tests pass MIGRATIONS_PRE_088 to buildDb/buildCaller directly.
-const MIGRATIONS = [...MIGRATIONS_PRE_088, '088_verify_failure_classes.sql'];
+// wants a pre-095 DB (the "absent columns render exactly as today" case) —
+// those tests pass MIGRATIONS_PRE_095 to buildDb/buildCaller directly.
+const MIGRATIONS = [...MIGRATIONS_PRE_095, '095_verify_failure_classes.sql'];
 
 function buildDb(migrations: readonly string[] = MIGRATIONS): Database.Database {
   const db = new Database(':memory:');
@@ -124,11 +124,11 @@ function seedRequest(
     verdictJson?: string | null;
     errorMessage?: string | null;
     enqueuedAt: string;
-    // Migration-088 columns (verification-setup-flow.md §3.1/§3.6). Leave all
-    // five OMITTED (the default) on a pre-088 test DB — providing any one
+    // Migration-095 columns (verification-setup-flow.md §3.1/§3.6). Leave all
+    // five OMITTED (the default) on a pre-095 test DB — providing any one
     // triggers the follow-up UPDATE below, which requires the caller's DB to
-    // actually carry migration 088 (the default MIGRATIONS set does; a
-    // pre-088 test always builds via MIGRATIONS_PRE_088 and never passes
+    // actually carry migration 095 (the default MIGRATIONS set does; a
+    // pre-095 test always builds via MIGRATIONS_PRE_095 and never passes
     // these).
     failureClass?: string | null;
     modality?: string | null;
@@ -156,8 +156,8 @@ function seedRequest(
     opts.errorMessage ?? null,
     opts.enqueuedAt,
   );
-  // Migration-088 columns are set via a follow-up UPDATE (rather than folded
-  // into the INSERT above) so a pre-088 test DB — which lacks these columns
+  // Migration-095 columns are set via a follow-up UPDATE (rather than folded
+  // into the INSERT above) so a pre-095 test DB — which lacks these columns
   // entirely — keeps calling this helper unmodified; only a test that
   // explicitly passes one of the five new fields touches the new columns.
   if (
@@ -316,7 +316,7 @@ describe('cyboflow.verificationRequests.list', () => {
       enqueue_key: null,
       session_id: null,
       session_name: null,
-      // Migration-088 columns — every field NULL/unset on this row, so every
+      // Migration-095 columns — every field NULL/unset on this row, so every
       // derived field fail-softs to its default (undefined/false).
       failureClass: undefined,
       modality: undefined,
@@ -412,7 +412,7 @@ describe('cyboflow.verificationRequests.list', () => {
     );
   });
 
-  // --- migration-088 surfacing (verification-setup-flow.md §3.1/§3.6) -----
+  // --- migration-095 surfacing (verification-setup-flow.md §3.1/§3.6) -----
 
   it('parses a valid failure_class/modality into failureClass/modality', async () => {
     const { caller, db } = buildCaller();
@@ -540,8 +540,8 @@ describe('cyboflow.verificationRequests.list', () => {
     expect(result.find((r) => r.id === 'vr-ordinary')?.setupProof).toBe(false);
   });
 
-  it('a pre-088 DB (columns absent entirely) renders every new field exactly as today', async () => {
-    const { caller, db } = buildCaller(MIGRATIONS_PRE_088);
+  it('a pre-095 DB (columns absent entirely) renders every new field exactly as today', async () => {
+    const { caller, db } = buildCaller(MIGRATIONS_PRE_095);
     openDb = db;
     seedRun(db, 'run-a', 1);
     seedRequest(db, { id: 'vr-1', runId: 'run-a', projectId: 1, status: 'passed', enqueuedAt: '2026-06-28T00:00:01.000Z' });

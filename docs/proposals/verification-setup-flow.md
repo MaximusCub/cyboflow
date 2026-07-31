@@ -15,8 +15,10 @@ spec as written, all deliberate:
   read-side cache (APFS clonefile) and rebuilds the electron ABI inside the
   mirror, rather than performing a fresh install — same §7.2 guarantees,
   layout-agnostic.
-- Migrations landed as 088/089 on this branch; they collide with main's
-  088/089 and renumber at rebase (routine).
+- Migrations are 095/096. They were authored as 088/089, collided with main's
+  own 088/089 (`artifacts_revision_ensure` / `interactive_prototype`), and were
+  renumbered when this branch rebased onto main — the expected, routine outcome
+  of developing a schema change on a long-lived branch.
 - §5.4's "matrix row 4" (own instance running) is exercised as an attach-mode
   CDP-port squat → env-skip; full-isolation green requires a live dogfood run
   (the levers landed: CYBOFLOW_VITE_PORT / CYBOFLOW_CDP_PORT / CYBOFLOW_DIR).

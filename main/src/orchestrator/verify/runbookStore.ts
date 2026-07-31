@@ -1,7 +1,7 @@
 /**
  * VerifyRunbookStore — the MACHINE-LOCAL half of the verification runbook
  * contract (docs/proposals/verification-setup-flow.md §5.2 seam 1 + §5.3),
- * persisted on migration 089's `verify_runbook_local` table.
+ * persisted on migration 096's `verify_runbook_local` table.
  *
  * WHAT THIS REPLACES. The phase-0 degrade gate already asks "does this
  * (project, modality) have a PROVEN runbook?" — and until now the answer was a
@@ -48,7 +48,7 @@
  * real filesystem to exercise a DB state machine.
  *
  * FAIL-SOFT BY DESIGN, exactly as capabilityStore.ts: every method catches its
- * own SQL/IO errors (a pre-089 DB missing the table, a locked file, a malformed
+ * own SQL/IO errors (a pre-096 DB missing the table, a locked file, a malformed
  * row, an injected dep that throws) and degrades to the SAFE answer rather than
  * throwing. For `status()` the safe answer is `'absent'` — the degrade gate then
  * skips with a setup CTA, which is a bad day, not a broken one. There is no
@@ -488,7 +488,7 @@ export class VerifyRunbookStore {
 
   /**
    * Read the (project, modality) record, or `undefined` when absent. NOT
-   * fail-soft on its own — callers wrap it, so a genuine SQL error (a pre-089
+   * fail-soft on its own — callers wrap it, so a genuine SQL error (a pre-096
    * DB) surfaces to the caller's single catch and its single degraded answer,
    * rather than being confused with "no such record".
    */

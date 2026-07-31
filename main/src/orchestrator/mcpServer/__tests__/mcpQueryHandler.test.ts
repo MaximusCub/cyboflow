@@ -4328,7 +4328,7 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   }
 
   /**
-   * Seed a resolvable machine-local runbook draft (migration 089) so a
+   * Seed a resolvable machine-local runbook draft (migration 096) so a
    * setup_proof request's pin can pass `VerifyRunbookStore.getByHash`. The
    * content only needs to PARSE as a VerifyRunbookV1 — getByHash trusts the
    * stored `portable_hash` column rather than recomputing it, so the test can
@@ -4441,17 +4441,17 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         delivery_state TEXT,
         snapshot_sha TEXT,
         enqueue_key TEXT,
-        -- Migration 088 (verification-setup-flow §3): classification + gate axes.
+        -- Migration 095 (verification-setup-flow §3): classification + gate axes.
         failure_class TEXT,
         failure_evidence_json TEXT,
         modality TEXT,
         preflight_json TEXT,
         setup_proof INTEGER NOT NULL DEFAULT 0,
-        -- Migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+        -- Migration 096 (§5.2 seam 3): the content-addressed runbook PIN.
         runbook_hash TEXT,
         runbook_local_version INTEGER
       );
-      -- Migration 089 (§5.2 seam 1): the MACHINE-LOCAL runbook record the
+      -- Migration 096 (§5.2 seam 1): the MACHINE-LOCAL runbook record the
       -- register tool writes through VerifyRunbookStore.
       CREATE TABLE verify_runbook_local (
         project_id INTEGER NOT NULL,

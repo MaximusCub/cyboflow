@@ -77,13 +77,13 @@ function buildDb(): Database.Database {
       snapshot_sha     TEXT,
       enqueue_key      TEXT,
       judge_calls_used INTEGER NOT NULL DEFAULT 0,
-      -- migration 088 (docs/proposals/verification-setup-flow.md §3)
+      -- migration 095 (docs/proposals/verification-setup-flow.md §3)
       failure_class         TEXT,
       failure_evidence_json TEXT,
       modality              TEXT,
       preflight_json        TEXT,
       setup_proof           INTEGER NOT NULL DEFAULT 0,
-      -- migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+      -- migration 096 (§5.2 seam 3): the content-addressed runbook PIN.
       runbook_hash          TEXT,
       runbook_local_version INTEGER
     );

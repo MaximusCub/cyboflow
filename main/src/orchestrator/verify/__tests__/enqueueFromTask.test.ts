@@ -79,12 +79,12 @@ function buildDb(): Database.Database {
       delivery_state   TEXT,
       snapshot_sha     TEXT,
       enqueue_key      TEXT,
-      -- migration 088 (docs/proposals/verification-setup-flow.md §3/§3.6): the
+      -- migration 095 (docs/proposals/verification-setup-flow.md §3/§3.6): the
       -- modality stamp this seam delegates to scheduler.enqueue, and the
       -- setup-proof flag it threads through.
       modality         TEXT,
       setup_proof      INTEGER NOT NULL DEFAULT 0,
-      -- migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+      -- migration 096 (§5.2 seam 3): the content-addressed runbook PIN.
       runbook_hash          TEXT,
       runbook_local_version INTEGER
     );

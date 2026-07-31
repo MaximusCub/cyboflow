@@ -67,7 +67,7 @@ export type { TaskEnqueueResult };
 // ---------------------------------------------------------------------------
 
 /**
- * The migration-089 request-row pin: the portable half's content hash plus the
+ * The migration-096 request-row pin: the portable half's content hash plus the
  * machine-local record's CAS version, both stamped at enqueue so the runner can
  * execute exactly that revision or reject (§5.2 seam 3).
  */
