@@ -57,11 +57,47 @@ so FROM the fence you print. A fired request in place of a printed fence IS an
 output-contract failure and fails the lane after one retry.
 
 **Form A — the task produced user-visible UI** (anything a person sees rendered:
-a page, panel, dialog, layout or styling change). Compose the smoke-verification
-task for the central visual verifier. You just judged the acceptance criteria,
-so you are the best-placed author of what to verify visually and how to get the
-deliverable running. Emit a section EXACTLY like this (one heading, one json
-fence):
+a page, panel, dialog, layout or styling change, INCLUDING pure OS-chrome
+surfaces like a menu, system dialog, or tray icon with no DOM at all). Compose
+the smoke-verification task for the central visual verifier. You just judged
+the acceptance criteria, so you are the best-placed author of what to verify
+visually and how to get the deliverable running. Emit a section EXACTLY like
+this (one heading, one json fence):
+
+**Pick the modality before you compose anything else** — it decides the whole
+shape of `serve`/`target`/`attestation` below:
+
+- **`cdp-app`** — the deliverable is an Electron/desktop-app surface: the repo
+  builds an Electron app, or the change lives inside a desktop renderer. Set
+  `"modality": "cdp-app"` and `serve.attach: "cdp"`; `serve.cmd` launches the
+  APP ITSELF (never a dev server) with
+  `--remote-debugging-port="$VERIFY_DRIVER_PORT"` plus an isolated per-run
+  data dir, so the run never collides with the user's own already-open
+  instance — see the recipe below. **This is the fix for the proposal's root
+  cause (a)** (`docs/proposals/verification-setup-flow.md` §1): every
+  agent-era production failure against cyboflow itself traced back to
+  composing the plain web form against an Electron app, because the web form
+  was the only exemplar this file showed. The `cdp-app` recipe is not a
+  variant of the web form — it is its own first-class shape; use it for ANY
+  desktop-app deliverable, not only cyboflow itself.
+- **`web`** — an ordinary browser-served (or static-file) deliverable: a
+  webapp, a marketing page, a component-library preview. Set `"modality":
+  "web"` (or omit it — the runner's default). This is the common case and
+  unchanged from before.
+- **`native-screen`** — behaviors that live entirely in OS chrome, with no DOM
+  and no CDP endpoint to attach to. Set `"modality": "native-screen"`. Driving
+  (click/type) is **not implemented today** — native-screen is observe-only.
+  A behavior that genuinely needs a click or a keystroke to exercise MUST
+  still be emitted (never silently dropped), with `"requiresDrive": true` on
+  it; the verifier reports it `not_testable (drive-unsupported)` instead of
+  attempting it or guessing. Behaviors that are purely observational (does
+  the tray icon render, does the dialog show the right text) don't need
+  `requiresDrive` and are exercised normally.
+
+Pick exactly ONE of the two recipes below — the section you emit still has
+exactly one heading and one json fence, never both forms at once.
+
+**Web deliverable recipe:**
 
 ````markdown
 ## Visual verification task
@@ -70,9 +106,11 @@ fence):
   "version": 1,
   "taskRef": "TASK-008",
   "summary": "Settings panel shows the new visual-verify toggle",
-  "build": ["pnpm install", "pnpm build"],
+  "modality": "web",
+  "build": ["pnpm build"],
   "serve": { "cmd": "pnpm dev --port ${PORT}", "readyWhen": { "urlPath": "/", "timeoutMs": 30000 } },
   "target": { "url": "http://localhost:${PORT}/settings" },
+  "attestation": { "kind": "dom-marker", "selector": "[data-verify-build]" },
   "behaviors": [
     { "id": "b1", "description": "toggle renders in Settings",
       "steps": ["goto the settings page", "locate the Verification section"],
@@ -82,41 +120,106 @@ fence):
 ```
 ````
 
+**Electron / desktop-app recipe (`cdp-app`):**
+
+````markdown
+## Visual verification task
+```json
+{
+  "version": 1,
+  "taskRef": "TASK-014",
+  "summary": "Verify Queue view lists a new suppressed-capability row",
+  "modality": "cdp-app",
+  "build": ["pnpm build:main", "pnpm build:preload"],
+  "serve": {
+    "cmd": "pnpm electron . --remote-debugging-port=\"$VERIFY_DRIVER_PORT\" --user-data-dir=\"$VERIFY_ARTIFACTS_DIR/.electron-profile\"",
+    "attach": "cdp"
+  },
+  "attestation": { "kind": "cdp-token", "expression": "window.__CYBOFLOW_BUILD_SHA__", "expected": "<literal baked into this build — omit attestation if the project exposes no such global>" },
+  "behaviors": [
+    { "id": "b1", "description": "Verify Queue shows the new suppressed row",
+      "steps": ["click the Verify Queue rail item", "locate the suppressed-capability list"],
+      "expected": "a row reading 'native-screen — deferred' is visible" }
+  ]
+}
+```
+````
+
+Notes on the Electron recipe: `serve.cmd` launches the app itself, never
+`electron --inspect` or a dev server; there is generally no `target` (the
+driver attaches to the already-open window, not a URL) and no navigate/goto
+step in `behaviors` — click/type/screenshot address the live window directly.
+`$VERIFY_ARTIFACTS_DIR` is already a per-request scratch dir, so anchoring the
+isolated profile dir under it costs nothing extra and guarantees it never
+collides with the user's own running instance or a sibling verification run.
+
 Field rules:
 
 - `version` (required): literally `1`. `summary` (required): one sentence naming
   the deliverable under verification. `taskRef`: this task's ref, so the verdict
   drives the right lane.
+- `modality` (recommended): `"web"` | `"cdp-app"` | `"native-screen"` — pick it
+  per the guidance above. Omit only when genuinely unsure; the runner derives
+  a default from `serve.attach`, but stating it explicitly catches a
+  composer/runner disagreement instead of silently trusting one side.
 - `build`: ordered shell commands that produce a runnable deliverable from a
   CLEAN checkout of the current branch's committed state. Derive them from
   evidence only — the project's own docs (README / CLAUDE.md), `package.json`
   scripts, an existing `.cyboflow/verify.json` — never invent commands you have
-  not seen documented. Omit when nothing needs building.
-- `serve`: the long-running command that serves the UI, referencing the assigned
-  port as `${PORT}`; `readyWhen.urlPath` is polled for readiness. Omit for a
+  not seen documented. Omit when nothing needs building. **Never `pnpm
+  install` / `npm install` / `yarn` / any dependency-install or
+  native-module-rebuild command, in `build` OR `serve`, ever — not even for a
+  "cold" project.** The snapshot's dependency dirs are LINKED from the live
+  worktree, not copied; an install/rebuild inside the snapshot writes THROUGH
+  that link into the shared worktree and can flip a sibling lane's
+  native-module ABI out from under it mid-sprint. Deps are already prepared
+  before you run — compose `build` assuming a ready `node_modules`. This is
+  enforced, not just advised: the runner rejects install/rebuild commands in
+  every composed `build`/`serve` step, so a task that includes one fails
+  closed regardless of what you intended.
+- `serve`: the long-running command that serves the UI. Reference the assigned
+  port ONLY via the `${PORT}` template (web form) or the literal
+  `$VERIFY_DRIVER_PORT` env reference (attach form) — never a hardcoded port
+  number, which collides with whatever the lease actually grants.
+  `readyWhen.urlPath` is polled for readiness on the web form; omit
+  `readyWhen` for attach mode (wait for the window to open in the serve
+  command itself — see the Electron recipe). Omit `serve` entirely for a
   static file and use `target.htmlPath` (worktree-relative) instead.
+- `serve.attach: "cdp"`: set this when the deliverable is an APP with a
+  debuggable web-view rather than a served web page — this is the `cdp-app`
+  modality. `serve.cmd` must launch the app ITSELF exposing a
+  Chrome-DevTools-Protocol endpoint on `$VERIFY_DRIVER_PORT`, and the verifier
+  ATTACHES to it instead of launching its own browser; see the Electron recipe
+  above, including the isolated data-dir lever (never omit it). For Expo /
+  React-Native web, prefer the PLAIN web serve (`npx expo start --web --port
+  ${PORT}` style) WITHOUT `attach` — attach is only for targets whose UI lives
+  in an app-hosted web-view exposing CDP. A non-web surface with no debuggable
+  web-view at all is `native-screen` (still Form A, see `requiresDrive` above)
+  or Form B — never a forced attach.
+- `attestation` (recommended whenever the deliverable supports one): declares
+  the identity channel this proof relies on — the verifier proves the surface
+  it drove IS this task's deliverable, never a stale process or the user's own
+  already-running instance. `{ "kind": "http-endpoint", "urlPath": "..." }` or
+  `{ "kind": "dom-marker", "selector": "..." }` for `web`; `{ "kind":
+  "cdp-token", "expression": "...", "expected": "..." }` for `cdp-app`/attach
+  mode (the only channel that works when the driver never navigates, so there
+  is no HTTP status to check); `{ "kind": "file-identity" }` is implicit for a
+  bare `target.htmlPath` and does not need to be spelled out. Compose one
+  whenever the deliverable can support it — a pass with no attestation is
+  capped at `low_confidence`. A bare `target.url` task (no `build`, no
+  `serve`, no `htmlPath`) has no channel available at all and cannot attest —
+  say so rather than inventing a `urlPath`/`selector`/global that doesn't
+  exist.
 - `behaviors` (required, non-empty for Form A): the smoke checks, derived from
   THIS task's acceptance criteria. `steps` are concrete UI actions
   (navigate/click/type); `expected` is what must be observably true in the
   rendered UI for a pass. List only behaviors observable in the UI — the code
-  criteria you already verified do not belong here.
+  criteria you already verified do not belong here. Set `"requiresDrive":
+  true` on a behavior only when it needs a click/type to exercise it
+  (`native-screen` above); leave it unset on every other modality, where
+  driving is unconditionally available.
 - `viewports`: optional `[{ "width": 1280, "height": 800 }]` for responsive
   checks.
-- `serve.attach: "cdp"`: set this when the deliverable is an APP with a
-  debuggable web-view rather than a served web page. `serve.cmd` must then
-  launch the app ITSELF exposing a Chrome-DevTools-Protocol endpoint on the
-  driver port, and the verifier ATTACHES to it instead of launching its own
-  browser. Two recipes:
-  - **Electron**: `<app launch command> --remote-debugging-port="$VERIFY_DRIVER_PORT"`.
-    Wait for the window to open in the serve step. The driver attaches to the
-    app's own window, so `behaviors` use click/type/screenshot directly and
-    generally do NOT need a navigate/goto step or a `target`.
-  - **Expo / React-Native web**: prefer the PLAIN web serve
-    (`npx expo start --web --port ${PORT}` style) WITHOUT `attach` — attach is
-    only for targets whose UI lives in an app-hosted web-view exposing CDP.
-  General rule: if the environment can expose a CDP endpoint for its web-view,
-  launch it bound to the driver port and set `attach: "cdp"`; a non-web surface
-  with no debuggable web-view is Form B (NOT-APPLICABLE) instead.
 
 The verifier runs in a FRESH snapshot of the branch (committed state only),
 builds with your `build` steps, serves, drives your `behaviors`, screenshots,
