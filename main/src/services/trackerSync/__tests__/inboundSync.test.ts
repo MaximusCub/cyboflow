@@ -256,7 +256,10 @@ interface IdeaRow {
 
 function ideas(): IdeaRow[] {
   return raw
-    .prepare('SELECT id, title, body, stage_id, archived_at FROM ideas ORDER BY created_at ASC, id ASC')
+    // rowid = true insertion order. created_at is datetime('now') with ONE-SECOND
+    // resolution, so same-second rows tie and the id tiebreak is a minted UUID —
+    // i.e. random — which made apply-order assertions a coin flip.
+    .prepare('SELECT id, title, body, stage_id, archived_at FROM ideas ORDER BY rowid ASC')
     .all() as IdeaRow[];
 }
 
