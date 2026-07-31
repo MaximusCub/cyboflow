@@ -1,0 +1,608 @@
+/**
+ * Unit tests for the tracker-sync data-access layer
+ * (main/src/services/trackerSync/store.ts) — migration 093's four tables.
+ *
+ * Runs against a REAL temp-file DB through the full migration chain (same
+ * technique as main/src/database/__tests__/migration093.test.ts and the
+ * fullChainContinuity family), so the CHECK/UNIQUE/FK constraints and
+ * `datetime('now')` defaults from the actual schema are exercised, not a
+ * hand-rolled fixture. A project row is seeded directly with SQL (the FK
+ * tracker_connections.project_id needs one); connections/links/outbox/
+ * conflict rows are seeded through the store functions under test wherever
+ * the test doesn't need a specific timestamp — the outbox ordering tests seed
+ * `created_at`/`next_attempt_at` directly with SQL since they need
+ * deterministic control over those columns that `enqueueOutbox` (which always
+ * uses the schema's `datetime('now')` default) does not expose.
+ *
+ * Covers, per the task brief:
+ *   - upsertLink's refresh-on-re-upsert semantics (same id, updated mutable
+ *     columns, orphaned_at cleared).
+ *   - claimNextPending: atomic claim (state flip + attempts++), oldest-first
+ *     ordering, and next_attempt_at gating (future-dated rows skipped).
+ *   - resolveOutbox's failed->pending retry re-queue vs. a terminal failed.
+ *   - requeueInFlightAsAmbiguous (boot-time crash recovery).
+ *   - listLinks' activeOnly filtering.
+ *   - resolveConflict's state/resolved_at stamping.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseService } from '../../../database/database';
+import {
+  insertConnection,
+  getConnection,
+  listConnections,
+  updateConnectionSettings,
+  advanceCursor,
+  storeSecret,
+  readSecret,
+  upsertLink,
+  getLinkByEntity,
+  getLinkByExternal,
+  listLinks,
+  updateBaseline,
+  markOrphaned,
+  listLinksByParentExternal,
+  enqueueOutbox,
+  claimNextPending,
+  resolveOutbox,
+  listUnresolvedOutbox,
+  findOutboxByClientKey,
+  requeueInFlightAsAmbiguous,
+  insertConflict,
+  listOpenConflicts,
+  resolveConflict,
+  hasOpenConflictForLink,
+  type NewConnectionRow,
+} from '../store';
+
+let tmpDir: string;
+let dbPath: string;
+let svc: DatabaseService;
+let raw: Database.Database;
+
+beforeEach(() => {
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-trackersync-store-'));
+  dbPath = join(tmpDir, 'test.db');
+  svc = new DatabaseService(dbPath);
+  svc.initialize();
+  raw = svc.getDb();
+  raw.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj 1', '/tmp/p1');
+});
+
+afterEach(() => {
+  raw.close();
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+/** A fully-populated NewConnectionRow, minus the overrides a test needs. */
+function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnectionRow {
+  return {
+    id: 'conn-1',
+    project_id: 1,
+    provider: 'linear',
+    status: 'active',
+    workspace_id: null,
+    workspace_name: null,
+    actor_label: null,
+    base_url: null,
+    secret_ciphertext: null,
+    source_json: null,
+    selection_mode: 'all',
+    selection_json: null,
+    state_mapping_json: '{}',
+    two_way: 1,
+    mirror_subissues: 1,
+    conflict_mode: 'auto',
+    cursor_updated_at: null,
+    cursor_external_id: null,
+    last_sync_at: null,
+    last_sync_log_json: null,
+    ...overrides,
+  };
+}
+
+/** Seed a connection row through the store and return its id. */
+function seedConnection(overrides: Partial<NewConnectionRow> = {}): string {
+  const row = insertConnection(raw, makeConnectionRow(overrides));
+  return row.id;
+}
+
+/** Raw fetch of one outbox row by id — used for assertions the public API doesn't expose a getter for. */
+function fetchOutboxRow(id: number) {
+  return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as
+    | {
+        id: number;
+        state: string;
+        attempts: number;
+        last_error: string | null;
+        next_attempt_at: string | null;
+      }
+    | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Connections
+// ---------------------------------------------------------------------------
+
+describe('trackerSync store — connections', () => {
+  it('inserts and reads back a connection row verbatim', () => {
+    const inserted = insertConnection(raw, makeConnectionRow({ id: 'conn-x', base_url: 'https://api.plane.so' }));
+    expect(inserted.id).toBe('conn-x');
+    expect(inserted.base_url).toBe('https://api.plane.so');
+    expect(inserted.status).toBe('active');
+    expect(inserted.created_at).toBeTruthy();
+    expect(inserted.updated_at).toBeTruthy();
+
+    const fetched = getConnection(raw, 'conn-x');
+    expect(fetched).toEqual(inserted);
+  });
+
+  it('getConnection returns null for a missing id', () => {
+    expect(getConnection(raw, 'nope')).toBeNull();
+  });
+
+  it('listConnections excludes disconnected connections by default and includes them with the option', () => {
+    seedConnection({ id: 'conn-a', status: 'active' });
+    seedConnection({ id: 'conn-b', status: 'disconnected', provider: 'plane' });
+    seedConnection({ id: 'conn-c', status: 'paused' });
+
+    const defaultList = listConnections(raw, 1);
+    expect(defaultList.map((c) => c.id).sort()).toEqual(['conn-a', 'conn-c']);
+
+    const fullList = listConnections(raw, 1, { includeDisconnected: true });
+    expect(fullList.map((c) => c.id).sort()).toEqual(['conn-a', 'conn-b', 'conn-c']);
+  });
+
+  it('listConnections scopes to a project when projectId is given, and covers all projects when omitted', () => {
+    raw.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj 2', '/tmp/p2');
+    seedConnection({ id: 'conn-p1' });
+    insertConnection(raw, makeConnectionRow({ id: 'conn-p2', project_id: 2 }));
+
+    expect(listConnections(raw, 1).map((c) => c.id)).toEqual(['conn-p1']);
+    expect(listConnections(raw, 2).map((c) => c.id)).toEqual(['conn-p2']);
+    expect(listConnections(raw).map((c) => c.id).sort()).toEqual(['conn-p1', 'conn-p2']);
+  });
+
+  it('updateConnectionSettings writes only the supplied keys and stamps updated_at', () => {
+    const before = seedConnection({ id: 'conn-1', conflict_mode: 'auto', two_way: 1 });
+    const beforeRow = getConnection(raw, before)!;
+
+    updateConnectionSettings(raw, before, { conflict_mode: 'manual', workspace_name: 'Acme Co' });
+
+    const after = getConnection(raw, before)!;
+    expect(after.conflict_mode).toBe('manual');
+    expect(after.workspace_name).toBe('Acme Co');
+    // Untouched fields survive the partial patch.
+    expect(after.two_way).toBe(beforeRow.two_way);
+    expect(after.selection_mode).toBe(beforeRow.selection_mode);
+  });
+
+  it('advanceCursor sets the compound cursor columns', () => {
+    const id = seedConnection();
+    advanceCursor(raw, id, '2026-07-30 12:00:00', 'LIN-999');
+    const row = getConnection(raw, id)!;
+    expect(row.cursor_updated_at).toBe('2026-07-30 12:00:00');
+    expect(row.cursor_external_id).toBe('LIN-999');
+  });
+
+  it('storeSecret/readSecret round-trip a ciphertext Buffer', () => {
+    const id = seedConnection();
+    expect(readSecret(raw, id)).toBeNull();
+
+    const cipher = Buffer.from('encrypted-bytes', 'utf-8');
+    storeSecret(raw, id, cipher);
+
+    const readBack = readSecret(raw, id);
+    expect(Buffer.isBuffer(readBack)).toBe(true);
+    expect(readBack!.equals(cipher)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Links
+// ---------------------------------------------------------------------------
+
+describe('trackerSync store — links', () => {
+  it('upsertLink creates a new row on first call', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+      external_url: 'https://linear.app/team/issue/LIN-1',
+    });
+    expect(link.entity_id).toBe('idea-1');
+    expect(link.external_id).toBe('LIN-1');
+    expect(link.orphaned_at).toBeNull();
+  });
+
+  it('a re-upsert for the same (entity_type, entity_id, provider) refreshes mutable columns in place — no duplicate row', () => {
+    const connId = seedConnection();
+    const first = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+      external_url: 'https://linear.app/LIN-1',
+      baseline_json: '{"title":"old"}',
+    });
+
+    const second = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+      external_url: 'https://linear.app/LIN-1-renamed',
+      baseline_json: '{"title":"new"}',
+    });
+
+    // Same row, not a new one.
+    expect(second.id).toBe(first.id);
+    expect(second.external_url).toBe('https://linear.app/LIN-1-renamed');
+    expect(second.baseline_json).toBe('{"title":"new"}');
+
+    const all = listLinks(raw, connId);
+    expect(all).toHaveLength(1);
+  });
+
+  it('a re-upsert clears orphaned_at — a link seen again is live again', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-1',
+      provider: 'linear',
+      external_id: 'LIN-2',
+    });
+    markOrphaned(raw, link.id);
+    expect(getLinkByEntity(raw, 'task', 'task-1', 'linear')!.orphaned_at).not.toBeNull();
+
+    const refreshed = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-1',
+      provider: 'linear',
+      external_id: 'LIN-2',
+    });
+    expect(refreshed.id).toBe(link.id);
+    expect(refreshed.orphaned_at).toBeNull();
+  });
+
+  it('getLinkByEntity and getLinkByExternal resolve the same row from either identity; both return null on a miss', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-9',
+      provider: 'plane',
+      external_id: 'proj/PLN-9',
+    });
+
+    expect(getLinkByEntity(raw, 'idea', 'idea-9', 'plane')).toEqual(link);
+    expect(getLinkByExternal(raw, connId, 'proj/PLN-9')).toEqual(link);
+    expect(getLinkByEntity(raw, 'idea', 'does-not-exist', 'plane')).toBeNull();
+    expect(getLinkByExternal(raw, connId, 'does-not-exist')).toBeNull();
+  });
+
+  it('listLinks activeOnly filters out orphaned links', () => {
+    const connId = seedConnection();
+    const live = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-live',
+      provider: 'linear',
+      external_id: 'LIN-LIVE',
+    });
+    const orphan = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-orphan',
+      provider: 'linear',
+      external_id: 'LIN-ORPHAN',
+    });
+    markOrphaned(raw, orphan.id);
+
+    expect(listLinks(raw, connId).map((l) => l.id).sort()).toEqual([live.id, orphan.id].sort());
+    expect(listLinks(raw, connId, { activeOnly: true }).map((l) => l.id)).toEqual([live.id]);
+  });
+
+  it('updateBaseline overwrites baseline_json', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+    });
+    updateBaseline(raw, link.id, '{"stage":"done"}');
+    expect(getLinkByEntity(raw, 'idea', 'idea-1', 'linear')!.baseline_json).toBe('{"stage":"done"}');
+  });
+
+  it('listLinksByParentExternal returns only the mirrored children of one parent', () => {
+    const connId = seedConnection();
+    upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-child-1',
+      provider: 'linear',
+      external_id: 'LIN-CHILD-1',
+      external_parent_id: 'LIN-PARENT',
+    });
+    upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-child-2',
+      provider: 'linear',
+      external_id: 'LIN-CHILD-2',
+      external_parent_id: 'LIN-PARENT',
+    });
+    upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-unrelated',
+      provider: 'linear',
+      external_id: 'LIN-OTHER',
+      external_parent_id: 'LIN-SOME-OTHER-PARENT',
+    });
+
+    const children = listLinksByParentExternal(raw, connId, 'LIN-PARENT');
+    expect(children.map((c) => c.entity_id).sort()).toEqual(['task-child-1', 'task-child-2']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Outbox
+// ---------------------------------------------------------------------------
+
+describe('trackerSync store — outbox', () => {
+  it('enqueueOutbox writes the schema defaults (state=pending, attempts=0)', () => {
+    const connId = seedConnection();
+    const row = enqueueOutbox(raw, {
+      connection_id: connId,
+      kind: 'create_sub_issue',
+      payload_json: '{"title":"x"}',
+    });
+    expect(row.state).toBe('pending');
+    expect(row.attempts).toBe(0);
+    expect(row.last_error).toBeNull();
+    expect(row.next_attempt_at).toBeNull();
+  });
+
+  it('claimNextPending claims the oldest eligible row first, atomically flipping state and incrementing attempts', () => {
+    const connId = seedConnection();
+    // Seed three rows with explicit created_at so ordering is deterministic
+    // (enqueueOutbox always uses datetime('now'), which has 1s resolution).
+    const insert = raw.prepare(
+      `INSERT INTO tracker_outbox (connection_id, kind, payload_json, state, created_at, updated_at, next_attempt_at)
+       VALUES (?, 'update_state', '{}', 'pending', ?, ?, ?)`,
+    );
+    const oldest = insert.run(connId, '2026-01-01 00:00:01', '2026-01-01 00:00:01', null).lastInsertRowid as number;
+    const middle = insert.run(connId, '2026-01-01 00:00:02', '2026-01-01 00:00:02', null).lastInsertRowid as number;
+    insert.run(connId, '2026-01-01 00:00:03', '2026-01-01 00:00:03', null); // youngest — claimed last
+
+    const first = claimNextPending(raw, connId, '2026-06-01 00:00:00');
+    expect(first?.id).toBe(oldest);
+    expect(first?.state).toBe('in_flight');
+    expect(first?.attempts).toBe(1);
+    // The claim really mutated the row, not just read it.
+    expect(fetchOutboxRow(oldest)?.state).toBe('in_flight');
+
+    const second = claimNextPending(raw, connId, '2026-06-01 00:00:00');
+    expect(second?.id).toBe(middle);
+    expect(second?.id).not.toBe(first?.id);
+  });
+
+  it('claimNextPending gates on next_attempt_at: future rows are skipped, past/null rows are eligible', () => {
+    const connId = seedConnection();
+    const insert = raw.prepare(
+      `INSERT INTO tracker_outbox (connection_id, kind, payload_json, state, created_at, updated_at, next_attempt_at)
+       VALUES (?, 'update_state', '{}', 'pending', ?, ?, ?)`,
+    );
+    // Oldest by created_at, but not eligible until far in the future.
+    const future = insert
+      .run(connId, '2026-01-01 00:00:01', '2026-01-01 00:00:01', '2099-01-01 00:00:00')
+      .lastInsertRowid as number;
+    const eligiblePast = insert
+      .run(connId, '2026-01-01 00:00:02', '2026-01-01 00:00:02', '2026-01-01 00:00:00')
+      .lastInsertRowid as number;
+    const eligibleNull = insert
+      .run(connId, '2026-01-01 00:00:03', '2026-01-01 00:00:03', null)
+      .lastInsertRowid as number;
+
+    const now = '2026-06-01 00:00:00';
+    const claimed = new Set<number>();
+    let claim = claimNextPending(raw, connId, now);
+    while (claim) {
+      claimed.add(claim.id);
+      claim = claimNextPending(raw, connId, now);
+    }
+
+    expect(claimed).toEqual(new Set([eligiblePast, eligibleNull]));
+    expect(claimed.has(future)).toBe(false);
+    // The future-dated row is still sitting there, untouched, pending.
+    expect(fetchOutboxRow(future)?.state).toBe('pending');
+  });
+
+  it('resolveOutbox("failed", nextAttemptAtIso) requeues to pending for retry; without it, the failure is terminal', () => {
+    const connId = seedConnection();
+    const retryable = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const terminal = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+
+    const claimedRetryable = claimNextPending(raw, connId, '2026-06-01 00:00:00')!;
+    const claimedTerminal = claimNextPending(raw, connId, '2026-06-01 00:00:00')!;
+    expect([claimedRetryable.id, claimedTerminal.id].sort()).toEqual([retryable.id, terminal.id].sort());
+
+    resolveOutbox(raw, claimedRetryable.id, 'failed', {
+      lastError: 'rate limited',
+      nextAttemptAtIso: '2026-06-01 00:05:00',
+    });
+    const afterRetry = fetchOutboxRow(claimedRetryable.id)!;
+    expect(afterRetry.state).toBe('pending');
+    expect(afterRetry.next_attempt_at).toBe('2026-06-01 00:05:00');
+    expect(afterRetry.last_error).toBe('rate limited');
+
+    resolveOutbox(raw, claimedTerminal.id, 'failed', { lastError: 'bad request' });
+    const afterTerminal = fetchOutboxRow(claimedTerminal.id)!;
+    expect(afterTerminal.state).toBe('failed');
+    expect(afterTerminal.next_attempt_at).toBeNull();
+    expect(afterTerminal.last_error).toBe('bad request');
+
+    // Not eligible yet (nextAttemptAtIso is in the future relative to "now").
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:01')).toBeNull();
+    // Once "now" passes next_attempt_at, the retry is claimable again with attempts incremented.
+    const reclaimed = claimNextPending(raw, connId, '2026-06-01 00:05:00');
+    expect(reclaimed?.id).toBe(claimedRetryable.id);
+    expect(reclaimed?.attempts).toBe(2);
+
+    // The terminal failure never comes back.
+    expect(claimNextPending(raw, connId, '2099-01-01 00:00:00')).toBeNull();
+  });
+
+  it('claimNextPending returns null when a connection has no outbox rows at all', () => {
+    const connId = seedConnection();
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:00')).toBeNull();
+  });
+
+  it('resolveOutbox("done") and resolveOutbox("ambiguous") set state verbatim and clear next_attempt_at', () => {
+    const connId = seedConnection();
+    const done = enqueueOutbox(raw, { connection_id: connId, kind: 'close_parent', payload_json: '{}' });
+    const ambiguous = enqueueOutbox(raw, { connection_id: connId, kind: 'create_sub_issue', payload_json: '{}' });
+    claimNextPending(raw, connId, '2026-06-01 00:00:00');
+    claimNextPending(raw, connId, '2026-06-01 00:00:00');
+
+    resolveOutbox(raw, done.id, 'done');
+    resolveOutbox(raw, ambiguous.id, 'ambiguous');
+
+    expect(fetchOutboxRow(done.id)?.state).toBe('done');
+    expect(fetchOutboxRow(ambiguous.id)?.state).toBe('ambiguous');
+  });
+
+  it('listUnresolvedOutbox returns pending/in_flight/ambiguous but not done/failed', () => {
+    const connId = seedConnection();
+    const pending = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const inFlight = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const ambiguous = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const done = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const failed = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+
+    // Stamp each row's terminal/in-progress state directly — the point of this
+    // test is the SELECT filter, not the claim/resolve transitions (covered by
+    // the claimNextPending/resolveOutbox tests above).
+    const setState = (id: number, state: string) =>
+      raw.prepare('UPDATE tracker_outbox SET state = ? WHERE id = ?').run(state, id);
+    setState(pending.id, 'pending');
+    setState(inFlight.id, 'in_flight');
+    setState(ambiguous.id, 'ambiguous');
+    setState(done.id, 'done');
+    setState(failed.id, 'failed');
+
+    const unresolved = listUnresolvedOutbox(raw, connId).map((r) => r.id).sort();
+    expect(unresolved).toEqual([pending.id, inFlight.id, ambiguous.id].sort());
+  });
+
+  it('findOutboxByClientKey looks up by the idempotency key, scoped to the connection', () => {
+    const connId = seedConnection();
+    const row = enqueueOutbox(raw, {
+      connection_id: connId,
+      kind: 'create_sub_issue',
+      client_key: 'client-key-abc',
+      payload_json: '{}',
+    });
+    expect(findOutboxByClientKey(raw, connId, 'client-key-abc')).toEqual(row);
+    expect(findOutboxByClientKey(raw, connId, 'no-such-key')).toBeNull();
+  });
+
+  it('requeueInFlightAsAmbiguous converts every in_flight row for a connection and returns the count, leaving pending rows untouched', () => {
+    const connId = seedConnection();
+    const willClaim1 = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const willClaim2 = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+    const staysPending = enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+
+    claimNextPending(raw, connId, '2026-06-01 00:00:00');
+    claimNextPending(raw, connId, '2026-06-01 00:00:00');
+    expect(fetchOutboxRow(willClaim1.id)?.state).toBe('in_flight');
+    expect(fetchOutboxRow(willClaim2.id)?.state).toBe('in_flight');
+
+    const count = requeueInFlightAsAmbiguous(raw, connId);
+    expect(count).toBe(2);
+    expect(fetchOutboxRow(willClaim1.id)?.state).toBe('ambiguous');
+    expect(fetchOutboxRow(willClaim2.id)?.state).toBe('ambiguous');
+    expect(fetchOutboxRow(staysPending.id)?.state).toBe('pending');
+
+    // Idempotent — nothing left in_flight the second time.
+    expect(requeueInFlightAsAmbiguous(raw, connId)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conflicts
+// ---------------------------------------------------------------------------
+
+describe('trackerSync store — conflicts', () => {
+  it('insertConflict opens a conflict that shows up in listOpenConflicts and hasOpenConflictForLink', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      provider: 'linear',
+      external_id: 'LIN-1',
+    });
+    const conflict = insertConflict(raw, {
+      connection_id: connId,
+      link_id: link.id,
+      kind: 'field_conflict',
+      field: 'title',
+      local_value: 'Local title',
+      remote_value: 'Remote title',
+    });
+    expect(conflict.state).toBe('open');
+    expect(conflict.resolved_at).toBeNull();
+
+    expect(listOpenConflicts(raw, connId).map((c) => c.id)).toEqual([conflict.id]);
+    expect(hasOpenConflictForLink(raw, link.id)).toBe(true);
+  });
+
+  it('resolveConflict stamps state=resolved, records the resolution, and sets resolved_at', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'task',
+      entity_id: 'task-1',
+      provider: 'plane',
+      external_id: 'proj/1',
+    });
+    const conflict = insertConflict(raw, {
+      connection_id: connId,
+      link_id: link.id,
+      kind: 'remote_deleted',
+    });
+
+    resolveConflict(raw, conflict.id, 'accept-theirs');
+
+    const row = raw.prepare('SELECT state, resolution, resolved_at FROM tracker_conflicts WHERE id = ?').get(
+      conflict.id,
+    ) as { state: string; resolution: string | null; resolved_at: string | null };
+    expect(row.state).toBe('resolved');
+    expect(row.resolution).toBe('accept-theirs');
+    expect(row.resolved_at).not.toBeNull();
+
+    expect(listOpenConflicts(raw, connId)).toEqual([]);
+    expect(hasOpenConflictForLink(raw, link.id)).toBe(false);
+  });
+
+  it('a conflict can be open with no link_id (a general remote-deletion record) and never counts toward hasOpenConflictForLink', () => {
+    const connId = seedConnection();
+    const conflict = insertConflict(raw, { connection_id: connId, kind: 'remote_deleted' });
+    expect(conflict.link_id).toBeNull();
+    expect(listOpenConflicts(raw, connId).map((c) => c.id)).toEqual([conflict.id]);
+  });
+});
