@@ -792,3 +792,99 @@ describe('cyboflowMcpServer create/update task scope param', () => {
     expect(updated['error']).not.toBe('invalid_arguments');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The verify-setup tool surface (docs/proposals/verification-setup-flow.md
+// §5.2 seams 1+2, §3.6): the BLOCKING await, the runbook registration, and the
+// three setup-proof fields grafted onto cyboflow_request_verification.
+//
+// These tools are run-scoped, so every flow sees them — the declarations are
+// therefore asserted to SAY they are for the verify-setup flow, which is the
+// only thing keeping a sprint lane from reaching for the blocking one.
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer ListTools verify-setup tools', () => {
+  it('declares the blocking await tool, scoped to the verify-setup flow', async () => {
+    const tool = (await listTools()).find((t) => t.name === 'cyboflow_await_verification');
+    expect(tool).toBeDefined();
+    expect(tool!.description).toContain('BLOCKS');
+    expect(tool!.description).toContain('verify-setup');
+    expect(tool!.inputSchema.required).toEqual(['request_id']);
+    expect(Object.keys(tool!.inputSchema.properties).sort()).toEqual(['request_id', 'timeout_ms']);
+  });
+
+  it('declares the runbook-registration tool with the three declarable modalities', async () => {
+    const tool = (await listTools()).find((t) => t.name === 'cyboflow_register_verify_runbook');
+    expect(tool).toBeDefined();
+    expect(tool!.description).toContain('verify-setup');
+    expect(tool!.inputSchema.required).toEqual(['modality']);
+    // 'mobile' is deferred (§4) and must never be offered as registrable.
+    expect(tool!.inputSchema.properties['modality'].enum).toEqual(['web', 'cdp-app', 'native-screen']);
+  });
+
+  it('cyboflow_request_verification gains setup_proof + the two pin halves', async () => {
+    const tool = (await listTools()).find((t) => t.name === 'cyboflow_request_verification');
+    expect(tool).toBeDefined();
+    const props = tool!.inputSchema.properties;
+    expect(props['setup_proof']?.type).toBe('boolean');
+    expect(props['runbook_hash']?.type).toBe('string');
+    expect(props['runbook_local_version']?.type).toBe('number');
+  });
+});
+
+describe('cyboflowMcpServer CallTool verify-setup validation', () => {
+  it('cyboflow_await_verification rejects a missing/empty request_id and a non-numeric timeout', async () => {
+    expect(await callTool('cyboflow_await_verification', {})).toMatchObject({ error: 'invalid_arguments' });
+    expect(await callTool('cyboflow_await_verification', { request_id: '' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_await_verification', { request_id: 'vr_1', timeout_ms: 'soon' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('cyboflow_await_verification passes validation with valid args (mocked connection error)', async () => {
+    const res = await callTool('cyboflow_await_verification', { request_id: 'vr_1', timeout_ms: 60000 });
+    expect(res['error']).not.toBe('invalid_arguments');
+  });
+
+  it('cyboflow_register_verify_runbook rejects a missing/out-of-enum modality and non-string bindings', async () => {
+    expect(await callTool('cyboflow_register_verify_runbook', {})).toMatchObject({ error: 'invalid_arguments' });
+    expect(await callTool('cyboflow_register_verify_runbook', { modality: 'mobile' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(
+      await callTool('cyboflow_register_verify_runbook', { modality: 'web', bindings_json: { a: 1 } }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('cyboflow_register_verify_runbook passes validation with valid args (mocked connection error)', async () => {
+    const res = await callTool('cyboflow_register_verify_runbook', {
+      modality: 'cdp-app',
+      bindings_json: '{"dataDirLever":"CYBOFLOW_DIR"}',
+    });
+    expect(res['error']).not.toBe('invalid_arguments');
+  });
+
+  it('cyboflow_request_verification rejects malformed setup-proof fields', async () => {
+    expect(
+      await callTool('cyboflow_request_verification', { intent: 'x', setup_proof: 'yes' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_request_verification', { intent: 'x', runbook_hash: 7 }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_request_verification', { intent: 'x', runbook_local_version: '3' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('cyboflow_request_verification passes validation with well-formed setup-proof fields', async () => {
+    const res = await callTool('cyboflow_request_verification', {
+      intent: 'the app boots',
+      setup_proof: true,
+      runbook_hash: 'hash-abc',
+      runbook_local_version: 2,
+    });
+    expect(res['error']).not.toBe('invalid_arguments');
+  });
+});

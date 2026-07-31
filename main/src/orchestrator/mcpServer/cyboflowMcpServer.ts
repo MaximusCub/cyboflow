@@ -846,6 +846,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description:
                 "Optional lane ref of the task this verification is for (e.g. \"TASK-008\"), used by the visual merge-gate to drive the async verdict onto the right lane. Pass YOUR task's ref in a multi-task sprint; omit for a single-task run.",
             },
+            setup_proof: {
+              type: 'boolean',
+              description:
+                "Optional — mark this request as the verify-setup flow's PROOF run rather than ordinary lane traffic. Meaningful only for the verify-setup flow: a setup-proof run is EXEMPT from the project's lifetime verification budget (and never counted against it), drains at LOWER priority than live sprint lanes (promoted after 5 minutes so it cannot starve), may execute an UNPROVEN runbook draft (being unproven is exactly what it is trying to fix — gating it would deadlock the bootstrap), and, when it PASSES while pinned, causes the ENGINE to mark that runbook revision proven. You never mark a runbook proven yourself. Defaults to false.",
+            },
+            runbook_hash: {
+              type: 'string',
+              description:
+                'Optional — the portable-runbook content hash returned by cyboflow_register_verify_runbook. Pin the revision this request must execute (verify-setup flow, paired with setup_proof + runbook_local_version). Omitted on ordinary requests: the engine then resolves and pins the project\'s PROVEN revision itself.',
+            },
+            runbook_local_version: {
+              type: 'number',
+              description:
+                'Optional — the machine-local record CAS version returned alongside runbook_hash. Must be passed WITH runbook_hash (half a pin is ignored): together they let the runner execute exactly that revision or reject with a structured mismatch instead of improvising.',
+            },
           },
           // `intent` is required for the legacy form only — a `task`-form call
           // derives it from task.summary, so neither field is schema-required.
@@ -857,6 +872,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         description:
           "Request an ad-hoc code-review eval of THIS session's current working-tree diff against its base. FIRE-AND-CONTINUE: returns { status, rubricVersion } immediately ('queued' | 'requeued' = replaced a prior ad-hoc verdict | 'in_flight' = one is already grading); a 3-slot jury (2×Claude + 1×Codex) grades asynchronously and the verdict lands as a non-blocking review-queue item. Errors: adhoc_eval_tagged_run_rejected (A/B-tagged runs auto-grade; ad-hoc would distort arm comparison), adhoc_eval_exists_auto (the run already has its canonical automatic eval), adhoc_eval_no_diff (no diff to grade), run_not_found. Explicit calls bypass the automatic-eval on/off settings.",
         inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        name: 'cyboflow_await_verification',
+        description:
+          "BLOCKS until a verification request you already enqueued reaches a verdict, then returns it inline: { status, failureClass, feedback, errorMessage }. Meaningful for the verify-setup flow, whose derive → prove-by-running → diagnose → re-prove loop needs each outcome inside the same turn; ordinary sprint lanes must NOT use it (they fire cyboflow_request_verification, park at awaiting-verify, and the merge gate drives the verdict onto the lane asynchronously). Run-bound: the request must belong to THIS run. `status` is one of passed | failed | low_confidence | skipped | timeout — or, if your wait budget expires first, the request's still-live status (queued/leased/running) with errorMessage 'await timeout', which means YOU stopped waiting, not that the request failed (it keeps running and still delivers its verdict to the artifacts + review queue). On a failure, `failureClass` is the harness's attribution — 'env' (an environment problem it PROVED: failed preflight, occupied port, lock contention), 'deliverable' (the commands genuinely do not stand the project up), or 'ambiguous' (no corroboration either way) — and is the thing to read before deciding what to change.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            request_id: {
+              type: 'string',
+              description: 'The verification request id cyboflow_request_verification returned (required).',
+            },
+            timeout_ms: {
+              type: 'number',
+              description:
+                'Optional wait budget in milliseconds. Defaults to 15 minutes and is clamped to the 20-minute ceiling (the longest a verification request may itself run — waiting past it cannot surface a verdict that does not exist).',
+            },
+          },
+          required: ['request_id'],
+        },
+      },
+      {
+        name: 'cyboflow_register_verify_runbook',
+        description:
+          "Register (or refresh) the MACHINE-LOCAL half of THIS project's verification runbook and return { hash, version } — the content-addressed hash of the committed portable half and the CAS version of the local record. Meaningful for the verify-setup flow. It reads `.cyboflow/verify-runbook.json` from THIS run's worktree itself (there is no content argument — COMMIT the file first, then register: the returned hash addresses what you actually committed, which is what a later request is pinned to). Registering always produces an 'unproven-draft': new content is by definition unproven, and only a PASSING setup_proof verification promotes it. Re-register after every edit — the hash changes, so the old record no longer describes what you are proving. Errors come back verbatim and name the offending file or key (e.g. \"portable runbook is not valid JSON: …\", \"portable runbook declares no \\\"cdp-app\\\" modality\") so you can fix the file and retry.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            modality: {
+              type: 'string',
+              enum: ['web', 'cdp-app', 'native-screen'],
+              description:
+                "Which modality's record to register; the portable runbook must declare an entry for it. 'mobile' is not registrable — it is deferred (pending the Xcode MCP) and no execution path could satisfy it.",
+            },
+            bindings_json: {
+              type: 'string',
+              description:
+                'Optional JSON object of HOST-STABLE resolved lever bindings — binary paths, the data-dir lever name, ABI facts. NEVER request-scoped values: ports and temp dirs are leased per request by the scheduler, and a persisted one would go stale or collide. Validated as parseable JSON.',
+            },
+          },
+          required: ['modality'],
+        },
       },
       // ---------------------------------------------------------------------
       // Workflow + variant configuration (edit flows / configure variants from
@@ -1088,6 +1145,16 @@ async function executeMcpQuery(
 function invalidArgs(expected: string): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected }) }] };
 }
+
+/**
+ * IPC budget for the BLOCKING `cyboflow_await_verification` call
+ * (docs/proposals/verification-setup-flow.md §5.2 seam 2). Deliberately larger
+ * than the orchestrator handler's own 20-minute clamp: whichever side gives up
+ * first owns the answer the agent sees, and the handler's answer ("still
+ * queued/running — I stopped waiting") is diagnostic while this transport's
+ * ('orchestrator_timeout') is not.
+ */
+const AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS = 22 * 60_000;
 
 function invalidQuestionArguments(): CallToolResult {
   return {
@@ -2304,8 +2371,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         viewports?: unknown;
         baseline_key?: unknown;
         task_ref?: unknown;
+        setup_proof?: unknown;
+        runbook_hash?: unknown;
+        runbook_local_version?: unknown;
       };
-      const { intent: rawIntent, task, type_override, url, html_path, viewports, baseline_key, task_ref } = args;
+      const {
+        intent: rawIntent,
+        task,
+        type_override,
+        url,
+        html_path,
+        viewports,
+        baseline_key,
+        task_ref,
+        setup_proof,
+        runbook_hash,
+        runbook_local_version,
+      } = args;
       // `intent` is required for the LEGACY form only. A task-form call (the
       // fan-out prose passes just `task` + `task_ref`) derives a best-effort
       // intent from task.summary here — unvalidated; the handler strictly
@@ -2365,6 +2447,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_ref: string (optional)' }) }],
         };
       }
+      if (setup_proof !== undefined && typeof setup_proof !== 'boolean') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'setup_proof: boolean (optional)' }) }],
+        };
+      }
+      if (runbook_hash !== undefined && typeof runbook_hash !== 'string') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'runbook_hash: string (optional)' }) }],
+        };
+      }
+      if (runbook_local_version !== undefined && typeof runbook_local_version !== 'number') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'runbook_local_version: number (optional)' }) },
+          ],
+        };
+      }
       const queryParams: Record<string, unknown> = { intent };
       // `task` is threaded through VERBATIM, unvalidated — the handler strictly
       // validates its shape server-side (parseVerificationTaskV1) so a malformed
@@ -2384,6 +2483,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (baseline_key !== undefined) queryParams['baselineKey'] = baseline_key;
       // taskRef: the lane attribution for the visual merge-gate (verdict→lane).
       if (task_ref !== undefined) queryParams['taskRef'] = task_ref;
+      // §3.6/§5.2 seam 3 (verification-setup-flow): the setup flow's proof
+      // channel. The two pin halves are threaded independently and the HANDLER
+      // requires both before it stamps anything — half a pin is not a pin, and
+      // dropping it there (rather than here) keeps one rule at one site.
+      if (setup_proof !== undefined) queryParams['setupProof'] = setup_proof;
+      if (runbook_hash !== undefined) queryParams['runbookHash'] = runbook_hash;
+      if (runbook_local_version !== undefined) queryParams['runbookLocalVersion'] = runbook_local_version;
       return executeMcpQuery('mcp-request-verification', queryParams);
     }
 
@@ -2393,6 +2499,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // is nothing to validate. Fire-and-continue — the reply is the queue status,
       // never the verdict.
       return executeMcpQuery('mcp-run-eval', {});
+    }
+
+    case 'cyboflow_await_verification': {
+      const args = (request.params.arguments ?? {}) as { request_id?: unknown; timeout_ms?: unknown };
+      const { request_id, timeout_ms } = args;
+      if (typeof request_id !== 'string' || request_id.length === 0) {
+        return invalidArgs('request_id: string (the id cyboflow_request_verification returned)');
+      }
+      if (timeout_ms !== undefined && (typeof timeout_ms !== 'number' || !Number.isFinite(timeout_ms))) {
+        return invalidArgs('timeout_ms: number (optional)');
+      }
+      // `request_id` is renamed to `verificationRequestId` on the wire: every
+      // message on this socket already carries its OWN `requestId` correlation
+      // id, and colliding the two would make the handler answer the wrong call.
+      const queryParams: Record<string, unknown> = { verificationRequestId: request_id };
+      if (timeout_ms !== undefined) queryParams['timeoutMs'] = timeout_ms;
+      // The TRANSPORT budget must outlive the HANDLER's wait budget, or the
+      // socket would give up first and hand the caller 'orchestrator_timeout'
+      // instead of the handler's honest answer ("still running, I stopped
+      // waiting"). Same pattern as the question gate's 30-minute transport
+      // budget, sized here off the handler's own 20-minute clamp plus slack.
+      return executeMcpQuery('mcp-await-verification', queryParams, AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS);
+    }
+
+    case 'cyboflow_register_verify_runbook': {
+      const args = (request.params.arguments ?? {}) as { modality?: unknown; bindings_json?: unknown };
+      const { modality, bindings_json } = args;
+      if (modality !== 'web' && modality !== 'cdp-app' && modality !== 'native-screen') {
+        return invalidArgs("modality: 'web' | 'cdp-app' | 'native-screen'");
+      }
+      if (bindings_json !== undefined && typeof bindings_json !== 'string') {
+        return invalidArgs('bindings_json: string (optional, JSON object)');
+      }
+      const queryParams: Record<string, unknown> = { modality };
+      // Parseability is re-checked server-side (one validation site); the type
+      // guard here only keeps a non-string off the wire.
+      if (bindings_json !== undefined) queryParams['bindingsJson'] = bindings_json;
+      return executeMcpQuery('mcp-register-verify-runbook', queryParams);
     }
 
     case 'cyboflow_list_workflows': {

@@ -130,7 +130,13 @@ import {
   type ReprioritizeBacklogItem,
   type ReprioritizeBacklogProposalPayload,
 } from '../../../../shared/types/agentThread';
-import { VerificationScheduler } from '../verify/verificationScheduler';
+import {
+  AGENT_REQUEST_TIMEOUT_CEILING_MS,
+  VerificationScheduler,
+} from '../verify/verificationScheduler';
+import { prepareVerificationEnqueue } from '../verify/enqueueFromTask';
+import type { VerifyRunbookStore } from '../verify/runbookStore';
+import { isVerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
 import {
   FALLBACK_CHAINS,
   isVerificationType,
@@ -202,6 +208,18 @@ const AD_HOC_EVAL_REJECTION_ERRORS: Record<
     'adhoc_eval_no_diff: no diff was captured for this run (no worktree, or nothing changed since ' +
     'its base), so there is nothing to grade.',
 };
+
+/**
+ * Default wait budget for `cyboflow_await_verification` when the caller names
+ * none (docs/proposals/verification-setup-flow.md §5.2 seam 2). Fifteen minutes
+ * sits deliberately between the agent engine's 10-minute default deadline and its
+ * 20-minute ceiling ({@link AGENT_REQUEST_TIMEOUT_CEILING_MS}, which is also this
+ * tool's clamp): long enough that an ordinary proof run — cold build, boot,
+ * drive, judge — is awaited to completion rather than abandoned one minute short,
+ * and short enough that a wedged request cannot hold a flow's turn hostage for
+ * longer than the request could legally live.
+ */
+const AWAIT_VERIFICATION_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -497,6 +515,56 @@ export type McpQueryMessage =
        * the only lane; non-sprint runs have no gate).
        */
       taskRef?: string;
+      /**
+       * §3.6 (docs/proposals/verification-setup-flow.md) — this request is the
+       * phase-2 setup flow's PROOF run, not ordinary lane traffic: exempt from the
+       * project's lifetime judge budget, drained at lower priority, allowed to
+       * execute an UNPROVEN draft (proving it is how a project stops being
+       * unproven), and — when it PASSES with a pin — the trigger for the engine's
+       * own `markProven` flip. Defaults to false.
+       */
+      setupProof?: boolean;
+      /**
+       * §5.2 seam 3 — the caller-supplied PIN: the portable half's content hash
+       * and the machine-local record's CAS version, as returned by
+       * `mcp-register-verify-runbook`. Only a setup proof supplies these (it pins
+       * the DRAFT it is trying to prove); an ordinary request leaves them absent
+       * and the handler resolves the project's PROVEN revision instead. Both must
+       * be present together — half a pin is not a pin.
+       */
+      runbookHash?: string;
+      runbookLocalVersion?: number;
+    }
+  | {
+      /**
+       * BLOCKING (§5.2 seam 2): wait until a previously-enqueued verification
+       * request settles and return its verdict inline. `verificationRequestId` is
+       * the id `mcp-request-verification` replied with; `requestId` is this
+       * message's own wire correlation id (the two are unrelated). Run-bound like
+       * every other tool: a request belonging to a DIFFERENT run is rejected.
+       */
+      type: 'mcp-await-verification';
+      requestId: string;
+      runId: string;
+      /** The verification_requests.id to wait on. */
+      verificationRequestId: string;
+      /** Wait budget in ms; defaults to 15 min and is clamped to a 20-min ceiling. */
+      timeoutMs?: number;
+    }
+  | {
+      /**
+       * §5.2 seam 1 — register (or refresh) the MACHINE-LOCAL half of this
+       * project's verification runbook from the portable file committed in THIS
+       * run's worktree. Replies { hash, version } (the content-addressed portable
+       * hash + the record's CAS version) or the store's error verbatim.
+       */
+      type: 'mcp-register-verify-runbook';
+      requestId: string;
+      runId: string;
+      /** One of the three declarable modalities; validated server-side. */
+      modality: string;
+      /** Host-stable resolved lever bindings (binary paths, data-dir lever name, ABI facts). */
+      bindingsJson?: string;
     }
   | {
       /**
@@ -1278,6 +1346,26 @@ export interface McpQueryHandlerDeps {
    * (the documented degrade pattern shared with workflowConfig / agentThreadStore).
    */
   runAdHocEval?: (runId: string) => Promise<AdHocSnapshotResult>;
+
+  /**
+   * The MACHINE-LOCAL verification-runbook store (§5.2 seam 1), backing
+   * `cyboflow_register_verify_runbook`. Concrete class rather than a structural
+   * surface, for the same reason as `agentThreadStore` above: VerifyRunbookStore
+   * lives under main/src/orchestrator/verify/ — orchestrator layer, not
+   * main/src/services — so the ORCHESTRATOR LAYERING RULE does not demand an
+   * injected interface, and the deps bag is used purely so a test can hand in a
+   * store built over its own fixture DB.
+   *
+   * It MUST be the same instance the VerificationScheduler was initialized with
+   * (main/src/index.ts wires one `verifyRunbookStore` into both): the setup flow
+   * registers a draft through this tool and the ENGINE proves that exact record
+   * on a passing setup-proof run, so two stores over the same table would still
+   * work but two stores over different DBs would silently never agree.
+   *
+   * Absent ⇒ the register tool returns 'runbook_store_unavailable'; nothing else
+   * is affected.
+   */
+  verifyRunbookStore?: VerifyRunbookStore;
 }
 
 /**
@@ -1454,10 +1542,25 @@ export class McpQueryHandler {
           await this.handleDesignAckFeedback(msg, client);
           break;
         case 'mcp-request-verification':
-          // FIRE-AND-CONTINUE: resolves posture + enqueues synchronously, replies
-          // { requestId } (or { skipped:true } for a disabled run), then nudges the
-          // scheduler — the lane never blocks on the verdict.
-          this.handleRequestVerification(msg, client);
+          // FIRE-AND-CONTINUE on the VERDICT (the lane never blocks on it), but
+          // AWAITED here: the enqueue-time runbook resolution (§5.2 seam 3) does
+          // filesystem work, and the reply must not be written until the row —
+          // pin included — exists.
+          await this.handleRequestVerification(msg, client);
+          break;
+        case 'mcp-await-verification':
+          // BLOCKING (§5.2 seam 2) — holds the socket open until the request
+          // settles or the caller's bounded deadline expires, exactly like the
+          // question gate above. The setup flow's prove→diagnose→re-prove loop
+          // needs the verdict IN ITS OWN TURN; fire-and-continue delivery has no
+          // channel back to a live turn.
+          await this.handleAwaitVerification(msg, client);
+          break;
+        case 'mcp-register-verify-runbook':
+          // AWAITED: the store reads + validates the portable runbook file and
+          // fingerprints the host, so the reply cannot be written until the
+          // record (and its hash + CAS version) actually exists.
+          await this.handleRegisterVerifyRunbook(msg, client);
           break;
         case 'mcp-run-eval':
           // FIRE-AND-CONTINUE: awaits only the snapshot + enqueue (never the jury),
@@ -3945,11 +4048,36 @@ export class McpQueryHandler {
    * both the derived input AND the task are passed to the scheduler so
    * `task_json` dual-writes alongside `deliverable_json`. `msg.task` absent ⇒ this
    * method's behavior is byte-identical to the pre-redesign legacy path.
+   *
+   * PHASE 2 (docs/proposals/verification-setup-flow.md §5.2 seams 1+3, §7.2)
+   * inserts ONE shared step between validation and enqueue —
+   * `prepareVerificationEnqueue`, the same function the programmatic
+   * `enqueueTaskVerification` seam calls — which (a) REJECTS a task whose
+   * build/serve mutates dependencies, with `forbidden_dependency_command: …`
+   * named exactly like the `invalid_verification_task` rejection above, and (b)
+   * injects the project's PROVEN runbook revision + its content-addressed pin.
+   * Sharing it is the point: two enqueue paths applying two versions of one rule
+   * is how a guard stops covering half the traffic.
+   *
+   * ASYNC as of that step (the runbook status re-validates a file against a
+   * hash, an input-hash and a host fingerprint — all filesystem work). The reply
+   * is still written before any verdict exists, so the fire-and-continue
+   * contract the tool advertises is unchanged.
+   *
+   * SETUP PROOF (§3.6/§5.3). `setupProof` + the `runbookHash`/`runbookLocalVersion`
+   * pin are the phase-2 setup flow's channel through this SAME handler rather
+   * than a parallel one. Together they say "this request exists to PROVE the
+   * revision I just registered": the row is stamped budget-exempt and
+   * lower-priority, the §3.2 "no proven runbook" gate is bypassed (a project
+   * cannot prove a runbook if being unproven blocks the proof), and a PASS is
+   * what the ENGINE — never the flow — turns into `markProven`. The pin is
+   * supplied rather than resolved for the same reason: the revision under proof
+   * is by construction not yet proven, so the lookup would find nothing.
    */
-  private handleRequestVerification(
+  private async handleRequestVerification(
     msg: Extract<McpQueryMessage, { type: 'mcp-request-verification' }>,
     client: net.Socket,
-  ): void {
+  ): Promise<void> {
     const ctx = this.resolveReviewItemRunContext(msg.runId);
     if (!ctx.ok) {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
@@ -4083,6 +4211,50 @@ export class McpQueryHandler {
       if (viewports !== undefined) input.viewports = viewports;
     }
 
+    // §7.2 guard + §5.2 seam-3 injection, shared with the programmatic seam. A
+    // rejection replies ok:false and enqueues NOTHING (mirroring the
+    // invalid_verification_task posture above); an injection replaces the task's
+    // build/serve/attestation with the proven runbook's and hands back the pin to
+    // stamp. The legacy intent-only path (no `task`) passes through untouched.
+    //
+    // A CALLER-SUPPLIED PIN SHORT-CIRCUITS THE LOOKUP (§5.2/§5.3): the setup
+    // flow's proof run pins the DRAFT it is trying to prove, which by definition
+    // is not proven yet — requiring a proven record for it would be the same
+    // bootstrap deadlock §3.6 exempts it from at the degrade gate. Both halves
+    // must arrive together; half a pin is dropped rather than stamped, since the
+    // runner's CAS would have nothing to validate against.
+    const wirePin =
+      typeof msg.runbookHash === 'string' &&
+      msg.runbookHash.length > 0 &&
+      typeof msg.runbookLocalVersion === 'number' &&
+      Number.isFinite(msg.runbookLocalVersion)
+        ? { hash: msg.runbookHash, localVersion: msg.runbookLocalVersion }
+        : undefined;
+    const prepared = await prepareVerificationEnqueue({
+      projectId: ctx.projectId,
+      runId: msg.runId,
+      type: effectiveType,
+      ...(task !== undefined ? { task } : {}),
+      ...(wirePin !== undefined ? { pin: wirePin } : {}),
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
+    if (!prepared.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: prepared.error,
+      });
+      return;
+    }
+    // A merged task supersedes both persisted columns, so the legacy input is
+    // re-derived from it — `deliverable_json` must never describe a shape
+    // `task_json` no longer carries.
+    if (prepared.task !== undefined && prepared.task !== task) {
+      task = prepared.task;
+      input = deriveLegacyInputFromTask(task, input.taskRef);
+    }
+
     try {
       const requestId = VerificationScheduler.getInstance().enqueue({
         runId: msg.runId,
@@ -4091,6 +4263,10 @@ export class McpQueryHandler {
         input,
         chain,
         task,
+        ...(msg.setupProof === true ? { setupProof: true } : {}),
+        ...(prepared.pin
+          ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
+          : {}),
       });
       // Reply SYNCHRONOUSLY (the lane continues), then kick the drain loop. enqueue
       // already nudges; the extra nudge is harmless (coalesced) and makes the
@@ -4193,6 +4369,259 @@ export class McpQueryHandler {
       ok: false,
       error: AD_HOC_EVAL_REJECTION_ERRORS[result.reason],
     });
+  }
+
+  /**
+   * BLOCK until a verification request settles, then reply with its verdict
+   * (docs/proposals/verification-setup-flow.md §5.2 seam 2 — "the setup flow's
+   * test-execute step needs a wait-for-verdict seam, bounded, with the verdict
+   * surfaced inline").
+   *
+   * THIS IS THE ONE VERIFICATION CALL THAT DOES NOT RETURN IMMEDIATELY, and the
+   * asymmetry is deliberate. `mcp-request-verification` is fire-and-continue
+   * because a sprint lane's turn ENDS at the enqueue — the verdict arrives later
+   * and is driven onto the parked lane by the merge gate, with no live turn to
+   * hand it to. The setup flow inverts that: "derive → prove by running →
+   * diagnose → adjust → re-prove" is a loop inside a single turn, and each arrow
+   * consumes the previous outcome. Long-blocking MCP calls are precedented here —
+   * `handleRequestUserInput` holds this same socket open across an unbounded human
+   * decision — and unlike that gate this one is BOUNDED by the caller's own
+   * deadline.
+   *
+   * RUN-BOUND, like every other tool on this socket: the request must belong to
+   * THIS run. Cross-run awaits are rejected as `not_your_request` rather than
+   * served — a flow blocking on another run's request would both leak that run's
+   * verdict and hold a socket for a deadline it does not control.
+   *
+   * TIMING OUT IS NOT CANCELING. On expiry the reply carries the request's CURRENT
+   * (non-terminal) status with `errorMessage: 'await timeout'`; the request keeps
+   * draining and still delivers its verdict to the screenshots artifact + the
+   * review queue through the normal path. The flow's correct response is to report
+   * that it stopped waiting — never to treat it as a failure of the deliverable.
+   */
+  private async handleAwaitVerification(
+    msg: Extract<McpQueryMessage, { type: 'mcp-await-verification' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    if (typeof msg.verificationRequestId !== 'string' || msg.verificationRequestId.length === 0) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_arguments: request_id must be a non-empty verification request id',
+      });
+      return;
+    }
+
+    // OWNERSHIP GUARD (run-bound). A read failure is reported as not-found rather
+    // than swallowed: awaiting a request this handler cannot even see would block
+    // for the full deadline and then report a status it never read.
+    let ownerRunId: string | null = null;
+    try {
+      const row = this.db
+        .prepare('SELECT run_id FROM verification_requests WHERE id = ?')
+        .get(msg.verificationRequestId) as { run_id?: unknown } | undefined;
+      ownerRunId = typeof row?.run_id === 'string' ? row.run_id : null;
+    } catch (err) {
+      this.logger?.warn('[Cyboflow MCP Query] await-verification ownership read failed', {
+        runId: msg.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      ownerRunId = null;
+    }
+    if (ownerRunId === null) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'verification_request_not_found',
+      });
+      return;
+    }
+    if (ownerRunId !== msg.runId) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'not_your_request',
+      });
+      return;
+    }
+
+    // Clamp the wait budget. The ceiling is the AGENT request deadline itself:
+    // waiting longer than the longest a request may legally run cannot surface a
+    // verdict that does not exist, it only holds the socket. A non-positive /
+    // malformed value falls back to the default rather than resolving instantly,
+    // which would silently turn the blocking tool into a poll.
+    const requested = typeof msg.timeoutMs === 'number' && Number.isFinite(msg.timeoutMs) ? msg.timeoutMs : NaN;
+    const timeoutMs =
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, AGENT_REQUEST_TIMEOUT_CEILING_MS)
+        : AWAIT_VERIFICATION_DEFAULT_TIMEOUT_MS;
+
+    const scheduler = VerificationScheduler.tryGetInstance();
+    if (scheduler === null) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'verification_unavailable',
+      });
+      return;
+    }
+
+    try {
+      const outcome = await scheduler.awaitTerminal(msg.verificationRequestId, timeoutMs);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          status: outcome.status,
+          failureClass: outcome.failureClass,
+          feedback: outcome.feedback,
+          errorMessage: outcome.errorMessage,
+        },
+      });
+    } catch (err) {
+      this.logger?.error('[Cyboflow MCP Query] await-verification failed', {
+        runId: msg.runId,
+        verificationRequestId: msg.verificationRequestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'verification_await_failed',
+      });
+    }
+  }
+
+  /**
+   * Register (or refresh) the MACHINE-LOCAL half of this project's verification
+   * runbook from the portable file committed in THIS run's worktree (§5.2 seam 1),
+   * replying `{ hash, version }` — the content-addressed hash of the portable half
+   * and the CAS version of the local record.
+   *
+   * THE WORKTREE IS THE SOURCE, NOT THE WIRE. The tool takes no runbook content:
+   * the store reads `.cyboflow/verify-runbook.json` from the run's own worktree
+   * itself. That is what makes the returned hash mean something — it addresses the
+   * file the flow actually committed, not a payload the flow retyped, so a request
+   * pinned to that hash executes the revision a human can `git show`.
+   *
+   * ERRORS COME BACK VERBATIM. `registerDraft` returns (never throws) messages
+   * like "portable runbook is not valid JSON: …" and "portable runbook declares no
+   * \"cdp-app\" modality", each naming the offending path or key. Collapsing those
+   * into an opaque code would leave the setup flow guessing at a file it just
+   * wrote; passing them through is what lets it fix the file and retry in the same
+   * turn.
+   *
+   * `bindings_json` is validated as PARSEABLE JSON here and stored opaquely — the
+   * store has no schema for it (§5.3 leaves the machine-local bindings shape to
+   * the modality), but persisting text that is not even JSON would guarantee a
+   * later reader fails on data this handler could have rejected at the door.
+   */
+  private async handleRegisterVerifyRunbook(
+    msg: Extract<McpQueryMessage, { type: 'mcp-register-verify-runbook' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    if (!isVerifyRunbookModality(msg.modality)) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        // 'mobile' is deliberately NOT accepted: §4 defers it entirely, so a
+        // record declaring it could never be satisfied by any execution path.
+        error: "invalid_modality: expected 'web' | 'cdp-app' | 'native-screen'",
+      });
+      return;
+    }
+
+    if (msg.bindingsJson !== undefined) {
+      try {
+        JSON.parse(msg.bindingsJson);
+      } catch (err) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: `invalid_bindings_json: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return;
+      }
+    }
+
+    const store = this.deps.verifyRunbookStore;
+    if (!store) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'runbook_store_unavailable',
+      });
+      return;
+    }
+
+    const worktreePath = this.resolveRunWorktree(msg.runId);
+    if (worktreePath === null) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'run_worktree_unavailable',
+      });
+      return;
+    }
+
+    try {
+      const result = await store.registerDraft(
+        ctx.projectId,
+        worktreePath,
+        msg.modality,
+        msg.bindingsJson,
+      );
+      if ('error' in result) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: result.error,
+        });
+        return;
+      }
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { hash: result.hash, version: result.version },
+      });
+    } catch (err) {
+      // registerDraft is total by contract; this is the belt-and-braces path so a
+      // future non-total collaborator cannot take the socket down with it.
+      this.logger?.error('[Cyboflow MCP Query] register-verify-runbook failed', {
+        runId: msg.runId,
+        modality: msg.modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'runbook_register_failed',
+      });
+    }
   }
 
   /**

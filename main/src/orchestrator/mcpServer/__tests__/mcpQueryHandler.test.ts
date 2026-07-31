@@ -36,6 +36,8 @@ import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../spri
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { VerificationScheduler } from '../../verify/verificationScheduler';
+import { VerifyRunbookStore } from '../../verify/runbookStore';
+import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
 import type { VerdictV1 } from '../../../../../shared/types/visualVerification';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
@@ -4323,7 +4325,32 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         report_json TEXT,
         delivery_state TEXT,
         snapshot_sha TEXT,
-        enqueue_key TEXT
+        enqueue_key TEXT,
+        -- Migration 088 (verification-setup-flow §3): classification + gate axes.
+        failure_class TEXT,
+        failure_evidence_json TEXT,
+        modality TEXT,
+        preflight_json TEXT,
+        setup_proof INTEGER NOT NULL DEFAULT 0,
+        -- Migration 089 (§5.2 seam 3): the content-addressed runbook PIN.
+        runbook_hash TEXT,
+        runbook_local_version INTEGER
+      );
+      -- Migration 089 (§5.2 seam 1): the MACHINE-LOCAL runbook record the
+      -- register tool writes through VerifyRunbookStore.
+      CREATE TABLE verify_runbook_local (
+        project_id INTEGER NOT NULL,
+        modality TEXT NOT NULL,
+        portable_hash TEXT NOT NULL,
+        portable_json TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL CHECK (status IN ('proven','unproven-draft')),
+        bindings_json TEXT,
+        proof_json TEXT,
+        input_hash TEXT,
+        host_fingerprint_json TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (project_id, modality)
       );
     `);
 
@@ -4777,6 +4804,621 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(true);
     expect(typeof (response.data as { requestId?: string }).requestId).toBe('string');
+  });
+
+  // §7.2 (docs/proposals/verification-setup-flow.md): the ENQUEUE half of the
+  // dependency guard, applied through the SAME shared helper the programmatic
+  // seam calls — a snapshot's node_modules is symlinked from the live worktree,
+  // so an install inside it flips native-module ABIs under every sibling lane,
+  // invisibly to the mutation check.
+  it('rejects a composed task whose build step mutates dependencies, enqueuing nothing', async () => {
+    seedVerifyRun(vdb, 'run-vguard', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-guard',
+        runId: 'run-vguard',
+        intent: 'the toggle renders',
+        task: {
+          version: 1,
+          summary: 'the toggle renders',
+          behaviors: [{ id: 'b1', description: 'renders', expected: 'visible' }],
+          build: ['pnpm install --frozen-lockfile', 'pnpm run build'],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    // Mirrors the invalid_verification_task naming style, and names the command
+    // verbatim so the composer can fix it without re-deriving anything.
+    expect(response.error).toMatch(/^forbidden_dependency_command:/);
+    expect(response.error).toContain('pnpm install --frozen-lockfile');
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('a clean composed task is unaffected by the §7.2 guard', async () => {
+    seedVerifyRun(vdb, 'run-vguard-ok', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-guard-ok',
+        runId: 'run-vguard-ok',
+        intent: 'the toggle renders',
+        task: {
+          version: 1,
+          summary: 'the toggle renders',
+          behaviors: [{ id: 'b1', description: 'renders', expected: 'visible' }],
+          build: ['pnpm run build'],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(typeof (response.data as { requestId?: string }).requestId).toBe('string');
+  });
+
+  // §3.6 + §5.2 seam 3: the verify-setup flow's proof channel through this SAME
+  // handler — the setup-proof flag plus a caller-supplied pin (the flow pins the
+  // DRAFT it is trying to prove, which by definition no lookup would find).
+  it('threads setup_proof + the runbook pin onto the enqueued row', async () => {
+    seedVerifyRun(vdb, 'run-vproof', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-proof',
+        runId: 'run-vproof',
+        intent: 'the app boots',
+        task: {
+          version: 1,
+          summary: 'the app boots',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+        setupProof: true,
+        runbookHash: 'hash-abc',
+        runbookLocalVersion: 3,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare(
+        'SELECT setup_proof, runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?',
+      )
+      .get(data.requestId) as {
+      setup_proof: number;
+      runbook_hash: string | null;
+      runbook_local_version: number | null;
+    };
+    expect(row.setup_proof).toBe(1);
+    expect(row.runbook_hash).toBe('hash-abc');
+    expect(row.runbook_local_version).toBe(3);
+  });
+
+  it('HALF a pin is not a pin — the hash alone is dropped rather than stamped', async () => {
+    seedVerifyRun(vdb, 'run-vhalfpin', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-halfpin',
+        runId: 'run-vhalfpin',
+        intent: 'the app boots',
+        task: {
+          version: 1,
+          summary: 'the app boots',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'window visible' }],
+          serve: { cmd: 'pnpm dev --port ${PORT}' },
+        },
+        setupProof: true,
+        runbookHash: 'hash-abc',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare(
+        'SELECT setup_proof, runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?',
+      )
+      .get(data.requestId) as {
+      setup_proof: number;
+      runbook_hash: string | null;
+      runbook_local_version: number | null;
+    };
+    // The setup-proof posture still applies (it is independent of the pin); only
+    // the unusable half-pin is dropped, so the runner's CAS has nothing to
+    // validate against rather than something it cannot resolve.
+    expect(row.setup_proof).toBe(1);
+    expect(row.runbook_hash).toBeNull();
+    expect(row.runbook_local_version).toBeNull();
+  });
+
+  it('an ordinary request stamps no pin and no setup-proof flag', async () => {
+    seedVerifyRun(vdb, 'run-vplain', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-plain',
+        runId: 'run-vplain',
+        intent: 'the page renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const data = parseLastWrite(writes).data as { requestId: string };
+    const row = vdb
+      .prepare(
+        'SELECT setup_proof, runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?',
+      )
+      .get(data.requestId) as {
+      setup_proof: number;
+      runbook_hash: string | null;
+      runbook_local_version: number | null;
+    };
+    expect(row.setup_proof).toBe(0);
+    expect(row.runbook_hash).toBeNull();
+    expect(row.runbook_local_version).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // mcp-await-verification (§5.2 seam 2) — the BLOCKING verdict read. Rows are
+  // written directly here: these tests are about the await contract, not about
+  // driving a request through the drain.
+  // -------------------------------------------------------------------------
+
+  function insertTerminalRequest(
+    id: string,
+    runId: string,
+    patch: { status: string; verdictJson?: string; errorMessage?: string; failureClass?: string } = {
+      status: 'passed',
+    },
+  ): void {
+    vdb.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json,
+          verdict_json, error_message, failure_class)
+       VALUES (?, ?, 1, ?, 'interactive-web-behavior', '{"intent":"x"}', '[]', ?, ?, ?)`,
+    ).run(
+      id,
+      runId,
+      patch.status,
+      patch.verdictJson ?? null,
+      patch.errorMessage ?? null,
+      patch.failureClass ?? null,
+    );
+  }
+
+  it('await → replies with the settled status, failure class, feedback and error message', async () => {
+    seedVerifyRun(vdb, 'run-await', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
+    insertTerminalRequest('vr_await_ok', 'run-await', {
+      status: 'failed',
+      verdictJson: JSON.stringify({ feedback: 'the serve command never came up' }),
+      errorMessage: 'serve timed out',
+      failureClass: 'env',
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-await-verification',
+        requestId: 'aw-1',
+        runId: 'run-await',
+        verificationRequestId: 'vr_await_ok',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toEqual({
+      status: 'failed',
+      failureClass: 'env',
+      feedback: 'the serve command never came up',
+      errorMessage: 'serve timed out',
+    });
+  });
+
+  it("await on ANOTHER run's request → not_your_request (run-bound like every other tool)", async () => {
+    seedVerifyRun(vdb, 'run-await-a', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
+    seedVerifyRun(vdb, 'run-await-b', { enabled: true, type: 'interactive-web-behavior', chain: ['playwright'] });
+    insertTerminalRequest('vr_await_other', 'run-await-b');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-await-verification',
+        requestId: 'aw-2',
+        runId: 'run-await-a',
+        verificationRequestId: 'vr_await_other',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('not_your_request');
+  });
+
+  it('await on an unknown request id → verification_request_not_found', async () => {
+    seedVerifyRun(vdb, 'run-await-missing', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-await-verification',
+        requestId: 'aw-3',
+        runId: 'run-await-missing',
+        verificationRequestId: 'vr_does_not_exist',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('verification_request_not_found');
+  });
+
+  it('await returns the CURRENT status with an await-timeout note when the wait budget expires', async () => {
+    seedVerifyRun(vdb, 'run-await-slow', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+    });
+    insertTerminalRequest('vr_await_slow', 'run-await-slow', { status: 'running' });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-await-verification',
+        requestId: 'aw-4',
+        runId: 'run-await-slow',
+        verificationRequestId: 'vr_await_slow',
+        timeoutMs: 20,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toEqual({
+      status: 'running',
+      failureClass: null,
+      feedback: null,
+      errorMessage: 'await timeout',
+    });
+  });
+
+  it('await on a terminal run → run_not_active (no wait)', async () => {
+    seedVerifyRun(vdb, 'run-await-done', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright'],
+      status: 'completed',
+    });
+    insertTerminalRequest('vr_await_done', 'run-await-done');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-await-verification',
+        requestId: 'aw-5',
+        runId: 'run-await-done',
+        verificationRequestId: 'vr_await_done',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('run_not_active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp-register-verify-runbook (cyboflow_register_verify_runbook — §5.2 seam 1)
+//
+// The tool takes NO runbook content: the store reads
+// `.cyboflow/verify-runbook.json` out of the run's own worktree, which is what
+// makes the returned hash address the file the flow actually committed. These
+// tests therefore use a REAL temp worktree with a real file, and inject only the
+// two cheap probes (input hash / host fingerprint) the store needs for its drift
+// baseline.
+// ---------------------------------------------------------------------------
+
+describe('McpQueryHandler — mcp-register-verify-runbook', () => {
+  const VALID_RUNBOOK = {
+    version: 1,
+    modalities: {
+      web: {
+        build: ['pnpm run build'],
+        serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
+        attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+      },
+    },
+  };
+
+  let rdb: Database.Database;
+  let worktree: string;
+  let store: VerifyRunbookStore;
+
+  /** Write the portable half into the run's worktree (the only input this tool reads). */
+  function writeRunbook(contents: string): void {
+    mkdirSync(join(worktree, '.cyboflow'), { recursive: true });
+    writeFileSync(join(worktree, VERIFY_RUNBOOK_RELATIVE_PATH), contents, 'utf8');
+  }
+
+  function makeHandler(withStore = true): McpQueryHandler {
+    return new McpQueryHandler(dbAdapter(rdb), undefined, withStore ? { verifyRunbookStore: store } : {});
+  }
+
+  beforeEach(() => {
+    rdb = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
+    rdb.exec(`
+      CREATE TABLE verify_runbook_local (
+        project_id INTEGER NOT NULL,
+        modality TEXT NOT NULL,
+        portable_hash TEXT NOT NULL,
+        portable_json TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL CHECK (status IN ('proven','unproven-draft')),
+        bindings_json TEXT,
+        proof_json TEXT,
+        input_hash TEXT,
+        host_fingerprint_json TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (project_id, modality)
+      );
+    `);
+    worktree = mkdtempSync(join(os.tmpdir(), 'cyboflow-runbook-'));
+    rdb.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json)
+       VALUES ('run-rb', 'wf-1', 1, ?, 'running', '{}')`,
+    ).run(worktree);
+    store = new VerifyRunbookStore(dbAdapter(rdb), {
+      readPortableFile: async (dirPath: string) => {
+        try {
+          return readFileSync(join(dirPath, VERIFY_RUNBOOK_RELATIVE_PATH), 'utf8');
+        } catch {
+          return null;
+        }
+      },
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fp-1',
+    });
+  });
+
+  afterEach(() => {
+    rmSync(worktree, { recursive: true, force: true });
+    rdb.close();
+  });
+
+  it('a valid committed runbook registers an unproven draft and replies { hash, version }', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      {
+        type: 'mcp-register-verify-runbook',
+        requestId: 'rb-1',
+        runId: 'run-rb',
+        modality: 'web',
+        bindingsJson: JSON.stringify({ dataDirLever: 'CYBOFLOW_DIR' }),
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { hash: string; version: number };
+    expect(typeof data.hash).toBe('string');
+    expect(data.hash.length).toBeGreaterThan(0);
+    expect(data.version).toBe(1);
+
+    const row = rdb
+      .prepare(
+        'SELECT status, portable_hash, bindings_json, input_hash, host_fingerprint_json FROM verify_runbook_local WHERE project_id = 1 AND modality = ?',
+      )
+      .get('web') as {
+      status: string;
+      portable_hash: string;
+      bindings_json: string | null;
+      input_hash: string | null;
+      host_fingerprint_json: string | null;
+    };
+    // Registering NEVER proves: new content is unproven content, and only a
+    // passing setup-proof run may promote it (engine-enforced, §5.3).
+    expect(row.status).toBe('unproven-draft');
+    expect(row.portable_hash).toBe(data.hash);
+    expect(JSON.parse(row.bindings_json as string)).toEqual({ dataDirLever: 'CYBOFLOW_DIR' });
+    expect(row.input_hash).toBe('input-hash-1');
+    expect(row.host_fingerprint_json).toBe('host-fp-1');
+  });
+
+  it('re-registering edited content bumps the CAS version and changes the hash', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+    const first = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-2a', runId: 'run-rb', modality: 'web' },
+      first.socket,
+    );
+    const firstData = parseLastWrite(first.writes).data as { hash: string; version: number };
+
+    writeRunbook(
+      JSON.stringify({
+        ...VALID_RUNBOOK,
+        modalities: {
+          web: { ...VALID_RUNBOOK.modalities.web, build: ['pnpm run build:web'] },
+        },
+      }),
+    );
+    const second = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-2b', runId: 'run-rb', modality: 'web' },
+      second.socket,
+    );
+    const secondData = parseLastWrite(second.writes).data as { hash: string; version: number };
+
+    expect(secondData.version).toBe(firstData.version + 1);
+    expect(secondData.hash).not.toBe(firstData.hash);
+  });
+
+  it('an unparseable runbook file surfaces the store error VERBATIM (so the flow can fix the file)', async () => {
+    writeRunbook('{ this is not json');
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-3', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^portable runbook is not valid JSON:/);
+    const count = rdb.prepare('SELECT COUNT(*) AS n FROM verify_runbook_local').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('a runbook that declares a DIFFERENT modality is rejected by name', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-4', runId: 'run-rb', modality: 'cdp-app' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('declares no "cdp-app" modality');
+  });
+
+  it('a missing runbook file names the path it looked in', async () => {
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-5', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain(worktree);
+  });
+
+  it('a malformed modality is rejected before any file is read', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      // 'mobile' is deferred (§4) — deliberately NOT registrable.
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-6', runId: 'run-rb', modality: 'mobile' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^invalid_modality:/);
+    const count = rdb.prepare('SELECT COUNT(*) AS n FROM verify_runbook_local').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('bindings_json that is not JSON is rejected at the door', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      {
+        type: 'mcp-register-verify-runbook',
+        requestId: 'rb-7',
+        runId: 'run-rb',
+        modality: 'web',
+        bindingsJson: 'electronBinary=/usr/bin/x',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^invalid_bindings_json:/);
+    const count = rdb.prepare('SELECT COUNT(*) AS n FROM verify_runbook_local').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('no store wired → runbook_store_unavailable (documented no-op fallback)', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler(false).handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-8', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('runbook_store_unavailable');
+  });
+
+  it('a run with no worktree cannot register (there is no tree to read the file from)', async () => {
+    rdb.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json)
+       VALUES ('run-rb-nowt', 'wf-1', 1, NULL, 'running', '{}')`,
+    ).run();
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-9', runId: 'run-rb-nowt', modality: 'web' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('run_worktree_unavailable');
   });
 });
 

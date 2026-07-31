@@ -114,6 +114,8 @@ import {
 } from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
+import { VerifyRunbookStore } from './orchestrator/verify/runbookStore';
+import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../shared/types/verifyRunbook';
 import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
@@ -181,7 +183,7 @@ import type { RunGitDiff } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { AgentThreadDbStore } from './orchestrator/agentThread/agentThreadDbStore';
 import { AgentThreadService } from './orchestrator/agentThread/agentThreadService';
 import {
@@ -536,9 +538,10 @@ if (isDevelopment) {
 
 // Chromium's network service can crash and restart during the initial dev-server
 // load (observed on macOS: "Network service crashed, restarting service" →
-// ERR_FAILED (-2) loading http://localhost:4521). The service comes back within a
-// second, so retry the load rather than leaving a blank window with a dead tRPC
-// transport. Only the initial in-flight load is the casualty; a short retry recovers.
+// ERR_FAILED (-2) loading http://localhost:<vite port>). The service comes back
+// within a second, so retry the load rather than leaving a blank window with a
+// dead tRPC transport. Only the initial in-flight load is the casualty; a short
+// retry recovers.
 async function loadDevUrlWithRetry(win: BrowserWindow, url: string, attempts = 6): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     try {
@@ -552,6 +555,15 @@ async function loadDevUrlWithRetry(win: BrowserWindow, url: string, attempts = 6
     }
   }
 }
+
+// Dogfood prerequisite (verification-setup-flow.md §5.4): a verification
+// instance of cyboflow launches with CYBOFLOW_VITE_PORT=$VERIFY_PORT and
+// CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT (plus its own CYBOFLOW_DIR) so it
+// never contends with the developer's own `pnpm dev` instance for the
+// renderer port or the debug-port singleton — mirrors the leased-port
+// parameterization already applied to the `electron-dev` script and
+// vite.config.ts. Defaults reproduce the historical hardcoded values exactly.
+const DEV_RENDERER_PORT = process.env.CYBOFLOW_VITE_PORT ?? '4521';
 
 /** Human label for the running kind, used only in the already-running dialog. */
 function describeInstanceKind(dataDir: string): string {
@@ -795,7 +807,7 @@ async function createWindow() {
   attachOrchestratorTrpcToWindow(mainWindow);
 
   if (isDevelopment) {
-    await loadDevUrlWithRetry(mainWindow, 'http://localhost:4521');
+    await loadDevUrlWithRetry(mainWindow, `http://localhost:${DEV_RENDERER_PORT}`);
     mainWindow.webContents.openDevTools();
     
     // Enable IPC debugging in development
@@ -1736,6 +1748,82 @@ async function initializeServices(): Promise<boolean> {
         'app.asar.unpacked/main/dist/main/src/orchestrator/verify/driver/driverCli.js',
       )
     : path.join(__dirname, 'orchestrator', 'verify', 'driver', 'driverCli.js');
+  // Phase 2 (docs/proposals/verification-setup-flow.md §5.2 seam 1 + §5.3): the
+  // MACHINE-LOCAL half of the runbook contract. The store is DB + policy; the
+  // three environment probes below are its IO, injected here so the store itself
+  // stays fs-free (its standalone-typecheck invariant).
+  //
+  // computeInputHash / hostFingerprint are what make a proof EXPIRE. §5.3's rule
+  // is "any component changing demotes", so both must be (a) stable across calls
+  // on an unchanged host — they are compared for equality, not merely stored —
+  // and (b) cheap, since `status()` recomputes them on every gated request.
+  const verifyRunbookStore = new VerifyRunbookStore(cyboflowDb, {
+    // ABSENT vs UNREADABLE both answer null: the store's contract is that null
+    // means "this tree does not carry the file", which is the ordinary pre-merge
+    // state on every branch that has not landed the runbook yet, and must NOT
+    // demote a proven record.
+    readPortableFile: async (dirPath: string): Promise<string | null> => {
+      try {
+        return await fs.promises.readFile(path.join(dirPath, VERIFY_RUNBOOK_RELATIVE_PATH), 'utf8');
+      } catch {
+        return null;
+      }
+    },
+    // The §5.3 project INPUT hash: the things that change what "build and serve
+    // this project" MEANS — the package scripts the runbook's commands invoke,
+    // the lockfile (a dependency bump can break a dev server), and the two ABI
+    // facts §1's root cause (c) turned on. Deliberately NOT a hash of the whole
+    // tree: every commit would then demote the runbook, which would make the
+    // proof worthless by expiring it constantly.
+    computeInputHash: async (dirPath: string): Promise<string | null> => {
+      try {
+        const raw = await fs.promises.readFile(path.join(dirPath, 'package.json'), 'utf8');
+        const parsed: unknown = JSON.parse(raw);
+        const pkg = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+        const hash = createHash('sha256');
+        hash.update(JSON.stringify(pkg.scripts ?? null));
+        hash.update(String(pkg.packageManager ?? ''));
+        for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb']) {
+          try {
+            hash.update(await fs.promises.readFile(path.join(dirPath, lockfile)));
+          } catch {
+            // absent lockfile — nothing to fold in.
+          }
+        }
+        hash.update(process.versions.node.split('.')[0]);
+        hash.update(process.versions.modules);
+        return hash.digest('hex');
+      } catch {
+        // Could not observe the inputs. The store treats null as "cannot tell",
+        // which fails soft to 'absent' WITHOUT demoting — an inability to look is
+        // not evidence that something changed.
+        return null;
+      }
+    },
+    // The §5.3 host fingerprint. The chromium path is the driver's OWN resolution
+    // (the same probe preflight uses), so a chromium that moved or vanished
+    // demotes the proof rather than surfacing ten minutes into a deploy. The TCC
+    // grant state is deliberately excluded: probing it shells the peekaboo binary
+    // on EVERY gated request, and the per-modality capability ledger (§3.3)
+    // already owns grant regressions.
+    hostFingerprint: async (): Promise<string> => {
+      let chromium: string | null = null;
+      try {
+        chromium = await probeChromiumExecutable();
+      } catch {
+        chromium = null;
+      }
+      return JSON.stringify({
+        chromium,
+        node: process.versions.node.split('.')[0],
+        electronAbi: process.versions.modules,
+        platform: process.platform,
+        arch: process.arch,
+        appPath: app.getPath('exe'),
+      });
+    },
+    logger: cyboflowLogger,
+  });
   const verificationAgentRunner = new VerificationAgentRunner({
     query: makeVerificationAgentQuery(cyboflowLogger),
     // Codex runtime for a codex-pinned/inherited visual-verify agent; absent Codex CLI fails open to skipped.
@@ -1775,6 +1863,13 @@ async function initializeServices(): Promise<boolean> {
     // preflight check actually runs on a native-screen deployment (the gate and
     // the preflight must agree on the same evidence source).
     nativeCaptureProbe: () => peekabooBackend.healthCheck(),
+    // §5.2 seam 3 — resolve the PINNED runbook revision by its content hash so
+    // the runner can refuse to execute anything else. The store answers from
+    // `portable_json` (stored verbatim for exactly this reason): the snapshot the
+    // runner executes in may predate the runbook file entirely, so the content
+    // cannot come from the tree under test.
+    resolveRunbookByHash: (projectId, modality, hash) =>
+      verifyRunbookStore.getByHash(projectId, modality, hash),
     logger: cyboflowLogger,
   });
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
@@ -1843,9 +1938,24 @@ async function initializeServices(): Promise<boolean> {
     // mark + the K-consecutive-env-failure circuit breaker, and the non-blocking
     // finding its trip raises (through verdictDelivery, which owns the
     // ReviewItemRouter chokepoint — the scheduler never touches a router).
-    // `runbookStatus` is deliberately NOT wired: phase 2 owns the runbook store,
-    // and the scheduler's 'absent' default is the honest answer until it lands.
     capabilityStore: new VerifyCapabilityStore(cyboflowDb, cyboflowLogger),
+    // Phase 2 §3.2/§5.3: the degrade gate's real answer, replacing the honest
+    // 'absent' placeholder. Probed against the PROJECT path — the gate asks a
+    // project-level question ("has this project ever proven a runbook for this
+    // modality on this host"), while the enqueue-time injection
+    // (scheduler.resolveProvenRunbook) probes the requesting RUN's worktree,
+    // which is the tree whose commands would actually execute. No project path
+    // (a deleted/unresolvable project row) ⇒ 'absent', which skips with the setup
+    // CTA rather than guessing.
+    runbookStatus: async (projectId, modality) => {
+      const projectPath = databaseService.getProject(projectId)?.path;
+      if (!projectPath) return 'absent';
+      return verifyRunbookStore.status(projectId, projectPath, modality);
+    },
+    // The same store instance backs the enqueue-time pinned injection (§5.2 seam
+    // 3) and the ENGINE-ENFORCED proof flip (§5.3) — a setup-proof request that
+    // actually passed is the only transition into 'proven'.
+    runbookStore: verifyRunbookStore,
     capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // Phase 1 modality roster (§4): the live grant probe that decides whether a
     // `native-screen` request may deploy at all. Reuses the capture backend's
@@ -2116,6 +2226,13 @@ async function initializeServices(): Promise<boolean> {
       // access — this only widens the root set, never bypasses enforcement.
       getAssistantFolderAccess: () => configManager.getAssistantFolderAccess(),
       getAssistantExcludedProjectPaths: () => configManager.getAssistantExcludedProjectPaths(),
+      // Phase 2 §5.2 seam 1: the cyboflow_register_verify_runbook tool writes the
+      // MACHINE-LOCAL runbook record through this store. Deliberately the SAME
+      // instance the VerificationScheduler was initialized with above — the setup
+      // flow registers a draft here and the ENGINE proves that exact record on a
+      // passing setup-proof run, so the two halves of "derive → prove" must be
+      // looking at one store over one DB.
+      verifyRunbookStore,
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
