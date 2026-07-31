@@ -1,0 +1,215 @@
+/**
+ * TrackerConnectedView — manage-surface tests.
+ *
+ * Same harness as IntegrationsSettings.test.tsx: the real component over a
+ * module mock of the tRPC client.
+ *
+ * Coverage: each settings row sends the MINIMAL patch for its own field (never
+ * a whole-connection write); mirroring is hidden while two-way is off; the log
+ * renders the summary's entries verbatim; "Sync now" swaps in the pass's log;
+ * the conflicts card appears for Manual mode / a non-zero count and its two
+ * buttons resolve with the right choice; Disconnect confirms inline first.
+ */
+import '@testing-library/jest-dom';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  TrackerConflictSummary,
+  TrackerConnectionSummary,
+} from '../../../../../shared/types/trackerSync';
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      tracker: {
+        conflicts: { query: vi.fn() },
+        updateSettings: { mutate: vi.fn() },
+        syncNow: { mutate: vi.fn() },
+        resolveConflict: { mutate: vi.fn() },
+        disconnect: { mutate: vi.fn() },
+      },
+    },
+  },
+}));
+
+// Imported after the mock so vi.mock hoisting is in effect.
+import { TrackerConnectedView } from './TrackerConnectedView';
+import { trpc } from '../../../trpc/client';
+
+const mockConflicts = vi.mocked(trpc.cyboflow.tracker.conflicts.query);
+const mockUpdate = vi.mocked(trpc.cyboflow.tracker.updateSettings.mutate);
+const mockSyncNow = vi.mocked(trpc.cyboflow.tracker.syncNow.mutate);
+const mockResolve = vi.mocked(trpc.cyboflow.tracker.resolveConflict.mutate);
+const mockDisconnect = vi.mocked(trpc.cyboflow.tracker.disconnect.mutate);
+
+const onClose = vi.fn();
+const onChanged = vi.fn();
+
+function makeConnection(
+  overrides: Partial<TrackerConnectionSummary> = {},
+): TrackerConnectionSummary {
+  return {
+    id: 'conn-1',
+    projectId: 7,
+    provider: 'linear',
+    status: 'active',
+    workspaceName: 'Acme',
+    actorLabel: 'J. Kesteva',
+    baseUrl: null,
+    sourceLabel: 'Core · Current cycle',
+    selectionMode: 'all',
+    twoWay: true,
+    mirrorSubissues: true,
+    conflictMode: 'auto',
+    stateMapping: { triage: 'dont', backlog: 'idea', todo: 'ready', done: 'done' },
+    lastSyncAt: '2026-07-30T10:00:00.000Z',
+    lastSyncLog: [
+      { marker: '▸', line: 'GET /issues' },
+      { marker: '✓', line: 'created 12 ideas' },
+    ],
+    linkedCount: 12,
+    openConflictCount: 0,
+    ...overrides,
+  };
+}
+
+const CONFLICT: TrackerConflictSummary = {
+  id: 41,
+  connectionId: 'conn-1',
+  kind: 'field_conflict',
+  field: 'title',
+  localValue: 'Token budget alerts',
+  remoteValue: 'Budget alerts for tokens',
+  entityRef: 'IDEA-004',
+  entityTitle: 'Token budget alerts',
+  createdAt: '2026-07-30T10:00:00.000Z',
+};
+
+function renderView(connection = makeConnection()): void {
+  render(
+    <TrackerConnectedView
+      isOpen
+      connection={connection}
+      onClose={onClose}
+      onChanged={onChanged}
+    />,
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockConflicts.mockResolvedValue([]);
+  mockUpdate.mockResolvedValue({ ok: true });
+  mockResolve.mockResolvedValue({ ok: true });
+  mockDisconnect.mockResolvedValue({ ok: true });
+  mockSyncNow.mockResolvedValue({
+    connectionId: 'conn-1',
+    ran: true,
+    swept: false,
+    paused: false,
+    entries: [{ marker: '✓', line: 'sync complete · next in 5m' }],
+    error: null,
+  });
+});
+
+describe('TrackerConnectedView — sync settings', () => {
+  it('writes only the toggled field back through updateSettings', async () => {
+    renderView();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Write status back' }));
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', twoWay: false }),
+    );
+
+    // Optimistic: mirroring disappears with two-way off, so its row cannot be
+    // written while it has no meaning.
+    expect(
+      screen.queryByRole('switch', { name: 'Mirror task breakdowns' }),
+    ).not.toBeInTheDocument();
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('patches mirroring and conflict mode independently', async () => {
+    renderView();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Mirror task breakdowns' }));
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        mirrorSubissues: false,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manual review' }));
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', conflictMode: 'manual' }),
+    );
+  });
+});
+
+describe('TrackerConnectedView — sync log', () => {
+  it('renders the summary log verbatim and replaces it with the Sync now result', async () => {
+    renderView();
+
+    expect(screen.getByText('GET /issues')).toBeInTheDocument();
+    expect(screen.getByText('created 12 ideas')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+
+    expect(await screen.findByText('sync complete · next in 5m')).toBeInTheDocument();
+    expect(mockSyncNow).toHaveBeenCalledWith({ connectionId: 'conn-1' });
+    expect(screen.queryByText('GET /issues')).not.toBeInTheDocument();
+  });
+});
+
+describe('TrackerConnectedView — conflicts', () => {
+  it('stays hidden while auto-resolution has nothing open', () => {
+    renderView();
+
+    expect(screen.queryByTestId('tracker-conflicts-card')).not.toBeInTheDocument();
+    expect(mockConflicts).not.toHaveBeenCalled();
+  });
+
+  it('lists open conflicts and resolves per side', async () => {
+    mockConflicts.mockResolvedValue([CONFLICT]);
+    renderView(makeConnection({ conflictMode: 'manual', openConflictCount: 1 }));
+
+    expect(await screen.findByTestId('tracker-conflicts-card')).toBeInTheDocument();
+    expect(mockConflicts).toHaveBeenCalledWith({ connectionId: 'conn-1' });
+    expect(screen.getByText('Budget alerts for tokens')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept theirs' }));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ conflictId: 41, choice: 'remote' }),
+    );
+    // The resolved row leaves the list without waiting for a refetch.
+    await waitFor(() =>
+      expect(screen.getByText('Nothing is waiting on a decision.')).toBeInTheDocument(),
+    );
+  });
+
+  it('surfaces a non-zero count even in auto mode', async () => {
+    mockConflicts.mockResolvedValue([CONFLICT]);
+    renderView(makeConnection({ openConflictCount: 1 }));
+
+    expect(await screen.findByTestId('tracker-conflicts-card')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Accept ours' }));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ conflictId: 41, choice: 'local' }),
+    );
+  });
+});
+
+describe('TrackerConnectedView — disconnect', () => {
+  it('confirms inline before disconnecting', async () => {
+    renderView();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    expect(mockDisconnect).not.toHaveBeenCalled();
+    expect(screen.getByText('Disconnect? Existing links stay.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+});

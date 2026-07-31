@@ -13,6 +13,7 @@ import { API } from '../../utils/api';
 import { Button } from '../ui/Button';
 import { SettingsSection } from '../ui/SettingsSection';
 import { Toggle } from '../ui/Toggle';
+import { TrackerIntegrationSection } from './tracker/TrackerIntegrationSection';
 
 type ProviderStatus = 'checking' | 'connected' | 'attention' | 'unavailable';
 
@@ -377,6 +378,8 @@ export function IntegrationsSettings(): React.JSX.Element {
           </p>
         )}
       </SettingsSection>
+
+      <TrackerIntegrationSection />
 
       <div className="flex items-center justify-between gap-4 border-t border-border-primary pt-4">
         <p className="text-xs leading-relaxed text-text-tertiary">
