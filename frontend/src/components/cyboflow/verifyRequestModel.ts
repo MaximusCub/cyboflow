@@ -14,6 +14,8 @@
 import type {
   RequestStatus,
   VerdictV1,
+  VerificationFailureClass,
+  VerificationFailureEvidence,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationReportV1,
@@ -211,4 +213,71 @@ export function sessionLabel(req: VerificationRequest): string {
   const id = req.session_id?.trim();
   if (id !== undefined && id.length > 0) return id;
   return req.run_id;
+}
+
+// ---------------------------------------------------------------------------
+// Failure-class chip + budget line
+// (docs/proposals/verification-setup-flow.md §3.1 "Attribution split" / §3.6
+// "surface budget state in the Verify Queue"; migration 088.)
+// ---------------------------------------------------------------------------
+
+/**
+ * Muted chip styling for the failure-class label — deliberately QUIET, unlike
+ * {@link STATUS_PILL_CLASS} / `RESULT_PILL_CLASS`'s severity coloring. The
+ * class is informational provenance ("why did this land here"), not a
+ * lifecycle state the user needs to triage at a glance; the status pill next
+ * to it already carries the urgency.
+ */
+export const FAILURE_CLASS_CHIP_CLASS = 'bg-bg-tertiary text-text-tertiary';
+
+/**
+ * Short label + one-line explanation per {@link VerificationFailureClass},
+ * for the chip's visible text and its `title` tooltip. Mirrors the three-way
+ * doc on the shared type (§3.1) — never invents copy the classifier's own
+ * contract doesn't already state.
+ */
+export const FAILURE_CLASS_COPY: Readonly<Record<VerificationFailureClass, { label: string; title: string }>> = {
+  env: {
+    label: 'env',
+    title: 'Harness-proven environment failure — not charged to the lane’s retry budget.',
+  },
+  deliverable: {
+    label: 'deliverable',
+    title: 'A judged failure attributable to the code under test.',
+  },
+  ambiguous: {
+    label: 'ambiguous',
+    title: 'No harness-derived provenance either way — treated as blocking, same as an undifferentiated failure.',
+  },
+};
+
+/**
+ * True when a row is BOTH terminal AND carries a classified failure — the
+ * exact condition the chip renders under (§3.1: `failureClass` is stamped
+ * only on a terminal failure, but a defensive terminal-status check keeps the
+ * chip from ever appearing on a still-live row even if a future writer bug
+ * stamped one early).
+ */
+export function hasFailureClassChip(req: VerificationRequest): boolean {
+  return TERMINAL_STATUSES.has(req.status) && req.failureClass !== undefined;
+}
+
+/**
+ * One {@link VerificationFailureEvidence} entry formatted for the bounded,
+ * monospace evidence list in the detail dialog: `source (check): detail`,
+ * omitting the parenthesized check id when the entry did not carry one.
+ */
+export function formatFailureEvidence(entry: VerificationFailureEvidence): string {
+  const check = entry.check !== undefined && entry.check.trim().length > 0 ? ` (${entry.check})` : '';
+  return `${entry.source}${check}: ${entry.detail}`;
+}
+
+/**
+ * The compact budget-line copy for the Verify-Queue header: "verify budget:
+ * used/total". Callers are expected to skip rendering the line entirely when
+ * `budgetCalls` is `null` (unlimited, §3.6) — this formatter assumes a
+ * resolved, non-null total and does not special-case unlimited itself.
+ */
+export function budgetLineText(usedCalls: number, budgetCalls: number): string {
+  return `verify budget: ${usedCalls}/${budgetCalls}`;
 }

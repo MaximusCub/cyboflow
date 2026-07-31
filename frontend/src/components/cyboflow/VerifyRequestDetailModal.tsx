@@ -33,7 +33,11 @@ import type {
   VerificationTaskV1,
 } from '../../../../shared/types/visualVerification';
 import {
+  FAILURE_CLASS_CHIP_CLASS,
+  FAILURE_CLASS_COPY,
   STATUS_PILL_CLASS,
+  formatFailureEvidence,
+  hasFailureClassChip,
   isAgentEngineRow,
   parseDeliverable,
   parseReport,
@@ -234,6 +238,16 @@ function VerifyRequestDetail({ req }: { req: VerificationRequest }): ReactElemen
         </span>
       </div>
 
+      {hasFailureClassChip(req) && req.failureClass !== undefined && (
+        <span
+          data-testid="verify-failure-class-chip"
+          title={FAILURE_CLASS_COPY[req.failureClass].title}
+          className={`w-fit rounded-button px-1.5 py-0.5 text-[10px] font-medium ${FAILURE_CLASS_CHIP_CLASS}`}
+        >
+          failure class: {FAILURE_CLASS_COPY[req.failureClass].label}
+        </span>
+      )}
+
       <p data-testid="verify-detail-status-summary" className="text-xs text-text-secondary">
         {statusSummary(req, isAgent)}
       </p>
@@ -389,6 +403,22 @@ function VerifyRequestDetail({ req }: { req: VerificationRequest }): ReactElemen
       {req.error_message !== null && req.error_message.trim().length > 0 && (
         <Section title="Error">
           <p className="text-xs text-status-error">{req.error_message}</p>
+        </Section>
+      )}
+
+      {/* --- Failure-class evidence (§3.1 classifier audit trail) -------- */}
+      {req.failureEvidence !== undefined && req.failureEvidence.length > 0 && (
+        <Section title="Failure evidence">
+          <ul
+            data-testid="verify-detail-failure-evidence"
+            className="max-h-40 overflow-auto rounded-card border border-border-primary bg-bg-secondary p-3"
+          >
+            {req.failureEvidence.map((entry, i) => (
+              <li key={`${i}-${entry.source}`} className="font-mono text-[11px] text-text-secondary">
+                {formatFailureEvidence(entry)}
+              </li>
+            ))}
+          </ul>
         </Section>
       )}
 

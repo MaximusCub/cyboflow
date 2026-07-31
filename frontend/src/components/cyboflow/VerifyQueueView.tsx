@@ -38,6 +38,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { API } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import {
@@ -47,12 +48,16 @@ import {
 import { VerifyRequestDetailModal } from './VerifyRequestDetailModal';
 import {
   STATUS_PILL_CLASS,
+  budgetLineText,
   isAgentEngineRow,
   isPending,
   sessionLabel,
   statusSummary,
   taskSummary,
 } from './verifyRequestModel';
+
+/** Poll cadence for the header's verify-budget line — same as the default request-list poll (useVerificationRequests' DEFAULT_REFETCH_INTERVAL_MS), kept as a LOCAL constant since `judge_calls_used` is a separate sibling query (see the router's own doc for why it's not folded into `list`). */
+const BUDGET_REFETCH_INTERVAL_MS = 2500;
 
 // ---------------------------------------------------------------------------
 // Row
@@ -207,6 +212,44 @@ export function VerifyQueueView(): ReactElement {
 
   const { requests, isLoading, error } = useVerificationRequests({ projectId });
 
+  // Verify-budget summary for the header line (§3.6 "surface budget state in
+  // the Verify Queue") — a SIBLING trpc query, not derived from `requests`:
+  // `judge_calls_used` is deliberately excluded from the list row shape (see
+  // the router's own doc), so it has no client-side derivation path. Polled
+  // independently on the same cadence as the request list. A query failure
+  // degrades to hiding the line entirely — the queue's own error banner
+  // already covers the primary `requests` failure mode, and a stale/missing
+  // budget number is never worth a second error surface.
+  const [budget, setBudget] = useState<{ budgetCalls: number | null; usedCalls: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (projectId === null) {
+      setBudget(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchBudget = (): void => {
+      void trpc.cyboflow.verificationRequests.budget
+        .query({ projectId })
+        .then((res) => {
+          if (cancelled) return;
+          setBudget({ budgetCalls: res.budgetCalls, usedCalls: res.usedCalls });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setBudget(null);
+        });
+    };
+    fetchBudget();
+    const timer = setInterval(fetchBudget, BUDGET_REFETCH_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectId]);
+
   const handleProjectChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const raw = event.target.value;
     setProjectId(raw === '' ? null : Number(raw));
@@ -292,6 +335,11 @@ export function VerifyQueueView(): ReactElement {
             Visual-verification requests · captures &amp; verdicts
           </p>
         </div>
+        {budget !== null && budget.budgetCalls !== null && (
+          <span data-testid="verify-budget-line" className="text-[11px] text-text-tertiary">
+            {budgetLineText(budget.usedCalls, budget.budgetCalls)}
+          </span>
+        )}
         <label className="ml-auto flex items-center gap-2">
           <span className="eyebrow text-text-tertiary">Project</span>
           <select

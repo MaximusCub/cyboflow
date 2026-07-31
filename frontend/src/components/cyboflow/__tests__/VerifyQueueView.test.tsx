@@ -21,9 +21,10 @@ import type { VerificationRequest } from '../../../hooks/useVerificationRequests
 // Mocks (hoisted so the static component import binds to them).
 // ---------------------------------------------------------------------------
 
-const { useVerificationRequestsSpy, getAllSpy } = vi.hoisted(() => ({
+const { useVerificationRequestsSpy, getAllSpy, budgetQuerySpy } = vi.hoisted(() => ({
   useVerificationRequestsSpy: vi.fn(),
   getAllSpy: vi.fn(),
+  budgetQuerySpy: vi.fn(),
 }));
 
 vi.mock('../../../hooks/useVerificationRequests', () => ({
@@ -32,6 +33,19 @@ vi.mock('../../../hooks/useVerificationRequests', () => ({
 
 vi.mock('../../../utils/api', () => ({
   API: { projects: { getAll: getAllSpy } },
+}));
+
+// The verify-budget header line (§3.6) is fetched by a direct trpc call, not
+// through useVerificationRequests (judge_calls_used is deliberately excluded
+// from the list row shape — see the router's own doc).
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      verificationRequests: {
+        budget: { query: budgetQuerySpy },
+      },
+    },
+  },
 }));
 
 vi.mock('../../../stores/navigationStore', () => ({
@@ -82,6 +96,10 @@ beforeEach(() => {
   useVerificationRequestsSpy.mockReset();
   getAllSpy.mockReset();
   getAllSpy.mockResolvedValue({ success: true, data: [{ id: 1, name: 'ProjA', path: '/tmp/a' }] });
+  budgetQuerySpy.mockReset();
+  // Unlimited by default — the header line stays hidden unless a test opts a
+  // project into a non-null budget.
+  budgetQuerySpy.mockResolvedValue({ projectId: 1, projectName: 'ProjA', budgetCalls: null, usedCalls: 0 });
 });
 
 describe('VerifyQueueView', () => {
@@ -447,5 +465,80 @@ describe('VerifyQueueView', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('verify-detail-modal')).not.toBeInTheDocument(),
     );
+  });
+
+  // --- verify-budget header line (§3.6) ------------------------------------
+
+  it('renders the budget line for a project with a non-null budget', async () => {
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    budgetQuerySpy.mockResolvedValue({ projectId: 1, projectName: 'ProjA', budgetCalls: 50, usedCalls: 12 });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-budget-line')).toHaveTextContent('verify budget: 12/50');
+  });
+
+  it('hides the budget line for an unlimited (null) budget', async () => {
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    budgetQuerySpy.mockResolvedValue({ projectId: 1, projectName: 'ProjA', budgetCalls: null, usedCalls: 3 });
+
+    render(<VerifyQueueView />);
+
+    await screen.findByTestId('verify-queue-empty');
+    expect(screen.queryByTestId('verify-budget-line')).not.toBeInTheDocument();
+  });
+
+  it('hides the budget line when the budget query fails (non-fatal — the queue itself keeps rendering)', async () => {
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    budgetQuerySpy.mockRejectedValue(new Error('boom'));
+
+    render(<VerifyQueueView />);
+
+    await screen.findByTestId('verify-queue-empty');
+    expect(screen.queryByTestId('verify-budget-line')).not.toBeInTheDocument();
+  });
+
+  // --- failure-class chip + evidence (§3.1, detail dialog) -----------------
+
+  it('shows the failure-class chip and evidence list on a classified terminal row', async () => {
+    const user = userEvent.setup();
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'skipped',
+          failureClass: 'env',
+          failureEvidence: [
+            { source: 'preflight', check: 'chromium', detail: 'chromium binary not resolvable' },
+          ],
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+    await user.click(await screen.findByTestId('verify-queue-row-vr-1'));
+
+    expect(await screen.findByTestId('verify-failure-class-chip')).toHaveTextContent('env');
+    expect(screen.getByTestId('verify-detail-failure-evidence')).toHaveTextContent(
+      'preflight (chromium): chromium binary not resolvable',
+    );
+  });
+
+  it('omits the failure-class chip and evidence list when the row has neither', async () => {
+    const user = userEvent.setup();
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+    await user.click(await screen.findByTestId('verify-queue-row-vr-1'));
+
+    expect(await screen.findByTestId('verify-detail-modal')).toBeInTheDocument();
+    expect(screen.queryByTestId('verify-failure-class-chip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('verify-detail-failure-evidence')).not.toBeInTheDocument();
   });
 });

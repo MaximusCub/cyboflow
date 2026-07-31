@@ -79,7 +79,16 @@ function rowEqual(a: VerificationRequest, b: VerificationRequest): boolean {
     // Origin-session columns (LEFT-JOINed by the list query). Static for a given
     // row in practice, but compared anyway so a renamed session repaints its pill.
     a.session_id === b.session_id &&
-    a.session_name === b.session_name
+    a.session_name === b.session_name &&
+    // Migration-088 derived fields (verification-setup-flow.md §3.1/§3.6) — the
+    // failure-class chip + evidence list. `failureEvidence` is compared via
+    // JSON.stringify (small bounded array; a plain === would always see a
+    // fresh array reference from a fresh JSON.parse on every poll and never
+    // consider two content-equal polls equal).
+    a.failureClass === b.failureClass &&
+    a.modality === b.modality &&
+    a.setupProof === b.setupProof &&
+    JSON.stringify(a.failureEvidence) === JSON.stringify(b.failureEvidence)
   );
 }
 
