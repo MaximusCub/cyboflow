@@ -113,6 +113,22 @@ interface TrackerAdapter {
 
 Linear = GraphQL client; Plane = REST client (`X-API-Key`, configurable base URL). The wizard, sync engine, mapping table, conflict machinery, and mirroring logic are all provider-agnostic above this seam.
 
+## Implementation notes (v1 as landed)
+
+Where the build refined the design above — the spec stands, these are the deltas:
+
+- **Cursor advance is per-item, not per-page.** `TaskChangeRouter.applyChange` is async and queue-serialized, so a page cannot share one sqlite transaction with the cursor write. Inbound applies items in ascending `(updatedAt, externalId)` order and advances the compound cursor after each; the overlap window + idempotent re-apply give the same crash guarantee.
+- **The tRPC router reaches the engine through a facade bridge** (`main/src/orchestrator/trackerSyncBridge.ts`): router files must standalone-typecheck (no `electron`/`better-sqlite3`/`services/*` imports), so `TrackerSyncService` registers itself as a `TrackerSyncFacade` at boot.
+- **Linear custom views are not a v1 narrow** (team → whole / project / cycle only): the customViews issue-filter API is too awkward for the payoff. Plane narrows: project → whole / cycle / module.
+- **Outbox failure policy gained a third branch**: non-retryable 4xx (not 408/429) settles terminally instead of retrying every 32 minutes forever. Auth errors pause the connection; 5xx/network use capped exponential backoff.
+- **An unresolved outbox row halts inbound cursor advance at that issue** (not just echo-skips it) — the batch resumes once the row settles.
+- **Mirroring semantics**: sibling terminality for the close-parent rollup counts Won't do as settled (a cancelled story must not strand the parent open); decomposition never writes 'started' over an already-terminal idea's state.
+- **Deletion sweep cadence**: the first pass after every boot sweeps (deletes are most likely to have been missed while the app was closed), then every 12th pass (~hourly) and on every "Sync now".
+- **Reconcile links** are created with a null baseline — the first inbound pass adopts the issue's current snapshot without applying anything; the wizard carries the issue's identifier + URL so the ref chip lands at connect time.
+- **Connected-view edit shortcuts are v1-read-only** for source/selection/mapping (changing them means re-running the wizard); direction, mirroring, and conflict mode toggle live via `updateSettings`. Deep-links would require a credential re-prompt since keys never return to the renderer.
+- **Plane flags for the live smoke**: docs are mid-rename `/issues/` → `/work-items/` (adapter uses `/issues/`; one-line segment swap if a real instance disagrees); assignees need `expand=assignees`; the workspace slug is part of credentials.
+- **Open TODO**: the local-delete prompt (what happens to the tracker issue when a linked entity is deleted locally) is not yet wired into the backlog's delete path; `linkForEntity` exists on the router for exactly that affordance.
+
 ## V2 (explicitly out of v1 scope)
 
 - **Smart import**: an agent classifies incoming issues (idea vs. task, nesting, epic assignment) instead of ideas-by-default.
