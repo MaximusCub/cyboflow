@@ -1,0 +1,551 @@
+/**
+ * Unit tests for the OUTBOUND detection half
+ * (main/src/services/trackerSync/writeBack.ts).
+ *
+ * Runs against a REAL temp-file DB through the full migration chain (same
+ * technique as store.test.ts / migration093.test.ts) so board seeding, the
+ * entity tables, and migration 093's constraints are the real thing. The
+ * TaskChangeRouter is NOT involved — its post-commit broadcast payload is
+ * synthesized directly (see makeEvent), which is exactly what the listener
+ * sees in production and keeps these tests free of the chokepoint's queueing.
+ *
+ * Covers, per the task brief:
+ *   - stage-change enqueue (Done -> 'completed') + dedup on a repeated event.
+ *   - the last-written-group baseline stamp suppressing a re-enqueue.
+ *   - two_way = 0 / paused / unlinked / epic entities ignored.
+ *   - decomposition: origin 'started' + one create_sub_issue per unlinked
+ *     minted task, and NO creates when mirroring is off.
+ *   - close_parent only once EVERY mirrored sibling is terminal.
+ *   - Won't do -> 'cancelled'.
+ *   - dispose() making the listener inert.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseService } from '../../../database/database';
+import type { TrackerOutboxRow } from '../../../database/models';
+import type { BacklogTaskItem, TaskChangeAction, TaskChangedEvent, TaskType } from '../../../../../shared/types/tasks';
+import { insertConnection, upsertLink, listUnresolvedOutbox, updateBaseline, getLinkByEntity, type NewConnectionRow } from '../store';
+import { resolveStageIds } from '../stateMapping';
+import { createWriteBackListener, type WriteBackBaselineStamp } from '../writeBack';
+
+const PROJECT_ID = 1;
+const NOW = '2026-07-30 12:00:00';
+
+let tmpDir: string;
+let svc: DatabaseService;
+let raw: Database.Database;
+let stageIds: ReturnType<typeof resolveStageIds>;
+
+beforeEach(() => {
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-trackersync-writeback-'));
+  svc = new DatabaseService(join(tmpDir, 'test.db'));
+  svc.initialize();
+  raw = svc.getDb();
+  raw.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run(PROJECT_ID, 'Proj 1', '/tmp/p1');
+  svc.seedDefaultBoard(PROJECT_ID);
+  stageIds = resolveStageIds(raw, PROJECT_ID);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  raw.close();
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const BOARD_ID = `board-${PROJECT_ID}-default`;
+
+function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnectionRow {
+  return {
+    id: 'conn-1',
+    project_id: PROJECT_ID,
+    provider: 'linear',
+    status: 'active',
+    workspace_id: 'ws-1',
+    workspace_name: 'Acme',
+    actor_label: 'K.',
+    base_url: null,
+    secret_ciphertext: null,
+    source_json: null,
+    selection_mode: 'all',
+    selection_json: JSON.stringify({ containerId: 'team-1', narrowId: 'all', narrowKind: 'all' }),
+    state_mapping_json: '{}',
+    two_way: 1,
+    mirror_subissues: 1,
+    conflict_mode: 'auto',
+    cursor_updated_at: null,
+    cursor_external_id: null,
+    last_sync_at: null,
+    last_sync_log_json: null,
+    ...overrides,
+  };
+}
+
+function seedConnection(overrides: Partial<NewConnectionRow> = {}): string {
+  return insertConnection(raw, makeConnectionRow(overrides)).id;
+}
+
+function seedIdea(id: string, ref: string, stageId: string = stageIds.idea): void {
+  raw
+    .prepare(
+      'INSERT INTO ideas (id, project_id, ref, title, summary, body, board_id, stage_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    )
+    .run(id, PROJECT_ID, ref, `Idea ${ref}`, null, null, BOARD_ID, stageId);
+}
+
+function seedTask(id: string, ref: string, opts: { stageId?: string; ideaId?: string; body?: string | null } = {}): void {
+  raw
+    .prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, summary, body, board_id, stage_id, originating_idea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      PROJECT_ID,
+      ref,
+      `Task ${ref}`,
+      `summary ${ref}`,
+      opts.body ?? null,
+      BOARD_ID,
+      opts.stageId ?? stageIds.ready,
+      opts.ideaId ?? null,
+    );
+}
+
+/** A synthesized post-commit broadcast payload, matching TaskChangeRouter's emit. */
+function makeEvent(
+  id: string,
+  type: TaskType,
+  stageId: string,
+  overrides: Partial<BacklogTaskItem> = {},
+  action: TaskChangeAction = 'stageMoved',
+): TaskChangedEvent {
+  const task: BacklogTaskItem = {
+    id,
+    project_id: PROJECT_ID,
+    type,
+    ref: id.toUpperCase(),
+    title: `Title ${id}`,
+    summary: null,
+    body: null,
+    priority: 'P2',
+    category: 'feature',
+    repo: null,
+    parent_epic_id: null,
+    originating_idea_id: null,
+    scope: null,
+    board_id: BOARD_ID,
+    stage_id: stageId,
+    archived_at: null,
+    decomposed_at: null,
+    approved_at: null,
+    experiment_id: null,
+    sort_order: null,
+    version: 1,
+    stage_position: 0,
+    inFlow: [],
+    awaitingReview: false,
+    isDone: false,
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+  return { projectId: PROJECT_ID, taskId: id, action, task };
+}
+
+function makeListener() {
+  return createWriteBackListener({ db: raw, nowIso: () => NOW });
+}
+
+function outbox(connectionId = 'conn-1'): TrackerOutboxRow[] {
+  return listUnresolvedOutbox(raw, connectionId);
+}
+
+/** Stamp a link's baseline the way outboxWorker does after a successful write. */
+function stampLastWritten(linkId: number, stamp: WriteBackBaselineStamp): void {
+  updateBaseline(raw, linkId, JSON.stringify(stamp));
+}
+
+// ---------------------------------------------------------------------------
+// Stage-driven write-back
+// ---------------------------------------------------------------------------
+
+describe('writeBack — stage moves', () => {
+  it('enqueues update_state for a linked idea moved to Done, and dedups a repeat', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    const listener = makeListener();
+    const event = makeEvent('ide_1', 'idea', stageIds.done);
+    listener.handleTaskChanged(event);
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(rows[0].external_id).toBe('ext-1');
+    expect(rows[0].entity_id).toBe('ide_1');
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+
+    // A replayed event must not queue the same remote write twice.
+    listener.handleTaskChanged(event);
+    expect(outbox()).toHaveLength(1);
+  });
+
+  it("maps Won't do to the 'cancelled' group", () => {
+    const connectionId = seedConnection();
+    seedTask('tsk_1', 'TASK-1', { stageId: stageIds.wontdo });
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    makeListener().handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.wontdo));
+
+    expect(JSON.parse(outbox()[0].payload_json)).toEqual({ desiredGroup: 'cancelled' });
+  });
+
+  it('writes nothing for Ready for development (readiness is not started)', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.ready);
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.ready));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips a group the baseline says we already wrote', () => {
+    const connectionId = seedConnection();
+    seedTask('tsk_1', 'TASK-1', { stageId: stageIds.done });
+    const link = upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+    stampLastWritten(link.id, {
+      stateId: 'state-done',
+      lastWrittenGroup: 'completed',
+      lastWrittenAt: NOW,
+    });
+
+    makeListener().handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.done));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('ignores an unlinked entity, a two_way=0 connection, and a paused connection', () => {
+    // (a) linked but two_way off
+    const twoWayOff = seedConnection({ id: 'conn-off', two_way: 0 });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: twoWayOff,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+    // (b) linked but the connection is paused
+    const paused = seedConnection({ id: 'conn-paused', status: 'paused' });
+    seedIdea('ide_2', 'IDEA-2', stageIds.done);
+    upsertLink(raw, {
+      connection_id: paused,
+      entity_type: 'idea',
+      entity_id: 'ide_2',
+      provider: 'plane',
+      external_id: 'ext-2',
+    });
+    // (c) not linked at all
+    seedIdea('ide_3', 'IDEA-3', stageIds.done);
+
+    const listener = makeListener();
+    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+    listener.handleTaskChanged(makeEvent('ide_2', 'idea', stageIds.done));
+    listener.handleTaskChanged(makeEvent('ide_3', 'idea', stageIds.done));
+
+    expect(outbox('conn-off')).toHaveLength(0);
+    expect(outbox('conn-paused')).toHaveLength(0);
+  });
+
+  it('ignores an orphaned link and a deleted-action event', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    const link = upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+    raw.prepare("UPDATE entity_external_links SET orphaned_at = datetime('now') WHERE id = ?").run(link.id);
+
+    const listener = makeListener();
+    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+    expect(outbox()).toHaveLength(0);
+
+    raw.prepare('UPDATE entity_external_links SET orphaned_at = NULL WHERE id = ?').run(link.id);
+    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done, {}, 'deleted'));
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('goes inert after dispose()', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    const listener = makeListener();
+    listener.dispose();
+    listener.handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('swallows a routing failure instead of breaking the entity write', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+    // An event whose project has no board makes resolveStageIds throw.
+    const orphanProjectEvent = { ...makeEvent('ide_1', 'idea', stageIds.done), projectId: 999 };
+
+    expect(() => makeListener().handleTaskChanged(orphanProjectEvent)).not.toThrow();
+    expect(errorSpy).toHaveBeenCalled();
+    expect(outbox()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Decomposition + sub-issue mirroring
+// ---------------------------------------------------------------------------
+
+describe('writeBack — decomposition', () => {
+  function seedDecomposedIdea(connectionId: string): void {
+    seedIdea('ide_1', 'IDEA-1');
+    seedTask('tsk_1', 'TASK-1', { ideaId: 'ide_1', body: 'body one' });
+    seedTask('tsk_2', 'TASK-2', { ideaId: 'ide_1' });
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-idea',
+    });
+  }
+
+  const decomposedEvent = () =>
+    makeEvent('ide_1', 'idea', '', { decomposed_at: NOW }, 'decomposed');
+
+  it("enqueues the origin issue's 'started' write plus one create_sub_issue per unlinked minted task", () => {
+    const connectionId = seedConnection();
+    seedDecomposedIdea(connectionId);
+
+    const listener = makeListener();
+    listener.handleTaskChanged({
+      ...decomposedEvent(),
+      task: { ...decomposedEvent().task, stage_id: stageIds.idea },
+    });
+
+    const rows = outbox();
+    expect(rows).toHaveLength(3);
+
+    const stateRow = rows.find((r) => r.kind === 'update_state');
+    expect(stateRow?.external_id).toBe('ext-idea');
+    expect(JSON.parse(stateRow?.payload_json ?? '{}')).toEqual({ desiredGroup: 'started' });
+
+    const creates = rows.filter((r) => r.kind === 'create_sub_issue');
+    expect(creates.map((r) => r.entity_id)).toEqual(['tsk_1', 'tsk_2']);
+    for (const create of creates) {
+      expect(create.entity_type).toBe('task');
+      expect(create.client_key).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    // Description prefers the body, falling back to the summary.
+    expect(JSON.parse(creates[0].payload_json)).toEqual({
+      parentExternalId: 'ext-idea',
+      title: 'Task TASK-1',
+      description: 'body one',
+    });
+    expect(JSON.parse(creates[1].payload_json).description).toBe('summary TASK-2');
+  });
+
+  it('does not re-queue a create for a task that is already linked or already queued', () => {
+    const connectionId = seedConnection();
+    seedDecomposedIdea(connectionId);
+    // tsk_1 already has its sub-issue.
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'ext-sub-1',
+      external_parent_id: 'ext-idea',
+    });
+
+    const listener = makeListener();
+    const event = { ...decomposedEvent(), task: { ...decomposedEvent().task, stage_id: stageIds.idea } };
+    listener.handleTaskChanged(event);
+    // A replay must not double-create tsk_2 either.
+    listener.handleTaskChanged(event);
+
+    const creates = outbox().filter((r) => r.kind === 'create_sub_issue');
+    expect(creates.map((r) => r.entity_id)).toEqual(['tsk_2']);
+  });
+
+  it('writes only the origin state when mirroring is off', () => {
+    const connectionId = seedConnection({ mirror_subissues: 0 });
+    seedDecomposedIdea(connectionId);
+
+    makeListener().handleTaskChanged({
+      ...decomposedEvent(),
+      task: { ...decomposedEvent().task, stage_id: stageIds.idea },
+    });
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'started' });
+  });
+
+  it("does not drag a Done idea back to 'started' on a replayed decomposition", () => {
+    const connectionId = seedConnection();
+    seedDecomposedIdea(connectionId);
+
+    makeListener().handleTaskChanged({
+      ...decomposedEvent(),
+      task: { ...decomposedEvent().task, stage_id: stageIds.done },
+    });
+
+    const stateRows = outbox().filter((r) => r.kind !== 'create_sub_issue');
+    expect(stateRows).toHaveLength(1);
+    expect(JSON.parse(stateRows[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it('skips archived minted tasks', () => {
+    const connectionId = seedConnection();
+    seedDecomposedIdea(connectionId);
+    raw.prepare("UPDATE tasks SET archived_at = datetime('now') WHERE id = 'tsk_2'").run();
+
+    makeListener().handleTaskChanged({
+      ...decomposedEvent(),
+      task: { ...decomposedEvent().task, stage_id: stageIds.idea },
+    });
+
+    expect(outbox().filter((r) => r.kind === 'create_sub_issue').map((r) => r.entity_id)).toEqual(['tsk_1']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parent rollup
+// ---------------------------------------------------------------------------
+
+describe('writeBack — close-parent rollup', () => {
+  function seedMirroredPair(connectionId: string, secondStage: string): void {
+    seedIdea('ide_1', 'IDEA-1');
+    seedTask('tsk_1', 'TASK-1', { ideaId: 'ide_1', stageId: stageIds.done });
+    seedTask('tsk_2', 'TASK-2', { ideaId: 'ide_1', stageId: secondStage });
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-idea',
+    });
+    for (const [entityId, externalId] of [
+      ['tsk_1', 'ext-sub-1'],
+      ['tsk_2', 'ext-sub-2'],
+    ]) {
+      upsertLink(raw, {
+        connection_id: connectionId,
+        entity_type: 'task',
+        entity_id: entityId,
+        provider: 'linear',
+        external_id: externalId,
+        external_parent_id: 'ext-idea',
+      });
+    }
+  }
+
+  it('does NOT close the parent while a sibling is still open', () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.inDevelopment);
+
+    makeListener().handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.done));
+
+    const rows = outbox();
+    expect(rows.map((r) => r.kind)).toEqual(['update_state']);
+    expect(rows[0].external_id).toBe('ext-sub-1');
+  });
+
+  it('closes the parent once every mirrored sibling is terminal', () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.done);
+
+    makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.done));
+
+    const rows = outbox();
+    const closeRow = rows.find((r) => r.kind === 'close_parent');
+    expect(closeRow?.external_id).toBe('ext-idea');
+    expect(JSON.parse(closeRow?.payload_json ?? '{}')).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it("counts a Won't-do sibling as settled and dedups a repeated close", () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.wontdo);
+
+    const listener = makeListener();
+    const event = makeEvent('tsk_1', 'task', stageIds.done);
+    listener.handleTaskChanged(event);
+    listener.handleTaskChanged(event);
+
+    expect(outbox().filter((r) => r.kind === 'close_parent')).toHaveLength(1);
+  });
+
+  it('does not close a parent we already wrote as completed', () => {
+    const connectionId = seedConnection();
+    seedMirroredPair(connectionId, stageIds.done);
+    const parentLink = getLinkByEntity(raw, 'idea', 'ide_1', 'linear');
+    stampLastWritten(parentLink?.id ?? 0, {
+      stateId: 'state-done',
+      lastWrittenGroup: 'completed',
+      lastWrittenAt: NOW,
+    });
+
+    makeListener().handleTaskChanged(makeEvent('tsk_2', 'task', stageIds.done));
+
+    expect(outbox().filter((r) => r.kind === 'close_parent')).toHaveLength(0);
+  });
+});
