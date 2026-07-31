@@ -1,6 +1,29 @@
 # Verification Setup Flow
 
-Status: PROPOSAL v2 (2026-07-30). Follow-up to `verification-agent-redesign.md`.
+Status: PHASES 0–2 IMPLEMENTED (2026-07-30, this branch — 15 commits from
+`504aef09` "failure taxonomy" through `e284c210` "acceptance matrix"). Phase 3
+(onboarding + health panel) remains design-only. Implementation deltas from the
+spec as written, all deliberate:
+- The "no attestation ⇒ no `passed`" invariant is enforced for DECLARED specs
+  (missing/mismatched driver record ⇒ failed-ambiguous-blocking) and for the
+  implicit file-identity case; a task with NO spec caps a pass at
+  `low_confidence` instead of failing it — transitional, because runbooks
+  (which every build/serve task now requires) make attestation mandatory per
+  modality, so the no-spec-pass path survives only for degenerate bare-url
+  checks where advisory-visible beats hard-failing.
+- The dep preparer CLONES the live worktree's dependency dirs into a keyed
+  read-side cache (APFS clonefile) and rebuilds the electron ABI inside the
+  mirror, rather than performing a fresh install — same §7.2 guarantees,
+  layout-agnostic.
+- Migrations landed as 088/089 on this branch; they collide with main's
+  088/089 and renumber at rebase (routine).
+- §5.4's "matrix row 4" (own instance running) is exercised as an attach-mode
+  CDP-port squat → env-skip; full-isolation green requires a live dogfood run
+  (the levers landed: CYBOFLOW_VITE_PORT / CYBOFLOW_CDP_PORT / CYBOFLOW_DIR).
+- Native-screen: observe-only as specced; the drive-consent matrix row is a
+  `test.todo` pending a live, audited drive API (§8 open question).
+
+Original proposal follows. Follow-up to `verification-agent-redesign.md`.
 Scope decisions locked with Krishna in-session. v2 folds in all 11 findings of
 the Codex adversarial review (8 high / 3 medium); the review's verdict on v1 —
 "no-ship as specified" — targeted spec precision, not the phase structure,

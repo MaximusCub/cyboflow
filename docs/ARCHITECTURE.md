@@ -165,6 +165,30 @@ any agent-chain request stranded queued/leased/running when the switch flips
 verification budget (`projects.visual_verify_budget_calls` /
 `verification_requests.judge_calls_used`, migration 056).
 
+The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–2
+implemented) sits on top of the agent engine: failures are classified
+`env | deliverable | ambiguous` (`failureClassifier.ts` — env requires
+harness-derived evidence and converts a blocking FAIL into a lane-advancing
+skip; everything model-authored stays blocking), a pre-deploy preflight
+(`preflight.ts`) + per-(project, modality) capability ledger with a circuit
+breaker (`capabilityStore.ts`, migration 088) stop repeat environment burns,
+and build/serve tasks only run against a **proven runbook**
+(`.cyboflow/verify-runbook.json` portable half + `verify_runbook_local`
+machine-local record, `runbookStore.ts`/`runbookHash.ts`, migration 089 —
+content-addressed pin stamped at enqueue, validated by the runner, proven by
+an engine-observed passing setup run). Requests resolve a **modality**
+(`web | cdp-app | native-screen | mobile`) driving slot-pool concurrency
+(`agentSlots` + `VERIFY_SCREEN_LEASE`), per-modality **attestation** (driver
+`attest` commands + `VERIFY_ATTEST_NONCE`; no attestation ⇒ no clean pass),
+and observe-only native-screen. Dependency mutation inside snapshots is
+triple-guarded (§7.2): enqueue rejection + a default-deny `canUseTool` Bash
+guard (`dependencyCommandGuard.ts`) + `depPreparer.ts`'s keyed read-side
+dependency mirror that snapshots symlink instead of the live worktree. The
+`verify-setup` built-in flow (5th `CYBOFLOW_WORKFLOW_NAMES` entry) derives,
+registers (`cyboflow_register_verify_runbook`), and proves runbooks inline via
+the blocking `cyboflow_await_verification` seam; `acceptanceMatrix.test.ts`
+scripts the failure-injection acceptance rows.
+
 ### Services (`main/src/services/`)
 
 Core business logic services. Key components:
