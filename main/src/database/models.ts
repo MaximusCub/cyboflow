@@ -472,10 +472,16 @@ export type {
  * connection. Secrets are NOT modeled as plaintext: `secret_ciphertext` is an
  * Electron `safeStorage`-encrypted blob, decrypted only in the main process
  * (docs/proposals/tracker-sync-integration.md "Auth & secrets"). SQLite
- * BOOLEANs surface as 0|1 (`two_way`, `mirror_subissues`), matching the
+ * BOOLEANs surface as 0|1 (`mirror_subissues`), matching the
  * `blocking`/`selected` convention on ReviewItemRow above. `source_json` /
  * `selection_json` / `state_mapping_json` / `last_sync_log_json` are
  * sync-engine-owned opaque JSON blobs, not modeled column-by-column here.
+ *
+ * The three `*_mode` columns (migration 094) are the per-direction cadences
+ * that REPLACED 093's single `two_way` flag — see TrackerDirectionMode in
+ * shared/types/trackerSync.ts. `two_way` itself survives as a dead column (094
+ * backfills the modes from it and nothing reads it again), so it is
+ * deliberately absent from this shape: a row type is what the code may read.
  */
 export interface TrackerConnectionRow {
   id: string;
@@ -491,7 +497,12 @@ export interface TrackerConnectionRow {
   selection_mode: 'all' | 'assignee' | 'manual';
   selection_json: string | null;
   state_mapping_json: string;
-  two_way: number; // 0 | 1
+  /** Status flow for LINKED items, BOTH directions (stage write-back + remote state apply). */
+  status_sync_mode: 'auto' | 'manual';
+  /** Importing NEW remote issues as ideas. */
+  pull_mode: 'auto' | 'manual';
+  /** Creating a TOP-LEVEL tracker issue for a NEW cyboflow idea. */
+  push_mode: 'auto' | 'manual';
   mirror_subissues: number; // 0 | 1
   conflict_mode: 'auto' | 'manual';
   cursor_updated_at: string | null;
@@ -540,11 +551,15 @@ export interface EntityExternalLinkRow {
  * `issueCreate` accepts it directly; Plane has no such key, so an ambiguous
  * create is reconciled by listing the parent's sub-issues and matching
  * against this record instead.
+ *
+ * `create_issue` (migration 094) is the PUSH kind: a TOP-LEVEL issue minted in
+ * the connection's source container for a locally-created idea, as opposed to
+ * `create_sub_issue`'s mirrored child of an existing issue.
  */
 export interface TrackerOutboxRow {
   id: number;
   connection_id: string;
-  kind: 'create_sub_issue' | 'update_state' | 'close_parent';
+  kind: 'create_sub_issue' | 'create_issue' | 'update_state' | 'close_parent';
   entity_type: string | null;
   entity_id: string | null;
   external_id: string | null;

@@ -61,12 +61,14 @@ export function insertConnection(db: Database.Database, row: NewConnectionRow): 
       `INSERT INTO tracker_connections (
          id, project_id, provider, status, workspace_id, workspace_name, actor_label,
          base_url, secret_ciphertext, source_json, selection_mode, selection_json,
-         state_mapping_json, two_way, mirror_subissues, conflict_mode,
+         state_mapping_json, status_sync_mode, pull_mode, push_mode,
+         mirror_subissues, conflict_mode,
          cursor_updated_at, cursor_external_id, last_sync_at, last_sync_log_json
        ) VALUES (
          @id, @project_id, @provider, @status, @workspace_id, @workspace_name, @actor_label,
          @base_url, @secret_ciphertext, @source_json, @selection_mode, @selection_json,
-         @state_mapping_json, @two_way, @mirror_subissues, @conflict_mode,
+         @state_mapping_json, @status_sync_mode, @pull_mode, @push_mode,
+         @mirror_subissues, @conflict_mode,
          @cursor_updated_at, @cursor_external_id, @last_sync_at, @last_sync_log_json
        )
        RETURNING *`,
@@ -119,7 +121,9 @@ export interface ConnectionSettingsPatch {
   selection_mode?: TrackerConnectionRow['selection_mode'];
   selection_json?: string | null;
   state_mapping_json?: string;
-  two_way?: number;
+  status_sync_mode?: TrackerConnectionRow['status_sync_mode'];
+  pull_mode?: TrackerConnectionRow['pull_mode'];
+  push_mode?: TrackerConnectionRow['push_mode'];
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];
   source_json?: string | null;
@@ -136,7 +140,9 @@ const CONNECTION_SETTINGS_COLUMNS = [
   'selection_mode',
   'selection_json',
   'state_mapping_json',
-  'two_way',
+  'status_sync_mode',
+  'pull_mode',
+  'push_mode',
   'mirror_subissues',
   'conflict_mode',
   'source_json',
@@ -306,7 +312,8 @@ export function reactivateConnection(
          actor_label = @actor_label, base_url = @base_url,
          secret_ciphertext = @secret_ciphertext, source_json = @source_json,
          selection_mode = @selection_mode, selection_json = @selection_json,
-         state_mapping_json = @state_mapping_json, two_way = @two_way,
+         state_mapping_json = @state_mapping_json,
+         status_sync_mode = @status_sync_mode, pull_mode = @pull_mode, push_mode = @push_mode,
          mirror_subissues = @mirror_subissues, conflict_mode = @conflict_mode,
          cursor_updated_at = @cursor_updated_at, cursor_external_id = @cursor_external_id,
          last_sync_at = @last_sync_at, last_sync_log_json = @last_sync_log_json,
@@ -655,22 +662,37 @@ export function enqueueOutbox(db: Database.Database, input: EnqueueOutboxInput):
  * `attempts`. Runs inside a `BEGIN IMMEDIATE` transaction (mirrors
  * transitions.ts's `tx.immediate(...)` pattern) so two concurrent callers
  * can never claim the same row. Returns null when nothing is eligible.
+ *
+ * `allowedKinds` narrows the claim to a subset of `kind`s — the seam the
+ * per-direction modes drain through (migration 094): a connection whose push
+ * direction is 'manual' drains only its STATUS kinds on the tick, and the
+ * create rows it skips stay `pending`, untouched and in order, until a "Sync
+ * now" widens the filter. An EMPTY array claims nothing (every direction is
+ * held); OMITTING it claims any kind.
  */
 export function claimNextPending(
   db: Database.Database,
   connectionId: string,
   nowIso: string,
+  allowedKinds?: readonly TrackerOutboxRow['kind'][],
 ): TrackerOutboxRow | null {
+  if (allowedKinds !== undefined && allowedKinds.length === 0) return null;
+  // Parameterized IN list — the kinds are a closed union, but the placeholders
+  // keep this module's "no string-interpolated values in SQL" property intact.
+  const kindFilter =
+    allowedKinds === undefined ? '' : ` AND kind IN (${allowedKinds.map(() => '?').join(', ')})`;
+  const kindParams: string[] = allowedKinds === undefined ? [] : [...allowedKinds];
+
   const claim = db.transaction((connId: string, now: string): TrackerOutboxRow | null => {
     const candidate = db
       .prepare(
         `SELECT id FROM tracker_outbox
           WHERE connection_id = ? AND state = 'pending'
-            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)${kindFilter}
           ORDER BY created_at ASC, id ASC
           LIMIT 1`,
       )
-      .get(connId, now) as { id: number } | undefined;
+      .get(connId, now, ...kindParams) as { id: number } | undefined;
     if (!candidate) return null;
     return db
       .prepare(

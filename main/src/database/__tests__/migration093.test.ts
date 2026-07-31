@@ -92,6 +92,12 @@ describe('Migration 093: tracker-sync data model', () => {
       'last_sync_log_json',
       'created_at',
       'updated_at',
+      // Appended by 094 (the per-direction modes). This suite runs the FULL
+      // migration chain, so it necessarily sees the later file's columns; they
+      // are asserted for real in migration094.test.ts.
+      'status_sync_mode',
+      'pull_mode',
+      'push_mode',
     ]);
 
     expect(columnNames(raw, 'entity_external_links')).toEqual([

@@ -103,7 +103,9 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     selection_mode: 'all',
     selection_json: null,
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -224,7 +226,7 @@ describe('trackerSync store — connections', () => {
   });
 
   it('updateConnectionSettings writes only the supplied keys and stamps updated_at', () => {
-    const before = seedConnection({ id: 'conn-1', conflict_mode: 'auto', two_way: 1 });
+    const before = seedConnection({ id: 'conn-1', conflict_mode: 'auto', status_sync_mode: 'auto' });
     const beforeRow = getConnection(raw, before)!;
 
     updateConnectionSettings(raw, before, { conflict_mode: 'manual', workspace_name: 'Acme Co' });
@@ -233,7 +235,7 @@ describe('trackerSync store — connections', () => {
     expect(after.conflict_mode).toBe('manual');
     expect(after.workspace_name).toBe('Acme Co');
     // Untouched fields survive the partial patch.
-    expect(after.two_way).toBe(beforeRow.two_way);
+    expect(after.status_sync_mode).toBe(beforeRow.status_sync_mode);
     expect(after.selection_mode).toBe(beforeRow.selection_mode);
   });
 
@@ -368,7 +370,9 @@ describe('trackerSync store — connections', () => {
       status: 'disconnected',
       workspace_id: 'ws-1',
       workspace_name: 'Old name',
-      two_way: 0,
+      status_sync_mode: 'manual',
+      pull_mode: 'manual',
+      push_mode: 'manual',
       conflict_mode: 'manual',
       source_json: JSON.stringify({ containerId: 'team-old' }),
       cursor_updated_at: '2026-07-01 00:00:00',
@@ -388,7 +392,9 @@ describe('trackerSync store — connections', () => {
         status: 'active',
         workspace_id: 'ws-1',
         workspace_name: 'Acme',
-        two_way: 1,
+        status_sync_mode: 'auto',
+        pull_mode: 'auto',
+        push_mode: 'auto',
         conflict_mode: 'auto',
         source_json: JSON.stringify({ containerId: 'team-new' }),
         cursor_updated_at: null,
@@ -401,7 +407,9 @@ describe('trackerSync store — connections', () => {
     expect(revived.id).toBe('conn-1');
     expect(revived.status).toBe('active');
     expect(revived.workspace_name).toBe('Acme');
-    expect(revived.two_way).toBe(1);
+    expect(revived.status_sync_mode).toBe('auto');
+    expect(revived.pull_mode).toBe('auto');
+    expect(revived.push_mode).toBe('auto');
     expect(revived.conflict_mode).toBe('auto');
     expect(JSON.parse(revived.source_json ?? '{}')).toEqual({ containerId: 'team-new' });
     // The cursor RESET is what makes the retained links re-bind: the next pass
@@ -702,6 +710,41 @@ describe('trackerSync store — outbox', () => {
     const second = claimNextPending(raw, connId, '2026-06-01 00:00:00');
     expect(second?.id).toBe(middle);
     expect(second?.id).not.toBe(first?.id);
+  });
+
+  it('claimNextPending honours allowedKinds — a held direction is skipped, not consumed', () => {
+    const connId = seedConnection();
+    const insert = raw.prepare(
+      `INSERT INTO tracker_outbox (connection_id, kind, payload_json, state, created_at, updated_at)
+       VALUES (?, ?, '{}', 'pending', ?, ?)`,
+    );
+    // The push row is OLDER, so a filter that merely re-ordered would still
+    // return it first; only a real filter can skip it.
+    const push = insert.run(connId, 'create_issue', '2026-01-01 00:00:01', '2026-01-01 00:00:01')
+      .lastInsertRowid as number;
+    const status = insert.run(connId, 'update_state', '2026-01-01 00:00:02', '2026-01-01 00:00:02')
+      .lastInsertRowid as number;
+
+    const claimed = claimNextPending(raw, connId, '2026-06-01 00:00:00', ['update_state', 'close_parent']);
+    expect(claimed?.id).toBe(status);
+    // The skipped row is untouched — still pending, still on attempt 0, so a
+    // later pass that DOES own its direction picks it up unchanged.
+    expect(fetchOutboxRow(push)?.state).toBe('pending');
+    expect(fetchOutboxRow(push)?.attempts).toBe(0);
+
+    // Nothing else of that kind is left.
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:00', ['update_state', 'close_parent'])).toBeNull();
+    // Widen the filter and the held row is claimable.
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:00', ['create_issue'])?.id).toBe(push);
+  });
+
+  it('claimNextPending with an EMPTY allowedKinds claims nothing (every direction held)', () => {
+    const connId = seedConnection();
+    enqueueOutbox(raw, { connection_id: connId, kind: 'update_state', payload_json: '{}' });
+
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:00', [])).toBeNull();
+    // …and omitting the filter still claims any kind.
+    expect(claimNextPending(raw, connId, '2026-06-01 00:00:00')).not.toBeNull();
   });
 
   it('claimNextPending gates on next_attempt_at: future rows are skipped, past/null rows are eligible', () => {

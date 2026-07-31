@@ -145,6 +145,20 @@ export type TrackerSelectionMode = 'all' | 'assignee' | 'manual';
 export type TrackerConflictMode = 'auto' | 'manual';
 export type TrackerConnectionStatus = 'active' | 'paused' | 'disconnected';
 
+/**
+ * Per-direction sync cadence. 'auto' runs on the 5-minute tick and live
+ * entity-change events; 'manual' defers that direction until an explicit
+ * "Sync now" (intents still queue durably in the meantime — manual mode
+ * delays work, it never drops it).
+ *
+ * Three independent directions replace the former single two-way toggle:
+ *  - statusSyncMode: status changes on LINKED items, both directions
+ *    (stage write-back out, remote state application in)
+ *  - pullMode: NEW remote issues importing as ideas
+ *  - pushMode: NEW cyboflow ideas creating top-level tracker issues
+ */
+export type TrackerDirectionMode = 'auto' | 'manual';
+
 /** The three entity tables a tracker link can point at (mirrors EntityExternalLinkRow). */
 export type TrackerEntityType = 'idea' | 'epic' | 'task';
 
@@ -202,7 +216,9 @@ export interface TrackerConnectionSummary {
   /** Human label for the wizard's Step-1 choice, e.g. "Core · Cycle 12". */
   sourceLabel: string;
   selectionMode: TrackerSelectionMode;
-  twoWay: boolean;
+  statusSyncMode: TrackerDirectionMode;
+  pullMode: TrackerDirectionMode;
+  pushMode: TrackerDirectionMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   stateMapping: TrackerStateMapping;
@@ -284,7 +300,9 @@ export interface TrackerConnectPayload {
   selectionMode: TrackerSelectionMode;
   selectionJson: TrackerSelectionJson | null;
   stateMapping: TrackerStateMapping;
-  twoWay: boolean;
+  statusSyncMode: TrackerDirectionMode;
+  pullMode: TrackerDirectionMode;
+  pushMode: TrackerDirectionMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   reconcile: TrackerReconcileDecision[];
@@ -295,7 +313,9 @@ export interface TrackerConnectPayload {
  * leaves the stored value untouched (mirrors the store's ConnectionSettingsPatch).
  */
 export interface TrackerSettingsPatch {
-  twoWay?: boolean;
+  statusSyncMode?: TrackerDirectionMode;
+  pullMode?: TrackerDirectionMode;
+  pushMode?: TrackerDirectionMode;
   mirrorSubissues?: boolean;
   conflictMode?: TrackerConflictMode;
   stateMapping?: TrackerStateMapping;
