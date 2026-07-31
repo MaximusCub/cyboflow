@@ -46,15 +46,28 @@
  *    user's own running app answers just as happily). Each channel proves
  *    identity a different way — an injected per-request nonce read back over
  *    HTTP or out of the DOM, a build-stamped global evaluated over CDP, or (the
- *    weakest, native-only) a window title. EVERY attest invocation writes
- *    `<VERIFY_ARTIFACTS_DIR>/.driver/attest.json` — the SAME driver-owned
- *    dotdir as `browser.pid` — because the RUNNER trusts that file and NEVER
- *    the agent's own report echo: a model can claim it attested, it cannot
- *    forge a file only this CLI writes (`VerificationReportV1.attestation` is
- *    explicitly "for HUMAN display only"). A failed attestation still writes
- *    the file (with `ok:false`) and exits non-zero with the detail on stderr,
- *    so "the channel came up and disagreed" is distinguishable from "the agent
- *    never ran the step at all" (no file).
+ *    weakest, native-only) a window title. Every invocation writes
+ *    `<VERIFY_ARTIFACTS_DIR>/.driver/attest.json` beside `browser.pid`.
+ *
+ *    THAT FILE IS A SELF-CHECK AID, NOT EVIDENCE. It used to be the runner's
+ *    attestation source of truth, on the reasoning that a model "cannot forge a
+ *    file only this CLI writes" — which was false: the agent has Bash and owns
+ *    `VERIFY_ARTIFACTS_DIR`, so one `echo >` produced a perfect record for a
+ *    channel that never ran. The authoritative probe now lives in the harness
+ *    (`../harnessAttestation.ts`), which runs it itself against the still-live
+ *    surface after the session ends. These subcommands remain because they are
+ *    genuinely useful to the AGENT — running one catches a broken serve step
+ *    while there is still time to fix it — but nothing the runner decides
+ *    depends on them or on the file they write.
+ *
+ *  - `serve <cmd...>` — starts the deliverable's server (or the app itself, in
+ *    attach mode) DETACHED, recording its pid at
+ *    `<VERIFY_ARTIFACTS_DIR>/.driver/serve.pid` and its output at
+ *    `.driver/serve.log`. It exists so the HARNESS owns the surface's lifetime:
+ *    the agent starts it and leaves it running, the runner attests against it
+ *    after the session ends, and only then is everything torn down. An agent
+ *    that backgrounded its own `pnpm dev` and killed it before returning would
+ *    leave nothing to attest — and, per §7.1, an unattestable pass is a FAIL.
  *
  *  - `native-screenshot` — a Peekaboo capture of the REAL screen, the only
  *    observe path for the `native-screen` modality (no CDP endpoint exists for
@@ -78,7 +91,7 @@
  * caller.
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { Browser, Page } from 'playwright';
@@ -90,11 +103,18 @@ const DRIVER_STATE_DIR = '.driver';
 /** Filename (under DRIVER_STATE_DIR) recording the launched browser's pid. */
 const PID_FILE_NAME = 'browser.pid';
 
+/** Filename (under DRIVER_STATE_DIR) recording the `serve` command's detached process-group leader pid. */
+const SERVE_PID_FILE_NAME = 'serve.pid';
+
+/** Filename (under DRIVER_STATE_DIR) collecting the `serve` command's stdout+stderr. */
+const SERVE_LOG_FILE_NAME = 'serve.log';
+
 /**
  * Filename (under DRIVER_STATE_DIR, beside `browser.pid`) recording the LAST
- * attestation this driver performed (§7.1). The runner reads THIS file for its
- * attestation verdict — never the agent's report echo — so it must live
- * somewhere only the driver writes.
+ * attestation this driver performed (§7.1). A SELF-CHECK aid for the agent, not
+ * evidence: the runner performs its own probe (`../harnessAttestation.ts`) and
+ * never reads this file — see this module's header for why the old
+ * read-the-file design was forgeable.
  */
 const ATTEST_FILE_NAME = 'attest.json';
 
@@ -125,6 +145,7 @@ export const NATIVE_SCREEN_DRIVE_REFUSAL =
   'drive-unsupported on native-screen (observe-only — proposal §4 fn.²)';
 
 export const USAGE = `Usage:
+  serve <cmd...>
   goto <url>
   click <selector>
   type <selector> <text...>
@@ -154,6 +175,7 @@ export type AttestCommand =
   | { kind: 'attest'; channel: 'window'; titlePattern: string };
 
 export type DriverCommand =
+  | { kind: 'serve'; command: string }
   | { kind: 'goto'; url: string }
   | { kind: 'click'; selector: string }
   | { kind: 'type'; selector: string; text: string }
@@ -171,12 +193,12 @@ export const ATTEST_KIND_BY_CHANNEL: Record<AttestCommand['channel'], Attestatio
 };
 
 /**
- * What the driver writes to `.driver/attest.json` — the runner's ONLY
- * attestation source of truth (§7.1). `kind` lets the runner reject a file
- * written by a DIFFERENT channel than the task declared (an agent that ran
- * `attest window` for a task whose spec is `http-endpoint` has not proven the
- * declared channel), and `at` makes a stale file from an earlier attempt
- * auditable.
+ * What the driver writes to `.driver/attest.json` — the AGENT's self-check
+ * record (§7.1). `kind` names the channel the agent actually ran and `at` makes
+ * a stale record from an earlier attempt auditable. Deliberately NOT read by
+ * the runner: it lives under `VERIFY_ARTIFACTS_DIR`, which the agent can write
+ * with a single Bash redirect, so it can only ever be a diagnostic for the
+ * agent and a human — the identity verdict comes from the harness's own probe.
  */
 export interface DriverAttestRecord {
   ok: boolean;
@@ -196,6 +218,18 @@ export type ParseArgvResult = { ok: true; command: DriverCommand } | { ok: false
 export function parseArgv(argv: string[]): ParseArgvResult {
   const [cmd, ...rest] = argv;
   switch (cmd) {
+    case 'serve': {
+      // Trailing words are JOINED (like `type`, unlike the attest channels):
+      // the argument is a SHELL COMMAND LINE, so both the quoted form
+      // (`serve 'pnpm dev --port 29260'`) and the bare form
+      // (`serve pnpm dev --port 29260`) must mean the same thing. Re-joining
+      // is exact for the quoted form and the obvious reading of the bare one.
+      const command = rest.join(' ').trim();
+      if (command.length === 0) {
+        return { ok: false, message: 'serve requires a command: serve <cmd...>' };
+      }
+      return { ok: true, command: { kind: 'serve', command } };
+    }
     case 'goto': {
       if (rest.length !== 1 || rest[0].trim().length === 0) {
         return { ok: false, message: 'goto requires exactly one argument: <url>' };
@@ -367,6 +401,14 @@ export interface DriverDeps {
     port: number;
     userDataDir: string;
   }): Promise<{ pid: number }>;
+  /**
+   * Run `command` through `sh -c`, DETACHED as its own process-group leader,
+   * with stdout+stderr appended to `logPath`; returns the leader's pid. The
+   * group is what makes teardown tractable: a dev server is almost never one
+   * process (a shell wrapping a node wrapping esbuild), and only a group-scoped
+   * kill reliably takes the whole tree with it.
+   */
+  spawnDetachedShell(args: { command: string; logPath: string }): Promise<{ pid: number }>;
   /** Poll the CDP endpoint until it accepts connections or timeoutMs elapses. */
   waitForCdpReady(port: number, timeoutMs: number): Promise<void>;
   /** `browser.close()` — for a CDP-attached Browser this terminates it. */
@@ -405,10 +447,31 @@ export function pidFilePath(artifactsDir: string): string {
 }
 
 /**
- * `$VERIFY_ARTIFACTS_DIR/.driver/attest.json` — the attestation record's path,
- * exported so `verificationAgentRunner`'s default reader and the tests resolve
- * it through the SAME function the writer uses (a path the two ends spelled
- * separately would silently degrade every attestation to "missing").
+ * `$VERIFY_ARTIFACTS_DIR/.driver/serve.pid` — where `serve` records the
+ * detached process-GROUP leader it started. Exported so the runner's teardown
+ * reaper and this writer resolve the path through one function.
+ *
+ * TRUST NOTE, since this file lives in agent-writable space: it is a CLEANUP
+ * AID, never an input to any gate. A forged or edited `serve.pid` can only
+ * break the agent's OWN teardown (the harness kills the wrong pid, or none) —
+ * it cannot make an unattested surface look attested, because identity is
+ * decided by a live probe (`../harnessAttestation.ts`), not by anything on
+ * disk. That is the distinction that makes this file safe to keep here and
+ * `attest.json` unsafe to keep trusting.
+ */
+export function servePidFilePath(artifactsDir: string): string {
+  return join(artifactsDir, DRIVER_STATE_DIR, SERVE_PID_FILE_NAME);
+}
+
+/** `$VERIFY_ARTIFACTS_DIR/.driver/serve.log` — the served process's captured output (the agent's `launch_failed` excerpt). */
+export function serveLogPath(artifactsDir: string): string {
+  return join(artifactsDir, DRIVER_STATE_DIR, SERVE_LOG_FILE_NAME);
+}
+
+/**
+ * `$VERIFY_ARTIFACTS_DIR/.driver/attest.json` — the agent's self-check record.
+ * Exported so the writer and the tests resolve it through ONE function. The
+ * runner deliberately has no reader for it (see {@link DriverAttestRecord}).
  */
 export function attestFilePath(artifactsDir: string): string {
   return join(artifactsDir, DRIVER_STATE_DIR, ATTEST_FILE_NAME);
@@ -539,6 +602,19 @@ export async function runDriverCommand(
     return 1;
   }
 
+  // `serve` is PAGELESS and modality-agnostic: it starts the deliverable (a dev
+  // server, or the app itself in attach/native mode), which is a precondition of
+  // every modality including native-screen — the drive guard above is about
+  // driving a surface, not about bringing one up.
+  if (command.kind === 'serve') {
+    const dirResult = requireArtifactsDir(env);
+    if (!dirResult.ok) {
+      deps.stderr(dirResult.message);
+      return 1;
+    }
+    return serveCommand(command, dirResult.artifactsDir, deps);
+  }
+
   if (command.kind === 'native-screenshot') {
     const dirResult = requireArtifactsDir(env);
     if (!dirResult.ok) {
@@ -660,7 +736,10 @@ async function launchAndConnect(port: number, artifactsDir: string, deps: Driver
 }
 
 async function executeCommand(
-  command: Exclude<DriverCommand, { kind: 'stop' } | { kind: 'attest' } | { kind: 'native-screenshot' }>,
+  command: Exclude<
+    DriverCommand,
+    { kind: 'stop' } | { kind: 'attest' } | { kind: 'native-screenshot' } | { kind: 'serve' }
+  >,
   page: Page,
   artifactsDir: string,
   deps: DriverDeps,
@@ -702,6 +781,44 @@ async function executeCommand(
 }
 
 // ---------------------------------------------------------------------------
+// serve — the harness-owned surface lifetime
+// ---------------------------------------------------------------------------
+
+/**
+ * `serve <cmd...>` — start the deliverable DETACHED and return IMMEDIATELY.
+ *
+ * Readiness is deliberately NOT waited on here: the task's `readyWhen` polling
+ * stays the agent's job, exactly as before, because only the agent knows what
+ * "ready" means for its deliverable and it must be free to report
+ * `launch_failed` with the server's own log tail. What this command adds is
+ * OWNERSHIP — the pid of the process group lands in `.driver/serve.pid`, so the
+ * runner can attest against the live surface after the session ends and then
+ * tear the whole tree down, instead of depending on an agent to background a
+ * process correctly and then not kill it.
+ *
+ * A spawn failure is a plain non-zero exit with the error on stderr: the agent
+ * sees its serve step fail and reports `launch_failed`, which is the honest
+ * outcome and the one the harness contract already asks for.
+ */
+async function serveCommand(
+  command: Extract<DriverCommand, { kind: 'serve' }>,
+  artifactsDir: string,
+  deps: DriverDeps,
+): Promise<number> {
+  try {
+    await deps.ensureDir(join(artifactsDir, DRIVER_STATE_DIR));
+    const logPath = serveLogPath(artifactsDir);
+    const { pid } = await deps.spawnDetachedShell({ command: command.command, logPath });
+    await deps.writePidFile(servePidFilePath(artifactsDir), pid);
+    deps.stdout(`ok: serve started (process group ${pid}); output: ${logPath}`);
+    return 0;
+  } catch (err) {
+    deps.stderr(`serve failed to start: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Attestation (§7.1) + the native-screen observe surface (§4 fn.²)
 // ---------------------------------------------------------------------------
 
@@ -726,15 +843,15 @@ function truncateDetail(value: string, max = 200): string {
  * Run ONE attest command end-to-end: evaluate the channel, ALWAYS write
  * `.driver/attest.json`, then exit 0/1. A probe that THROWS (connection
  * refused, missing peekaboo binary, an unreachable CDP endpoint) is recorded
- * as `ok:false` with the error in `detail` rather than escaping — the runner
- * must be able to tell "the channel came up and disagreed" (file, ok:false)
- * from "the agent never ran the attest step" (no file at all), and a throw
- * that skipped the write would collapse the two.
+ * as `ok:false` with the error in `detail` rather than escaping, so the agent
+ * gets an actionable answer from every path rather than a stack trace.
  *
- * The attest-file write itself is FAIL-SOFT: a write failure is reported on
- * stderr and forces a non-zero exit (a successful attestation the runner
- * cannot see is worthless, so it must not read as success), but it never
- * throws out of the CLI.
+ * The EXIT CODE is what the agent acts on; the file is a record for a human
+ * reading the artifacts afterwards. Neither reaches the runner's verdict — the
+ * harness re-derives identity itself (`../harnessAttestation.ts`), so running
+ * this command is a diagnostic, not a step that "counts". The write is
+ * fail-soft in the same spirit: a write failure is reported and forces a
+ * non-zero exit, but never throws out of the CLI.
  */
 async function runAttestCommand(
   command: AttestCommand,
@@ -885,8 +1002,14 @@ async function evaluateAttestation(
  * throwing — a malformed pattern must not turn into "probe failed" noise when
  * the honest answer ("does any window title contain this?") is still
  * computable.
+ *
+ * Exported so the harness's authoritative `window-identity` probe
+ * (`../harnessAttestation.ts`) and this CLI's self-check aid agree on what a
+ * `titlePattern` MEANS. Two spellings of the matcher would let the agent's own
+ * check pass while the harness's fails (or the reverse), which is the most
+ * confusing failure this channel could produce.
  */
-function compileTitleMatcher(pattern: string): (title: string) => boolean {
+export function compileTitleMatcher(pattern: string): (title: string) => boolean {
   try {
     const re = new RegExp(pattern);
     return (title) => re.test(title);
@@ -1062,6 +1185,67 @@ export function probeChromiumExecutable(): Promise<string | null> {
   return defaultResolveChromiumExecutable();
 }
 
+/**
+ * Reject `promise` after `timeoutMs` with `label` in the message. Local because
+ * the two places that need it are both in this file's CDP-attach path and both
+ * want the same shape of error text; a shared util would only be indirection.
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+/**
+ * Evaluate `expression` against the LIVE page behind a CDP endpoint and return
+ * `String(result)` — the shared engine behind the harness's `dom-marker` and
+ * `cdp-token` attestation probes (`../harnessAttestation.ts`).
+ *
+ * ATTACH-ONLY BY CONSTRUCTION. It connects or it throws; it never launches a
+ * chromium and never creates a page. Both are essential: the harness runs this
+ * to ask "is the surface the agent just drove really this deliverable", and a
+ * probe that could conjure its own blank page would answer a question about
+ * itself. "No page here" is a genuine identity failure, so it surfaces as a
+ * throw, which {@link performHarnessAttestation} folds into `verified: false`.
+ *
+ * The connection is closed with a PLAIN `browser.close()`, which on a
+ * connectOverCDP browser only disconnects the client (killing it takes the
+ * `Browser.close` protocol command — see `createDefaultDriverDeps().closeBrowser`).
+ * That asymmetry is load-bearing here: the probe must leave the surface running,
+ * because the runner tears everything down deliberately, afterwards.
+ */
+export async function evaluateOverCdp(port: number, expression: string, timeoutMs: number): Promise<string> {
+  const browser = await withDeadline(
+    defaultConnectOverCDP(`http://127.0.0.1:${port}`),
+    timeoutMs,
+    `CDP connect to port ${port}`,
+  );
+  try {
+    const contexts = browser.contexts();
+    if (contexts.length === 0) {
+      throw new Error(`CDP endpoint on port ${port} exposes no browser context`);
+    }
+    const page = contexts[0].pages().find((p) => !isDevtoolsPage(p));
+    if (!page) {
+      throw new Error(`CDP endpoint on port ${port} exposes no page (the surface was closed?)`);
+    }
+    const value: unknown = await withDeadline(page.evaluate(expression), timeoutMs, 'CDP evaluate');
+    return String(value);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 async function defaultSpawnDetachedChromium(args: {
   executablePath: string;
   port: number;
@@ -1084,6 +1268,38 @@ async function defaultSpawnDetachedChromium(args: {
     throw new Error('failed to spawn chromium: no pid assigned');
   }
   return { pid: child.pid };
+}
+
+/**
+ * `sh -c <command>`, detached into its OWN process group with stdout+stderr
+ * appended to `logPath`.
+ *
+ * `detached: true` is what makes teardown possible at all: it gives the shell a
+ * fresh process group whose id equals its pid, so the runner's reaper can
+ * SIGKILL `-pid` and take the server AND everything it forked. Without it a
+ * `pnpm dev` would leave its node/esbuild children orphaned and the leased port
+ * bound. `unref()` then lets this short-lived CLI exit immediately, which is the
+ * whole contract of `serve` (the agent polls readiness itself).
+ *
+ * The log fd is duplicated into the child by `spawn`, so closing our copy right
+ * after is correct — the child keeps writing to the file.
+ */
+async function defaultSpawnDetachedShell(args: {
+  command: string;
+  logPath: string;
+}): Promise<{ pid: number }> {
+  await mkdir(dirname(args.logPath), { recursive: true });
+  const fd = openSync(args.logPath, 'a');
+  try {
+    const child = spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd] });
+    child.unref();
+    if (!child.pid) {
+      throw new Error('failed to spawn the serve command: no pid assigned');
+    }
+    return { pid: child.pid };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 async function defaultWaitForCdpReady(port: number, timeoutMs: number): Promise<void> {
@@ -1206,6 +1422,7 @@ export function createDefaultDriverDeps(): DriverDeps {
     connectOverCDP: defaultConnectOverCDP,
     resolveChromiumExecutable: defaultResolveChromiumExecutable,
     spawnDetachedChromium: defaultSpawnDetachedChromium,
+    spawnDetachedShell: defaultSpawnDetachedShell,
     waitForCdpReady: defaultWaitForCdpReady,
     closeBrowser: async (browser) => {
       // `browser.close()` on a connectOverCDP browser only disconnects the

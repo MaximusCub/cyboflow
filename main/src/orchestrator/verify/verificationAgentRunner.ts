@@ -29,7 +29,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -65,11 +65,21 @@ import type {
 } from '../../../../shared/types/verifyRunbook';
 import { canonicalJsonStringify } from '../agentThread/specHash';
 import {
-  attestFilePath,
+  createDefaultDriverDeps,
+  evaluateOverCdp,
+  extractWindowTitles,
+  peekabooListWindowsArgs,
   pidFilePath,
   probeChromiumExecutable,
+  servePidFilePath,
   DEFAULT_PEEKABOO_BIN,
+  PEEKABOO_TIMEOUT_MS,
 } from './driver/driverCore';
+import {
+  performHarnessAttestation,
+  type HarnessAttestationDeps,
+  type HarnessAttestationResult,
+} from './harnessAttestation';
 
 const execFileAsync = promisify(execFile);
 
@@ -223,15 +233,32 @@ export interface VerificationAgentRequest {
   runbookHash?: string;
   /**
    * The machine-local record's CAS version at enqueue, carried alongside
-   * {@link VerificationAgentRequest.runbookHash} as PROVENANCE. It is recorded
-   * on the rejection detail and on the §5.3 proof, but it is deliberately NOT
-   * an independent reject condition: `registerDraft` bumps the version on every
-   * re-registration, so re-registering byte-identical content would fail a
-   * version equality check while the thing that actually matters — the commands
-   * about to run — is unchanged. Content equality is the invariant; the version
-   * is how a human reconstructs which revision produced which verdict.
+   * {@link VerificationAgentRequest.runbookHash} as PROVENANCE. On an ORDINARY
+   * request it is deliberately NOT an independent reject condition:
+   * `registerDraft` bumps the version on every re-registration, so re-registering
+   * byte-identical content would fail a version equality check while the thing
+   * that actually matters — the commands about to run — is unchanged. Content
+   * equality is the invariant there; the version is how a human reconstructs
+   * which revision produced which verdict.
+   *
+   * On a {@link VerificationAgentRequest.setupProof} request it IS a reject
+   * condition — see {@link checkRunbookPin}. The asymmetry is the point: an
+   * ordinary request only needs the commands to match, whereas a proof run's
+   * whole output is an attestation ABOUT one specific record revision, and an
+   * attestation naming a revision that has already been superseded is false
+   * rather than merely stale.
    */
   runbookLocalVersion?: number;
+  /**
+   * §3.6/§5.3 — this request is the SETUP FLOW's proof run (the request row's
+   * `setup_proof` column), not ordinary lane traffic. The runner needs it for
+   * exactly one decision: which half of {@link checkRunbookPin}'s revision check
+   * applies. A proof run legitimately executes against an `'unproven-draft'`
+   * record (proving it is the entire point, so requiring `'proven'` would
+   * deadlock the bootstrap), and in exchange it must pin to the EXACT record
+   * version it was enqueued against.
+   */
+  setupProof?: boolean;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -285,6 +312,23 @@ export interface VerificationAgentRunResult {
    * because there is no defect here to retry against.
    */
   runbookMismatch?: boolean;
+  /**
+   * This `'skipped'` came from a TRANSPORT-LEVEL failure of the deployed session
+   * — the SDK layer threw (a {@link VerificationAgentQueryError}, a socket
+   * reset, a 5xx) before any structured output existed — rather than from
+   * anything the agent said.
+   *
+   * It exists for ONE consumer: the scheduler's §3.1 gate-integrity guard
+   * (`settleAgentTerminal`), which converts a deployed-but-unexplained
+   * `'skipped'` into a blocking `'failed'`. That guard must NOT fire here, and
+   * the guard cannot tell the difference on its own: a transport skip and a
+   * model-authored skip both arrive classified `'ambiguous'` with no report. The
+   * distinction is real and it is harness-owned — the exception was raised by
+   * OUR code, so no amount of model content can manufacture it — so the runner
+   * states it explicitly rather than leaving the scheduler to infer it from an
+   * error string.
+   */
+  transportFailure?: boolean;
 }
 
 /**
@@ -359,15 +403,25 @@ export interface VerificationAgentRunnerDeps {
    */
   peekabooBin?: string;
   /**
-   * Read the driver-written `.driver/attest.json` (§7.1) for this request, or
-   * `null` when it is absent/unreadable/malformed. This is the ONLY
-   * attestation input the runner trusts — the agent's
-   * `VerificationReportV1.attestation` echo is human-facing narrative, and a
-   * model cannot forge a file only the driver CLI writes. FAIL-SOFT by
-   * contract: every "could not read it" answer is `null`, which the floor
-   * treats exactly like "the channel never came up".
+   * PERFORM the §7.1 identity probe against the still-live surface — the ONLY
+   * attestation evidence the floor accepts. Defaults to
+   * {@link performHarnessAttestation} wired to real HTTP/CDP/peekaboo probes;
+   * tests inject a thunk.
+   *
+   * WHY THIS IS A VERB AND NOT A READ. It used to be `readAttestFile`, pointed
+   * at `<artifactsDir>/.driver/attest.json`, on the reasoning that a model
+   * "cannot forge a file only the driver CLI writes". The agent has `Bash` and
+   * owns `VERIFY_ARTIFACTS_DIR`, so it could — one redirect produced a perfect
+   * record for a channel that never ran, and the nonce could not help because
+   * the nonce is exported into the agent's OWN environment. Attestation is now
+   * something the HARNESS DOES, over sockets the agent does not mediate;
+   * nothing under `VERIFY_ARTIFACTS_DIR` carries evidentiary weight for
+   * identity any more.
    */
-  readAttestFile?: (artifactsDir: string) => Promise<AttestationRecord | null>;
+  attest?: (
+    spec: AttestationSpec,
+    args: { verifyPort: number | null; driverPort: number; nonce: string },
+  ) => Promise<HarnessAttestationResult>;
   /**
    * §5.2 seam 3 — resolve the machine-local runbook record for
    * (project, modality) by the CONTENT HASH pinned on the request row. Wired at
@@ -397,6 +451,12 @@ export interface VerificationAgentRunnerDeps {
   /** Best-effort SIGKILL of the driver's recorded browser pid, if still alive. */
   reapBrowser?: (artifactsDir: string) => void;
   /**
+   * Best-effort SIGKILL of the process GROUP the driver's `serve` command
+   * started, if still alive. Runs at teardown, strictly AFTER the attestation
+   * probe — the surface has to be alive to be proven.
+   */
+  reapServe?: (artifactsDir: string) => void;
+  /**
    * Write the harness-captured transcript to `<artifactsDir>/<fileName>` (creating
    * the directory as needed). Injected so tests can assert the call without
    * touching disk; a failure here is ALWAYS fail-soft (logged, never changes the
@@ -424,6 +484,7 @@ against its expected result — then return ONE structured report.
 Environment (already set for your Bash tool):
 - VERIFY_ARTIFACTS_DIR — write every screenshot here (bare filenames, no subdirs).
 - VERIFY_DRIVER — a CLI you drive the headless browser with. Subcommands:
+    "$VERIFY_DRIVER" serve '<command>'                    # starts the serve/app, detached
     "$VERIFY_DRIVER" goto <url>
     "$VERIFY_DRIVER" click <selector>
     "$VERIFY_DRIVER" type <selector> <text...>
@@ -433,32 +494,52 @@ Environment (already set for your Bash tool):
     "$VERIFY_DRIVER" attest dom <selector>
     "$VERIFY_DRIVER" attest cdp <expression> <expected>
     "$VERIFY_DRIVER" attest window <titlePattern>
-    "$VERIFY_DRIVER" stop
   All driver commands act on ONE persistent browser page across invocations.
 - VERIFY_PORT — when present, bind your dev/preview server to THIS port (the task's
   serve command references it). When absent, the task points at an already-live target.
 - VERIFY_ATTEST_NONCE — a per-request secret. It is what makes an attestation mean
-  something: the surface you verified must hand this exact value back (in the
-  attest http response body, or in the attest dom element's text /
-  data-verify-nonce attribute). A port answering, or a page rendering, proves
-  nothing on its own — a stale server or the user's own running app answers too.
+  something: the surface must hand this exact value back (in the attest http
+  response body, or in the attest dom element's text / data-verify-nonce
+  attribute) when the HARNESS asks it, after you finish. A port answering, or a
+  page rendering, proves nothing on its own — a stale server or the user's own
+  running app answers too. Your job is to make the deliverable's serve step carry
+  the nonce, not to report on it: you hold this value yourself, so you repeating
+  it back could never prove anything.
 - VERIFY_MODALITY — "web" | "cdp-app" | "native-screen" | "mobile".
 - CDP-attach mode — when the task's serve has "attach": "cdp", its serve command
   launches the deliverable APP ITSELF exposing a DevTools endpoint on
-  VERIFY_DRIVER_PORT (e.g. --remote-debugging-port="$VERIFY_DRIVER_PORT"). Run that
-  command, wait for the app window to be up, then drive with the SAME driver
-  subcommands — the driver attaches to the app's own web-view (no separate browser,
-  and usually no goto: the app window is already the surface under test).
+  VERIFY_DRIVER_PORT (e.g. --remote-debugging-port="$VERIFY_DRIVER_PORT"). Start it
+  the same way ("$VERIFY_DRIVER" serve '<that command>'), wait for the app window to
+  be up, then drive with the SAME driver subcommands — the driver attaches to the
+  app's own web-view (no separate browser, and usually no goto: the app window is
+  already the surface under test).
 
-ATTESTATION (required whenever the task carries an "attestation" object):
-- You MUST run the task's attest step and see it SUCCEED before you report
-  outcome "pass". The harness reads the driver's own record of that step, not your
-  word for it — a report claiming "pass" without a successful attest run is
-  rejected as unproven, whatever the screenshots show.
-- Match the channel to the task's spec: kind "http-endpoint" → attest http <urlPath>;
-  "dom-marker" → attest dom <selector>; "cdp-token" → attest cdp <expression> <expected>;
-  "window-identity" → attest window <titlePattern>. Running a DIFFERENT channel than
-  the task declared does not satisfy it.
+STARTING THE SERVE/APP — AND LEAVING IT RUNNING:
+- Start the task's serve command (or, in CDP-attach mode, the app itself) with
+    "$VERIFY_DRIVER" serve '<the task's serve command, with \${PORT} substituted>'
+  It returns immediately, having started the command detached and recorded it for
+  the harness. You then poll readiness exactly as before; its output is captured at
+  "$VERIFY_ARTIFACTS_DIR/.driver/serve.log" (tail that for a launch_failed excerpt).
+  Do NOT background the command yourself with & or nohup.
+- WHEN YOU FINISH, LEAVE EVERYTHING RUNNING. Do not kill the serve, do not kill the
+  app, do not run "$VERIFY_DRIVER" stop. The harness verifies the surface's identity
+  against the LIVE app after you finish, then tears everything down itself. A surface
+  you shut down cannot be attested and the task will FAIL.
+
+ATTESTATION (the harness proves identity; you cannot):
+- Whenever the task carries an "attestation" object, the HARNESS runs that channel
+  itself — after your session ends, against the still-live surface, before teardown.
+  Nothing you write anywhere, including under VERIFY_ARTIFACTS_DIR, counts as proof:
+  a file in your own working space proves only that you can write files. A pass the
+  harness cannot independently attest is rejected as unproven, whatever your
+  screenshots or your report say.
+- The attest subcommands are SELF-CHECK aids, and worth running: kind "http-endpoint"
+  → attest http <urlPath>; "dom-marker" → attest dom <selector>; "cdp-token" →
+  attest cdp <expression> <expected>; "window-identity" → attest window
+  <titlePattern>. A failure tells you your serve step is wrong (a stale process, the
+  user's own app, a missing marker route) while you can still fix it and re-serve —
+  which is exactly when that information is useful. Running one is never what makes
+  the attestation count, and skipping one never makes it fail.
 - You may echo what you saw in the report's optional "attestation" field
   ({ "verified": bool, "kind": "...", "detail": "..." }) — that is for humans reading
   the verdict; it is never treated as proof.
@@ -689,7 +770,22 @@ function executableFingerprint(source: {
 }
 
 /**
- * Does the composed task still match the runbook revision it was pinned to?
+ * What the REQUEST expects of the record its pin resolves to, beyond the
+ * content compare. Defaulted to the ORDINARY posture so a call site that
+ * forgets to pass it gets the STRICTER of the two answers (proven-status
+ * required, no version equality) rather than the more permissive one — the same
+ * fail-safe direction every other gate in this file picks.
+ */
+export interface RunbookPinExpectations {
+  /** The §3.6 setup-flow proof run (`VerificationAgentRequest.setupProof`). */
+  setupProof: boolean;
+  /** The record CAS version stamped on the request row, or null when unstamped. */
+  localVersion: number | null;
+}
+
+/**
+ * Does the composed task still match the runbook revision it was pinned to —
+ * AND is that revision still the one this request is entitled to execute?
  *
  * WHY THIS EXISTS AT ALL (§5.2 seam 3, the v2 correction). The verifier runs in
  * a DETACHED snapshot at the task's sha, so the runbook is unresolvable from
@@ -701,6 +797,35 @@ function executableFingerprint(source: {
  * here. A verdict is a claim about a specific tree; a verdict produced by
  * commands from a different tree is not a weaker claim, it is a false one.
  *
+ * CONTENT EQUALITY IS NOT THE WHOLE CHECK, because a record carries two facts a
+ * hash cannot: its STATUS and its VERSION, and each matters to exactly one of
+ * the two request kinds.
+ *
+ *  - An ORDINARY request additionally requires `status === 'proven'`. The §3.2
+ *    degrade gate already refused to enqueue an unproven build/serve task, so a
+ *    record that is `'unproven-draft'` BY THE TIME THE RUNNER LOOKS was demoted
+ *    in the window between enqueue and deploy — a real drift signal (an edited
+ *    dev script, a moved host fingerprint) that the store recorded and this
+ *    request would otherwise execute straight past. Resolving by hash alone
+ *    cannot see it: the demotion changes the row's status, never its content
+ *    address.
+ *  - A SETUP-PROOF request instead requires `version === localVersion`, and
+ *    deliberately does NOT require `'proven'` — proving the draft is the entire
+ *    point, so a proven-status requirement would deadlock the bootstrap. The
+ *    version equality that would be wrong for an ordinary request (see
+ *    {@link VerificationAgentRequest.runbookLocalVersion}) is exactly right
+ *    here: the flow registered a draft and immediately asked for a proof OF
+ *    THAT draft, so a `registerDraft` landing mid-flight means the proof about
+ *    to be produced would be recorded against content the record no longer
+ *    holds. `markProven`'s own CAS would decline the flip afterwards anyway —
+ *    rejecting here just declines it BEFORE spending a deployment on a proof
+ *    that could never be recorded.
+ *
+ * Both rejections are env-class by construction at the call site (a status/
+ * version read is a harness fact, never model prose): a demotion race or a
+ * re-registration is host/state drift, not a defect in the deliverable, and
+ * re-running the lane's implement agent could not fix either.
+ *
  * Returns the mismatch DETAIL rather than a bare boolean so the rejection can
  * name what actually differs — the caller puts it on the request row, where it
  * is the only thing a human has to work from.
@@ -710,6 +835,7 @@ export function checkRunbookPin(
   modality: VerificationModality,
   task: VerificationTaskV1,
   hash: string,
+  expectations: RunbookPinExpectations = { setupProof: false, localVersion: null },
 ): { ok: true } | { ok: false; detail: string } {
   if (record === null) {
     return {
@@ -733,6 +859,21 @@ export function checkRunbookPin(
       detail: `the composed task's build/serve/attestation do not match pinned runbook ${hash.slice(0, 12)} (record v${record.version}, status "${record.status}") — expected ${expected}, task carries ${actual}`,
     };
   }
+  if (expectations.setupProof) {
+    if (expectations.localVersion !== null && record.version !== expectations.localVersion) {
+      return {
+        ok: false,
+        detail: `setup-proof request pinned runbook ${hash.slice(0, 12)} at record v${expectations.localVersion}, but the record is now v${record.version} — it was re-registered mid-flight, so this proof would attest to a superseded revision`,
+      };
+    }
+    return { ok: true };
+  }
+  if (record.status !== 'proven') {
+    return {
+      ok: false,
+      detail: `runbook revision not proven: pinned runbook ${hash.slice(0, 12)} (record v${record.version}) is "${record.status}" — it was demoted between this request's enqueue and its deployment`,
+    };
+  }
   return { ok: true };
 }
 
@@ -747,25 +888,11 @@ export const ATTESTATION_MISSING_MESSAGE =
 /** Explanatory note attached when a pass is capped for having no attestation channel at all. */
 export const ATTESTATION_UNCAPPED_MESSAGE = 'no attestation channel — pass capped at low_confidence';
 
-/**
- * The driver-written attestation record, as the runner consumes it (a
- * structural subset of driverCore's `DriverAttestRecord`, so the file's
- * contents drop straight in). `kind` is a plain `string` on purpose: an
- * unrecognized channel name must simply MATCH NO declared spec — the floor
- * compares it to the task's declared kind, and a value outside the union can
- * only ever fail that comparison, which is the conservative direction.
- */
-export interface AttestationRecord {
-  ok: boolean;
-  kind: string;
-  detail: string;
-}
-
 /** What the floor decided about a PASS report's identity proof. */
 export type AttestationFloorOutcome =
-  /** The declared channel came up and matched (or is true by construction). */
+  /** The declared channel was probed and matched (or is true by construction). */
   | { kind: 'verified'; channel: AttestationSpec['kind']; detail: string }
-  /** A channel WAS declared but its driver record is absent or names a different channel. */
+  /** A channel WAS declared but the harness's own probe did not verify it. */
   | { kind: 'missing'; detail: string }
   /** No channel was declared at all — the pass is advisory, capped at low_confidence. */
   | { kind: 'uncapped'; detail: string };
@@ -793,26 +920,32 @@ export function effectiveAttestationSpec(task: VerificationTaskV1): AttestationS
 }
 
 /**
- * Apply §7.1's floor to a PASS report, given the effective spec and the
- * driver-written attestation record.
+ * Apply §7.1's floor to a PASS report, given the effective spec and the result
+ * of the HARNESS's own identity probe.
  *
- *  - `file-identity` ⇒ `verified` without consulting any record (see
+ *  - `file-identity` ⇒ `verified` without probing anything (see
  *    {@link effectiveAttestationSpec}).
- *  - Any other declared spec ⇒ `verified` ONLY when the record exists, says
- *    `ok:true`, AND names the SAME channel. A record for a different channel
- *    does not satisfy the declaration: proving a window title says nothing
- *    about the HTTP endpoint the task said it would prove. Anything else is
- *    `missing` — §7.1's hard rule, "no attestation ⇒ no `passed`, period".
+ *  - Any other declared spec ⇒ `verified` ONLY when the harness probed that
+ *    channel and it came back `verified`. Anything else is `missing` — §7.1's
+ *    hard rule, "no attestation ⇒ no `passed`, period". Note that "the channel
+ *    disagreed" and "the channel could not be reached" deliberately land in the
+ *    SAME bucket: an unproven identity is unproven regardless of why, and
+ *    splitting them would only invite a future softening of the second.
  *  - No spec at all ⇒ `uncapped`. This is the one place the proposal's strict
  *    wording is softened deliberately: a task that never declared a channel
  *    has not FAILED an identity check, it simply never had one, and failing it
  *    outright would break every pre-existing bare-`target.url` check. Capping
  *    it at `low_confidence` keeps the invariant that ONLY a proven surface can
  *    reach `passed`, while leaving the result advisory rather than blocking.
+ *
+ * There is no longer a "wrong channel" branch: the harness picks the channel
+ * FROM the declared spec, so the probe's `kind` always echoes it. That mismatch
+ * class existed only because the evidence used to be a file the agent chose
+ * when to write.
  */
 export function evaluateAttestationFloor(
   spec: AttestationSpec | null,
-  record: AttestationRecord | null,
+  probe: HarnessAttestationResult | null,
 ): AttestationFloorOutcome {
   if (spec === null) {
     return {
@@ -827,22 +960,16 @@ export function evaluateAttestationFloor(
       detail: 'file-identity: the runner owns the opened path, so identity holds by construction',
     };
   }
-  if (record === null) {
+  if (probe === null) {
     return {
       kind: 'missing',
-      detail: `declared channel "${spec.kind}" but the driver wrote no attestation record — the attest step never ran`,
+      detail: `declared channel "${spec.kind}" but the harness performed no identity probe`,
     };
   }
-  if (record.kind !== spec.kind) {
-    return {
-      kind: 'missing',
-      detail: `declared channel "${spec.kind}" but the driver's attestation record is for "${record.kind}"`,
-    };
+  if (!probe.verified) {
+    return { kind: 'missing', detail: `the harness probed "${spec.kind}" and it did NOT verify: ${probe.detail}` };
   }
-  if (!record.ok) {
-    return { kind: 'missing', detail: `channel "${spec.kind}" ran and FAILED: ${record.detail}` };
-  }
-  return { kind: 'verified', channel: spec.kind, detail: record.detail };
+  return { kind: 'verified', channel: spec.kind, detail: probe.detail };
 }
 
 /**
@@ -1037,29 +1164,40 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
 const defaultResolveChromium = (): Promise<string | null> => probeChromiumExecutable();
 
 /**
- * Read `<artifactsDir>/.driver/attest.json` (§7.1). FAIL-SOFT to `null` on
- * EVERY unhappy path — absent file, unreadable, unparseable, or a shape that
- * is not the driver's record — because the floor's answer for "no usable
- * record" is identical to its answer for "the channel never came up", and a
- * throw here would turn a provable verification failure into an unexplained
- * runner crash. The path is resolved through driverCore's own
- * {@link attestFilePath} so writer and reader can never drift.
+ * The REAL probes behind {@link performHarnessAttestation}, built out of the
+ * driver's own machinery rather than re-implemented: `httpGet` and
+ * `runPeekaboo` come straight off `createDefaultDriverDeps()` (which is a plain
+ * object of function references — no browser, no child process, nothing
+ * touched until one is called), and the CDP evaluation goes through driverCore's
+ * exported {@link evaluateOverCdp}, the same `connectOverCDP` path the CLI uses.
+ *
+ * Sharing the implementations is the point: the harness's authoritative probe
+ * and the agent's `attest` self-check must be able to disagree about the
+ * SURFACE, never about what "GET this path" or "match this title" means. Two
+ * spellings would eventually produce a self-check that passes and a harness
+ * probe that fails, which is the least debuggable outcome available.
  */
-const defaultReadAttestFile = async (artifactsDir: string): Promise<AttestationRecord | null> => {
-  try {
-    const raw = await readFile(attestFilePath(artifactsDir), 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.ok !== 'boolean' || typeof record.kind !== 'string') return null;
-    return {
-      ok: record.ok,
-      kind: record.kind,
-      detail: typeof record.detail === 'string' ? record.detail : '',
-    };
-  } catch {
-    return null;
-  }
+const buildHarnessAttestationDeps = (
+  peekabooBin: string,
+  logger?: LoggerLike,
+): HarnessAttestationDeps => {
+  const driver = createDefaultDriverDeps();
+  return {
+    httpGetBody: async (url, timeoutMs) => {
+      const res = await driver.httpGet(url, timeoutMs);
+      if (res.status < 200 || res.status >= 300) {
+        // A non-2xx is a REJECTION, not an empty body: the probe contract is
+        // "resolve only what the surface actually served", so a 404 page that
+        // happened to echo the nonce could never be read as a pass.
+        throw new Error(`${url} returned HTTP ${res.status}`);
+      }
+      return res.body;
+    },
+    cdpEvaluate: (port, expression, timeoutMs) => evaluateOverCdp(port, expression, timeoutMs),
+    listNativeWindows: async () =>
+      extractWindowTitles(await driver.runPeekaboo(peekabooBin, peekabooListWindowsArgs(), PEEKABOO_TIMEOUT_MS)),
+    ...(logger ? { logger } : {}),
+  };
 };
 
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
@@ -1128,6 +1266,42 @@ const defaultReapBrowser = (artifactsDir: string): void => {
   }
 };
 
+/**
+ * Kill the process GROUP the driver's `serve` command started (mirrors
+ * {@link defaultReapBrowser}, with `-pid` in place of `pid`). The group is the
+ * unit that matters: a dev server is a shell wrapping a node wrapping a bundler,
+ * and killing only the leader orphans the children that actually hold the port.
+ *
+ * THE PID FILE IS A CLEANUP AID, NOT A TRUST INPUT — and the distinction is the
+ * whole reason serve moved into the driver. `.driver/serve.pid` sits in
+ * agent-writable space, so its contents are exactly as forgeable as
+ * `attest.json` was. The difference is what a forgery BUYS: a bogus pid makes
+ * the harness kill the wrong thing or nothing at all, which harms the agent's
+ * own environment and leaks a port the scheduler's probe will quarantine. It
+ * cannot make an unproven surface look proven, because identity is decided by a
+ * live probe that reads nothing off disk. That is why this file may live here
+ * and the attestation record may not.
+ */
+const defaultReapServe = (artifactsDir: string): void => {
+  try {
+    const raw = readFileSync(servePidFilePath(artifactsDir), 'utf8');
+    const pid = Number.parseInt(raw.trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 1) return;
+    try {
+      process.kill(pid, 0); // alive?
+    } catch {
+      return; // already gone
+    }
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      // best-effort — the scheduler's leased-port probe + quarantine is the backstop.
+    }
+  } catch {
+    // no serve.pid / unreadable — the agent never started one through the driver.
+  }
+};
+
 // ---------------------------------------------------------------------------
 // VerificationAgentRunner
 // ---------------------------------------------------------------------------
@@ -1137,6 +1311,21 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
 
   constructor(deps: VerificationAgentRunnerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * The production {@link VerificationAgentRunnerDeps.attest} thunk: the pure
+   * evaluator bound to the real probes. Built per call rather than once at
+   * construction because the probes are only ever needed on the pass path of a
+   * request that declared a non-trivial channel — most runs never build one.
+   */
+  private defaultAttest(logger: LoggerLike | undefined): NonNullable<VerificationAgentRunnerDeps['attest']> {
+    const peekabooBin = this.deps.peekabooBin ?? DEFAULT_PEEKABOO_BIN;
+    return (spec, args) =>
+      performHarnessAttestation(spec, {
+        ...args,
+        deps: buildHarnessAttestationDeps(peekabooBin, logger),
+      });
   }
 
   /**
@@ -1161,6 +1350,58 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * §3.1 EVIDENCE INTEGRITY — every screenshot the report REFERENCES must be a
+   * bare basename (no path traversal, mirroring `cyboflow_report_artifact`'s
+   * safety rules) AND must actually exist in the artifacts dir. Returns the
+   * violation detail for the terminal `errorMessage`, or `null` when every
+   * reference resolves.
+   *
+   * WHY BOTH REFERENCE CHANNELS ARE CHECKED. The top-level `screenshots[]`
+   * gallery is what the artifact renders; each behavior's
+   * `evidence.screenshots[]` is what a human — or the merge gate's reader —
+   * consults to decide whether that behavior was genuinely exercised. Both are
+   * model-authored free text. Validating only the gallery (which is all the
+   * pre-existing loop did) leaves the actual EVIDENCE claim unchecked: a report
+   * can pass every behavior citing `login-success.png`, publish an empty
+   * gallery, and sail through with a fabricated audit trail. So both are
+   * compared against the one thing a model cannot author — the directory
+   * listing.
+   *
+   * EVERY violation is collected before returning, rather than first-wins,
+   * because the terminal message is all a human gets: "these four files do not
+   * exist" reads as fabrication, whereas one name at a time reads as a typo.
+   * Each distinct name is probed ONCE (the two channels overlap heavily by
+   * design — the gallery is normally the union of the evidence lists).
+   */
+  private async validateReportScreenshots(
+    report: VerificationReportV1,
+    artifactsDir: string,
+  ): Promise<string | null> {
+    const fileExists = this.deps.fileExists ?? defaultFileExists;
+    const referenced = new Set<string>([
+      ...report.screenshots.map((s) => s.fileName),
+      ...report.behaviors.flatMap((b) => b.evidence.screenshots),
+    ]);
+    const notBare: string[] = [];
+    const missing: string[] = [];
+    for (const fileName of referenced) {
+      if (basename(fileName) !== fileName) {
+        notBare.push(fileName);
+        continue;
+      }
+      if (!(await fileExists(join(artifactsDir, fileName)))) missing.push(fileName);
+    }
+    const problems: string[] = [];
+    if (notBare.length > 0) {
+      problems.push(`must be bare filenames: ${notBare.map((f) => `"${f}"`).join(', ')}`);
+    }
+    if (missing.length > 0) {
+      problems.push(`not found in artifacts dir: ${missing.map((f) => `"${f}"`).join(', ')}`);
+    }
+    return problems.length > 0 ? `report references screenshots that ${problems.join('; ')}` : null;
   }
 
   /**
@@ -1206,10 +1447,23 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
 
   /**
    * Deploy the agent for one request and return the mapped verdict. NEVER throws
-   * for an ordinary failure — every infra/agent error maps to a fail-open
-   * `skipped` (or `timeout` on abort) so a verification problem can never wedge a
-   * lane; only a truly unexpected error would escape. Teardown (abort the query,
-   * stop the driver, reap the browser, dispose the snapshot) runs on EVERY path.
+   * for an ordinary failure — every INFRA error maps to a fail-open `skipped`
+   * (or `timeout` on abort) so a verification problem can never wedge a lane;
+   * only a truly unexpected error would escape. Teardown (abort the query, stop
+   * the driver, reap the browser, dispose the snapshot) runs on EVERY path.
+   *
+   * "INFRA" IS NARROWER THAN "AGENT" HERE, and the line matters more than
+   * anything else in this method (§3.1). `skipped` ADVANCES the lane at the
+   * merge gate, so fail-open is only ever safe for a failure the HARNESS
+   * observed: a preflight check, a snapshot that would not provision, a pin that
+   * no longer resolves, a transport error from our own SDK layer, an
+   * unattributable build failure in the dirty shared worktree. Anything the
+   * MODEL authored after a successful deploy — an unparseable report, a
+   * screenshot reference with no file behind it, a pass with no attestation —
+   * maps to a blocking `failed` instead, because a fail-open there is a lane
+   * advancing on a verification that never happened. The scheduler keeps one
+   * backstop for the same invariant (`settleAgentTerminal`); this method is
+   * where the statuses are meant to be right in the first place.
    */
   async run(req: VerificationAgentRequest): Promise<VerificationAgentRunResult> {
     const logger = this.deps.logger;
@@ -1255,7 +1509,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     const resolveRunbookByHash = this.deps.resolveRunbookByHash;
     if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
       const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
-      const pinned = checkRunbookPin(record, modality, req.task, req.runbookHash);
+      const pinned = checkRunbookPin(record, modality, req.task, req.runbookHash, {
+        setupProof: req.setupProof === true,
+        localVersion: typeof req.runbookLocalVersion === 'number' ? req.runbookLocalVersion : null,
+      });
       if (!pinned.ok) {
         logger?.warn('[VerificationAgentRunner] runbook pin rejected; skipping without deploy', {
           runId: req.runId,
@@ -1316,6 +1573,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;
     let env: Record<string, string> | null = null;
+    // §7.1: the per-REQUEST identity secret. Minted HERE, before the env is
+    // built, because two consumers need the same value: the agent's environment
+    // (so its serve step can inject it into the deliverable) and the HARNESS's
+    // own post-session probe (which asks the surface to hand it back). The
+    // second is what makes it evidence — the agent knowing the nonce proves
+    // nothing about the agent, only about whatever surface can echo it.
+    const attestNonce = randomUUID();
     // Hoisted out of the try so the outer catch can report the provisioning mode
     // it failed under (the §3.1 classifier's `'deliverable'` gate is
     // snapshot-only, so an unknown mode must stay `undefined`, never guessed).
@@ -1370,12 +1634,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         VERIFY_ARTIFACTS_DIR: req.artifactsDir,
         VERIFY_DRIVER_PORT: String(req.verifyDriverPort),
         VERIFY_DRIVER: driverScriptPath,
-        // §7.1: the per-REQUEST identity secret. Minted fresh here (never
-        // reused, never derived from anything the deliverable could guess) so
-        // that a surface handing it back cannot be a stale server, a warm
+        // Never reused and never derived from anything the deliverable could
+        // guess, so a surface handing it back cannot be a stale server, a warm
         // cache, or the user's own running app — only something this request's
         // serve step injected can carry it.
-        VERIFY_ATTEST_NONCE: randomUUID(),
+        VERIFY_ATTEST_NONCE: attestNonce,
         VERIFY_MODALITY: modality,
         ...(modality === 'native-screen'
           ? { VERIFY_PEEKABOO_BIN: this.deps.peekabooBin ?? DEFAULT_PEEKABOO_BIN }
@@ -1444,8 +1707,27 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         emitSeamError('verify-agent-deploy-failed', err instanceof Error ? err : new Error(message), {
           agentKey: 'visual-verify',
         });
+        // THE ONE DEPLOYED SKIP THAT IS NOT A HOLE (§3.1). Everything else the
+        // agent can produce after a deploy now maps to a blocking status — an
+        // unparseable report, a phantom screenshot, an unattested pass — because
+        // `skipped` ADVANCES the lane and a model must never be able to author
+        // its own advance. This path is different in kind: the exception was
+        // raised by OUR SDK layer (a transport reset, a 5xx, a stream that
+        // closed), so it is HARNESS-OBSERVED and model CONTENT cannot shape it.
+        // No report exists to have been judged, and nothing about the
+        // deliverable has been claimed either way.
+        //
+        // Blocking on it would be actively harmful: every Anthropic API hiccup
+        // would become a lane-blocking FAIL that sends an implement agent to
+        // "fix" code the harness never even looked at — the §3.1 failure mode
+        // this whole classification exists to avoid, just with a different
+        // trigger. So it stays a fail-open skip, flagged
+        // ({@link VerificationAgentRunResult.transportFailure}) so the
+        // scheduler's gate-integrity guard can tell it apart from a skip the
+        // agent talked its way into.
         return {
           status: 'skipped',
+          transportFailure: true,
           errorMessage: `agent deploy error: ${message}`,
           fileNames: [],
           ...deployedProvenance,
@@ -1457,12 +1739,35 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       }
 
       // (d) Validate the report harness-side (never trust the model verbatim).
+      //
+      // A REJECTION HERE IS BLOCKING, NOT A SKIP (§3.1 gate integrity). This
+      // return used to be a fail-open `'skipped'`, which is the most dangerous
+      // shape in the whole engine: `skipped` ADVANCES the lane at the merge gate
+      // (mergeGateLaneAdvance), so a session that returned prose, a truncated
+      // object, a report naming behaviors nobody asked about, or literally
+      // nothing at all (`structured === null` after a clean drain — the
+      // normalizer's `root: expected an object`) would ship the lane's code with
+      // NO verification having happened. And unlike a transport error, this
+      // outcome is entirely MODEL-AUTHORED: the one thing an agent must never be
+      // able to do is advance its own lane by emitting garbage.
+      //
+      // The harness contract states the schema verbatim, so a violation is a
+      // contract violation with a deployed session behind it — exactly the
+      // "cannot attribute this to the environment" case §3.1 sends to
+      // `'ambiguous'`, which stays blocking. Attribution stays honest: the
+      // classifier sees no report outcome and no harness evidence, so it never
+      // charges this to the deliverable either.
       const expectedIds = req.task.behaviors.map((b) => b.id);
       const normalized = normalizeVerificationReportV1(raw, expectedIds);
       if (!normalized.ok) {
+        logger?.warn('[VerificationAgentRunner] structured report failed validation; blocking', {
+          runId: req.runId,
+          requestId: req.requestId,
+          error: normalized.error,
+        });
         return {
-          status: 'skipped',
-          errorMessage: `invalid report: ${normalized.error}`,
+          status: 'failed',
+          errorMessage: `invalid structured report: ${normalized.error}`,
           fileNames: [],
           ...deployedProvenance,
         };
@@ -1482,26 +1787,24 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         });
       }
 
-      // Every screenshots[].fileName must be a BARE basename that exists in the
-      // artifacts dir (mirrors cyboflow_report_artifact's safety rules).
-      const fileExists = this.deps.fileExists ?? defaultFileExists;
-      for (const shot of report.screenshots) {
-        if (basename(shot.fileName) !== shot.fileName) {
-          return {
-            status: 'skipped',
-            errorMessage: `report screenshot "${shot.fileName}" must be a bare filename`,
-            fileNames: [],
-            ...deployedProvenance,
-          };
-        }
-        if (!(await fileExists(join(req.artifactsDir, shot.fileName)))) {
-          return {
-            status: 'skipped',
-            errorMessage: `report screenshot "${shot.fileName}" not found in artifacts dir`,
-            fileNames: [],
-            ...deployedProvenance,
-          };
-        }
+      // (d0) Every screenshot the report REFERENCES must be a bare basename that
+      // really exists in the artifacts dir — BLOCKING when it does not (§3.1
+      // gate integrity, same argument as the validation branch above: a
+      // model-authored claim must never be able to produce an advancing skip).
+      const phantom = await this.validateReportScreenshots(report, req.artifactsDir);
+      if (phantom !== null) {
+        logger?.warn('[VerificationAgentRunner] report references screenshots that do not exist; blocking', {
+          runId: req.runId,
+          requestId: req.requestId,
+          detail: phantom,
+        });
+        return {
+          status: 'failed',
+          errorMessage: phantom,
+          report,
+          fileNames: [],
+          ...deployedProvenance,
+        };
       }
 
       // (d2) §7.1 ATTESTATION FLOOR — evaluated on the PASS path only, and
@@ -1510,20 +1813,42 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // mutated snapshot still ADVANCES the lane, so a surface that was never
       // identified must fail first rather than be softened into an advance.
       //
-      // The record is read from the DRIVER'S file — never `report.attestation`,
-      // which is the agent's own narrative echo. That asymmetry is the whole
-      // point of §7.1: the harness must not accept a model's word that it
-      // proved something.
+      // THE HARNESS PROBES; IT DOES NOT READ. The evidence is a live probe this
+      // process performs — never `report.attestation` (the agent's narrative
+      // echo) and never anything under VERIFY_ARTIFACTS_DIR (which the agent can
+      // write). This runs HERE, inside the try, so it happens after the session
+      // ended but before the `finally` tears the surface down: an attestation is
+      // a question you can only ask something that is still alive, which is also
+      // why the harness contract forbids the agent from stopping its own serve.
       let floor: AttestationFloorOutcome | null = null;
       if (report.outcome === 'pass') {
         const spec = effectiveAttestationSpec(req.task);
-        // Only a channel that needs proving costs a read: `file-identity` is
-        // true by construction and "no spec" has nothing to look for.
-        const record =
-          spec !== null && spec.kind !== 'file-identity'
-            ? await (this.deps.readAttestFile ?? defaultReadAttestFile)(req.artifactsDir)
-            : null;
-        floor = evaluateAttestationFloor(spec, record);
+        // Only a channel that needs proving costs a probe: `file-identity` is
+        // true by construction and "no spec" has nothing to ask.
+        let probe: HarnessAttestationResult | null = null;
+        if (spec !== null && spec.kind !== 'file-identity') {
+          const attest = this.deps.attest ?? this.defaultAttest(logger);
+          try {
+            probe = await attest(spec, {
+              verifyPort: req.verifyPort,
+              driverPort: req.verifyDriverPort,
+              nonce: attestNonce,
+            });
+          } catch (err) {
+            // performHarnessAttestation never throws by contract; this catch is
+            // the one cheap backstop for a mis-wired injection, and it exists
+            // because the alternative is catastrophic in the wrong direction —
+            // an escaping throw lands in the outer catch, which returns a
+            // fail-open `skipped`, i.e. the lane ADVANCES on the exact unproven
+            // pass this floor exists to block. Unverified is the safe reading.
+            probe = {
+              verified: false,
+              kind: spec.kind,
+              detail: `the harness attestation probe threw: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        }
+        floor = evaluateAttestationFloor(spec, probe);
         if (floor.kind === 'missing') {
           // Terminal FAIL, not a skip. The §3.1 classifier sees a report
           // outcome of 'pass' (not 'fail'), so this lands 'ambiguous' — which
@@ -1595,8 +1920,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       };
     } finally {
       // (f) Teardown — ALWAYS, abort-safe, best-effort. Stop the browser via the
-      // driver, independently reap its pid, dispose the snapshot. The scheduler
-      // owns the leased-port probe + quarantine after this returns.
+      // driver, independently reap its pid, kill the serve's process group,
+      // dispose the snapshot. The scheduler owns the leased-port probe +
+      // quarantine after this returns.
+      //
+      // ORDERING IS LOAD-BEARING: every teardown below happens AFTER the
+      // attestation probe in the try block, because the probe interrogates the
+      // LIVE surface. Moving any of it earlier — or letting the agent do its own
+      // cleanup, which is why the harness contract forbids that — would make
+      // every declared channel unprovable and every honest pass a FAIL.
       req.signal.removeEventListener('abort', onAbort);
       controller.abort();
       if (driverScriptPath && env) {
@@ -1612,6 +1944,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       const reapBrowser = this.deps.reapBrowser ?? defaultReapBrowser;
       try {
         reapBrowser(req.artifactsDir);
+      } catch {
+        // best-effort
+      }
+      const reapServe = this.deps.reapServe ?? defaultReapServe;
+      try {
+        reapServe(req.artifactsDir);
       } catch {
         // best-effort
       }

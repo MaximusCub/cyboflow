@@ -24,6 +24,7 @@ import {
   ATTESTATION_MISSING_MESSAGE,
   ATTESTATION_UNCAPPED_MESSAGE,
   RUNBOOK_MISMATCH_PREFIX,
+  VERIFY_HARNESS_CONTRACT,
   type VerificationAgentRunnerDeps,
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
@@ -117,7 +118,8 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   codexQuery: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
   writeTranscript: ReturnType<typeof vi.fn>;
-  readAttestFile: ReturnType<typeof vi.fn>;
+  attest: ReturnType<typeof vi.fn>;
+  reapServe: ReturnType<typeof vi.fn>;
 } {
   const dispose = vi.fn(async () => {});
   const stopDriver = vi.fn(async () => {});
@@ -125,12 +127,14 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   const codexQuery = vi.fn(async () => makeOutcome(validReport()));
   const warn = vi.fn();
   const writeTranscript = vi.fn(async () => {});
-  // §7.1: a driver-written record that MATCHES the default fixture's declared
-  // channel. Injected (never the real fs reader) so the suite never touches
-  // disk and every floor branch is driven explicitly.
-  const readAttestFile = vi.fn(async () => ({
-    ok: true,
-    kind: 'http-endpoint',
+  const reapServe = vi.fn();
+  // §7.1: the HARNESS's own probe, faked. It stands in for a live HTTP GET
+  // against the surface the agent just drove — injected so the suite dials no
+  // socket and every floor branch is driven explicitly. Note what it is NOT: a
+  // reader of anything the agent could have written.
+  const attest = vi.fn(async () => ({
+    verified: true,
+    kind: 'http-endpoint' as const,
     detail: 'endpoint returned this request nonce',
   }));
   const provision = vi.fn(
@@ -161,8 +165,9 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
     stopDriver,
     reapBrowser: vi.fn(),
+    reapServe,
     writeTranscript,
-    readAttestFile,
+    attest,
     ...overrides,
   };
   return {
@@ -173,7 +178,8 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     codexQuery,
     warn,
     writeTranscript,
-    readAttestFile,
+    attest,
+    reapServe,
   };
 }
 
@@ -502,7 +508,14 @@ describe('VerificationAgentRunner.run', () => {
     expect(result.errorMessage).toContain('not resolvable');
   });
 
-  it('skips when the report fails validation (unknown behavior id)', async () => {
+  // -------------------------------------------------------------------------
+  // §3.1 GATE INTEGRITY — a MODEL-AUTHORED contract violation after a deploy is
+  // BLOCKING, never a fail-open skip. `skipped` ADVANCES the lane at the merge
+  // gate, so every one of these used to let an agent ship a lane's code by
+  // returning garbage instead of a report.
+  // -------------------------------------------------------------------------
+
+  it('FAILS (not skips) when the report fails validation (unknown behavior id)', async () => {
     const { runner, dispose } = makeRunner({
       query: async () =>
         makeOutcome(
@@ -512,28 +525,84 @@ describe('VerificationAgentRunner.run', () => {
         ),
     });
     const result = await runner.run(makeReq());
-    expect(result.status).toBe('skipped');
-    expect(result.errorMessage).toContain('invalid report');
+    expect(result.status).toBe('failed');
+    expect(result.deployed).toBe(true);
+    expect(result.errorMessage).toContain('invalid structured report');
     expect(dispose).toHaveBeenCalledTimes(1); // teardown still runs
   });
 
-  it('skips when a reported screenshot does not exist in the artifacts dir', async () => {
+  it('FAILS when the session drained without ANY structured output (null)', async () => {
+    // The degenerate garbage case: a clean drain that produced no report at all.
+    // A skip here would advance the lane on a verification that never spoke.
+    const { runner } = makeRunner({ query: async () => ({ structured: null, transcript: null }) });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('invalid structured report');
+  });
+
+  it('FAILS when a reported screenshot does not exist in the artifacts dir', async () => {
     // Path-aware: the driver CLI must stay PRESENT, or the §3.5 preflight would
     // short-circuit this request before the screenshot check is ever reached.
     const { runner } = makeRunner({ fileExists: async (p: string) => !p.endsWith('s.png') });
     const result = await runner.run(makeReq());
-    expect(result.status).toBe('skipped');
-    expect(result.errorMessage).toContain('not found');
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('not found in artifacts dir');
+    expect(result.errorMessage).toContain('s.png');
   });
 
-  it('skips when a reported screenshot is not a bare filename', async () => {
+  it("FAILS on a phantom screenshot cited ONLY by a behavior's evidence (the gallery is clean)", async () => {
+    // The attack the gallery-only check missed: publish an empty/valid gallery,
+    // then cite a file nobody wrote as the EVIDENCE that a behavior passed.
+    const { runner } = makeRunner({
+      query: async () =>
+        makeOutcome(
+          validReport({
+            behaviors: [
+              {
+                id: 'b1',
+                result: 'pass',
+                evidence: { screenshots: ['s.png', 'never-written.png'], notes: 'ok' },
+              },
+            ],
+          }),
+        ),
+      fileExists: async (p: string) => !p.endsWith('never-written.png'),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('never-written.png');
+  });
+
+  it('names EVERY phantom file at once, so the terminal reads as fabrication rather than a typo', async () => {
+    const { runner } = makeRunner({
+      query: async () =>
+        makeOutcome(
+          validReport({
+            behaviors: [
+              { id: 'b1', result: 'pass', evidence: { screenshots: ['b.png'], notes: 'ok' } },
+            ],
+            screenshots: [
+              { fileName: 'a.png', caption: 'x' },
+              { fileName: 's.png', caption: 'the widget' },
+            ],
+          }),
+        ),
+      fileExists: async (p: string) => p.endsWith('s.png') || p.endsWith('driverCli.js'),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('a.png');
+    expect(result.errorMessage).toContain('b.png');
+  });
+
+  it('FAILS when a reported screenshot is not a bare filename', async () => {
     const { runner } = makeRunner({
       query: async () =>
         makeOutcome(validReport({ screenshots: [{ fileName: '../escape.png', caption: 'x' }] })),
     });
     const result = await runner.run(makeReq());
-    expect(result.status).toBe('skipped');
-    expect(result.errorMessage).toContain('bare filename');
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('bare filenames');
   });
 
   it('routes a snapshot build failure to failed; a live-fallback build failure to skipped', async () => {
@@ -795,6 +864,19 @@ describe('VerificationAgentRunner.run — §3.5 preflight', () => {
     expect(result.status).toBe('skipped');
     expect(result.deployed).toBe(true);
     expect(result.provisionMode).toBe('snapshot');
+    // …and it is FLAGGED as harness-observed, which is what exempts it from the
+    // scheduler's gate-integrity guard. Every OTHER deployed skip is a model
+    // claim and gets blocked; this one is our own SDK layer raising.
+    expect(result.transportFailure).toBe(true);
+  });
+
+  it('a deployed skip the MODEL produced carries no transport flag (nothing exempts it)', async () => {
+    // The contrast case: a report the harness rejected is not a transport
+    // failure, and must never wear the flag that makes a skip advance.
+    const { runner } = makeRunner({ query: async () => ({ structured: {}, transcript: null }) });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed'); // blocking at source, so the flag never applies
+    expect(result.transportFailure).toBeUndefined();
   });
 
   it('CDP-attach mode skips the chromium check entirely (the driver attaches, it never launches one)', async () => {
@@ -887,28 +969,33 @@ describe('effectiveAttestationSpec', () => {
 });
 
 describe('evaluateAttestationFloor', () => {
-  it('file-identity is verified by construction, with no record consulted', () => {
+  it('file-identity is verified by construction, with no probe consulted', () => {
     expect(evaluateAttestationFloor({ kind: 'file-identity' }, null)).toMatchObject({ kind: 'verified' });
   });
 
-  it('a matching ok record verifies the declared channel', () => {
+  it('a verified probe verifies the declared channel', () => {
     const outcome = evaluateAttestationFloor(
       { kind: 'cdp-token', expression: 'window.__B__', expected: 'sha' },
-      { ok: true, kind: 'cdp-token', detail: 'matched' },
+      { verified: true, kind: 'cdp-token', detail: 'matched' },
     );
     expect(outcome).toEqual({ kind: 'verified', channel: 'cdp-token', detail: 'matched' });
   });
 
-  it('a MISSING record, a FAILED record, and a record for a DIFFERENT channel all read as missing', () => {
+  it('an UNVERIFIED probe and a probe that never ran both read as missing', () => {
+    // Deliberately one bucket: "the channel disagreed" and "the channel could
+    // not be reached" are both unproven identity, and only the reason differs.
     const spec = { kind: 'http-endpoint', urlPath: '/x' } as const;
     expect(evaluateAttestationFloor(spec, null).kind).toBe('missing');
-    expect(evaluateAttestationFloor(spec, { ok: false, kind: 'http-endpoint', detail: 'no nonce' }).kind).toBe('missing');
-    expect(evaluateAttestationFloor(spec, { ok: true, kind: 'window-identity', detail: 'title' }).kind).toBe('missing');
+    expect(
+      evaluateAttestationFloor(spec, { verified: false, kind: 'http-endpoint', detail: 'no nonce' }).kind,
+    ).toBe('missing');
   });
 
   it('no spec at all is uncapped (advisory), never missing', () => {
     expect(evaluateAttestationFloor(null, null).kind).toBe('uncapped');
-    expect(evaluateAttestationFloor(null, { ok: true, kind: 'dom-marker', detail: 'x' }).kind).toBe('uncapped');
+    expect(
+      evaluateAttestationFloor(null, { verified: true, kind: 'dom-marker', detail: 'x' }).kind,
+    ).toBe('uncapped');
   });
 });
 
@@ -968,44 +1055,75 @@ describe('coerceDriveUnsupportedBehaviors', () => {
 // ---------------------------------------------------------------------------
 
 describe('VerificationAgentRunner.run — §7.1 attestation floor', () => {
-  it('a declared channel with a MATCHING driver record leaves the pass alone', async () => {
-    const { runner, readAttestFile } = makeRunner();
+  it('a declared channel the HARNESS probed and verified leaves the pass alone', async () => {
+    const { runner, attest, query } = makeRunner();
     const result = await runner.run(makeReq());
     expect(result.status).toBe('passed');
     expect(result.verdict?.status).toBe('pass');
-    expect(readAttestFile).toHaveBeenCalledWith('/artifacts');
+    // Probed with the task's own spec, the leased ports, and THE SAME nonce the
+    // agent's env carried — the surface must hand back this request's secret.
+    expect(attest).toHaveBeenCalledWith(
+      { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+      {
+        verifyPort: 29260,
+        driverPort: 29261,
+        nonce: query.mock.calls[0][0].env.VERIFY_ATTEST_NONCE,
+      },
+    );
   });
 
-  it('a declared channel with NO driver record FAILS the pass (no attestation ⇒ no passed)', async () => {
-    const { runner } = makeRunner({ readAttestFile: async () => null });
+  it('a declared channel the harness could NOT verify FAILS the pass (no attestation ⇒ no passed)', async () => {
+    const { runner } = makeRunner({
+      attest: async () => ({ verified: false, kind: 'http-endpoint', detail: 'connect ECONNREFUSED' }),
+    });
     const result = await runner.run(makeReq());
     expect(result.status).toBe('failed');
     expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
-    expect(result.errorMessage).toContain('the attest step never ran');
+    expect(result.errorMessage).toContain('ECONNREFUSED');
     // The report is still persisted verbatim — the floor changes the verdict,
     // never the record of what the agent said.
     expect(result.report?.outcome).toBe('pass');
   });
 
-  it('a driver record that FAILED, or that names a DIFFERENT channel, fails the same way', async () => {
-    const failed = makeRunner({
-      readAttestFile: async () => ({ ok: false, kind: 'http-endpoint', detail: 'body had no nonce' }),
+  it('a probe that THROWS is treated as unverified, never as a fail-open skip', async () => {
+    // The thunk is injected, so a mis-wiring can throw even though the real
+    // implementation contracts not to. An escape would land in the outer catch
+    // and return `skipped`, which ADVANCES the lane — the one direction this
+    // floor must never fail in.
+    const { runner } = makeRunner({
+      attest: async () => {
+        throw new Error('probe wiring blew up');
+      },
     });
-    const a = await failed.runner.run(makeReq());
-    expect(a.status).toBe('failed');
-    expect(a.errorMessage).toContain('body had no nonce');
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('probe wiring blew up');
+  });
 
-    const wrongChannel = makeRunner({
-      readAttestFile: async () => ({ ok: true, kind: 'window-identity', detail: 'matched a title' }),
+  it('a PERFECT forged attest.json in the artifacts dir changes NOTHING', async () => {
+    // THE FORGERY THIS DESIGN EXISTS TO CLOSE. The agent has Bash and owns
+    // VERIFY_ARTIFACTS_DIR, so `echo '{"ok":true,...}' > .driver/attest.json`
+    // used to be a complete identity proof. Here the file is written for real
+    // and the harness's own probe says "no" — the verdict must follow the
+    // probe. `fileExists` answering true for everything is the strongest form
+    // of the fake: even a runner that went looking for the file finds it.
+    const forged = { ok: true, kind: 'http-endpoint', detail: 'attested (forged)' };
+    const { runner } = makeRunner({
+      fileExists: async () => true,
+      attest: async () => ({ verified: false, kind: 'http-endpoint', detail: 'body had no nonce' }),
     });
-    const b = await wrongChannel.runner.run(makeReq());
-    expect(b.status).toBe('failed');
-    expect(b.errorMessage).toContain('window-identity');
+    const result = await runner.run(makeReq());
+
+    expect(JSON.parse(JSON.stringify(forged)).ok).toBe(true); // the forgery is well-formed
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('body had no nonce');
   });
 
   it('a missing attestation OUTRANKS the mutation demotion — failed, not low_confidence', async () => {
     const { runner } = makeRunner({
-      readAttestFile: async () => null,
+      attest: async () => ({ verified: false, kind: 'http-endpoint', detail: 'no nonce' }),
       checkSnapshotMutated: async () => true,
     });
     const result = await runner.run(makeReq());
@@ -1013,8 +1131,8 @@ describe('VerificationAgentRunner.run — §7.1 attestation floor', () => {
     expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
   });
 
-  it('a task with NO channel caps its pass at low_confidence, without reading any record', async () => {
-    const { runner, readAttestFile } = makeRunner();
+  it('a task with NO channel caps its pass at low_confidence, without probing anything', async () => {
+    const { runner, attest } = makeRunner();
     const result = await runner.run(
       makeReq({ task: makeTask({ attestation: undefined, target: { url: 'http://127.0.0.1:29260' } }) }),
     );
@@ -1022,21 +1140,20 @@ describe('VerificationAgentRunner.run — §7.1 attestation floor', () => {
     expect(result.verdict?.status).toBe('low_confidence');
     expect(result.errorMessage).toContain(ATTESTATION_UNCAPPED_MESSAGE);
     expect(result.verdict?.feedback).toContain(ATTESTATION_UNCAPPED_MESSAGE);
-    expect(readAttestFile).not.toHaveBeenCalled();
+    expect(attest).not.toHaveBeenCalled();
   });
 
   it('the degenerate htmlPath task passes unchanged — identity holds by construction', async () => {
-    const { runner, readAttestFile } = makeRunner();
+    const { runner, attest } = makeRunner();
     const result = await runner.run(
       makeReq({ task: makeTask({ attestation: undefined, target: { htmlPath: '/tmp/out.html' } }) }),
     );
     expect(result.status).toBe('passed');
-    expect(readAttestFile).not.toHaveBeenCalled();
+    expect(attest).not.toHaveBeenCalled();
   });
 
   it('the floor never runs on a non-pass report — a fail stays a judged fail, not an attestation error', async () => {
-    const { runner, readAttestFile } = makeRunner({
-      readAttestFile: vi.fn(async () => null),
+    const { runner, attest } = makeRunner({
       query: async () =>
         makeOutcome(
           validReport({
@@ -1049,7 +1166,85 @@ describe('VerificationAgentRunner.run — §7.1 attestation floor', () => {
     expect(result.status).toBe('failed');
     expect(result.verdict?.status).toBe('fail');
     expect(result.errorMessage).toBeUndefined();
-    expect(readAttestFile).not.toHaveBeenCalled();
+    expect(attest).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run() — teardown ownership: the harness attests, THEN kills the surface
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner.run — surface lifetime', () => {
+  it('attests BEFORE any teardown — a surface torn down first could never be proven', async () => {
+    const order: string[] = [];
+    const { runner } = makeRunner({
+      attest: async () => {
+        order.push('attest');
+        return { verified: true, kind: 'http-endpoint', detail: 'nonce echoed' };
+      },
+      stopDriver: async () => {
+        order.push('stopDriver');
+      },
+      reapBrowser: () => order.push('reapBrowser'),
+      reapServe: () => order.push('reapServe'),
+    });
+    const result = await runner.run(makeReq());
+
+    expect(result.status).toBe('passed');
+    expect(order).toEqual(['attest', 'stopDriver', 'reapBrowser', 'reapServe']);
+  });
+
+  it('reaps the serve on EVERY path, including one that never reached the floor', async () => {
+    const { runner, reapServe } = makeRunner({
+      query: async () => ({ structured: null, transcript: null }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(reapServe).toHaveBeenCalledWith('/artifacts');
+  });
+
+  it('a reapServe that throws never changes the verdict (best-effort teardown)', async () => {
+    const { runner } = makeRunner({
+      reapServe: () => {
+        throw new Error('kill: no such process');
+      },
+    });
+    await expect(runner.run(makeReq())).resolves.toMatchObject({ status: 'passed' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The immutable harness contract — the text the agent is held to
+// ---------------------------------------------------------------------------
+
+describe('VERIFY_HARNESS_CONTRACT', () => {
+  it('tells the agent to start the serve THROUGH the driver', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('"$VERIFY_DRIVER" serve');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('Do NOT background the command yourself');
+  });
+
+  it('tells the agent to LEAVE the surface running, and why', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('LEAVE EVERYTHING RUNNING');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('cannot be attested and the task will FAIL');
+    // The reason, not just the rule: an agent told only "don't" reasons its way
+    // around the rule the first time cleanup looks tidy.
+    expect(VERIFY_HARNESS_CONTRACT).toContain('against the LIVE app after you finish');
+  });
+
+  it('frames attest as a SELF-CHECK and names the harness as the authority', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('SELF-CHECK aids');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('the HARNESS runs that channel');
+    // The old promise — "the harness reads the driver's own record" — was the
+    // forgeable claim; it must not come back.
+    expect(VERIFY_HARNESS_CONTRACT).not.toContain("reads the driver's own record");
+    expect(VERIFY_HARNESS_CONTRACT).toContain('including under VERIFY_ARTIFACTS_DIR, counts as proof');
+  });
+
+  it('no longer OFFERS `stop` as a subcommand, and forbids calling it', () => {
+    // It survives only as a prohibition; the subcommand list (each line indented
+    // four spaces) must not advertise it as something to reach for.
+    expect(VERIFY_HARNESS_CONTRACT).not.toContain('    "$VERIFY_DRIVER" stop');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('do not run "$VERIFY_DRIVER" stop');
   });
 });
 
@@ -1241,6 +1436,59 @@ describe('checkRunbookPin', () => {
     });
     expect(checkRunbookPin(record(), 'web', differentReady, 'a'.repeat(64)).ok).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // The RECORD checks (Codex finding 3): a content hash says "same commands",
+  // it cannot say "still the revision this request may execute".
+  // -------------------------------------------------------------------------
+
+  it('rejects an ORDINARY request whose record is no longer PROVEN (a demotion race)', () => {
+    // The §3.2 gate refused to enqueue an unproven build/serve task, so a record
+    // that reads 'unproven-draft' HERE was demoted between enqueue and deploy —
+    // real drift, invisible to a content compare (a demotion changes the row's
+    // status, never its content address).
+    const r = checkRunbookPin(record({ status: 'unproven-draft' }), 'web', matchingTask, 'a'.repeat(64), {
+      setupProof: false,
+      localVersion: 3,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.detail).toContain('not proven');
+  });
+
+  it('defaults to the ORDINARY (stricter) posture when expectations are omitted', () => {
+    // A call site that forgets the argument must get the fail-SAFE answer, not
+    // the permissive one.
+    const r = checkRunbookPin(record({ status: 'unproven-draft' }), 'web', matchingTask, 'a'.repeat(64));
+    expect(r.ok).toBe(false);
+  });
+
+  it("a SETUP-PROOF request ACCEPTS an 'unproven-draft' at the pinned version (proving it is the point)", () => {
+    const r = checkRunbookPin(record({ status: 'unproven-draft', version: 7 }), 'web', matchingTask, 'a'.repeat(64), {
+      setupProof: true,
+      localVersion: 7,
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it('a SETUP-PROOF request REJECTS a record re-registered since it was pinned', () => {
+    // Byte-identical content, so the hash resolves and the fingerprint matches:
+    // version equality is the only thing keeping this proof from attesting to a
+    // revision it never executed.
+    const r = checkRunbookPin(record({ status: 'unproven-draft', version: 8 }), 'web', matchingTask, 'a'.repeat(64), {
+      setupProof: true,
+      localVersion: 7,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.detail).toContain('setup-proof request pinned');
+  });
+
+  it('a SETUP-PROOF request with NO pinned version has nothing to CAS against and is accepted', () => {
+    const r = checkRunbookPin(record({ status: 'unproven-draft' }), 'web', matchingTask, 'a'.repeat(64), {
+      setupProof: true,
+      localVersion: null,
+    });
+    expect(r).toEqual({ ok: true });
+  });
 });
 
 describe('VerificationAgentRunner — runbook pin enforcement', () => {
@@ -1327,5 +1575,42 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
     const { runner } = makeRunner({ resolveRunbookByHash });
     await runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
     expect(resolveRunbookByHash).toHaveBeenCalledWith(1, 'web', HASH);
+  });
+
+  it('a DEMOTED record → env-class skip on an ordinary request, even though the content still matches', async () => {
+    const { runner, query } = makeRunner({
+      resolveRunbookByHash: () => ({ ...resolved, status: 'unproven-draft' }),
+    });
+    const result = await runner.run(
+      makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }),
+    );
+    expect(result.status).toBe('skipped');
+    expect(result.runbookMismatch).toBe(true);
+    expect(result.errorMessage).toContain('not proven');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('a SETUP-PROOF request deploys against that same demoted record (the bootstrap is not blocked)', async () => {
+    const { runner, query } = makeRunner({
+      resolveRunbookByHash: () => ({ ...resolved, status: 'unproven-draft' }),
+    });
+    const result = await runner.run(
+      makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2, setupProof: true }),
+    );
+    expect(result.status).toBe('passed');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("a SETUP-PROOF request whose record VERSION moved → env-class skip, no deploy", async () => {
+    const { runner, query } = makeRunner({
+      resolveRunbookByHash: () => ({ ...resolved, status: 'unproven-draft', version: 9 }),
+    });
+    const result = await runner.run(
+      makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2, setupProof: true }),
+    );
+    expect(result.status).toBe('skipped');
+    expect(result.runbookMismatch).toBe(true);
+    expect(result.errorMessage).toContain('setup-proof request pinned');
+    expect(query).not.toHaveBeenCalled();
   });
 });

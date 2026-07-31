@@ -323,8 +323,8 @@ export function createTranscriptAccumulator(): TranscriptAccumulator {
 export function forbiddenDepCommandDenyMessage(command: string): string {
   return [
     `Blocked: \`${command}\` mutates dependencies.`,
-    'Dependency install/rebuild is forbidden inside verification snapshots — deps are prepared outside the snapshot,',
-    "and this snapshot's node_modules is a SYMLINK into that shared dependency tree, so the write would not stay local to this verification.",
+    'Dependency install/rebuild is forbidden inside verification snapshots — deps are prepared and',
+    'ABI-rebuilt OUTSIDE the snapshot, so an install here would silently redo that work against the wrong ABI and burn your deadline.',
     'Do not work around it (no alternate package manager, no cd elsewhere, no hand-editing node_modules):',
     'if the deliverable cannot be built without it, report outcome "build_failed" with this message instead.',
   ].join(' ');

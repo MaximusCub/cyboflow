@@ -24,6 +24,8 @@ import {
   pidFilePath,
   runDriverCommand,
   sanitizeScreenshotName,
+  serveLogPath,
+  servePidFilePath,
   USAGE,
   type DriverAttestRecord,
   type DriverDeps,
@@ -50,6 +52,7 @@ interface FakeCalls {
   textContents: string[];
   attributes: Array<{ selector: string; name: string }>;
   evaluates: string[];
+  shells: Array<{ command: string; logPath: string }>;
 }
 
 function freshCalls(): FakeCalls {
@@ -68,6 +71,7 @@ function freshCalls(): FakeCalls {
     textContents: [],
     attributes: [],
     evaluates: [],
+    shells: [],
   };
 }
 
@@ -154,6 +158,10 @@ function makeDeps(
     connectOverCDP: vi.fn(async () => browser as unknown as Browser),
     resolveChromiumExecutable: vi.fn(async () => '/fake/chromium'),
     spawnDetachedChromium: vi.fn(async () => ({ pid: 4242 })),
+    spawnDetachedShell: vi.fn(async (args: { command: string; logPath: string }) => {
+      calls.shells.push(args);
+      return { pid: 5150 };
+    }),
     waitForCdpReady: vi.fn(async () => {}),
     closeBrowser: vi.fn(async () => {}),
     readPidFile: vi.fn(async () => null),
@@ -261,6 +269,25 @@ describe('parseArgv', () => {
       ok: true,
       command: { kind: 'screenshot', name: 'evil.png', viewport: undefined },
     });
+  });
+
+  it('parses serve, joining trailing words into ONE shell command line', () => {
+    // Both callable forms must mean the same thing: the quoted single-argument
+    // form the harness contract prescribes, and the bare form a shell would
+    // split. Anything else would make `serve pnpm dev --port 1` run `pnpm`.
+    expect(parseArgv(['serve', 'pnpm dev --port 29260'])).toEqual({
+      ok: true,
+      command: { kind: 'serve', command: 'pnpm dev --port 29260' },
+    });
+    expect(parseArgv(['serve', 'pnpm', 'dev', '--port', '29260'])).toEqual({
+      ok: true,
+      command: { kind: 'serve', command: 'pnpm dev --port 29260' },
+    });
+  });
+
+  it('rejects serve with no command (or only whitespace)', () => {
+    expect(parseArgv(['serve'])).toMatchObject({ ok: false });
+    expect(parseArgv(['serve', '   '])).toMatchObject({ ok: false });
   });
 
   it('parses stop', () => {
@@ -1016,6 +1043,73 @@ describe('runDriverCommand — native-screenshot', () => {
     const failDeps = makeDeps(withoutDir);
     expect(await runDriverCommand(['native-screenshot', 'home'], { VERIFY_MODALITY: 'native-screen' }, failDeps)).toBe(1);
     expect(withoutDir.peekaboo).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// serve — the harness-owned surface lifetime
+//
+// The command exists so the RUNNER, not the agent, owns when the deliverable
+// dies: the harness attests against the live surface after the session ends and
+// tears it down itself. These pin the two facts that makes possible — the
+// process group is recorded where the reaper looks, and the CLI returns without
+// waiting on readiness (which stays the agent's job).
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — serve', () => {
+  it('spawns the command detached, records its process group at .driver/serve.pid, and returns immediately', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const stdoutLines: string[] = [];
+    const withStdout = { ...deps, stdout: (l: string) => stdoutLines.push(l) };
+
+    const exitCode = await runDriverCommand(['serve', 'pnpm dev --port 29260'], ENV, withStdout);
+
+    expect(exitCode).toBe(0);
+    expect(calls.shells).toEqual([
+      { command: 'pnpm dev --port 29260', logPath: serveLogPath(ENV.VERIFY_ARTIFACTS_DIR) },
+    ]);
+    expect(deps.writePidFile).toHaveBeenCalledWith(servePidFilePath(ENV.VERIFY_ARTIFACTS_DIR), 5150);
+    // Nothing waited on: no readiness poll, no CDP connect, no browser.
+    expect(deps.waitForCdpReady).not.toHaveBeenCalled();
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+    expect(stdoutLines.join('\n')).toContain('serve started');
+  });
+
+  it('needs VERIFY_ARTIFACTS_DIR but NOT a driver port (it starts a process, it does not drive one)', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    expect(
+      await runDriverCommand(['serve', 'pnpm dev'], { VERIFY_ARTIFACTS_DIR: ENV.VERIFY_ARTIFACTS_DIR }, deps),
+    ).toBe(0);
+
+    const noDir = freshCalls();
+    const noDirDeps = makeDeps(noDir);
+    expect(await runDriverCommand(['serve', 'pnpm dev'], { VERIFY_DRIVER_PORT: '9333' }, noDirDeps)).toBe(1);
+    expect(noDir.shells).toEqual([]);
+  });
+
+  it('is ALLOWED under native-screen — bringing the app up is not driving it', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const exitCode = await runDriverCommand(['serve', 'electron .'], NATIVE_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(calls.shells).toHaveLength(1);
+  });
+
+  it('exits non-zero with the spawn error when the command cannot start (the agent reports launch_failed)', async () => {
+    const calls = freshCalls();
+    const stderrLines: string[] = [];
+    const deps = makeDeps(calls, {
+      spawnDetachedShell: vi.fn(async () => {
+        throw new Error('failed to spawn the serve command: no pid assigned');
+      }),
+      stderr: (l) => stderrLines.push(l),
+    });
+    const exitCode = await runDriverCommand(['serve', 'pnpm dev'], ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(stderrLines.join('\n')).toContain('no pid assigned');
+    expect(deps.writePidFile).not.toHaveBeenCalled();
   });
 });
 

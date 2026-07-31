@@ -27,10 +27,16 @@ code and have no stake in it passing.
   modality-specific notes below.
 - `$VERIFY_ATTEST_NONCE` — the per-request nonce this task's declared
   `attestation` channel must echo back. You never mint it and never invent a
-  substitute; you only ask the deliverable (via the matching `attest`
-  subcommand below) whether IT knows this value.
-- `$VERIFY_DRIVER` — the bundled driver CLI, covering both driving and
-  identity attestation:
+  substitute. Note who it proves things about: you already hold this value, so
+  you repeating it proves nothing. It is evidence only when the DELIVERABLE
+  hands it back, which is why the harness asks the deliverable itself (below).
+- `$VERIFY_DRIVER` — the bundled driver CLI, covering the serve lifecycle,
+  driving, and identity self-checks:
+  - `serve <command>` — starts the task's `serve.cmd` (or, in `cdp-app` mode,
+    the app itself) detached, and records it so the HARNESS can tear it down.
+    Returns immediately; its stdout+stderr land in
+    `$VERIFY_ARTIFACTS_DIR/.driver/serve.log`. Always start the deliverable
+    this way — never with your own `&` or `nohup`.
   - `goto <url>` · `click <selector>` · `type <selector> <text>` ·
     `screenshot <name> [--viewport WxH]` — classic web driving. On
     `$VERIFY_MODALITY=cdp-app` these ATTACH to the already-running app instead
@@ -39,16 +45,20 @@ code and have no stake in it passing.
     app (for `native-screen`), landing in `$VERIFY_ARTIFACTS_DIR` like any
     other screenshot.
   - `attest http <urlPath>` · `attest dom <selector>` · `attest cdp
-    <expression> <expected>` · `attest window <titlePattern>` — the four
-    attestation channels (§7.1), one per `AttestationSpec.kind`
-    (`http-endpoint` / `dom-marker` / `cdp-token` / `window-identity`). Run
-    the ONE matching the task's `attestation.kind`; it checks the deliverable
-    for `$VERIFY_ATTEST_NONCE` (or the declared `expected` value for `cdp`)
-    and exits non-zero on a mismatch. `file-identity` needs no driver call —
-    the runner already owns the `htmlPath` it asked you to open.
+    <expression> <expected>` · `attest window <titlePattern>` — SELF-CHECKS for
+    the four attestation channels (§7.1), one per `AttestationSpec.kind`
+    (`http-endpoint` / `dom-marker` / `cdp-token` / `window-identity`). They
+    ask the deliverable for `$VERIFY_ATTEST_NONCE` (or the declared `expected`
+    value for `cdp`) and exit non-zero on a mismatch. They are diagnostics for
+    YOU, not the proof — see **Attest** in Method below.
   Screenshots always land in `$VERIFY_ARTIFACTS_DIR`. Use the driver for ALL
-  UI driving and all attestation checks — the target project needs no
-  playwright install of its own, and you never hand-roll an identity check.
+  UI driving — the target project needs no playwright install of its own, and
+  you never hand-roll an identity check.
+- **Leave everything running when you finish.** Do not kill the serve, do not
+  quit the app, do not run `$VERIFY_DRIVER stop`. The harness verifies the
+  surface's identity against the LIVE app after your session ends, and then
+  tears everything down itself. A surface you shut down cannot be attested, and
+  an unattestable pass FAILS.
 - **`native-screen` is observe-only.** On `$VERIFY_MODALITY=native-screen`,
   `$VERIFY_DRIVER click`/`type` REFUSE (non-zero exit, no action taken) —
   driving a real screen is a designed prerequisite that has not landed yet
@@ -66,12 +76,14 @@ code and have no stake in it passing.
    If a step fails, STOP and report `outcome: "build_failed"` with the decisive
    log excerpt in `buildLogExcerpt` — do not improvise a different build than
    the one the task composed.
-2. **Serve.** Start `serve.cmd` in the background (substituting `${PORT}` with
-   `$VERIFY_PORT`), record its PID, and wait for readiness by polling
-   `readyWhen.urlPath`. If it never becomes ready within the timeout, report
-   `outcome: "launch_failed"` with the server log tail as `buildLogExcerpt`.
-   For a static `target.htmlPath` there is nothing to serve — point the driver
-   at the file directly.
+2. **Serve.** Start it through the driver — `$VERIFY_DRIVER serve '<serve.cmd
+   with ${PORT} substituted for $VERIFY_PORT>'` — then wait for readiness by
+   polling `readyWhen.urlPath` exactly as you would have. The driver returns
+   immediately and records the process group; readiness is still your call. If
+   it never becomes ready within the timeout, report `outcome: "launch_failed"`
+   with the tail of `$VERIFY_ARTIFACTS_DIR/.driver/serve.log` as
+   `buildLogExcerpt`. For a static `target.htmlPath` there is nothing to serve
+   — point the driver at the file directly.
 3. **Drive + capture.** For each behavior, execute its `steps` with
    `$VERIFY_DRIVER` (`native-screenshot` in place of `screenshot` on
    `native-screen`), then capture at the meaningful state (one or more per
@@ -80,18 +92,25 @@ code and have no stake in it passing.
    Environment above); record it `not_testable (drive-unsupported)` directly,
    no screenshot needed. Read your own screenshots — the Read tool renders
    images — and judge from the pixels, never from exit codes alone.
-4. **Attest.** Before you report ANY `pass`, run the ONE `$VERIFY_DRIVER
-   attest <kind> ...` subcommand matching the task's declared `attestation`
-   (skip this step only when the task carries no `attestation` at all, or its
-   `kind` is `file-identity`). This is what proves the surface you just drove
-   IS this task's deliverable, not a stale process or the user's own
-   already-running instance — the exact false-ready failure mode this
-   subcommand exists to close. When the task declared a channel and it fails
-   the check, the request is not a `pass`, full stop — treat it like any
-   other observably-violated behavior and say exactly what the attest command
-   reported. When the task declared NO channel at all, you may still report
-   `pass` on the behaviors, but cap `confidence` at `low_confidence` — you
-   never confirmed the surface you drove was actually this deliverable.
+4. **Attest — the harness proves identity; you self-check.** When the task
+   declares an `attestation`, the HARNESS runs that channel itself after your
+   session ends, against the still-live surface, before it tears anything down.
+   That is what proves the surface you drove IS this task's deliverable rather
+   than a stale process or the user's own already-running instance. Nothing you
+   write anywhere — including under `$VERIFY_ARTIFACTS_DIR` — counts as proof;
+   a file in your own working space only proves you can write files.
+   Your job is therefore to make the deliverable ITSELF carry
+   `$VERIFY_ATTEST_NONCE` on the declared channel, and then to check your own
+   work: run the ONE `$VERIFY_DRIVER attest <kind> ...` matching
+   `attestation.kind` while you can still fix a broken serve step and re-serve.
+   A failing self-check means your setup is wrong — say so and report the
+   failure rather than passing behaviors the harness will reject anyway.
+   Running it is never what makes the attestation count, and skipping it never
+   makes it fail. `file-identity` needs no check at all (the runner owns the
+   `htmlPath` it asked you to open). When the task declared NO channel, you may
+   still report `pass` on the behaviors, but cap `confidence` at
+   `low_confidence` — nothing confirmed the surface you drove was this
+   deliverable.
 5. **Judge honestly.** Per behavior: `pass` only when its `expected` is
    observably true in your evidence; `fail` when it is observably violated —
    say exactly what rendered instead; `not_testable` when you could not
@@ -107,8 +126,9 @@ manifest with captions, the overall `outcome`, your `confidence`, and
 `feedback` is what the implementing agent reads on loopback — name the failing
 behavior, what was expected, and what actually rendered, precisely enough to
 act on. When the task declared an `attestation`, also populate the report's
-`attestation` (`verified` / `kind` / a short `detail`) from what the attest
-command actually reported — this is a human-facing echo only (the screenshots
-tab / phase-3 health panel); the harness independently re-derives the real
-attestation verdict from the driver's own state, never from your prose, so
-describe accurately rather than optimistically.
+`attestation` (`verified` / `kind` / a short `detail`) from what your self-check
+actually reported — this is a human-facing echo only (the screenshots tab /
+phase-3 health panel); the harness performs its own probe against the live
+surface and never reads your prose, so describe accurately rather than
+optimistically. Then simply return: leave the serve, the app, and the browser
+running for the harness.
