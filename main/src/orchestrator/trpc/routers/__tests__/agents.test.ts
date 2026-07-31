@@ -8,7 +8,7 @@
  * AgentOverrideRouter wired as the chokepoint.
  *
  * Locks:
- *  - list returns the 16 builtins, each source 'builtin', isOverridden:false,
+ *  - list returns the 17 builtins, each source 'builtin', isOverridden:false,
  *    stats.costUsd null.
  *  - EVERY canonical key is step-BOUND (workflowCount >= 1) — both planes now
  *    honor `step.fanOut` as the single source of truth for stage parallelism
@@ -123,6 +123,7 @@ function makeWiredCaller(rawDb: Database.Database): ReturnType<typeof appRouter.
 const ALL_CANONICAL_KEYS = [
   'context',
   'research',
+  'verify-setup',
   'ui-prototype',
   'architecture',
   'adversarial-review',
@@ -145,11 +146,11 @@ const FAN_OUT_INNER_KEYS = ['implement', 'write-tests', 'code-review', 'task-ver
 describe('cyboflow.agents.list', () => {
   beforeEach(() => AgentOverrideRouter._resetForTesting());
 
-  it('returns the 16 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
+  it('returns the 17 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
     const entries = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
 
-    expect(entries).toHaveLength(16);
+    expect(entries).toHaveLength(17);
     for (const e of entries) {
       expect(e.source).toBe('builtin');
       expect(e.isOverridden).toBe(false);
@@ -338,7 +339,7 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(custom.name).toBe('cyboflow-my-helper');
 
     const listed = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(listed).toHaveLength(17);
+    expect(listed).toHaveLength(18);
     expect(listed.find((e) => e.agentKey === 'my-helper')).toBeDefined();
 
     const deleted = await caller.cyboflow.agents.deleteCustom({
@@ -348,7 +349,7 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(deleted).toEqual({ ok: true });
 
     const afterDelete = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(afterDelete).toHaveLength(16);
+    expect(afterDelete).toHaveLength(17);
   });
 
   it('createCustom CONFLICTs on a reserved builtin key', async () => {

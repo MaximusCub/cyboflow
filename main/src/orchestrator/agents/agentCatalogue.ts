@@ -1,5 +1,5 @@
 /**
- * agentCatalogue — the 16-entry built-in agent catalogue, parsed once at boot
+ * agentCatalogue — the 17-entry built-in agent catalogue, parsed once at boot
  * from the bundled `.md` files under `workflows/<wf>/agents/`.
  *
  * There are intentionally NO hardcoded prompt bodies here: each built-in agent's
@@ -7,7 +7,7 @@
  * SAME `.md` the spawn-time overlay copies verbatim. The catalogue is keyed by
  * the agent's file BASENAME (== the canonical agent key == the frontmatter name
  * with `cyboflow-` stripped), and the `role` is the workflow the bundle belongs
- * to (`planner` | `sprint` | `compound`).
+ * to (see {@link BuiltInAgentRole} — one member per `CYBOFLOW_WORKFLOW_NAMES`).
  *
  * Path resolution mirrors `builtInWorkflows.ts`: `join(__dirname, '..',
  * 'workflows', '<wf>.md')` resolves the prose `.md`, and `resolveWorkflowBundle`
@@ -21,8 +21,14 @@ import { CANONICAL_AGENT_KEYS } from '../../../../shared/types/agentIdentity';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import { parseBundledAgent } from './bundledAgentParser';
 
-/** A workflow role a built-in agent's bundle belongs to. */
-export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound' | 'ship';
+/**
+ * A workflow role a built-in agent's bundle belongs to — one member per
+ * `CYBOFLOW_WORKFLOW_NAMES` entry, because `loadBuiltInAgents` walks that tuple
+ * and stamps the loop variable straight onto `role`. Widening the tuple without
+ * widening this union is a compile error, which is the point: the role must stay
+ * a closed set the Agents gallery can group by, not a bare `string`.
+ */
+export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound' | 'ship' | 'verify-setup';
 
 /**
  * One fully-parsed built-in agent. `name` is the frontmatter `name:`
@@ -42,8 +48,9 @@ export interface BuiltInAgent {
 let cached: Map<string, BuiltInAgent> | null = null;
 
 /**
- * Parse + memoize the built-in agent catalogue. Walks the three built-in
- * workflows, reads each bundle's `agents/*.md`, parses each, and keys by basename.
+ * Parse + memoize the built-in agent catalogue. Walks EVERY built-in workflow in
+ * `CYBOFLOW_WORKFLOW_NAMES`, reads each bundle's `agents/*.md`, parses each, and
+ * keys by basename.
  */
 export function loadBuiltInAgents(): Map<string, BuiltInAgent> {
   if (cached !== null) return cached;

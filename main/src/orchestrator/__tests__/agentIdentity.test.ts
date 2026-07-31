@@ -69,8 +69,15 @@ describe('AC-P0-3: no phantom labels remapped', () => {
 });
 
 describe('CANONICAL_AGENT_KEYS shape + isCanonicalAgentKey guard', () => {
-  it('has exactly 16 canonical keys', () => {
-    expect(CANONICAL_AGENT_KEYS.length).toBe(16);
+  it('has exactly 17 canonical keys', () => {
+    expect(CANONICAL_AGENT_KEYS.length).toBe(17);
+  });
+
+  it('includes the verify-setup flow agent', () => {
+    // The 5th built-in flow (docs/proposals/verification-setup-flow.md §5.1) binds
+    // ONE agent whose key equals its workflow name; a missing key here would make
+    // every verify-setup step fall back to `general-purpose` at spawn time.
+    expect(isCanonicalAgentKey('verify-setup')).toBe(true);
   });
 
   it('returns true for a member and false for a non-member', () => {

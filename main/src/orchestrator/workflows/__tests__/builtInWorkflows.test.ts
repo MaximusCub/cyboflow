@@ -3,8 +3,8 @@
  * descriptors that severed the SoloFlow plugin-cache dependency (P0).
  *
  * Coverage:
- *  1. Maps EXACTLY the three cyboflow built-in names (planner + sprint +
- *     compound), keyed by CYBOFLOW_WORKFLOW_NAMES.
+ *  1. Maps EXACTLY the cyboflow built-in names (planner + sprint + compound +
+ *     ship + verify-setup), keyed by CYBOFLOW_WORKFLOW_NAMES.
  *  2. Each descriptor path points at an existing, readable, non-empty `.md`
  *     prompt body alongside the module.
  *  3. The prompt bodies are self-contained: no `.soloflow` / `IDEA-NNN.md` /
@@ -18,10 +18,10 @@ import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../sh
 import { CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT } from '../../../../../shared/types/agentIdentity';
 
 describe('buildBuiltInWorkflows', () => {
-  it('maps exactly the cyboflow built-in names (planner + sprint + compound + ship)', () => {
+  it('maps exactly the cyboflow built-in names (planner + sprint + compound + ship + verify-setup)', () => {
     const descriptors = buildBuiltInWorkflows();
     const names = descriptors.map((d) => d.name).sort();
-    expect(names).toEqual(['compound', 'planner', 'ship', 'sprint']);
+    expect(names).toEqual(['compound', 'planner', 'ship', 'sprint', 'verify-setup']);
     // Keyed by CYBOFLOW_WORKFLOW_NAMES — same set, no extras, no omissions.
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
   });
@@ -310,5 +310,192 @@ describe('buildBuiltInWorkflows', () => {
         `step ${step.id} agent "${step.agent}" must be a canonical key or '${HUMAN_GATE_AGENT}'`,
       ).toBe(true);
     }
+  });
+
+  it('verify-setup definition is 1 phase / 5 steps: inspect → derive → approve-runbook → prove → human-review', () => {
+    const def = WORKFLOW_DEFINITIONS['verify-setup'];
+    expect(def, "WORKFLOW_DEFINITIONS['verify-setup'] present").toBeDefined();
+    expect(def.id).toBe('verify-setup');
+
+    // ONE phase, mirroring compound's single-phase shape (the flow this one is
+    // modelled on 1:1 — propose → gate → apply → terminal merge gate).
+    expect(def.phases).toHaveLength(1);
+    expect(def.phases[0]!.id).toBe('verify-setup');
+    expect(def.phases[0]!.label).toBe('Verify Setup');
+    expect(def.phases[0]!.color, 'phase color is a 7-char hex').toMatch(/^#[0-9a-f]{6}$/);
+
+    const steps = def.phases.flatMap((p) => p.steps);
+    expect(steps.map((s) => s.id)).toEqual([
+      'inspect',
+      'derive',
+      'approve-runbook',
+      'prove',
+      'human-review',
+    ]);
+
+    // Every step.agent is either a canonical agent key or the human gate — and the
+    // three working steps all bind the ONE verify-setup agent.
+    const validAgents = new Set<string>([...CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT]);
+    for (const step of steps) {
+      expect(
+        validAgents.has(step.agent),
+        `step ${step.id} agent "${step.agent}" must be a canonical key or '${HUMAN_GATE_AGENT}'`,
+      ).toBe(true);
+    }
+    for (const id of ['inspect', 'derive', 'prove']) {
+      expect(steps.find((s) => s.id === id)!.agent, `${id} binds the verify-setup agent`).toBe(
+        'verify-setup',
+      );
+    }
+
+    // EXACTLY two human gates, both workflow steps: approve-runbook (before
+    // anything touches the repo) and the terminal human-review merge gate.
+    const gates = steps.filter((s) => s.human === true);
+    expect(gates.map((s) => s.id)).toEqual(['approve-runbook', 'human-review']);
+    for (const gate of gates) {
+      expect(gate.agent, `${gate.id} is a human gate`).toBe(HUMAN_GATE_AGENT);
+    }
+    expect(steps[steps.length - 1]!.id, 'human-review is the terminal step').toBe('human-review');
+
+    // The programmatic step prompt is built from desc + outputArtifact, so the
+    // proposal artifact MUST be a declared step output — otherwise a programmatic
+    // run never mints the doc the approve-runbook gate reviews (the exact gap that
+    // once shipped a doc-less compound run).
+    const derive = steps.find((s) => s.id === 'derive')!;
+    expect(derive.outputArtifact?.atype).toBe('compound-recommendations');
+    expect(derive.outputArtifact?.label).toBe('Runbook proposal');
+  });
+
+  it('verify-setup step descs pin the contract: levers not values, no installs, engine-owned proof', () => {
+    const steps = WORKFLOW_DEFINITIONS['verify-setup'].phases.flatMap((p) => p.steps);
+    const descOf = (id: string): string => steps.find((s) => s.id === id)!.desc ?? '';
+
+    // inspect probes for the isolation levers + the existing runbook, from evidence.
+    expect(descOf('inspect'), 'inspect probes the isolation levers').toMatch(
+      /isolation levers/i,
+    );
+    expect(descOf('inspect'), 'inspect reads the existing runbook + its status').toMatch(
+      /verify-runbook\.json/,
+    );
+
+    // derive drafts TEMPLATES (levers, never resolved values) and never an install.
+    expect(descOf('derive'), 'derive drafts the portable half as templates').toMatch(
+      /\$\{PORT\}/,
+    );
+    expect(descOf('derive'), 'derive forbids install/rebuild commands').toMatch(
+      /never an install or native-rebuild command/i,
+    );
+    expect(descOf('derive'), 'derive requires an attestation spec per modality').toMatch(
+      /attestation/i,
+    );
+    // The rung ladder: rung 2 is proposed, NEVER auto-applied.
+    expect(descOf('derive'), 'derive names the rung ladder').toMatch(
+      /rung 0[\s\S]*rung 1[\s\S]*rung 2/i,
+    );
+    expect(descOf('derive'), 'a rung-2 diff is never auto-applied').toMatch(/NEVER auto-applied/);
+
+    // prove proves BY RUNNING, and the flow never marks proven itself.
+    expect(descOf('prove'), 'prove fires a setup-proof verification').toMatch(
+      /cyboflow_request_verification/,
+    );
+    expect(descOf('prove'), 'prove blocks on the verdict').toMatch(
+      /cyboflow_await_verification/,
+    );
+    expect(descOf('prove'), 'prove registers each declared modality').toMatch(
+      /cyboflow_register_verify_runbook/,
+    );
+    expect(descOf('prove'), 'the ENGINE marks proven, never the flow').toMatch(
+      /never this flow/i,
+    );
+    // Exhaustion keeps the draft — never a dead end (§5.3 unproven-draft).
+    expect(descOf('prove'), 'exhaustion keeps the unproven draft').toMatch(
+      /keep the unproven draft/i,
+    );
+    expect(descOf('prove'), 'exhaustion is never a dead end').toMatch(/never a dead end/i);
+  });
+
+  it('verify-setup prose contracts the runbook split, the rung ladder, and the §3.2 skip CTA', () => {
+    const descriptor = buildBuiltInWorkflows().find((d) => d.name === 'verify-setup');
+    expect(descriptor, 'verify-setup descriptor present').toBeDefined();
+    expect(descriptor!.path, 'verify-setup path').toMatch(/verify-setup\.md$/);
+    // Collapse wrapped-prose whitespace so multi-word phrases match regardless of
+    // where markdown line-wrapping falls.
+    const raw = readFileSync(descriptor!.path, 'utf-8');
+    const flat = raw.replace(/\s+/g, ' ');
+
+    // Both human gates run INLINE via AskUserQuestion; nothing self-approves.
+    expect(raw, 'verify-setup must name AskUserQuestion').toMatch(/AskUserQuestion/);
+    expect(flat, 'verify-setup forbids silently passing a gate').toMatch(
+      /never silently (pass|proceed past) a gate/i,
+    );
+
+    // The three MCP seams the flow drives, by name.
+    expect(raw).toMatch(/cyboflow_register_verify_runbook/);
+    expect(raw).toMatch(/cyboflow_request_verification/);
+    expect(raw).toMatch(/cyboflow_await_verification/);
+    expect(flat, 'setup proofs are budget-exempt + lower priority').toMatch(
+      /exempt from the project's lifetime judge budget/i,
+    );
+
+    // §5.3 runbook contract: split halves, request-scoped values never persisted,
+    // attestation REQUIRED per modality.
+    expect(flat, 'the portable half is committed').toMatch(/Committed-portable/);
+    expect(flat, 'the machine-local half is a project-row record').toMatch(/Machine-local/);
+    expect(flat, 'request-scoped values are never persisted').toMatch(
+      /Request-scoped values are NEVER persisted/,
+    );
+    expect(flat, 'attestation is required per modality').toMatch(
+      /Attestation is REQUIRED per modality/,
+    );
+
+    // §5.1 rung ladder, with rung 2 never auto-applied.
+    expect(flat).toMatch(/Rung 0 — existing levers only/);
+    expect(flat).toMatch(/Rung 1 — config-only/);
+    expect(flat).toMatch(/Rung 2 — a proposed diff/);
+    expect(flat, 'rung 2 is never auto-applied').toMatch(/\*\*never\s+auto-applied\*\*/);
+
+    // §7.2: install/rebuild commands are runner-rejected, not merely discouraged.
+    expect(flat, 'no install or rebuild, ever').toMatch(/Never an install or a rebuild/);
+
+    // §3.2: an unproven project's build/serve verifications SKIP with a CTA until
+    // this flow proves a runbook — the reason this flow exists at all.
+    expect(flat, 'unproven ⇒ build/serve requests are skipped, not attempted').toMatch(
+      /would have to \*\*build or serve\*\* the deliverable is \*\*skipped\*\*, not attempted/,
+    );
+    expect(flat, 'the skip carries the setup CTA').toMatch(
+      /no proven verification runbook for this project \(run verification setup\)/,
+    );
+
+    // Proof-by-running is engine-enforced: the flow never marks its own runbook proven.
+    expect(flat, 'the flow never marks a runbook proven').toMatch(
+      /You never mark a runbook proven/,
+    );
+  });
+
+  it('verify-setup subagent persona: evidence-only, no installs, no hardcoded ports, no self-proof', () => {
+    const descriptor = buildBuiltInWorkflows().find((d) => d.name === 'verify-setup')!;
+    const agentPath = join(dirname(descriptor.path), 'verify-setup', 'agents', 'verify-setup.md');
+    const flat = readFileSync(agentPath, 'utf-8').replace(/\s+/g, ' ');
+
+    expect(flat, 'the persona reads the project from evidence').toMatch(
+      /evidence, never inference/i,
+    );
+    expect(flat, 'a command nobody documented does not exist').toMatch(
+      /A command you cannot find written down does not exist/,
+    );
+    expect(flat, 'never installs or rebuilds').toMatch(/Never install, never rebuild/);
+    expect(flat, 'never hardcodes a port or a temp dir').toMatch(
+      /Never hardcode a port, a temp dir, or an absolute path/,
+    );
+    expect(flat, 'never claims a runbook works — proving is a separate step').toMatch(
+      /Never claim a runbook works/,
+    );
+    expect(flat, 'the persona writes no cyboflow state and no repo files').toMatch(
+      /Never write cyboflow state, never write repo files, never commit/,
+    );
+
+    // Single-writer invariant: a bundled agent body must never name a `cyboflow_*`
+    // write tool (validateAgentDraft rejects one, so an edited copy would fail).
+    expect(flat, 'no cyboflow_* tool tokens in an agent body').not.toMatch(/cyboflow_/);
   });
 });

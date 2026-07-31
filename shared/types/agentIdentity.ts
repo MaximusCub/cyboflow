@@ -4,7 +4,7 @@
  * The canonical agent key is the bundled agent's FILE BASENAME — the stem of each
  * `main/src/orchestrator/workflows/<wf>/agents/<key>.md` (equivalently the
  * frontmatter `name:` with the `cyboflow-` prefix stripped; a unit test asserts
- * the two agree for all 15 files). This single key is used by:
+ * the two agree for all 17 files). This single key is used by:
  *   (i)   `WorkflowStep.agent` in WORKFLOW_DEFINITIONS,
  *   (ii)  the Agents catalogue + gallery,
  *   (iii) the `agent_overrides.agent_key` column, and
@@ -35,6 +35,12 @@ export const CANONICAL_AGENT_KEYS = [
   'visual-verify',
   'sprint-review',
   'compounder',
+  // The verify-setup flow's single subagent (docs/proposals/verification-setup-flow.md
+  // §5.1). Its key deliberately EQUALS its workflow name — the flow binds exactly
+  // one agent to four of its five steps, so a distinct persona name would only add
+  // a second thing to remember. Ordered last, mirroring how every earlier flow's
+  // agents were appended as their flow landed.
+  'verify-setup',
 ] as const;
 
 export type CanonicalAgentKey = (typeof CANONICAL_AGENT_KEYS)[number];

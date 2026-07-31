@@ -157,6 +157,33 @@ describe('snapshotRunForEval', () => {
     expect(db.runs.length).toBe(0); // no insert
   });
 
+  it('skips VERIFY-SETUP by name even though it is a built-in with a human-review step', async () => {
+    // The 5th built-in (docs/proposals/verification-setup-flow.md §5.1) also ends on
+    // a terminal human-review merge gate, which fires this trigger — but its diff is
+    // a verification runbook plus isolation levers whose real acceptance test is its
+    // own proof run, so it is exempt by name exactly like compound. Tagged or not,
+    // global ON, per-run ON: it must still skip (the exemption is unconditional).
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r'))
+          return runRow({
+            workflowName: 'verify-setup',
+            eval_enabled: 1,
+            experiment_id: 'exp-1',
+            variant_id: 'var-1',
+          });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-vs', deps);
+    expect(outcome).toBe('skipped');
+    expect(deps.gitDiff).not.toHaveBeenCalled(); // no diff capture
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0); // no insert
+  });
+
   // ── Eval on/off resolution matrix (migration 044) ────────────────────────
 
   it('global OFF + per-run NULL → skips, writes NO row, does not enqueue', async () => {

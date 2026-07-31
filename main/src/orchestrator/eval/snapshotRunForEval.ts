@@ -14,12 +14,15 @@
  * sessions (they run under the __quick__ sentinel workflow, never a cyboflow name)
  * and custom/edited flows (checked on the WORKFLOW NAME, not the step id, since a
  * custom flow could carry a step literally named 'human-review'). Sprint + ship
- * reach this trigger; planner has no human-review step. COMPOUND now DOES carry a
- * terminal 'human-review' step (its "merge in changes" gate), but it is EXPLICITLY
- * EXEMPT here: compound mines already-merged work and its write-back diff (doc edits
- * + quick fixes) is not rubric-eval material, so it is skipped by name even though
- * it is a cyboflow built-in — preserving the long-standing "planner/compound never
- * auto-eval" contract now that compound has the step.
+ * reach this trigger; planner has no human-review step. COMPOUND and VERIFY-SETUP
+ * both DO carry a terminal 'human-review' step (their "merge in changes" gate), but
+ * both are EXPLICITLY EXEMPT here — verify-setup because its diff is a verification
+ * runbook plus isolation levers whose real acceptance test is its own proof run
+ * (docs/proposals/verification-setup-flow.md §5.1), and compound because it
+ * mines already-merged work and its write-back diff (doc edits + quick fixes) is
+ * not rubric-eval material. Both are skipped BY NAME even though they are cyboflow
+ * built-ins — preserving the long-standing "planner/compound never auto-eval"
+ * contract now that these flows have the step.
  *
  * Re-fire dedup: the composite PK (run_id, rubric_version) + INSERT OR IGNORE means
  * a request-changes loop or interactive resume re-reporting human-review does NOT
@@ -249,13 +252,19 @@ export async function snapshotRunForEval(
     return 'skipped';
   }
 
-  // Compound is eval-exempt by name: it carries a terminal 'human-review' step (its
-  // "merge in changes" gate) that fires this trigger on BOTH planes (the programmatic
-  // human gate and the orchestrated cyboflow_report_step both emit the transition),
-  // but its diff mines already-merged work and is not rubric material. Skip it here —
-  // the single chokepoint covering path A (human-review step-begin) AND the terminal
-  // A/B subscriber — so a compound run never auto-grades regardless of caller.
-  if (run.workflowName === 'compound') {
+  // Compound and verify-setup are eval-exempt BY NAME. Both carry a terminal
+  // 'human-review' step (their "merge in changes" gate) that fires this trigger on
+  // BOTH planes (the programmatic human gate and the orchestrated
+  // cyboflow_report_step both emit the transition), and neither one's diff is rubric
+  // material: compound's mines already-merged work, and verify-setup's is a
+  // `.cyboflow/verify-runbook.json` plus at most a couple of isolation levers
+  // (docs/proposals/verification-setup-flow.md §5.1 — "the setup flow must not be
+  // rubric-graded"; grading it would tax every project that dares to configure
+  // verification, for a diff whose real acceptance test is the proof run itself).
+  // Skipping here — the single chokepoint covering path A (human-review step-begin)
+  // AND the terminal A/B subscriber — means neither flow ever auto-grades regardless
+  // of caller.
+  if (run.workflowName === 'compound' || run.workflowName === 'verify-setup') {
     return 'skipped';
   }
 

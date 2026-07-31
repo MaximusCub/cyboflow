@@ -67,6 +67,7 @@ const SUBTITLE_BY_NAME: Record<string, string> = {
   sprint: 'Parallel task fan-out → sprint review',
   compound: 'Mine merged work for learnings → tasks + review items',
   ship: 'Idea → epics → tasks → execute → integrate (planner + sprint, end to end)',
+  'verify-setup': 'Derive → prove → persist this project\'s visual-verification runbook',
 };
 
 /**
@@ -78,6 +79,7 @@ const TITLE_BY_NAME: Record<string, string> = {
   sprint: 'Sprint',
   compound: 'Compound',
   ship: 'Ship',
+  'verify-setup': 'Verify Setup',
 };
 
 /** Title-case a raw workflow name for display when no static title exists. */

@@ -43,6 +43,7 @@ const WORKFLOW_LABEL: Record<CyboflowWorkflowName, string> = {
   sprint: 'Sprint',
   compound: 'Compound',
   ship: 'Ship',
+  'verify-setup': 'Verify Setup',
 };
 
 // ---------------------------------------------------------------------------

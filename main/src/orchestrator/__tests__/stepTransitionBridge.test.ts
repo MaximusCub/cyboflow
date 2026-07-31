@@ -138,6 +138,18 @@ describe('resolveInitialStepId', () => {
     expect(resolveInitialStepId('planner')).toBe('context');
     expect(resolveInitialStepId('sprint')).toBe('analyze-dependencies');
     expect(resolveInitialStepId('compound')).toBe('load-sprint');
+    expect(resolveInitialStepId('verify-setup')).toBe('inspect');
+  });
+
+  it('every INITIAL_STEP_IDS entry IS the first step of its definition (no namespace drift)', () => {
+    // The map is hand-written while the definitions move; a stale entry silently
+    // stamps a step id the phase state cannot resolve, so pin them against each
+    // other rather than against literals alone.
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
+      expect(resolveInitialStepId(name), `${name} initial step`).toBe(
+        WORKFLOW_DEFINITIONS[name].phases[0]!.steps[0]!.id,
+      );
+    }
   });
 });
 

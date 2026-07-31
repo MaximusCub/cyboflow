@@ -337,14 +337,27 @@ export interface WorkflowRunListRow {
 }
 
 /**
- * The four user-facing built-in flows in cyboflow v1.
+ * The five user-facing built-in flows in cyboflow v1.
  *
  * Narrowed from the historical SoloFlow set of five: `planner`, `sprint`,
- * `compound`, and `ship` are cyboflow-native flows that write via the
- * `cyboflow_*` MCP tools, never `.soloflow/` files. The dropped `prune` flow
+ * `compound`, `ship`, and `verify-setup` are cyboflow-native flows that write via
+ * the `cyboflow_*` MCP tools, never `.soloflow/` files. The dropped `prune` flow
  * keeps its prose under `docs/workflows-future/` for a future rebuild. The
  * internal `__quick__` sentinel is NOT a member here — it is filtered out of the
  * picker and handled separately by the quick-session pipeline.
+ *
+ * THIS TUPLE IS AN APP-WIDE EXHAUSTIVE DISCRIMINANT, not a list. Adding a member
+ * is a compile-time tripwire on every `Record<CyboflowWorkflowName, …>` — today
+ * `WORKFLOW_DEFINITIONS` (below), `INITIAL_STEP_IDS`
+ * (`main/src/orchestrator/stepTransitionBridge.ts`), and the renderer's
+ * `WORKFLOW_LABEL` (`frontend/src/components/agentRail/ProposalCardBodies.tsx`) —
+ * and it silently widens every derived surface that iterates it: the seeded
+ * built-in rows (`buildBuiltInWorkflows`), the built-in agent catalogue
+ * (`agentCatalogue.loadBuiltInAgents`), the reserved-name guard in
+ * `WorkflowRegistry`, and the `TelemetryFlow` union. A new member therefore also
+ * needs its flow `.md` + agent bundle on disk and a decision on the
+ * code-review-eval auto-entry posture (`snapshotRunForEval`). See
+ * `docs/proposals/verification-setup-flow.md` §5.1, which costs this out.
  *
  * A parallel sprint is a SINGLE session-hosted `sprint` run seeded with N task
  * ids: the sprint ORCHESTRATOR AGENT analyzes the task dependency DAG itself,
@@ -358,7 +371,13 @@ export interface WorkflowRunListRow {
  * `WorkflowRegistry.listByProject`.
 
  */
-export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint', 'compound', 'ship'] as const;
+export const CYBOFLOW_WORKFLOW_NAMES = [
+  'planner',
+  'sprint',
+  'compound',
+  'ship',
+  'verify-setup',
+] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
@@ -636,7 +655,7 @@ export interface WorkflowStepTransitionEvent {
 // The v1 loopback invariant still holds: `loopback` is intra-phase only.
 
 /**
- * The three built-in workflow definitions, keyed by `CyboflowWorkflowName`.
+ * The built-in workflow definitions, keyed by `CyboflowWorkflowName`.
  * `Readonly<Record<…>>` forces the compiler to flag any missing key.
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
@@ -1142,6 +1161,88 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: 'Final taste check; on approve, retire the idea to Decomposed and seal the sprint.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // verify-setup — the per-project visual-verification setup flow
+  // (docs/proposals/verification-setup-flow.md §5): derive → prove → persist →
+  // reuse. It exists because BOTH prior designs failed in opposite directions —
+  // the legacy waterfall demanded a hand-authored `.cyboflow/verify.json` nobody
+  // ever wrote, and the agent engine guesses the build/serve environment per run
+  // with no memory and guessed wrong every single time (0-for-5 in production).
+  // The middle is a runbook derived ONCE from evidence and then PROVED by an
+  // actual run through the real verification path.
+  //
+  // Shape is Compound's `extract → approve-learnings → write-back → human-review`
+  // template 1:1 — propose, gate, apply + commit, terminal merge gate — with the
+  // proof step wedged between apply and gate, because "we wrote a config file" is
+  // exactly the non-guarantee this flow exists to replace. FIVE steps in a single
+  // 'Verify Setup' phase with exactly TWO human gates: `approve-runbook` (the
+  // proposal, BEFORE anything touches the repo) and the terminal `human-review`
+  // merge gate over the committed diff + the per-modality proof outcomes.
+  //
+  // Two properties that are load-bearing and easy to break:
+  //  - It is EVAL-EXEMPT by name in snapshotRunForEval, exactly like compound
+  //    (§5.1): its diff is a config file and a couple of isolation levers, not
+  //    rubric material, and rubric-grading the setup flow would tax every project
+  //    that dares to configure verification.
+  //  - `prove` NEVER marks a runbook proven. It fires a `setup_proof` verification
+  //    and awaits the verdict; the ENGINE marks (project, modality, hash) proven
+  //    off a PASSING request with full §5.3 provenance. Proof-by-running is
+  //    engine-enforced precisely so a flow cannot assert its own success.
+  'verify-setup': {
+    id: 'verify-setup',
+    phases: [
+      {
+        id: 'verify-setup',
+        label: 'Verify Setup',
+        color: '#0ea5e9',
+        steps: [
+          {
+            id: 'inspect',
+            name: 'Inspect the project',
+            agent: 'verify-setup',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Probe how this project\'s UI actually stands up: its dev / build / start scripts, framework, whether the deliverable is an Electron-style app or browser-served, the isolation levers it ALREADY has (a port env var or CLI flag, a data-dir lever, a remote-debugging/CDP flag), and any existing .cyboflow/verify-runbook.json plus its proven/unproven status. Evidence only — package.json scripts, README/CLAUDE.md, the app entrypoints — never a command nobody documented, and never run an install or a rebuild.',
+          },
+          {
+            id: 'derive',
+            name: 'Derive the runbook',
+            agent: 'verify-setup',
+            mcps: ['filesystem'],
+            retries: 0,
+            outputArtifact: { atype: 'compound-recommendations', label: 'Runbook proposal' },
+            desc: 'Draft the PORTABLE runbook per declared modality — build/serve command TEMPLATES carrying ${PORT}-style lever placeholders (never a resolved port, never a temp dir, never an install or native-rebuild command) plus the REQUIRED attestation spec for each modality — alongside the machine-local bindings (binary paths, data-dir lever name, ABI facts) and any rung-ladder repo changes: rung 0 existing levers only, rung 1 config-only, rung 2 a proposed diff that is NEVER auto-applied. Publish ONE proposal doc via cyboflow_report_artifact; nothing is written to the repo at this step.',
+          },
+          {
+            id: 'approve-runbook',
+            name: 'Approve runbook',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You review the runbook proposal — the commands, the per-modality attestation channel, and every rung-1 / rung-2 repo change it wants — and approve, trim, or reject BEFORE anything is written to the repo.',
+          },
+          {
+            id: 'prove',
+            name: 'Prove the runbook',
+            agent: 'verify-setup',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Write .cyboflow/verify-runbook.json plus the APPROVED rung-1/rung-2 changes and commit them, register each declared modality via cyboflow_register_verify_runbook, then prove each one by RUNNING it: compose a proof task FROM the runbook, fire cyboflow_request_verification with setup_proof true, and block on cyboflow_await_verification. A PASS is what marks the runbook proven — the engine does that from the passing request, never this flow. On FAIL, diagnose from failureClass/feedback, adjust, re-register, re-prove (max 3 rounds per modality); on exhaustion keep the unproven draft, put the diagnosis in the run summary, and continue — never a dead end.',
+          },
+          {
+            id: 'human-review',
+            name: 'Human review',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'Final "merge in changes" gate over the committed runbook + repo diff and the per-modality proof outcomes (proven, or still an unproven draft with its diagnosis) — approve to make the branch mergeable, reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
       },

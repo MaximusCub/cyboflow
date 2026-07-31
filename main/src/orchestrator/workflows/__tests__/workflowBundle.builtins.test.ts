@@ -83,6 +83,18 @@ describe('built-in workflow bundles', () => {
     ]);
     assertAgentShape(bundle.agents);
   });
+
+  it('verify-setup ships its single heavy-phase subagent (both gates stay inline)', () => {
+    const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'verify-setup.md'));
+    // Both human gates (approve-runbook / human-review) run inline in the
+    // orchestrator, so the bundle ships no commands. The flow binds ONE agent to
+    // its three working steps (inspect / derive / prove) — the survey and the draft
+    // are the only context-heavy work; writing, registering, and proving are
+    // orchestrator-owned because they are cyboflow-state writes.
+    expect(bundle.commands).toEqual([]);
+    expect(bundle.agents.map((a) => a.name)).toEqual(['verify-setup']);
+    assertAgentShape(bundle.agents);
+  });
 });
 
 /**

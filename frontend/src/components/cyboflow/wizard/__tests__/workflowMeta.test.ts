@@ -108,6 +108,26 @@ describe('buildWorkflowMeta', () => {
     );
   });
 
+  it('(a3) verify-setup resolves its built-in title + subtitle and its 5-step definition', () => {
+    // The 5th built-in is the one whose raw name is NOT a single lowercase word, so
+    // it is also the case that proves the title map beats the titleCase() fallback
+    // (which would render 'Verify-setup').
+    const meta = buildWorkflowMeta(
+      [makeWorkflow({ id: 'wf-verify-setup', name: 'verify-setup', spec_json: '{}' })],
+      [],
+    );
+
+    const verifySetup = meta.find((m) => m.name === 'verify-setup')!;
+    expect(verifySetup.title).toBe('Verify Setup');
+    expect(verifySetup.slashCommand).toBe('/verify-setup');
+    expect(verifySetup.subtitle).toBe(
+      "Derive → prove → persist this project's visual-verification runbook",
+    );
+    // Counts come from the built-in fallback definition (one phase, five steps).
+    expect(verifySetup.phaseCount).toBe(1);
+    expect(verifySetup.stepCount).toBe(5);
+  });
+
   it('(b) a custom workflow with a broken/empty spec yields zero counts and a blank subtitle', () => {
     const meta = buildWorkflowMeta(
       [
