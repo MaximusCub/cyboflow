@@ -17,6 +17,12 @@
  * It knows nothing about the scheduler, leases, or the agent runner; those
  * compose this as a building block (§5.4/§5.6).
  *
+ * Dependency linking has one seam beyond the mechanics: when a prepared dep set
+ * exists (`depPreparer`, verification-setup-flow §7.2) the links point at that
+ * per-key MIRROR instead of the live worktree, so a write inside the snapshot
+ * can no longer flip a native module's ABI under the sibling lanes. Absent a
+ * prepared set, linking is unchanged.
+ *
  * Electron-free by design (plain Node `child_process`/`fs`/`os`/`path`) so it
  * can be unit-tested with no DB/Electron and reused from any process.
  */
@@ -27,6 +33,7 @@ import type { Dirent } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
+import { VerifyDepPreparer, defaultDepExec } from './depPreparer';
 
 const execFileAsync = promisify(execFile);
 
@@ -145,17 +152,30 @@ export async function findDependencyDirs(root: string, maxDepth = NODE_MODULES_S
  * documented future refinement, not this slice). Best-effort per-dir: a
  * missing parent (the snapshot's checked-out tree doesn't have that nested
  * dir) or a symlink failure is logged and skipped, never thrown.
+ *
+ * WHAT THE LINK POINTS AT (verification-setup-flow §7.2). With no prepared set
+ * it points at the LIVE worktree dir, which is the pre-existing behavior and the
+ * documented hazard: anything the verification writes into `node_modules` writes
+ * THROUGH the symlink into the tree every sibling lane is building against, and
+ * `checkSnapshotMutated`'s `git diff HEAD` cannot see it (untracked). With a
+ * prepared set (`mirrors`), it points at the per-key MIRROR instead, so the same
+ * write-through lands in a disposable cache and the native-module ABI inside is
+ * already the deliverable's (the mirror was rebuilt for it, outside every
+ * snapshot). Per-dir lookup, not all-or-nothing: a src with no mirror entry
+ * simply links live.
  */
 async function linkDependencyDirs(
   runWorktreePath: string,
   snapshotWorktreePath: string,
   dependencyDirs: readonly string[],
   logger?: LoggerLike,
+  mirrors?: ReadonlyMap<string, string> | null,
 ): Promise<void> {
   for (const srcDir of dependencyDirs) {
     const rel = path.relative(runWorktreePath, srcDir);
     const destPath = path.join(snapshotWorktreePath, rel);
     const destParent = path.dirname(destPath);
+    const linkTarget = mirrors?.get(srcDir) ?? srcDir;
 
     try {
       await fsPromises.access(destParent);
@@ -168,15 +188,70 @@ async function linkDependencyDirs(
     }
 
     try {
-      await fsPromises.symlink(srcDir, destPath, 'dir');
+      await fsPromises.symlink(linkTarget, destPath, 'dir');
     } catch (err) {
       logger?.warn('snapshotProvisioner: failed to symlink dependency dir', {
         srcDir,
+        linkTarget,
         destPath,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Default dependency preparer (lazy, kill-switchable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Memoized default preparers, keyed by resolved base dir. Lazy on purpose: this
+ * module is imported on the app-boot graph, and a preparer constructed at import
+ * time would resolve `CYBOFLOW_DIR` before `setCyboflowDirectory`/the env is
+ * necessarily settled. Keying by base dir keeps a test that flips `CYBOFLOW_DIR`
+ * from inheriting the previous run's instance.
+ *
+ * The FIRST caller's logger is retained for a given base dir. The app has one
+ * logger, so this is a distinction without a difference in production; a test
+ * that needs its own logging injects its own preparer via `opts.depPreparer`.
+ */
+const defaultDepPreparers = new Map<string, VerifyDepPreparer>();
+
+/**
+ * The prepared-set cache root: `<CYBOFLOW_DIR|~/.cyboflow>/verify-deps`.
+ *
+ * Deliberately NOT `utils/cyboflowDirectory.getCyboflowSubdirectory` — that
+ * module imports `electron`, and this one is Electron-free by construction so it
+ * stays unit-testable with no Electron/DB (see the module doc). The env var is
+ * the same first-class override that resolver honors; the packaged per-variant
+ * dirs it also handles only shift WHERE the cache lives, never whether it works.
+ */
+function resolveDefaultDepBaseDir(): string {
+  return path.join(process.env.CYBOFLOW_DIR ?? path.join(os.homedir(), '.cyboflow'), 'verify-deps');
+}
+
+/**
+ * The default preparer, or `null` when disabled.
+ *
+ * `CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER=1` is the rollback lever (mirroring
+ * `CYBOFLOW_DISABLE_WARM_SDK=1` for warm SDK sessions): it reverts dependency
+ * linking to the pre-§7.2 behavior — symlinks straight into the live worktree —
+ * with no rebuild, no cache, no clone. Read on EVERY call rather than at module
+ * load so flipping it takes effect on the next verification, and so a test can
+ * set it per-case.
+ *
+ * Exported for tests only; production reaches it through `provisionSnapshot`.
+ */
+export function resolveDefaultDepPreparer(logger?: LoggerLike): VerifyDepPreparer | null {
+  if (process.env.CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER === '1') return null;
+
+  const baseDir = resolveDefaultDepBaseDir();
+  const cached = defaultDepPreparers.get(baseDir);
+  if (cached) return cached;
+
+  const preparer = new VerifyDepPreparer({ baseDir, exec: defaultDepExec, ...(logger ? { logger } : {}) });
+  defaultDepPreparers.set(baseDir, preparer);
+  return preparer;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +273,14 @@ export interface ProvisionSnapshotOptions {
   logger?: LoggerLike;
   /** Injectable git seam (tests only); defaults to a real `execFile('git', ...)`. */
   gitExec?: GitExec;
+  /**
+   * Dependency preparer (§7.2). Omitted ⇒ the lazy default
+   * ({@link resolveDefaultDepPreparer}, itself disabled by
+   * `CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER=1`). `null` ⇒ explicitly disabled for
+   * this call, which is the pre-§7.2 behavior verbatim: dependency dirs are
+   * symlinked straight into the live worktree.
+   */
+  depPreparer?: VerifyDepPreparer | null;
 }
 
 /**
@@ -242,7 +325,12 @@ export async function provisionSnapshot(opts: ProvisionSnapshotOptions): Promise
 
   try {
     const dependencyDirs = await findDependencyDirs(runWorktreePath);
-    await linkDependencyDirs(runWorktreePath, worktreePath, dependencyDirs, logger);
+    // §7.2: prepare BEFORE linking, so the links can point at the mirror. The
+    // preparer is fail-soft by contract — a null map means "no prepared set",
+    // and linking then behaves exactly as it did before this seam existed.
+    const preparer = opts.depPreparer === undefined ? resolveDefaultDepPreparer(logger) : opts.depPreparer;
+    const mirrors = preparer ? await preparer.prepare(runWorktreePath, dependencyDirs) : null;
+    await linkDependencyDirs(runWorktreePath, worktreePath, dependencyDirs, logger, mirrors);
   } catch (err) {
     // Dependency-dir linking is a convenience for the agent's build step, not
     // a correctness requirement of the snapshot itself — never fail

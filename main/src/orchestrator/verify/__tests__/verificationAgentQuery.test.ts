@@ -1,13 +1,73 @@
 /**
- * Unit tests for createTranscriptAccumulator (verifier-transcript capture) — the
- * markdown-transcript builder verificationAgentQuery.ts's drain loop feeds every
- * raw SDK message through. Uses the REAL typed fakeSdk builders (sdkAssistantText,
- * sdkAssistantToolUse, sdkUserToolResult) so a message-shape drift is caught by
- * fakeSdk's own `satisfies` checks against the SDK's exported types, not just here.
+ * Unit tests for verificationAgentQuery — the verification agent's single SDK
+ * boundary. Two surfaces:
+ *
+ *  - createTranscriptAccumulator (verifier-transcript capture): the
+ *    markdown-transcript builder the drain loop feeds every raw SDK message
+ *    through. Uses the REAL typed fakeSdk builders (sdkAssistantText,
+ *    sdkAssistantToolUse, sdkUserToolResult) so a message-shape drift is caught
+ *    by fakeSdk's own `satisfies` checks against the SDK's exported types, not
+ *    just here.
+ *  - the §7.2 dependency-mutation Bash guard: the `canUseTool` this module bakes
+ *    into every deployed session, exercised BOTH directly and through a mocked
+ *    `query()` (so the wiring — not just the predicate — is pinned, alongside
+ *    the hermetic options it has to compose with).
  */
-import { describe, it, expect } from 'vitest';
-import { sdkAssistantText, sdkAssistantToolUse, sdkUserToolResult } from '../../../test/fakes/fakeSdk';
-import { createTranscriptAccumulator } from '../verificationAgentQuery';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import {
+  makeFakeQuery,
+  sdkAssistantText,
+  sdkAssistantToolUse,
+  sdkResultSuccess,
+  sdkUserToolResult,
+  type FakeQueryFn,
+  type FakeQueryParams,
+} from '../../../test/fakes/fakeSdk';
+
+// The SDK `query` is mocked so the query wrapper is exercisable with a canned
+// stream (no claude subprocess), mirroring eval/__tests__/evalJudgeQuery.test.ts.
+const queryMock = vi.fn();
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+  query: (...args: unknown[]) => queryMock(...args),
+}));
+vi.mock('../../../services/panels/claude/claudeExecutablePath', () => ({
+  resolveClaudeExecutablePath: () => '/fake/claude',
+}));
+
+import {
+  createTranscriptAccumulator,
+  makeDependencyCommandCanUseTool,
+  makeVerificationAgentQuery,
+} from '../verificationAgentQuery';
+
+let lastOptions: Record<string, unknown> | undefined;
+
+/** Point the mocked `query()` at a fakeSdk `FakeQueryFn`, capturing the options the module baked. */
+function install(fn: FakeQueryFn): void {
+  queryMock.mockImplementation((params: FakeQueryParams) => {
+    lastOptions = params.options as unknown as Record<string, unknown>;
+    return fn(params);
+  });
+}
+
+beforeEach(() => {
+  queryMock.mockReset();
+  lastOptions = undefined;
+});
+
+/** Invoke a CanUseTool with the minimal options bag the SDK passes. */
+async function decide(
+  guard: ReturnType<typeof makeDependencyCommandCanUseTool>,
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<PermissionResult | null> {
+  return guard(toolName, input, {
+    signal: new AbortController().signal,
+    toolUseID: 'toolu_test',
+    requestId: 'req_test',
+  });
+}
 
 describe('createTranscriptAccumulator', () => {
   it('returns null when nothing was fed', () => {
@@ -98,5 +158,127 @@ describe('createTranscriptAccumulator', () => {
     acc.onMessage('not a message');
     acc.onMessage(42);
     expect(acc.text()).toBeNull();
+  });
+});
+
+describe('makeDependencyCommandCanUseTool — the §7.2 execution-time guard', () => {
+  /** The runner's tool ceiling, as the query builder passes it to the factory. */
+  const VERIFY_SET = ['Bash', 'Read', 'Grep', 'Glob'] as const;
+
+  const INSTALLS = [
+    'pnpm install',
+    'pnpm install --frozen-lockfile',
+    'npm ci',
+    'yarn add left-pad',
+    'pnpm -r rebuild',
+    'cd frontend && npm install',
+    'npx playwright install chromium',
+    'npx electron-builder install-app-deps',
+    './node_modules/.bin/electron-rebuild -f',
+  ];
+
+  it.each(INSTALLS)('denies the dependency-mutating Bash command %j', async (command) => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    const decision = await decide(guard, 'Bash', { command });
+
+    expect(decision?.behavior).toBe('deny');
+    if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+    // Names the command back, states the rule, and routes the agent to the
+    // honest outcome instead of a workaround.
+    expect(decision.message).toContain(command);
+    expect(decision.message).toContain('forbidden inside verification snapshots');
+    expect(decision.message).toContain('build_failed');
+    // Not an interrupt: the agent should continue and report, not be killed.
+    expect(decision.interrupt).toBeUndefined();
+  });
+
+  const BENIGN = [
+    'pnpm run build',
+    'pnpm dev --port 29260',
+    'pnpm test:unit',
+    'node scripts/serve.mjs',
+    'ls node_modules',
+    'electron . --remote-debugging-port=29261',
+  ];
+
+  it.each(BENIGN)('allows the benign Bash command %j, echoing its input', async (command) => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    const decision = await decide(guard, 'Bash', { command });
+
+    // `updatedInput` is MANDATORY on allow — a bare { behavior: 'allow' }
+    // ZodErrors at the CLI and reaches the model as an is_error tool_result.
+    expect(decision).toEqual({ behavior: 'allow', updatedInput: { command } });
+  });
+
+  it('leaves every non-Bash tool IN THE SET untouched, even when its input reads like an install', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    for (const toolName of ['Read', 'Grep', 'Glob']) {
+      const input = { pattern: 'pnpm install', file_path: '/wt/README.md' };
+      expect(await decide(guard, toolName, input)).toEqual({ behavior: 'allow', updatedInput: input });
+    }
+  });
+
+  it('default-DENIES any tool outside the verify set (a handler must not widen the sandbox)', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    for (const toolName of ['Write', 'Edit', 'WebFetch', 'NotebookEdit']) {
+      const decision = await decide(guard, toolName, { file_path: '/wt/a.ts', content: 'x' });
+      expect(decision?.behavior).toBe('deny');
+      if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+      expect(decision.message).toContain(toolName);
+      expect(decision.message).toContain('not part of the verification harness');
+    }
+  });
+
+  it('allows a Bash call with no string command rather than guessing', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    expect(await decide(guard, 'Bash', {})).toEqual({ behavior: 'allow', updatedInput: {} });
+  });
+
+  it('logs the denial (a blocked command must be diagnosable from the run log)', async () => {
+    const warn = vi.fn();
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() });
+
+    await decide(guard, 'Bash', { command: 'pnpm install' });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('dependency-mutating'), { command: 'pnpm install' });
+  });
+});
+
+describe('makeVerificationAgentQuery — sandbox wiring', () => {
+  it('installs the dependency guard as canUseTool WITHOUT weakening the hermetic options', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery();
+
+    await fn({ prompt: 'p', systemPrompt: 's', cwd: '/wt', allowedTools: ['Bash', 'Read'], env: {} });
+
+    const opts = lastOptions ?? {};
+    // The immutable sandbox is intact…
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.strictMcpConfig).toBe(true);
+    expect(opts.mcpServers).toEqual({});
+    expect(opts.pathToClaudeCodeExecutable).toBe('/fake/claude');
+    // …and mutually exclusive with permissionPromptToolName, which is never set.
+    expect(opts.permissionPromptToolName).toBeUndefined();
+
+    // Availability vs auto-approval split: `tools` is the HARD whitelist (the
+    // full verify set), while `allowedTools` auto-approves only the read-only
+    // members — 'Bash' is excluded so every shell call consults canUseTool
+    // (an allowedTools entry bypasses the handler entirely, SDK contract).
+    expect(opts.tools).toEqual(['Bash', 'Read']);
+    expect(opts.allowedTools).toEqual(['Read']);
+
+    const canUseTool = opts.canUseTool as CanUseTool | undefined;
+    expect(typeof canUseTool).toBe('function');
+    if (!canUseTool) throw new Error('expected canUseTool to be installed');
+
+    const denied = await decide(canUseTool, 'Bash', { command: 'pnpm install --frozen-lockfile' });
+    expect(denied?.behavior).toBe('deny');
+    const allowed = await decide(canUseTool, 'Bash', { command: 'pnpm run build' });
+    expect(allowed?.behavior).toBe('allow');
   });
 });

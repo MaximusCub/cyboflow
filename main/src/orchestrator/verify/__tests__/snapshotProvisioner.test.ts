@@ -1,10 +1,12 @@
 /**
  * snapshotProvisioner tests — run against a REAL throwaway git repo fixture
  * (no DB, no Electron). Covers captureSnapshotSha, provisionSnapshot's
- * exact-sha checkout + node_modules symlinking, the typed bad-sha error, and
- * dispose's unconditional/idempotent teardown.
+ * exact-sha checkout + node_modules symlinking, the §7.2 prepared-dependency
+ * mirror seam (link at the mirror when a set exists, at the live worktree when
+ * it does not) and its kill switch, the typed bad-sha error, and dispose's
+ * unconditional/idempotent teardown.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -13,11 +15,35 @@ import {
   captureSnapshotSha,
   provisionSnapshot,
   findDependencyDirs,
+  resolveDefaultDepPreparer,
   SnapshotProvisionError,
 } from '../snapshotProvisioner';
+import { VerifyDepPreparer, type DepExec } from '../depPreparer';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+/**
+ * An exec seam for VerifyDepPreparer that performs `cp` in-process and treats
+ * the Electron rebuild as a recorded no-op — the preparer's own suite proves its
+ * mechanics; here it only has to produce a REAL mirror on disk for the link to
+ * point at.
+ */
+function fakeDepExec(): DepExec {
+  return async (cmd, args) => {
+    if (cmd === 'cp') {
+      await fsPromises.cp(args[1], args[2], { recursive: true });
+      return { code: 0, out: '' };
+    }
+    return { code: 0, out: '' };
+  };
+}
+
+/** Adds the lockfile + package.json the preparer keys on (uncommitted is fine — it reads the live worktree). */
+async function addPreparerInputs(dir: string): Promise<void> {
+  await fsPromises.writeFile(path.join(dir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+  await fsPromises.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'fixture' }));
 }
 
 /** Initializes a fixture repo with an initial commit, config'd for CI commits. */
@@ -29,6 +55,21 @@ async function initFixtureRepo(dir: string): Promise<void> {
   git(dir, ['add', '.']);
   git(dir, ['commit', '-q', '-m', 'init']);
 }
+
+/**
+ * HERMETICITY: with no explicit `depPreparer`, provisionSnapshot resolves the
+ * DEFAULT preparer, whose cache lives under `CYBOFLOW_DIR|~/.cyboflow`. A unit
+ * test must never build a prepared set in the user's real data dir, so the §7.2
+ * kill switch is on for every test in this file. The cases that DO exercise the
+ * preparer inject their own (an explicit `depPreparer` bypasses the switch), and
+ * the kill-switch test manages the variable itself.
+ */
+beforeEach(() => {
+  process.env.CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER = '1';
+});
+afterEach(() => {
+  delete process.env.CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER;
+});
 
 describe('snapshotProvisioner', () => {
   describe('captureSnapshotSha', () => {
@@ -143,6 +184,78 @@ describe('snapshotProvisioner', () => {
       });
     });
 
+    it('links dependency dirs at the PREPARED MIRROR when a prepared set exists (§7.2)', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        const worktree = path.join(dir, 'worktree');
+        await fsPromises.mkdir(worktree, { recursive: true });
+        await initFixtureRepo(worktree);
+        await addPreparerInputs(worktree);
+        await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+        await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
+
+        const baseDir = path.join(dir, 'verify-deps');
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: fakeDepExec() });
+        const snapshotSha = await captureSnapshotSha(worktree);
+
+        const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
+        try {
+          const linkPath = path.join(provision.worktreePath, 'node_modules');
+          const target = await fsPromises.readlink(linkPath);
+
+          // The link points INTO the disposable prepared-set cache, not at the
+          // shared worktree — so a write-through cannot flip a sibling lane's ABI.
+          expect(target.startsWith(baseDir + path.sep)).toBe(true);
+          expect(path.basename(target)).toBe('node_modules');
+          expect(target).not.toBe(path.join(worktree, 'node_modules'));
+          // …and it is a usable mirror of the live tree.
+          expect(await fsPromises.readFile(path.join(linkPath, 'marker.txt'), 'utf8')).toBe('live-marker\n');
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
+    it('links at the LIVE worktree dirs when the preparer declines (no prepared set)', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        const worktree = path.join(dir, 'worktree');
+        await fsPromises.mkdir(worktree, { recursive: true });
+        await initFixtureRepo(worktree);
+        // No lockfile ⇒ the preparer has no stable key and returns null.
+        await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+        await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
+
+        const depPreparer = new VerifyDepPreparer({ baseDir: path.join(dir, 'verify-deps'), exec: fakeDepExec() });
+        const snapshotSha = await captureSnapshotSha(worktree);
+
+        const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
+        try {
+          const target = await fsPromises.readlink(path.join(provision.worktreePath, 'node_modules'));
+          expect(target).toBe(path.join(worktree, 'node_modules'));
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
+    it('depPreparer: null is the pre-§7.2 behavior verbatim (live-worktree symlinks, no cache built)', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        const worktree = path.join(dir, 'worktree');
+        await fsPromises.mkdir(worktree, { recursive: true });
+        await initFixtureRepo(worktree);
+        await addPreparerInputs(worktree);
+        await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+
+        const snapshotSha = await captureSnapshotSha(worktree);
+        const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer: null });
+        try {
+          const target = await fsPromises.readlink(path.join(provision.worktreePath, 'node_modules'));
+          expect(target).toBe(path.join(worktree, 'node_modules'));
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
     it('throws a typed SnapshotProvisionError for a sha that does not resolve', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
         await initFixtureRepo(dir);
@@ -185,6 +298,33 @@ describe('snapshotProvisioner', () => {
         await fsPromises.rm(provision.worktreePath, { recursive: true, force: true });
 
         await expect(provision.dispose()).resolves.toBeUndefined();
+      });
+    });
+  });
+
+  describe('resolveDefaultDepPreparer', () => {
+    it('CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER=1 disables the default preparer (rollback lever)', () => {
+      // Set by the file-wide beforeEach — this is the assertion that it bites.
+      expect(resolveDefaultDepPreparer()).toBeNull();
+    });
+
+    it('resolves (and memoizes) a preparer rooted at <CYBOFLOW_DIR>/verify-deps when enabled', async () => {
+      await withTempDir('snapshot-provisioner-cyboflow-dir-', async (dir) => {
+        const previousDir = process.env.CYBOFLOW_DIR;
+        delete process.env.CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER;
+        process.env.CYBOFLOW_DIR = dir;
+        try {
+          const first = resolveDefaultDepPreparer();
+          expect(first).toBeInstanceOf(VerifyDepPreparer);
+          // Memoized per base dir — the same instance, not a new one per call.
+          expect(resolveDefaultDepPreparer()).toBe(first);
+          // Resolution is lazy AND inert: nothing is created until a real
+          // prepare() actually builds a set.
+          await expect(fsPromises.access(path.join(dir, 'verify-deps'))).rejects.toThrow();
+        } finally {
+          if (previousDir === undefined) delete process.env.CYBOFLOW_DIR;
+          else process.env.CYBOFLOW_DIR = previousDir;
+        }
       });
     });
   });
