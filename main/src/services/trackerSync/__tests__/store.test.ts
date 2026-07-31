@@ -26,6 +26,9 @@
  *     that reach past the tracker tables into ideas/epics/tasks, so a hard
  *     delete's zombie links are findable and its cascade is knowable up front.
  *   - resolveConflict's state/resolved_at stamping.
+ *   - findDisconnectedConnection's revival identity, base_url included: a
+ *     workspace slug is unique only within one tracker INSTANCE, so two
+ *     self-hosted deployments sharing a slug must not revive each other's row.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -258,20 +261,20 @@ describe('trackerSync store — connections', () => {
     seedConnection({ id: 'conn-1', workspace_id: 'ws-1' });
     // An ACTIVE row is the project's live connection for that workspace — never
     // a revival candidate.
-    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')).toBeNull();
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1', null)).toBeNull();
 
     updateConnectionSettings(raw, 'conn-1', { status: 'disconnected' });
-    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')?.id).toBe('conn-1');
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1', null)?.id).toBe('conn-1');
 
     // Every axis of the identity is load-bearing.
-    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-2')).toBeNull();
-    expect(findDisconnectedConnection(raw, 1, 'plane', 'ws-1')).toBeNull();
-    expect(findDisconnectedConnection(raw, 2, 'linear', 'ws-1')).toBeNull();
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-2', null)).toBeNull();
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'ws-1', null)).toBeNull();
+    expect(findDisconnectedConnection(raw, 2, 'linear', 'ws-1', null)).toBeNull();
   });
 
   it('findDisconnectedConnection never claims a row whose workspace identity was never recorded', () => {
     seedConnection({ id: 'conn-1', status: 'disconnected', workspace_id: null });
-    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')).toBeNull();
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1', null)).toBeNull();
   });
 
   it('findDisconnectedConnection returns the most recently updated candidate', () => {
@@ -283,7 +286,80 @@ describe('trackerSync store — connections', () => {
     stamp.run('2026-07-01 00:00:00', 'older');
     stamp.run('2026-07-02 00:00:00', 'newer');
 
-    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')?.id).toBe('newer');
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1', null)?.id).toBe('newer');
+  });
+
+  it('findDisconnectedConnection does NOT claim the same workspace slug on a DIFFERENT instance', () => {
+    // The regression: the identity key ignored `base_url`, but a Plane workspace
+    // slug is unique only WITHIN an instance. A retired self-hosted connection
+    // would then be revived by a connect to an unrelated instance that happens to
+    // use the same slug — keeping every old link, so write-back targets issue ids
+    // that belong to the other deployment and the deletion sweep reads its 404s
+    // as remote deletions.
+    seedConnection({
+      id: 'conn-a',
+      provider: 'plane',
+      status: 'disconnected',
+      workspace_id: 'acme',
+      base_url: 'https://plane.a.example',
+    });
+
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://plane.b.example')).toBeNull();
+
+    // The SAME instance spelled differently is still the same instance: a
+    // trailing slash and origin case are not identity.
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://plane.a.example')?.id).toBe(
+      'conn-a',
+    );
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://plane.a.example/')?.id).toBe(
+      'conn-a',
+    );
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'HTTPS://Plane.A.Example//')?.id).toBe(
+      'conn-a',
+    );
+  });
+
+  it('findDisconnectedConnection reads a stored Plane cloud origin and a NULL base_url as one instance', () => {
+    // The wizard pre-fills the cloud origin, so one life of a cloud connection
+    // can hold the literal string and another a NULL — same instance either way.
+    seedConnection({
+      id: 'conn-cloud',
+      provider: 'plane',
+      status: 'disconnected',
+      workspace_id: 'acme',
+      base_url: 'https://api.plane.so',
+    });
+
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', null)?.id).toBe('conn-cloud');
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://api.plane.so/')?.id).toBe(
+      'conn-cloud',
+    );
+    // A self-hosted deployment of the same slug remains a different connection.
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://plane.acme.dev')).toBeNull();
+  });
+
+  it('findDisconnectedConnection prefers an OLDER row on the matching instance over a newer one elsewhere', () => {
+    seedConnection({
+      id: 'other-instance',
+      provider: 'plane',
+      status: 'disconnected',
+      workspace_id: 'acme',
+      base_url: 'https://plane.b.example',
+    });
+    seedConnection({
+      id: 'this-instance',
+      provider: 'plane',
+      status: 'disconnected',
+      workspace_id: 'acme',
+      base_url: 'https://plane.a.example',
+    });
+    const stamp = raw.prepare('UPDATE tracker_connections SET updated_at = ? WHERE id = ?');
+    stamp.run('2026-07-02 00:00:00', 'other-instance');
+    stamp.run('2026-07-01 00:00:00', 'this-instance');
+
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'acme', 'https://plane.a.example')?.id).toBe(
+      'this-instance',
+    );
   });
 
   it('reactivateConnection rewrites the retired row IN PLACE, keeping its id and clearing the cursor', () => {

@@ -374,8 +374,26 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * never survives a quit usefully. Persisting it would be strictly worse: an
    * unconsumed ruling (the user backed out of the confirm) would then outlive
    * the session and silently cancel someone's issue the next time that entity
-   * was deleted, weeks later. Expiry ({@link UNLINK_RULING_TTL_MS}) covers the
-   * same abandonment within a session.
+   * was deleted, weeks later.
+   *
+   * A ruling is keyed by ENTITY ONLY — it carries no correlation to the one
+   * removal the user was looking at — so an ABANDONED one is a loaded gun
+   * pointed at every later removal of that entity. Three layers keep it
+   * harmless, and each covers a case the others cannot:
+   *
+   *   1. EXPLICIT INVALIDATION ({@link TrackerSyncService.clearUnlinkRuling}).
+   *      The renderer clears the ruling the moment its confirm dialog closes
+   *      without committing (and when the ruling dialog itself is dismissed).
+   *      The precise, immediate answer — but it depends on the renderer being
+   *      alive and reachable, so it cannot be the only one.
+   *   2. ACTOR CHECK ({@link TrackerSyncService.handleLocalRemoval}). A ruling
+   *      is a HUMAN's answer to a dialog, so only an `actor: 'user'` removal
+   *      may spend it. A provider-authored (inbound sync) or
+   *      orchestrator-authored archive/delete during the window can never
+   *      consume one, however the window was left open.
+   *   3. TTL ({@link UNLINK_RULING_TTL_MS}). The backstop under both: it bounds
+   *      abandonment that layer 1 missed (renderer crash, a reload mid-confirm)
+   *      to ten minutes, after which no actor can spend the ruling either.
    */
   private readonly stagedRulings = new Map<string, StagedUnlinkRuling>();
 
@@ -1152,13 +1170,23 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // flags, status — with the CURSOR reset to null, and that reset is
     // load-bearing: the first pass re-fetches from the beginning, so every issue
     // meets its existing link and merges against its own baseline instead of
-    // importing. Identity is (project_id, provider, workspace_id); a different
-    // workspace, or one whose identity was never recorded, still mints.
+    // importing. Identity is (project_id, provider, workspace_id, base_url); a
+    // different workspace, a different INSTANCE of the same workspace slug, or
+    // one whose identity was never recorded, still mints.
+    //
+    // A different SOURCE (team/project/cycle) on the SAME workspace+instance is
+    // deliberately still a revival, because a narrowed scope cannot strand a
+    // link: the cursor reset re-fetches the new scope from the beginning, and a
+    // link whose issue now falls OUTSIDE it is protected by the deletion sweep's
+    // selection-independent point lookup — absence from a scoped listing is
+    // confirmed against getIssue before anything is archived, so out-of-scope
+    // reads as out-of-scope, not as deleted (see runDeletionSweep).
     const revivable = findDisconnectedConnection(
       this.db,
       payload.projectId,
       payload.credentials.provider,
       identity.workspaceId,
+      payload.credentials.baseUrl ?? null,
     );
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
     if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
@@ -1492,13 +1520,36 @@ export class TrackerSyncService implements TrackerSyncFacade {
     } as const;
 
     if (conflict.field === 'stage') {
-      // `remote_value` on a stage conflict is the MAPPED board stage id, not
-      // the tracker's state id. The conflict's payload does carry the raw state
-      // (acceptLocalFieldValue stamps it), but this side has no need of it: the
-      // entity now AGREES with the remote, so the next pass's three-way merge
-      // sees no divergence and refreshes the whole baseline itself. Covered by a
-      // repeat-pass test rather than assumed.
+      // `remote_value` on a stage conflict is the MAPPED board stage id, not the
+      // tracker's state id — so the raw state comes off the payload the conflict
+      // recorded (inboundSync's TrackerConflictPayload).
+      //
+      // STAMP BEFORE APPLY, for the reason inboundSync.stampRemoteGroup
+      // documents: writeBack's listener runs INLINE on TaskChangeRouter's
+      // post-commit emit, so a stage move to Done/Won't do that finds no
+      // matching `lastWrittenGroup` on the link reads as a LOCAL change and
+      // enqueues an update_state. The worker then writes the FIRST state of that
+      // group — which is not necessarily the state the user just accepted (a
+      // workspace with two completed states loses the one they picked). Stamping
+      // first makes the listener recognize the move as already-remote and queue
+      // nothing. A stamp that lands on a failed applyChange is still TRUE: it
+      // says only where the remote stands.
+      //
+      // A legacy row that carries no state id cannot be stamped without
+      // inventing one, so it keeps the previous behavior: the next pass's
+      // three-way merge sees the entity agreeing with the remote and refreshes
+      // the whole baseline itself.
       if (remote === null) return;
+      const remoteState = readConflictRemoteState(conflict.payload_json);
+      if (remoteState !== null) {
+        this.stampBaseline(link, {
+          stateId: remoteState.stateId,
+          // Mirrors inboundSync's stampRemoteGroup: a null group CLEARS the key
+          // rather than leaving a stale one that would suppress a later, genuine
+          // local write-back.
+          lastWrittenGroup: remoteState.group ?? undefined,
+        });
+      }
       await this.router.applyChange(connection.project_id, { ...base, stageId: remote });
       return;
     }
@@ -1658,6 +1709,25 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
+   * DISCARD a staged ruling the user has backed out of — layer 1 of the three
+   * defenses documented at {@link TrackerSyncService.stagedRulings}. Called
+   * when the archive/delete confirm behind the ruling dialog closes without
+   * committing, and when the ruling dialog itself is dismissed.
+   *
+   * Without it the answer stays consumable for the whole TTL, and the NEXT
+   * user-authored removal of that same entity — minutes later, from anywhere in
+   * the UI — would spend it and cancel a tracker issue the user explicitly
+   * declined to cancel.
+   *
+   * Idempotent and total: clearing an entity with no staged ruling is a no-op,
+   * so the renderer can fire it defensively without first asking whether one
+   * exists.
+   */
+  async clearUnlinkRuling(entityType: TrackerEntityType, entityId: string): Promise<void> {
+    this.stagedRulings.delete(rulingKey(entityType, entityId));
+  }
+
+  /**
    * The LOCAL-DELETE ruling applied DIRECTLY, without the staging step. Both
    * answers ORPHAN the link — the entity is going away, so there is nothing left
    * to sync — and `cancelRemote` additionally queues the state write that moves
@@ -1753,6 +1823,17 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *   what distinguishes "the user chose this in the removal dialog" from "the
    *   provider did this to us". An inbound apply never stages one.
    *
+   * ONLY A HUMAN'S REMOVAL SPENDS A HUMAN'S RULING (layer 2 of the three
+   * defenses at {@link TrackerSyncService.stagedRulings}). The ruling is the
+   * answer to a dialog a person was looking at, so it is consumable ONLY by an
+   * `actor: 'user'` event. A provider- or orchestrator-authored archive/delete
+   * landing inside the window is treated exactly as it would be with no ruling
+   * staged at all: a delete still orphans its links (they have nowhere else to
+   * go), an archive is left alone, and NOTHING is queued at the tracker. The
+   * ruling itself survives untouched for the removal it was actually collected
+   * for. An event with no `actor` at all (a hand-built broadcast) is
+   * unattributed, and therefore not a user.
+   *
    * CASCADE MEMBERS INHERIT THE ROOT'S RULING (and the dialog says so). The
    * router emits one 'deleted' event per cascade entity, CHILDREN FIRST — and it
    * has already deleted every row by then, so the only place a child's lineage
@@ -1769,11 +1850,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
       if (!deleted && !archived) return;
 
       this.pruneStaleRulings();
+      const byUser = event.actor === 'user';
       const key = rulingKey(event.task.type, event.taskId);
-      const own = this.stagedRulings.get(key) ?? null;
+      const own = byUser ? (this.stagedRulings.get(key) ?? null) : null;
       // Inheritance is a DELETE-only affair: the archive toggle changes exactly
-      // one row, so an archived epic's children are still on the board.
-      const ruling = own ?? (deleted ? this.inheritedRuling(event.task) : null);
+      // one row, so an archived epic's children are still on the board. Gated on
+      // `byUser` too — a cascade member must not reach around the actor check to
+      // pick up the root's ruling.
+      const ruling = own ?? (deleted && byUser ? this.inheritedRuling(event.task) : null);
       if (!deleted && ruling === null) return;
 
       for (const link of this.liveLinksForEntity(event.task.type, event.taskId)) {

@@ -21,6 +21,13 @@
  * who then cancelled the confirm kept the entity but had already lost the link
  * and possibly cancelled the remote issue.)
  *
+ * DISMISSING CLEARS. A staged ruling is keyed by entity alone, so an abandoned
+ * one would sit there consumable until it expires and could be spent by an
+ * unrelated later removal. Dismissing this dialog therefore also fires
+ * `cyboflow.tracker.clearUnlinkRuling` for the entity — discarding anything a
+ * previous, backed-out round left staged. Fire-and-forget: the main side's TTL
+ * is the backstop, and a failed clear must not trap the user in the dialog.
+ *
  * `hasLinkedDescendants` says the delete will cascade into other synced entities
  * (an idea's epics/tasks, an epic's tasks); they inherit this same ruling, so
  * the copy says so before the user picks.
@@ -88,6 +95,19 @@ export function TrackerUnlinkDialog({
   // tasks on the board, so the ruling has nothing to inherit it.
   const rulesChildren = action === 'delete' && hasLinkedDescendants;
 
+  /**
+   * Dismissed without ruling. Discard whatever this entity may still have
+   * staged before handing control back — see "DISMISSING CLEARS" above. The
+   * clear is not awaited (and its failure is swallowed): the dialog must close
+   * on the click, and the main side's TTL covers a clear that never lands.
+   */
+  const dismiss = (): void => {
+    void trpc.cyboflow.tracker.clearUnlinkRuling
+      .mutate({ entityType, entityId })
+      .catch(() => undefined);
+    onClose();
+  };
+
   const rule = async (cancelRemote: boolean): Promise<void> => {
     if (submitting) return;
     setSubmitting(true);
@@ -110,8 +130,8 @@ export function TrackerUnlinkDialog({
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
-      <ModalHeader title={`${entityRef} is linked to ${providerName}`} onClose={onClose} />
+    <Modal isOpen={isOpen} onClose={dismiss} size="sm" showCloseButton={false}>
+      <ModalHeader title={`${entityRef} is linked to ${providerName}`} onClose={dismiss} />
       <ModalBody className="space-y-3">
         <div className="flex flex-col gap-2" data-testid="tracker-unlink-dialog">
           <p className="text-sm text-text-secondary">
@@ -140,7 +160,7 @@ export function TrackerUnlinkDialog({
       <ModalFooter>
         <button
           type="button"
-          onClick={onClose}
+          onClick={dismiss}
           className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
         >
           Cancel

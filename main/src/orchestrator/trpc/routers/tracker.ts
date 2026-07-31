@@ -14,6 +14,7 @@
  *   linkForEntity                 : query        -> TrackerEntityLinkRef | null
  *   hasLinkedDescendants          : query        -> boolean (does the delete cascade hit synced children?)
  *   stageUnlinkRuling             : mutation     -> { ok } (COLLECT the local-removal ruling; mutates nothing)
+ *   clearUnlinkRuling             : mutation     -> { ok } (DISCARD a ruling the user backed out of)
  *   unlinkEntity                  : mutation     -> { unlinked } (apply a ruling directly)
  *   onTrackerChanged              : subscription -> TrackerChangedEvent
  *
@@ -468,6 +469,25 @@ export const trackerRouter = router({
         await getTrackerSyncFacade().stageUnlinkRuling(input.entityType, input.entityId, {
           cancelRemote: input.cancelRemote,
         });
+        return { ok: true };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * DISCARD a staged ruling: the confirm dialog behind it closed without
+   * committing (Cancel / escape / overlay), or the ruling dialog itself was
+   * dismissed. Without this the abandoned answer stays consumable until it
+   * expires, and the next removal of that entity would spend it — cancelling a
+   * tracker issue the user explicitly backed out of. Idempotent: an entity with
+   * no staged ruling is a no-op, so the renderer may fire it defensively.
+   */
+  clearUnlinkRuling: protectedProcedure
+    .input(z.object({ entityType: entityTypeSchema, entityId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<{ ok: true }> => {
+      try {
+        await getTrackerSyncFacade().clearUnlinkRuling(input.entityType, input.entityId);
         return { ok: true };
       } catch (err) {
         rethrowAsTRPCError(err);

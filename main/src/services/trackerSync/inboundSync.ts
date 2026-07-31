@@ -43,9 +43,10 @@
  * for why both exist.
  *
  * ECHO SUPPRESSION, OUTBOUND SIDE. The other direction needs its own seam:
- * TaskChangedEvent carries no actor/origin, so writeBack.ts's listener — which
- * runs INLINE on TaskChangeRouter's post-commit emit — cannot tell a
- * provider-authored stage move from a local one and would queue a state write
+ * TaskChangedEvent's `actor` is OPTIONAL and merely advisory (a hand-built
+ * broadcast carries none), so writeBack.ts's listener — which runs INLINE on
+ * TaskChangeRouter's post-commit emit — cannot lean on it to tell a
+ * provider-authored stage move from a local one, and would queue a state write
  * straight back at the issue we just read it from. Its dedupe key is the link
  * baseline's `lastWrittenGroup`, which this module reads as "the canonical
  * group the REMOTE issue is already known to be at": every stage move made in

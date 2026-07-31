@@ -126,6 +126,18 @@ export interface TrackerSyncFacade {
   ): Promise<void>;
 
   /**
+   * DISCARD a staged ruling the user has backed out of — the renderer calls it
+   * when the archive/delete confirm behind the ruling dialog closes without
+   * committing, and when the ruling dialog itself is dismissed.
+   *
+   * Without it the abandoned answer stays consumable until it expires, and the
+   * NEXT removal of that same entity would spend it — cancelling a tracker
+   * issue the user explicitly declined to cancel. Idempotent: clearing an
+   * entity with no staged ruling is a no-op.
+   */
+  clearUnlinkRuling(entityType: TrackerEntityType, entityId: string): Promise<void>;
+
+  /**
    * Apply the ruling DIRECTLY (drop the link now; `cancelRemote` also queues the
    * cancelled-group write). The board's delete path uses
    * {@link TrackerSyncFacade.stageUnlinkRuling} instead — this remains for

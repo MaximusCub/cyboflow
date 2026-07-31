@@ -19,7 +19,10 @@
  *     fire-and-forget first pass, plus the 'connection' broadcast — and the
  *     ordering that makes it safe: nothing is written when the credential probe
  *     fails, and a reconcile row rejected AFTER the row+secret anchor is logged
- *     and skipped rather than sinking the connection.
+ *     and skipped rather than sinking the connection. Plus the revival IDENTITY:
+ *     the same workspace slug on a DIFFERENT tracker instance mints a new
+ *     connection, while the same instance spelled with a trailing slash (or left
+ *     on the provider's default origin) revives the retired row.
  *   - connections(): the summary's counts, source label, mapping and
  *     defensively-parsed log.
  *   - resolveConflictChoice: all four branches (field remote / field local /
@@ -28,7 +31,10 @@
  *   - resolveConflictChoice ACROSS a following inbound pass: a ruling that does
  *     not advance the link's baseline re-opens the same conflict forever, so
  *     title/description/one-way-stage local rulings (and the remote ones) are
- *     each driven through a real second pass with the remote unchanged.
+ *     each driven through a real second pass with the remote unchanged. The
+ *     stage + 'remote' cases additionally run with the REAL write-back listener
+ *     subscribed, because accepting a remote stage without first stamping the
+ *     raw remote state echoed a write-back that overwrote the accepted state.
  *   - disconnect: status + the cleared secret + delisting.
  *   - unlinkEntity: the ruling applied DIRECTLY — 'keep' orphans with an empty
  *     outbox, 'cancel' queues exactly one deduped cancelled-group write, an
@@ -39,6 +45,11 @@
  *     orphans its children's links (with or without a ruling) and those children
  *     inherit the root's answer, and an archive with no ruling is left entirely
  *     alone (that is inbound sync's link to manage).
+ *   - the three defenses that keep an ABANDONED ruling from being spent by an
+ *     unrelated later removal: clearUnlinkRuling (the renderer's explicit
+ *     discard), the ACTOR check (only an actor:'user' removal consumes one, so
+ *     a provider- or orchestrator-authored archive/delete inside the window
+ *     cannot), and the TTL underneath both.
  *   - reconcilePreview: which entities are candidates and how a title matches.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -66,7 +77,11 @@ vi.mock('electron', () => ({
 }));
 
 import { DatabaseService } from '../../../database/database';
-import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
+import {
+  TASK_ALL_CHANNEL,
+  TaskChangeRouter,
+  taskChangeEvents,
+} from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
 import {
   trackerProjectChannel,
@@ -102,8 +117,13 @@ import {
   type NewConnectionRow,
   type UpsertLinkInput,
 } from '../store';
-import type { UpdateStatePayload } from '../writeBack';
+import {
+  createWriteBackListener,
+  type UpdateStatePayload,
+  type WriteBackListener,
+} from '../writeBack';
 import { TrackerSyncService } from '../trackerSyncService';
+import type { TaskChangedEvent } from '../../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -628,6 +648,67 @@ describe('TrackerSyncService.connect', () => {
     expect(getConnection(raw, first.connectionId)?.status).toBe('disconnected');
     expect(getConnection(raw, second.connectionId)?.status).toBe('active');
   });
+
+  /** Plane credentials for a given instance — the workspace slug stays constant. */
+  function planeCredentials(baseUrl: string | undefined): TrackerCredentialsInput {
+    return {
+      provider: 'plane',
+      apiKey: API_KEY,
+      workspaceSlug: 'acme',
+      ...(baseUrl !== undefined ? { baseUrl } : {}),
+    };
+  }
+
+  it('mints a NEW connection when the same workspace slug lives on a DIFFERENT instance', async () => {
+    // The regression: the revival key was (project, provider, workspace_id), but
+    // a Plane workspace slug is unique only within ONE deployment. Reviving here
+    // would rewrite base_url while KEEPING every link, so write-back would target
+    // issue ids that belong to the other instance and the deletion sweep would
+    // read its 404s as remote deletions.
+    const first = await service.connect(
+      connectPayload({ credentials: planeCredentials('https://plane.a.example') }),
+    );
+    await service.disconnect(first.connectionId);
+
+    const second = await service.connect(
+      connectPayload({ credentials: planeCredentials('https://plane.b.example') }),
+    );
+
+    expect(second.connectionId).not.toBe(first.connectionId);
+    // The retired row keeps its links; nothing reads them while it is retired.
+    expect(getConnection(raw, first.connectionId)?.status).toBe('disconnected');
+    expect(getConnection(raw, first.connectionId)?.base_url).toBe('https://plane.a.example');
+    expect(getConnection(raw, second.connectionId)?.base_url).toBe('https://plane.b.example');
+  });
+
+  it('still REVIVES when the base URL differs only by a trailing slash', async () => {
+    const first = await service.connect(
+      connectPayload({ credentials: planeCredentials('https://plane.a.example') }),
+    );
+    await service.disconnect(first.connectionId);
+
+    const second = await service.connect(
+      connectPayload({ credentials: planeCredentials('https://plane.a.example/') }),
+    );
+
+    expect(second.connectionId).toBe(first.connectionId);
+    const count = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('still REVIVES a Plane CLOUD connection whose base URL was left implicit', async () => {
+    // The wizard pre-fills the cloud origin, so one life of the same cloud
+    // connection can hold the literal string and the next a NULL.
+    const first = await service.connect(
+      connectPayload({ credentials: planeCredentials('https://api.plane.so') }),
+    );
+    await service.disconnect(first.connectionId);
+
+    const second = await service.connect(connectPayload({ credentials: planeCredentials(undefined) }));
+
+    expect(second.connectionId).toBe(first.connectionId);
+    expect(getConnection(raw, first.connectionId)?.base_url).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1214,101 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
     expect(allConflicts()).toHaveLength(1);
     expect(readIdea(ideaId).title).toBe('Remote title');
   });
+
+  /**
+   * The REAL write-back listener on the REAL emitter, wired the way
+   * TrackerSyncService.start does (and inboundSync.test.ts's echo-suppression
+   * suite) — the only way an enqueue triggered by a resolution's own applyChange
+   * is observable, since the listener runs INLINE on TaskChangeRouter's
+   * post-commit emit.
+   */
+  let listener: WriteBackListener | null = null;
+  let handler: ((event: TaskChangedEvent) => void) | null = null;
+
+  function subscribeWriteBack(): void {
+    const built = createWriteBackListener({ db: raw, nowIso: () => '2026-07-30 12:00:00' });
+    const fn = (event: TaskChangedEvent): void => built.handleTaskChanged(event);
+    taskChangeEvents.on(TASK_ALL_CHANNEL, fn);
+    listener = built;
+    handler = fn;
+  }
+
+  afterEach(() => {
+    if (handler !== null) taskChangeEvents.off(TASK_ALL_CHANNEL, handler);
+    listener?.dispose();
+    listener = null;
+    handler = null;
+  });
+
+  it("stage + 'remote' does not echo a write-back over the state the user just accepted", async () => {
+    // The regression: accepting the REMOTE stage applied the mapped stage without
+    // first stamping the raw remote state onto the baseline, so the inline
+    // write-back listener read Done as a LOCAL move and queued an update_state —
+    // and the worker picks the FIRST state of the group, dragging the issue off
+    // 'Released' (the exact state the user accepted) onto 'Done'.
+    adapter.states = [
+      ...STATES,
+      { id: 'state-released', name: 'Released', color: null, group: 'completed' },
+    ];
+    subscribeWriteBack();
+
+    const { ideaId, conflictId } = await openConflict(
+      { stateId: 'state-released' },
+      // Ready for development deliberately writes nothing back, so the LOCAL half
+      // of the conflict contributes no outbox row of its own.
+      moveStage(STAGE.ready),
+    );
+    expect(conflictRow(conflictId).field).toBe('stage');
+    expect(outboxRows()).toEqual([]);
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    // The entity moves...
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.done);
+    // ...and NOTHING is queued back at the provider.
+    expect(outboxRows()).toEqual([]);
+    // The stamp says what is TRUE: the remote sits on that state, in that group.
+    expect(baselineOf('ext-1').stateId).toBe('state-released');
+    expect(baselineOf('ext-1').lastWrittenGroup).toBe('completed');
+  });
+
+  it("stage + 'remote' clears a STALE write-back stamp when the remote leaves the terminal groups", async () => {
+    // Imported from a started state, so the baseline carries
+    // lastWrittenGroup='started'. The remote has since dropped to Backlog, which
+    // belongs to no write-back group — leaving the stale key would suppress a
+    // later, genuine local move to In development.
+    const { ideaId, conflictId } = await openConflict(
+      { stateId: 'state-backlog' },
+      moveStage(STAGE.done),
+      { two_way: 1 },
+      { stateId: 'state-progress' },
+    );
+    expect(baselineOf('ext-1').lastWrittenGroup).toBe('started');
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.idea);
+    expect(baselineOf('ext-1').stateId).toBe('state-backlog');
+    expect(baselineOf('ext-1')).not.toHaveProperty('lastWrittenGroup');
+  });
+
+  it("stage + 'remote' on a LEGACY conflict row (no recorded remote state) still applies the stage", async () => {
+    // Rows written before the payload carried the raw state cannot be stamped
+    // without inventing a state id, so they keep the pre-fix behavior.
+    const { ideaId, conflictId } = await openConflict(
+      { stateId: 'state-progress' },
+      moveStage(STAGE.done),
+      { two_way: 0 },
+    );
+    raw
+      .prepare('UPDATE tracker_conflicts SET payload_json = ? WHERE id = ?')
+      .run(JSON.stringify({ externalId: 'ext-1', mode: 'manual' }), conflictId);
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    expect(readIdea(ideaId).stage_id).toBe(STAGE.ready);
+    expect(baselineOf('ext-1')).not.toHaveProperty('lastWrittenGroup');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1561,6 +1737,99 @@ describe('TrackerSyncService staged local-removal ruling', () => {
     expect(outboxRows()).toEqual([]);
     expect(linkRow(link.id).orphaned_at).toBeNull();
     await expect(service.linkForEntity('idea', ideaId)).resolves.not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // The three defenses against an ABANDONED ruling (TTL above, plus these two)
+  // -------------------------------------------------------------------------
+
+  it('clearUnlinkRuling discards a ruling the user backed out of, so a later delete only unlinks', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    // The confirm dialog behind the ruling closed without committing.
+    await service.clearUnlinkRuling('idea', ideaId);
+    // Well inside the TTL, so nothing but the explicit clear can save this.
+    await router.applyDelete(PROJECT_ID, { actor: 'user', taskId: ideaId });
+
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('clearing an entity with no staged ruling is a harmless no-op', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await expect(service.clearUnlinkRuling('idea', ideaId)).resolves.toBeUndefined();
+    // Nothing was staged and nothing was touched — the link is still live.
+    expect(linkRow(link.id).orphaned_at).toBeNull();
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it('a PROVIDER-authored archive cannot spend a human\'s staged ruling — the user\'s own later archive still can', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    // The user staged 'cancel it' and then backed out of the confirm. Inbound
+    // sync archives the same idea on the tracker's behalf moments later.
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyChange(PROJECT_ID, { actor: 'linear', taskId: ideaId, archived: true });
+
+    // The provider's archive is treated exactly as it would be with no ruling
+    // staged at all: inbound sync keeps owning the link, and NOTHING was
+    // queued at the tracker.
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).toBeNull();
+
+    // ...and the ruling is not destroyed either — it is still there for the
+    // removal it was actually collected for, well inside the TTL.
+    await router.applyChange(PROJECT_ID, { actor: 'linear', taskId: ideaId, archived: false });
+    await router.applyChange(PROJECT_ID, { actor: 'user', taskId: ideaId, archived: true });
+
+    expect(queuedGroups()).toEqual(['cancelled']);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+  });
+
+  it('an ORCHESTRATOR-authored delete orphans the links without spending the ruling', async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyDelete(PROJECT_ID, { actor: 'orchestrator', taskId: ideaId });
+
+    // A delete ALWAYS orphans (the entity is gone and nothing else ever will),
+    // but the cancel the user backed out of is not queued.
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(outboxRows()).toEqual([]);
+  });
+
+  it("a cascade child cannot inherit the root's ruling on a non-user delete", async () => {
+    makeConnection();
+    service.start();
+    const { ideaId, link } = await seedLinkedIdea();
+    const childId = await createEntity('task', {
+      title: 'Mirrored child',
+      originatingIdeaId: ideaId,
+    });
+    const childLink = upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'task',
+      entity_id: childId,
+      provider: 'linear',
+      external_id: 'ext-child',
+    });
+
+    await service.stageUnlinkRuling('idea', ideaId, { cancelRemote: true });
+    await router.applyDelete(PROJECT_ID, { actor: 'orchestrator', taskId: ideaId });
+
+    expect(outboxRows()).toEqual([]);
+    expect(linkRow(link.id).orphaned_at).not.toBeNull();
+    expect(linkRow(childLink.id).orphaned_at).not.toBeNull();
   });
 
   it('reports whether a delete cascade will take synced children with it', async () => {

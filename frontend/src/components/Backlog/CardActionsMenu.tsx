@@ -30,13 +30,21 @@
  * `tracker.hasLinkedDescendants` so the ruling dialog can say the answer covers
  * the synced children the delete cascade takes with it.
  *
+ * BACKING OUT INVALIDATES THE RULING. A staged ruling is keyed by entity alone,
+ * so an abandoned one stays consumable on the main side until it expires — and
+ * the next removal of that entity would spend it, cancelling a tracker issue the
+ * user explicitly declined to cancel. Closing the confirm WITHOUT committing
+ * therefore fires `tracker.clearUnlinkRuling`. `onClose` alone cannot tell the
+ * two apart (the confirm dialogs also close it on success), which is what the
+ * dialogs' `onCommitted` callback is for.
+ *
  * When `onReorder` is wired (Kanban board cards only), the menu also exposes
  * "Move up" / "Move down" / "Move to top" — the keyboard / single-pointer
  * alternative to drag-reorder (WCAG 2.5.7), driving the SAME reorder core as
  * DnD. Without it (ListView, epic children) the Move items are hidden and the
  * menu renders exactly as before.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   MoreHorizontal,
   ArrowRightLeft,
@@ -102,6 +110,13 @@ export function CardActionsMenu({
   const [trackerLink, setTrackerLink] = useState<TrackerEntityLinkRef | null>(null);
   /** Does the delete cascade take synced children with it? Ideas/epics only. */
   const [trackerChildren, setTrackerChildren] = useState(false);
+  /**
+   * Is a tracker ruling STAGED for the confirm dialog now open, and still
+   * unspent? A ref rather than state because the confirm's `onCommitted` and
+   * `onClose` fire in the same tick — the close handler has to read what the
+   * commit handler just wrote, which a queued state update would not give it.
+   */
+  const rulingStaged = useRef(false);
 
   // Prefer the task's own board; the fallback narrows to the task's PROJECT
   // before picking a default — the store now holds boards for ALL projects, and
@@ -196,7 +211,25 @@ export function CardActionsMenu({
     setParkedIntent(null);
     setTrackerLink(null);
     setTrackerChildren(false);
+    rulingStaged.current = true;
     if (intent !== null) openConfirm(intent);
+  };
+
+  /**
+   * The confirm closed. If a ruling is still staged, the user backed out — so
+   * discard it now rather than leaving it consumable by an unrelated later
+   * removal of the same entity. A committed confirm has already cleared the
+   * flag via `onCommitted`, so this is a no-op there.
+   *
+   * Not awaited, and failures are swallowed: the dialog must close on the
+   * click, and the main side's TTL is the backstop for a clear that never lands.
+   */
+  const discardStagedRuling = (): void => {
+    if (!rulingStaged.current) return;
+    rulingStaged.current = false;
+    void trpc.cyboflow.tracker.clearUnlinkRuling
+      .mutate({ entityType: task.type, entityId: task.id })
+      .catch(() => undefined);
   };
 
   const items: DropdownItem[] = [];
@@ -301,12 +334,26 @@ export function CardActionsMenu({
       <ArchiveConfirmDialog
         task={task}
         isOpen={archiveOpen}
-        onClose={() => setArchiveOpen(false)}
+        onCommitted={() => {
+          // The archive landed, so the entity event has already spent the ruling.
+          rulingStaged.current = false;
+        }}
+        onClose={() => {
+          setArchiveOpen(false);
+          discardStagedRuling();
+        }}
       />
       <DeleteConfirmDialog
         task={task}
         isOpen={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
+        onCommitted={() => {
+          // The delete landed, so the entity event has already spent the ruling.
+          rulingStaged.current = false;
+        }}
+        onClose={() => {
+          setDeleteOpen(false);
+          discardStagedRuling();
+        }}
       />
       {trackerLink !== null && parkedIntent !== null && (
         <TrackerUnlinkDialog
@@ -319,7 +366,9 @@ export function CardActionsMenu({
           isOpen
           onClose={() => {
             // Dismissed without a ruling: the destructive action is abandoned
-            // too, so nothing is deleted and the link stays live.
+            // too, so nothing is deleted and the link stays live. The dialog
+            // fires its own clearUnlinkRuling on the way out (nothing was staged
+            // in THIS round, but an earlier abandoned one may still be live).
             setParkedIntent(null);
             setTrackerLink(null);
             setTrackerChildren(false);

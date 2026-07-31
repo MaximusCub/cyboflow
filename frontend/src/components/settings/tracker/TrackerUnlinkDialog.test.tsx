@@ -8,7 +8,9 @@
  * STAGES its own `cancelRemote` — and stages ONLY, never `unlinkEntity`, so
  * nothing is mutated while the delete confirm behind this dialog is still
  * dismissible — and only then hands control back; the copy says so, and says the
- * ruling covers synced children on a cascading delete; dismissing rules nothing;
+ * ruling covers synced children on a cascading delete; dismissing rules nothing
+ * and additionally CLEARS any ruling still staged for the entity (a staged
+ * ruling is keyed by entity alone, so an abandoned one would stay consumable);
  * a rejected staging keeps the dialog open and does NOT let the delete through.
  */
 import '@testing-library/jest-dom';
@@ -21,6 +23,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       tracker: {
         stageUnlinkRuling: { mutate: vi.fn() },
+        clearUnlinkRuling: { mutate: vi.fn() },
         // Present but never expected to fire — the pre-confirm unlink is exactly
         // what this design removed.
         unlinkEntity: { mutate: vi.fn() },
@@ -34,6 +37,7 @@ import { TrackerUnlinkDialog } from './TrackerUnlinkDialog';
 import { trpc } from '../../../trpc/client';
 
 const mockStage = vi.mocked(trpc.cyboflow.tracker.stageUnlinkRuling.mutate);
+const mockClear = vi.mocked(trpc.cyboflow.tracker.clearUnlinkRuling.mutate);
 const mockUnlink = vi.mocked(trpc.cyboflow.tracker.unlinkEntity.mutate);
 
 const LINK: TrackerEntityLinkRef = {
@@ -63,6 +67,7 @@ function renderDialog(props: Partial<Parameters<typeof TrackerUnlinkDialog>[0]> 
 
 beforeEach(() => {
   mockStage.mockReset().mockResolvedValue({ ok: true });
+  mockClear.mockReset().mockResolvedValue({ ok: true });
   mockUnlink.mockReset().mockResolvedValue({ unlinked: true });
   onClose.mockReset();
   onResolved.mockReset();
@@ -105,6 +110,8 @@ describe('TrackerUnlinkDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
     // The old design's pre-confirm mutation is gone for good.
     expect(mockUnlink).not.toHaveBeenCalled();
+    // Choosing is not backing out — the ruling just staged must survive.
+    expect(mockClear).not.toHaveBeenCalled();
   });
 
   it('"Cancel in <provider>" stages the remote cancel, then releases the delete', async () => {
@@ -145,6 +152,29 @@ describe('TrackerUnlinkDialog', () => {
     expect(mockStage).not.toHaveBeenCalled();
     expect(onResolved).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('dismissing CLEARS any ruling still staged for the entity', async () => {
+    // The regression: a staged ruling is keyed by entity alone and stays
+    // consumable for its whole TTL, so an answer the user backed out of could be
+    // spent by an unrelated later archive/delete of the same entity.
+    renderDialog({ entityType: 'idea', entityId: 'ide_9' });
+    fireEvent.click(screen.getByText('Cancel'));
+
+    await waitFor(() => expect(mockClear).toHaveBeenCalledTimes(1));
+    expect(mockClear).toHaveBeenCalledWith({ entityType: 'idea', entityId: 'ide_9' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes on dismiss even when the clear is rejected — the TTL is the backstop', async () => {
+    mockClear.mockRejectedValueOnce(new Error('main is restarting'));
+    renderDialog();
+    fireEvent.click(screen.getByText('Cancel'));
+
+    // Not awaited: the dialog hands control back on the click regardless.
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockClear).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('keeps the dialog open and blocks the delete when staging fails', async () => {

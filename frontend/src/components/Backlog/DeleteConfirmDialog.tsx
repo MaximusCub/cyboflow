@@ -22,12 +22,21 @@ interface DeleteConfirmDialogProps {
   task: BacklogTaskItem;
   isOpen: boolean;
   onClose: () => void;
+  /**
+   * The delete COMMITTED — fired immediately before {@link onClose} on the
+   * success path only. `onClose` alone cannot say which happened (it is also
+   * Cancel / escape / overlay), and CardActionsMenu has to tell the two apart:
+   * a confirm the user backed out of must invalidate the tracker ruling staged
+   * in front of it, while a committed one has already spent it.
+   */
+  onCommitted?: () => void;
 }
 
 export function DeleteConfirmDialog({
   task,
   isOpen,
   onClose,
+  onCommitted,
 }: DeleteConfirmDialogProps): React.JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +56,7 @@ export function DeleteConfirmDialog({
         projectId: task.project_id,
         taskId: task.id,
       });
+      onCommitted?.();
       onClose();
     } catch (err: unknown) {
       setError(friendlyStageError(err));

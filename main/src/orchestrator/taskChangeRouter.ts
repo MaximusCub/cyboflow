@@ -50,6 +50,7 @@ import type {
   IdeaAttachment,
   IdeaScope,
   Priority,
+  TaskActor,
   TaskChangeAction,
   TaskChangedEvent,
   TaskType,
@@ -194,7 +195,10 @@ export interface TaskFieldChanges {
   sortOrder?: number | null;
 }
 
-export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear' | 'plane';
+// Declared in shared/types/tasks.ts (it rides on TaskChangedEvent, which crosses
+// into the renderer) and re-exported here so the chokepoint stays the one import
+// site every caller already uses.
+export type { TaskActor };
 
 export interface TaskChange {
   actor: TaskActor;
@@ -1156,7 +1160,7 @@ export class TaskChangeRouter {
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, type, taskId, 'created');
+    this.emitChange(projectId, type, taskId, 'created', change.actor);
     return { taskId, event: { id: eventId, seq: eventSeq } };
   }
 
@@ -1824,7 +1828,7 @@ export class TaskChangeRouter {
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, resolvedType, taskId, action);
+    this.emitChange(projectId, resolvedType, taskId, action, change.actor);
     return {
       taskId,
       event: { id: eventId, seq: eventSeq },
@@ -1915,7 +1919,13 @@ export class TaskChangeRouter {
     // Post-commit: one 'deleted' event per entity, pre-delete snapshot attached.
     for (const { id, snapshot } of snapshots) {
       if (!snapshot) continue; // vanished before the snapshot read — nothing to broadcast
-      this.broadcast(projectId, { projectId, taskId: id, action: 'deleted', task: snapshot });
+      this.broadcast(projectId, {
+        projectId,
+        taskId: id,
+        action: 'deleted',
+        task: snapshot,
+        actor: opts.actor,
+      });
     }
 
     // NOTE: the rollup re-derive happens in applyDelete AFTER this queue task
@@ -2196,7 +2206,7 @@ export class TaskChangeRouter {
       eventId = last?.id ?? 0;
       eventSeq = last?.seq ?? 0;
     } else {
-      this.emitChange(projectId, 'task', blockedId, 'updated');
+      this.emitChange(projectId, 'task', blockedId, 'updated', change.actor);
     }
 
     return { taskId: blockedId, dependsOnTaskId: prereqId, event: { id: eventId, seq: eventSeq } };
@@ -2998,10 +3008,21 @@ export class TaskChangeRouter {
     return { id: Number(info.lastInsertRowid), seq };
   }
 
-  private emitChange(projectId: number, type: TaskType, taskId: string, action: TaskChangeAction): void {
+  /**
+   * `actor` is carried onto the event so a consumer can tell a human's write
+   * from a provider-/orchestrator-authored one. Purely additive and optional on
+   * the payload — no existing consumer reads it (see TaskChangedEvent).
+   */
+  private emitChange(
+    projectId: number,
+    type: TaskType,
+    taskId: string,
+    action: TaskChangeAction,
+    actor: TaskActor,
+  ): void {
     const task = this.buildBacklogTaskItem(type, taskId);
     if (!task) return; // deleted between commit and emit — nothing to broadcast
-    this.broadcast(projectId, { projectId, taskId, action, task });
+    this.broadcast(projectId, { projectId, taskId, action, task, actor });
   }
 
   /** Emit one event on BOTH the per-project channel and the cross-project TASK_ALL_CHANNEL. */

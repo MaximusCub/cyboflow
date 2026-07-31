@@ -173,15 +173,80 @@ export function updateConnectionSettings(
 }
 
 /**
+ * The base URL a provider addresses when `base_url` is NULL — i.e. what "no
+ * base URL" actually means on the wire.
+ *
+ * Linear is cloud-only (its endpoint is baked into the adapter and the wizard
+ * offers no field), so nothing can be equal to its default. Plane's wizard
+ * PRE-FILLS the cloud origin, so one life of a cloud connection can store the
+ * literal string while another stores NULL — the same instance, spelled two
+ * ways. Mirrors planeAdapter.ts's own DEFAULT_BASE_URL; the two are the same
+ * fact stated for two different purposes (addressing vs. identity), and a
+ * self-hosted instance never collides with either.
+ */
+const PROVIDER_DEFAULT_BASE_URL: Record<TrackerConnectionRow['provider'], string | null> = {
+  linear: null,
+  plane: 'https://api.plane.so',
+};
+
+/**
+ * A `base_url` reduced to the INSTANCE it names, for identity comparison:
+ * origin lower-cased, trailing slashes dropped, blank treated as absent, and
+ * the provider's own default origin collapsed to null so an explicit
+ * `https://api.plane.so` and a NULL are one instance.
+ *
+ * The path is deliberately kept AS TYPED past the origin — a self-hosted Plane
+ * behind a path prefix (`https://tools.acme.dev/plane`) is a different instance
+ * from one at the root, and paths can be case-sensitive.
+ */
+function normalizeBaseUrl(
+  provider: TrackerConnectionRow['provider'],
+  baseUrl: string | null,
+): string | null {
+  const normalized = canonicalizeUrl(baseUrl);
+  if (normalized === null) return null;
+  return normalized === canonicalizeUrl(PROVIDER_DEFAULT_BASE_URL[provider]) ? null : normalized;
+}
+
+/** One URL reduced to its comparable form, or null when there is nothing to compare. */
+function canonicalizeUrl(raw: string | null): string | null {
+  const trimmed = (raw ?? '').trim();
+  if (trimmed.length === 0) return null;
+  try {
+    const url = new URL(trimmed);
+    // `origin` already lower-cases scheme + host and drops a default port.
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, '') || null;
+  } catch {
+    // Not a parseable URL (a bare host, a typo). Two spellings of the same
+    // unparseable value should still collapse, so give it the same treatment.
+    return trimmed.toLowerCase().replace(/\/+$/, '') || null;
+  }
+}
+
+/**
  * The DISCONNECTED connection a re-connect should REVIVE, or null.
  *
- * IDENTITY IS `(project_id, provider, workspace_id)` — "the same workspace, on
- * the same tracker, in the same project". `workspace_id` is the honest key
- * because it is what the connect flow persists from the LIVE
- * `validateCredentials()` probe (Linear's organization id, Plane's workspace
- * slug), NOT anything the user typed: it survives exactly the event that makes
- * this lookup necessary, a credential rotation. The API key changes, the
- * workspace does not.
+ * IDENTITY IS `(project_id, provider, workspace_id, base_url)` — "the same
+ * workspace, on the same tracker INSTANCE, in the same project".
+ * `workspace_id` is the honest key for the first three because it is what the
+ * connect flow persists from the LIVE `validateCredentials()` probe (Linear's
+ * organization id, Plane's workspace slug), NOT anything the user typed: it
+ * survives exactly the event that makes this lookup necessary, a credential
+ * rotation. The API key changes, the workspace does not.
+ *
+ * `base_url` IS PART OF THE KEY because a Plane workspace slug is unique only
+ * WITHIN one deployment: two self-hosted instances can each have an `acme`.
+ * Reviving across them would rewrite `base_url` while KEEPING every retained
+ * link, so write-back would target external ids belonging to the other
+ * instance, and the deletion sweep would read that instance's 404s as remote
+ * deletions and archive live local entities. A differing base URL therefore
+ * mints a NEW connection; the old row keeps its links, harmlessly, since it
+ * stays `disconnected` and nothing reads a retired row's links.
+ *
+ * Comparison is on the NORMALIZED value ({@link normalizeBaseUrl}), which is
+ * why the filter runs in JS rather than in the WHERE clause: sqlite cannot
+ * canonicalize a URL, and matching the stored string verbatim would fork the
+ * identity on a trailing slash.
  *
  * Only `disconnected` rows are candidates. An active or paused connection is
  * still the project's live connection for that workspace, and silently
@@ -198,16 +263,17 @@ export function findDisconnectedConnection(
   projectId: number,
   provider: TrackerConnectionRow['provider'],
   workspaceId: string,
+  baseUrl: string | null,
 ): TrackerConnectionRow | null {
-  const row = db
+  const wanted = normalizeBaseUrl(provider, baseUrl);
+  const rows = db
     .prepare(
       `SELECT * FROM tracker_connections
         WHERE project_id = ? AND provider = ? AND workspace_id = ? AND status = 'disconnected'
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 1`,
+        ORDER BY updated_at DESC, id DESC`,
     )
-    .get(projectId, provider, workspaceId) as TrackerConnectionRow | undefined;
-  return row ?? null;
+    .all(projectId, provider, workspaceId) as TrackerConnectionRow[];
+  return rows.find((row) => normalizeBaseUrl(provider, row.base_url) === wanted) ?? null;
 }
 
 /**

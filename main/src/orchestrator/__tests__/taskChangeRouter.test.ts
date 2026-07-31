@@ -1443,6 +1443,10 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     });
     expect(events).toHaveLength(1);
     expect(events[0].action).toBe('created');
+    // The authoring actor rides along, so a consumer can tell a human's write
+    // from a provider-/orchestrator-authored one (TrackerSyncService's staged
+    // unlink ruling is consumable ONLY by actor:'user').
+    expect(events[0].actor).toBe('user');
     expect(events[0].task.type).toBe('idea');
     expect(events[0].task.body).toBe('body text');
     expect(events[0].task.scope).toBe('small');

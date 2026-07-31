@@ -232,9 +232,30 @@ export interface BacklogTaskItem {
  */
 export type TaskChangeAction = 'created' | 'updated' | 'stageMoved' | 'decomposed' | 'deleted';
 
+/**
+ * Who authored an entity write. Lives HERE rather than beside the chokepoint
+ * because it rides on {@link TaskChangedEvent}, which crosses into the renderer;
+ * main/src/orchestrator/taskChangeRouter.ts re-exports it so every existing
+ * import site is unchanged.
+ */
+export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear' | 'plane';
+
 export interface TaskChangedEvent {
   projectId: number;
   taskId: string;
   action: TaskChangeAction;
   task: BacklogTaskItem;
+  /**
+   * Who authored the write this event announces — the `actor` the chokepoint
+   * already held at the emit site.
+   *
+   * OPTIONAL for shape parity: hand-built events (designHandoffService's idea
+   * broadcast, test fixtures) carry none, and a consumer must treat `undefined`
+   * as "unattributed", never as any particular actor. Consumers that gate a
+   * user-authored-only behaviour therefore test `=== 'user'` rather than
+   * `!== 'linear'` — see TrackerSyncService.handleLocalRemoval, where a staged
+   * unlink ruling is a HUMAN's dialog answer and only a human's removal may
+   * spend it.
+   */
+  actor?: TaskActor;
 }
