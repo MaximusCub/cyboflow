@@ -317,8 +317,9 @@ export async function processAmbiguous(
  *   - `create_sub_issue` + `capabilities.idempotentCreate` (Linear): the client
  *     key IS the issue id, so a point lookup settles it — found means the create
  *     landed, missing means it never did and a retry is safe.
- *   - `create_sub_issue` without idempotent creates (Plane): list the selection
- *     and match on parent + exact title.
+ *   - `create_sub_issue` without idempotent creates (Plane): ask the adapter for
+ *     the child of this parent carrying the row's client key (see
+ *     {@link ClientKeyRecoverableAdapter}) — same two answers, same guarantee.
  *   - `update_state` / `close_parent`: idempotent by nature — straight back to
  *     pending, the drain will simply write the state again.
  *
@@ -350,7 +351,7 @@ export async function resolveAmbiguous(
   try {
     found = adapter.capabilities.idempotentCreate
       ? await adapter.getIssue(clientKey)
-      : await findByParentAndTitle(adapter, connection, payload);
+      : await findByClientKey(adapter, connection, payload, clientKey);
   } catch (err) {
     if (err instanceof TrackerAuthError) {
       resolveOutbox(deps.db, row.id, 'failed', { lastError: describeError(err) });
@@ -372,27 +373,50 @@ export async function resolveAmbiguous(
 }
 
 /**
- * Plane's list-and-match: the parent's children, matched on exact title.
- * Throws when the connection has no usable source selection — "cannot look it
+ * Recovery seam for a provider whose creates are NOT natively idempotent
+ * (Plane): the adapter stamps the outbox row's client key into every issue it
+ * creates and can therefore point at the one child of a parent that is ours.
+ *
+ * Deliberately not on `TrackerAdapter`: the marker carrying the key is provider
+ * plumbing that the adapter strips from every description it returns (so it
+ * never lands in a local body or a merge baseline), which is exactly why this
+ * match cannot be done here over a mapped `TrackerIssue`.
+ */
+interface ClientKeyRecoverableAdapter {
+  findSubIssueByClientKey(parentExternalId: string, clientKey: string): Promise<TrackerIssue | null>;
+}
+
+function supportsClientKeyRecovery(
+  adapter: TrackerAdapter,
+): adapter is TrackerAdapter & ClientKeyRecoverableAdapter {
+  const candidate = adapter as Partial<ClientKeyRecoverableAdapter>;
+  return typeof candidate.findSubIssueByClientKey === 'function';
+}
+
+/**
+ * Match the parent's children on the row's CLIENT KEY, never on the title: a
+ * parent routinely holds two children with the same title, and adopting the
+ * wrong one would link the task to an unrelated issue and point every later
+ * write-back at it. Because the adapter stamps the key into every create, "no
+ * child carries it" means our create never landed and the retry is safe.
+ *
+ * Throws when the adapter cannot match by client key at all — "cannot look it
  * up" must NOT read as "it isn't there", or the retry would duplicate the
  * sub-issue.
  */
-async function findByParentAndTitle(
+async function findByClientKey(
   adapter: TrackerAdapter,
   connection: TrackerConnectionRow,
   payload: CreateSubIssuePayload,
+  clientKey: string,
 ): Promise<TrackerIssue | null> {
-  const selection = parseSelection(connection);
-  if (selection === null) {
-    throw new TrackerApiError(connection.provider, 'connection has no source selection to reconcile against');
+  if (!supportsClientKeyRecovery(adapter)) {
+    throw new TrackerApiError(
+      connection.provider,
+      'adapter has neither idempotent creates nor client-key recovery',
+    );
   }
-  const issues = await adapter.listIssues(selection);
-  return (
-    issues.find(
-      (issue) =>
-        issue.parentExternalId === payload.parentExternalId && issue.title === payload.title,
-    ) ?? null
-  );
+  return await adapter.findSubIssueByClientKey(payload.parentExternalId, clientKey);
 }
 
 /** Put a row back in the pending queue, eligible immediately. */

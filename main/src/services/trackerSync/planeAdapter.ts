@@ -47,10 +47,31 @@ const CLOUD_APP_ORIGIN = 'https://app.plane.so';
 const CAPABILITIES: TrackerAdapterCapabilities = {
   nativeParentAutoClose: false,
   selfHostedBaseUrl: true,
-  // Plane has no client-supplied issue id on create — outbox recovery for an
-  // ambiguous create is reconcile-by-listing-sub-issues, not a lookup here.
+  // Plane has no client-supplied issue id on create, so the create itself is
+  // not idempotent. Authorship is recovered instead from the marker paragraph
+  // every create stamps into the description — see SYNC_MARKER_PREFIX and
+  // {@link PlaneAdapter.findSubIssueByClientKey}.
   idempotentCreate: false,
 };
+
+/**
+ * Recovery marker: the outbox row's client key, written as the final paragraph
+ * of every sub-issue this adapter creates. Plane accepts no idempotency key on
+ * create, so this is the ONLY provider-visible proof that a given issue is the
+ * one a lost create produced — matching on parent + title cannot tell our child
+ * apart from a sibling that happens to share the title.
+ *
+ * The marker is stripped from every description the adapter returns (see
+ * {@link mapDescription}) so it never reaches a local body or a merge baseline.
+ */
+const SYNC_MARKER_PREFIX = 'cyboflow-sync:';
+
+/** `cyboflow-sync: <uuid>` — the exact shape createSubIssue emits (client keys are UUIDs). */
+const SYNC_MARKER_RE =
+  /cyboflow-sync:[ \t]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/** Plane's representation of "no description" — also what an empty draft body becomes. */
+const EMPTY_PARAGRAPH = '<p></p>';
 
 const KNOWN_STATE_GROUPS: ReadonlySet<string> = new Set([
   'triage',
@@ -257,13 +278,8 @@ export class PlaneAdapter implements TrackerAdapter {
 
   async getIssue(externalId: string): Promise<TrackerIssue | null> {
     const { projectId, issueId } = splitExternalId(externalId);
-    const response = await this.send(
-      'GET',
-      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/${issueId}/?expand=assignees`
-    );
-    if (response.status === 404) return null;
-    this.assertOk(response);
-    const raw = (await response.json()) as PlaneIssueWire;
+    const raw = await this.fetchIssueWire(projectId, issueId);
+    if (raw === null) return null;
     const identifier = await this.getProjectIdentifier(projectId);
     return this.mapIssue(projectId, identifier, raw);
   }
@@ -272,14 +288,15 @@ export class PlaneAdapter implements TrackerAdapter {
     parentExternalId: string,
     draft: SubIssueDraft,
     // Plane has no idempotency key on create (capabilities.idempotentCreate
-    // = false) — the outbox reconciles ambiguous creates by listing the
-    // parent's sub-issues, not by anything this adapter does with the key.
-    _clientKey: string
+    // = false), so the key is carried in the description instead: EVERY create
+    // ends with the SYNC_MARKER_PREFIX paragraph, which is what makes
+    // findSubIssueByClientKey's "no child carries it" answer conclusive.
+    clientKey: string
   ): Promise<TrackerIssue> {
     const { projectId, issueId: parentIssueId } = splitExternalId(parentExternalId);
     const body: Record<string, unknown> = {
       name: draft.title,
-      description_html: toDescriptionHtml(draft.description),
+      description_html: toCreateDescriptionHtml(draft.description, clientKey),
       parent: parentIssueId,
     };
     if (draft.stateId !== undefined) {
@@ -303,7 +320,62 @@ export class PlaneAdapter implements TrackerAdapter {
     );
   }
 
+  /**
+   * Ambiguous-create recovery (see the outbox worker): the child of
+   * `parentExternalId` that carries `clientKey` in its SYNC_MARKER_PREFIX
+   * paragraph, or null when no child carries it — which, because every create
+   * sends the marker, PROVES the create never landed and a retry is safe.
+   *
+   * Title is deliberately NOT a criterion: a parent routinely holds two
+   * children with the same title, and adopting the wrong one would silently
+   * redirect every later write-back onto an unrelated issue.
+   *
+   * Not part of `TrackerAdapter`: the marker is stripped from every description
+   * this adapter returns, so the match cannot be performed by the sync core
+   * over a mapped `TrackerIssue` — it has to read the raw payload here.
+   */
+  async findSubIssueByClientKey(
+    parentExternalId: string,
+    clientKey: string
+  ): Promise<TrackerIssue | null> {
+    const { projectId, issueId: parentIssueId } = splitExternalId(parentExternalId);
+    // Parent-scoped by construction: a Plane sub-issue always lives in its
+    // parent's project, so the project issue list is the whole search space.
+    const raw = await this.paginateAll<PlaneIssueWire>(
+      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/`,
+      // Same expansion listIssues uses, so an adopted issue maps identically to
+      // one that arrived through the inbound path.
+      { expand: 'assignees' }
+    );
+    const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
+    for (const candidate of raw) {
+      if (candidate.parent !== parentIssueId) continue;
+      // Documented choice: Plane's list payload does not reliably carry any
+      // description field, and the marker lives only in the description — so a
+      // candidate that arrived without one is re-fetched from the detail
+      // endpoint rather than treated as unmarked.
+      const described = hasDescriptionPayload(candidate)
+        ? candidate
+        : await this.fetchIssueWire(projectId, candidate.id);
+      if (described === null || !carriesSyncMarker(described, marker)) continue;
+      const identifier = await this.getProjectIdentifier(projectId);
+      return this.mapIssue(projectId, identifier, described);
+    }
+    return null;
+  }
+
   // ---- internals -----------------------------------------------------
+
+  /** Raw detail fetch; null on 404 (the issue does not exist / is hard-deleted). */
+  private async fetchIssueWire(projectId: string, issueId: string): Promise<PlaneIssueWire | null> {
+    const response = await this.send(
+      'GET',
+      `/workspaces/${this.workspaceSlug}/projects/${projectId}/issues/${issueId}/?expand=assignees`
+    );
+    if (response.status === 404) return null;
+    this.assertOk(response);
+    return (await response.json()) as PlaneIssueWire;
+  }
 
   /**
    * Narrows the already-fetched project issue list down to a cycle/module
@@ -470,13 +542,41 @@ function mapDescription(raw: PlaneIssueWire): string | null {
   // happens to carry (Plane's list/detail responses are inconsistent about
   // exposing `description_stripped` vs a plain `description`) over the rich
   // `description_html`, falling back to a naive tag-strip of the html.
+  //
+  // Our own recovery marker comes off every one of them: it is sync plumbing,
+  // and a body that is nothing BUT the marker is an empty description.
   const plain = raw.description_stripped ?? raw.description ?? null;
-  if (plain !== null && plain.trim().length > 0) return plain.trim();
+  if (plain !== null) {
+    const cleaned = stripSyncMarker(plain);
+    if (cleaned.length > 0) return cleaned;
+  }
   if (raw.description_html) {
-    const naive = stripHtml(raw.description_html).trim();
+    const naive = stripSyncMarker(stripHtml(raw.description_html));
     if (naive.length > 0) return naive;
   }
   return null;
+}
+
+/** Drop the recovery marker (and the whitespace it leaves behind) from a description. */
+function stripSyncMarker(text: string): string {
+  return text.replace(SYNC_MARKER_RE, '').trim();
+}
+
+/** True when the payload carries the given `cyboflow-sync: <key>` marker. */
+function carriesSyncMarker(raw: PlaneIssueWire, marker: string): boolean {
+  // The marker survives escapeHtml unchanged, so the raw html matches literally.
+  return [raw.description_html, raw.description_stripped, raw.description].some(
+    (field) => typeof field === 'string' && field.includes(marker)
+  );
+}
+
+/** False when the endpoint returned no description field at all — see findSubIssueByClientKey. */
+function hasDescriptionPayload(raw: PlaneIssueWire): boolean {
+  return (
+    typeof raw.description_html === 'string' ||
+    typeof raw.description_stripped === 'string' ||
+    typeof raw.description === 'string'
+  );
 }
 
 function stripHtml(html: string): string {
@@ -504,10 +604,22 @@ function deriveInitials(name: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
+/**
+ * Description html for a create: the draft body, then the recovery marker as
+ * its own paragraph. The marker is UNCONDITIONAL — findSubIssueByClientKey
+ * reads "no child carries it" as proof the create never landed, which only
+ * holds if every create carries it, empty-bodied ones included.
+ */
+function toCreateDescriptionHtml(markdown: string | undefined, clientKey: string): string {
+  const body = toDescriptionHtml(markdown);
+  const marker = `<p>${escapeHtml(`${SYNC_MARKER_PREFIX} ${clientKey}`)}</p>`;
+  return body === undefined || body === EMPTY_PARAGRAPH ? marker : `${body}${marker}`;
+}
+
 function toDescriptionHtml(markdown: string | undefined): string | undefined {
   if (markdown === undefined) return undefined;
   const trimmed = markdown.trim();
-  if (trimmed.length === 0) return '<p></p>';
+  if (trimmed.length === 0) return EMPTY_PARAGRAPH;
   const escaped = escapeHtml(trimmed);
   return escaped
     .split(/\n{2,}/)

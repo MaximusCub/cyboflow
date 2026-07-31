@@ -18,7 +18,8 @@
  *   - a group with no provider state -> terminal failure (no retry storm).
  *   - post-send local failure leaves the row `in_flight` for boot recovery.
  *   - ambiguous recovery: Linear point-lookup (found -> adopted, missing ->
- *     pending), Plane list-and-match, and update_state -> straight to pending.
+ *     pending), Plane client-key match (a same-title sibling is NOT ours), and
+ *     update_state -> straight to pending.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -29,6 +30,7 @@ import { DatabaseService } from '../../../database/database';
 import type { TrackerConnectionRow, TrackerOutboxRow } from '../../../database/models';
 import type {
   TrackerIssue,
+  TrackerProvider,
   TrackerSourceNarrow,
   TrackerSourceSelection,
   TrackerSourceTree,
@@ -93,7 +95,7 @@ interface CreateCall {
 
 /** Scriptable TrackerAdapter: records every call, throws whatever a test queues. */
 class FakeAdapter implements TrackerAdapter {
-  readonly provider = 'linear' as const;
+  provider: TrackerProvider = 'linear';
   capabilities: TrackerAdapterCapabilities = {
     nativeParentAutoClose: true,
     selfHostedBaseUrl: false,
@@ -154,10 +156,47 @@ class FakeAdapter implements TrackerAdapter {
     if (this.failUpdate) throw this.takeFailure('failUpdate');
   }
 
-  private takeFailure(key: 'failUpdate' | 'failCreate' | 'failLookup'): Error {
+  protected takeFailure(key: 'failUpdate' | 'failCreate' | 'failLookup'): Error {
     const err = this[key] as Error;
     this[key] = null;
     return err;
+  }
+}
+
+/**
+ * Plane-shaped fake: creates are NOT idempotent, so recovery goes through the
+ * client-key marker the adapter stamps into every issue it creates.
+ *
+ * The key lives in `markers`, not on the TrackerIssue — exactly like the real
+ * marker paragraph, which PlaneAdapter strips from every description it
+ * returns. A recovery that matched on anything the sync core can see (title,
+ * description) would be matching on the wrong thing.
+ */
+class FakeMarkerAdapter extends FakeAdapter {
+  provider: TrackerProvider = 'plane';
+  capabilities: TrackerAdapterCapabilities = {
+    nativeParentAutoClose: false,
+    selfHostedBaseUrl: true,
+    idempotentCreate: false,
+  };
+
+  /** externalId -> the client key stamped into that issue's description. */
+  readonly markers = new Map<string, string>();
+  clientKeyLookups = 0;
+
+  async findSubIssueByClientKey(
+    parentExternalId: string,
+    clientKey: string,
+  ): Promise<TrackerIssue | null> {
+    this.clientKeyLookups += 1;
+    if (this.failLookup) throw this.takeFailure('failLookup');
+    return (
+      this.issues.find(
+        (issue) =>
+          issue.parentExternalId === parentExternalId &&
+          this.markers.get(issue.externalId) === clientKey,
+      ) ?? null
+    );
   }
 }
 
@@ -506,41 +545,70 @@ describe('processAmbiguous', () => {
     expect(adapter.createCalls).toHaveLength(1);
   });
 
-  it('adopts a Plane create by listing the parent and matching on title', async () => {
+  it('adopts the Plane child carrying the row CLIENT KEY, not the same-title sibling', async () => {
     const connection = seedConnection({ provider: 'plane' });
     const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
     makeAmbiguous(row.id, connection.id);
 
-    const adapter = new FakeAdapter();
-    adapter.capabilities = { ...adapter.capabilities, idempotentCreate: false };
+    const adapter = new FakeMarkerAdapter();
     adapter.issues = [
-      makeIssue('proj-1/other', { title: 'Different task', parentExternalId: 'ext-idea' }),
-      makeIssue('proj-1/mine', { title: 'Task TASK-1', parentExternalId: 'ext-other-parent' }),
-      makeIssue('proj-1/hit', { title: 'Task TASK-1', parentExternalId: 'ext-idea' }),
+      // Listed FIRST and identical on parent + title: a title match adopts it.
+      makeIssue('proj-1/sibling', { title: 'Task TASK-1', parentExternalId: 'ext-idea' }),
+      makeIssue('proj-1/ours', { title: 'Task TASK-1', parentExternalId: 'ext-idea' }),
     ];
+    adapter.markers.set('proj-1/ours', 'client-key-1');
 
     const report = await processAmbiguous(makeDeps(adapter), connection);
 
-    expect(adapter.listIssuesCalls).toBe(1);
     expect(report.created).toBe(1);
     expect(fetchOutbox(row.id).state).toBe('done');
-    // Only the row matching BOTH parent and exact title is adopted.
-    expect(getLinkByEntity(raw, 'task', 'tsk_1', 'plane')?.external_id).toBe('proj-1/hit');
+    expect(getLinkByEntity(raw, 'task', 'tsk_1', 'plane')?.external_id).toBe('proj-1/ours');
+    // Recovery goes through the client-key lookup — title is not a criterion.
+    expect(adapter.clientKeyLookups).toBe(1);
+    expect(adapter.listIssuesCalls).toBe(0);
   });
 
-  it('returns a Plane create to pending when no child matches', async () => {
+  it('does NOT adopt a same-title sibling that lacks the marker — the row is requeued', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    makeAmbiguous(row.id, connection.id);
+
+    const adapter = new FakeMarkerAdapter();
+    // Routine case: the parent already holds an unrelated child with our title,
+    // and our own create never landed.
+    adapter.issues = [makeIssue('proj-1/sibling', { title: 'Task TASK-1', parentExternalId: 'ext-idea' })];
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(report.created).toBe(0);
+    expect(report.ambiguousResolved).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('pending');
+    expect(settled.next_attempt_at).toBe(NOW);
+    expect(getLinkByEntity(raw, 'task', 'tsk_1', 'plane')).toBeNull();
+
+    // ...and the retry creates OUR child, leaving the sibling alone.
+    const drainReport = await drainOutbox(makeDeps(adapter), connection);
+    expect(drainReport.created).toBe(1);
+    expect(getLinkByEntity(raw, 'task', 'tsk_1', 'plane')?.external_id).toBe('client-key-1');
+  });
+
+  it('leaves the row ambiguous when the adapter can neither point-look-up nor match a client key', async () => {
     const connection = seedConnection({ provider: 'plane' });
     const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
     makeAmbiguous(row.id, connection.id);
 
     const adapter = new FakeAdapter();
     adapter.capabilities = { ...adapter.capabilities, idempotentCreate: false };
-    adapter.issues = [makeIssue('proj-1/other', { title: 'Different task', parentExternalId: 'ext-idea' })];
 
     const report = await processAmbiguous(makeDeps(adapter), connection);
 
-    expect(report.ambiguousResolved).toBe(1);
-    expect(fetchOutbox(row.id).state).toBe('pending');
+    // "Cannot look it up" must never read as "it isn't there" — requeueing here
+    // would duplicate the sub-issue.
+    expect(report.ambiguousResolved).toBe(0);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('ambiguous');
+    expect(settled.last_error).toContain('client-key recovery');
   });
 
   it('sends an ambiguous state write straight back to pending (idempotent by nature)', async () => {
