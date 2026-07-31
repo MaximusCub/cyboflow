@@ -467,14 +467,117 @@ export type {
   SprintBatchTaskStatus,
 } from '../../../shared/types/sprintBatch';
 
-export interface TaskExternalLinkRow {
+/**
+ * `tracker_connections` row (migration 093) — one row per Linear/Plane
+ * connection. Secrets are NOT modeled as plaintext: `secret_ciphertext` is an
+ * Electron `safeStorage`-encrypted blob, decrypted only in the main process
+ * (docs/proposals/tracker-sync-integration.md "Auth & secrets"). SQLite
+ * BOOLEANs surface as 0|1 (`two_way`, `mirror_subissues`), matching the
+ * `blocking`/`selected` convention on ReviewItemRow above. `source_json` /
+ * `selection_json` / `state_mapping_json` / `last_sync_log_json` are
+ * sync-engine-owned opaque JSON blobs, not modeled column-by-column here.
+ */
+export interface TrackerConnectionRow {
+  id: string;
+  project_id: number;
+  provider: 'linear' | 'plane';
+  status: 'active' | 'paused' | 'disconnected';
+  workspace_id: string | null;
+  workspace_name: string | null;
+  actor_label: string | null;
+  base_url: string | null;
+  secret_ciphertext: Buffer | null;
+  source_json: string | null;
+  selection_mode: 'all' | 'assignee' | 'manual';
+  selection_json: string | null;
+  state_mapping_json: string;
+  two_way: number; // 0 | 1
+  mirror_subissues: number; // 0 | 1
+  conflict_mode: 'auto' | 'manual';
+  cursor_updated_at: string | null;
+  cursor_external_id: string | null;
+  last_sync_at: string | null;
+  last_sync_log_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `entity_external_links` row (migration 093) — generalizes the dormant
+ * task-only `task_external_links` (migrations 014/015, dropped by 093) to
+ * link BOTH ideas and tasks to a tracker issue. Two independent UNIQUE
+ * constraints: an entity maps to at most one issue per provider
+ * (entity_type, entity_id, provider), and an external issue maps to at most
+ * one entity per connection (connection_id, external_id). `baseline_json` is
+ * the last-synced field snapshot the conflict engine three-way-merges
+ * against (tracker-sync-integration.md "Conflict resolution").
+ * `orphaned_at` is set when the linked entity was archived by a remote
+ * deletion (Auto conflict mode) — the link itself is kept for history.
+ */
+export interface EntityExternalLinkRow {
   id: number;
-  task_id: string;
-  provider: string;
-  external_id: string | null;
+  connection_id: string;
+  entity_type: 'idea' | 'epic' | 'task';
+  entity_id: string;
+  provider: 'linear' | 'plane';
+  external_id: string;
+  external_identifier: string | null;
   external_url: string | null;
-  synced_cursor: string | null;
+  external_parent_id: string | null;
   baseline_json: string | null;
+  orphaned_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `tracker_outbox` row (migration 093) — the durable pre-write record for
+ * every remote write, written BEFORE the API call is attempted
+ * (tracker-sync-integration.md "Durability & failure semantics" #1). The
+ * inbound cursor cannot advance past an item with an unresolved outbox
+ * entry, so a half-created sub-issue can never be double-created or
+ * re-imported. `client_key` is the client-generated idempotency key: Linear's
+ * `issueCreate` accepts it directly; Plane has no such key, so an ambiguous
+ * create is reconciled by listing the parent's sub-issues and matching
+ * against this record instead.
+ */
+export interface TrackerOutboxRow {
+  id: number;
+  connection_id: string;
+  kind: 'create_sub_issue' | 'update_state' | 'close_parent';
+  entity_type: string | null;
+  entity_id: string | null;
+  external_id: string | null;
+  client_key: string | null;
+  payload_json: string;
+  state: 'pending' | 'in_flight' | 'done' | 'failed' | 'ambiguous';
+  attempts: number;
+  last_error: string | null;
+  next_attempt_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `tracker_conflicts` row (migration 093) — Manual-mode conflict queue rows
+ * plus Auto-mode remote-deletion records (tracker-sync-integration.md
+ * "Conflict resolution"). `link_id` is a NULLABLE FK ON DELETE SET NULL (not
+ * CASCADE): a conflict row survives its link being removed so the history
+ * stays inspectable.
+ */
+export interface TrackerConflictRow {
+  id: number;
+  connection_id: string;
+  link_id: number | null;
+  kind: 'field_conflict' | 'remote_deleted';
+  field: string | null;
+  local_value: string | null;
+  remote_value: string | null;
+  payload_json: string | null;
+  state: 'open' | 'resolved';
+  resolution: string | null;
+  created_at: string;
+  resolved_at: string | null;
 }
 
 /**
