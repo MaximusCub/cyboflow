@@ -125,6 +125,7 @@ import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
+import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
 import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
@@ -426,6 +427,12 @@ let designFeedbackOutbox: DesignFeedbackOutbox | null = null;
 // process.kill + fs.existsSync) — safe to construct at module load. Wired into
 // WorktreeManager (reap on worktree removal) and the boot sweep below.
 const codexBrokerReaper = new CodexBrokerReaper();
+
+// Issue-tracker sync loop — Linear/Plane (docs/proposals/tracker-sync-integration.md).
+// Module-level so the before-quit handler can stop it; constructed + started in
+// initializeServices (it needs the sqlite handle plus TaskChangeRouter), so it is
+// null until boot finishes wiring.
+let trackerSyncService: TrackerSyncService | null = null;
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -1294,6 +1301,20 @@ async function initializeServices(): Promise<boolean> {
   // getInstance(); its taskChangeEvents emitter is consumed directly by the
   // cyboflow.tasks.onTaskChanged subscription (no bridge needed here).
   const taskChangeRouter = TaskChangeRouter.initialize(cyboflowDb);
+
+  // Issue-tracker sync loop (migration 093). Started HERE, immediately after the
+  // chokepoint it subscribes to: start() does boot crash-recovery (demoting any
+  // `in_flight` outbox row to `ambiguous`) BEFORE arming its listener or poll
+  // timer, so it must run before any entity write can reach it. Its 60s timer is
+  // unref'd — it never keeps the app alive — and the poll itself is gated on each
+  // connection's own 5-minute `last_sync_at`. A project with no tracker connection
+  // costs one empty `listConnections` per tick.
+  trackerSyncService = new TrackerSyncService({
+    db: databaseService.getDb(),
+    router: taskChangeRouter,
+    logger: cyboflowLogger,
+  });
+  trackerSyncService.start();
 
   // Sprint-lane write chokepoint (feat/parallel-sprint, migrations 022 + 023).
   // The single serialized writer for `sprint_batches`/`sprint_batch_tasks`;
@@ -4813,6 +4834,14 @@ app.on('before-quit', async (event) => {
   // Clear any pending idle session-summary timers (session-summary-plan.md §5).
   if (sessionSummaryScheduler) {
     sessionSummaryScheduler.dispose();
+  }
+
+  // Stop the issue-tracker poll loop: clears its timer + pending write-back
+  // debounces and unsubscribes it from taskChangeEvents. Synchronous — an
+  // in-flight pass is deliberately NOT awaited, since abandoning one mid-drain is
+  // exactly the crash its boot ambiguous-recovery already handles.
+  if (trackerSyncService) {
+    trackerSyncService.stop();
   }
 
   // Stop orchestrator (drains run queues)
