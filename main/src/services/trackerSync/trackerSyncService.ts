@@ -78,6 +78,7 @@ import type {
   EntityExternalLinkRow,
   TrackerConflictRow,
   TrackerConnectionRow,
+  TrackerOutboxRow,
 } from '../../database/models';
 import type { BacklogTaskItem, TaskChangedEvent } from '../../../../shared/types/tasks';
 import type {
@@ -86,6 +87,7 @@ import type {
   TrackerConnectPayload,
   TrackerConnectionSummary,
   TrackerCredentialsInput,
+  TrackerDirectionMode,
   TrackerEntityLinkRef,
   TrackerEntityType,
   TrackerIssue,
@@ -196,6 +198,50 @@ const MAX_LOG_ENTRIES = 60;
  * be applied to some later, unrelated removal.
  */
 export const UNLINK_RULING_TTL_MS = 10 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Direction modes
+// ---------------------------------------------------------------------------
+
+/**
+ * What caused a pass. 'auto' is the 5-minute tick and the debounced write-back
+ * drain — the cadences a 'manual' direction opts out of. 'manual' is the user
+ * asking ("Sync now", and the first pass `connect` kicks, which is that same
+ * ask spelled differently): it runs EVERY direction whatever the modes say,
+ * because a mode is a statement about automatic cadence, not about consent.
+ */
+export type TrackerSyncTrigger = 'auto' | 'manual';
+
+/** The outbox kinds the STATUS direction owns (linked items' state, outbound). */
+const STATUS_OUTBOX_KINDS = ['update_state', 'close_parent'] as const;
+
+/**
+ * The outbox kinds the PUSH direction owns. Sub-issue mirroring rides here
+ * alongside the top-level push: both file NEW issues into the user's tracker,
+ * which is the thing `push_mode` decides the cadence of.
+ */
+const PUSH_OUTBOX_KINDS = ['create_sub_issue', 'create_issue'] as const;
+
+/** True when a direction in `mode` may run under `trigger`. */
+function directionRuns(mode: TrackerDirectionMode, trigger: TrackerSyncTrigger): boolean {
+  return mode === 'auto' || trigger === 'manual';
+}
+
+/**
+ * The outbox kinds this pass may CLAIM. Rows of every other kind stay `pending`
+ * and in order until a pass whose filter includes them comes along — the whole
+ * "manual delays work, it never drops it" contract, expressed as a claim
+ * filter rather than as a skipped enqueue.
+ */
+function drainKinds(
+  connection: TrackerConnectionRow,
+  trigger: TrackerSyncTrigger,
+): TrackerOutboxRow['kind'][] {
+  const kinds: TrackerOutboxRow['kind'][] = [];
+  if (directionRuns(connection.status_sync_mode, trigger)) kinds.push(...STATUS_OUTBOX_KINDS);
+  if (directionRuns(connection.push_mode, trigger)) kinds.push(...PUSH_OUTBOX_KINDS);
+  return kinds;
+}
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -538,13 +584,21 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * and the failure policy. Never rejects: every failure is folded into the
    * returned result and the persisted log.
    */
-  syncConnection(connectionId: string, opts: { force?: boolean } = {}): Promise<TrackerSyncPassResult> {
-    return this.lock(connectionId, () => this.runPass(connectionId, opts.force === true));
+  syncConnection(
+    connectionId: string,
+    opts: { force?: boolean; trigger?: TrackerSyncTrigger } = {},
+  ): Promise<TrackerSyncPassResult> {
+    const trigger = opts.trigger ?? 'auto';
+    return this.lock(connectionId, () => this.runPass(connectionId, opts.force === true, trigger));
   }
 
-  /** The manual "Sync now" — a forced pass, which also always sweeps for deletions. */
+  /**
+   * The manual "Sync now" — a forced pass, which also always sweeps for
+   * deletions AND runs every direction regardless of its mode (see
+   * {@link TrackerSyncTrigger}).
+   */
   syncNow(connectionId: string): Promise<TrackerSyncPassResult> {
-    return this.syncConnection(connectionId, { force: true });
+    return this.syncConnection(connectionId, { force: true, trigger: 'manual' });
   }
 
   /**
@@ -590,7 +644,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * it must still write the '⚠ authorization failed' line the connected view
    * renders as a re-connect prompt.
    */
-  private async runPass(connectionId: string, force: boolean): Promise<TrackerSyncPassResult> {
+  private async runPass(
+    connectionId: string,
+    force: boolean,
+    trigger: TrackerSyncTrigger,
+  ): Promise<TrackerSyncPassResult> {
     const entries: TrackerSyncLogEntry[] = [];
     const connection = getConnection(this.db, connectionId);
     if (connection === null) {
@@ -616,16 +674,32 @@ export class TrackerSyncService implements TrackerSyncFacade {
     /** Conflicts opened/auto-resolved this pass — drives the 'conflicts' broadcast. */
     let conflictsTouched = 0;
 
+    // THE DIRECTION GATES for this pass, resolved once from the connection's
+    // three modes and the trigger, and reported into the log so a user looking
+    // at "nothing happened" can see which direction was holding.
+    //
+    // The inbound PHASE is gated on the union: status sync and import are two
+    // independent directions that happen to share one fetch, so a connection
+    // that pulls manually but syncs status automatically must still merge its
+    // linked items every pass (and sweep for remote deletions). Inside the
+    // phase, each direction gates its own half — see runInboundSync's
+    // applyLinkedStage / importNewIssues.
+    const drainable = drainKinds(connection, trigger);
+    const pullRuns = directionRuns(connection.pull_mode, trigger);
+    const applyLinkedStage = directionRuns(connection.status_sync_mode, trigger);
+    const inboundRuns = pullRuns || applyLinkedStage;
+    appendHeldDirectionLines(entries, connection, trigger);
+
     try {
       const adapter = this.buildAdapter(connection);
-      const writeBack = await this.runWriteBack(connection, adapter, entries);
+      const writeBack = await this.runWriteBack(connection, adapter, entries, drainable);
       if (writeBack.abandoned) return abandonedResult(connectionId, entries);
       paused = writeBack.paused;
 
       // Phases 3+4 are gated on the outbox holding no unresolved create whose
       // outcome is still unknown — see {@link recoverCreatesBeforeInbound}.
       let inboundAllowed = false;
-      if (!paused) {
+      if (!paused && inboundRuns) {
         // Its own phase boundary: the gate can perform a remote lookup and
         // adopt a create locally, neither of which may follow a disconnect.
         if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
@@ -644,6 +718,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
             router: this.router,
             reviewRouter: this.reviewRouter,
             nowIso: this.nowIso,
+            applyLinkedStage,
+            importNewIssues: pullRuns,
           },
           connection,
         );
@@ -714,11 +790,19 @@ export class TrackerSyncService implements TrackerSyncFacade {
     connection: TrackerConnectionRow,
     adapter: TrackerAdapter,
     entries: TrackerSyncLogEntry[],
+    allowedKinds: readonly TrackerOutboxRow['kind'][],
   ): Promise<WriteBackOutcome> {
     const deps: OutboxDeps = { db: this.db, adapterFor: () => adapter, nowIso: this.nowIso };
+    // DELIBERATELY NOT kind-filtered: an `ambiguous` row is a write whose
+    // outcome nobody knows, and leaving one unreconciled halts the inbound
+    // batch for every direction. Reconciling is establishing what already
+    // happened remotely, not performing a held direction's work — and a row the
+    // reconcile returns to `pending` is then subject to the drain filter below
+    // like any other.
     const ambiguous = await processAmbiguous(deps, connection);
     const abandoned = !ambiguous.authPaused && !this.isStillActive(connection.id);
-    const drained = ambiguous.authPaused || abandoned ? null : await drainOutbox(deps, connection);
+    const drained =
+      ambiguous.authPaused || abandoned ? null : await drainOutbox(deps, connection, allowedKinds);
     appendWriteBackLines(entries, ambiguous, drained);
     return { paused: ambiguous.authPaused || drained?.authPaused === true, abandoned };
   }
@@ -807,9 +891,15 @@ export class TrackerSyncService implements TrackerSyncFacade {
   private scheduleWriteBackDrain(projectId: number): void {
     try {
       for (const connection of listConnections(this.db, projectId)) {
-        if (connection.status !== 'active' || connection.two_way !== 1) continue;
+        if (connection.status !== 'active') continue;
+        // The nudge is an AUTOMATIC cadence, so it only ever arms for a row an
+        // 'auto' direction owns. A pending row belonging to a held direction is
+        // not a reason to wake up — it is waiting for a "Sync now", which runs
+        // its own pass.
+        const kinds = new Set<TrackerOutboxRow['kind']>(drainKinds(connection, 'auto'));
+        if (kinds.size === 0) continue;
         const pending = listUnresolvedOutbox(this.db, connection.id).some(
-          (row) => row.state === 'pending',
+          (row) => row.state === 'pending' && kinds.has(row.kind),
         );
         if (!pending) continue;
         this.armDrainTimer(connection.id);
@@ -879,7 +969,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
       let error: string | null = null;
       try {
         const adapter = this.buildAdapter(connection);
-        const writeBack = await this.runWriteBack(connection, adapter, entries);
+        // 'auto' trigger: the debounced drain IS the automatic cadence, so a
+        // held direction's rows stay queued for the next "Sync now".
+        const writeBack = await this.runWriteBack(
+          connection,
+          adapter,
+          entries,
+          drainKinds(connection, 'auto'),
+        );
         if (writeBack.abandoned) return abandonedResult(connectionId, entries);
         paused = writeBack.paused;
       } catch (err) {
@@ -1002,7 +1099,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
       selection_mode: 'all',
       selection_json: null,
       state_mapping_json: '{}',
-      two_way: 0,
+      // Irrelevant to a probe (nothing syncs through a scratch row) but the
+      // shape is the row's, so they are spelled out rather than guessed at.
+      status_sync_mode: 'manual',
+      pull_mode: 'manual',
+      push_mode: 'manual',
       mirror_subissues: 0,
       conflict_mode: 'auto',
       cursor_updated_at: null,
@@ -1148,7 +1249,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       selection_json:
         payload.selectionJson === null ? null : JSON.stringify(payload.selectionJson),
       state_mapping_json: JSON.stringify(payload.stateMapping),
-      two_way: payload.twoWay ? 1 : 0,
+      status_sync_mode: payload.statusSyncMode,
+      pull_mode: payload.pullMode,
+      push_mode: payload.pushMode,
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -1272,7 +1375,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       baseUrl: row.base_url,
       sourceLabel: readSourceLabel(row),
       selectionMode: row.selection_mode,
-      twoWay: row.two_way === 1,
+      statusSyncMode: row.status_sync_mode,
+      pullMode: row.pull_mode,
+      pushMode: row.push_mode,
       mirrorSubissues: row.mirror_subissues === 1,
       conflictMode: row.conflict_mode,
       // resolveEffectiveMapping over an EMPTY state list is exactly "the stored
@@ -1295,7 +1400,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) return;
     updateConnectionSettings(this.db, connectionId, {
-      ...(patch.twoWay !== undefined ? { two_way: patch.twoWay ? 1 : 0 } : {}),
+      ...(patch.statusSyncMode !== undefined ? { status_sync_mode: patch.statusSyncMode } : {}),
+      ...(patch.pullMode !== undefined ? { pull_mode: patch.pullMode } : {}),
+      ...(patch.pushMode !== undefined ? { push_mode: patch.pushMode } : {}),
       ...(patch.mirrorSubissues !== undefined
         ? { mirror_subissues: patch.mirrorSubissues ? 1 : 0 }
         : {}),
@@ -1594,15 +1701,20 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * Queue the state write that makes the tracker converge onto our stage after
    * the user accepts the LOCAL side of a stage conflict. Mirrors writeBack's own
    * enqueue guard (same-intent unresolved rows dedupe), and no-ops when the
-   * connection is one-way or the stage has no outbound meaning — Idea and Ready
-   * for development deliberately write nothing.
+   * stage has no outbound meaning — Idea and Ready for development deliberately
+   * write nothing.
+   *
+   * `status_sync_mode` is NOT consulted, for the reason writeBack's header
+   * gives: an enqueue is durable INTENT and the drain is where a held direction
+   * waits. The user has just ruled that their stage is the truth; a manual
+   * status mode says when that ruling reaches the tracker, not whether.
    */
   private enqueueStageWriteBack(
     connection: TrackerConnectionRow,
     link: EntityExternalLinkRow,
     stageId: string | null,
   ): void {
-    if (stageId === null || connection.two_way !== 1) return;
+    if (stageId === null) return;
     const group = writeBackGroupForStage(stageId, resolveStageIds(this.db, connection.project_id));
     if (group === null) return;
     this.enqueueGroupWriteBack(connection, link, group);
@@ -1778,11 +1890,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * half-applied ruling — orphaned but never cancelled — is exactly the outcome
    * the user asked us to avoid.
    *
-   * `two_way` is NOT consulted for the cancel. That flag governs the AUTOMATIC
-   * write-back — whether stage moves stream out on their own — whereas this is a
-   * direct instruction about the one issue in front of the user, answered in a
-   * dialog that named it. A disconnected connection is skipped instead: its
-   * stored key is gone, so the row could never drain.
+   * `status_sync_mode` is NOT consulted for the cancel. That mode governs the
+   * AUTOMATIC cadence — whether stage moves stream out on their own — whereas
+   * this is a direct instruction about the one issue in front of the user,
+   * answered in a dialog that named it, and it lands in the outbox either way.
+   * A disconnected connection is skipped instead: its stored key is gone, so
+   * the row could never drain.
    */
   private dropLink(link: EntityExternalLinkRow, cancelRemote: boolean): void {
     const connection = getConnection(this.db, link.connection_id);
@@ -2007,7 +2120,32 @@ function hasUnresolvedCreateRecovery(
   adapter: TrackerAdapter,
 ): boolean {
   if (adapter.capabilities.idempotentCreate) return false;
-  return listUnresolvedOutbox(db, connectionId).some((row) => row.kind === 'create_sub_issue');
+  // BOTH create kinds. A pushed idea's unacked issue is the same hazard as an
+  // unacked mirrored child — the remote issue exists under a provider-minted id
+  // that matches neither the outbox row's `external_id` nor its `client_key` —
+  // except that importing it would duplicate the very idea that produced it.
+  return listUnresolvedOutbox(db, connectionId).some(
+    (row) => row.kind === 'create_sub_issue' || row.kind === 'create_issue',
+  );
+}
+
+/**
+ * One line per direction this pass is HOLDING, so "sync complete · 0 changes"
+ * on a manual-mode connection is legible instead of looking broken. A pass with
+ * every direction running says nothing extra.
+ */
+function appendHeldDirectionLines(
+  entries: TrackerSyncLogEntry[],
+  connection: TrackerConnectionRow,
+  trigger: TrackerSyncTrigger,
+): void {
+  const held: string[] = [];
+  if (!directionRuns(connection.status_sync_mode, trigger)) held.push('status');
+  if (!directionRuns(connection.pull_mode, trigger)) held.push('import');
+  if (!directionRuns(connection.push_mode, trigger)) held.push('push');
+  for (const direction of held) {
+    entries.push({ marker: '·', line: `${direction} held · manual — use Sync now` });
+  }
 }
 
 /** Phase 3's counters. */
@@ -2024,6 +2162,18 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
   }
   const conflicts = report.conflictsOpened + report.autoResolved;
   if (conflicts > 0) entries.push({ marker: '✎', line: `conflicts ${conflicts}` });
+  if (report.stageDeferred > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(report.stageDeferred, 'status change')} held — use Sync now`,
+    });
+  }
+  if (report.importDeferred > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(report.importDeferred, 'new issue')} held — use Sync now`,
+    });
+  }
   if (report.archivedRemotely > 0) {
     entries.push({ marker: '·', line: `archived ${plural(report.archivedRemotely, 'remote item')}` });
   }

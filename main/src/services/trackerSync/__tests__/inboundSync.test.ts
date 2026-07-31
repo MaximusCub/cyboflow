@@ -155,6 +155,9 @@ class FakeAdapter implements TrackerAdapter {
   async createSubIssue(): Promise<TrackerIssue> {
     throw new Error('not used');
   }
+  async createIssue(): Promise<TrackerIssue> {
+    throw new Error('not used');
+  }
   async updateIssueState(): Promise<void> {
     throw new Error('not used');
   }
@@ -265,7 +268,9 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     selection_mode: 'all',
     selection_json: null,
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -1300,6 +1305,56 @@ describe('runInboundSync — echo suppression', () => {
     expect(reload().cursor_updated_at).toBeNull();
   });
 
+  it('holds a PUSHED-but-unacked issue so it is never imported as a duplicate idea', async () => {
+    const connection = makeConnection();
+    // The push shape: we filed IDEA ide-1 as a top-level issue, the create
+    // committed, and its response was lost. The remote issue carries a
+    // provider-minted id matching neither column — only the marker names it.
+    enqueueOutbox(raw, {
+      connection_id: 'conn-1',
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: 'ide-1',
+      client_key: 'ck-push',
+      payload_json: '{}',
+    });
+    adapter.issues = [
+      makeIssue({
+        externalId: 'proj1/pushed',
+        title: 'Ship tracker sync',
+        parentExternalId: null,
+        recoveryClientKey: 'ck-push',
+      }),
+    ];
+
+    const report = await runInboundSync(deps, connection);
+
+    // Importing it here would produce a SECOND idea for the one that made it.
+    expect(report.haltedOnOutbox).toBe('proj1/pushed');
+    expect(report.imported).toBe(0);
+    expect(ideas()).toHaveLength(0);
+    expect(reload().cursor_updated_at).toBeNull();
+  });
+
+  it('holds a pushed issue by client_key alone where creates are idempotent', async () => {
+    const connection = makeConnection();
+    enqueueOutbox(raw, {
+      connection_id: 'conn-1',
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: 'ide-1',
+      // Linear: the client key IS the created issue's id, so no marker exists.
+      client_key: 'ext-1',
+      payload_json: '{}',
+    });
+    adapter.issues = [makeIssue()];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.haltedOnOutbox).toBe('ext-1');
+    expect(ideas()).toHaveLength(0);
+  });
+
   it('does not hold an issue whose marker belongs to a SETTLED outbox row', async () => {
     const connection = makeConnection();
     const row = enqueueOutbox(raw, {
@@ -1505,5 +1560,221 @@ describe('runInboundSync — inbound changes do not echo back outbound', () => {
     });
 
     expect(outboxRows()).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyLinkedStage — the inbound half of a MANUAL status direction
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — applyLinkedStage: false (status direction held)', () => {
+  /** Import an issue, then hand back the created idea id. */
+  async function importOnce(connection: TrackerConnectionRow): Promise<string> {
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    return ideas()[0].id;
+  }
+
+  /** The same deps with the stage dimension held. */
+  function heldDeps(): InboundSyncDeps {
+    return { ...deps, applyLinkedStage: false };
+  }
+
+  it('does NOT move the stage, and PINS the baseline state so the move survives to the next pass', async () => {
+    const connection = makeConnection();
+    await importOnce(connection);
+
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const held = await runInboundSync(heldDeps(), reload());
+
+    expect(held.updated).toBe(0);
+    expect(held.stageDeferred).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
+    // The state half of the baseline did NOT advance — the remote move is still
+    // "unseen", which is what makes it applicable later.
+    expect(baselineOf('ext-1').stateId).toBe('st-backlog');
+    // …while the rest of the snapshot did.
+    expect(baselineOf('ext-1').updatedAt).toBe('2026-07-30T11:00:00.000Z');
+    // And the CURSOR did not move past it — otherwise the next pass would
+    // filter the very issue it is supposed to finally apply.
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+
+    // The very next pass that IS allowed to apply it does so, from the same
+    // remote state — nothing had to be re-sent or re-detected.
+    const applied = await runInboundSync(deps, reload());
+    expect(applied.updated).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(baselineOf('ext-1').stateId).toBe('st-done');
+  });
+
+  it('still merges CONTENT while the stage is held, without clobbering the pinned state', async () => {
+    const connection = makeConnection();
+    await importOnce(connection);
+
+    adapter.issues = [
+      makeIssue({
+        title: 'Ship tracker sync (v1)',
+        description: 'Linear AND Plane.',
+        stateId: 'st-done',
+        updatedAt: '2026-07-30T11:00:00.000Z',
+      }),
+    ];
+    const report = await runInboundSync(heldDeps(), reload());
+
+    // Content is a different direction and keeps flowing.
+    expect(report.updated).toBe(1);
+    const [idea] = ideas();
+    expect(idea.title).toBe('Ship tracker sync (v1)');
+    expect(idea.body).toContain('Linear AND Plane.');
+    expect(idea.stage_id).toBe(STAGE.idea);
+
+    // The content half advanced; the state half did not. This is the
+    // cross-field clobber composeBaselineJson has to avoid.
+    const baseline = baselineOf('ext-1');
+    expect(baseline.title).toBe('Ship tracker sync (v1)');
+    expect(baseline.description).toBe('Linear AND Plane.');
+    expect(baseline.stateId).toBe('st-backlog');
+  });
+
+  it('opens no STAGE conflict while held, so a manual-mode item is not parked', async () => {
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+
+    // Both sides move the status: normally a stage conflict.
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: STAGE.done,
+    });
+    adapter.issues = [
+      makeIssue({ stateId: 'st-ready', title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+
+    const report = await runInboundSync(heldDeps(), reload());
+
+    // No stage conflict — asking the user to rule on a dimension they have
+    // asked us not to sync would also park the item and stop the content merge.
+    expect(conflicts()).toHaveLength(0);
+    expect(report.conflictsOpened).toBe(0);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    // The content half still landed.
+    expect(ideas()[0].title).toBe('Remote title');
+  });
+
+  it('still IMPORTS new issues while the stage direction is held', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue({ stateId: 'st-done' })];
+
+    const report = await runInboundSync(heldDeps(), connection);
+
+    // Import is the PULL direction and has its own mode; a held status
+    // direction must not silently stop it. The mapped stage still applies —
+    // the hold is about MOVING a linked entity, not about where a brand-new
+    // import lands.
+    expect(report.imported).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// importNewIssues — the inbound half of a MANUAL pull direction
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — importNewIssues: false (import direction held)', () => {
+  /** The same deps with the import direction held. */
+  function heldDeps(): InboundSyncDeps {
+    return { ...deps, importNewIssues: false };
+  }
+
+  it('does not import a new issue, and holds the cursor so it is re-offered', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue()];
+
+    const held = await runInboundSync(heldDeps(), connection);
+
+    expect(held.imported).toBe(0);
+    expect(held.importDeferred).toBe(1);
+    // NOT counted as a skip: a skip is a decision, a deferral is a delay.
+    expect(held.skipped).toBe(0);
+    expect(ideas()).toHaveLength(0);
+    expect(reload().cursor_updated_at).toBeNull();
+
+    // The next pass that MAY import finds the same issue waiting.
+    const allowed = await runInboundSync(deps, reload());
+    expect(allowed.imported).toBe(1);
+    expect(ideas()).toHaveLength(1);
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it('keeps merging LINKED items past a held import, without advancing the cursor', async () => {
+    const connection = makeConnection();
+    // ext-1 imports normally on a fully-open pass…
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    // …then a NEW issue arrives BEFORE a change to the linked one.
+    adapter.issues = [
+      makeIssue({ externalId: 'ext-2', title: 'Newcomer', updatedAt: '2026-07-30T10:30:00.000Z' }),
+      makeIssue({ title: 'Ship tracker sync (v1)', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+    const held = await runInboundSync(heldDeps(), reload());
+
+    // The linked item behind the held one still merged…
+    expect(held.updated).toBe(1);
+    expect(held.importDeferred).toBe(1);
+    expect(ideas().map((i) => i.title)).toEqual(['Ship tracker sync (v1)']);
+    // …but the cursor stayed at the last FULLY applied issue, so the newcomer
+    // is re-offered rather than filtered out by the cursor that skipped it.
+    expect(reload().cursor_external_id).toBe('ext-1');
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+
+    // Re-applying the linked item next pass is a no-op, not a duplicate.
+    const allowed = await runInboundSync(deps, reload());
+    expect(allowed.imported).toBe(1);
+    expect(allowed.updated).toBe(0);
+    expect(ideas()).toHaveLength(2);
+  });
+
+  it('still ADOPTS a half-imported idea — repair is not a new import', async () => {
+    const connection = makeConnection();
+    const crashing = new CrashingRouter(router);
+    adapter.issues = [makeIssue({ stateId: 'st-progress' })];
+
+    // Crash after the idea commits but before its link is written.
+    crashing.crashAfterCreate = true;
+    await expect(
+      runInboundSync({ ...deps, router: crashing }, connection),
+    ).rejects.toThrow('simulated crash');
+    const [orphan] = ideas();
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+
+    // Import is now held — but leaving the orphan unrepaired would strand an
+    // idea nothing points at, so the adopt proceeds.
+    crashing.crashAfterCreate = false;
+    const report = await runInboundSync({ ...heldDeps(), router: crashing }, reload());
+
+    expect(report.imported).toBe(1);
+    expect(report.importDeferred).toBe(0);
+    expect(ideas()).toHaveLength(1);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.entity_id).toBe(orphan.id);
+    // Repair completed, so the cursor is free to move.
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it("does not defer an issue it would never have imported anyway", async () => {
+    // A 'dont'-mapped state and a selection-filtered issue are DECISIONS, not
+    // delays — deferring them would pin the cursor forever on issues no mode
+    // will ever let in.
+    const connection = makeConnection({
+      state_mapping_json: JSON.stringify({ 'st-backlog': 'dont' }),
+    });
+    adapter.issues = [makeIssue()];
+
+    const held = await runInboundSync(heldDeps(), connection);
+
+    expect(held.importDeferred).toBe(0);
+    expect(held.skipped).toBe(1);
+    expect(reload().cursor_external_id).toBe('ext-1');
   });
 });

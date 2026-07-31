@@ -104,7 +104,7 @@ import type {
   TrackerState,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
 import { TrackerAuthError } from '../errors';
 import { joinBody, splitBody, type EntityWriteRouter } from '../inboundSync';
 import {
@@ -159,6 +159,12 @@ class FakeAdapter implements TrackerAdapter {
   };
 
   readonly calls: string[] = [];
+  /** Every top-level push, with the container it was filed into. */
+  readonly createIssueCalls: Array<{
+    containerId: string;
+    draft: IssueDraft;
+    clientKey: string;
+  }> = [];
   states: TrackerState[] = STATES;
   issues: TrackerIssue[] = [];
   /** Scripted failure for validateCredentials (the auth-error path). */
@@ -197,11 +203,20 @@ class FakeAdapter implements TrackerAdapter {
   }
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     clientKey: string,
   ): Promise<TrackerIssue> {
     this.calls.push('createSubIssue');
     return makeIssue({ externalId: clientKey, title: draft.title, parentExternalId });
+  }
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.calls.push('createIssue');
+    this.createIssueCalls.push({ containerId: selection.containerId, draft, clientKey });
+    return makeIssue({ externalId: clientKey, title: draft.title, parentExternalId: null });
   }
   async updateIssueState(): Promise<void> {
     this.calls.push('updateIssueState');
@@ -294,7 +309,9 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     selection_mode: 'all',
     selection_json: null,
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'manual',
     cursor_updated_at: null,
@@ -391,7 +408,9 @@ function connectPayload(overrides: Partial<TrackerConnectPayload> = {}): Tracker
     selectionMode: 'all',
     selectionJson: null,
     stateMapping: { 'state-backlog': 'idea', 'state-done': 'done' },
-    twoWay: true,
+    statusSyncMode: 'auto',
+    pullMode: 'auto',
+    pushMode: 'auto',
     mirrorSubissues: true,
     conflictMode: 'auto',
     reconcile: [],
@@ -481,7 +500,9 @@ describe('TrackerSyncService.connect', () => {
     expect(row?.workspace_id).toBe('ws-1');
     expect(row?.workspace_name).toBe('Acme');
     expect(row?.actor_label).toBe('K. Esteva');
-    expect(row?.two_way).toBe(1);
+    expect(row?.status_sync_mode).toBe('auto');
+    expect(row?.pull_mode).toBe('auto');
+    expect(row?.push_mode).toBe('auto');
     expect(row?.mirror_subissues).toBe(1);
     expect(row?.conflict_mode).toBe('auto');
     expect(JSON.parse(row?.source_json ?? '{}')).toEqual({ ...SOURCE, label: 'Core · Whole team' });
@@ -767,7 +788,9 @@ describe('TrackerSyncService.connections', () => {
     expect(summary.actorLabel).toBe('K. Esteva');
     expect(summary.baseUrl).toBeNull();
     expect(summary.sourceLabel).toBe('Core · Whole team');
-    expect(summary.twoWay).toBe(true);
+    expect(summary.statusSyncMode).toBe('auto');
+    expect(summary.pullMode).toBe('auto');
+    expect(summary.pushMode).toBe('auto');
     expect(summary.mirrorSubissues).toBe(true);
     expect(summary.conflictMode).toBe('manual');
     // The unknown mapping target is dropped, the valid one survives.
@@ -782,14 +805,18 @@ describe('TrackerSyncService.connections', () => {
     makeConnection();
 
     await service.updateSettings(CONN_ID, {
-      twoWay: false,
+      statusSyncMode: 'manual',
+      pushMode: 'manual',
       conflictMode: 'auto',
       selectionMode: 'assignee',
       selectionJson: { assigneeIds: ['user-1'] },
     });
 
     const row = getConnection(raw, CONN_ID);
-    expect(row?.two_way).toBe(0);
+    expect(row?.status_sync_mode).toBe('manual');
+    expect(row?.push_mode).toBe('manual');
+    // An omitted direction keeps its stored value.
+    expect(row?.pull_mode).toBe('auto');
     expect(row?.conflict_mode).toBe('auto');
     expect(row?.selection_mode).toBe('assignee');
     expect(JSON.parse(row?.selection_json ?? '{}')).toEqual({ assigneeIds: ['user-1'] });
@@ -1114,19 +1141,24 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
     expect(body).toContain('<!-- cyboflow:tracker linear:ext-1 -->');
   });
 
-  it("stage + 'local': the next pass re-opens nothing on a ONE-WAY connection", async () => {
-    // two_way off means there is no convergence write-back to paper over a
-    // baseline that never moved, so the baseline stamp is the ONLY thing that
-    // can end the loop.
+  it("stage + 'local': the next pass re-opens nothing while the status direction is HELD", async () => {
+    // A manual status direction means the convergence write-back sits in the
+    // outbox instead of reaching the tracker, so nothing papers over a baseline
+    // that never moved — the baseline stamp is the ONLY thing that can end the
+    // loop. The conflict is opened while the direction still runs, then the
+    // direction is held, which is exactly the order a user flipping the setting
+    // produces.
     const { ideaId, conflictId } = await openConflict(
       { stateId: 'state-progress' },
       moveStage(STAGE.done),
-      { two_way: 0 },
+      { status_sync_mode: 'auto' },
     );
     expect(conflictRow(conflictId).field).toBe('stage');
+    await service.updateSettings(CONN_ID, { statusSyncMode: 'manual' });
 
     await service.resolveConflictChoice(conflictId, 'local');
-    expect(outboxRows()).toEqual([]);
+    // QUEUED, not sent: the ruling is durable intent, the mode decides when.
+    expect(outboxRows().map((row) => [row.kind, row.state])).toEqual([['update_state', 'pending']]);
 
     adapter.issues = [makeIssue({ stateId: 'state-progress', updatedAt: TOUCHED_AGAIN })];
     const pass = await service.syncConnection(CONN_ID);
@@ -1149,7 +1181,7 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
     const { conflictId } = await openConflict(
       { stateId: 'state-backlog' },
       moveStage(STAGE.done),
-      { two_way: 1 },
+      { status_sync_mode: 'auto' },
       { stateId: 'state-progress' },
     );
     expect(baselineOf('ext-1').lastWrittenGroup).toBe('started');
@@ -1280,7 +1312,7 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
     const { ideaId, conflictId } = await openConflict(
       { stateId: 'state-backlog' },
       moveStage(STAGE.done),
-      { two_way: 1 },
+      { status_sync_mode: 'auto' },
       { stateId: 'state-progress' },
     );
     expect(baselineOf('ext-1').lastWrittenGroup).toBe('started');
@@ -1298,7 +1330,7 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
     const { ideaId, conflictId } = await openConflict(
       { stateId: 'state-progress' },
       moveStage(STAGE.done),
-      { two_way: 0 },
+      { status_sync_mode: 'auto' },
     );
     raw
       .prepare('UPDATE tracker_conflicts SET payload_json = ? WHERE id = ?')
@@ -1475,7 +1507,7 @@ describe('TrackerSyncService.unlinkEntity', () => {
   });
 
   it('cancels even on a one-way connection — the ruling is about THIS issue, not the sync policy', async () => {
-    makeConnection({ two_way: 0 });
+    makeConnection({ status_sync_mode: 'manual' });
     const { ideaId } = await seedLinkedIdea();
 
     await service.unlinkEntity('idea', ideaId, { cancelRemote: true });
@@ -1545,6 +1577,11 @@ describe('TrackerSyncService staged local-removal ruling', () => {
       external_identifier: 'CORE-142',
       ...overrides,
     });
+    // Creating the idea ALSO queued a push (`create_issue`) — writeBack's
+    // trigger 4, which has its own coverage. These cases are about the removal
+    // ruling, so the incidental row is dropped here rather than filtered out of
+    // every outbox assertion below.
+    raw.prepare(`DELETE FROM tracker_outbox WHERE kind = 'create_issue'`).run();
     return { ideaId, link };
   }
 
@@ -1649,6 +1686,9 @@ describe('TrackerSyncService staged local-removal ruling', () => {
       external_id: 'ext-child',
       external_parent_id: 'ext-1',
     });
+    // Same as seedLinkedIdea: the parent idea's creation queued a push, which
+    // is trigger 4's business and not this case's.
+    raw.prepare(`DELETE FROM tracker_outbox WHERE kind = 'create_issue'`).run();
 
     // The epic itself is unlinked, so the dialog never even opened — the child
     // link is exactly the one the old design stranded.

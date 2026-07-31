@@ -71,7 +71,7 @@ import type {
   TrackerState,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
 import { TrackerApiError, TrackerAuthError } from '../errors';
 import {
   enqueueOutbox,
@@ -144,6 +144,12 @@ class FakeAdapter implements TrackerAdapter {
   updateStateGate: Promise<void> | null = null;
 
   readonly updateCalls: Array<{ externalId: string; stateId: string }> = [];
+  /** Every top-level push, with the container it was filed into and the draft. */
+  readonly createIssueCalls: Array<{
+    selection: TrackerSourceSelection;
+    draft: IssueDraft;
+    clientKey: string;
+  }> = [];
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     this.calls.push('validateCredentials');
@@ -177,11 +183,26 @@ class FakeAdapter implements TrackerAdapter {
   }
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     clientKey: string,
   ): Promise<TrackerIssue> {
     this.calls.push('createSubIssue');
     return makeIssue({ externalId: clientKey, title: draft.title, parentExternalId });
+  }
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.calls.push('createIssue');
+    this.createIssueCalls.push({ selection, draft, clientKey });
+    const issue = makeIssue({ externalId: clientKey, title: draft.title, parentExternalId: null });
+    // The tracker now HOLDS it: a created issue has to show up in the listings
+    // the deletion sweep reads, or the very pass that filed it would decide the
+    // issue had been deleted remotely and archive the idea behind it.
+    this.issues.push(issue);
+    this.issuesById.set(issue.externalId, issue);
+    return issue;
   }
   async updateIssueState(externalId: string, stateId: string): Promise<void> {
     this.calls.push('updateIssueState');
@@ -245,7 +266,7 @@ class PlaneLikeAdapter implements TrackerAdapter {
   }
   async createSubIssue(
     parentExternalId: string,
-    draft: SubIssueDraft,
+    draft: IssueDraft,
     clientKey: string,
   ): Promise<TrackerIssue> {
     this.calls.push('createSubIssue');
@@ -262,21 +283,41 @@ class PlaneLikeAdapter implements TrackerAdapter {
     );
     throw new TrackerApiError('plane', 'request failed (500)', 500);
   }
+  /** The TOP-LEVEL push, with the same commit-then-lose-the-response failure. */
+  async createIssue(
+    _selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.calls.push('createIssue');
+    this.issues.push(
+      makeIssue({
+        externalId: 'proj1/pushed',
+        identifier: 'PROJ-8',
+        title: draft.title,
+        parentExternalId: null,
+        recoveryClientKey: clientKey,
+      }),
+    );
+    throw new TrackerApiError('plane', 'request failed (500)', 500);
+  }
   async updateIssueState(): Promise<void> {
     throw new Error('not used');
   }
 
   /** The marker lookup the outbox's ambiguous recovery uses (see outboxWorker). */
-  async findSubIssueByClientKey(
-    parentExternalId: string,
+  async findIssueByClientKey(
+    scope: { containerId: string | null; parentExternalId: string | null },
     clientKey: string,
   ): Promise<TrackerIssue | null> {
-    this.calls.push('findSubIssueByClientKey');
+    this.calls.push('findIssueByClientKey');
     if (this.failRecovery) throw new TrackerApiError('plane', 'request failed (500)', 500);
     return (
       this.issues.find(
         (issue) =>
-          issue.parentExternalId === parentExternalId && issue.recoveryClientKey === clientKey,
+          (scope.parentExternalId === null ||
+            issue.parentExternalId === scope.parentExternalId) &&
+          issue.recoveryClientKey === clientKey,
       ) ?? null
     );
   }
@@ -328,7 +369,9 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     selection_mode: 'all',
     selection_json: null,
     state_mapping_json: '{}',
-    two_way: 1,
+    status_sync_mode: 'auto',
+    pull_mode: 'auto',
+    push_mode: 'auto',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -971,5 +1014,301 @@ describe('TrackerSyncService write-back wiring', () => {
     // A double subscription would enqueue twice (the dedupe guard would in fact
     // catch it, but the row count is the honest signal for "subscribed once").
     expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The direction-mode gating matrix (migration 094)
+// ---------------------------------------------------------------------------
+
+describe('TrackerSyncService direction modes', () => {
+  /** Import an issue as an idea on a fully-automatic connection, then hand back its id. */
+  async function importedIdea(connection: TrackerConnectionRow): Promise<string> {
+    adapter.issues = [makeIssue()];
+    await service.syncConnection(connection.id);
+    return getLinkByExternal(raw, connection.id, 'ext-1')?.entity_id ?? '';
+  }
+
+  /** Flip a connection's modes after the fixture work is done. */
+  function setModes(modes: Partial<Record<'status_sync_mode' | 'pull_mode' | 'push_mode', string>>): void {
+    for (const [column, value] of Object.entries(modes)) {
+      raw.prepare(`UPDATE tracker_connections SET ${column} = ? WHERE id = ?`).run(value, CONN_ID);
+    }
+  }
+
+  // ----- pull -----
+
+  it('pull MANUAL defers the import until a manual trigger, holding the cursor meanwhile', async () => {
+    makeConnection({ pull_mode: 'manual' });
+    adapter.issues = [makeIssue()];
+
+    const auto = await service.syncConnection(CONN_ID);
+
+    expect(ideas()).toHaveLength(0);
+    expect(auto.entries.map((e) => e.line)).toEqual(
+      expect.arrayContaining([
+        'import held · manual — use Sync now',
+        '1 new issue held — use Sync now',
+      ]),
+    );
+    // The CURSOR did not move past the held issue — otherwise the manual pass
+    // below would filter out the very issue it is supposed to import.
+    expect(getConnection(raw, CONN_ID)?.cursor_updated_at).toBeNull();
+
+    const manual = await service.syncNow(CONN_ID);
+
+    expect(manual.error).toBeNull();
+    expect(ideas().map((i) => i.title)).toEqual(['Ship the tracker sync']);
+    expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-1');
+  });
+
+  it('status AUTO + pull MANUAL: linked items still merge and sweep, only the NEW issue waits', async () => {
+    // The two directions are independent and merely share one fetch, so a
+    // connection that pulls manually must NOT lose its automatic status sync.
+    const connection = makeConnection();
+    const ideaId = await importedIdea(connection);
+    setModes({ pull_mode: 'manual' });
+
+    adapter.issues = [
+      makeIssue({
+        title: 'Ship the tracker sync (v1)',
+        stateId: 'state-done',
+        updatedAt: '2026-07-30T11:00:00.000Z',
+      }),
+      makeIssue({
+        externalId: 'ext-2',
+        title: 'Remote newcomer',
+        updatedAt: '2026-07-30T11:00:01.000Z',
+      }),
+    ];
+    // A FRESH service instance: the deletion sweep's cadence counter is
+    // in-memory and starts at 0, so its first pass always sweeps (the
+    // documented post-boot behaviour). The fixture import above already spent
+    // the original service's sweeping pass.
+    const rebooted = new TrackerSyncService({
+      db: raw,
+      router,
+      nowIso: () => now,
+      adapterFactory: () => adapter,
+    });
+    const auto = await rebooted.syncConnection(CONN_ID);
+
+    // The linked item got BOTH halves of the status-auto treatment.
+    const linked = raw.prepare('SELECT title, stage_id FROM ideas WHERE id = ?').get(ideaId) as {
+      title: string;
+      stage_id: string;
+    };
+    expect(linked.title).toBe('Ship the tracker sync (v1)');
+    expect(linked.stage_id).toBe(STAGE.done);
+    // …and the new issue did not land.
+    expect(ideas()).toHaveLength(1);
+    expect(auto.entries.map((e) => e.line)).toContain('1 new issue held — use Sync now');
+    // The sweep rides along with the inbound phase.
+    expect(auto.swept).toBe(true);
+    expect(adapter.calls).toContain('listIssueIds');
+    // The cursor holds at the last FULLY applied issue, so the held newcomer is
+    // re-offered rather than filtered out next time.
+    expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-1');
+
+    await rebooted.syncNow(CONN_ID);
+
+    expect(ideas().map((i) => i.title)).toContain('Remote newcomer');
+    expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-2');
+  });
+
+  it('status MANUAL + pull AUTO: imports still land while the linked stage waits', async () => {
+    const connection = makeConnection();
+    const ideaId = await importedIdea(connection);
+    setModes({ status_sync_mode: 'manual' });
+
+    adapter.issues = [
+      makeIssue({ stateId: 'state-done', updatedAt: '2026-07-30T11:00:00.000Z' }),
+      makeIssue({
+        externalId: 'ext-2',
+        title: 'Remote newcomer',
+        updatedAt: '2026-07-30T11:00:01.000Z',
+      }),
+    ];
+    const auto = await service.syncConnection(CONN_ID);
+
+    // The import direction is untouched by the status hold…
+    expect(ideas().map((i) => i.title)).toContain('Remote newcomer');
+    // …while the linked entity's stage waits.
+    expect(
+      (raw.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string })
+        .stage_id,
+    ).not.toBe(STAGE.done);
+    expect(auto.entries.map((e) => e.line)).toContain('1 status change held — use Sync now');
+    // A stage deferral pins the cursor at the last fully-applied issue too — it
+    // stays where the fixture import left it, so the newcomer AFTER it (which
+    // did apply) is simply re-offered next pass rather than lost.
+    expect(getConnection(raw, CONN_ID)?.cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+    expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-1');
+
+    await service.syncNow(CONN_ID);
+
+    expect(
+      (raw.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string })
+        .stage_id,
+    ).toBe(STAGE.done);
+    // A re-offered import is a no-op, not a duplicate.
+    expect(ideas().filter((i) => i.title === 'Remote newcomer')).toHaveLength(1);
+  });
+
+  // ----- status, outbound -----
+
+  it('status MANUAL holds the OUTBOUND stage write, keeping the row queued for a manual trigger', async () => {
+    const connection = makeConnection();
+    service.start();
+    const ideaId = await importedIdea(connection);
+    setModes({ status_sync_mode: 'manual' });
+
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: STAGE.done,
+    });
+
+    // The INTENT is durable regardless of the mode.
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(1);
+
+    // An automatic pass — and the debounced drain — leave it alone.
+    adapter.updateCalls.length = 0;
+    await service.syncConnection(CONN_ID);
+    await service.drainConnection(CONN_ID);
+    expect(adapter.updateCalls).toEqual([]);
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(1);
+    expect(listUnresolvedOutbox(raw, CONN_ID)[0].state).toBe('pending');
+
+    // "Sync now" runs every direction.
+    await service.syncNow(CONN_ID);
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+  });
+
+  // ----- status, inbound -----
+
+  it('status MANUAL holds the INBOUND stage too, while content keeps merging', async () => {
+    const connection = makeConnection();
+    const ideaId = await importedIdea(connection);
+    setModes({ status_sync_mode: 'manual' });
+
+    adapter.issues = [
+      makeIssue({
+        title: 'Ship the tracker sync (v1)',
+        stateId: 'state-done',
+        updatedAt: '2026-07-30T11:00:00.000Z',
+      }),
+    ];
+    const held = await service.syncConnection(CONN_ID);
+
+    expect(held.entries.map((e) => e.line)).toContain('status held · manual — use Sync now');
+    const afterHold = raw.prepare('SELECT title, stage_id FROM ideas WHERE id = ?').get(ideaId) as {
+      title: string;
+      stage_id: string;
+    };
+    // Content flowed…
+    expect(afterHold.title).toBe('Ship the tracker sync (v1)');
+    // …the status did not.
+    expect(afterHold.stage_id).not.toBe(STAGE.done);
+
+    // The very same remote state is applied by the manual pass — nothing had to
+    // change remotely for the held move to survive.
+    await service.syncNow(CONN_ID);
+    expect(
+      (raw.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string })
+        .stage_id,
+    ).toBe(STAGE.done);
+  });
+
+  // ----- push -----
+
+  it('push MANUAL queues the create and holds it until a manual trigger', async () => {
+    makeConnection({ push_mode: 'manual' });
+    service.start();
+
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      fields: { title: 'A locally-filed idea' },
+    });
+
+    const queued = listUnresolvedOutbox(raw, CONN_ID);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].kind).toBe('create_issue');
+
+    // Automatic passes and the debounced drain both leave it queued.
+    const auto = await service.syncConnection(CONN_ID);
+    await service.drainConnection(CONN_ID);
+    expect(auto.entries.map((e) => e.line)).toContain('push held · manual — use Sync now');
+    expect(adapter.createIssueCalls).toHaveLength(0);
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(1);
+
+    await service.syncNow(CONN_ID);
+
+    expect(adapter.createIssueCalls).toHaveLength(1);
+    expect(adapter.createIssueCalls[0].draft.title).toBe('A locally-filed idea');
+    expect(adapter.createIssueCalls[0].selection.containerId).toBe(SOURCE.containerId);
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+  });
+
+  it('push AUTO files the issue on an ordinary pass and links it to the originating idea', async () => {
+    makeConnection();
+    service.start();
+
+    const created = await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      fields: { title: 'A locally-filed idea' },
+    });
+    await service.syncConnection(CONN_ID);
+
+    expect(adapter.createIssueCalls).toHaveLength(1);
+    const link = getLinkByEntity(raw, 'idea', created.taskId, 'linear');
+    expect(link?.external_id).toBe(adapter.createIssueCalls[0].clientKey);
+    expect(link?.orphaned_at).toBeNull();
+  });
+
+  it('holds every direction at once, and a single Sync now runs all three', async () => {
+    const connection = makeConnection();
+    service.start();
+    const ideaId = await importedIdea(connection);
+    setModes({ status_sync_mode: 'manual', pull_mode: 'manual', push_mode: 'manual' });
+
+    // One local status change (outbound), one new idea (push)…
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: STAGE.done,
+    });
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      fields: { title: 'A locally-filed idea' },
+    });
+    // …and one new remote issue (pull).
+    adapter.issues = [makeIssue(), makeIssue({ externalId: 'ext-2', title: 'Remote newcomer' })];
+    adapter.updateCalls.length = 0;
+
+    const auto = await service.syncConnection(CONN_ID);
+
+    expect(auto.entries.map((e) => e.line)).toEqual(
+      expect.arrayContaining([
+        'status held · manual — use Sync now',
+        'import held · manual — use Sync now',
+        'push held · manual — use Sync now',
+      ]),
+    );
+    expect(adapter.updateCalls).toEqual([]);
+    expect(adapter.createIssueCalls).toHaveLength(0);
+    expect(ideas()).toHaveLength(2); // the imported one + the locally-filed one
+
+    await service.syncNow(CONN_ID);
+
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    expect(adapter.createIssueCalls).toHaveLength(1);
+    expect(ideas().map((i) => i.title)).toContain('Remote newcomer');
   });
 });

@@ -158,6 +158,15 @@ const stateMappingSchema = z.record(z.string(), mappingTargetSchema);
 const selectionModeSchema = z.enum(['all', 'assignee', 'manual']);
 const conflictModeSchema = z.enum(['auto', 'manual']);
 
+/**
+ * One of the three per-direction cadences (TrackerDirectionMode). Same two
+ * literals as `conflictModeSchema` and deliberately a SEPARATE declaration:
+ * they answer different questions ("when does this direction run" vs. "who
+ * resolves a clash"), and sharing one schema would silently couple them if
+ * either ever grows a third value.
+ */
+const directionModeSchema = z.enum(['auto', 'manual']);
+
 const selectionJsonSchema = z.object({
   assigneeIds: z.array(z.string()).optional(),
   issueIds: z.array(z.string()).optional(),
@@ -306,7 +315,9 @@ export const trackerRouter = router({
         selectionMode: selectionModeSchema,
         selectionJson: selectionJsonSchema.nullable(),
         stateMapping: stateMappingSchema,
-        twoWay: z.boolean(),
+        statusSyncMode: directionModeSchema,
+        pullMode: directionModeSchema,
+        pushMode: directionModeSchema,
         mirrorSubissues: z.boolean(),
         conflictMode: conflictModeSchema,
         reconcile: z.array(reconcileDecisionSchema),
@@ -343,7 +354,9 @@ export const trackerRouter = router({
     .input(
       z.object({
         connectionId: z.string().min(1),
-        twoWay: z.boolean().optional(),
+        statusSyncMode: directionModeSchema.optional(),
+        pullMode: directionModeSchema.optional(),
+        pushMode: directionModeSchema.optional(),
         mirrorSubissues: z.boolean().optional(),
         conflictMode: conflictModeSchema.optional(),
         stateMapping: stateMappingSchema.optional(),

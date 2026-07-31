@@ -112,6 +112,7 @@ import {
   type TrackerStageIds,
 } from './stateMapping';
 import { isWriteBackGroup, parseJsonObject, type WriteBackGroup } from './writeBack';
+import { PROVENANCE_MARKER_PREFIX, provenanceMarker } from './provenance';
 
 // ---------------------------------------------------------------------------
 // Dependencies + public shapes
@@ -153,6 +154,36 @@ export interface InboundSyncDeps {
    * {@link fileAutoResolutionFinding}.
    */
   reviewRouter?: ReviewFindingRouter;
+  /**
+   * May this pass move a LINKED entity's stage in response to the remote state?
+   * Defaults to true. False is the inbound half of `status_sync_mode = 'manual'`
+   * (migration 094): the stage dimension stands down for the pass — no stage
+   * apply, no stage conflict — and the change is kept RE-OFFERABLE two ways, so
+   * that "manual delays work" never becomes "manual drops it":
+   *   - the baseline's `stateId` is PINNED to its old value, so the diff
+   *     reproduces on a later pass instead of reading as already-seen;
+   *   - the CURSOR stops advancing at that issue, so a later pass still fetches
+   *     it at all (see {@link runInboundSync}).
+   * Content (title/description) is a different direction and merges normally
+   * either way.
+   */
+  applyLinkedStage?: boolean;
+  /**
+   * May this pass import a NEW (unlinked) remote issue as an idea? Defaults to
+   * true. False is `pull_mode = 'manual'` (migration 094).
+   *
+   * INDEPENDENT of {@link InboundSyncDeps.applyLinkedStage}, which is why the
+   * inbound phase runs whenever EITHER direction is live: a connection that
+   * pulls manually but syncs status automatically still needs its linked items
+   * merged every pass. A skipped import holds the cursor exactly like a
+   * deferred stage does, so the issue is re-offered until a pass may import it.
+   *
+   * ADOPTION IS NOT AN IMPORT. A half-imported idea from a crashed pass (found
+   * by its provenance marker) is REPAIR of an import that already happened, so
+   * it proceeds either way — leaving it unrepaired would strand an idea nothing
+   * points at.
+   */
+  importNewIssues?: boolean;
 }
 
 /** The last-synced remote snapshot a link three-way-merges against. */
@@ -232,6 +263,18 @@ export interface InboundSyncReport {
   autoResolved: number;
   /** Linked entities archived because the remote issue was archived. */
   archivedRemotely: number;
+  /**
+   * Remote stage changes recognized but NOT applied because the status
+   * direction is held ({@link InboundSyncDeps.applyLinkedStage}). Each one also
+   * pins the cursor, so they are re-offered until a pass may apply them.
+   */
+  stageDeferred: number;
+  /**
+   * NEW remote issues recognized but NOT imported because the import direction
+   * is held ({@link InboundSyncDeps.importNewIssues}). Pins the cursor for the
+   * same reason: a held import must be delayed, never dropped.
+   */
+  importDeferred: number;
   /** Filled in by {@link runDeletionSweep} when the service folds its result in. */
   sweepArchived?: number;
   /** External id the batch stopped at because our own write is still in flight. */
@@ -273,23 +316,10 @@ export const OVERLAP_WINDOW_MS = 10 * 60 * 1000;
 
 const PROVIDER_LABEL: Record<TrackerProvider, string> = { linear: 'Linear', plane: 'Plane' };
 
-/** Machine-recognizable marker prefix so the footer can be split back off a body. */
-const PROVENANCE_MARKER_PREFIX = '<!-- cyboflow:tracker';
 /** The markdown rule the footer block opens with. */
 const FOOTER_FENCE = '---\n';
 /** The substring that identifies a footer block inside a stored body. */
 const FOOTER_START = FOOTER_FENCE + PROVENANCE_MARKER_PREFIX;
-
-/**
- * The marker an imported idea's footer opens with. It embeds the issue's
- * `(provider, externalId)` because this is the IMPORT'S RECOVERY KEY (see the
- * module header): the marker is written in the same statement as the idea, so
- * it is the only durable trace of an import whose link write never happened.
- * {@link findAdoptableIdea} reads it back.
- */
-function provenanceMarker(provider: TrackerProvider, externalId: string): string {
-  return `${PROVENANCE_MARKER_PREFIX} ${provider}:${externalId} -->`;
-}
 
 /** The provenance block appended to an imported idea's body (issue ref + URL). */
 function buildProvenanceFooter(provider: TrackerProvider, issue: TrackerIssue): string {
@@ -569,6 +599,10 @@ interface SyncContext {
   mapping: TrackerStateMapping;
   /** stateId -> the provider state's CANONICAL group (the write-back stamp's input). */
   stateGroups: Record<string, TrackerStateGroup>;
+  /** See {@link InboundSyncDeps.applyLinkedStage}. */
+  applyLinkedStage: boolean;
+  /** See {@link InboundSyncDeps.importNewIssues}. */
+  importNewIssues: boolean;
   report: InboundSyncReport;
 }
 
@@ -647,6 +681,8 @@ export async function runInboundSync(
     conflictsOpened: 0,
     autoResolved: 0,
     archivedRemotely: 0,
+    stageDeferred: 0,
+    importDeferred: 0,
   };
 
   const selection = parseSourceSelection(connection);
@@ -684,9 +720,20 @@ export async function runInboundSync(
     stageIds,
     mapping,
     stateGroups,
+    applyLinkedStage: deps.applyLinkedStage !== false,
+    importNewIssues: deps.importNewIssues !== false,
     report,
   };
 
+  // The cursor is a high-water mark of "everything at or before this is FULLY
+  // applied", so it stops moving the moment this pass DEFERS anything — a stage
+  // change or a whole import. Deliberately not a `break`: the rest of the batch
+  // still applies, it is just re-delivered next pass, where re-applying it is a
+  // no-op against the baselines this pass advanced (see the module header's
+  // cursor note). Without this, held work would be filtered out of every later
+  // fetch by the very cursor that skipped it — "manual delays work" would
+  // quietly become "manual drops it".
+  let cursorAdvances = true;
   for (const issue of ordered) {
     // ECHO SUPPRESSION: one of our own writes is still in flight for this
     // issue. Stop the batch here — applying it would race our own create /
@@ -697,12 +744,26 @@ export async function runInboundSync(
       break;
     }
 
-    await applyIssue(ctx, issue);
-    advanceCursor(db, connection.id, issue.updatedAt, issue.externalId);
+    const outcome = await applyIssue(ctx, issue);
+    if (outcome !== 'applied') {
+      cursorAdvances = false;
+      if (outcome === 'stage-deferred') report.stageDeferred++;
+      else report.importDeferred++;
+    }
+    if (cursorAdvances) advanceCursor(db, connection.id, issue.updatedAt, issue.externalId);
   }
 
   return report;
 }
+
+/**
+ * What {@link applyIssue} did with one issue, as far as the CURSOR is concerned.
+ * Both deferrals mean the issue is NOT finished with — a held direction
+ * recognized work and declined to do it — so the cursor must not move past it:
+ *   - 'stage-deferred'  — a remote stage change the status direction is holding.
+ *   - 'import-deferred' — a new issue the import direction is holding.
+ */
+type ApplyOutcome = 'applied' | 'stage-deferred' | 'import-deferred';
 
 /** What the unresolved outbox makes untouchable this pass — see {@link collectOutboxBlockers}. */
 interface OutboxBlockers {
@@ -722,10 +783,17 @@ interface OutboxBlockers {
  *
  * `clientKeys` — the same create keys, matched instead against the issue's
  * `recoveryClientKey`. Where creates are NOT idempotent (Plane) the created
- * child carries a PROVIDER-MINTED id that matches neither column, so the
+ * issue carries a PROVIDER-MINTED id that matches neither column, so the
  * description marker the adapter surfaces is the only proof it is ours; without
  * this arm a create that committed and then lost its response would be imported
  * here as a brand-new idea.
+ *
+ * KIND-AGNOSTIC by construction, which is what makes it cover the PUSH
+ * direction for free: an unacked `create_issue` (an idea we filed as a
+ * top-level issue) blocks on exactly the same two columns as an unacked
+ * `create_sub_issue`, so the pushed issue is never re-imported as a SECOND idea
+ * alongside the one that produced it. The outbox row carries the originating
+ * idea's id, so the reconcile that follows links the remote issue back to it.
  *
  * Deliberately reads the whole unresolved set once rather than calling
  * findOutboxByClientKey per issue: that lookup is state-agnostic, so a
@@ -751,7 +819,7 @@ function isBlockedByOutbox(blockers: OutboxBlockers, issue: TrackerIssue): boole
 }
 
 /** Apply a single fetched issue. Never advances the cursor — the caller does. */
-async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<void> {
+async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyOutcome> {
   const { db, connection, report } = ctx;
   const link = getLinkByExternal(db, connection.id, issue.externalId);
 
@@ -760,26 +828,41 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<void> 
     // something the tracker already retired is pure noise.
     if (issue.archivedAt !== null) {
       report.skipped++;
-      return;
+      return 'applied';
     }
     const target = targetFor(ctx, issue);
     if (target === 'dont') {
       report.skipped++;
-      return;
+      return 'applied';
     }
     if (!passesSelectionFilter(connection, issue)) {
       report.skipped++;
-      return;
+      return 'applied';
     }
-    await importIssueAsIdea(ctx, issue, target);
-    return;
+    // A half-imported idea from a crashed pass is REPAIR of an import that
+    // already happened, not a new one — so it proceeds even while the import
+    // direction is held. Resolved HERE rather than inside importIssueAsIdea so
+    // the gate below can tell the two apart.
+    const adoptable = findAdoptableIdea(
+      db,
+      connection.project_id,
+      connection.provider,
+      provenanceMarker(connection.provider, issue.externalId),
+    );
+    if (!ctx.importNewIssues && adoptable === null) {
+      // Deferred, NOT skipped: the cursor holds so this issue is re-offered
+      // until a pass may import it.
+      return 'import-deferred';
+    }
+    await importIssueAsIdea(ctx, issue, target, adoptable);
+    return 'applied';
   }
 
   // Manual mode parks a conflicting item until the user decides; everything
   // else keeps flowing past it.
   if (hasOpenConflictForLink(db, link.id)) {
     report.skipped++;
-    return;
+    return 'applied';
   }
 
   // An orphaned link already had its remote deletion/archive applied. Leaving
@@ -787,7 +870,7 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<void> 
   // resurrecting a link whose issue came back is a user decision.
   if (link.orphaned_at !== null) {
     report.skipped++;
-    return;
+    return 'applied';
   }
 
   const local = readLocalEntity(db, link.entity_type, link.entity_id);
@@ -795,12 +878,12 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<void> 
     // The local entity was hard-deleted out from under the link. Outbound owns
     // the "what happens to the tracker issue" prompt; inbound just stands down.
     report.skipped++;
-    return;
+    return 'applied';
   }
 
   if (issue.archivedAt !== null) {
     await applyRemoteArchive(ctx, issue, link);
-    return;
+    return 'applied';
   }
 
   const baseline = parseBaseline(link.baseline_json);
@@ -811,10 +894,10 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<void> 
     // become mergeable from the next change on.
     updateBaseline(db, link.id, composeBaselineJson(link.baseline_json, snapshotOf(issue)));
     report.skipped++;
-    return;
+    return 'applied';
   }
 
-  await mergeLinkedIssue(ctx, issue, link, local, baseline);
+  return await mergeLinkedIssue(ctx, issue, link, local, baseline);
 }
 
 /** selection_mode gate — applied only to issues that would import as NEW ideas. */
@@ -840,16 +923,18 @@ function passesSelectionFilter(connection: TrackerConnectionRow, issue: TrackerI
  * then the link, then the placement. A crash after the create is repaired on
  * the next pass by adopting the marked idea instead of creating a second one;
  * a crash after the link leaves an ordinary linked entity the merge path owns.
+ *
+ * `adopted` is that half-imported idea, resolved by the CALLER (applyIssue) —
+ * which needs the same answer to tell a genuine new import from a repair when
+ * the import direction is held.
  */
 async function importIssueAsIdea(
   ctx: SyncContext,
   issue: TrackerIssue,
   target: TrackerMappingTarget,
+  adopted: { id: string; stageId: string } | null,
 ): Promise<void> {
   const { db, connection, report } = ctx;
-
-  const marker = provenanceMarker(connection.provider, issue.externalId);
-  const adopted = findAdoptableIdea(db, connection.project_id, connection.provider, marker);
 
   let entityId: string;
   if (adopted !== null) {
@@ -954,7 +1039,7 @@ async function mergeLinkedIssue(
   link: EntityExternalLinkRow,
   local: LocalEntity,
   baseline: TrackerBaseline,
-): Promise<void> {
+): Promise<ApplyOutcome> {
   const { db, connection, report } = ctx;
   const localBody = splitBody(local.body);
   // Tracks the link's baseline blob across the echo-suppression stamp below,
@@ -1001,8 +1086,17 @@ async function mergeLinkedIssue(
   const remoteStageId = mappingTargetToStageId(targetFor(ctx, issue), ctx.stageIds);
   const remoteStageChanged = remoteStageId !== null && remoteStageId !== baselineStageId;
   const localStageChanged = baselineStageId !== null && local.stageId !== baselineStageId;
+  /** The status direction is held and this issue HAS a stage change waiting. */
+  let stageDeferred = false;
   if (remoteStageChanged && remoteStageId !== local.stageId) {
-    if (localStageChanged) {
+    if (!ctx.applyLinkedStage) {
+      // HELD: no move, and no conflict either — a conflict row would demand a
+      // ruling on a dimension the user has asked us not to sync yet, and (in
+      // Manual conflict mode) would park the whole item, stopping the content
+      // merge that is still supposed to flow. The diff is still COMPUTED, since
+      // knowing a change is waiting is what pins the cursor.
+      stageDeferred = true;
+    } else if (localStageChanged) {
       conflicts.push({ field: 'stage', localValue: local.stageId, remoteValue: remoteStageId });
     } else {
       stageMove = remoteStageId;
@@ -1023,7 +1117,7 @@ async function mergeLinkedIssue(
       report.conflictsOpened++;
     }
     // Nothing applied, baseline untouched — the item is parked.
-    return;
+    return stageDeferred ? 'stage-deferred' : 'applied';
   }
 
   // Auto mode: tracker wins content, cyboflow wins stage. Record each override
@@ -1060,7 +1154,18 @@ async function mergeLinkedIssue(
     report.updated++;
   }
 
-  updateBaseline(db, link.id, composeBaselineJson(baselineJson, snapshotOf(issue)));
+  // The STATE half of the snapshot is pinned to the old baseline when the stage
+  // dimension is held, so the remote move stays "unseen" and applies on the
+  // first pass allowed to apply it. Everything else advances: the content merge
+  // ran, and re-offering a title we already merged would re-open its conflict
+  // forever. Field-by-field rather than skipping the write, because
+  // `composeBaselineJson` is a whole-snapshot overlay and letting `stateId`
+  // ride along on a content update is exactly the cross-field clobber that has
+  // bitten this function before.
+  const snapshot = snapshotOf(issue);
+  if (!ctx.applyLinkedStage) snapshot.stateId = baseline.stateId;
+  updateBaseline(db, link.id, composeBaselineJson(baselineJson, snapshot));
+  return stageDeferred ? 'stage-deferred' : 'applied';
 }
 
 /**
