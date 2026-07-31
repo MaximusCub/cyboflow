@@ -33,8 +33,10 @@
  *     an issue absent from the SCOPED id listing but still alive on the point
  *     lookup is out of scope, not deleted.
  *   - echo suppression: an unresolved outbox row halts the batch and the
- *     cursor never advances past the blocked issue (by external_id AND by the
- *     create path's client_key).
+ *     cursor never advances past the blocked issue (by external_id, by the
+ *     create path's client_key, and by the recovery MARKER a lost create's
+ *     child carries when the provider minted its own id) — while a marker from
+ *     an already-settled row holds nothing.
  *   - inbound changes never echo back OUTBOUND: the real writeBack listener is
  *     subscribed to the real taskChangeEvents (the way TrackerSyncService wires
  *     it) and must stay silent for provider-authored stage moves while still
@@ -72,10 +74,12 @@ import {
   runDeletionSweep,
   type EntityWriteRouter,
   type InboundSyncDeps,
+  type ReviewFindingRouter,
   type TrackerBaseline,
   type TrackerConflictPayload,
 } from '../inboundSync';
 import type { TaskChange } from '../../../orchestrator/taskChangeRouter';
+import type { ReviewItemCreate } from '../../../orchestrator/reviewItemRouter';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -182,6 +186,28 @@ class CrashingRouter implements EntityWriteRouter {
   }
 }
 
+/**
+ * Captures what an Auto-mode override files on the review-inbox chokepoint. A
+ * fake rather than a real ReviewItemRouter: these cases are about WHAT the
+ * merge reports, not about how review_items rows are written.
+ */
+class FakeReviewRouter implements ReviewFindingRouter {
+  readonly created: ReviewItemCreate[] = [];
+  readonly projectIds: number[] = [];
+  /** Scripted failure — filing an audit record must never sink the pass. */
+  fail: Error | null = null;
+
+  async applyReviewItem(
+    projectId: number,
+    change: ReviewItemCreate,
+  ): Promise<{ reviewItemId: string }> {
+    if (this.fail !== null) throw this.fail;
+    this.projectIds.push(projectId);
+    this.created.push(change);
+    return { reviewItemId: `rvw_${this.created.length}` };
+  }
+}
+
 function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
   return {
     externalId: 'ext-1',
@@ -195,6 +221,7 @@ function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     parentExternalId: null,
     updatedAt: '2026-07-30T10:00:00.000Z',
     archivedAt: null,
+    recoveryClientKey: null,
     ...overrides,
   };
 }
@@ -798,6 +825,135 @@ describe('runInboundSync — three-way merge', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Auto-mode audit findings
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — the audit record an AUTO override files', () => {
+  let review: FakeReviewRouter;
+  /** The dep bag WITH the review-queue seam wired (the app's real shape). */
+  let audited: InboundSyncDeps;
+
+  beforeEach(() => {
+    review = new FakeReviewRouter();
+    audited = { ...deps, reviewRouter: review };
+  });
+
+  /** Import `issue` through the audited deps, then hand back the created idea id. */
+  async function importOnce(connection: TrackerConnectionRow, issue: TrackerIssue): Promise<string> {
+    adapter.issues = [issue];
+    await runInboundSync(audited, connection);
+    return ideas()[0].id;
+  }
+
+  it('a CONTENT override files exactly one non-blocking finding carrying BOTH values', async () => {
+    // The regression: the override's only record was a tracker_conflicts row
+    // that is written already-resolved, and every product surface lists OPEN
+    // conflicts only — so the local value the tracker overwrote was
+    // unreachable from inside the app.
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    const ideaId = await importOnce(connection, makeIssue());
+    review.created.length = 0;
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, fields: { title: 'Local title' } });
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    const report = await runInboundSync(audited, reload());
+
+    expect(report.autoResolved).toBe(1);
+    expect(review.created).toHaveLength(1);
+    const [finding] = review.created;
+    expect(review.projectIds).toEqual([1]);
+    expect(finding.op).toBe('create');
+    expect(finding.kind).toBe('finding');
+    // NON-BLOCKING always: an audit record must never park anything.
+    expect(finding.blocking).toBe(false);
+    // The tracker is the actor — this is the provider's value landing locally.
+    expect(finding.actor).toBe('linear');
+    expect(finding.entityType).toBe('idea');
+    expect(finding.entityId).toBe(ideaId);
+
+    const ref = (raw.prepare('SELECT ref FROM ideas WHERE id = ?').get(ideaId) as { ref: string }).ref;
+    expect(finding.title).toBe(`Tracker sync auto-resolved a conflict on ${ref}`);
+
+    const body = finding.body ?? '';
+    expect(body).toContain(ref);
+    expect(body).toContain('title');
+    // BOTH sides, so the overwritten value is recoverable by reading it...
+    expect(body).toContain('Local title');
+    expect(body).toContain('Remote title');
+    // ...plus which side won and why, and how to find the issue.
+    expect(body).toContain('tracker');
+    expect(body).toContain('CORE-142');
+    expect(body).toContain('https://linear.app/acme/issue/CORE-142');
+  });
+
+  it('a STAGE override files one too — the doc says EVERY override', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    const ideaId = await importOnce(connection, makeIssue());
+    review.created.length = 0;
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, stageId: STAGE.wontdo });
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    const report = await runInboundSync(audited, reload());
+
+    expect(report.autoResolved).toBe(1);
+    expect(review.created).toHaveLength(1);
+    const body = review.created[0].body ?? '';
+    expect(body).toContain('stage');
+    expect(body).toContain(STAGE.wontdo);
+    expect(body).toContain(STAGE.done);
+    // Stage is the one field cyboflow wins.
+    expect(body).toContain('cyboflow');
+  });
+
+  it('files NOTHING for a clean remote-only apply — there was no override to audit', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    await importOnce(connection, makeIssue());
+    review.created.length = 0;
+
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(audited, reload());
+
+    expect(report.updated).toBe(1);
+    expect(report.autoResolved).toBe(0);
+    expect(review.created).toEqual([]);
+  });
+
+  it('files nothing and throws nothing when the review-queue seam is absent', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    const ideaId = ideas()[0].id;
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, fields: { title: 'Local title' } });
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    // `deps` carries no reviewRouter — the resolved conflict row stays the
+    // record and the pass runs to completion regardless.
+    const report = await runInboundSync(deps, reload());
+    expect(report.autoResolved).toBe(1);
+    expect(review.created).toEqual([]);
+    expect(conflicts()).toHaveLength(1);
+  });
+
+  it('survives a review-queue write that throws — the conflict row is the fallback record', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    const ideaId = await importOnce(connection, makeIssue());
+
+    await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: ideaId, fields: { title: 'Local title' } });
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    review.fail = new Error('review queue is wedged');
+
+    const report = await runInboundSync(audited, reload());
+
+    expect(report.autoResolved).toBe(1);
+    expect(ideas()[0].title).toBe('Remote title');
+    expect(conflicts()[0].resolution).toBe('auto-remote');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Selection filtering
 // ---------------------------------------------------------------------------
 
@@ -1111,6 +1267,56 @@ describe('runInboundSync — echo suppression', () => {
     expect(report.imported).toBe(0);
     expect(ideas()).toHaveLength(0);
     expect(reload().cursor_updated_at).toBeNull();
+  });
+
+  it('recognizes a lost CREATE by its recovery marker when the provider minted its own id', async () => {
+    const connection = makeConnection();
+    enqueueOutbox(raw, {
+      connection_id: 'conn-1',
+      kind: 'create_sub_issue',
+      entity_type: 'task',
+      entity_id: 'tsk-1',
+      client_key: 'ck-1',
+      payload_json: JSON.stringify({ parentExternalId: 'proj1/parent', title: 'Mirrored task' }),
+    });
+    // The Plane shape: the create COMMITTED but its response was lost, so the
+    // child comes back under a provider-minted composite id that matches
+    // neither external_id nor client_key. The marker the create stamped into
+    // its description is the only thing identifying it as ours.
+    adapter.issues = [
+      makeIssue({
+        externalId: 'proj1/child',
+        title: 'Mirrored task',
+        parentExternalId: 'proj1/parent',
+        recoveryClientKey: 'ck-1',
+      }),
+    ];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.haltedOnOutbox).toBe('proj1/child');
+    expect(report.imported).toBe(0);
+    expect(ideas()).toHaveLength(0);
+    expect(reload().cursor_updated_at).toBeNull();
+  });
+
+  it('does not hold an issue whose marker belongs to a SETTLED outbox row', async () => {
+    const connection = makeConnection();
+    const row = enqueueOutbox(raw, {
+      connection_id: 'conn-1',
+      kind: 'create_sub_issue',
+      entity_type: 'task',
+      entity_id: 'tsk-1',
+      client_key: 'ck-1',
+      payload_json: JSON.stringify({ parentExternalId: 'proj1/parent', title: 'Mirrored task' }),
+    });
+    raw.prepare("UPDATE tracker_outbox SET state = 'done' WHERE id = ?").run(row.id);
+    adapter.issues = [makeIssue({ externalId: 'proj1/child', recoveryClientKey: 'ck-1' })];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.haltedOnOutbox).toBeUndefined();
+    expect(report.imported).toBe(1);
   });
 
   it('resumes once the outbox row settles', async () => {

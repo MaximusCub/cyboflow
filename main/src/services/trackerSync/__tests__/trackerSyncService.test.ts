@@ -20,6 +20,11 @@
  *     inside the interval skips, and syncNow bypasses the gate.
  *   - phase order (ambiguous -> outbox drain -> inbound -> sweep), observed
  *     through the adapter's call log.
+ *   - the inbound ordering backstop: on a provider without idempotent creates,
+ *     a create that COMMITS and then loses its response defers inbound (rather
+ *     than importing its child as a duplicate idea) until the marker lookup
+ *     adopts it — in the same pass when the lookup works, on the next one when
+ *     the outage is still up.
  *   - an auth failure pauses the connection and the loop survives it.
  *   - the status guards: a pass never starts for a non-active connection, and a
  *     disconnect landing mid-pass abandons every later phase without persisting.
@@ -67,7 +72,7 @@ import type {
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type { SubIssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
-import { TrackerAuthError } from '../errors';
+import { TrackerApiError, TrackerAuthError } from '../errors';
 import {
   enqueueOutbox,
   getConnection,
@@ -192,6 +197,91 @@ class FakeAdapter implements TrackerAdapter {
   }
 }
 
+/**
+ * A PLANE-shaped adapter: creates are not idempotent, so a lost create is
+ * recovered by the description marker instead of a point lookup. Its
+ * `createSubIssue` COMMITS the child and then throws — the exact failure the
+ * ordering backstop exists for.
+ */
+class PlaneLikeAdapter implements TrackerAdapter {
+  readonly provider = 'plane' as const;
+  readonly capabilities: TrackerAdapterCapabilities = {
+    nativeParentAutoClose: false,
+    selfHostedBaseUrl: true,
+    idempotentCreate: false,
+  };
+
+  /** The tracker's own issue list — createSubIssue appends to it before failing. */
+  issues: TrackerIssue[] = [];
+  /** The outage that swallowed the create response is still up: recovery lookups fail too. */
+  failRecovery = false;
+
+  readonly calls: string[] = [];
+
+  async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  async listContainers(): Promise<TrackerSourceTree> {
+    throw new Error('not used');
+  }
+  async listNarrows(): Promise<TrackerSourceNarrow[]> {
+    throw new Error('not used');
+  }
+  async listStates(): Promise<TrackerState[]> {
+    this.calls.push('listStates');
+    return STATES;
+  }
+  async listIssues(): Promise<TrackerIssue[]> {
+    this.calls.push('listIssues');
+    return this.issues;
+  }
+  async listIssueIds(): Promise<string[]> {
+    this.calls.push('listIssueIds');
+    return this.issues.map((issue) => issue.externalId);
+  }
+  async getIssue(externalId: string): Promise<TrackerIssue | null> {
+    this.calls.push('getIssue');
+    return this.issues.find((issue) => issue.externalId === externalId) ?? null;
+  }
+  async createSubIssue(
+    parentExternalId: string,
+    draft: SubIssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.calls.push('createSubIssue');
+    // COMMITTED — under a provider-minted id that matches neither the outbox
+    // row's external_id nor its client_key — and only THEN lost.
+    this.issues.push(
+      makeIssue({
+        externalId: 'proj1/child',
+        identifier: 'PROJ-7',
+        title: draft.title,
+        parentExternalId,
+        recoveryClientKey: clientKey,
+      }),
+    );
+    throw new TrackerApiError('plane', 'request failed (500)', 500);
+  }
+  async updateIssueState(): Promise<void> {
+    throw new Error('not used');
+  }
+
+  /** The marker lookup the outbox's ambiguous recovery uses (see outboxWorker). */
+  async findSubIssueByClientKey(
+    parentExternalId: string,
+    clientKey: string,
+  ): Promise<TrackerIssue | null> {
+    this.calls.push('findSubIssueByClientKey');
+    if (this.failRecovery) throw new TrackerApiError('plane', 'request failed (500)', 500);
+    return (
+      this.issues.find(
+        (issue) =>
+          issue.parentExternalId === parentExternalId && issue.recoveryClientKey === clientKey,
+      ) ?? null
+    );
+  }
+}
+
 function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
   return {
     externalId: 'ext-1',
@@ -205,6 +295,7 @@ function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     parentExternalId: null,
     updatedAt: '2026-07-30T10:00:00.000Z',
     archivedAt: null,
+    recoveryClientKey: null,
     ...overrides,
   };
 }
@@ -252,6 +343,14 @@ function outboxRows(connectionId = CONN_ID): TrackerOutboxRow[] {
   return raw
     .prepare('SELECT * FROM tracker_outbox WHERE connection_id = ? ORDER BY id ASC')
     .all(connectionId) as TrackerOutboxRow[];
+}
+
+/** Every idea in the project — "nothing was imported" must mean zero rows. */
+function ideas(): Array<{ id: string; title: string }> {
+  return raw.prepare('SELECT id, title FROM ideas ORDER BY rowid ASC').all() as Array<{
+    id: string;
+    title: string;
+  }>;
 }
 
 function storedLog(connectionId = CONN_ID): TrackerSyncLogEntry[] {
@@ -468,6 +567,97 @@ describe('TrackerSyncService pass sequence', () => {
 
     // ...but a forced pass always does.
     expect((await service.syncNow(CONN_ID)).swept).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound ordering backstop
+// ---------------------------------------------------------------------------
+
+/**
+ * The duplicate-import hazard the two recovery layers close together: a Plane
+ * create that COMMITS and then loses its response leaves an ambiguous outbox
+ * row AND a live remote child whose external id matches nothing local. If
+ * inbound ran anyway, that child would be imported as a brand-new idea.
+ */
+describe('TrackerSyncService inbound ordering backstop', () => {
+  let plane: PlaneLikeAdapter;
+
+  function usePlane(): void {
+    makeConnection({ provider: 'plane', workspace_id: 'acme' });
+    plane = new PlaneLikeAdapter();
+    service = new TrackerSyncService({
+      db: raw,
+      router,
+      nowIso: () => now,
+      adapterFactory: () => plane,
+    });
+    enqueueOutbox(raw, {
+      connection_id: CONN_ID,
+      kind: 'create_sub_issue',
+      entity_type: 'task',
+      entity_id: 'tsk-1',
+      client_key: 'ck-1',
+      payload_json: JSON.stringify({
+        parentExternalId: 'proj1/parent',
+        title: 'Mirrored task',
+        description: null,
+      }),
+    });
+  }
+
+  it('defers inbound while a lost create is unresolved, then adopts it on the next pass', async () => {
+    usePlane();
+    // The outage that swallowed the create response is still up, so the marker
+    // lookup cannot settle the row this pass either.
+    plane.failRecovery = true;
+    service.start();
+
+    const first = await service.syncConnection(CONN_ID);
+
+    // The create landed remotely; the row parks ambiguous rather than retrying.
+    expect(outboxRows()[0].state).toBe('ambiguous');
+    expect(plane.issues.map((issue) => issue.externalId)).toEqual(['proj1/child']);
+    // Inbound (and the sweep) stood down: the child is NOT a new idea, and the
+    // cursor did not move past it.
+    expect(ideas()).toHaveLength(0);
+    expect(first.error).toBeNull();
+    expect(first.swept).toBe(false);
+    expect(plane.calls).not.toContain('listIssues');
+    const held = getConnection(raw, CONN_ID);
+    expect(held?.cursor_updated_at).toBeNull();
+    expect(held?.cursor_external_id).toBeNull();
+    expect(renderedLog()).toContain('⚠ inbound deferred · unresolved create recovery');
+
+    // Next pass: the outage has cleared, so the marker lookup adopts the child
+    // onto the mirrored task and inbound is free to run again.
+    plane.failRecovery = false;
+    setNow('2026-07-30T12:10:00.000Z');
+    const second = await service.syncConnection(CONN_ID);
+
+    expect(second.error).toBeNull();
+    expect(outboxRows()[0].state).toBe('done');
+    const link = getLinkByEntity(raw, 'task', 'tsk-1', 'plane');
+    expect(link?.external_id).toBe('proj1/child');
+    expect(link?.external_parent_id).toBe('proj1/parent');
+    expect(plane.calls).toContain('listIssues');
+    // ...and the adopted child was never imported as a second entity.
+    expect(ideas()).toHaveLength(0);
+  });
+
+  it('runs inbound in the SAME pass when the extra reconcile round settles the create', async () => {
+    usePlane();
+    // The create is lost, but the recovery lookup works — the backstop's one
+    // extra processAmbiguous round adopts it and inbound proceeds normally.
+    service.start();
+
+    const result = await service.syncConnection(CONN_ID);
+
+    expect(result.error).toBeNull();
+    expect(outboxRows()[0].state).toBe('done');
+    expect(plane.calls).toContain('listIssues');
+    expect(renderedLog()).not.toContain('⚠ inbound deferred · unresolved create recovery');
+    expect(ideas()).toHaveLength(0);
   });
 });
 

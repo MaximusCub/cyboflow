@@ -1303,6 +1303,14 @@ async function initializeServices(): Promise<boolean> {
   // cyboflow.tasks.onTaskChanged subscription (no bridge needed here).
   const taskChangeRouter = TaskChangeRouter.initialize(cyboflowDb);
 
+  // Unified review-inbox write chokepoint (migration 016 / P3). The single
+  // serialized writer for `review_items`; the reviewItems tRPC router + the
+  // report-finding MCP handler reach it via getInstance(). Initialized HERE,
+  // ahead of the tracker sync loop below, because that loop takes it at
+  // construction: every Auto-mode conflict override files a non-blocking audit
+  // finding on it.
+  const reviewItemRouter = ReviewItemRouter.initialize(cyboflowDb);
+
   // Issue-tracker sync loop (migration 093). Started HERE, immediately after the
   // chokepoint it subscribes to: start() does boot crash-recovery (demoting any
   // `in_flight` outbox row to `ambiguous`) BEFORE arming its listener or poll
@@ -1313,6 +1321,7 @@ async function initializeServices(): Promise<boolean> {
   trackerSyncService = new TrackerSyncService({
     db: databaseService.getDb(),
     router: taskChangeRouter,
+    reviewRouter: reviewItemRouter,
     logger: cyboflowLogger,
   });
   trackerSyncService.start();
@@ -1330,13 +1339,11 @@ async function initializeServices(): Promise<boolean> {
   // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
 
-  // Unified review-inbox write chokepoint (migration 016 / P3) + the human-gate
-  // run-pause manager (P4). ReviewItemRouter is the single serialized writer for
-  // `review_items`; the reviewItems tRPC router + the report-finding MCP handler
-  // reach it via getInstance(). HumanStepManager owns the human=true step gate:
-  // it opens a blocking decision review_item (pausing the run) and applies
+  // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
+  // initialized above (the tracker sync loop needs that one at construction, so
+  // it is minted earlier): HumanStepManager owns the human=true step gate — it
+  // opens a blocking decision review_item (pausing the run) and applies
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
-  ReviewItemRouter.initialize(cyboflowDb);
   // In-artifact feedback write chokepoint (migration 077, IDEA-033) — the single
   // serialized writer for feedback_comments / feedback_batches; the
   // cyboflow.feedback tRPC router reaches it via getInstance(). Its feedbackEvents

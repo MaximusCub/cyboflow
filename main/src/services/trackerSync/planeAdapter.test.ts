@@ -9,7 +9,9 @@
  * listIssues → getIssue → updateIssueState, cursor pagination, INCLUSIVE
  * sinceIso filtering, createSubIssue's request shape (including the
  * `cyboflow-sync: <clientKey>` recovery marker every create stamps into the
- * description), the marker's removal on every read path, the client-key lookup
+ * description), the marker's removal on every read path AND the key it carries
+ * being surfaced first on `recoveryClientKey` (what lets the inbound pass
+ * recognize a lost create's child), the client-key lookup
  * ambiguous-create recovery runs, state-group passthrough including the
  * unknown-group → 'backlog' fallback, and the `/work-items/` ↔ `/issues/`
  * path-rename compatibility fallback (default segment, the 404→fallback
@@ -426,6 +428,113 @@ describe('PlaneAdapter marker stripping on read', () => {
     const issue = await adapter.getIssue('proj1/iss1');
 
     expect(issue?.description).toBeNull();
+  });
+});
+
+describe('PlaneAdapter recovery-marker surfacing', () => {
+  const base = {
+    id: 'iss1',
+    name: 'Fix the bug',
+    sequence_id: 42,
+    state: 'state-open',
+    assignees: [] as string[],
+    estimate_point: null,
+    parent: null,
+    updated_at: '2026-07-01T00:00:00.000Z',
+    archived_at: null,
+  };
+
+  function detailFetch(issueWire: Record<string, unknown>) {
+    return scriptedFetch([
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
+        respond: () => ({ status: 200, body: issueWire }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+  }
+
+  it('surfaces the marker key on the mapped issue while still stripping it from the body', async () => {
+    const { fetchImpl } = detailFetch({
+      ...base,
+      description_html: `<p>real body</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`,
+    });
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issue = await adapter.getIssue('proj1/iss1');
+
+    // Both halves of the contract: the key is READABLE by the sync core, and
+    // the description it merges against is still marker-free.
+    expect(issue?.recoveryClientKey).toBe(CLIENT_KEY);
+    expect(issue?.description).toBe('real body');
+  });
+
+  it('leaves recoveryClientKey null on an issue that carries no marker', async () => {
+    const { fetchImpl } = detailFetch({ ...base, description_html: '<p>real body</p>' });
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issue = await adapter.getIssue('proj1/iss1');
+
+    expect(issue?.recoveryClientKey).toBeNull();
+    expect(issue?.description).toBe('real body');
+  });
+
+  it('surfaces it from a plain-text list payload too — the inbound pass reads listIssues', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: () => ({
+          status: 200,
+          body: {
+            results: [
+              { ...base, id: 'child1', description_stripped: `mine\n\ncyboflow-sync: ${CLIENT_KEY}` },
+              { ...base, id: 'other1', description_stripped: 'someone else’s' },
+            ],
+            next_cursor: null,
+            next_page_results: false,
+          },
+        }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issues = await adapter.listIssues(ALL_SELECTION);
+
+    expect(issues.map((issue) => issue.recoveryClientKey)).toEqual([CLIENT_KEY, null]);
+    expect(issues[0].description).toBe('mine');
+  });
+
+  it('surfaces it on the create response, which echoes the marker back', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) => method === 'POST' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: (body) => ({
+          status: 201,
+          body: {
+            ...base,
+            id: 'child1',
+            parent: 'parentIss',
+            description_html: (body as { description_html?: string }).description_html ?? null,
+          },
+        }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issue = await adapter.createSubIssue('proj1/parentIss', { title: 'Sub task' }, CLIENT_KEY);
+
+    expect(issue.recoveryClientKey).toBe(CLIENT_KEY);
   });
 });
 

@@ -185,6 +185,7 @@ const issueSchema = z.object({
   parentExternalId: z.string().nullable(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
+  recoveryClientKey: z.string().nullable(),
 });
 
 const reconcileDecisionSchema = z.object({

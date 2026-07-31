@@ -29,7 +29,18 @@
  * row is one of our own in-flight writes. The batch STOPS at it (it is not
  * applied and the cursor is not advanced past it), so a half-created sub-issue
  * can never be re-imported as a fresh idea — the proposal's hard correctness
- * requirement.
+ * requirement. "Referenced by" is three-way (see {@link collectOutboxBlockers}):
+ * the row's `external_id`, its `client_key`, and — where the provider cannot
+ * make a create idempotent — the recovery marker the created child carries in
+ * its description, which is the ONLY link back to us once the provider mints
+ * its own id.
+ *
+ * That marker arm only fires for an issue THIS pass actually fetched with a
+ * description on it, so it is one of two layers: trackerSyncService.runPass
+ * additionally DEFERS this whole phase while a non-idempotent create is still
+ * unresolved, which covers the fetch shapes where no marker ever surfaces (a
+ * slim list payload, a selection the child falls outside of). See that method
+ * for why both exist.
  *
  * ECHO SUPPRESSION, OUTBOUND SIDE. The other direction needs its own seam:
  * TaskChangedEvent carries no actor/origin, so writeBack.ts's listener — which
@@ -55,6 +66,13 @@
  * is as narrow as two un-transacted writes allow; a crash inside it costs at
  * most the follow-up placement, which the adopt path repairs.
  *
+ * AUTO-MODE AUDIT. Auto mode resolves a both-sides-changed field silently, so
+ * the value it discards has to be recoverable somewhere the user actually
+ * looks. The resolved `tracker_conflicts` row is not that place — every surface
+ * reading conflicts lists OPEN ones — so each override also files a
+ * NON-BLOCKING review-queue finding carrying both values, through the optional
+ * `reviewRouter` seam. See {@link fileAutoResolutionFinding}.
+ *
  * ERRORS. A per-issue failure (a rejected applyChange — active runs, a
  * forbidden stage, a vanished entity) propagates out of runInboundSync. That
  * is intentional: the cursor has not advanced past the failing item, so the
@@ -63,6 +81,7 @@
 import type Database from 'better-sqlite3';
 import type { EntityExternalLinkRow, TrackerConnectionRow } from '../../database/models';
 import type { TaskChange, TaskFieldChanges } from '../../orchestrator/taskChangeRouter';
+import type { ReviewItemCreate } from '../../orchestrator/reviewItemRouter';
 import type { TrackerAdapter } from './adapterTypes';
 import type {
   TrackerIssue,
@@ -107,6 +126,18 @@ export interface EntityWriteRouter {
   applyChange(projectId: number, change: TaskChange): Promise<{ taskId: string }>;
 }
 
+/**
+ * The narrow slice of ReviewItemRouter this pass needs — the review-inbox write
+ * chokepoint, used for the audit record every AUTO override files (see
+ * {@link fileAutoResolutionFinding}). Declared structurally for the same reason
+ * {@link EntityWriteRouter} is: nothing here should be tempted to reach past
+ * applyReviewItem, and a test can hand over a recorder without this module
+ * depending on the router's construction.
+ */
+export interface ReviewFindingRouter {
+  applyReviewItem(projectId: number, change: ReviewItemCreate): Promise<{ reviewItemId: string }>;
+}
+
 export interface InboundSyncDeps {
   /** Real better-sqlite3 handle; all tracker-table access goes through store.ts. */
   db: Database.Database;
@@ -114,6 +145,13 @@ export interface InboundSyncDeps {
   router: EntityWriteRouter;
   /** Injected clock (ISO-8601) — stamped into conflict payloads. */
   nowIso(): string;
+  /**
+   * The review-inbox chokepoint an Auto-mode override is audited on. OPTIONAL:
+   * a caller that does not wire it simply files nothing, and the already-
+   * resolved `tracker_conflicts` row stays the only record — see
+   * {@link fileAutoResolutionFinding}.
+   */
+  reviewRouter?: ReviewFindingRouter;
 }
 
 /** The last-synced remote snapshot a link three-way-merges against. */
@@ -452,6 +490,8 @@ const ENTITY_TABLE: Record<EntityExternalLinkRow['entity_type'], 'ideas' | 'epic
 };
 
 interface LocalEntity {
+  /** Display ref (IDEA-009 / TASK-014) — what an audit record names the entity by. */
+  ref: string;
   title: string;
   body: string | null;
   stageId: string;
@@ -469,11 +509,11 @@ function readLocalEntity(
 ): LocalEntity | null {
   const row = db
     .prepare(
-      `SELECT title, body, stage_id AS stageId
+      `SELECT ref, title, body, stage_id AS stageId
          FROM ${ENTITY_TABLE[entityType]}
         WHERE id = ?`,
     )
-    .get(entityId) as { title: string; body: string | null; stageId: string } | undefined;
+    .get(entityId) as LocalEntity | undefined;
   return row ?? null;
 }
 
@@ -520,6 +560,8 @@ function findAdoptableIdea(
 interface SyncContext {
   db: Database.Database;
   router: EntityWriteRouter;
+  /** Absent when the caller wired no review-inbox seam — overrides then file nothing. */
+  reviewRouter?: ReviewFindingRouter;
   nowIso(): string;
   connection: TrackerConnectionRow;
   stageIds: TrackerStageIds;
@@ -627,7 +669,7 @@ export async function runInboundSync(
     .sort((a, b) => compareCursor(issueKey(a), issueKey(b)))
     .filter((issue) => cursor === null || compareCursor(issueKey(issue), cursor) > 0);
 
-  const blocked = collectBlockedExternalIds(db, connection.id);
+  const blockers = collectOutboxBlockers(db, connection.id);
 
   const stateGroups: Record<string, TrackerStateGroup> = {};
   for (const state of states) stateGroups[state.id] = state.group;
@@ -635,6 +677,7 @@ export async function runInboundSync(
   const ctx: SyncContext = {
     db,
     router,
+    reviewRouter: deps.reviewRouter,
     nowIso: deps.nowIso,
     connection,
     stageIds,
@@ -648,7 +691,7 @@ export async function runInboundSync(
     // issue. Stop the batch here — applying it would race our own create /
     // state write, and advancing past it would let a half-created sub-issue
     // re-import on the next pass.
-    if (blocked.has(issue.externalId)) {
+    if (isBlockedByOutbox(blockers, issue)) {
       report.haltedOnOutbox = issue.externalId;
       break;
     }
@@ -660,23 +703,50 @@ export async function runInboundSync(
   return report;
 }
 
+/** What the unresolved outbox makes untouchable this pass — see {@link collectOutboxBlockers}. */
+interface OutboxBlockers {
+  /** Matched against a fetched issue's `externalId`. */
+  ids: Set<string>;
+  /** Matched against a fetched issue's `recoveryClientKey`. */
+  clientKeys: Set<string>;
+}
+
 /**
- * External ids an unresolved outbox row refers to. Both `external_id` (an
- * update-state / close-parent write against a known issue) and `client_key`
- * (a create whose client-generated id BECOMES the external id where the
- * provider supports idempotent creates) count.
+ * Everything an unresolved outbox row makes untouchable, in the two shapes a
+ * fetched issue can present it in.
+ *
+ * `ids` — `external_id` (an update-state / close-parent write against a known
+ * issue) and `client_key` (a create whose client-generated id BECOMES the
+ * external id where the provider supports idempotent creates).
+ *
+ * `clientKeys` — the same create keys, matched instead against the issue's
+ * `recoveryClientKey`. Where creates are NOT idempotent (Plane) the created
+ * child carries a PROVIDER-MINTED id that matches neither column, so the
+ * description marker the adapter surfaces is the only proof it is ours; without
+ * this arm a create that committed and then lost its response would be imported
+ * here as a brand-new idea.
  *
  * Deliberately reads the whole unresolved set once rather than calling
  * findOutboxByClientKey per issue: that lookup is state-agnostic, so a
  * long-since-'done' create would block its own issue forever.
  */
-function collectBlockedExternalIds(db: Database.Database, connectionId: string): Set<string> {
-  const blocked = new Set<string>();
+function collectOutboxBlockers(db: Database.Database, connectionId: string): OutboxBlockers {
+  const ids = new Set<string>();
+  const clientKeys = new Set<string>();
   for (const row of listUnresolvedOutbox(db, connectionId)) {
-    if (row.external_id !== null) blocked.add(row.external_id);
-    if (row.client_key !== null) blocked.add(row.client_key);
+    if (row.external_id !== null) ids.add(row.external_id);
+    if (row.client_key !== null) {
+      ids.add(row.client_key);
+      clientKeys.add(row.client_key);
+    }
   }
-  return blocked;
+  return { ids, clientKeys };
+}
+
+/** True when one of OUR writes is still in flight for this issue (either shape). */
+function isBlockedByOutbox(blockers: OutboxBlockers, issue: TrackerIssue): boolean {
+  if (blockers.ids.has(issue.externalId)) return true;
+  return issue.recoveryClientKey !== null && blockers.clientKeys.has(issue.recoveryClientKey);
 }
 
 /** Apply a single fetched issue. Never advances the cursor — the caller does. */
@@ -963,7 +1033,14 @@ async function mergeLinkedIssue(
       if (conflict.field === 'title') fields.title = issue.title;
       else fields.body = joinBody(issue.description, localBody.footer);
     }
-    recordAutoResolution(ctx, link, issue, conflict, remoteWins ? 'auto-remote' : 'auto-local');
+    await recordAutoResolution(
+      ctx,
+      link,
+      local,
+      issue,
+      conflict,
+      remoteWins ? 'auto-remote' : 'auto-local',
+    );
   }
 
   if (Object.keys(fields).length > 0 || stageMove !== undefined) {
@@ -985,14 +1062,19 @@ async function mergeLinkedIssue(
   updateBaseline(db, link.id, composeBaselineJson(baselineJson, snapshotOf(issue)));
 }
 
-/** File an Auto-mode override as a conflict row that is immediately resolved. */
-function recordAutoResolution(
+/**
+ * Record an Auto-mode override, in BOTH places it has to exist: an immediately-
+ * resolved `tracker_conflicts` row (the engine's own history) and a non-blocking
+ * review-queue finding (the user-facing audit record).
+ */
+async function recordAutoResolution(
   ctx: SyncContext,
   link: EntityExternalLinkRow,
+  local: LocalEntity,
   issue: TrackerIssue,
   conflict: FieldConflict,
   resolution: 'auto-remote' | 'auto-local',
-): void {
+): Promise<void> {
   const row = insertConflict(ctx.db, {
     connection_id: ctx.connection.id,
     link_id: link.id,
@@ -1004,6 +1086,102 @@ function recordAutoResolution(
   });
   resolveConflict(ctx.db, row.id, resolution);
   ctx.report.autoResolved++;
+  await fileAutoResolutionFinding(ctx, link, local, issue, conflict, resolution);
+}
+
+/**
+ * The design doc's REQUIRED audit record for an Auto-mode override: "Every
+ * auto-resolution that overrode a change files a non-blocking review-queue
+ * finding for spot-checking" (Conflict resolution → Auto).
+ *
+ * WHY THE CONFLICT ROW IS NOT ENOUGH. It is written already-RESOLVED, and every
+ * surface that reads conflicts — the facade's `conflicts()`, the connected view —
+ * lists OPEN ones. So on the default (Auto) mode a title or description the
+ * tracker overwrote was recorded in a table no product surface reads: the user
+ * could neither notice the override nor recover what it replaced. The finding
+ * carries BOTH values, which is what makes the overwritten one restorable by
+ * reading it.
+ *
+ * ALWAYS NON-BLOCKING. This is a spot-check, not a gate; nothing about a merge
+ * that already happened should park a run or demand an answer.
+ *
+ * FAIL-SOFT, BOTH WAYS. With no `reviewRouter` wired (a unit test driving the
+ * merge in isolation) nothing is filed at all, and a router that throws is
+ * swallowed: the override has already been applied and its conflict row is
+ * already durable, so failing the pass here would only replay the whole merge
+ * next interval — and re-file the same audit record — for no gain. The conflict
+ * row remains the fallback record in both cases.
+ */
+async function fileAutoResolutionFinding(
+  ctx: SyncContext,
+  link: EntityExternalLinkRow,
+  local: LocalEntity,
+  issue: TrackerIssue,
+  conflict: FieldConflict,
+  resolution: 'auto-remote' | 'auto-local',
+): Promise<void> {
+  const router = ctx.reviewRouter;
+  if (router === undefined) return;
+  const { connection } = ctx;
+  try {
+    await router.applyReviewItem(connection.project_id, {
+      op: 'create',
+      // The provider is the actor, exactly as on the applyChange this override
+      // rides in on: the value landing locally is the tracker's, whoever's poll
+      // happened to carry it.
+      actor: connection.provider,
+      kind: 'finding',
+      title: `Tracker sync auto-resolved a conflict on ${local.ref}`,
+      body: autoResolutionBody(connection.provider, local, issue, conflict, resolution),
+      blocking: false,
+      severity: 'info',
+      source: `tracker:${connection.provider}`,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+      payload: { kind: 'finding', category: 'tracker-sync' },
+    });
+  } catch {
+    // Deliberately swallowed — see the fail-soft note above.
+  }
+}
+
+/**
+ * The finding's body: which entity, which field, BOTH values, which side won
+ * and why, and the issue it came from. Written for a human skimming the review
+ * queue days later, so the losing value is spelled out rather than referenced.
+ */
+function autoResolutionBody(
+  provider: TrackerProvider,
+  local: LocalEntity,
+  issue: TrackerIssue,
+  conflict: FieldConflict,
+  resolution: 'auto-remote' | 'auto-local',
+): string {
+  const label = PROVIDER_LABEL[provider];
+  const remoteWon = resolution === 'auto-remote';
+  return [
+    `**${local.ref} — ${local.title}**`,
+    '',
+    `Both sides changed \`${conflict.field}\` since the last sync, and Auto mode resolved it:`,
+    remoteWon
+      ? `the **tracker** value won (Auto mode gives content fields to the tracker).`
+      : `the **cyboflow** value won (Auto mode gives stage/status to cyboflow).`,
+    '',
+    `- cyboflow — ${remoteWon ? 'OVERWRITTEN' : 'kept'}: ${renderConflictValue(conflict.localValue)}`,
+    `- ${label} — ${remoteWon ? 'applied' : 'NOT applied'}: ${renderConflictValue(conflict.remoteValue)}`,
+    '',
+    `Issue: [${issue.identifier}](${issue.url}) · ${label} \`${issue.externalId}\``,
+  ].join('\n');
+}
+
+/**
+ * One side's value in the finding body. A multi-line value (a description) goes
+ * in a fenced block so it survives markdown intact; an absent or blank one reads
+ * as "(empty)" rather than as a stray pair of backticks.
+ */
+function renderConflictValue(value: string | null): string {
+  if (value === null || value.trim().length === 0) return '_(empty)_';
+  return value.includes('\n') ? `\n\n\`\`\`\n${value}\n\`\`\`\n` : `\`${value}\``;
 }
 
 /**

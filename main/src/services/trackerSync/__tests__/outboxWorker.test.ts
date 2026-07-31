@@ -247,6 +247,7 @@ function makeIssue(externalId: string, overrides: Partial<TrackerIssue> = {}): T
     parentExternalId: null,
     updatedAt: '2026-07-30T11:59:00.000Z',
     archivedAt: null,
+    recoveryClientKey: null,
     ...overrides,
   };
 }

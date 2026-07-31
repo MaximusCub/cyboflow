@@ -124,6 +124,21 @@ export interface TrackerIssue {
   updatedAt: string;
   /** Remote archive marker (Linear archivedAt); null = live. */
   archivedAt: string | null;
+  /**
+   * The `cyboflow-sync` recovery marker found in the provider-native
+   * description, surfaced BEFORE the adapter strips it; null when the issue
+   * carries none, or when the provider's creates are natively idempotent and no
+   * marker is ever written (Linear).
+   *
+   * WHY IT CROSSES THIS SEAM. Where creates are NOT idempotent (Plane), a
+   * create that commits and then loses its response leaves a live remote child
+   * under a PROVIDER-MINTED id that matches neither the outbox row's
+   * `external_id` nor its `client_key` — so the inbound pass, which halts on
+   * those two columns, would see an unlinked issue and import it as a second
+   * idea. This marker is the only thing identifying that child as ours, and it
+   * is gone from every `description` an adapter returns.
+   */
+  recoveryClientKey: string | null;
 }
 
 export type TrackerSelectionMode = 'all' | 'assignee' | 'manual';

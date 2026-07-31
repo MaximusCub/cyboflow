@@ -38,6 +38,8 @@ import {
   getConnection,
   listConnections,
   updateConnectionSettings,
+  findDisconnectedConnection,
+  reactivateConnection,
   advanceCursor,
   storeSecret,
   readSecret,
@@ -250,6 +252,93 @@ describe('trackerSync store — connections', () => {
     const readBack = readSecret(raw, id);
     expect(Buffer.isBuffer(readBack)).toBe(true);
     expect(readBack!.equals(cipher)).toBe(true);
+  });
+
+  it('findDisconnectedConnection matches on the full (project, provider, workspace) identity, and only when retired', () => {
+    seedConnection({ id: 'conn-1', workspace_id: 'ws-1' });
+    // An ACTIVE row is the project's live connection for that workspace — never
+    // a revival candidate.
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')).toBeNull();
+
+    updateConnectionSettings(raw, 'conn-1', { status: 'disconnected' });
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')?.id).toBe('conn-1');
+
+    // Every axis of the identity is load-bearing.
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-2')).toBeNull();
+    expect(findDisconnectedConnection(raw, 1, 'plane', 'ws-1')).toBeNull();
+    expect(findDisconnectedConnection(raw, 2, 'linear', 'ws-1')).toBeNull();
+  });
+
+  it('findDisconnectedConnection never claims a row whose workspace identity was never recorded', () => {
+    seedConnection({ id: 'conn-1', status: 'disconnected', workspace_id: null });
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')).toBeNull();
+  });
+
+  it('findDisconnectedConnection returns the most recently updated candidate', () => {
+    seedConnection({ id: 'older', status: 'disconnected', workspace_id: 'ws-1' });
+    seedConnection({ id: 'newer', status: 'disconnected', workspace_id: 'ws-1' });
+    // `datetime('now')` has one-second resolution, so two inserts in the same
+    // test tie — stamp them apart rather than sleeping.
+    const stamp = raw.prepare('UPDATE tracker_connections SET updated_at = ? WHERE id = ?');
+    stamp.run('2026-07-01 00:00:00', 'older');
+    stamp.run('2026-07-02 00:00:00', 'newer');
+
+    expect(findDisconnectedConnection(raw, 1, 'linear', 'ws-1')?.id).toBe('newer');
+  });
+
+  it('reactivateConnection rewrites the retired row IN PLACE, keeping its id and clearing the cursor', () => {
+    seedConnection({
+      id: 'conn-1',
+      status: 'disconnected',
+      workspace_id: 'ws-1',
+      workspace_name: 'Old name',
+      two_way: 0,
+      conflict_mode: 'manual',
+      source_json: JSON.stringify({ containerId: 'team-old' }),
+      cursor_updated_at: '2026-07-01 00:00:00',
+      cursor_external_id: 'ext-9',
+      last_sync_at: '2026-07-01 00:00:00',
+      last_sync_log_json: '[{"marker":"OK","line":"a previous life"}]',
+    });
+    storeSecret(raw, 'conn-1', Buffer.from('old-key', 'utf-8'));
+
+    // The wizard's fresh payload. Its own `id` is IGNORED — the id argument is
+    // the row being rewritten, which is the whole point of the call.
+    const revived = reactivateConnection(
+      raw,
+      'conn-1',
+      makeConnectionRow({
+        id: 'trk_freshly_minted',
+        status: 'active',
+        workspace_id: 'ws-1',
+        workspace_name: 'Acme',
+        two_way: 1,
+        conflict_mode: 'auto',
+        source_json: JSON.stringify({ containerId: 'team-new' }),
+        cursor_updated_at: null,
+        cursor_external_id: null,
+        last_sync_at: null,
+        last_sync_log_json: null,
+      }),
+    );
+
+    expect(revived.id).toBe('conn-1');
+    expect(revived.status).toBe('active');
+    expect(revived.workspace_name).toBe('Acme');
+    expect(revived.two_way).toBe(1);
+    expect(revived.conflict_mode).toBe('auto');
+    expect(JSON.parse(revived.source_json ?? '{}')).toEqual({ containerId: 'team-new' });
+    // The cursor RESET is what makes the retained links re-bind: the next pass
+    // re-fetches everything and merges each issue against its existing link.
+    expect(revived.cursor_updated_at).toBeNull();
+    expect(revived.cursor_external_id).toBeNull();
+    expect(revived.last_sync_at).toBeNull();
+    expect(revived.last_sync_log_json).toBeNull();
+
+    // One row, not two — and the stale key is gone with the rest of the row.
+    const count = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
+    expect(count.n).toBe(1);
+    expect(readSecret(raw, 'conn-1')).toBeNull();
   });
 });
 

@@ -437,6 +437,12 @@ function mapIssueNode(node: LinearIssueNode): TrackerIssue {
     parentExternalId: node.parent?.id ?? null,
     updatedAt: node.updatedAt,
     archivedAt: node.archivedAt,
+    // ALWAYS null for Linear, and stated explicitly rather than left off: this
+    // adapter has `capabilities.idempotentCreate`, so the outbox's client key IS
+    // the created issue's id. A lost create is recovered by external id (a
+    // point lookup), no marker is ever written into a body, and there is
+    // therefore nothing to surface here. See TrackerIssue.recoveryClientKey.
+    recoveryClientKey: null,
   };
 }
 

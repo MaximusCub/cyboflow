@@ -20,7 +20,8 @@
  *
  * Grouped into four sections mirroring the four tables:
  *   - Connections: insertConnection / getConnection / listConnections /
- *     updateConnectionSettings / advanceCursor / storeSecret / readSecret /
+ *     updateConnectionSettings / findDisconnectedConnection /
+ *     reactivateConnection / advanceCursor / storeSecret / readSecret /
  *     clearSecret.
  *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
  *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal /
@@ -169,6 +170,85 @@ export function updateConnectionSettings(
   setClauses.push("updated_at = datetime('now')");
   params.push(id);
   db.prepare(`UPDATE tracker_connections SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
+}
+
+/**
+ * The DISCONNECTED connection a re-connect should REVIVE, or null.
+ *
+ * IDENTITY IS `(project_id, provider, workspace_id)` — "the same workspace, on
+ * the same tracker, in the same project". `workspace_id` is the honest key
+ * because it is what the connect flow persists from the LIVE
+ * `validateCredentials()` probe (Linear's organization id, Plane's workspace
+ * slug), NOT anything the user typed: it survives exactly the event that makes
+ * this lookup necessary, a credential rotation. The API key changes, the
+ * workspace does not.
+ *
+ * Only `disconnected` rows are candidates. An active or paused connection is
+ * still the project's live connection for that workspace, and silently
+ * repointing it from a wizard run would move someone else's links. A stored
+ * NULL `workspace_id` never matches either (SQL's NULL comparison), which is
+ * deliberate rather than incidental: a row whose identity we never learned
+ * cannot be claimed BY identity.
+ *
+ * Most recently updated first, so a workspace connected and retired more than
+ * once revives the life whose links are freshest.
+ */
+export function findDisconnectedConnection(
+  db: Database.Database,
+  projectId: number,
+  provider: TrackerConnectionRow['provider'],
+  workspaceId: string,
+): TrackerConnectionRow | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM tracker_connections
+        WHERE project_id = ? AND provider = ? AND workspace_id = ? AND status = 'disconnected'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1`,
+    )
+    .get(projectId, provider, workspaceId) as TrackerConnectionRow | undefined;
+  return row ?? null;
+}
+
+/**
+ * Re-arm a retired connection IN PLACE from a fresh wizard payload: every
+ * column {@link insertConnection} would have written is written here instead,
+ * onto the row `id` already names.
+ *
+ * REUSING THE ID IS THE WHOLE POINT. `disconnect` deliberately keeps the links,
+ * and a link is scoped to its `connection_id` — so a re-connect that minted a
+ * new id would leave every one of them attached to a dead connection, and the
+ * first pass would re-import the entire synced backlog as new ideas.
+ *
+ * `row` is exactly the value insertConnection takes (minus the id), so the two
+ * paths cannot drift: the caller composes the row once and picks a verb. An
+ * `id` key present on `row` is ignored — the `id` ARGUMENT is the row being
+ * rewritten. The caller is expected to pass a NULL cursor in it: re-fetching
+ * from the beginning is what lets each retained link re-bind, merging its issue
+ * against its own baseline instead of importing it again.
+ */
+export function reactivateConnection(
+  db: Database.Database,
+  id: string,
+  row: Omit<NewConnectionRow, 'id'>,
+): TrackerConnectionRow {
+  return db
+    .prepare(
+      `UPDATE tracker_connections SET
+         project_id = @project_id, provider = @provider, status = @status,
+         workspace_id = @workspace_id, workspace_name = @workspace_name,
+         actor_label = @actor_label, base_url = @base_url,
+         secret_ciphertext = @secret_ciphertext, source_json = @source_json,
+         selection_mode = @selection_mode, selection_json = @selection_json,
+         state_mapping_json = @state_mapping_json, two_way = @two_way,
+         mirror_subissues = @mirror_subissues, conflict_mode = @conflict_mode,
+         cursor_updated_at = @cursor_updated_at, cursor_external_id = @cursor_external_id,
+         last_sync_at = @last_sync_at, last_sync_log_json = @last_sync_log_json,
+         updated_at = datetime('now')
+       WHERE id = @id
+       RETURNING *`,
+    )
+    .get({ ...row, id }) as TrackerConnectionRow;
 }
 
 /**

@@ -72,13 +72,24 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
  * apart from a sibling that happens to share the title.
  *
  * The marker is stripped from every description the adapter returns (see
- * {@link mapDescription}) so it never reaches a local body or a merge baseline.
+ * {@link mapDescription}) so it never reaches a local body or a merge baseline
+ * — but the key it carries is surfaced first, on `TrackerIssue.recoveryClientKey`
+ * ({@link readRecoveryClientKey}), because the inbound pass needs it to
+ * recognize a lost create's child before importing anything.
  */
 const SYNC_MARKER_PREFIX = 'cyboflow-sync:';
 
 /** `cyboflow-sync: <uuid>` — the exact shape createSubIssue emits (client keys are UUIDs). */
 const SYNC_MARKER_RE =
   /cyboflow-sync:[ \t]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/**
+ * {@link SYNC_MARKER_RE} with the key captured. A SEPARATE, NON-GLOBAL copy on
+ * purpose: `exec` on a /g regex carries `lastIndex` between calls, which would
+ * make the read stateful across issues.
+ */
+const SYNC_MARKER_KEY_RE =
+  /cyboflow-sync:[ \t]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 /** Plane's representation of "no description" — also what an empty draft body becomes. */
 const EMPTY_PARAGRAPH = '<p></p>';
@@ -478,6 +489,11 @@ export class PlaneAdapter implements TrackerAdapter {
       parentExternalId: raw.parent ? composeId(projectId, raw.parent) : null,
       updatedAt: raw.updated_at,
       archivedAt: raw.archived_at ?? null,
+      // Read BEFORE mapDescription strips it — every path that maps a wire
+      // issue (list, detail, create response, client-key recovery) goes through
+      // here, so a marker-bearing issue surfaces its key no matter how it was
+      // fetched.
+      recoveryClientKey: readRecoveryClientKey(raw),
     };
   }
 
@@ -661,6 +677,26 @@ function mapDescription(raw: PlaneIssueWire): string | null {
 /** Drop the recovery marker (and the whitespace it leaves behind) from a description. */
 function stripSyncMarker(text: string): string {
   return text.replace(SYNC_MARKER_RE, '').trim();
+}
+
+/**
+ * The client key this issue's description carries, or null when it carries
+ * none. Reads the RAW payload — every description this adapter RETURNS has
+ * already had the marker stripped — and looks at each description field the
+ * endpoint happens to expose, exactly like {@link carriesSyncMarker}.
+ *
+ * Lower-cased because the match is case-insensitive (Plane round-trips the html
+ * we sent, but nothing here depends on that) while the outbox column holds a
+ * `randomUUID()` key, which is always lower-case: the sync core compares the
+ * two for exact equality.
+ */
+function readRecoveryClientKey(raw: PlaneIssueWire): string | null {
+  for (const field of [raw.description_html, raw.description_stripped, raw.description]) {
+    if (typeof field !== 'string') continue;
+    const match = SYNC_MARKER_KEY_RE.exec(field);
+    if (match !== null) return match[1].toLowerCase();
+  }
+  return null;
 }
 
 /** True when the payload carries the given `cyboflow-sync: <key>` marker. */

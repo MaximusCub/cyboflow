@@ -18,7 +18,12 @@
  *   2. drainOutbox      — perform the queued remote writes. MUST precede
  *      inbound: every unresolved outbox row HALTS the inbound batch (echo
  *      suppression), so draining first is what lets the cursor move at all.
- *   3. runInboundSync   — pull remote changes in.
+ *   3. runInboundSync   — pull remote changes in, GATED on the drain having left
+ *      no create whose outcome is still unknown (a provider without idempotent
+ *      creates parks those `ambiguous`). See
+ *      {@link TrackerSyncService.recoverCreatesBeforeInbound}: importing while
+ *      one is open is how a committed-but-lost sub-issue becomes a duplicate
+ *      idea. Phases 3+4 stand down for the pass rather than risk it.
  *   4. runDeletionSweep — every SWEEP_EVERY_N_PASSES-th pass, and on every
  *      "Sync now". It costs a full remote id listing, so it is deliberately not
  *      per-pass.
@@ -111,6 +116,7 @@ import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
   clearSecret,
   enqueueOutbox,
+  findDisconnectedConnection,
   getConflict,
   getConnection,
   getLinkByEntity,
@@ -123,6 +129,7 @@ import {
   listOpenConflicts,
   listUnresolvedOutbox,
   markOrphaned,
+  reactivateConnection,
   readSecret,
   requeueInFlightAsAmbiguous,
   resolveConflict,
@@ -130,6 +137,7 @@ import {
   updateBaseline,
   updateConnectionSettings,
   upsertLink,
+  type NewConnectionRow,
 } from './store';
 import {
   joinBody,
@@ -140,6 +148,7 @@ import {
   type EntityWriteRouter,
   type InboundSweepReport,
   type InboundSyncReport,
+  type ReviewFindingRouter,
 } from './inboundSync';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
@@ -238,6 +247,14 @@ interface WriteBackOutcome {
   abandoned: boolean;
 }
 
+/** {@link TrackerSyncService.recoverCreatesBeforeInbound}'s ruling on phases 3+4. */
+interface InboundGate {
+  /** Inbound (and the sweep) may run this pass. */
+  proceed: boolean;
+  /** The extra reconcile round hit an auth failure and paused the connection. */
+  paused: boolean;
+}
+
 export interface TrackerSyncServiceDeps {
   /** Real better-sqlite3 handle; all tracker-table access goes through store.ts. */
   db: Database.Database;
@@ -247,6 +264,13 @@ export interface TrackerSyncServiceDeps {
    * tempted to reach past applyChange.
    */
   router: EntityWriteRouter;
+  /**
+   * The review-inbox chokepoint. Declared structurally (ReviewItemRouter
+   * satisfies it) for the same reason `router` is. OPTIONAL so a test can drive
+   * the loop without one — the engine then files no auto-resolution audit
+   * findings, and the resolved conflict rows stay the only record.
+   */
+  reviewRouter?: ReviewFindingRouter;
   /** Injected clock (ISO-8601). Defaults to the real one. */
   nowIso?: () => string;
   /** Injected provider-client construction. Defaults to {@link defaultAdapterFactory}. */
@@ -315,6 +339,7 @@ function rulingKey(entityType: TrackerEntityType, entityId: string): string {
 export class TrackerSyncService implements TrackerSyncFacade {
   private readonly db: Database.Database;
   private readonly router: EntityWriteRouter;
+  private readonly reviewRouter?: ReviewFindingRouter;
   private readonly nowIso: () => string;
   private readonly adapterFactory: TrackerAdapterFactory;
   private readonly logger?: LoggerLike;
@@ -357,6 +382,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
   constructor(deps: TrackerSyncServiceDeps) {
     this.db = deps.db;
     this.router = deps.router;
+    this.reviewRouter = deps.reviewRouter;
     this.nowIso = deps.nowIso ?? (() => new Date().toISOString());
     this.adapterFactory = deps.adapterFactory ?? defaultAdapterFactory;
     this.logger = deps.logger;
@@ -578,11 +604,29 @@ export class TrackerSyncService implements TrackerSyncFacade {
       if (writeBack.abandoned) return abandonedResult(connectionId, entries);
       paused = writeBack.paused;
 
+      // Phases 3+4 are gated on the outbox holding no unresolved create whose
+      // outcome is still unknown — see {@link recoverCreatesBeforeInbound}.
+      let inboundAllowed = false;
       if (!paused) {
+        // Its own phase boundary: the gate can perform a remote lookup and
+        // adopt a create locally, neither of which may follow a disconnect.
+        if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
+        const gate = await this.recoverCreatesBeforeInbound(connection, adapter, entries);
+        paused = gate.paused;
+        inboundAllowed = gate.proceed;
+      }
+
+      if (!paused && inboundAllowed) {
         if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
         entries.push({ marker: '▸', line: 'GET issues' });
         const inbound = await runInboundSync(
-          { db: this.db, adapter, router: this.router, nowIso: this.nowIso },
+          {
+            db: this.db,
+            adapter,
+            router: this.router,
+            reviewRouter: this.reviewRouter,
+            nowIso: this.nowIso,
+          },
           connection,
         );
         appendInboundLines(entries, inbound);
@@ -659,6 +703,52 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const drained = ambiguous.authPaused || abandoned ? null : await drainOutbox(deps, connection);
     appendWriteBackLines(entries, ambiguous, drained);
     return { paused: ambiguous.authPaused || drained?.authPaused === true, abandoned };
+  }
+
+  /**
+   * ORDERING BACKSTOP between the drain and the inbound fetch: a create whose
+   * outcome nobody knows must be settled BEFORE anything is imported.
+   *
+   * THE HAZARD. Where a provider cannot make a create idempotent (Plane), a
+   * create that COMMITS and then loses its response leaves an `ambiguous` outbox
+   * row and a live remote child under a PROVIDER-MINTED id. Inbound halts on an
+   * unresolved row's `external_id` / `client_key`, and that child's id is
+   * neither — so it reads as an unlinked issue and gets imported as a second,
+   * duplicate idea for work we already mirrored.
+   *
+   * TWO LAYERS, and both are needed. inboundSync additionally halts on the
+   * recovery MARKER the child carries in its description
+   * (`TrackerIssue.recoveryClientKey`), which is exact but only speaks for an
+   * issue this pass actually fetched WITH a description on it. This backstop
+   * covers everything that arm cannot see — a slim list payload, a provider that
+   * drops the description field, a child outside the fetch window — by simply
+   * not importing at all while the question is open.
+   *
+   * WHAT IT DOES. Nothing when the adapter has idempotent creates (the client
+   * key IS the issue id there, so recovery is a point lookup and inbound's
+   * `client_key` arm already covers it). Otherwise: one extra
+   * {@link processAmbiguous} round — the drain may have just parked a row that
+   * phase 1 never saw — and, if anything is STILL unresolved after it, phases
+   * 3+4 stand down for this pass. The next pass re-reconciles; deferring an
+   * inbound poll costs one interval, a duplicate idea costs the user a cleanup.
+   */
+  private async recoverCreatesBeforeInbound(
+    connection: TrackerConnectionRow,
+    adapter: TrackerAdapter,
+    entries: TrackerSyncLogEntry[],
+  ): Promise<InboundGate> {
+    if (!hasUnresolvedCreateRecovery(this.db, connection.id, adapter)) {
+      return { proceed: true, paused: false };
+    }
+    const deps: OutboxDeps = { db: this.db, adapterFor: () => adapter, nowIso: this.nowIso };
+    const recovered = await processAmbiguous(deps, connection);
+    appendWriteBackLines(entries, recovered, null);
+    if (recovered.authPaused) return { proceed: false, paused: true };
+    if (!hasUnresolvedCreateRecovery(this.db, connection.id, adapter)) {
+      return { proceed: true, paused: false };
+    }
+    entries.push({ marker: '⚠', line: 'inbound deferred · unresolved create recovery' });
+    return { proceed: false, paused: false };
   }
 
   /**
@@ -996,10 +1086,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      but the row's identity columns — and Plane's addressing slug — come
    *      from the LIVE identity, not from anything the renderer typed; and a
    *      safeStorage refusal must be known before anything is written.
-   *   2. Insert the row + store the secret. This pair is the DURABLE ANCHOR:
+   *   2. Persist the row + store the secret. This pair is the DURABLE ANCHOR:
    *      up to here nothing entity-visible has happened, so a failure — a
    *      constraint, a crash, an unusable keychain — leaves genuinely nothing
    *      behind and `connect` rejects with no half-built state.
+   *      RE-CONNECT, NOT A SECOND CONNECTION: when a DISCONNECTED row already
+   *      holds this workspace's identity, its id is REUSED and the row rewritten
+   *      in place — see {@link findDisconnectedConnection} for the identity key
+   *      and the note below for why minting a fresh one duplicates a backlog.
    *   3. THEN the reconcile decisions (discards, then links), FAIL-SOFT per row.
    *      Each row is an independent user decision, so a rejected archive (an
    *      active run on a task) or a colliding external id is logged and skipped:
@@ -1014,9 +1108,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const identity = await this.adapterForCredentials(payload.credentials).validateCredentials();
     const cipher = encryptTrackerSecret(payload.credentials.apiKey);
 
-    const connectionId = `trk_${randomUUID()}`;
-    insertConnection(this.db, {
-      id: connectionId,
+    // The row the wizard just described, composed ONCE so the insert and the
+    // re-connect path below cannot drift apart.
+    const row: Omit<NewConnectionRow, 'id'> = {
       project_id: payload.projectId,
       provider: payload.credentials.provider,
       status: 'active',
@@ -1043,7 +1137,32 @@ export class TrackerSyncService implements TrackerSyncFacade {
       cursor_external_id: null,
       last_sync_at: null,
       last_sync_log_json: null,
-    });
+    };
+
+    // RE-CONNECT vs. a genuinely new connection. `disconnect` retires the row
+    // but KEEPS its links — they are the history of what synced — and a link is
+    // scoped to a `connection_id`. So minting a fresh id for a workspace this
+    // project already syncs would strand every one of those links on the dead
+    // row, and the first pass would find each remote issue unlinked and import
+    // it as a NEW idea: a routine credential rotation (disconnect, paste the new
+    // key, connect) silently duplicating the entire synced backlog.
+    //
+    // Reviving instead is what makes the retained links do their job. The row is
+    // rewritten from this wizard run — credentials, source, selection, mapping,
+    // flags, status — with the CURSOR reset to null, and that reset is
+    // load-bearing: the first pass re-fetches from the beginning, so every issue
+    // meets its existing link and merges against its own baseline instead of
+    // importing. Identity is (project_id, provider, workspace_id); a different
+    // workspace, or one whose identity was never recorded, still mints.
+    const revivable = findDisconnectedConnection(
+      this.db,
+      payload.projectId,
+      payload.credentials.provider,
+      identity.workspaceId,
+    );
+    const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
+    if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
+    else reactivateConnection(this.db, connectionId, row);
     storeSecret(this.db, connectionId, cipher);
 
     // Past the anchor: every reconcile row from here is applied on its own, and
@@ -1786,6 +1905,25 @@ function appendWriteBackLines(
   if (created > 0) entries.push({ marker: '✓', line: `mirrored ${plural(created, 'sub-issue')}` });
   if (retries > 0) entries.push({ marker: '·', line: `${plural(retries, 'write')} queued for retry` });
   if (failed > 0) entries.push({ marker: '⚠', line: `${plural(failed, 'write')} failed` });
+}
+
+/**
+ * Does the outbox still hold a create whose outcome is genuinely unknown? True
+ * only for a provider without idempotent creates — everywhere else the client
+ * key IS the created issue's id, so a lost create is recovered by a point lookup
+ * and inbound's own `client_key` halt already covers the window.
+ *
+ * `listUnresolvedOutbox` is already scoped to pending / in_flight / ambiguous,
+ * which is exactly the unsettled set: a terminal failure ('failed', no
+ * `next_attempt_at`) is not pending an answer and never gates a poll.
+ */
+function hasUnresolvedCreateRecovery(
+  db: Database.Database,
+  connectionId: string,
+  adapter: TrackerAdapter,
+): boolean {
+  if (adapter.capabilities.idempotentCreate) return false;
+  return listUnresolvedOutbox(db, connectionId).some((row) => row.kind === 'create_sub_issue');
 }
 
 /** Phase 3's counters. */

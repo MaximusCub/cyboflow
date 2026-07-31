@@ -143,11 +143,13 @@ class FakeAdapter implements TrackerAdapter {
   issues: TrackerIssue[] = [];
   /** Scripted failure for validateCredentials (the auth-error path). */
   failValidate: Error | null = null;
+  /** The workspace the live probe reports — the reconnect identity key. */
+  workspaceId = 'ws-1';
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     this.calls.push('validateCredentials');
     if (this.failValidate !== null) throw this.failValidate;
-    return { workspaceId: 'ws-1', workspaceName: 'Acme', actorLabel: 'K. Esteva' };
+    return { workspaceId: this.workspaceId, workspaceName: 'Acme', actorLabel: 'K. Esteva' };
   }
   async listContainers(): Promise<TrackerSourceTree> {
     this.calls.push('listContainers');
@@ -199,6 +201,7 @@ function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     parentExternalId: null,
     updatedAt: '2026-07-30T10:00:00.000Z',
     archivedAt: null,
+    recoveryClientKey: null,
     ...overrides,
   };
 }
@@ -572,6 +575,58 @@ describe('TrackerSyncService.connect', () => {
     await vi.waitFor(() => {
       expect(getConnection(raw, connectionId)?.last_sync_at).not.toBeNull();
     });
+  });
+
+  it('REVIVES the disconnected connection for the same workspace instead of duplicating the backlog', async () => {
+    // The regression: disconnect deliberately KEEPS the links, but connect used
+    // to always mint a fresh id — so a routine credential rotation (disconnect,
+    // paste a new key, connect) stranded every link on the dead connection and
+    // re-imported the entire synced backlog as brand-new ideas.
+    adapter.issues = [makeIssue()];
+
+    const first = await service.connect(connectPayload());
+    await vi.waitFor(() => {
+      expect(getConnection(raw, first.connectionId)?.last_sync_at).not.toBeNull();
+    });
+    const importedId = importedIdeaId();
+    const link = getLinkByExternal(raw, first.connectionId, 'ext-1');
+    expect(link?.entity_id).toBe(importedId);
+
+    await service.disconnect(first.connectionId);
+    const second = await service.connect(connectPayload());
+
+    // Same row, re-armed — not a second connection.
+    expect(second.connectionId).toBe(first.connectionId);
+    const count = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
+    expect(count.n).toBe(1);
+    const revived = getConnection(raw, first.connectionId);
+    expect(revived?.status).toBe('active');
+    expect((readSecret(raw, first.connectionId) as Buffer).toString('utf-8')).toBe(API_KEY);
+
+    // The link survived the round trip and still points at the same idea.
+    const relinked = getLinkByExternal(raw, first.connectionId, 'ext-1');
+    expect(relinked?.id).toBe(link?.id);
+    expect(relinked?.entity_id).toBe(importedId);
+
+    // ...so the pass the reconnect kicks MERGES the same remote issue against
+    // that link (a no-op diff) instead of importing a duplicate idea.
+    await vi.waitFor(() => {
+      expect(getConnection(raw, first.connectionId)?.last_sync_at).not.toBeNull();
+    });
+    expect(importedIdeaId()).toBe(importedId);
+  });
+
+  it('still mints a NEW connection when the workspace identity differs', async () => {
+    const first = await service.connect(connectPayload());
+    await service.disconnect(first.connectionId);
+
+    // A different Linear organization is a different connection, links and all.
+    adapter.workspaceId = 'ws-2';
+    const second = await service.connect(connectPayload());
+
+    expect(second.connectionId).not.toBe(first.connectionId);
+    expect(getConnection(raw, first.connectionId)?.status).toBe('disconnected');
+    expect(getConnection(raw, second.connectionId)?.status).toBe('active');
   });
 });
 
