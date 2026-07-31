@@ -10,6 +10,7 @@ import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../.
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { getShellPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import {
@@ -2747,7 +2748,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         append: this.composeSystemPromptAppend(options) ?? undefined,
       },
       mcpServers: await this.composeMcpServers(options),
-      env: this.composeRunEnv(options),
+      env: await this.composeRunEnv(options),
       // S0.2(a): a global-agent isolation spawn loads NO user/project settings —
       // no inherited MCP servers, plugins, or permission `allow` rules. Every
       // other spawn keeps the ['user','project'] sources it always had.
@@ -3050,7 +3051,38 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return mcpServers as Record<string, McpServerConfig>;
   }
 
-  private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string | undefined> {
+  /**
+   * Compose the `env` slice of the SDK Options.
+   *
+   * PATH is resolved through `getShellPath()` + the resolved node dir rather
+   * than inherited from `process.env` — the SAME composition
+   * `AbstractCliManager.getSystemEnvironment` applies on the interactive
+   * substrate. Without it the SDK substrate inherits Electron's raw environment,
+   * which under a Finder/Dock launch is whatever `launchd` hands the app
+   * (`/usr/bin:/bin:/usr/sbin:/sbin`) — no `/opt/homebrew/bin`, no
+   * `/usr/local/bin`, no nvm. Two things break, both silently:
+   *
+   *   1. Every stdio MCP server whose command resolves via PATH (`npx`, `maestro`,
+   *      …) fails to exec, so the server is simply absent from the toolset. Only
+   *      the injected 'cyboflow' entry survived, because composeMcpServers builds
+   *      it with an ABSOLUTE interpreter from findNodeExecutable().
+   *   2. The agent's own Bash tool cannot find `node`/`npx`, so any project gate
+   *      it runs reports "command not found".
+   *
+   * Launching the same build from a terminal masks the bug entirely (Electron
+   * inherits the shell's PATH), so it reproduces only on a packaged app opened
+   * from Finder/Dock. `getShellPath()` sources the user's login AND `.zshrc`
+   * config in the packaged branch and unions the result with the current
+   * `process.env.PATH`, so this is strictly additive — no entry the spawn
+   * previously had can be lost.
+   *
+   * Fail-soft: if the node path cannot be resolved we still apply the shell PATH
+   * (which normally already contains a node dir) rather than dropping the fix.
+   * The resolution is cached on both sides (getShellPath memoizes; the node path
+   * rides `cachedNodePathPromise`), so the composed value is stable across spawns
+   * and does not churn the warm-session options fingerprint.
+   */
+  private async composeRunEnv(options: ClaudeSpawnOptions): Promise<Record<string, string | undefined>> {
     const verbose = this.configManager?.getConfig()?.verbose;
     // The per-run artifacts dir the agent writes screenshot PNGs into — the SAME
     // CYBOFLOW_DIR/artifacts/runs/<runId>/ subtree the gallery serves bytes from
@@ -3063,12 +3095,34 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const runArtifactsDir = getCyboflowSubdirectory('artifacts', 'runs', artifactRunKey);
     return {
       ...process.env,
+      PATH: await this.resolveSpawnPath(),
       CYBOFLOW_RUN_ARTIFACTS_DIR: runArtifactsDir,
       // Mark the tree as agent-spawned so a project gate run by this agent
       // self-governs its vitest fork pool (shared/types/testConcurrency.ts).
       ...managedTestConcurrencyEnv(),
       ...(verbose ? { MCP_DEBUG: '1' } : {})
     };
+  }
+
+  /**
+   * The PATH handed to the SDK spawn (and inherited by every stdio MCP server it
+   * starts and by the agent's Bash tool). Mirrors
+   * AbstractCliManager.getSystemEnvironment: the resolved node dir FIRST so the
+   * interpreter cyboflow itself resolved wins over any other node on PATH,
+   * followed by the shell-resolved PATH. See composeRunEnv for why this cannot
+   * be `process.env.PATH`.
+   */
+  private async resolveSpawnPath(): Promise<string> {
+    const shellPath = getShellPath();
+    try {
+      const nodePath = await (this.cachedNodePathPromise ?? (this.cachedNodePathPromise = findNodeExecutable()));
+      return `${path.dirname(nodePath)}:${shellPath}`;
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] Could not resolve node executable for spawn PATH; using shell PATH only: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return shellPath;
+    }
   }
 
   /**
