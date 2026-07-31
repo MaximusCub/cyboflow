@@ -129,3 +129,169 @@ export interface TrackerIssue {
 export type TrackerSelectionMode = 'all' | 'assignee' | 'manual';
 export type TrackerConflictMode = 'auto' | 'manual';
 export type TrackerConnectionStatus = 'active' | 'paused' | 'disconnected';
+
+/** The three entity tables a tracker link can point at (mirrors EntityExternalLinkRow). */
+export type TrackerEntityType = 'idea' | 'epic' | 'task';
+
+// ---------------------------------------------------------------------------
+// Read models — the connected view + wizard tRPC surface
+//
+// EVERY shape below is renderer-visible. None of them carries key material, and
+// none ever will: the API key flows renderer->main once inside
+// TrackerCredentialsInput and is encrypted before it reaches sqlite.
+// ---------------------------------------------------------------------------
+
+/**
+ * One line of a connection's sync log, persisted as a JSON array in
+ * `tracker_connections.last_sync_log_json`. `marker` is the leading glyph the
+ * connected view's log column renders in its own color; `line` is the text.
+ */
+export interface TrackerSyncLogEntry {
+  marker: string;
+  line: string;
+}
+
+/**
+ * What one sync pass did — the "Sync now" mutation's result. The main-side
+ * `TrackerSyncPassResult` (trackerSyncService.ts) is an alias of this type, so
+ * the wire shape and the engine's own result cannot drift apart.
+ */
+export interface TrackerSyncPassSummary {
+  connectionId: string;
+  /** False when the connection id is unknown (nothing ran, nothing persisted). */
+  ran: boolean;
+  /** The deletion sweep ran this pass. */
+  swept: boolean;
+  /** The connection was left `paused` (bad/absent credentials). */
+  paused: boolean;
+  /** The composed log, exactly as persisted. */
+  entries: TrackerSyncLogEntry[];
+  /** Non-null when the pass failed; the message is also in `entries`. */
+  error: string | null;
+}
+
+/**
+ * One connected-view card. `workspaceName` / `actorLabel` are nullable columns
+ * normalized to '' here — the card always renders a string, and "unknown
+ * workspace" is not a state worth branching on in the renderer.
+ */
+export interface TrackerConnectionSummary {
+  id: string;
+  projectId: number;
+  provider: TrackerProvider;
+  status: TrackerConnectionStatus;
+  workspaceName: string;
+  actorLabel: string;
+  /** Plane self-hosted origin; null on cloud/Linear connections. */
+  baseUrl: string | null;
+  /** Human label for the wizard's Step-1 choice, e.g. "Core · Cycle 12". */
+  sourceLabel: string;
+  selectionMode: TrackerSelectionMode;
+  twoWay: boolean;
+  mirrorSubissues: boolean;
+  conflictMode: TrackerConflictMode;
+  stateMapping: TrackerStateMapping;
+  lastSyncAt: string | null;
+  lastSyncLog: TrackerSyncLogEntry[];
+  /** Active (non-orphaned) entity links on this connection. */
+  linkedCount: number;
+  openConflictCount: number;
+}
+
+/** `tracker_conflicts.kind` (mirrors TrackerConflictRow). */
+export type TrackerConflictKind = 'field_conflict' | 'remote_deleted';
+
+/** The user's per-conflict decision in the connected view's conflict list. */
+export type TrackerConflictChoice = 'local' | 'remote';
+
+/**
+ * One row of the Manual-mode conflict list. `entityRef` / `entityTitle` come
+ * from the linked entity and are null when the conflict has no link (or the
+ * entity is gone) — a `remote_deleted` conflict on a hard-deleted entity, say.
+ */
+export interface TrackerConflictSummary {
+  id: number;
+  connectionId: string;
+  kind: TrackerConflictKind;
+  /** 'title' | 'description' | 'stage' on a field conflict; null on remote_deleted. */
+  field: string | null;
+  localValue: string | null;
+  remoteValue: string | null;
+  entityRef: string | null;
+  entityTitle: string | null;
+  createdAt: string;
+}
+
+/** One row of the wizard's Reconcile step (a pre-existing backlog item). */
+export interface TrackerReconcileItem {
+  entityType: 'idea' | 'task';
+  entityId: string;
+  ref: string;
+  title: string;
+  /** Best title match among the fetched issues, or null when nothing matched. */
+  suggestedExternalId: string | null;
+}
+
+/** The user's Keep / Link / Discard ruling for one Reconcile row. */
+export interface TrackerReconcileDecision {
+  entityType: 'idea' | 'task';
+  entityId: string;
+  action: 'keep' | 'link' | 'discard';
+  /** The issue to link to — required for action 'link', ignored otherwise. */
+  linkExternalId?: string;
+  /**
+   * The linked issue's display ref ("CORE-142") and web URL, carried alongside
+   * the id so the link row lands with its ref chip populated — the wizard
+   * already holds the issue list, and nothing else back-fills these later.
+   */
+  linkIdentifier?: string;
+  linkUrl?: string;
+}
+
+/**
+ * `tracker_connections.selection_json` — the wizard's Step-2 choice. Mirrors
+ * the main-side `TrackerSelectionPayload` (inboundSync.ts), which reads the
+ * same blob back for inbound filtering.
+ */
+export interface TrackerSelectionJson {
+  /** selection_mode 'assignee': only issues assigned to one of these import. */
+  assigneeIds?: string[];
+  /** selection_mode 'manual': only these external ids import. */
+  issueIds?: string[];
+}
+
+/** Everything the wizard's final Review step hands to `connect`. */
+export interface TrackerConnectPayload {
+  projectId: number;
+  credentials: TrackerCredentialsInput;
+  source: TrackerSourceSelection;
+  sourceLabel: string;
+  selectionMode: TrackerSelectionMode;
+  selectionJson: TrackerSelectionJson | null;
+  stateMapping: TrackerStateMapping;
+  twoWay: boolean;
+  mirrorSubissues: boolean;
+  conflictMode: TrackerConflictMode;
+  reconcile: TrackerReconcileDecision[];
+}
+
+/**
+ * The connected view's editable settings. Every field optional — an omitted key
+ * leaves the stored value untouched (mirrors the store's ConnectionSettingsPatch).
+ */
+export interface TrackerSettingsPatch {
+  twoWay?: boolean;
+  mirrorSubissues?: boolean;
+  conflictMode?: TrackerConflictMode;
+  stateMapping?: TrackerStateMapping;
+  selectionMode?: TrackerSelectionMode;
+  /** null clears the stored selection (back to "everything in the source"). */
+  selectionJson?: TrackerSelectionJson | null;
+}
+
+/** An entity's live tracker link — the "open in Linear/Plane" affordance's data. */
+export interface TrackerEntityLinkRef {
+  provider: TrackerProvider;
+  externalUrl: string | null;
+  externalIdentifier: string | null;
+}

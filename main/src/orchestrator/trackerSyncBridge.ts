@@ -1,0 +1,183 @@
+/**
+ * trackerSyncBridge — the seam between the tracker-sync ENGINE
+ * (main/src/services/trackerSync/*) and the tRPC surface that drives it
+ * (trpc/routers/tracker.ts). Design: docs/proposals/tracker-sync-integration.md.
+ *
+ * WHY A BRIDGE. tRPC router files must standalone-typecheck: no 'electron', no
+ * 'better-sqlite3', nothing under main/src/services/*. The router therefore
+ * cannot name TrackerSyncService — so this file declares the FACADE the router
+ * talks to, in terms of shared/types/trackerSync + plain JSON only, and the
+ * composition root (main/src/index.ts) injects the live service into it at boot.
+ * Same shape as trpc/routers/health.ts's setHealthProvider, one level up so the
+ * service (which may import orchestrator files — inboundSync already does) can
+ * implement the interface without importing a router.
+ *
+ * SECRETS. Nothing on this seam returns key material. `TrackerCredentialsInput`
+ * travels renderer -> main on the wizard/connect calls and is encrypted before
+ * it reaches sqlite; every read model here is key-free by construction.
+ */
+import { EventEmitter } from 'node:events';
+import type {
+  TrackerConflictChoice,
+  TrackerConflictSummary,
+  TrackerConnectPayload,
+  TrackerConnectionSummary,
+  TrackerCredentialsInput,
+  TrackerEntityLinkRef,
+  TrackerEntityType,
+  TrackerIssue,
+  TrackerReconcileItem,
+  TrackerSettingsPatch,
+  TrackerSourceNarrow,
+  TrackerSourceSelection,
+  TrackerSourceTree,
+  TrackerState,
+  TrackerSyncPassSummary,
+  TrackerWorkspaceIdentity,
+} from '../../../shared/types/trackerSync';
+
+// ---------------------------------------------------------------------------
+// The facade
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the tracker tRPC surface can ask of the sync engine.
+ * TrackerSyncService implements this directly (structurally AND nominally — it
+ * declares `implements TrackerSyncFacade`).
+ *
+ * The five `wizard*` methods are STATELESS probes: they build a throwaway
+ * provider client from the credentials in hand, persist nothing, and are the
+ * only methods that run before a connection row exists.
+ */
+export interface TrackerSyncFacade {
+  /** Live credential probe — the wizard's "Authorized as …" card. Persists nothing. */
+  wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity>;
+  /** Wizard Step 1, top level (Linear teams / Plane projects). */
+  wizardContainers(credentials: TrackerCredentialsInput): Promise<TrackerSourceTree>;
+  /** Wizard Step 1, second level for one container (always includes 'all'). */
+  wizardNarrows(
+    credentials: TrackerCredentialsInput,
+    containerId: string,
+  ): Promise<TrackerSourceNarrow[]>;
+  /** Wizard Step 3's mapping table — the source's states with canonical groups. */
+  wizardStates(
+    credentials: TrackerCredentialsInput,
+    selection: TrackerSourceSelection,
+  ): Promise<TrackerState[]>;
+  /** Wizard Step 2 — the issues in the chosen source (assignee/manual pickers + Reconcile). */
+  wizardIssues(
+    credentials: TrackerCredentialsInput,
+    selection: TrackerSourceSelection,
+  ): Promise<TrackerIssue[]>;
+
+  /** Wizard Step 4 — the project's pre-existing backlog items with suggested matches. */
+  reconcilePreview(projectId: number, issues: TrackerIssue[]): Promise<TrackerReconcileItem[]>;
+
+  /** Persist the connection (+ encrypted key + reconcile decisions) and kick the first pass. */
+  connect(payload: TrackerConnectPayload): Promise<{ connectionId: string }>;
+
+  /** The project's connected-view cards. */
+  connections(projectId: number): Promise<TrackerConnectionSummary[]>;
+
+  /** Patch a connection's editable settings. Unknown id is a no-op. */
+  updateSettings(connectionId: string, patch: TrackerSettingsPatch): Promise<void>;
+
+  /** Retire a connection: status 'disconnected' + the stored key cleared. Links stay. */
+  disconnect(connectionId: string): Promise<void>;
+
+  /** The manual "Sync now" — a forced pass, which also sweeps for remote deletions. */
+  syncNow(connectionId: string): Promise<TrackerSyncPassSummary>;
+
+  /** The connection's OPEN conflicts (Manual mode's queue). */
+  conflicts(connectionId: string): Promise<TrackerConflictSummary[]>;
+
+  /** Resolve one open conflict the user's way. Unknown/already-resolved id is a no-op. */
+  resolveConflictChoice(conflictId: number, choice: TrackerConflictChoice): Promise<void>;
+
+  /** An entity's live tracker link, or null when it is not synced. */
+  linkForEntity(
+    entityType: TrackerEntityType,
+    entityId: string,
+  ): Promise<TrackerEntityLinkRef | null>;
+}
+
+// ---------------------------------------------------------------------------
+// Module-level injectable singleton (set once at boot via setTrackerSyncFacade)
+// ---------------------------------------------------------------------------
+
+/**
+ * The tracker surface was called before main/src/index.ts injected the live
+ * service. Typed (not a bare Error) so the router can map it to a distinct
+ * TRPCError instead of guessing from a message.
+ */
+export class TrackerSyncNotInitializedError extends Error {
+  constructor() {
+    super(
+      'TrackerSyncService has not been wired into the tracker bridge. ' +
+        'Call setTrackerSyncFacade() from main/src/index.ts.',
+    );
+    this.name = 'TrackerSyncNotInitializedError';
+  }
+}
+
+let facade: TrackerSyncFacade | null = null;
+
+/**
+ * Inject the live TrackerSyncService at boot (composition root). Idempotent —
+ * calling again replaces the facade; tests install a fake per case and clear it
+ * via {@link _resetTrackerSyncFacadeForTesting}.
+ */
+export function setTrackerSyncFacade(next: TrackerSyncFacade): void {
+  facade = next;
+}
+
+/**
+ * The wired facade.
+ *
+ * @throws {TrackerSyncNotInitializedError} when boot has not injected one yet.
+ */
+export function getTrackerSyncFacade(): TrackerSyncFacade {
+  if (facade === null) throw new TrackerSyncNotInitializedError();
+  return facade;
+}
+
+/** Test-only: clear the wired facade so a case starts from the unset state. */
+export function _resetTrackerSyncFacadeForTesting(): void {
+  facade = null;
+}
+
+// ---------------------------------------------------------------------------
+// Change broadcast
+//
+// Mirrors taskChangeRouter.ts's emitter contract: a module-level EventEmitter
+// exported HERE (not from the router) so the service and the tRPC subscription
+// share one instance without a circular import, plus an exported channel helper
+// so both sides derive the channel name the same way.
+//
+// Project-scoped only (no cross-project channel): the Settings > Integrations
+// view is always opened for one project, so a global channel would just make
+// every project's traffic cross every subscription.
+// ---------------------------------------------------------------------------
+
+export const trackerSyncEvents = new EventEmitter();
+
+/** Build the emit channel name for a project. Exported so both sides stay in sync. */
+export function trackerProjectChannel(projectId: number): string {
+  return `tracker-project-${projectId}`;
+}
+
+/**
+ * What changed on a connection. Deliberately a NOTIFICATION, not a payload: the
+ * renderer re-reads whichever query the `kind` invalidates rather than trying to
+ * patch a card from an event.
+ *
+ *  - 'connection' — the connection row itself (connect / settings / disconnect /
+ *    an auth failure pausing it).
+ *  - 'sync'       — a pass finished and persisted its log.
+ *  - 'conflicts'  — conflicts were opened or resolved.
+ */
+export interface TrackerChangedEvent {
+  projectId: number;
+  connectionId: string;
+  kind: 'connection' | 'sync' | 'conflicts';
+}

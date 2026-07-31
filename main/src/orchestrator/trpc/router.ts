@@ -20,6 +20,7 @@ import { healthRouter } from './routers/health';
 import { insightsRouter } from './routers/insights';
 import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
+import { trackerRouter } from './routers/tracker';
 import { reviewItemsRouter } from './routers/reviewItems';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
@@ -52,6 +53,7 @@ export const appRouter = router({
     runs: runsRouter,
     substrates: substratesRouter,
     tasks: tasksRouter,
+    tracker: trackerRouter,
     variants: variantsRouter,
     verificationRequests: verificationRequestsRouter,
     workflows: workflowsRouter,

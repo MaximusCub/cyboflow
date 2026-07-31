@@ -20,13 +20,14 @@
  *
  * Grouped into four sections mirroring the four tables:
  *   - Connections: insertConnection / getConnection / listConnections /
- *     updateConnectionSettings / advanceCursor / storeSecret / readSecret.
- *   - Links: upsertLink / getLinkByEntity / getLinkByExternal / listLinks /
- *     updateBaseline / markOrphaned / listLinksByParentExternal.
+ *     updateConnectionSettings / advanceCursor / storeSecret / readSecret /
+ *     clearSecret.
+ *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
+ *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal.
  *   - Outbox: enqueueOutbox / claimNextPending / resolveOutbox /
  *     listUnresolvedOutbox / findOutboxByClientKey / requeueInFlightAsAmbiguous.
- *   - Conflicts: insertConflict / listOpenConflicts / resolveConflict /
- *     hasOpenConflictForLink.
+ *   - Conflicts: insertConflict / getConflict / listOpenConflicts /
+ *     resolveConflict / hasOpenConflictForLink.
  */
 import type Database from 'better-sqlite3';
 import type {
@@ -209,6 +210,18 @@ export function readSecret(db: Database.Database, id: string): Buffer | null {
   return row?.secret_ciphertext ?? null;
 }
 
+/**
+ * Drop a connection's stored ciphertext (disconnect). The ROW survives — the
+ * connection is kept as `status = 'disconnected'` for history, and its links
+ * stay inspectable — but the key it was authorized with does not: a disconnected
+ * connection must not be resumable without the user pasting a key again.
+ */
+export function clearSecret(db: Database.Database, id: string): void {
+  db.prepare(
+    `UPDATE tracker_connections SET secret_ciphertext = NULL, updated_at = datetime('now') WHERE id = ?`,
+  ).run(id);
+}
+
 // ---------------------------------------------------------------------------
 // Links
 // ---------------------------------------------------------------------------
@@ -283,6 +296,14 @@ export function getLinkByEntity(
   const row = db
     .prepare('SELECT * FROM entity_external_links WHERE entity_type = ? AND entity_id = ? AND provider = ?')
     .get(entityType, entityId, provider) as EntityExternalLinkRow | undefined;
+  return row ?? null;
+}
+
+/** Look up a link by its own row id (the conflict rows' `link_id` FK). */
+export function getLinkById(db: Database.Database, linkId: number): EntityExternalLinkRow | null {
+  const row = db.prepare('SELECT * FROM entity_external_links WHERE id = ?').get(linkId) as
+    | EntityExternalLinkRow
+    | undefined;
   return row ?? null;
 }
 
@@ -524,6 +545,14 @@ export function insertConflict(db: Database.Database, input: InsertConflictInput
       remote_value: input.remote_value ?? null,
       payload_json: input.payload_json ?? null,
     }) as TrackerConflictRow;
+}
+
+/** Fetch one conflict by id (open or resolved), or null when it does not exist. */
+export function getConflict(db: Database.Database, id: number): TrackerConflictRow | null {
+  const row = db.prepare('SELECT * FROM tracker_conflicts WHERE id = ?').get(id) as
+    | TrackerConflictRow
+    | undefined;
+  return row ?? null;
 }
 
 /** List a connection's open (unresolved) conflicts. */

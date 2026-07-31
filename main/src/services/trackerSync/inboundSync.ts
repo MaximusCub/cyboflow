@@ -181,8 +181,13 @@ function buildProvenanceFooter(provider: TrackerProvider, issue: TrackerIssue): 
  * pre-existing entity linked through the wizard's Reconcile step) reads back
  * as description-only, and rejoins without one — we never retro-fit a footer
  * onto an entity the user wrote themselves.
+ *
+ * Exported (with {@link joinBody}) for the service layer's manual
+ * conflict-resolution path, which applies a stored `remote_value` description
+ * onto an entity and must preserve that entity's footer exactly as this pass
+ * would have.
  */
-function splitBody(body: string | null): { description: string | null; footer: string | null } {
+export function splitBody(body: string | null): { description: string | null; footer: string | null } {
   if (body === null) return { description: null, footer: null };
   const at = body.indexOf(FOOTER_START);
   if (at < 0) return { description: body.length > 0 ? body : null, footer: null };
@@ -194,7 +199,7 @@ function splitBody(body: string | null): { description: string | null; footer: s
 }
 
 /** Inverse of {@link splitBody}. */
-function joinBody(description: string | null, footer: string | null): string | null {
+export function joinBody(description: string | null, footer: string | null): string | null {
   const desc = description !== null && description.trim().length > 0 ? description : null;
   if (footer === null) return desc;
   const block = `${FOOTER_FENCE}${footer}`;
