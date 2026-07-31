@@ -11,7 +11,7 @@
  * buttons resolve with the right choice; Disconnect confirms inline first.
  */
 import '@testing-library/jest-dom';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   TrackerConflictSummary,
@@ -58,7 +58,9 @@ function makeConnection(
     baseUrl: null,
     sourceLabel: 'Core · Current cycle',
     selectionMode: 'all',
-    twoWay: true,
+    statusSyncMode: 'auto',
+    pullMode: 'auto',
+    pushMode: 'auto',
     mirrorSubissues: true,
     conflictMode: 'auto',
     stateMapping: { triage: 'dont', backlog: 'idea', todo: 'ready', done: 'done' },
@@ -113,20 +115,47 @@ beforeEach(() => {
 });
 
 describe('TrackerConnectedView — sync settings', () => {
-  it('writes only the toggled field back through updateSettings', async () => {
+  it('writes only the changed direction row back through updateSettings', async () => {
     renderView();
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Write status back' }));
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Push to Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
     await waitFor(() =>
-      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', twoWay: false }),
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', pushMode: 'manual' }),
     );
 
-    // Optimistic: mirroring disappears with two-way off, so its row cannot be
-    // written while it has no meaning.
-    expect(
-      screen.queryByRole('switch', { name: 'Mirror task breakdowns' }),
-    ).not.toBeInTheDocument();
+    // Mirroring + conflict rows are always visible, regardless of direction.
+    expect(screen.getByRole('switch', { name: 'Mirror task breakdowns' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Conflict mode' })).toBeInTheDocument();
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('changes each direction row independently through updateSettings', async () => {
+    renderView();
+
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Sync task status' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        statusSyncMode: 'manual',
+      }),
+    );
+
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Pull from Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', pullMode: 'manual' }),
+    );
   });
 
   it('patches mirroring and conflict mode independently', async () => {

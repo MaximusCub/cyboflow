@@ -31,6 +31,7 @@ import type {
   TrackerConflictMode,
   TrackerConflictSummary,
   TrackerConnectionSummary,
+  TrackerDirectionMode,
   TrackerMappingTarget,
   TrackerSyncLogEntry,
 } from '../../../../../shared/types/trackerSync';
@@ -46,6 +47,15 @@ const CONFLICT_OPTIONS: readonly { value: TrackerConflictMode; label: string }[]
   { value: 'auto', label: 'Auto-resolve' },
   { value: 'manual', label: 'Manual review' },
 ];
+
+const DIRECTION_OPTIONS: readonly { value: TrackerDirectionMode; label: string }[] = [
+  { value: 'auto', label: 'Automatic' },
+  { value: 'manual', label: 'Manual' },
+];
+
+function directionLabel(mode: TrackerDirectionMode): string {
+  return mode === 'auto' ? 'Auto' : 'Manual';
+}
 
 const SELECTION_LABEL: Record<TrackerConnectionSummary['selectionMode'], string> = {
   all: 'All issues',
@@ -80,8 +90,12 @@ export function TrackerConnectedView({
 }: TrackerConnectedViewProps): React.JSX.Element {
   const meta = providerMeta(connection.provider);
 
-  // Optimistic mirror of the three editable settings rows.
-  const [twoWay, setTwoWay] = useState(connection.twoWay);
+  // Optimistic mirror of the editable settings rows.
+  const [statusSyncMode, setStatusSyncMode] = useState<TrackerDirectionMode>(
+    connection.statusSyncMode,
+  );
+  const [pullMode, setPullMode] = useState<TrackerDirectionMode>(connection.pullMode);
+  const [pushMode, setPushMode] = useState<TrackerDirectionMode>(connection.pushMode);
   const [mirrorSubissues, setMirrorSubissues] = useState(connection.mirrorSubissues);
   const [conflictMode, setConflictMode] = useState<TrackerConflictMode>(connection.conflictMode);
 
@@ -94,12 +108,16 @@ export function TrackerConnectedView({
 
   // Re-seed from a fresh summary (the parent re-reads on every tracker event).
   useEffect(() => {
-    setTwoWay(connection.twoWay);
+    setStatusSyncMode(connection.statusSyncMode);
+    setPullMode(connection.pullMode);
+    setPushMode(connection.pushMode);
     setMirrorSubissues(connection.mirrorSubissues);
     setConflictMode(connection.conflictMode);
     setLog(connection.lastSyncLog);
   }, [
-    connection.twoWay,
+    connection.statusSyncMode,
+    connection.pullMode,
+    connection.pushMode,
     connection.mirrorSubissues,
     connection.conflictMode,
     connection.lastSyncLog,
@@ -134,9 +152,19 @@ export function TrackerConnectedView({
       .catch((err: unknown) => setError(errorMessage(err)));
   };
 
-  const handleTwoWay = (next: boolean): void => {
-    setTwoWay(next);
-    patchSettings({ connectionId: connection.id, twoWay: next });
+  const handleStatusSyncMode = (next: TrackerDirectionMode): void => {
+    setStatusSyncMode(next);
+    patchSettings({ connectionId: connection.id, statusSyncMode: next });
+  };
+
+  const handlePullMode = (next: TrackerDirectionMode): void => {
+    setPullMode(next);
+    patchSettings({ connectionId: connection.id, pullMode: next });
+  };
+
+  const handlePushMode = (next: TrackerDirectionMode): void => {
+    setPushMode(next);
+    patchSettings({ connectionId: connection.id, pushMode: next });
   };
 
   const handleMirror = (next: boolean): void => {
@@ -198,14 +226,16 @@ export function TrackerConnectedView({
     return [...seen].map(mappingTargetLabel).join(' · ');
   }, [connection.stateMapping]);
 
+  const allAuto = statusSyncMode === 'auto' && pullMode === 'auto' && pushMode === 'auto';
+
   const stats: { label: string; value: string; tone?: string }[] = [
     { label: 'Items linked', value: String(connection.linkedCount) },
     { label: 'Selection', value: SELECTION_LABEL[connection.selectionMode] },
     { label: 'Source', value: connection.sourceLabel },
     {
       label: 'Direction',
-      value: twoWay ? 'Two-way' : 'Read only',
-      tone: twoWay ? 'text-status-success' : undefined,
+      value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
+      tone: allAuto ? 'text-status-success' : undefined,
     },
   ];
 
@@ -335,35 +365,68 @@ export function TrackerConnectedView({
 
                   <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold text-text-primary">Write status back</p>
+                      <p className="text-xs font-semibold text-text-primary">Sync task status</p>
                       <p className="text-[11px] text-text-tertiary">
-                        Cyboflow stage changes update the {meta.name} issue.
+                        Status changes on linked items flow both ways.
                       </p>
                     </div>
-                    <PillToggle
-                      checked={twoWay}
-                      onChange={handleTwoWay}
-                      label="Write status back"
+                    <Segmented
+                      options={DIRECTION_OPTIONS}
+                      value={statusSyncMode}
+                      onChange={handleStatusSyncMode}
+                      ariaLabel="Sync task status"
                     />
                   </div>
 
-                  {twoWay && (
-                    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
-                      <div className="min-w-0">
-                        <p className="text-xs font-semibold text-text-primary">
-                          Mirror task breakdowns
-                        </p>
-                        <p className="text-[11px] text-text-tertiary">
-                          Planner tasks become sub-issues of the origin issue.
-                        </p>
-                      </div>
-                      <PillToggle
-                        checked={mirrorSubissues}
-                        onChange={handleMirror}
-                        label="Mirror task breakdowns"
-                      />
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">
+                        Pull from {meta.name}
+                      </p>
+                      <p className="text-[11px] text-text-tertiary">
+                        New {meta.name} issues import as cyboflow ideas.
+                      </p>
                     </div>
-                  )}
+                    <Segmented
+                      options={DIRECTION_OPTIONS}
+                      value={pullMode}
+                      onChange={handlePullMode}
+                      ariaLabel={`Pull from ${meta.name}`}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">
+                        Push to {meta.name}
+                      </p>
+                      <p className="text-[11px] text-text-tertiary">
+                        New cyboflow ideas are created as {meta.name} issues.
+                      </p>
+                    </div>
+                    <Segmented
+                      options={DIRECTION_OPTIONS}
+                      value={pushMode}
+                      onChange={handlePushMode}
+                      ariaLabel={`Push to ${meta.name}`}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">
+                        Mirror task breakdowns
+                      </p>
+                      <p className="text-[11px] text-text-tertiary">
+                        Planner tasks become sub-issues of the origin issue.
+                      </p>
+                    </div>
+                    <PillToggle
+                      checked={mirrorSubissues}
+                      onChange={handleMirror}
+                      label="Mirror task breakdowns"
+                    />
+                  </div>
 
                   <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <div className="min-w-0">

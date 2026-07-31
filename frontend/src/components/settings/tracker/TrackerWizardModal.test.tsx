@@ -344,23 +344,30 @@ describe('TrackerWizardModal — Step 4 mapping', () => {
     }
   });
 
-  it('reveals mirroring + conflict mode only while two-way sync is on', async () => {
+  it('always shows mirroring + conflict mode alongside the three direction rows', async () => {
     renderWizard();
     await authorize();
     await advance(4);
 
     await screen.findByText('Map Linear states to cyboflow');
+    expect(screen.getByRole('group', { name: 'Sync task status' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Pull from Linear' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Push to Linear' })).toBeInTheDocument();
     expect(
       screen.getByRole('switch', { name: 'Mirror task breakdowns as sub-issues' }),
     ).toBeChecked();
     expect(screen.getByRole('group', { name: 'Conflict mode' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Two-way sync' }));
-
+    // Flipping a direction row leaves the other rows untouched and visible.
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Pull from Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
     expect(
-      screen.queryByRole('switch', { name: 'Mirror task breakdowns as sub-issues' }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole('group', { name: 'Conflict mode' })).not.toBeInTheDocument();
+      screen.getByRole('switch', { name: 'Mirror task breakdowns as sub-issues' }),
+    ).toBeChecked();
+    expect(screen.getByRole('group', { name: 'Conflict mode' })).toBeInTheDocument();
   });
 });
 
@@ -408,7 +415,9 @@ describe('TrackerWizardModal — Step 5 reconcile', () => {
         sourceLabel: 'Core · Whole team · all open issues',
         selectionMode: 'all',
         selectionJson: null,
-        twoWay: true,
+        statusSyncMode: 'auto',
+        pullMode: 'auto',
+        pushMode: 'auto',
         mirrorSubissues: true,
         conflictMode: 'auto',
         stateMapping: {
@@ -434,5 +443,30 @@ describe('TrackerWizardModal — Step 5 reconcile', () => {
     );
     expect(onConnected).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries a flipped direction mode through to the connect payload', async () => {
+    renderWizard();
+    await authorize();
+    await advance(4); // → Project → Source → Tasks → States
+
+    await screen.findByText('Map Linear states to cyboflow');
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Push to Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
+
+    await advance(2, 4); // → Reconcile → Review
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusSyncMode: 'auto',
+        pullMode: 'auto',
+        pushMode: 'manual',
+      }),
+    );
   });
 });

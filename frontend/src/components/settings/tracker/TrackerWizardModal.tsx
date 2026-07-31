@@ -38,6 +38,7 @@ import type { Project } from '../../../types/project';
 import type {
   TrackerConflictMode,
   TrackerCredentialsInput,
+  TrackerDirectionMode,
   TrackerIssue,
   TrackerProvider,
   TrackerReconcileDecision,
@@ -84,6 +85,15 @@ const MODE_OPTIONS: readonly { value: TrackerSelectionMode; label: string }[] = 
   { value: 'assignee', label: 'By assignee' },
   { value: 'manual', label: 'Manual' },
 ];
+
+const DIRECTION_OPTIONS: readonly { value: TrackerDirectionMode; label: string }[] = [
+  { value: 'auto', label: 'Automatic' },
+  { value: 'manual', label: 'Manual' },
+];
+
+function directionLabel(mode: TrackerDirectionMode): string {
+  return mode === 'auto' ? 'Auto' : 'Manual';
+}
 
 const RECONCILE_OPTIONS: readonly { value: ReconcileAction; label: string; selectedClass: string }[] = [
   { value: 'keep', label: 'Keep', selectedClass: 'bg-status-success text-text-on-status-success' },
@@ -157,7 +167,9 @@ export function TrackerWizardModal({
   const [states, setStates] = useState<TrackerState[]>([]);
   const [statesLoaded, setStatesLoaded] = useState(false);
   const [mapping, setMapping] = useState<TrackerStateMapping>({});
-  const [twoWay, setTwoWay] = useState(true);
+  const [statusSyncMode, setStatusSyncMode] = useState<TrackerDirectionMode>('auto');
+  const [pullMode, setPullMode] = useState<TrackerDirectionMode>('auto');
+  const [pushMode, setPushMode] = useState<TrackerDirectionMode>('auto');
   const [mirrorSubissues, setMirrorSubissues] = useState(true);
   const [conflictMode, setConflictMode] = useState<TrackerConflictMode>('auto');
 
@@ -498,9 +510,10 @@ export function TrackerWizardModal({
         selectionMode: mode,
         selectionJson,
         stateMapping: mapping,
-        twoWay,
-        // Mirroring is a write-back behaviour; with two-way off it has no meaning.
-        mirrorSubissues: twoWay && mirrorSubissues,
+        statusSyncMode,
+        pullMode,
+        pushMode,
+        mirrorSubissues,
         conflictMode,
         reconcile: reconcileDecisions,
       });
@@ -992,60 +1005,93 @@ export function TrackerWizardModal({
       </div>
 
       <div className={cn(CARD, 'p-3')}>
-        <div className="flex items-start gap-3">
-          <PillToggle checked={twoWay} onChange={setTwoWay} label="Two-way sync" />
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">Sync task status</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              Status changes on linked items flow both ways.
+            </p>
+          </div>
+          <Segmented
+            options={DIRECTION_OPTIONS}
+            value={statusSyncMode}
+            onChange={setStatusSyncMode}
+            ariaLabel="Sync task status"
+          />
+        </div>
+
+        <ul className="mt-3 space-y-1 border border-border-primary bg-surface-secondary p-3 text-[11px] text-text-secondary">
+          <li>Ready for development → nothing (readiness is not started)</li>
+          <li>In development → the {meta.name} started state</li>
+          <li>Done → the {meta.name} done state</li>
+          <li>Won’t do → the {meta.name} cancelled state</li>
+        </ul>
+
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">Pull from {meta.name}</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              New {meta.name} issues import as cyboflow ideas.
+            </p>
+          </div>
+          <Segmented
+            options={DIRECTION_OPTIONS}
+            value={pullMode}
+            onChange={setPullMode}
+            ariaLabel={`Pull from ${meta.name}`}
+          />
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">Push to {meta.name}</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              New cyboflow ideas are created as {meta.name} issues.
+            </p>
+          </div>
+          <Segmented
+            options={DIRECTION_OPTIONS}
+            value={pushMode}
+            onChange={setPushMode}
+            ariaLabel={`Push to ${meta.name}`}
+          />
+        </div>
+
+        <div className="mt-3 flex items-start gap-3 border-t border-border-primary pt-3">
+          <PillToggle
+            checked={mirrorSubissues}
+            onChange={setMirrorSubissues}
+            label="Mirror task breakdowns as sub-issues"
+          />
           <div className="min-w-0">
             <p className="text-xs font-semibold text-text-primary">
-              Two-way sync — write status back to {meta.name}
+              Mirror task breakdowns as sub-issues
             </p>
             <p className="mt-0.5 text-[11px] text-text-tertiary">
-              With this off, cyboflow only reads; nothing is ever written to {meta.name}.
+              When the planner decomposes an imported idea, each task is created as a sub-issue
+              and reports its own status back.
             </p>
           </div>
         </div>
 
-        {twoWay && (
-          <>
-            <ul className="mt-3 space-y-1 border border-border-primary bg-surface-secondary p-3 text-[11px] text-text-secondary">
-              <li>Ready for development → nothing (readiness is not started)</li>
-              <li>In development → the {meta.name} started state</li>
-              <li>Done → the {meta.name} done state</li>
-              <li>Won’t do → the {meta.name} cancelled state</li>
-            </ul>
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">When both sides changed</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              Auto-resolve merges field by field; Manual review queues each conflict for you.
+            </p>
+          </div>
+          <Segmented
+            options={CONFLICT_OPTIONS}
+            value={conflictMode}
+            onChange={setConflictMode}
+            ariaLabel="Conflict mode"
+          />
+        </div>
 
-            <div className="mt-3 flex items-start gap-3 border-t border-border-primary pt-3">
-              <PillToggle
-                checked={mirrorSubissues}
-                onChange={setMirrorSubissues}
-                label="Mirror task breakdowns as sub-issues"
-              />
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-text-primary">
-                  Mirror task breakdowns as sub-issues
-                </p>
-                <p className="mt-0.5 text-[11px] text-text-tertiary">
-                  When the planner decomposes an imported idea, each task is created as a sub-issue
-                  and reports its own status back.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-text-primary">When both sides changed</p>
-                <p className="mt-0.5 text-[11px] text-text-tertiary">
-                  Auto-resolve merges field by field; Manual review queues each conflict for you.
-                </p>
-              </div>
-              <Segmented
-                options={CONFLICT_OPTIONS}
-                value={conflictMode}
-                onChange={setConflictMode}
-                ariaLabel="Conflict mode"
-              />
-            </div>
-          </>
-        )}
+        <p className="mt-3 border-t border-dashed border-border-primary pt-3 text-[11px] text-text-tertiary">
+          Manual directions wait for you to press “Sync now”.
+        </p>
       </div>
     </div>
   );
@@ -1203,12 +1249,10 @@ export function TrackerWizardModal({
       },
       {
         label: 'Direction',
-        value: twoWay ? 'Two-way' : 'Read only',
-        detail: twoWay
-          ? `Status writes back${mirrorSubissues ? ' · sub-issue mirroring on' : ''} · conflicts ${
-              conflictMode === 'auto' ? 'auto-resolve' : 'queue for review'
-            }`
-          : `Cyboflow never writes to ${meta.name}`,
+        value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
+        detail: `${mirrorSubissues ? 'Sub-issue mirroring on' : 'Sub-issue mirroring off'} · conflicts ${
+          conflictMode === 'auto' ? 'auto-resolve' : 'queue for review'
+        }`,
       },
       {
         label: 'Mapping',
