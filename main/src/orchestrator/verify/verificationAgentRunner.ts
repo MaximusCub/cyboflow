@@ -29,8 +29,9 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access, readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
@@ -39,7 +40,11 @@ import {
   type VerificationReportV1,
   type VerdictV1,
   type RequestStatus,
+  type VerificationModality,
+  type VerificationType,
+  type AttestationSpec,
   normalizeVerificationReportV1,
+  resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
 import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
@@ -53,7 +58,12 @@ import {
   type ProvisionSnapshotOptions,
 } from './snapshotProvisioner';
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
-import { pidFilePath, probeChromiumExecutable } from './driver/driverCore';
+import {
+  attestFilePath,
+  pidFilePath,
+  probeChromiumExecutable,
+  DEFAULT_PEEKABOO_BIN,
+} from './driver/driverCore';
 
 const execFileAsync = promisify(execFile);
 
@@ -183,6 +193,17 @@ export interface VerificationAgentRequest {
    * query falls back to its own default.
    */
   timeoutMs?: number;
+  /**
+   * The §4 roster modality this request runs under, when the SCHEDULER already
+   * resolved one (it owns the `VerificationType` this module never sees — the
+   * agent path historically "never consults verify_type", §3.3). OPTIONAL
+   * today because that scheduler-side plumbing is a follow-up: when absent the
+   * runner derives the modality from the task alone
+   * ({@link resolveRequestModality}). A present value WINS — only the
+   * scheduler can know a request is `native-desktop`/`mobile-flow`, which no
+   * amount of task-shape inspection can recover.
+   */
+  modality?: VerificationModality;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -281,6 +302,34 @@ export interface VerificationAgentRunnerDeps {
    * be affirmative evidence of a squatter).
    */
   portFreeProbe?: (port: number) => Promise<boolean>;
+  /**
+   * §3.5 preflight probe for the `native-screen` modality only: `true` when
+   * this host can actually capture the screen (the retired
+   * `peekabooBackend.healthCheck()` — binary present AND both TCC grants —
+   * is the intended wiring, §4 "Driver additions"). ABSENT means the check
+   * does not run at all rather than fails: the scheduler-side gate already
+   * refuses a `native-screen` request on a host with no capability probe, so
+   * a second, evidence-free failure here would only add noise.
+   */
+  nativeCaptureProbe?: () => Promise<boolean>;
+  /**
+   * The peekaboo binary exported as `VERIFY_PEEKABOO_BIN` for a
+   * `native-screen` request (the driver's `attest window` /
+   * `native-screenshot` commands shell it). Defaults to the bare `peekaboo`
+   * PATH name — the same assumption `peekabooBackend`'s production client
+   * makes.
+   */
+  peekabooBin?: string;
+  /**
+   * Read the driver-written `.driver/attest.json` (§7.1) for this request, or
+   * `null` when it is absent/unreadable/malformed. This is the ONLY
+   * attestation input the runner trusts — the agent's
+   * `VerificationReportV1.attestation` echo is human-facing narrative, and a
+   * model cannot forge a file only the driver CLI writes. FAIL-SOFT by
+   * contract: every "could not read it" answer is `null`, which the floor
+   * treats exactly like "the channel never came up".
+   */
+  readAttestFile?: (artifactsDir: string) => Promise<AttestationRecord | null>;
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
@@ -323,16 +372,46 @@ Environment (already set for your Bash tool):
     "$VERIFY_DRIVER" click <selector>
     "$VERIFY_DRIVER" type <selector> <text...>
     "$VERIFY_DRIVER" screenshot <name> [--viewport WxH]   # writes to VERIFY_ARTIFACTS_DIR
+    "$VERIFY_DRIVER" native-screenshot <name> [--app <appTarget>]  # OS-screen capture
+    "$VERIFY_DRIVER" attest http <urlPath>
+    "$VERIFY_DRIVER" attest dom <selector>
+    "$VERIFY_DRIVER" attest cdp <expression> <expected>
+    "$VERIFY_DRIVER" attest window <titlePattern>
     "$VERIFY_DRIVER" stop
   All driver commands act on ONE persistent browser page across invocations.
 - VERIFY_PORT — when present, bind your dev/preview server to THIS port (the task's
   serve command references it). When absent, the task points at an already-live target.
+- VERIFY_ATTEST_NONCE — a per-request secret. It is what makes an attestation mean
+  something: the surface you verified must hand this exact value back (in the
+  attest http response body, or in the attest dom element's text /
+  data-verify-nonce attribute). A port answering, or a page rendering, proves
+  nothing on its own — a stale server or the user's own running app answers too.
+- VERIFY_MODALITY — "web" | "cdp-app" | "native-screen" | "mobile".
 - CDP-attach mode — when the task's serve has "attach": "cdp", its serve command
   launches the deliverable APP ITSELF exposing a DevTools endpoint on
   VERIFY_DRIVER_PORT (e.g. --remote-debugging-port="$VERIFY_DRIVER_PORT"). Run that
   command, wait for the app window to be up, then drive with the SAME driver
   subcommands — the driver attaches to the app's own web-view (no separate browser,
   and usually no goto: the app window is already the surface under test).
+
+ATTESTATION (required whenever the task carries an "attestation" object):
+- You MUST run the task's attest step and see it SUCCEED before you report
+  outcome "pass". The harness reads the driver's own record of that step, not your
+  word for it — a report claiming "pass" without a successful attest run is
+  rejected as unproven, whatever the screenshots show.
+- Match the channel to the task's spec: kind "http-endpoint" → attest http <urlPath>;
+  "dom-marker" → attest dom <selector>; "cdp-token" → attest cdp <expression> <expected>;
+  "window-identity" → attest window <titlePattern>. Running a DIFFERENT channel than
+  the task declared does not satisfy it.
+- You may echo what you saw in the report's optional "attestation" field
+  ({ "verified": bool, "kind": "...", "detail": "..." }) — that is for humans reading
+  the verdict; it is never treated as proof.
+
+NATIVE-SCREEN IS OBSERVE-ONLY:
+- When VERIFY_MODALITY is "native-screen" the goto/click/type/screenshot commands are
+  REFUSED (driving a native surface has no supported path yet). Use
+  native-screenshot to capture and attest window to prove identity. Any behavior you
+  cannot exercise without driving MUST be reported "not_testable" — never guessed.
 
 Rules:
 `;
@@ -374,7 +453,8 @@ Return a VerificationReportV1 as the structured output:
   "buildLogExcerpt": "<required when outcome is build_failed/launch_failed>",
   "confidence": 0.0-1.0,
   "feedback": "<one-paragraph human summary>",
-  "issues": [{ "severity": "low"|"medium"|"high", "description": "...", "fileName": "shot.png" }]
+  "issues": [{ "severity": "low"|"medium"|"high", "description": "...", "fileName": "shot.png" }],
+  "attestation": { "verified": true, "kind": "http-endpoint", "detail": "<what you saw>" }
 }
 Every screenshots[].fileName MUST be a file you actually wrote to VERIFY_ARTIFACTS_DIR.
 === END HARNESS CONTRACT ===`;
@@ -468,6 +548,239 @@ export function resolveVerifyCodexModel(resolved: ResolvedVerifyAgent): string |
   if (pinned) return pinned;
   if (runProvider === 'codex') return normalizeCodexModelSelection(runModel);
   return undefined;
+}
+
+/**
+ * The `VerificationType` fed to {@link resolveTaskModality} when the runner
+ * must DERIVE a modality from the task alone. `VerificationAgentRequest`
+ * carries no type today (the agent dispatch path "never consults verify_type",
+ * §3.3), and the resolver only uses the type to short-circuit the two
+ * modalities a task shape cannot express — `native-desktop` → `native-screen`
+ * and `mobile-flow` → `mobile`. Passing a web-shaped type therefore hands the
+ * decision entirely to the `serve.attach === 'cdp'` discriminant, which IS
+ * derivable, and leaves the two undertermined modalities to the explicit
+ * declaration channels (`req.modality` from the scheduler, `task.modality`
+ * from the composer).
+ */
+const MODALITY_DERIVATION_TYPE: VerificationType = 'interactive-web-behavior';
+
+/**
+ * Resolve the §4 roster modality for one request, in precedence order:
+ * the SCHEDULER's explicit `req.modality` (it owns the request row's
+ * `VerificationType`, the only source that can say `native-screen`/`mobile`),
+ * then the COMPOSER's `task.modality` declaration, then the task-shape
+ * derivation.
+ *
+ * A declared `web`/`cdp-app` that disagrees with the derivation is LOGGED, not
+ * corrected: the two channels are meant to agree, and a silent override in
+ * either direction would hide a composer bug (a `cdp-app` task composed with
+ * no `attach: 'cdp'` serve drives the wrong surface; a `web` declaration on an
+ * attach task launches a blank chromium). A declared `native-screen`/`mobile`
+ * NEVER logs a mismatch — those are structurally underivable from a task, so
+ * the "disagreement" carries no information.
+ */
+export function resolveRequestModality(
+  req: Pick<VerificationAgentRequest, 'modality' | 'task'>,
+  logger?: LoggerLike,
+): VerificationModality {
+  const derived = resolveTaskModality(MODALITY_DERIVATION_TYPE, req.task);
+  const declared = req.modality ?? req.task.modality;
+  if (declared === undefined) return derived;
+  if ((declared === 'web' || declared === 'cdp-app') && declared !== derived) {
+    logger?.warn('[VerificationAgentRunner] declared modality disagrees with the composed task shape', {
+      declared,
+      derived,
+      attach: req.task.serve?.attach ?? null,
+    });
+  }
+  return declared;
+}
+
+// ---------------------------------------------------------------------------
+// Attestation floor (§7.1 — "no attestation ⇒ no passed")
+// ---------------------------------------------------------------------------
+
+/** Terminal error for a pass the harness could not prove was about THIS deliverable. */
+export const ATTESTATION_MISSING_MESSAGE =
+  "attestation missing/mismatched — could not prove the verified surface is this task's deliverable";
+
+/** Explanatory note attached when a pass is capped for having no attestation channel at all. */
+export const ATTESTATION_UNCAPPED_MESSAGE = 'no attestation channel — pass capped at low_confidence';
+
+/**
+ * The driver-written attestation record, as the runner consumes it (a
+ * structural subset of driverCore's `DriverAttestRecord`, so the file's
+ * contents drop straight in). `kind` is a plain `string` on purpose: an
+ * unrecognized channel name must simply MATCH NO declared spec — the floor
+ * compares it to the task's declared kind, and a value outside the union can
+ * only ever fail that comparison, which is the conservative direction.
+ */
+export interface AttestationRecord {
+  ok: boolean;
+  kind: string;
+  detail: string;
+}
+
+/** What the floor decided about a PASS report's identity proof. */
+export type AttestationFloorOutcome =
+  /** The declared channel came up and matched (or is true by construction). */
+  | { kind: 'verified'; channel: AttestationSpec['kind']; detail: string }
+  /** A channel WAS declared but its driver record is absent or names a different channel. */
+  | { kind: 'missing'; detail: string }
+  /** No channel was declared at all — the pass is advisory, capped at low_confidence. */
+  | { kind: 'uncapped'; detail: string };
+
+/**
+ * The attestation channel a task's proof actually rests on: its own declared
+ * spec, else an IMPLICIT `file-identity` for the degenerate pre-live path
+ * (`target.htmlPath` with nothing to build and nothing to serve). The implicit
+ * case is not a loophole — identity there is true by construction, because the
+ * runner itself owns the path being opened: there is no live process, no port,
+ * and nothing for a stale server or the user's own app to race.
+ *
+ * A `target.url` task gets NO implicit spec: a bare URL is exactly the shape
+ * whose identity cannot be assumed (that URL may be answered by anything).
+ */
+export function effectiveAttestationSpec(task: VerificationTaskV1): AttestationSpec | null {
+  if (task.attestation !== undefined) return task.attestation;
+  const htmlPath = task.target?.htmlPath;
+  const degenerate =
+    typeof htmlPath === 'string' &&
+    htmlPath.trim().length > 0 &&
+    (task.build === undefined || task.build.length === 0) &&
+    task.serve === undefined;
+  return degenerate ? { kind: 'file-identity' } : null;
+}
+
+/**
+ * Apply §7.1's floor to a PASS report, given the effective spec and the
+ * driver-written attestation record.
+ *
+ *  - `file-identity` ⇒ `verified` without consulting any record (see
+ *    {@link effectiveAttestationSpec}).
+ *  - Any other declared spec ⇒ `verified` ONLY when the record exists, says
+ *    `ok:true`, AND names the SAME channel. A record for a different channel
+ *    does not satisfy the declaration: proving a window title says nothing
+ *    about the HTTP endpoint the task said it would prove. Anything else is
+ *    `missing` — §7.1's hard rule, "no attestation ⇒ no `passed`, period".
+ *  - No spec at all ⇒ `uncapped`. This is the one place the proposal's strict
+ *    wording is softened deliberately: a task that never declared a channel
+ *    has not FAILED an identity check, it simply never had one, and failing it
+ *    outright would break every pre-existing bare-`target.url` check. Capping
+ *    it at `low_confidence` keeps the invariant that ONLY a proven surface can
+ *    reach `passed`, while leaving the result advisory rather than blocking.
+ */
+export function evaluateAttestationFloor(
+  spec: AttestationSpec | null,
+  record: AttestationRecord | null,
+): AttestationFloorOutcome {
+  if (spec === null) {
+    return {
+      kind: 'uncapped',
+      detail: 'the composed task declared no attestation channel and is not a degenerate file target',
+    };
+  }
+  if (spec.kind === 'file-identity') {
+    return {
+      kind: 'verified',
+      channel: 'file-identity',
+      detail: 'file-identity: the runner owns the opened path, so identity holds by construction',
+    };
+  }
+  if (record === null) {
+    return {
+      kind: 'missing',
+      detail: `declared channel "${spec.kind}" but the driver wrote no attestation record — the attest step never ran`,
+    };
+  }
+  if (record.kind !== spec.kind) {
+    return {
+      kind: 'missing',
+      detail: `declared channel "${spec.kind}" but the driver's attestation record is for "${record.kind}"`,
+    };
+  }
+  if (!record.ok) {
+    return { kind: 'missing', detail: `channel "${spec.kind}" ran and FAILED: ${record.detail}` };
+  }
+  return { kind: 'verified', channel: spec.kind, detail: record.detail };
+}
+
+/**
+ * §4 fn.² coercion: on `native-screen` — which is observe-only until a native
+ * drive API exists — every behavior the TASK marked `requiresDrive` must land
+ * as `not_testable`, whatever the agent claimed. The agent is told this in the
+ * harness contract, but the harness must not DEPEND on it: a model that
+ * "passed" a click-through it could not possibly have performed is exactly the
+ * fabricated evidence this whole path exists to prevent, and a driver refusal
+ * it papered over is invisible in a screenshot.
+ *
+ * Deliberately does NOT re-derive `report.outcome`. Coercion only ever removes
+ * a claim; letting it turn an agent-reported `fail` back into a `pass` would
+ * be the harness upgrading a verdict on the strength of a rule about what the
+ * agent COULDN'T do. A coerced report still reaches `low_confidence` through
+ * {@link mapReportToResult}'s existing `anyNotTestable && !anyFail` branch,
+ * which is the honest ceiling for a run whose drive-required behaviors were
+ * never exercised.
+ */
+export function coerceDriveUnsupportedBehaviors(
+  report: VerificationReportV1,
+  task: VerificationTaskV1,
+  modality: VerificationModality,
+): { report: VerificationReportV1; coerced: number } {
+  if (modality !== 'native-screen') return { report, coerced: 0 };
+  const driveIds = new Set(task.behaviors.filter((b) => b.requiresDrive === true).map((b) => b.id));
+  if (driveIds.size === 0) return { report, coerced: 0 };
+
+  let coerced = 0;
+  const behaviors = report.behaviors.map((behavior) => {
+    if (!driveIds.has(behavior.id) || behavior.result === 'not_testable') return behavior;
+    coerced += 1;
+    const notes = behavior.evidence.notes.trim();
+    return {
+      ...behavior,
+      result: 'not_testable' as const,
+      evidence: {
+        ...behavior.evidence,
+        notes: notes.length > 0 ? `${notes}\ncoerced: drive-unsupported` : 'coerced: drive-unsupported',
+      },
+    };
+  });
+  return coerced > 0 ? { report: { ...report, behaviors }, coerced } : { report, coerced: 0 };
+}
+
+/**
+ * Fold an `uncapped` floor outcome into an otherwise-passing result: `passed`
+ * becomes `low_confidence`, with the reason on both the errorMessage and the
+ * verdict feedback (the merge gate reads the status; a human reads the
+ * feedback). A result that is ALREADY non-`passed` is returned untouched — it
+ * has either failed outright or been demoted for its own reason, and
+ * `low_confidence` is the cap this outcome asks for, not a floor to raise it
+ * to.
+ *
+ * `low_confidence` ADVANCES the lane as advisory (mergeGateLaneAdvance), which
+ * is the point: a degenerate URL check with no provable identity stays useful
+ * without being allowed to assert an identity it cannot prove.
+ */
+function applyAttestationCap(
+  result: VerificationAgentRunResult,
+  floor: AttestationFloorOutcome | null,
+): VerificationAgentRunResult {
+  if (floor === null || floor.kind !== 'uncapped' || result.status !== 'passed') return result;
+  const note = `${ATTESTATION_UNCAPPED_MESSAGE} (${floor.detail})`;
+  return {
+    ...result,
+    status: 'low_confidence',
+    ...(result.verdict
+      ? {
+          verdict: {
+            ...result.verdict,
+            status: 'low_confidence',
+            feedback: `${result.verdict.feedback}\n\n${note}`,
+          },
+        }
+      : {}),
+    errorMessage: note,
+  };
 }
 
 /** Compose the agent's user prompt from the task: the JSON payload plus a short framing. */
@@ -582,6 +895,32 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
  * this module's import.
  */
 const defaultResolveChromium = (): Promise<string | null> => probeChromiumExecutable();
+
+/**
+ * Read `<artifactsDir>/.driver/attest.json` (§7.1). FAIL-SOFT to `null` on
+ * EVERY unhappy path — absent file, unreadable, unparseable, or a shape that
+ * is not the driver's record — because the floor's answer for "no usable
+ * record" is identical to its answer for "the channel never came up", and a
+ * throw here would turn a provable verification failure into an unexplained
+ * runner crash. The path is resolved through driverCore's own
+ * {@link attestFilePath} so writer and reader can never drift.
+ */
+const defaultReadAttestFile = async (artifactsDir: string): Promise<AttestationRecord | null> => {
+  try {
+    const raw = await readFile(attestFilePath(artifactsDir), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.ok !== 'boolean' || typeof record.kind !== 'string') return null;
+    return {
+      ok: record.ok,
+      kind: record.kind,
+      detail: typeof record.detail === 'string' ? record.detail : '',
+    };
+  } catch {
+    return null;
+  }
+};
 
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
   try {
@@ -699,19 +1038,28 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
    * pair (p, p+1), so that arithmetic recovers the pool slot for a non-serving
    * task without widening {@link VerificationAgentRequest}.
    */
-  private async preflight(req: VerificationAgentRequest): Promise<AgentPreflightResult> {
+  private async preflight(
+    req: VerificationAgentRequest,
+    modality: VerificationModality,
+  ): Promise<AgentPreflightResult> {
+    const nativeCaptureProbe = this.deps.nativeCaptureProbe;
     return runAgentPreflight(
       {
         resolveNode: this.deps.resolveNode,
         resolveChromium: this.deps.resolveChromium ?? defaultResolveChromium,
         fileExists: this.deps.fileExists ?? defaultFileExists,
         portFreeProbe: this.deps.portFreeProbe ?? (async () => true),
+        // Passed through only when wired: an ABSENT probe means the
+        // 'native-capture' check does not run at all (see the dep's doc), so
+        // no default may be substituted here.
+        ...(nativeCaptureProbe ? { nativeCaptureProbe } : {}),
       },
       {
         task: req.task,
         driverCliPath: this.deps.driverCliPath,
         leasedPort: req.verifyPort ?? req.verifyDriverPort - 1,
         driverPort: req.verifyDriverPort,
+        modality,
       },
     );
   }
@@ -726,12 +1074,17 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   async run(req: VerificationAgentRequest): Promise<VerificationAgentRunResult> {
     const logger = this.deps.logger;
 
+    // (a) The §4 roster modality — resolved FIRST because everything below
+    // keys on it: which preflight checks apply, which env the agent gets, and
+    // whether drive-required behaviors are coerced out of the report.
+    const modality = resolveRequestModality(req, logger);
+
     // (a0) §3.5 preflight — the cheap host check, BEFORE any spend. A failure
     // returns immediately with NO snapshot and NO deploy; `deployed:false` tells
     // the scheduler not to charge the budget, and the carried `preflight` is the
     // harness-derived evidence the §3.1 classifier needs to call the resulting
     // terminal `'env'` (an advancing skip) rather than a lane-blocking FAIL.
-    const preflight = await this.preflight(req);
+    const preflight = await this.preflight(req, modality);
     if (!preflight.ok) {
       const failed = preflight.checks.filter((c) => !c.ok);
       logger?.warn('[VerificationAgentRunner] preflight failed; skipping without deploy', {
@@ -842,6 +1195,16 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         VERIFY_ARTIFACTS_DIR: req.artifactsDir,
         VERIFY_DRIVER_PORT: String(req.verifyDriverPort),
         VERIFY_DRIVER: driverScriptPath,
+        // §7.1: the per-REQUEST identity secret. Minted fresh here (never
+        // reused, never derived from anything the deliverable could guess) so
+        // that a surface handing it back cannot be a stale server, a warm
+        // cache, or the user's own running app — only something this request's
+        // serve step injected can carry it.
+        VERIFY_ATTEST_NONCE: randomUUID(),
+        VERIFY_MODALITY: modality,
+        ...(modality === 'native-screen'
+          ? { VERIFY_PEEKABOO_BIN: this.deps.peekabooBin ?? DEFAULT_PEEKABOO_BIN }
+          : {}),
         ...(req.verifyPort !== null ? { VERIFY_PORT: String(req.verifyPort) } : {}),
         // CDP-attach mode (task.serve.attach === 'cdp'): the serve command
         // launches the app under test exposing CDP on VERIFY_DRIVER_PORT, so the
@@ -929,7 +1292,20 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           ...deployedProvenance,
         };
       }
-      const report = normalized.report;
+      // (d1) §4 fn.² native-screen coercion — applied BEFORE any verdict
+      // mapping so every downstream branch (the attestation floor, the
+      // mutation demotion, the not_testable→low_confidence rule) sees the same
+      // honest behavior set. A claimed pass/fail on a behavior the driver would
+      // have REFUSED to drive is not evidence of anything.
+      const { report, coerced } = coerceDriveUnsupportedBehaviors(normalized.report, req.task, modality);
+      if (coerced > 0) {
+        logger?.info('[VerificationAgentRunner] coerced drive-required behaviors to not_testable', {
+          runId: req.runId,
+          requestId: req.requestId,
+          modality,
+          coerced,
+        });
+      }
 
       // Every screenshots[].fileName must be a BARE basename that exists in the
       // artifacts dir (mirrors cyboflow_report_artifact's safety rules).
@@ -953,6 +1329,49 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
       }
 
+      // (d2) §7.1 ATTESTATION FLOOR — evaluated on the PASS path only, and
+      // BEFORE the mutation check, because "we cannot prove this was your
+      // deliverable" outranks every other demotion: a low_confidence for a
+      // mutated snapshot still ADVANCES the lane, so a surface that was never
+      // identified must fail first rather than be softened into an advance.
+      //
+      // The record is read from the DRIVER'S file — never `report.attestation`,
+      // which is the agent's own narrative echo. That asymmetry is the whole
+      // point of §7.1: the harness must not accept a model's word that it
+      // proved something.
+      let floor: AttestationFloorOutcome | null = null;
+      if (report.outcome === 'pass') {
+        const spec = effectiveAttestationSpec(req.task);
+        // Only a channel that needs proving costs a read: `file-identity` is
+        // true by construction and "no spec" has nothing to look for.
+        const record =
+          spec !== null && spec.kind !== 'file-identity'
+            ? await (this.deps.readAttestFile ?? defaultReadAttestFile)(req.artifactsDir)
+            : null;
+        floor = evaluateAttestationFloor(spec, record);
+        if (floor.kind === 'missing') {
+          // Terminal FAIL, not a skip. The §3.1 classifier sees a report
+          // outcome of 'pass' (not 'fail'), so this lands 'ambiguous' — which
+          // REMAINS BLOCKING. That is §7.1's stated posture: without
+          // foreign-occupancy evidence a missing attestation is ambiguous and
+          // blocks, and calling it 'env' would advance the lane on a
+          // verification that proved nothing.
+          logger?.warn('[VerificationAgentRunner] attestation floor rejected a pass report', {
+            runId: req.runId,
+            requestId: req.requestId,
+            modality,
+            detail: floor.detail,
+          });
+          return {
+            status: 'failed',
+            errorMessage: `${ATTESTATION_MISSING_MESSAGE} (${floor.detail})`,
+            report,
+            fileNames: report.screenshots.map((s) => s.fileName),
+            ...deployedProvenance,
+          };
+        }
+      }
+
       // (e) Post-run mutation check — snapshot mode only (the fallback worktree is
       // expected to be dirty). A tracked-source mutation demotes to low_confidence.
       let mutated = false;
@@ -963,7 +1382,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
 
       // mapReportToResult already stamps deployed:true + provisionMode; the
       // preflight rides along so the scheduler persists it on EVERY terminal.
-      return { ...mapReportToResult(report, mode, mutated, verdictModel), preflight };
+      // The report is persisted AS-IS (including the agent's own attestation
+      // echo) — the floor changes the verdict, never the record of what the
+      // agent said.
+      return {
+        ...applyAttestationCap(mapReportToResult(report, mode, mutated, verdictModel), floor),
+        preflight,
+      };
     } catch (err) {
       // The outer catch can fire before OR after the deploy; `deployedProvenance`
       // is not in scope here, so budget attribution falls back to the honest

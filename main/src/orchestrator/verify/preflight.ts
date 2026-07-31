@@ -47,11 +47,14 @@
  * case the deploy can proceed, or it wasn't, in which case nothing downstream
  * can run at all — the driver wrapper cannot even be written).
  */
-import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type {
+  VerificationTaskV1,
+  VerificationModality,
+} from '../../../../shared/types/visualVerification';
 
 /** One preflight check's outcome. Only checks that RAN appear in {@link AgentPreflightResult.checks}. */
 export interface PreflightCheckResult {
-  id: 'node' | 'chromium' | 'driver-cli' | 'port-free' | 'driver-port-free';
+  id: 'node' | 'chromium' | 'driver-cli' | 'port-free' | 'driver-port-free' | 'native-capture';
   ok: boolean;
   /** Bounded human-readable detail — what was resolved, or why the check failed / was inconclusive. */
   detail: string;
@@ -79,6 +82,22 @@ export interface AgentPreflightDeps {
   fileExists: (absPath: string) => Promise<boolean>;
   /** `true` when nothing is listening on `port` (a connect attempt was refused/timed out); `false` when something answered — a squatter. */
   portFreeProbe: (port: number) => Promise<boolean>;
+  /**
+   * `true` when this host can actually capture the screen for the
+   * `native-screen` modality — binary present AND both macOS TCC grants
+   * (Screen Recording + Accessibility), i.e. the retired
+   * `peekabooBackend.healthCheck()` reused as the live grant probe (§4,
+   * "Driver additions for native-screen").
+   *
+   * OPTIONAL, and absence is NOT a failure: an unwired probe means the
+   * 'native-capture' check is simply NOT RUN. The scheduler-side capability
+   * gate already refuses to enqueue a `native-screen` request on a host with
+   * no proven capture capability, so a second, evidence-free failure here
+   * would add a check that can only fire where the request should never have
+   * arrived. A throw is INCONCLUSIVE (fail-open), like every probe but
+   * `resolveNode`.
+   */
+  nativeCaptureProbe?: () => Promise<boolean>;
 }
 
 function errorDetail(err: unknown): string {
@@ -127,6 +146,40 @@ async function checkChromium(deps: AgentPreflightDeps): Promise<PreflightCheckRe
   }
 }
 
+/**
+ * 'native-capture' — applicable ONLY when the request's modality is
+ * `'native-screen'` AND a {@link AgentPreflightDeps.nativeCaptureProbe} is
+ * wired. Every other modality drives a browser surface and never touches the
+ * screen-capture grants, so running it there would be noise; an unwired probe
+ * omits the check entirely (see the dep's doc for why an unwired probe is not
+ * a failure).
+ *
+ * An AFFIRMATIVE `false` fails it — that is the harness-derived fact "this
+ * host cannot capture the screen", which is exactly the §3.1 `'env'` evidence
+ * a native-screen skip needs. A THROW is inconclusive ⇒ `ok:true`, the same
+ * fail-open rule the chromium/file/port probes follow: an unanswerable probe
+ * must never be the reason a lane advances on an unrun verification.
+ */
+async function checkNativeCapture(probe: () => Promise<boolean>): Promise<PreflightCheckResult> {
+  try {
+    const capable = await probe();
+    if (!capable) {
+      return {
+        id: 'native-capture',
+        ok: false,
+        detail: 'native screen capture unavailable (probe returned false — binary missing or a TCC grant declined)',
+      };
+    }
+    return { id: 'native-capture', ok: true, detail: 'native screen capture available' };
+  } catch (err) {
+    return {
+      id: 'native-capture',
+      ok: true,
+      detail: `native-capture probe inconclusive (fail-open): ${errorDetail(err)}`,
+    };
+  }
+}
+
 /** 'driver-cli' — ALWAYS applicable: the bundled driver CLI entrypoint must exist before the runner can spawn it. A `fileExists` throw is inconclusive (fail-open). */
 async function checkDriverCli(deps: AgentPreflightDeps, driverCliPath: string): Promise<PreflightCheckResult> {
   try {
@@ -169,16 +222,27 @@ async function checkPortFree(
 
 /**
  * Run every APPLICABLE preflight check for a composed task, in order:
- * node → chromium (conditional) → driver-cli → port-free (conditional) →
- * driver-port-free. See each check's own doc for its applicability rule.
- * `ok` is the conjunction of every check that RAN; an inapplicable check is
- * simply absent from `checks`, never counted for or against `ok`.
+ * node → chromium (conditional) → native-capture (conditional) → driver-cli →
+ * port-free (conditional) → driver-port-free. See each check's own doc for its
+ * applicability rule. `ok` is the conjunction of every check that RAN; an
+ * inapplicable check is simply absent from `checks`, never counted for or
+ * against `ok`.
+ *
+ * `modality` (§4 roster) is OPTIONAL: it gates only the `native-capture`
+ * check, so a caller that has not yet resolved a modality runs exactly the
+ * pre-roster check set.
  */
 export async function runAgentPreflight(
   deps: AgentPreflightDeps,
-  args: { task: VerificationTaskV1; driverCliPath: string; leasedPort: number; driverPort: number },
+  args: {
+    task: VerificationTaskV1;
+    driverCliPath: string;
+    leasedPort: number;
+    driverPort: number;
+    modality?: VerificationModality;
+  },
 ): Promise<AgentPreflightResult> {
-  const { task, driverCliPath, leasedPort, driverPort } = args;
+  const { task, driverCliPath, leasedPort, driverPort, modality } = args;
   const isAttachCdp = task.serve?.attach === 'cdp';
   const checks: PreflightCheckResult[] = [];
 
@@ -186,6 +250,10 @@ export async function runAgentPreflight(
 
   if (!isAttachCdp) {
     checks.push(await checkChromium(deps));
+  }
+
+  if (modality === 'native-screen' && deps.nativeCaptureProbe) {
+    checks.push(await checkNativeCapture(deps.nativeCaptureProbe));
   }
 
   checks.push(await checkDriverCli(deps, driverCliPath));

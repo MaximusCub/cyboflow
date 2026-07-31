@@ -90,6 +90,24 @@ export const VERIFICATION_REPORT_JSON_SCHEMA: Record<string, unknown> = {
         },
       },
     },
+    // OPTIONAL (absent from `required`): the agent's human-facing ECHO of the
+    // attestation it ran (§7.1). Shaped strictly — `kind` is the closed
+    // AttestationSpec union, so a malformed echo is caught at the SDK boundary
+    // rather than in normalization — but never load-bearing: the runner's
+    // attestation verdict comes from the DRIVER-written state file, and this
+    // field only ever reaches a human reading the verdict.
+    attestation: {
+      type: 'object',
+      required: ['verified', 'kind', 'detail'],
+      properties: {
+        verified: { type: 'boolean' },
+        kind: {
+          type: 'string',
+          enum: ['http-endpoint', 'dom-marker', 'cdp-token', 'window-identity', 'file-identity'],
+        },
+        detail: { type: 'string' },
+      },
+    },
   },
 };
 

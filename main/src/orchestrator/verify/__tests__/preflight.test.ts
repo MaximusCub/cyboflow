@@ -197,3 +197,73 @@ describe('runAgentPreflight — affirmative failures', () => {
     expect(result.checks).toHaveLength(5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 'native-capture' — the §4 roster's modality-gated check
+// ---------------------------------------------------------------------------
+
+describe("runAgentPreflight — 'native-capture' applicability", () => {
+  const task = makeTask({ target: { url: 'https://example.com' } });
+
+  it('runs ONLY for modality native-screen, and only when a probe is wired', async () => {
+    const probe = async (): Promise<boolean> => true;
+    const wired = await runAgentPreflight(happyDeps({ nativeCaptureProbe: probe }), {
+      task,
+      ...ARGS,
+      modality: 'native-screen',
+    });
+    expect(checkFor(wired, 'native-capture')?.ok).toBe(true);
+    expect(wired.ok).toBe(true);
+
+    for (const modality of ['web', 'cdp-app', 'mobile'] as const) {
+      const other = await runAgentPreflight(happyDeps({ nativeCaptureProbe: probe }), {
+        task,
+        ...ARGS,
+        modality,
+      });
+      expect(checkFor(other, 'native-capture')).toBeUndefined();
+    }
+  });
+
+  it('is omitted entirely when no modality is supplied (the pre-roster check set)', async () => {
+    const result = await runAgentPreflight(happyDeps({ nativeCaptureProbe: async () => false }), {
+      task,
+      ...ARGS,
+    });
+    expect(checkFor(result, 'native-capture')).toBeUndefined();
+    expect(result.ok).toBe(true);
+  });
+
+  it('an ABSENT probe means the check does not run — never a failure (the scheduler gate already blocked it)', async () => {
+    const result = await runAgentPreflight(happyDeps(), { task, ...ARGS, modality: 'native-screen' });
+    expect(checkFor(result, 'native-capture')).toBeUndefined();
+    expect(result.ok).toBe(true);
+  });
+
+  it('an affirmative false FAILS the check (the harness-derived env evidence)', async () => {
+    const result = await runAgentPreflight(happyDeps({ nativeCaptureProbe: async () => false }), {
+      task,
+      ...ARGS,
+      modality: 'native-screen',
+    });
+    const check = checkFor(result, 'native-capture');
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toMatch(/probe returned false/);
+    expect(result.ok).toBe(false);
+  });
+
+  it('a THROWING probe is INCONCLUSIVE (ok:true) — the same fail-open rule as every other probe', async () => {
+    const result = await runAgentPreflight(
+      happyDeps({
+        nativeCaptureProbe: async () => {
+          throw new Error('peekaboo wedged');
+        },
+      }),
+      { task, ...ARGS, modality: 'native-screen' },
+    );
+    const check = checkFor(result, 'native-capture');
+    expect(check?.ok).toBe(true);
+    expect(check?.detail).toMatch(/inconclusive/i);
+    expect(result.ok).toBe(true);
+  });
+});

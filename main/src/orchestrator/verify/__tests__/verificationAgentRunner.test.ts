@@ -16,6 +16,12 @@ import {
   resolveVerifyProvider,
   resolveVerifyCodexModel,
   mapReportToResult,
+  resolveRequestModality,
+  effectiveAttestationSpec,
+  evaluateAttestationFloor,
+  coerceDriveUnsupportedBehaviors,
+  ATTESTATION_MISSING_MESSAGE,
+  ATTESTATION_UNCAPPED_MESSAGE,
   type VerificationAgentRunnerDeps,
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
@@ -46,10 +52,17 @@ function makeAgent(overrides: Partial<EffectiveAgent> = {}): EffectiveAgent {
   };
 }
 
+/**
+ * The default fixture is a PROPERLY ATTESTED task. §7.1's floor caps any pass
+ * whose identity was never proven, so a fixture with no attestation channel
+ * could never reach `passed` — the unattested / mismatched / degenerate shapes
+ * are driven explicitly by the floor suite below instead.
+ */
 function makeTask(overrides: Partial<VerificationTaskV1> = {}): VerificationTaskV1 {
   return {
     version: 1,
     summary: 'verify the widget',
+    attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
     behaviors: [{ id: 'b1', description: 'renders', expected: 'the widget is visible' }],
     ...overrides,
   };
@@ -101,6 +114,7 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   codexQuery: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
   writeTranscript: ReturnType<typeof vi.fn>;
+  readAttestFile: ReturnType<typeof vi.fn>;
 } {
   const dispose = vi.fn(async () => {});
   const stopDriver = vi.fn(async () => {});
@@ -108,6 +122,14 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   const codexQuery = vi.fn(async () => makeOutcome(validReport()));
   const warn = vi.fn();
   const writeTranscript = vi.fn(async () => {});
+  // §7.1: a driver-written record that MATCHES the default fixture's declared
+  // channel. Injected (never the real fs reader) so the suite never touches
+  // disk and every floor branch is driven explicitly.
+  const readAttestFile = vi.fn(async () => ({
+    ok: true,
+    kind: 'http-endpoint',
+    detail: 'endpoint returned this request nonce',
+  }));
   const provision = vi.fn(
     async (): Promise<SnapshotProvision> => ({ worktreePath: '/snap', sha: 'abc123', dispose }),
   );
@@ -137,9 +159,19 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     stopDriver,
     reapBrowser: vi.fn(),
     writeTranscript,
+    readAttestFile,
     ...overrides,
   };
-  return { runner: new VerificationAgentRunner(deps), dispose, stopDriver, query, codexQuery, warn, writeTranscript };
+  return {
+    runner: new VerificationAgentRunner(deps),
+    dispose,
+    stopDriver,
+    query,
+    codexQuery,
+    warn,
+    writeTranscript,
+    readAttestFile,
+  };
 }
 
 beforeEach(() => {
@@ -770,5 +802,349 @@ describe('VerificationAgentRunner.run — §3.5 preflight', () => {
     expect(result.status).toBe('passed');
     expect(query).toHaveBeenCalledTimes(1);
     expect((result.preflight?.checks ?? []).some((c) => c.id === 'chromium')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §4 roster — modality resolution
+// ---------------------------------------------------------------------------
+
+describe('resolveRequestModality', () => {
+  it('derives web from a plain task and cdp-app from an attach:cdp serve', () => {
+    expect(resolveRequestModality({ task: makeTask() })).toBe('web');
+    expect(
+      resolveRequestModality({ task: makeTask({ serve: { cmd: 'electron .', attach: 'cdp' } }) }),
+    ).toBe('cdp-app');
+  });
+
+  it("honors the composer's declared task.modality over the derivation", () => {
+    expect(resolveRequestModality({ task: makeTask({ modality: 'native-screen' }) })).toBe('native-screen');
+  });
+
+  it("the scheduler's req.modality WINS over the task declaration (only it knows the VerificationType)", () => {
+    const req = { modality: 'native-screen' as const, task: makeTask({ modality: 'web' }) };
+    expect(resolveRequestModality(req)).toBe('native-screen');
+  });
+
+  it('logs — but does not override — a web/cdp-app declaration that disagrees with the task shape', () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
+    const resolved = resolveRequestModality(
+      { task: makeTask({ modality: 'cdp-app' }) }, // no attach:'cdp' serve ⇒ derives 'web'
+      logger,
+    );
+    expect(resolved).toBe('cdp-app');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('NEVER logs a mismatch for native-screen/mobile — those are structurally underivable from a task', () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
+    resolveRequestModality({ task: makeTask({ modality: 'native-screen' }) }, logger);
+    resolveRequestModality({ task: makeTask({ modality: 'mobile' }) }, logger);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7.1 attestation floor — pure helpers
+// ---------------------------------------------------------------------------
+
+describe('effectiveAttestationSpec', () => {
+  it('returns the task\'s own declared spec', () => {
+    expect(effectiveAttestationSpec(makeTask())).toEqual({
+      kind: 'http-endpoint',
+      urlPath: '/__cyboflow_verify__',
+    });
+  });
+
+  it('implies file-identity for the degenerate htmlPath task (no build, no serve)', () => {
+    const task = makeTask({ attestation: undefined, target: { htmlPath: '/tmp/out.html' } });
+    expect(effectiveAttestationSpec(task)).toEqual({ kind: 'file-identity' });
+  });
+
+  it('does NOT imply file-identity once the task builds or serves', () => {
+    const built = makeTask({
+      attestation: undefined,
+      target: { htmlPath: '/tmp/out.html' },
+      build: ['pnpm build'],
+    });
+    expect(effectiveAttestationSpec(built)).toBeNull();
+    const served = makeTask({
+      attestation: undefined,
+      target: { htmlPath: '/tmp/out.html' },
+      serve: { cmd: 'pnpm dev' },
+    });
+    expect(effectiveAttestationSpec(served)).toBeNull();
+  });
+
+  it('gives a bare target.url NOTHING — that is exactly the shape whose identity cannot be assumed', () => {
+    expect(effectiveAttestationSpec(makeTask({ attestation: undefined, target: { url: 'http://x' } }))).toBeNull();
+  });
+});
+
+describe('evaluateAttestationFloor', () => {
+  it('file-identity is verified by construction, with no record consulted', () => {
+    expect(evaluateAttestationFloor({ kind: 'file-identity' }, null)).toMatchObject({ kind: 'verified' });
+  });
+
+  it('a matching ok record verifies the declared channel', () => {
+    const outcome = evaluateAttestationFloor(
+      { kind: 'cdp-token', expression: 'window.__B__', expected: 'sha' },
+      { ok: true, kind: 'cdp-token', detail: 'matched' },
+    );
+    expect(outcome).toEqual({ kind: 'verified', channel: 'cdp-token', detail: 'matched' });
+  });
+
+  it('a MISSING record, a FAILED record, and a record for a DIFFERENT channel all read as missing', () => {
+    const spec = { kind: 'http-endpoint', urlPath: '/x' } as const;
+    expect(evaluateAttestationFloor(spec, null).kind).toBe('missing');
+    expect(evaluateAttestationFloor(spec, { ok: false, kind: 'http-endpoint', detail: 'no nonce' }).kind).toBe('missing');
+    expect(evaluateAttestationFloor(spec, { ok: true, kind: 'window-identity', detail: 'title' }).kind).toBe('missing');
+  });
+
+  it('no spec at all is uncapped (advisory), never missing', () => {
+    expect(evaluateAttestationFloor(null, null).kind).toBe('uncapped');
+    expect(evaluateAttestationFloor(null, { ok: true, kind: 'dom-marker', detail: 'x' }).kind).toBe('uncapped');
+  });
+});
+
+describe('coerceDriveUnsupportedBehaviors', () => {
+  const task = makeTask({
+    behaviors: [
+      { id: 'b1', description: 'renders', expected: 'visible' },
+      { id: 'b2', description: 'click opens the menu', expected: 'menu shown', requiresDrive: true },
+    ],
+  });
+  const report = validReport({
+    behaviors: [
+      { id: 'b1', result: 'pass', evidence: { screenshots: [], notes: 'looks right' } },
+      { id: 'b2', result: 'pass', evidence: { screenshots: [], notes: 'clicked it' } },
+    ],
+  });
+
+  it('is a no-op on every modality but native-screen', () => {
+    for (const modality of ['web', 'cdp-app', 'mobile'] as const) {
+      const out = coerceDriveUnsupportedBehaviors(report, task, modality);
+      expect(out.coerced).toBe(0);
+      expect(out.report).toBe(report);
+    }
+  });
+
+  it('forces requiresDrive behaviors to not_testable with a coercion note, leaving the others alone', () => {
+    const out = coerceDriveUnsupportedBehaviors(report, task, 'native-screen');
+    expect(out.coerced).toBe(1);
+    expect(out.report.behaviors[0]).toEqual(report.behaviors[0]);
+    expect(out.report.behaviors[1].result).toBe('not_testable');
+    expect(out.report.behaviors[1].evidence.notes).toContain('coerced: drive-unsupported');
+    expect(out.report.behaviors[1].evidence.notes).toContain('clicked it');
+  });
+
+  it('never re-derives outcome — a coerced report keeps whatever the normalizer already settled', () => {
+    const failing = validReport({
+      outcome: 'fail',
+      behaviors: [{ id: 'b2', result: 'fail', evidence: { screenshots: [], notes: '' } }],
+    });
+    const out = coerceDriveUnsupportedBehaviors(failing, task, 'native-screen');
+    expect(out.report.outcome).toBe('fail');
+    expect(out.report.behaviors[0].result).toBe('not_testable');
+  });
+
+  it('leaves an already-not_testable behavior untouched (nothing to coerce)', () => {
+    const already = validReport({
+      behaviors: [{ id: 'b2', result: 'not_testable', evidence: { screenshots: [], notes: 'n/a' } }],
+    });
+    const out = coerceDriveUnsupportedBehaviors(already, task, 'native-screen');
+    expect(out.coerced).toBe(0);
+    expect(out.report).toBe(already);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run() — the §7.1 attestation floor end to end
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner.run — §7.1 attestation floor', () => {
+  it('a declared channel with a MATCHING driver record leaves the pass alone', async () => {
+    const { runner, readAttestFile } = makeRunner();
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect(result.verdict?.status).toBe('pass');
+    expect(readAttestFile).toHaveBeenCalledWith('/artifacts');
+  });
+
+  it('a declared channel with NO driver record FAILS the pass (no attestation ⇒ no passed)', async () => {
+    const { runner } = makeRunner({ readAttestFile: async () => null });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('the attest step never ran');
+    // The report is still persisted verbatim — the floor changes the verdict,
+    // never the record of what the agent said.
+    expect(result.report?.outcome).toBe('pass');
+  });
+
+  it('a driver record that FAILED, or that names a DIFFERENT channel, fails the same way', async () => {
+    const failed = makeRunner({
+      readAttestFile: async () => ({ ok: false, kind: 'http-endpoint', detail: 'body had no nonce' }),
+    });
+    const a = await failed.runner.run(makeReq());
+    expect(a.status).toBe('failed');
+    expect(a.errorMessage).toContain('body had no nonce');
+
+    const wrongChannel = makeRunner({
+      readAttestFile: async () => ({ ok: true, kind: 'window-identity', detail: 'matched a title' }),
+    });
+    const b = await wrongChannel.runner.run(makeReq());
+    expect(b.status).toBe('failed');
+    expect(b.errorMessage).toContain('window-identity');
+  });
+
+  it('a missing attestation OUTRANKS the mutation demotion — failed, not low_confidence', async () => {
+    const { runner } = makeRunner({
+      readAttestFile: async () => null,
+      checkSnapshotMutated: async () => true,
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+  });
+
+  it('a task with NO channel caps its pass at low_confidence, without reading any record', async () => {
+    const { runner, readAttestFile } = makeRunner();
+    const result = await runner.run(
+      makeReq({ task: makeTask({ attestation: undefined, target: { url: 'http://127.0.0.1:29260' } }) }),
+    );
+    expect(result.status).toBe('low_confidence');
+    expect(result.verdict?.status).toBe('low_confidence');
+    expect(result.errorMessage).toContain(ATTESTATION_UNCAPPED_MESSAGE);
+    expect(result.verdict?.feedback).toContain(ATTESTATION_UNCAPPED_MESSAGE);
+    expect(readAttestFile).not.toHaveBeenCalled();
+  });
+
+  it('the degenerate htmlPath task passes unchanged — identity holds by construction', async () => {
+    const { runner, readAttestFile } = makeRunner();
+    const result = await runner.run(
+      makeReq({ task: makeTask({ attestation: undefined, target: { htmlPath: '/tmp/out.html' } }) }),
+    );
+    expect(result.status).toBe('passed');
+    expect(readAttestFile).not.toHaveBeenCalled();
+  });
+
+  it('the floor never runs on a non-pass report — a fail stays a judged fail, not an attestation error', async () => {
+    const { runner, readAttestFile } = makeRunner({
+      readAttestFile: vi.fn(async () => null),
+      query: async () =>
+        makeOutcome(
+          validReport({
+            outcome: 'fail',
+            behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'missing' } }],
+          }),
+        ),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('failed');
+    expect(result.verdict?.status).toBe('fail');
+    expect(result.errorMessage).toBeUndefined();
+    expect(readAttestFile).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run() — native-screen: env, coercion, and the preflight capture probe
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner.run — §4 modality plumbing', () => {
+  it('exports a per-request VERIFY_ATTEST_NONCE and VERIFY_MODALITY on every run', async () => {
+    const first = makeRunner();
+    await first.runner.run(makeReq());
+    const envA = first.query.mock.calls[0][0].env;
+    expect(envA.VERIFY_MODALITY).toBe('web');
+    expect(typeof envA.VERIFY_ATTEST_NONCE).toBe('string');
+    expect(envA.VERIFY_ATTEST_NONCE.length).toBeGreaterThan(16);
+
+    const second = makeRunner();
+    await second.runner.run(makeReq());
+    // Per-REQUEST: a reused nonce would let a stale surface from an earlier
+    // request answer this one's attestation.
+    expect(second.query.mock.calls[0][0].env.VERIFY_ATTEST_NONCE).not.toBe(envA.VERIFY_ATTEST_NONCE);
+  });
+
+  it('reports VERIFY_MODALITY=cdp-app for an attach:cdp task', async () => {
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ task: makeTask({ serve: { cmd: 'electron .', attach: 'cdp' } }) }));
+    expect(query.mock.calls[0][0].env.VERIFY_MODALITY).toBe('cdp-app');
+  });
+
+  it('exports VERIFY_PEEKABOO_BIN ONLY on native-screen (default `peekaboo`, overridable)', async () => {
+    const web = makeRunner();
+    await web.runner.run(makeReq());
+    expect(web.query.mock.calls[0][0].env.VERIFY_PEEKABOO_BIN).toBeUndefined();
+
+    const native = makeRunner();
+    await native.runner.run(makeReq({ modality: 'native-screen' }));
+    const nativeEnv = native.query.mock.calls[0][0].env;
+    expect(nativeEnv.VERIFY_MODALITY).toBe('native-screen');
+    expect(nativeEnv.VERIFY_PEEKABOO_BIN).toBe('peekaboo');
+
+    const pinned = makeRunner({ peekabooBin: '/opt/peekaboo' });
+    await pinned.runner.run(makeReq({ modality: 'native-screen' }));
+    expect(pinned.query.mock.calls[0][0].env.VERIFY_PEEKABOO_BIN).toBe('/opt/peekaboo');
+  });
+
+  it('coerces a claimed pass on a requiresDrive behavior to not_testable on native-screen (⇒ low_confidence)', async () => {
+    const task = makeTask({
+      behaviors: [
+        { id: 'b1', description: 'renders', expected: 'visible' },
+        { id: 'b2', description: 'click opens the menu', expected: 'menu shown', requiresDrive: true },
+      ],
+    });
+    const { runner } = makeRunner({
+      query: async () =>
+        makeOutcome(
+          validReport({
+            behaviors: [
+              { id: 'b1', result: 'pass', evidence: { screenshots: ['s.png'], notes: 'ok' } },
+              { id: 'b2', result: 'pass', evidence: { screenshots: ['s.png'], notes: 'clicked' } },
+            ],
+          }),
+        ),
+    });
+    const result = await runner.run(makeReq({ task, modality: 'native-screen' }));
+
+    expect(result.status).toBe('low_confidence');
+    const b2 = result.report?.behaviors.find((b) => b.id === 'b2');
+    expect(b2?.result).toBe('not_testable');
+    expect(b2?.evidence.notes).toContain('coerced: drive-unsupported');
+    // The observable behavior is untouched.
+    expect(result.report?.behaviors.find((b) => b.id === 'b1')?.result).toBe('pass');
+  });
+
+  it('does NOT coerce the same task on a web modality', async () => {
+    const task = makeTask({
+      behaviors: [{ id: 'b1', description: 'click', expected: 'menu', requiresDrive: true }],
+    });
+    const { runner } = makeRunner();
+    const result = await runner.run(makeReq({ task, modality: 'web' }));
+    expect(result.status).toBe('passed');
+    expect(result.report?.behaviors[0].result).toBe('pass');
+  });
+
+  it('threads modality + nativeCaptureProbe into preflight: a false probe skips before any deploy', async () => {
+    const { runner, query } = makeRunner({ nativeCaptureProbe: async () => false });
+    const result = await runner.run(makeReq({ modality: 'native-screen' }));
+
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    const failed = (result.preflight?.checks ?? []).filter((c) => !c.ok).map((c) => c.id);
+    expect(failed).toEqual(['native-capture']);
+  });
+
+  it('never runs the native-capture check for a web request, even with a failing probe wired', async () => {
+    const { runner } = makeRunner({ nativeCaptureProbe: async () => false });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed');
+    expect((result.preflight?.checks ?? []).some((c) => c.id === 'native-capture')).toBe(false);
   });
 });

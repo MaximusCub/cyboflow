@@ -5,6 +5,10 @@
  * real command dispatch (connect-first-then-launch fallback, one-page reuse
  * across separate invocations, arg parsing, screenshot name sanitization,
  * pid-file plumbing, and stop's CDP-then-SIGKILL fallback).
+ *
+ * The attestation (§7.1) and native-screen (§4 fn.²) suites extend the same
+ * seam: `httpGet` / `runPeekaboo` / `writeAttestFile` are fakes too, so no
+ * socket is dialled and no peekaboo binary is spawned.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -12,12 +16,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Browser } from 'playwright';
 import {
+  attestFilePath,
   createDefaultDriverDeps,
+  extractWindowTitles,
+  NATIVE_SCREEN_DRIVE_REFUSAL,
   parseArgv,
   pidFilePath,
   runDriverCommand,
   sanitizeScreenshotName,
   USAGE,
+  type DriverAttestRecord,
   type DriverDeps,
 } from '../driverCore';
 
@@ -36,6 +44,12 @@ interface FakeCalls {
   viewports: Array<{ width: number; height: number }>;
   screenshots: string[];
   browserClosed: number;
+  httpGets: string[];
+  peekaboo: Array<{ bin: string; args: string[] }>;
+  attestWrites: Array<{ path: string; record: DriverAttestRecord }>;
+  textContents: string[];
+  attributes: Array<{ selector: string; name: string }>;
+  evaluates: string[];
 }
 
 function freshCalls(): FakeCalls {
@@ -48,10 +62,23 @@ function freshCalls(): FakeCalls {
     viewports: [],
     screenshots: [],
     browserClosed: 0,
+    httpGets: [],
+    peekaboo: [],
+    attestWrites: [],
+    textContents: [],
+    attributes: [],
+    evaluates: [],
   };
 }
 
-function makeFakePage(calls: FakeCalls) {
+/** What the fake page reports back for the DOM/CDP attestation channels. */
+interface FakePageData {
+  text?: string | null;
+  attr?: string | null;
+  evaluateResult?: unknown;
+}
+
+function makeFakePage(calls: FakeCalls, data: FakePageData = {}) {
   return {
     async goto(url: string): Promise<{ ok: () => boolean; status: () => number } | null> {
       calls.gotos.push(url);
@@ -65,7 +92,19 @@ function makeFakePage(calls: FakeCalls) {
         async fill(text: string): Promise<void> {
           calls.fills.push({ selector, text });
         },
+        async textContent(): Promise<string | null> {
+          calls.textContents.push(selector);
+          return data.text ?? null;
+        },
+        async getAttribute(name: string): Promise<string | null> {
+          calls.attributes.push({ selector, name });
+          return data.attr ?? null;
+        },
       };
+    },
+    async evaluate(expression: string): Promise<unknown> {
+      calls.evaluates.push(expression);
+      return data.evaluateResult;
     },
     async setViewportSize(size: { width: number; height: number }): Promise<void> {
       calls.viewports.push(size);
@@ -80,7 +119,7 @@ function makeFakePage(calls: FakeCalls) {
 /** A browser whose contexts/pages persist for the LIFETIME of this object — the
  * fixture that lets a test assert "one living page" is reused across two
  * SEPARATE runDriverCommand() calls that share a CDP connection. */
-function makeFakeBrowser(calls: FakeCalls) {
+function makeFakeBrowser(calls: FakeCalls, data: FakePageData = {}) {
   const contexts: Array<{ pages: () => unknown[]; newPage: () => Promise<unknown> }> = [];
   return {
     contexts: () => contexts,
@@ -91,7 +130,7 @@ function makeFakeBrowser(calls: FakeCalls) {
         pages: () => pages,
         async newPage() {
           calls.newPages += 1;
-          const page = makeFakePage(calls);
+          const page = makeFakePage(calls, data);
           pages.push(page);
           return page;
         },
@@ -105,8 +144,12 @@ function makeFakeBrowser(calls: FakeCalls) {
   };
 }
 
-function makeDeps(calls: FakeCalls, overrides: Partial<DriverDeps> = {}): DriverDeps {
-  const browser = makeFakeBrowser(calls);
+function makeDeps(
+  calls: FakeCalls,
+  overrides: Partial<DriverDeps> = {},
+  data: FakePageData = {},
+): DriverDeps {
+  const browser = makeFakeBrowser(calls, data);
   return {
     connectOverCDP: vi.fn(async () => browser as unknown as Browser),
     resolveChromiumExecutable: vi.fn(async () => '/fake/chromium'),
@@ -119,6 +162,17 @@ function makeDeps(calls: FakeCalls, overrides: Partial<DriverDeps> = {}): Driver
     ensureDir: vi.fn(async () => {}),
     isProcessAlive: vi.fn(() => true),
     killPid: vi.fn(() => {}),
+    httpGet: vi.fn(async (url: string) => {
+      calls.httpGets.push(url);
+      return { status: 200, body: '' };
+    }),
+    runPeekaboo: vi.fn(async (bin: string, args: string[]) => {
+      calls.peekaboo.push({ bin, args });
+      return '[]';
+    }),
+    writeAttestFile: vi.fn(async (path: string, record: DriverAttestRecord) => {
+      calls.attestWrites.push({ path, record });
+    }),
     stdout: () => {},
     stderr: () => {},
     ...overrides,
@@ -126,6 +180,17 @@ function makeDeps(calls: FakeCalls, overrides: Partial<DriverDeps> = {}): Driver
 }
 
 const ENV = { VERIFY_DRIVER_PORT: '9333', VERIFY_ARTIFACTS_DIR: '/tmp/verify-artifacts' };
+
+/** The per-request identity secret the runner exports; every attest channel checks for it. */
+const NONCE = 'nonce-abc-123';
+const ATTEST_ENV = { ...ENV, VERIFY_PORT: '29260', VERIFY_ATTEST_NONCE: NONCE };
+const NATIVE_ENV = { ...ENV, VERIFY_MODALITY: 'native-screen' };
+
+/** The single attest record written by the run under test (exactly one is expected). */
+function soleAttestRecord(calls: FakeCalls): DriverAttestRecord {
+  expect(calls.attestWrites).toHaveLength(1);
+  return calls.attestWrites[0].record;
+}
 
 // ---------------------------------------------------------------------------
 // parseArgv — all five commands + bad args
@@ -570,6 +635,442 @@ describe('runDriverCommand — stop', () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseArgv — the attestation + native-screen surface (§7.1 / §4 fn.²)
+// ---------------------------------------------------------------------------
+
+describe('parseArgv — attest', () => {
+  it('parses each channel with its exact arity', () => {
+    expect(parseArgv(['attest', 'http', '/__cyboflow_verify__'])).toEqual({
+      ok: true,
+      command: { kind: 'attest', channel: 'http', urlPath: '/__cyboflow_verify__' },
+    });
+    expect(parseArgv(['attest', 'dom', '#verify-marker'])).toEqual({
+      ok: true,
+      command: { kind: 'attest', channel: 'dom', selector: '#verify-marker' },
+    });
+    expect(parseArgv(['attest', 'cdp', 'window.__BUILD__', 'sha-1'])).toEqual({
+      ok: true,
+      command: { kind: 'attest', channel: 'cdp', expression: 'window.__BUILD__', expected: 'sha-1' },
+    });
+    expect(parseArgv(['attest', 'window', 'Cyboflow.*'])).toEqual({
+      ok: true,
+      command: { kind: 'attest', channel: 'window', titlePattern: 'Cyboflow.*' },
+    });
+  });
+
+  it('rejects wrong arity per channel — an attest argument is a comparison target, never joined free text', () => {
+    expect(parseArgv(['attest', 'http'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'http', '/a', '/b'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'dom'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'cdp', 'window.__BUILD__'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'cdp', 'a', 'b', 'c'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'window'])).toMatchObject({ ok: false });
+  });
+
+  it('rejects a missing or unknown channel', () => {
+    expect(parseArgv(['attest'])).toMatchObject({ ok: false });
+    expect(parseArgv(['attest', 'telepathy', 'x'])).toMatchObject({ ok: false });
+  });
+});
+
+describe('parseArgv — native-screenshot', () => {
+  it('parses a bare name and sanitizes it like the CDP screenshot does', () => {
+    expect(parseArgv(['native-screenshot', '../evil'])).toEqual({
+      ok: true,
+      command: { kind: 'native-screenshot', name: 'evil.png', appTarget: undefined },
+    });
+  });
+
+  it('parses an --app target', () => {
+    expect(parseArgv(['native-screenshot', 'window', '--app', 'Cyboflow'])).toEqual({
+      ok: true,
+      command: { kind: 'native-screenshot', name: 'window.png', appTarget: 'Cyboflow' },
+    });
+  });
+
+  it('rejects a missing name, a valueless --app, and an unknown flag', () => {
+    expect(parseArgv(['native-screenshot'])).toMatchObject({ ok: false });
+    expect(parseArgv(['native-screenshot', 'x', '--app'])).toMatchObject({ ok: false });
+    expect(parseArgv(['native-screenshot', 'x', '--bogus'])).toMatchObject({ ok: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attest http — the `web` channel (§7.1): the serve step's injected route must
+// hand back THIS request's nonce.
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — attest http', () => {
+  it('passes when the endpoint returns the nonce: exit 0, attest.json ok:true, no browser touched', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      httpGet: vi.fn(async (url: string) => {
+        calls.httpGets.push(url);
+        return { status: 200, body: `{"nonce":"${NONCE}"}` };
+      }),
+    });
+    const exitCode = await runDriverCommand(['attest', 'http', '/__cyboflow_verify__'], ATTEST_ENV, deps);
+
+    expect(exitCode).toBe(0);
+    expect(calls.httpGets).toEqual(['http://127.0.0.1:29260/__cyboflow_verify__']);
+    expect(calls.attestWrites[0].path).toBe(attestFilePath(ENV.VERIFY_ARTIFACTS_DIR));
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: true, kind: 'http-endpoint' });
+    expect(record.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // The identity check never needs a page — an attach-mode deliverable has none.
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a urlPath given without a leading slash', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      httpGet: vi.fn(async (url: string) => {
+        calls.httpGets.push(url);
+        return { status: 200, body: NONCE };
+      }),
+    });
+    await runDriverCommand(['attest', 'http', '__verify__'], ATTEST_ENV, deps);
+    expect(calls.httpGets).toEqual(['http://127.0.0.1:29260/__verify__']);
+  });
+
+  it('FAILS when the endpoint answers but the body does not carry the nonce (the false-ready case)', async () => {
+    const calls = freshCalls();
+    const stderrLines: string[] = [];
+    const deps = makeDeps(calls, {
+      httpGet: vi.fn(async () => ({ status: 200, body: 'some other app' })),
+      stderr: (l) => stderrLines.push(l),
+    });
+    const exitCode = await runDriverCommand(['attest', 'http', '/__verify__'], ATTEST_ENV, deps);
+
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: false, kind: 'http-endpoint' });
+    expect(stderrLines.join('\n')).toMatch(/does not carry this request's nonce/);
+  });
+
+  it('FAILS on a non-2xx response', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, { httpGet: vi.fn(async () => ({ status: 404, body: NONCE })) });
+    const exitCode = await runDriverCommand(['attest', 'http', '/__verify__'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: false });
+    expect(soleAttestRecord(calls).detail).toMatch(/HTTP 404/);
+  });
+
+  it('records a THROWN probe as ok:false rather than exiting with no file at all', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      httpGet: vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    });
+    const exitCode = await runDriverCommand(['attest', 'http', '/__verify__'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record.ok).toBe(false);
+    expect(record.detail).toMatch(/probe failed/);
+    expect(record.detail).toMatch(/ECONNREFUSED/);
+  });
+
+  it('FAILS (with a record) when VERIFY_ATTEST_NONCE or VERIFY_PORT is missing', async () => {
+    const noNonce = freshCalls();
+    expect(
+      await runDriverCommand(['attest', 'http', '/x'], { ...ENV, VERIFY_PORT: '29260' }, makeDeps(noNonce)),
+    ).toBe(1);
+    expect(soleAttestRecord(noNonce).detail).toMatch(/VERIFY_ATTEST_NONCE/);
+
+    const noPort = freshCalls();
+    expect(
+      await runDriverCommand(['attest', 'http', '/x'], { ...ENV, VERIFY_ATTEST_NONCE: NONCE }, makeDeps(noPort)),
+    ).toBe(1);
+    expect(soleAttestRecord(noPort).detail).toMatch(/VERIFY_PORT/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attest dom — the `web` fallback channel: the nonce lives in the rendered DOM.
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — attest dom', () => {
+  it('passes when the element TEXT carries the nonce', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { text: `build ${NONCE}` });
+    const exitCode = await runDriverCommand(['attest', 'dom', '#marker'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: true, kind: 'dom-marker' });
+    expect(calls.textContents).toEqual(['#marker']);
+  });
+
+  it('passes when only the data-verify-nonce ATTRIBUTE carries it', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { text: 'nothing useful', attr: NONCE });
+    const exitCode = await runDriverCommand(['attest', 'dom', '#marker'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(calls.attributes).toEqual([{ selector: '#marker', name: 'data-verify-nonce' }]);
+    expect(soleAttestRecord(calls).ok).toBe(true);
+  });
+
+  it('FAILS when neither text nor attribute carries the nonce', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { text: 'some other app', attr: 'stale-nonce' });
+    const exitCode = await runDriverCommand(['attest', 'dom', '#marker'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: false, kind: 'dom-marker' });
+  });
+
+  it('records ok:false (never a bare crash) when the page cannot be reached at all', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      connectOverCDP: vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    });
+    const exitCode = await runDriverCommand(['attest', 'dom', '#marker'], { ...ATTEST_ENV, VERIFY_DRIVER_ATTACH_ONLY: '1' }, deps);
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: false, kind: 'dom-marker' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attest cdp — the `cdp-app` channel: the ONLY one that covers attach mode.
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — attest cdp', () => {
+  it('passes when the evaluated expression stringifies to the expected token, in ATTACH mode', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { evaluateResult: 'sha-deadbeef' });
+    const exitCode = await runDriverCommand(
+      ['attest', 'cdp', 'window.__CYBOFLOW_BUILD__', 'sha-deadbeef'],
+      { ...ATTEST_ENV, VERIFY_DRIVER_ATTACH_ONLY: '1' },
+      deps,
+    );
+    expect(exitCode).toBe(0);
+    expect(calls.evaluates).toEqual(['window.__CYBOFLOW_BUILD__']);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: true, kind: 'cdp-token' });
+    // Attach mode: attached, never launched.
+    expect(deps.spawnDetachedChromium).not.toHaveBeenCalled();
+  });
+
+  it('FAILS on a mismatched token', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { evaluateResult: 'sha-other' });
+    const exitCode = await runDriverCommand(
+      ['attest', 'cdp', 'window.__CYBOFLOW_BUILD__', 'sha-deadbeef'],
+      ATTEST_ENV,
+      deps,
+    );
+    expect(exitCode).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: false, kind: 'cdp-token' });
+    expect(record.detail).toMatch(/sha-other/);
+  });
+
+  it('FAILS when the expression evaluates to undefined (no build stamp exposed)', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {}, { evaluateResult: undefined });
+    const exitCode = await runDriverCommand(['attest', 'cdp', 'window.__X__', 'sha-1'], ATTEST_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// attest window — the `native-screen` channel (weakest, per §7.1).
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — attest window', () => {
+  const listing = JSON.stringify({ windows: [{ title: 'Finder' }, { title: 'Cyboflow — main' }] });
+
+  it('passes on a matching window title, shells the peekaboo bin from env, never touches CDP', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      runPeekaboo: vi.fn(async (bin: string, args: string[]) => {
+        calls.peekaboo.push({ bin, args });
+        return listing;
+      }),
+    });
+    const exitCode = await runDriverCommand(
+      ['attest', 'window', 'Cyboflow'],
+      { ...NATIVE_ENV, VERIFY_PEEKABOO_BIN: '/opt/peekaboo' },
+      deps,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(calls.peekaboo).toEqual([{ bin: '/opt/peekaboo', args: ['list', 'windows', '--json'] }]);
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: true, kind: 'window-identity' });
+    // §7.1 requires the weakness to be recorded on the verdict, not implied.
+    expect(record.detail).toContain('window-identity (weakest channel)');
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bare `peekaboo` PATH name when VERIFY_PEEKABOO_BIN is unset', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      runPeekaboo: vi.fn(async (bin: string, args: string[]) => {
+        calls.peekaboo.push({ bin, args });
+        return listing;
+      }),
+    });
+    await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps);
+    expect(calls.peekaboo[0].bin).toBe('peekaboo');
+  });
+
+  it('FAILS when no listed window title matches, and still records the weakest-channel detail', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, { runPeekaboo: vi.fn(async () => listing) });
+    const exitCode = await runDriverCommand(['attest', 'window', 'SomeOtherApp'], NATIVE_ENV, deps);
+    expect(exitCode).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: false, kind: 'window-identity' });
+    expect(record.detail).toContain('window-identity (weakest channel)');
+  });
+
+  it('records a missing/failing peekaboo binary as ok:false', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      runPeekaboo: vi.fn(async () => {
+        throw new Error('spawn peekaboo ENOENT');
+      }),
+    });
+    const exitCode = await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(soleAttestRecord(calls).detail).toMatch(/ENOENT/);
+  });
+});
+
+describe('extractWindowTitles', () => {
+  it('collects titles from a nested JSON listing', () => {
+    const stdout = JSON.stringify({ data: { windows: [{ window_title: 'A' }, { title: 'B' }] } });
+    expect(extractWindowTitles(stdout)).toEqual(expect.arrayContaining(['A', 'B']));
+  });
+
+  it('falls back to one title per line when the output is not JSON', () => {
+    expect(extractWindowTitles('Finder\n  Cyboflow — main  \n\n')).toEqual(['Finder', 'Cyboflow — main']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// native-screenshot — the only OBSERVE path for native-screen (§4 fn.²)
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — native-screenshot', () => {
+  it('captures into VERIFY_ARTIFACTS_DIR with peekaboo image --path, no --app when none is named', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const exitCode = await runDriverCommand(['native-screenshot', 'home'], NATIVE_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(calls.peekaboo).toEqual([
+      { bin: 'peekaboo', args: ['image', '--path', join(ENV.VERIFY_ARTIFACTS_DIR, 'home.png')] },
+    ]);
+    expect(deps.ensureDir).toHaveBeenCalledWith(ENV.VERIFY_ARTIFACTS_DIR);
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+  });
+
+  it('passes an --app target through in peekabooBackend\'s own flag order', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    await runDriverCommand(['native-screenshot', 'app', '--app', 'Cyboflow'], NATIVE_ENV, deps);
+    expect(calls.peekaboo[0].args).toEqual([
+      'image',
+      '--app',
+      'Cyboflow',
+      '--path',
+      join(ENV.VERIFY_ARTIFACTS_DIR, 'app.png'),
+    ]);
+  });
+
+  it('is allowed regardless of attach mode (it never touches the browser)', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const exitCode = await runDriverCommand(['native-screenshot', 'home'], { ...ATTACH_ENV, VERIFY_MODALITY: 'native-screen' }, deps);
+    expect(exitCode).toBe(0);
+    expect(calls.peekaboo).toHaveLength(1);
+  });
+
+  it('exits non-zero with the peekaboo error when the capture fails', async () => {
+    const calls = freshCalls();
+    const stderrLines: string[] = [];
+    const deps = makeDeps(calls, {
+      runPeekaboo: vi.fn(async () => {
+        throw new Error('peekaboo exited 1: screen recording not granted');
+      }),
+      stderr: (l) => stderrLines.push(l),
+    });
+    const exitCode = await runDriverCommand(['native-screenshot', 'home'], NATIVE_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(stderrLines.join('\n')).toMatch(/screen recording not granted/);
+  });
+
+  it('requires VERIFY_ARTIFACTS_DIR but NOT a driver port (no CDP surface exists)', async () => {
+    const withoutPort = freshCalls();
+    const okDeps = makeDeps(withoutPort);
+    expect(
+      await runDriverCommand(
+        ['native-screenshot', 'home'],
+        { VERIFY_ARTIFACTS_DIR: ENV.VERIFY_ARTIFACTS_DIR, VERIFY_MODALITY: 'native-screen' },
+        okDeps,
+      ),
+    ).toBe(0);
+
+    const withoutDir = freshCalls();
+    const failDeps = makeDeps(withoutDir);
+    expect(await runDriverCommand(['native-screenshot', 'home'], { VERIFY_MODALITY: 'native-screen' }, failDeps)).toBe(1);
+    expect(withoutDir.peekaboo).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// native-screen DRIVE GUARD (§4 fn.²) — observe-only, refused loudly
+// ---------------------------------------------------------------------------
+
+describe('runDriverCommand — native-screen drive guard', () => {
+  const driveCommands: string[][] = [
+    ['goto', 'https://example.com'],
+    ['click', '#submit'],
+    ['type', '#input', 'hello'],
+    ['screenshot', 'home'],
+  ];
+
+  for (const argv of driveCommands) {
+    it(`refuses \`${argv[0]}\` under VERIFY_MODALITY=native-screen, before any CDP connect`, async () => {
+      const calls = freshCalls();
+      const stderrLines: string[] = [];
+      const deps = makeDeps(calls, { stderr: (l) => stderrLines.push(l) });
+      const exitCode = await runDriverCommand(argv, NATIVE_ENV, deps);
+
+      expect(exitCode).toBe(1);
+      expect(stderrLines.join('\n')).toContain(NATIVE_SCREEN_DRIVE_REFUSAL);
+      expect(deps.connectOverCDP).not.toHaveBeenCalled();
+      expect(deps.spawnDetachedChromium).not.toHaveBeenCalled();
+      expect(calls.gotos).toEqual([]);
+      expect(calls.clicks).toEqual([]);
+      expect(calls.fills).toEqual([]);
+      expect(calls.screenshots).toEqual([]);
+    });
+  }
+
+  it('leaves the same commands working on every OTHER modality', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    expect(await runDriverCommand(['goto', 'https://example.com'], { ...ENV, VERIFY_MODALITY: 'web' }, deps)).toBe(0);
+    expect(calls.gotos).toEqual(['https://example.com']);
+  });
+
+  it('still permits attest window and native-screenshot — the native-screen surface', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls, { runPeekaboo: vi.fn(async () => JSON.stringify([{ title: 'Cyboflow' }])) });
+    expect(await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps)).toBe(0);
+    expect(await runDriverCommand(['native-screenshot', 'home'], NATIVE_ENV, deps)).toBe(0);
+  });
+
+  it('stop is unaffected (teardown must always run)', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    expect(await runDriverCommand(['stop'], NATIVE_ENV, deps)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // pid-file write/read — real fs via createDefaultDriverDeps, still NO browser
 // ---------------------------------------------------------------------------
 
@@ -614,6 +1115,23 @@ describe('createDefaultDriverDeps — pid file + process helpers (no browser tou
     const { writeFile } = await import('node:fs/promises');
     await writeFile(path, 'not-a-pid', 'utf8');
     expect(await deps.readPidFile(path)).toBeNull();
+  });
+
+  it('attestFilePath sits beside browser.pid in the SAME driver dotdir', () => {
+    expect(attestFilePath(artifactsDir)).toBe(join(artifactsDir, '.driver', 'attest.json'));
+  });
+
+  it('writeAttestFile creates the dotdir and writes a record the runner can parse back', async () => {
+    const deps = createDefaultDriverDeps();
+    const record: DriverAttestRecord = {
+      ok: true,
+      kind: 'cdp-token',
+      detail: 'matched',
+      at: '2026-07-30T00:00:00.000Z',
+    };
+    await deps.writeAttestFile(attestFilePath(artifactsDir), record);
+    const { readFile } = await import('node:fs/promises');
+    expect(JSON.parse(await readFile(attestFilePath(artifactsDir), 'utf8'))).toEqual(record);
   });
 
   it('isProcessAlive/killPid operate on real pids without spawning a browser', () => {
