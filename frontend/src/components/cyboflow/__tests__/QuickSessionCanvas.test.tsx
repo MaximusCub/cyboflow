@@ -451,6 +451,10 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(screen.getByTestId('quick-session-history-list')).toBeInTheDocument();
     expect(node).toHaveTextContent('Summary & History');
     expect(node).toHaveTextContent('2 sittings');
+    // History-only is the OTHER "either gate true" permutation (showHistoryCard
+    // true, showSummaryBlock false) — prove it also yields the middle node's
+    // full two-edge wiring, not just the summary-enabled case above.
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
   });
 
   it('header label + sitting count: summary-only omits "History" and any sitting count; a single entry reads "1 sitting" not "1 sittings"', () => {
