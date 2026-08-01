@@ -116,6 +116,42 @@ export async function captureSnapshotSha(runWorktreePath: string, gitExec: GitEx
   return out.trim();
 }
 
+/**
+ * Is the portable runbook half VISIBLE AT `HEAD` of the run worktree — i.e.
+ * would the detached snapshot the verifier builds from actually contain it?
+ *
+ * `git cat-file -e HEAD:<path>` asks exactly that question, and asks it of the
+ * commit rather than the index or the working tree: a runbook that is written,
+ * or even staged, but not committed is invisible to a snapshot at a sha.
+ *
+ * WHY THIS CHECK EXISTS. Plenty of repos ignore or locally-exclude `.cyboflow/`
+ * — it is where cyboflow puts worktrees and local state — so a plain
+ * `git add .cyboflow/verify-runbook.json` in the setup flow's prove step is a
+ * SILENT no-op there (observed live 2026-07-31 on a project whose
+ * `.git/info/exclude` carried `.cyboflow/`). The registration then succeeds
+ * against the working-tree file, the proof runs against a snapshot with no
+ * runbook in it, and the failure surfaces far away from its cause. Answering
+ * "no" here turns that into one legible sentence at the moment the flow can
+ * still fix it with `git add -f`.
+ *
+ * Fail-soft to `false` on ANY error (not a repo, no HEAD yet, git missing): the
+ * caller uses this to attach a warning, never to fail a registration, and an
+ * unanswerable question is reported as "could not confirm", which is what a
+ * false says here.
+ */
+export async function isRunbookCommittedAtHead(
+  runWorktreePath: string,
+  relativePath: string,
+  gitExec: GitExec = defaultGitExec,
+): Promise<boolean> {
+  try {
+    await gitExec(['cat-file', '-e', `HEAD:${relativePath}`], runWorktreePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Dependency-dir provisioning (clone-into-snapshot)
 // ---------------------------------------------------------------------------

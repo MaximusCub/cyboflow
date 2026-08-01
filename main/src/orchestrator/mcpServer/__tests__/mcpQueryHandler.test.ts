@@ -5749,6 +5749,51 @@ describe('McpQueryHandler — mcp-register-verify-runbook', () => {
     expect(row.host_fingerprint_json).toBe('host-fp-1');
   });
 
+  // COMMITTED-AT-HEAD backstop (live dogfood 2026-07-31). registerDraft reads the
+  // WORKING TREE, but the proof builds a detached snapshot at a commit — and many
+  // repos ignore or locally-exclude `.cyboflow/`, which makes `git add` on the
+  // runbook a silent no-op. Without this, the flow registers happily and the
+  // proof fails ten minutes later against a snapshot with no runbook in it.
+  it('warns with committed:false when the runbook never reached HEAD', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK)); // worktree is not a git repo at all
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-1c', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    // Advisory only — the registration itself is valid and stands.
+    expect(response.ok).toBe(true);
+    const data = response.data as { hash: string; version: number; committed: boolean; warning?: string };
+    expect(data.version).toBe(1);
+    expect(data.committed).toBe(false);
+    expect(data.warning).toContain('git add -f');
+  });
+
+  it('reports committed:true with no warning once the runbook is present at HEAD', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+    // A real repo whose exclude carries `.cyboflow/` — the observed condition —
+    // with the runbook force-added past it, which is the documented fix.
+    execFileSync('git', ['init', '-q'], { cwd: worktree });
+    execFileSync('git', ['config', 'user.email', 'test@cyboflow.dev'], { cwd: worktree });
+    execFileSync('git', ['config', 'user.name', 'Cyboflow Test'], { cwd: worktree });
+    writeFileSync(join(worktree, '.git', 'info', 'exclude'), '.cyboflow/\n', 'utf8');
+    execFileSync('git', ['add', '-f', VERIFY_RUNBOOK_RELATIVE_PATH], { cwd: worktree });
+    execFileSync('git', ['commit', '-q', '-m', 'add runbook'], { cwd: worktree });
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-1d', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+
+    const data = parseLastWrite(writes).data as { committed: boolean; warning?: string };
+    expect(data.committed).toBe(true);
+    expect(data.warning).toBeUndefined();
+  });
+
   it('re-registering edited content bumps the CAS version and changes the hash', async () => {
     writeRunbook(JSON.stringify(VALID_RUNBOOK));
     const first = makeSocketDouble();

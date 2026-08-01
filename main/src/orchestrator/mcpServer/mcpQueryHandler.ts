@@ -140,9 +140,9 @@ import {
   VerificationScheduler,
 } from '../verify/verificationScheduler';
 import { prepareVerificationEnqueue } from '../verify/enqueueFromTask';
-import { captureSnapshotSha } from '../verify/snapshotProvisioner';
+import { captureSnapshotSha, isRunbookCommittedAtHead } from '../verify/snapshotProvisioner';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
-import { isVerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
+import { isVerifyRunbookModality, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
 import {
   FALLBACK_CHAINS,
   isVerificationType,
@@ -4791,11 +4791,35 @@ export class McpQueryHandler {
         });
         return;
       }
+      // COMMITTED-AT-HEAD backstop. registerDraft reads the WORKING TREE, but
+      // the proof runs against a detached snapshot at a commit — so a runbook
+      // that never reached HEAD registers cleanly and then proves against a
+      // snapshot that does not contain it. The common cause is mundane and
+      // silent: many repos ignore or locally-exclude `.cyboflow/` (it is where
+      // cyboflow keeps worktrees and local state), which makes a plain
+      // `git add .cyboflow/verify-runbook.json` a no-op (observed live
+      // 2026-07-31). Surface it here, where the flow can still fix it with
+      // `git add -f`, rather than letting it resurface as an inexplicable proof
+      // failure ten minutes later. Advisory only — the registration itself is
+      // valid and stands.
+      const committed = await isRunbookCommittedAtHead(worktreePath, VERIFY_RUNBOOK_RELATIVE_PATH);
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { hash: result.hash, version: result.version },
+        data: {
+          hash: result.hash,
+          version: result.version,
+          committed,
+          ...(committed
+            ? {}
+            : {
+                warning:
+                  `${VERIFY_RUNBOOK_RELATIVE_PATH} is not present at HEAD, so the proof's detached ` +
+                  'snapshot will not contain it. Commit it before proving — if `git add` appears to ' +
+                  'do nothing, this project ignores or excludes `.cyboflow/`, so use `git add -f`.',
+              }),
+        },
       });
     } catch (err) {
       // registerDraft is total by contract; this is the belt-and-braces path so a

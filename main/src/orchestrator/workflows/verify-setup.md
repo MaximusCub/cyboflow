@@ -142,6 +142,15 @@ Now, and only now, touch the repo. In order:
    (`chore: add verification runbook`). The runbook must be committed before you
    prove it: the verifier runs in a **detached snapshot at a commit**, so an
    uncommitted runbook is invisible to it.
+
+   **`git add` on this path can silently do nothing.** Plenty of projects ignore
+   or locally-exclude `.cyboflow/` — it is where cyboflow keeps worktrees and
+   local state — and `git add` on an ignored path is a no-op that reports
+   success. Stage it with `git add -f .cyboflow/verify-runbook.json`, and confirm
+   the commit really contains it with
+   `git cat-file -e HEAD:.cyboflow/verify-runbook.json`. Registration re-checks
+   this and hands back `committed: false` with a warning if you missed it; treat
+   that as a blocker on proving, not a note.
 2. **Register each approved modality:**
 
    ```
@@ -153,9 +162,16 @@ Now, and only now, touch the repo. In order:
 
    It reads and validates `.cyboflow/verify-runbook.json` from this run's
    worktree, registers (or refreshes) the machine-local draft record, and returns
-   `{ hash, version }` — the content-addressed portable hash and the CAS version
-   of the machine-local half. Quote both in your summary; they are the identity
-   every later request is pinned to.
+   `{ hash, version, committed }` — the content-addressed portable hash, the CAS
+   version of the machine-local half, and whether the file is actually present at
+   `HEAD`. Quote the hash and version in your summary; they are the identity every
+   later request is pinned to. If `committed` is false, fix that (see step 1) and
+   register again before proving — the proof would otherwise run against a
+   snapshot with no runbook in it.
+
+   A validation error names the exact path it failed on
+   (`modalities["web"].serve.cmd: expected non-empty string`). Fix that field;
+   do not re-derive the runbook from scratch over a shape error.
 3. **Prove each modality by running it.** Compose the proof task **FROM the
    runbook you just wrote** — not from anything you remember or would prefer —
    and fire it as a setup proof:

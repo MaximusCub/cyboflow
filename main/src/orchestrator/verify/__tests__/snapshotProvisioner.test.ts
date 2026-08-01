@@ -24,12 +24,14 @@ import * as path from 'node:path';
 import { withTempDir } from '../../../__test_fixtures__/tmp';
 import {
   captureSnapshotSha,
+  isRunbookCommittedAtHead,
   provisionSnapshot,
   findDependencyDirs,
   resolveDefaultDepPreparer,
   SnapshotProvisionError,
 } from '../snapshotProvisioner';
 import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
+import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -105,6 +107,45 @@ describe('snapshotProvisioner', () => {
 
         expect(sha).toBe(expected);
         expect(sha).toMatch(/^[0-9a-f]{40}$/);
+      });
+    });
+  });
+
+  // The `.cyboflow/` exclude collision (live dogfood 2026-07-31): many repos
+  // ignore or locally-exclude `.cyboflow/`, so `git add` on the runbook path is
+  // a no-op that reports success, the registration reads the working tree
+  // happily, and the proof then builds a snapshot with no runbook in it.
+  describe('isRunbookCommittedAtHead', () => {
+    it('is true when the runbook is present at HEAD', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        await initFixtureRepo(dir);
+        await fsPromises.mkdir(path.join(dir, '.cyboflow'), { recursive: true });
+        await fsPromises.writeFile(path.join(dir, VERIFY_RUNBOOK_RELATIVE_PATH), '{"version":1}');
+        git(dir, ['add', '-f', VERIFY_RUNBOOK_RELATIVE_PATH]);
+        git(dir, ['commit', '-q', '-m', 'add runbook']);
+
+        expect(await isRunbookCommittedAtHead(dir, VERIFY_RUNBOOK_RELATIVE_PATH)).toBe(true);
+      });
+    });
+
+    it('is false for a runbook written but never committed (the excluded-path case)', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        await initFixtureRepo(dir);
+        // Exactly the observed condition: the path is excluded, so `git add`
+        // succeeds while staging nothing at all.
+        await fsPromises.appendFile(path.join(dir, '.git', 'info', 'exclude'), '\n.cyboflow/\n');
+        await fsPromises.mkdir(path.join(dir, '.cyboflow'), { recursive: true });
+        await fsPromises.writeFile(path.join(dir, VERIFY_RUNBOOK_RELATIVE_PATH), '{"version":1}');
+        git(dir, ['add', '.']);
+        git(dir, ['commit', '-q', '--allow-empty', '-m', 'add runbook (or so it looked)']);
+
+        expect(await isRunbookCommittedAtHead(dir, VERIFY_RUNBOOK_RELATIVE_PATH)).toBe(false);
+      });
+    });
+
+    it('fails soft to false outside a git repo', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        expect(await isRunbookCommittedAtHead(dir, VERIFY_RUNBOOK_RELATIVE_PATH)).toBe(false);
       });
     });
   });
