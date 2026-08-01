@@ -386,6 +386,23 @@ describe('QuickSessionCanvas — session summary + history', () => {
     ).toBeInTheDocument();
   });
 
+  it('paints the summary well tint with slash-alpha rgb(), not the invalid legacy rgba() form', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'Refactoring the auth middleware and adding tests.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    const style = screen.getByTestId('quick-session-summary').getAttribute('style');
+    expect(style).toContain('rgb(var(--color-interactive-rgb) / 0.045)');
+    expect(style).not.toContain('rgba(var(--color-interactive-rgb),');
+  });
+
   it('renders nothing when the summary is null', () => {
     renderCanvas();
     expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
