@@ -845,7 +845,12 @@ export function QuickSessionCanvas({
                         flexDirection: 'column',
                         gap: 5,
                         borderLeft: '2px solid var(--color-interactive-primary)',
-                        background: 'rgba(var(--color-interactive-rgb), 0.045)',
+                        // Slash-alpha form is REQUIRED here: --color-interactive-rgb is a
+                        // SPACE-separated triple ("201 100 66"), and `rgba(<space triple>, a)`
+                        // mixes modern components with the legacy comma alpha — an invalid
+                        // declaration Chromium drops outright, leaving the well transparent on
+                        // every palette (verified over CDP on paper/dark/light).
+                        background: 'rgb(var(--color-interactive-rgb) / 0.045)',
                         padding: '9px 11px',
                         margin: '2px 0 0 -2px',
                       }}
