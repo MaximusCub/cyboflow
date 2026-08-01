@@ -6,6 +6,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.35] — 2026-08-01
+
+### Added
+
+- **Tracker sync (Linear & Plane)**: connect a Linear or Plane project and sync issues both ways. Remote issues import as ideas with a three-way merge; local ideas can be pushed as top-level issues; sync direction is gated independently per direction (manual mode defers rather than dropping). Includes a first-class tracker actor with attribution, `safeStorage`-backed secrets, a 6-step connect wizard with an explicit target-project step, a catalog that lists connections across all projects with project chips, and a connected view. Adapters for Linear (GraphQL, idempotent client-id creates) and Plane (REST, project-scoped ids). Schema in migrations 093–094.
+
+### Fixed
+
+- Shell `PATH` is resolved for SDK spawns so stdio MCP servers start reliably.
+- The gate self-heal beacon carries bounded diagnostic tags.
+
+### Build
+
+- Pin an `app-builder-lib` patch (via pnpm `patchedDependencies`) so macOS 26's stricter `security set-key-partition-list` no longer breaks signed builds.
+
 ## [0.1.34] — 2026-07-30
 
 ### Added
