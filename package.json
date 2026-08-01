@@ -22,7 +22,8 @@
       "msgpackr-extract"
     ],
     "patchedDependencies": {
-      "trpc-electron@0.1.2": "patches/trpc-electron@0.1.2.patch"
+      "trpc-electron@0.1.2": "patches/trpc-electron@0.1.2.patch",
+      "app-builder-lib@26.0.20": "patches/app-builder-lib@26.0.20.patch"
     }
   },
   "scripts": {

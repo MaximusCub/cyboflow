@@ -5,6 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
+  app-builder-lib@26.0.20:
+    hash: 81033cdc92e226b8296e3eccecc2700e36cfc03e05a29a1d4e696ca32d2281b4
+    path: patches/app-builder-lib@26.0.20.patch
   trpc-electron@0.1.2:
     hash: 38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19
     path: patches/trpc-electron@0.1.2.patch
@@ -8758,7 +8761,7 @@ snapshots:
 
   app-builder-bin@5.0.0-alpha.12: {}
 
-  app-builder-lib@26.0.20(dmg-builder@26.0.20):
+  app-builder-lib@26.0.20(patch_hash=81033cdc92e226b8296e3eccecc2700e36cfc03e05a29a1d4e696ca32d2281b4)(dmg-builder@26.0.20):
     dependencies:
       '@develar/schema-utils': 2.6.5
       '@electron/asar': 3.4.1
@@ -9517,7 +9520,7 @@ snapshots:
 
   dmg-builder@26.0.20:
     dependencies:
-      app-builder-lib: 26.0.20(dmg-builder@26.0.20)
+      app-builder-lib: 26.0.20(patch_hash=81033cdc92e226b8296e3eccecc2700e36cfc03e05a29a1d4e696ca32d2281b4)(dmg-builder@26.0.20)
       builder-util: 26.0.20
       fs-extra: 10.1.0
       iconv-lite: 0.6.3
@@ -9571,7 +9574,7 @@ snapshots:
 
   electron-builder@26.0.20:
     dependencies:
-      app-builder-lib: 26.0.20(dmg-builder@26.0.20)
+      app-builder-lib: 26.0.20(patch_hash=81033cdc92e226b8296e3eccecc2700e36cfc03e05a29a1d4e696ca32d2281b4)(dmg-builder@26.0.20)
       builder-util: 26.0.20
       builder-util-runtime: 9.4.0
       chalk: 4.1.2
