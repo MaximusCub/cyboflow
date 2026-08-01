@@ -237,9 +237,9 @@ leave the committed changes as they stand, and end.
 must never encode another machine's lies.
 
 - **Committed-portable** (`.cyboflow/verify-runbook.json`, in the repo): the
-  command TEMPLATES, the behaviors, the modality declarations, and the
-  readiness/attestation spec. Levers appear as **placeholders** — `${PORT}`,
-  `$VERIFY_DRIVER_PORT`, `$VERIFY_ARTIFACTS_DIR` — never as resolved values.
+  command TEMPLATES, the modality declarations, and the readiness/attestation
+  spec. Levers appear as **placeholders** — `${PORT}`, `$VERIFY_DRIVER_PORT`,
+  `$VERIFY_ARTIFACTS_DIR` — never as resolved values.
 - **Machine-local** (the project-row record written by
   `cyboflow_register_verify_runbook`, CAS-versioned against the portable hash):
   host capabilities and the resolved bindings that are **stable per host** —
@@ -250,11 +250,44 @@ must never encode another machine's lies.
   collides with whatever else is listening — which is precisely one of the
   historical failures.
 
+### The portable file's exact shape
+
+You write this file, so you own its correctness. A strict parser validates it on
+registration and rejects on the FIRST structural problem, naming the path
+(`modalities["web"].serve.cmd: expected non-empty string`). This is the whole
+schema — there is nothing else in it:
+
+```ts
+{
+  version: 1,                      // the literal 1
+  modalities: {                    // at least one key; ONLY these three exist
+    "web"?:           ModalityEntry,
+    "cdp-app"?:       ModalityEntry,
+    "native-screen"?: ModalityEntry,
+  },
+  levers?: { portEnv?: string, dataDirEnv?: string, cdpPortFlag?: string, notes?: string },
+}
+
+ModalityEntry = {
+  build?: string[],
+  serve?: { cmd: string, attach?: "cdp", readyWhen?: { urlPath?: string, timeoutMs?: number } },
+  attestation: AttestationSpec,    // REQUIRED
+  notes?: string,
+  viewports?: Array<{ width: number, height: number, label?: string }>,
+}
+```
+
+Field names are literal: `serve.cmd` (not `command`), `serve.readyWhen` (not
+`readiness`), `attestation.kind` (not `type`). `mobile` is not a declarable
+modality. **`behaviors` is not a runbook field** — behaviors belong to the
+`VerificationTaskV1` you compose at the prove step; putting them in the file is
+a silent no-op at best (unknown keys are dropped before hashing).
+
 **Attestation is REQUIRED per modality, not a nice-to-have.** A verification
 proves the surface it drove IS this deliverable, or it does not pass — there is
 no low-confidence escape hatch. Readiness alone is not identity: a port answering
 `200` may be a stale dev server from an unrelated worktree, or the user's own
-running app.
+running app. There are **exactly five** kinds, and a sixth is a parse error:
 
 - `web` → `{ "kind": "http-endpoint", "urlPath": "/__cyboflow_verify__" }` (the
   serve step exposes a route echoing the per-request nonce) or
@@ -267,12 +300,18 @@ running app.
 - `native-screen` → `{ "kind": "window-identity", "titlePattern": "..." }`, and
   record that it is the WEAKEST channel; a window title is spoofable and
   coincidental in a way an in-page nonce is not.
-- A static `target.htmlPath` needs nothing — `file-identity` holds by
-  construction, because the runner owns the path it opens.
+- `{ "kind": "file-identity" }` — ONLY for the degenerate pre-live path, a
+  `target.htmlPath` the runner itself wrote and opens. A project you SERVE over a
+  leased port is a live process on a socket you do not own, even if it is a
+  directory of plain HTML: it needs `http-endpoint` or `dom-marker` like any
+  other web deliverable. "The runner owns the directory and leases the port" is
+  exactly the reasoning this requirement exists to defeat — the lease is an
+  in-process mutex guarding a logical slot, not the OS socket.
 
 If a modality has no channel the project can support, say so in the proposal and
-let the human decide whether to add one (that is a legitimate rung-1 change) —
-never invent a route, selector, or global that does not exist.
+let the human decide whether to add one (adding a `data-verify-build` attribute
+to a root element is a textbook rung-1 change) — never invent a route, selector,
+or global that does not exist.
 
 **Never an install or a rebuild — anywhere, ever.** `pnpm install`, `npm ci`,
 `yarn`, `electron-rebuild`, `playwright install`: none of these may appear in a

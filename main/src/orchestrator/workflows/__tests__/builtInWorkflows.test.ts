@@ -498,4 +498,42 @@ describe('buildBuiltInWorkflows', () => {
     // write tool (validateAgentDraft rejects one, so an edited copy would fail).
     expect(flat, 'no cyboflow_* tool tokens in an agent body').not.toMatch(/cyboflow_/);
   });
+
+  // Dogfood findings 1 + 2 (2026-07-31). Left to PROSE, the drafting agent
+  // reverse-engineered VerifyRunbookV1 by grepping cyboflow's own source (which
+  // exists on no other machine) and, before it found the types, invented an
+  // attestation kind — `static-file-by-construction`, arguing no nonce was
+  // needed because "the runner owns the dir and leases ${PORT}", which is
+  // exactly the reasoning §7.1 exists to defeat. Both prompts now carry the
+  // literal contract; these assertions are the regression guard, since a prompt
+  // edit that quietly drops it reproduces the finding with no test failing.
+  it('both verify-setup prompts embed the literal VerifyRunbookV1 + AttestationSpec contract', () => {
+    const descriptor = buildBuiltInWorkflows().find((d) => d.name === 'verify-setup')!;
+    const orchestrator = readFileSync(descriptor.path, 'utf-8');
+    const subagent = readFileSync(
+      join(dirname(descriptor.path), 'verify-setup', 'agents', 'verify-setup.md'),
+      'utf-8',
+    );
+
+    for (const [label, body] of [['orchestrator', orchestrator], ['subagent', subagent]] as const) {
+      // The wrapper shape the draft missed entirely: no `version`, no
+      // `modalities` map, so parseVerifyRunbookV1 died on "expected literal 1".
+      expect(body, `${label}: declares the version literal`).toMatch(/version: 1/);
+      expect(body, `${label}: declares the modalities map`).toMatch(/modalities/);
+      // The exact field names the draft got wrong (`command`, `readiness`, `type`).
+      expect(body, `${label}: names serve.cmd literally`).toMatch(/serve\.cmd/);
+      expect(body, `${label}: names serve.readyWhen literally`).toMatch(/readyWhen/);
+      expect(body, `${label}: names attestation.kind literally`).toMatch(/attestation\.kind/);
+      // `behaviors` is NOT a runbook field — the draft added one.
+      expect(body, `${label}: says behaviors is not a runbook field`).toMatch(/behaviors/i);
+      // All five attestation kinds, so none has to be guessed.
+      for (const kind of ['http-endpoint', 'dom-marker', 'cdp-token', 'window-identity', 'file-identity']) {
+        expect(body, `${label}: names the '${kind}' attestation kind`).toContain(kind);
+      }
+      // The specific wrong turn: file-identity claimed for a served static site.
+      expect(body, `${label}: closes the file-identity loophole for a served deliverable`).toMatch(
+        /file-identity/,
+      );
+    }
+  });
 });

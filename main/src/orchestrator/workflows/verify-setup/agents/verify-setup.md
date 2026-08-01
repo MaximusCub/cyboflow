@@ -79,16 +79,48 @@ other.
 
 ## Draft the runbook: two halves, and the split is the contract
 
-**Portable half** — this gets committed to the repo, so it must be true on every
-machine that clones it:
+**Portable half** — this gets committed to the repo as
+`.cyboflow/verify-runbook.json`, so it must be true on every machine that clones
+it. It is validated by a STRICT parser that rejects on the first structural
+problem, so it is not a shape you may improvise. This is the whole schema:
 
-- `build` — ordered shell steps producing a runnable deliverable from a CLEAN
-  checkout of committed state.
-- `serve` — the long-running command, plus how readiness is observed. For
-  `cdp-app`, this launches the app with its remote-debugging port and isolated
-  data dir and there is no URL to poll.
-- `attestation` — REQUIRED, per modality. See below.
-- `behaviors` — the smoke checks that will constitute the proof.
+```ts
+{
+  version: 1,                      // the literal 1 — not "1", not 1.0
+  modalities: {                    // at least one key; ONLY these three exist
+    "web"?:           ModalityEntry,
+    "cdp-app"?:       ModalityEntry,
+    "native-screen"?: ModalityEntry,
+  },
+  levers?: {                       // lever NAMES, never values
+    portEnv?: string,              // env var the serve cmd reads the leased port from
+    dataDirEnv?: string,           // env var that redirects the app's state dir
+    cdpPortFlag?: string,          // CLI flag pinning the app's CDP port
+    notes?: string,
+  },
+}
+
+ModalityEntry = {
+  build?: string[],                // ordered shell steps
+  serve?: {
+    cmd: string,                   // REQUIRED inside serve; may contain ${PORT}
+    attach?: "cdp",                // ONLY this literal; omit for a classic web serve
+    readyWhen?: { urlPath?: string, timeoutMs?: number },
+  },
+  attestation: AttestationSpec,    // REQUIRED — see the five kinds below
+  notes?: string,                  // free-text derivation notes for a human reader
+  viewports?: Array<{ width: number, height: number, label?: string }>,
+}
+```
+
+Read those field names literally. `serve.cmd`, not `command`. `serve.readyWhen`,
+not `readiness`. `attestation.kind`, not `type`. Anything else is a parse error
+with your draft's name on it.
+
+**There is no `behaviors` field on a runbook.** Behaviors belong to the proof
+TASK the orchestrator composes at the prove step, not to the committed file.
+Return them in prose under your draft so the orchestrator can compose them; do
+not put them in the JSON.
 
 Every host-specific value in the portable half is a **placeholder**, never a
 resolved value: `${PORT}` for a leased web port, `$VERIFY_DRIVER_PORT` for the
@@ -96,9 +128,29 @@ debugging port in attach mode, `$VERIFY_ARTIFACTS_DIR` for a per-request scratch
 dir to anchor an isolated profile under. A literal port number in a committed
 runbook is a promise about someone else's machine.
 
+A worked example — a static site with no build step and no route it can add:
+
+```json
+{
+  "version": 1,
+  "modalities": {
+    "web": {
+      "build": [],
+      "serve": {
+        "cmd": "python3 -m http.server ${PORT} --directory .",
+        "readyWhen": { "urlPath": "/", "timeoutMs": 15000 }
+      },
+      "attestation": { "kind": "dom-marker", "selector": "[data-verify-build]" },
+      "notes": "Serve command is verbatim README.md:12 'Run locally'. No package.json anywhere in the repo."
+    }
+  }
+}
+```
+
 **Machine-local half** — the bindings that are stable on THIS host and meaningless
 on another: resolved binary paths, the NAME of the data-dir lever, native-ABI
-facts. List them separately and explicitly.
+facts. List them separately and explicitly, as their own JSON object; they are
+registered, never committed.
 
 **Never persist a request-scoped value in either half.** Ports and temp
 directories are resolved per request, after a lease is acquired. A persisted port
@@ -110,25 +162,42 @@ is listening.
 A verification either proves the surface it drove IS this deliverable, or it does
 not pass. There is no low-confidence escape hatch. "The port answered" is not
 identity: it may be a stale dev server from an unrelated worktree, or the user's
-own running app. For each modality you declare, name a concrete channel:
+own running app.
 
-- **`web`** — an HTTP endpoint the serve step exposes which echoes the
-  per-request nonce, or a DOM marker (an element's text or a `data-*` attribute)
-  carrying it when the deliverable cannot add a route.
-- **`cdp-app`** — a build-stamped global evaluated over the debugging connection,
-  compared against the literal this build bakes in. This is the only channel that
-  works in attach mode, where nothing ever navigates and there is no HTTP status
-  to check.
-- **`native-screen`** — a window-title / process-identity assertion. Say plainly
-  that this is the WEAKEST channel: a title is spoofable and coincidental in a way
-  an in-page nonce is not.
-- A static HTML file needs no channel — identity holds by construction, because
-  the runner owns the path it opens.
+**There are exactly five attestation kinds. You may not invent a sixth**, and a
+`kind` outside this list is rejected by the validator, so an invented one is a
+failed draft rather than a creative one:
+
+| `kind` | Required fields | For | What it proves |
+| --- | --- | --- | --- |
+| `http-endpoint` | `urlPath: string` | `web` | The serve step exposes a route; the driver GETs `http://localhost:$VERIFY_PORT<urlPath>` and the body must contain the per-request nonce. Needs a live, classic (non-attach) serve. |
+| `dom-marker` | `selector: string` | `web` | An element's text or `data-*` attribute in the rendered DOM carries the nonce — for a deliverable that cannot add a server-side route. |
+| `cdp-token` | `expression: string`, `expected: string` | `cdp-app` | `Runtime.evaluate(expression)` over the CDP session equals `expected`, an immutable build-stamped global. The ONLY channel that works in attach mode, where the driver never navigates. |
+| `window-identity` | `titlePattern: string` | `native-screen` | The launched app's OS window title matches. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
+| `file-identity` | *(none)* | degenerate pre-live `htmlPath` | Identity BY CONSTRUCTION: the runner itself writes and owns the path it opens. No live process, nothing to race. |
+
+Literal shapes (`urlPath` / `selector` / `expression` are always whatever the
+project ACTUALLY exposes — these are shapes, not fixed values):
+`{"kind":"http-endpoint","urlPath":"/__verify__"}`,
+`{"kind":"dom-marker","selector":"[data-verify-build]"}`,
+`{"kind":"cdp-token","expression":"window.__BUILD_SHA__","expected":"<the literal this build bakes in>"}`,
+`{"kind":"window-identity","titlePattern":"Cyboflow — .*"}`,
+`{"kind":"file-identity"}`.
+
+**`file-identity` is NOT the escape hatch for "this is just static files."** It
+covers only the degenerate path where the runner opens a file it wrote itself. A
+project you SERVE over a leased port — even a directory of plain HTML — is a live
+process on a socket you do not own, so it needs `http-endpoint` or `dom-marker`
+like any other web deliverable. The port lease is an in-process mutex guarding a
+logical slot, not the OS socket; "the runner owns the directory and leases the
+port, so nothing else can be answering" is precisely the reasoning this
+requirement exists to defeat.
 
 If a modality has no channel this project can support today, **say so** and
-propose adding one as a repo change. Never invent a route, selector, or global
-that does not exist — an attestation that names something absent fails the proof
-in the most confusing possible way.
+propose adding one as a repo change (adding a `data-verify-build` attribute to a
+root element is a textbook rung-1 change). Never invent a route, selector, or
+global that does not exist — an attestation that names something absent fails the
+proof in the most confusing possible way.
 
 ## Never install, never rebuild — this one is enforced
 
@@ -188,12 +257,16 @@ to you in two distinct phases:
 
 For the draft phase:
 
-1. A `## Runbook draft` section — per declared modality, the portable half
-   (`build`, `serve`, `attestation`, `behaviors`, with levers as placeholders)
-   shown as the JSON that would be committed, followed by a `### Machine-local
-   bindings` list for that modality. Behaviors are the smoke checks that will
-   serve as the proof: few, observable, and decisive. For `native-screen`, mark
-   any behavior that would need a click or a keystroke as drive-requiring.
+1. A `## Runbook draft` section — ONE fenced JSON block holding the whole
+   portable half exactly as it would be committed (`version`, `modalities` with
+   an entry per declared modality, optional `levers`), then a
+   `### Machine-local bindings` JSON block, then a `### Proposed behaviors` list.
+   The JSON must satisfy the schema above verbatim — the orchestrator writes what
+   you return, and a shape that misses on `version`, a modality key, `serve.cmd`,
+   or `attestation.kind` fails registration outright. Behaviors go in the prose
+   list, NOT in the JSON: they are few, observable, and decisive, and for
+   `native-screen` any behavior needing a click or a keystroke is marked
+   drive-requiring.
 2. A `## Rung ladder` section — `### Rung 0 (no change)` /
    `### Rung 1 (config only)` / `### Rung 2 (proposed diff)`, in that order. Keep
    every heading and write `None.` under the empty ones, so the human can see
