@@ -348,6 +348,69 @@ function RecommendationsBody({ artifact, projectId }: { artifact: Artifact; proj
 }
 
 // ---------------------------------------------------------------------------
+// verify-runbook — the verify-setup flow's runbook PROPOSAL: per modality the
+// build/serve commands and the attestation channel, the rung ladder of repo
+// changes it wants, the risks, and (after the prove step enriches the same
+// artifact) the per-modality proof outcome. Same markdown-doc chrome as
+// compound-recommendations, teal accent. Payload-backed: the setup orchestrator
+// composed the doc into payload_json.markdown, so it renders straight from the
+// payload (no entity source, no fetch) — the single surface the approve-runbook
+// gate points at, which is why it must not read as a Compound deliverable.
+// ---------------------------------------------------------------------------
+function VerifyRunbookBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['verify-runbook'];
+  const { data } = useArtifactData(artifact, projectId);
+  // `markdown` comes verbatim from orchestrator-supplied payload_json (laundered
+  // through parsePayload as Record<string, unknown>), so narrow to a string.
+  const markdown =
+    data?.kind === 'verify-runbook' && typeof data.payload.markdown === 'string'
+      ? data.payload.markdown
+      : '';
+
+  return (
+    <Shell testid="artifact-verify-runbook">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · runbook proposal"
+        meta={artifact.stepOrigin ?? 'verify-setup'}
+      />
+      <div style={{ flex: 1 }}>
+        <div
+          data-testid="artifact-verify-runbook-doc"
+          style={{
+            maxWidth: 680,
+            margin: '0 auto',
+            background: 'var(--color-surface-primary)',
+            border: `1px solid ${HAIRLINE}`,
+            padding: '34px 40px 56px',
+            marginTop: 18,
+            marginBottom: 18,
+          }}
+        >
+          <div
+            style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+          >
+            Verify setup
+          </div>
+          <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+            Runbook proposal
+          </h1>
+          {markdown ? (
+            <MarkdownPreview content={markdown} />
+          ) : (
+            <div data-testid="artifact-verify-runbook-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+              No runbook drafted yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // eval-report — the ad-hoc code-review eval's full verdict, rendered with the
 // SAME ScoreSummary module the end-of-sprint WorkflowSummaryPanel shows (band
 // hero + CI scale + gate chips + per-dimension breakdown + findings), fed from
@@ -2814,6 +2877,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <ArchDesignBody artifact={artifact} projectId={projectId} />;
     case 'compound-recommendations':
       return <RecommendationsBody artifact={artifact} projectId={projectId} />;
+    case 'verify-runbook':
+      return <VerifyRunbookBody artifact={artifact} projectId={projectId} />;
     case 'eval-report':
       return <EvalReportBody artifact={artifact} projectId={projectId} />;
     case 'decomposed-stories':

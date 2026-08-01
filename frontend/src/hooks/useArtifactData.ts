@@ -52,6 +52,7 @@ import type {
   Artifact,
   EvalReportPayload,
   RecommendationsArtifactPayload,
+  VerifyRunbookArtifactPayload,
   ScreenshotsArtifactPayload,
 } from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
@@ -112,6 +113,7 @@ export type ArtifactContent =
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
   | { kind: 'recommendations'; payload: RecommendationsPayload }
   | { kind: 'eval-report'; payload: EvalReportArtifactPayload }
+  | { kind: 'verify-runbook'; payload: VerifyRunbookArtifactPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
 export interface ArtifactData {
@@ -174,6 +176,18 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
         loading: false,
         error: null,
         data: { kind: 'eval-report', payload: parsePayload(payloadJson) },
+      });
+      return;
+    }
+    // verify-runbook is payload-backed for the same reason: the verify-setup
+    // orchestrator composed the runbook proposal into payload_json.markdown and
+    // enriches the SAME artifact with the proof outcomes, so there is no entity
+    // to re-derive from and it resolves synchronously.
+    if (atype === 'verify-runbook') {
+      setState({
+        loading: false,
+        error: null,
+        data: { kind: 'verify-runbook', payload: parsePayload(payloadJson) },
       });
       return;
     }

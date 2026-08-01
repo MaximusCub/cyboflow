@@ -361,6 +361,33 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
   });
 
+  // --- verify-runbook --------------------------------------------------------
+
+  it('renders the verify-runbook proposal doc with the teal eyebrow', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'verify-runbook', payload: { markdown: '## Runbook\n\n- serve on ${PORT}' } },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'verify-runbook', sourceRef: null })} {...PROPS} />);
+
+    // Its own tab identity, not compound's — this is the surface a human is
+    // asked to approve repo changes from (dogfood finding, 2026-07-31).
+    expect(screen.getByTestId('artifact-verify-runbook')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact \u00b7 runbook proposal');
+    expect(eyebrow).toHaveStyle({ color: '#1f8f7a' });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('serve on ${PORT}');
+  });
+
+  it('shows the verify-runbook empty state when the payload has no markdown', () => {
+    setHook({ loading: false, error: null, data: { kind: 'verify-runbook', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'verify-runbook', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-verify-runbook-empty')).toHaveTextContent('No runbook drafted yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
   // --- eval-report -----------------------------------------------------------
 
   it('renders the eval-report markdown doc with the amber eyebrow', () => {
@@ -1456,6 +1483,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'arch-design', mode: 'template', testid: 'artifact-arch-design', data: { loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } } },
       { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
       { atype: 'eval-report', mode: 'template', testid: 'artifact-eval-report', data: { loading: false, error: null, data: { kind: 'eval-report', payload: { markdown: '## x' } } } },
+      { atype: 'verify-runbook', mode: 'template', testid: 'artifact-verify-runbook', data: { loading: false, error: null, data: { kind: 'verify-runbook', payload: { markdown: '## x' } } } },
     ];
     for (const c of cases) {
       setHook(c.data);

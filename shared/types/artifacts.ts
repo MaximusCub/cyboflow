@@ -38,7 +38,16 @@ export type ArtifactType =
    * EvalWorker for run_evals rows with origin='adhoc' — NOT agent-reportable).
    * Payload-backed markdown, like 'compound-recommendations'.
    */
-  | 'eval-report';
+  | 'eval-report'
+  /**
+   * The verify-setup flow's runbook PROPOSAL — the whole review surface its
+   * approve-runbook gate points at (commands, attestation per modality, the
+   * rung ladder, risks), and later the proof outcomes. Payload-backed markdown.
+   * Reported under 'compound-recommendations' until this existed, which
+   * mislabeled it as a Compound deliverable at the exact gate a human is asked
+   * to approve repo changes from.
+   */
+  | 'verify-runbook';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -294,6 +303,23 @@ export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
     // eval report never reads as a planner or compound deliverable.
     color: '#f59e0b',
     glyph: '◎',
+    perEntity: false,
+  },
+  // Appended LAST so every historically-advertised reportable atype keeps its
+  // position in REPORTABLE_ARTIFACT_ATYPES (and thus in the MCP tool's enum).
+  'verify-runbook': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    reportable: true,
+    // Teal, the verification register — adjacent to arch-design's #2d7a8a
+    // (both are "here is the shape of the thing before you approve it") but
+    // greener, and deliberately nowhere near compound's violet.
+    color: '#1f8f7a',
+    glyph: '▨',
     perEntity: false,
   },
 };
@@ -925,6 +951,25 @@ export interface RecommendationsArtifactPayload {
  */
 export interface EvalReportPayload {
   /** The full verdict report, rendered through MarkdownPreview. */
+  markdown?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * The parsed `payload_json` shape of a `verify-runbook` artifact — the
+ * verify-setup flow's runbook PROPOSAL: per modality the build/serve commands
+ * and the attestation channel, the rung ladder of repo changes it wants, the
+ * risks, and (after the prove step) the per-modality proof outcome.
+ *
+ * Payload-backed exactly like {@link RecommendationsArtifactPayload}: the setup
+ * orchestrator composes the doc and reports it verbatim in `markdown`, so the
+ * renderer reads it straight from the payload with no fetch and no source_ref.
+ * One per run, ENRICHED in place — the same artifact the approve-runbook gate
+ * reviewed later carries the proof outcomes, so the human's review surface and
+ * the record of what happened to it are the same document.
+ */
+export interface VerifyRunbookArtifactPayload {
+  /** The full proposal doc, rendered through MarkdownPreview. */
   markdown?: string;
   [key: string]: unknown;
 }

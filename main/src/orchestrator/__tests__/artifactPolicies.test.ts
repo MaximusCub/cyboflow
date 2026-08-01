@@ -42,6 +42,7 @@ const LEGACY_RENDER_MODE: Record<ArtifactType, 'template' | 'canvas'> = {
   'approve-ideas': 'template',
   'approve-designs': 'template',
   'eval-report': 'template',
+  'verify-runbook': 'template',
 };
 const LEGACY_COLORS: Record<ArtifactType, string> = {
   'idea-spec': '#3b6dd6',
@@ -55,6 +56,7 @@ const LEGACY_COLORS: Record<ArtifactType, string> = {
   'approve-ideas': '#b8860b',
   'approve-designs': '#8a7326',
   'eval-report': '#f59e0b',
+  'verify-runbook': '#1f8f7a',
 };
 const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'idea-spec': '▤',
@@ -68,6 +70,7 @@ const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'approve-ideas': '☑',
   'approve-designs': '⊡',
   'eval-report': '◎',
+  'verify-runbook': '▨',
 };
 
 const ALL_ATYPES = Object.keys(LEGACY_RENDER_MODE) as ArtifactType[];
@@ -116,6 +119,9 @@ describe('ARTIFACT_POLICIES registry', () => {
       'interactive-prototype',
       'compound-recommendations',
       'approve-ideas',
+      // Appended LAST (registry order) so every historically-advertised atype
+      // keeps its position in the MCP report tool's enum.
+      'verify-runbook',
     ]);
     // arch-design / approve-designs are auto-mint-only (never agent-reportable);
     // eval-report is likewise system-minted only (EvalWorker).

@@ -98,7 +98,7 @@ Then compose ONE proposal document and publish it:
 
 ```
 cyboflow_report_artifact({
-  atype: "compound-recommendations",
+  atype: "verify-runbook",
   label: "Runbook proposal",
   payload_json: "{\"markdown\": \"<the doc>\"}"
 })
@@ -124,7 +124,7 @@ committed.
 
 STOP here. Present the gate with **AskUserQuestion** (header `Approve setup`,
 options **Approve all** / **Pick subset** / **Reject**) and point the user at the
-**`compound-recommendations` artifact tab** for the full proposal — keep the
+**`verify-runbook` artifact tab** for the full proposal — keep the
 option previews short (which modalities, which rungs), not a dump of every
 command. `cyboflow_report_step` each transition so the run rail tracks the gate.
 
@@ -241,7 +241,7 @@ Sprint, Ship, or Compound session ends on. `cyboflow_report_step` the transition
 then present the gate with **AskUserQuestion** (header `Approve setup`, options
 **Approve** / **Reject** — these exact labels), pointing the user at the run
 **Diff** tab (the committed runbook + approved repo changes) and the
-**`compound-recommendations`** artifact (the proposal plus the proof outcomes).
+**`verify-runbook`** artifact (the proposal plus the proof outcomes).
 Do **not** self-approve and never silently pass a gate. On **Approve**, the run
 completes and the branch is mergeable — the user merges the session from the UI
 (do **not** merge to main yourself). On **Reject**, summarize what was rejected,

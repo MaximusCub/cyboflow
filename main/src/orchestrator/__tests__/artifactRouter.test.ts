@@ -106,6 +106,10 @@ function buildDb(): Database.Database {
   // carries only the atypes it names, so applying it earlier would let 089
   // drop 'eval-report' right back out of the CHECK.
   db.exec(readFileSync(join(migDir, '091_eval_report_atype.sql'), 'utf-8'));
+  // Migration 097 widens it once more to add 'verify-runbook' (the verify-setup
+  // flow's proposal doc). Same ordering rule as 091 above — each recreate names
+  // its own atype list, so this must be LAST.
+  db.exec(readFileSync(join(migDir, '097_verify_runbook_atype.sql'), 'utf-8'));
   return db;
 }
 
