@@ -22,6 +22,12 @@ spec as written, all deliberate:
 - §5.4's "matrix row 4" (own instance running) is exercised as an attach-mode
   CDP-port squat → env-skip; full-isolation green requires a live dogfood run
   (the levers landed: CYBOFLOW_VITE_PORT / CYBOFLOW_CDP_PORT / CYBOFLOW_DIR).
+- LIVE-DOGFOODED 2026-08-01 (see §9). The run reached the terminal gate and
+  surfaced 5 findings — including two that made the flow unable to fire any
+  verification at all — none of which three rounds of adversarial review had
+  found, because each component was correct in isolation. Migrations are now
+  095/096/097. The proof path itself has still not been observed green
+  end-to-end; that needs a second dogfood run on top of these fixes.
 - Native-screen: observe-only as specced; the drive-consent matrix row is a
   `test.todo` pending a live, audited drive API (§8 open question).
 
@@ -483,6 +489,57 @@ Generated from the phase-1 roster; nearly invisible for most users.
 
 - v1 (2026-07-30): initial proposal from the four-phase synthesis
   (recon workflow + adversarial critique).
+- **DOGFOOD (2026-08-01): first live run of the flow, end to end, against a real
+  project (`cyboflow-web`, `web` modality) in a dev app built from this branch.**
+  5 findings, all fixed (`b452a916..d5c10714`). Three rounds of adversarial
+  review had found none of them, because every one lives in an INTERACTION —
+  each component is correct in isolation, so no unit test could have failed.
+  - **The flow could not fire a verification at all** (two independent blockers
+    on the same path). `PROGRAMMATIC_STEP_DISALLOWED_TOOLS` and the MCP
+    ownership guard both rejected `cyboflow_request_verification` on any
+    `execution_model = 'programmatic'` run. That rule was written for
+    sprint/ship, where the controller owns the enqueue; "programmatic" was a
+    proxy for that, and verify-setup — programmatic, no fan-out, no
+    controller-owned visual-verify step — is the counterexample. Separately,
+    `verify_enabled` resolved 0: the enablement ladder floors to the global
+    master switch, which ships off, so the flow that exists to make that switch
+    worth turning on was gated behind it. Fixed by re-keying both guards onto
+    "does a controller own the enqueue on this run?" and adding a bootstrap rung
+    above the enablement ladder.
+  - **The runbook contract was described in prose, not embedded.** The drafting
+    agent recovered `VerifyRunbookV1` only by grepping cyboflow's own source off
+    the local disk — which exists on no other machine — and before it found the
+    types it produced a draft the validator rejects on its first field, plus an
+    INVENTED attestation kind (`static-file-by-construction`) justified by "the
+    runner owns the dir and leases `${PORT}`", precisely the reasoning §7.1
+    exists to defeat. The strict validator held, so the guard worked; the prompt
+    should not have left the question open. Both prompts now carry the literal
+    schema, all five kinds, and a worked example, pinned by an invariant test.
+  - **A repo that excludes `.cyboflow/` silently breaks the write-back.** `git
+    add` on an ignored path is a no-op that reports success, so the runbook
+    registers against the working tree and the proof then builds a snapshot
+    without it. Registration now reports `committed` from `git cat-file -e
+    HEAD:<path>` and the prove step force-adds and verifies.
+  - **The proposal doc had no atype of its own**, so the one surface the
+    approve-runbook gate asks a human to approve repo changes from rendered as a
+    Compound deliverable. Added `verify-runbook` (migration 097).
+  - What the run PROVED works: migrations apply on a fresh DB; verify-setup
+    registers as the 5th built-in and its DAG runs; the survey threads verbatim
+    into derive; "nothing touches the repo before `approve-runbook`" held
+    EMPIRICALLY (byte-clean worktree); registration produced a valid record; and
+    under a condition that made proving impossible the flow did not fake a pass
+    — it committed the runbook, left it `unproven-draft`, and filed an honest
+    finding naming the missing tool. That is the §5 "an honest unproven draft is
+    not a failure" contract behaving exactly as designed.
+  - Still open (both PRE-EXISTING on main, neither introduced by this branch,
+    each needing its own reproduction): resolving a blocking gate while the run
+    is transiently `running` leaves the resume refused — the path is already
+    instrumented (`resolveReviewItemHandler` warns and returns `runStatus`), but
+    the observed consequence was a walk that redid completed work, and the
+    dogfood's auto-approver supplied unusual timing, so the cause is not yet
+    established; and the run session view's blocking "needs your input" card can
+    stay pinned to an already-decided approval, whose Approve then no-ops and
+    makes the run look wedged (approve from the Human Review queue meanwhile).
 - v3.1 (2026-07-31): Codex round-3 re-review of the fix delta — 6 findings
   (3 critical), all fixed (`b4c2fc39..84f1eccc`): ordinary requests can no
   longer carry wire pins (authorized setup proofs only); the MCP enqueue path
