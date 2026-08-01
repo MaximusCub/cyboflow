@@ -155,7 +155,7 @@ import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
-import { resolveRunFanOutInner } from '../laneChainResolution';
+import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
 import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
@@ -4107,24 +4107,39 @@ export class McpQueryHandler {
       return;
     }
 
-    // OWNERSHIP GUARD: on a programmatic run the workflow controller is the ONLY
-    // legitimate enqueuer, and it goes through its direct host capability
-    // (verify/enqueueFromTask.ts) — never this socket path. Any MCP-path call on
-    // a programmatic run is therefore a step turn firing the tool it was told
-    // not to (the per-spawn disallowedTools denial only reaches the Claude SDK
-    // manager; Codex and interactive turns ignore it), so reject it here —
+    // OWNERSHIP GUARD: when a programmatic run's workflow controller owns the
+    // enqueue it is the ONLY legitimate enqueuer, and it goes through its direct
+    // host capability (verify/enqueueFromTask.ts) — never this socket path. An
+    // MCP-path call on such a run is therefore a step turn firing the tool it was
+    // told not to (the per-spawn disallowedTools denial only reaches the Claude
+    // SDK manager; Codex and interactive turns ignore it), so reject it here —
     // provider-independently — before a rogue keyless request can race the
     // controller's own enqueue at the merge gate. Fail-soft read: a missing /
     // pre-schema execution_model resolves null and falls through.
-    if (this.readExecutionModel(msg.runId) === 'programmatic') {
+    //
+    // SCOPED by `runHasControllerVisualVerify`, not by the execution model alone.
+    // "Programmatic" was only ever a proxy for "the controller enqueues", and
+    // `verify-setup` is the counterexample: programmatic, no fan-out, no
+    // controller-owned visual-verify step, and its `prove` step's entire
+    // deliverable is firing a `setup_proof` request through THIS path. Guarding
+    // on the execution model alone rejected it, leaving the flow that bootstraps
+    // verification unable to prove anything (live dogfood run, 2026-07-31). A run
+    // with no such step has no controller enqueue to race. The predicate
+    // fail-CLOSES on an unresolvable definition, so an unreadable run keeps the
+    // old deny posture. Every other authorization below is unchanged — a
+    // `setup_proof` claim still has to be a verify-setup run with a registered pin.
+    if (
+      this.readExecutionModel(msg.runId) === 'programmatic' &&
+      runHasControllerVisualVerify(this.db, msg.runId)
+    ) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: false,
         error:
-          'programmatic_run_verification_rejected: verification enqueues on a programmatic run are ' +
-          'controller-owned. Do not fire this tool — print the visual-verification contract as TEXT ' +
-          'in your final message and the controller will enqueue it.',
+          'programmatic_run_verification_rejected: verification enqueues on this run are ' +
+          'controller-owned (its chain has a visual-verify step). Do not fire this tool — print the ' +
+          'visual-verification contract as TEXT in your final message and the controller will enqueue it.',
       });
       return;
     }

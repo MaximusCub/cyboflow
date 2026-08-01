@@ -31,7 +31,8 @@ import type { LoggerLike } from '../types';
 import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
 import { isSystemicStepError } from './systemicError';
-import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowStep, WorkflowDefinition } from '../../../../shared/types/workflows';
+import { definitionHasControllerVisualVerify } from '../laneChainResolution';
 import { providerForRuntime, type WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { normalizeEffortSelection, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
@@ -41,20 +42,42 @@ import {
 } from '../workflowPromptRenderer';
 
 /**
- * SDK tools denied on EVERY programmatic step turn. On the programmatic plane
- * the CONTROLLER owns the visual-verification enqueue (the agentless
- * visual-verify step in workflowController.ts) — a step turn firing
- * `cyboflow_request_verification` itself creates an unkeyed request the
- * controller never made and races the merge-gate against the contract-retry
- * loop (observed on the first live run, 2026-07-22: the task-verify turn fired
- * the request, self-parked the lane, and the lane failed despite a delivered
- * PASS). Constant across a run's turns so the warm-session options fingerprint
- * never recycles over it. Orchestrated runs never pass through this runner, so
- * the orchestrator's legitimate use of the tool is unaffected.
+ * SDK tools denied on the step turns of a programmatic run whose controller owns
+ * the visual-verification enqueue (the agentless visual-verify step in
+ * workflowController.ts) — a step turn firing `cyboflow_request_verification`
+ * itself creates an unkeyed request the controller never made and races the
+ * merge-gate against the contract-retry loop (observed on the first live run,
+ * 2026-07-22: the task-verify turn fired the request, self-parked the lane, and
+ * the lane failed despite a delivered PASS). Constant across a run's turns so the
+ * warm-session options fingerprint never recycles over it. Orchestrated runs
+ * never pass through this runner, so the orchestrator's legitimate use of the
+ * tool is unaffected.
+ *
+ * NOT applied to every programmatic run — see
+ * {@link programmaticDisallowedTools}. "Programmatic" was a proxy for "the
+ * controller enqueues"; `verify-setup` is programmatic with no controller-owned
+ * enqueue at all, and blanket-denying the tool made the flow that bootstraps
+ * verification unable to fire the one verification it exists to fire.
  */
 export const PROGRAMMATIC_STEP_DISALLOWED_TOOLS: readonly string[] = [
   'mcp__cyboflow__cyboflow_request_verification',
 ];
+
+/** Frozen empty deny list — a run with no controller-owned enqueue denies nothing. */
+const NO_DISALLOWED_TOOLS: readonly string[] = [];
+
+/**
+ * The deny list for THIS run's step turns: {@link PROGRAMMATIC_STEP_DISALLOWED_TOOLS}
+ * when the run's workflow has a controller-owned visual-verify step (sprint/ship
+ * and any chain that kept one), otherwise nothing.
+ *
+ * The spawn seam drops an EMPTY `disallowedTools` entirely
+ * (claudeCodeManager checks `.length > 0`), so a run with no controller-owned
+ * enqueue spawns byte-identically to one from before this deny list existed.
+ */
+export function programmaticDisallowedTools(def: WorkflowDefinition): readonly string[] {
+  return definitionHasControllerVisualVerify(def) ? PROGRAMMATIC_STEP_DISALLOWED_TOOLS : NO_DISALLOWED_TOOLS;
+}
 
 /** Per-run spawn parameters bound when the runner is constructed. */
 export interface SpawnStepRunnerOptions {
@@ -63,6 +86,20 @@ export interface SpawnStepRunnerOptions {
   runId: string;
   worktreePath: string;
   workflowName: string;
+  /**
+   * Per-spawn tool deny list for THIS run's step turns — normally
+   * {@link programmaticDisallowedTools}(the run's resolved definition), which
+   * denies `cyboflow_request_verification` only when the controller owns the
+   * enqueue. Captured at construction (not per step): the run's definition is
+   * frozen, and a value that varied per turn would recycle the warm-session
+   * options fingerprint.
+   *
+   * OMITTED ⇒ {@link PROGRAMMATIC_STEP_DISALLOWED_TOOLS}, the pre-scoping
+   * deny-everything posture. The unwired default is the CONSERVATIVE one so a
+   * caller that never learned about this option cannot accidentally open the
+   * merge-gate race; DefaultProgrammaticRunner always passes the scoped list.
+   */
+  disallowedTools?: readonly string[];
   /**
    * Per-step agent-permission-mode RESOLVER (permission-mode redesign §3c#2).
    * Invoked ONCE per `runStep` (NOT captured at construction) so each step turn
@@ -238,12 +275,13 @@ export class SpawnStepRunner implements StepRunner {
         prompt,
         hidePromptFromTranscript: true,
         agentInvocationStepId: step.id,
-        // On the programmatic plane the CONTROLLER owns the visual-verification
-        // enqueue (agentless visual-verify step), so NO step turn may fire the
-        // request itself — the first live run's task-verify turn did, hijacking
-        // the lane (2026-07-22). Denied on EVERY step turn (constant across the
-        // run, so warm lane sessions never recycle over the fingerprint).
-        disallowedTools: [...PROGRAMMATIC_STEP_DISALLOWED_TOOLS],
+        // When the CONTROLLER owns the visual-verification enqueue (the agentless
+        // visual-verify step), NO step turn may fire the request itself — the
+        // first live run's task-verify turn did, hijacking the lane (2026-07-22).
+        // Constant across the run, so warm lane sessions never recycle over the
+        // fingerprint; EMPTY for a run with no such step (the spawn seam drops an
+        // empty list), so verify-setup's `prove` step can fire its own proof.
+        disallowedTools: [...(this.opts.disallowedTools ?? PROGRAMMATIC_STEP_DISALLOWED_TOOLS)],
         ...(spawnModel ? { model: spawnModel } : {}),
         ...(stepProvider ? { agentProvider: stepProvider } : {}),
         ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),

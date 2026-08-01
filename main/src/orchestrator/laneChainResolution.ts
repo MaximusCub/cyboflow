@@ -32,7 +32,8 @@
 import type { DatabaseLike } from './types';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
-import type { FanOutInnerStep } from '../../../shared/types/workflows';
+import type { FanOutInnerStep, WorkflowDefinition } from '../../../shared/types/workflows';
+import { SPRINT_VISUAL_VERIFY_STEP } from '../../../shared/types/sprintBatch';
 
 /**
  * Resolve the run's fan-out lane vocabulary — the inner chains of EVERY step
@@ -74,4 +75,67 @@ export function resolveRunFanOutInner(db: DatabaseLike, runId: string): readonly
     }
   }
   return union.length > 0 ? union : null;
+}
+
+/**
+ * Does this workflow definition contain a CONTROLLER-OWNED visual-verify step —
+ * i.e. a fan-out inner step whose id is {@link SPRINT_VISUAL_VERIFY_STEP}, the
+ * one the programmatic controller drives agentlessly (workflowController.runFanOut)
+ * by enqueuing the verification itself and parking the lane?
+ *
+ * WHY THIS PREDICATE EXISTS. Two seams reject `cyboflow_request_verification`
+ * whenever a run's execution model is `programmatic` — the per-spawn deny list
+ * (programmatic/spawnStepRunner.ts) and the MCP ownership guard
+ * (mcpServer/mcpQueryHandler.handleRequestVerification). Both were written for
+ * sprint/ship, where the controller IS the only legitimate enqueuer and a step
+ * turn firing the tool itself creates an unkeyed request that races the merge
+ * gate (observed live 2026-07-22). Both encoded that as "programmatic ⇒ deny",
+ * which silently assumed every programmatic run has a controller-owned enqueue.
+ *
+ * `verify-setup` broke the assumption. It resolves programmatic like everything
+ * else (the global default floors SDK runs to programmatic), has NO fan-out and
+ * therefore no controller-owned visual-verify step, and its `prove` step's whole
+ * deliverable is firing a `setup_proof` verification — which both guards denied,
+ * making the one flow that bootstraps verification structurally incapable of
+ * doing so (found by the first live dogfood run, 2026-07-31; invisible to unit
+ * tests because deny list, flow definition, and gate are each correct alone).
+ *
+ * So the real question is not "is this run programmatic?" but "does a controller
+ * own the enqueue on this run?" — and the answer is exactly whether the chain the
+ * controller walks has the step it would enqueue from. A run with no such step
+ * has no enqueue to race, so the agent is the only party that can fire one.
+ *
+ * Deliberately keyed on the STEP ID, not the workflow name: an edited sprint that
+ * renames/removes `visual-verify` genuinely loses its controller-owned enqueue
+ * (the controller keys on the same literal), and a custom flow that adds one
+ * genuinely gains it. Name-matching would get both backwards.
+ */
+export function definitionHasControllerVisualVerify(def: WorkflowDefinition): boolean {
+  return def.phases.some((phase) =>
+    phase.steps.some(
+      (step) => step.fanOut?.inner.some((innerStep) => innerStep.id === SPRINT_VISUAL_VERIFY_STEP) === true,
+    ),
+  );
+}
+
+/**
+ * {@link definitionHasControllerVisualVerify} resolved from a runId, for the
+ * seams that hold a DB handle rather than the definition (the MCP socket).
+ * Resolves through the SAME frozen-spec contract as
+ * {@link resolveRunFanOutInner}, so the guard and the controller can never
+ * disagree about which chain a live run is walking.
+ *
+ * FAIL-CLOSED on an unresolvable definition: `resolveRunFanOutInner` returns null
+ * for a missing run row, an unparseable spec, OR a definition with no fan-out at
+ * all, and those cases are not distinguishable here. The callers use this to
+ * decide whether to DENY a verification enqueue, so an unresolvable run keeps
+ * today's deny posture — a wrongly-denied setup proof surfaces as an actionable
+ * tool error, while a wrongly-allowed one races a live sprint's merge gate.
+ */
+export function runHasControllerVisualVerify(db: DatabaseLike, runId: string): boolean {
+  const row = resolveRunFrozenSpec(db, runId);
+  if (!row) return true;
+  const def = resolveWorkflowDefinition(row.workflowName, row.specJson);
+  if (def === null) return true;
+  return definitionHasControllerVisualVerify(def);
 }

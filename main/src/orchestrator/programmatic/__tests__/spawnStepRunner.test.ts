@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SpawnStepRunner } from '../spawnStepRunner';
+import { SpawnStepRunner, programmaticDisallowedTools } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
-import type { WorkflowStep } from '../../../../../shared/types/workflows';
+import type { WorkflowDefinition, WorkflowStep } from '../../../../../shared/types/workflows';
 import type { ControllerStepContext } from '../types';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
@@ -60,6 +60,19 @@ describe('SpawnStepRunner', () => {
     for (const [passed] of calls as Array<[ClaudeSpawnerOptions]>) {
       expect(passed.disallowedTools).toEqual(['mcp__cyboflow__cyboflow_request_verification']);
     }
+  });
+
+  it('denies nothing when the run carries an empty deny list (no controller-owned enqueue)', async () => {
+    // verify-setup is programmatic with no fan-out, so its `prove` step MUST be
+    // able to fire cyboflow_request_verification itself — the setup proof is the
+    // flow's entire deliverable (live dogfood run, 2026-07-31).
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, workflowName: 'verify-setup', disallowedTools: [] });
+
+    await runner.runStep(step({ id: 'prove', agent: 'verify-setup' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.disallowedTools).toEqual([]);
   });
 
   // ── typed step-output channel (§5.3) ──────────────────────────────────────
@@ -544,5 +557,52 @@ describe('SpawnStepRunner', () => {
       expect('agentProvider' in passed).toBe(false);
       expect('agentRuntime' in passed).toBe(false);
     });
+  });
+});
+
+// ── deny-list scoping (dogfood finding 0, 2026-07-31) ───────────────────────
+// "Programmatic" was only ever a proxy for "the controller owns the enqueue".
+// The predicate is keyed on the visual-verify STEP so an edited chain that adds
+// or removes it moves the deny with it.
+describe('programmaticDisallowedTools', () => {
+  function definition(inner: string[]): WorkflowDefinition {
+    return {
+      id: 'wf',
+      phases: [
+        {
+          id: 'ph',
+          label: 'Phase',
+          color: '#3b6dd6',
+          steps: [
+            step({ id: 'plan' }),
+            {
+              ...step({ id: 'execute-tasks' }),
+              fanOut: { over: 'tasks', inner: inner.map((id) => ({ id, agent: id })) },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it('denies the enqueue tool when the chain has a controller-owned visual-verify step', () => {
+    expect(programmaticDisallowedTools(definition(['implement', 'task-verify', 'visual-verify']))).toEqual([
+      'mcp__cyboflow__cyboflow_request_verification',
+    ]);
+  });
+
+  it('denies nothing when no fan-out step declares a visual-verify inner step', () => {
+    // An edited sprint that removed the step genuinely loses its controller-owned
+    // enqueue — the controller keys on the same literal — so the deny must lift
+    // with it rather than leaving neither party able to enqueue.
+    expect(programmaticDisallowedTools(definition(['implement', 'task-verify']))).toEqual([]);
+  });
+
+  it('denies nothing for a definition with no fan-out at all (the verify-setup shape)', () => {
+    const def: WorkflowDefinition = {
+      id: 'verify-setup',
+      phases: [{ id: 'ph', label: 'Phase', color: '#3b6dd6', steps: [step({ id: 'inspect' }), step({ id: 'prove' })] }],
+    };
+    expect(programmaticDisallowedTools(def)).toEqual([]);
   });
 });

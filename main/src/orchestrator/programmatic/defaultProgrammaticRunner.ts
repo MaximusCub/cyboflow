@@ -35,7 +35,7 @@ import { enqueueTaskVerification } from '../verify/enqueueFromTask';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
-import { SpawnStepRunner } from './spawnStepRunner';
+import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
@@ -242,6 +242,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runId: ctx.runId,
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
+        // Deny `cyboflow_request_verification` on this run's step turns ONLY when
+        // the controller owns the enqueue (a fan-out chain carrying the agentless
+        // visual-verify step). A programmatic run without one — `verify-setup`,
+        // whose `prove` step fires the setup proof itself — denies nothing.
+        disallowedTools: programmaticDisallowedTools(def),
         ...(ctx.run.model ? { model: ctx.run.model } : {}),
         promptRenderContext: {
           provider: ctx.run.agent_provider ?? 'claude',

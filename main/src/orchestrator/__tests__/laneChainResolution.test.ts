@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { resolveRunFanOutInner } from '../laneChainResolution';
+import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 function makeDb(): Database.Database {
@@ -199,5 +199,58 @@ describe('resolveRunFanOutInner', () => {
     db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
 
     expect(resolveRunFanOutInner(dbAdapter(db), 'run-1')).toBeNull();
+  });
+});
+
+/**
+ * `runHasControllerVisualVerify` — the "does a controller own the enqueue on this
+ * run?" predicate the two verification-tool guards were re-keyed onto after the
+ * first live verify-setup dogfood run (2026-07-31) proved that "programmatic"
+ * was the wrong question.
+ */
+describe('runHasControllerVisualVerify', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it("is true for the canonical built-in 'sprint' chain (it carries visual-verify)", () => {
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'sprint', '{}')").run();
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'run-1')).toBe(true);
+  });
+
+  it("is false for the built-in 'verify-setup' flow (no fan-out, so no controller enqueue)", () => {
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'verify-setup', '{}')").run();
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'run-1')).toBe(false);
+  });
+
+  it('is false for a custom fan-out chain that declares no visual-verify step', () => {
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'custom-flow', ?)").run(FANOUT_SPEC);
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'run-1')).toBe(false);
+  });
+
+  it('is false for a definition with no fan-out at all', () => {
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'custom-flow', ?)").run(NO_FANOUT_SPEC);
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'run-1')).toBe(false);
+  });
+
+  it('FAIL-CLOSES to true when the run row is missing or the definition is unresolvable', () => {
+    // The callers use this to decide whether to DENY an enqueue: a wrongly-denied
+    // setup proof is an actionable tool error, a wrongly-allowed one races a live
+    // sprint's merge gate. So an unreadable run keeps the deny posture.
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'no-such-run')).toBe(true);
+
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'not-a-builtin', '{}')").run();
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+    expect(runHasControllerVisualVerify(dbAdapter(db), 'run-1')).toBe(true);
   });
 });

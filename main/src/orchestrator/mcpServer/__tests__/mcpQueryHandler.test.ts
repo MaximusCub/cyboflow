@@ -4850,10 +4850,12 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect((JSON.parse(row.task_json) as { taskRef?: string }).taskRef).toBe('TASK-777');
   });
 
-  // Ownership guard: on a programmatic run the controller enqueues through its
-  // direct host capability, never this socket path — so ANY MCP-path call on a
-  // programmatic run is a rogue step turn, regardless of provider (the
-  // per-spawn disallowedTools denial only reaches the Claude SDK manager).
+  // Ownership guard: when a programmatic run's controller owns the enqueue it
+  // goes through its direct host capability, never this socket path — so an
+  // MCP-path call on such a run is a rogue step turn, regardless of provider
+  // (the per-spawn disallowedTools denial only reaches the Claude SDK manager).
+  // Scoped to chains that actually HAVE a controller-owned visual-verify step,
+  // since "programmatic" was only ever a proxy for that (dogfood finding 0).
   it('programmatic run → rejected provider-independently, no row enqueued', async () => {
     seedVerifyRun(vdb, 'run-vprog', {
       enabled: true,
@@ -4917,6 +4919,38 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         requestId: 'rv-orch',
         runId: 'run-vorch',
         intent: 'the toggle renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(typeof (response.data as { requestId?: string }).requestId).toBe('string');
+  });
+
+  // The blocker the first live dogfood run surfaced (2026-07-31): verify-setup
+  // resolves PROGRAMMATIC like every other SDK run, but its chain has no fan-out
+  // and therefore no controller-owned visual-verify step — nobody else can
+  // enqueue for it, and its `prove` step's entire deliverable is firing a proof
+  // through this exact path. The old execution-model-only guard rejected it,
+  // making the flow that bootstraps verification unable to prove anything.
+  it('programmatic run whose chain has NO controller-owned visual-verify step is NOT rejected', async () => {
+    seedVerifyRun(vdb, 'run-vsetupprog', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
+    });
+    vdb.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-vsetupprog');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-setupprog',
+        runId: 'run-vsetupprog',
+        intent: 'the runbook stands the project up',
         url: 'http://localhost:5173',
       },
       socket,
