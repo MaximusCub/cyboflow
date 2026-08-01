@@ -111,6 +111,105 @@ const DECOMPOSE_STEP_ID = 'decompose';
 const SHIP_WORKFLOW_NAME = 'ship';
 
 // ---------------------------------------------------------------------------
+// Gate self-heal diagnostics
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `questions.created_at` value to epoch ms, or null when unparseable.
+ *
+ * requestQuestion writes ISO-8601 (`new Date().toISOString()`), which
+ * `Date.parse` handles directly. The column also carries a
+ * `DEFAULT CURRENT_TIMESTAMP` (migration 010), which SQLite renders as
+ * `YYYY-MM-DD HH:MM:SS` in UTC with no zone marker — `Date.parse` would read
+ * that as LOCAL time and skew the age by the host's UTC offset, so it is
+ * normalized to ISO first.
+ */
+export function parseGateCreatedAtMs(raw: unknown): number | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Bucket a wedged gate's age into a LOW-CARDINALITY Sentry tag value.
+ *
+ * The boundaries are chosen to test the standing hypothesis that the wedge is
+ * the CLI's 600s PreToolUse hook timeout: if that is the cause, ages cluster in
+ * the `540-660s` bucket. Anything landing well outside it points elsewhere
+ * (a dropped control channel, a same-process hook death, a stalled agent).
+ */
+export function bucketGateAgeSeconds(seconds: number): string {
+  if (seconds < 60) return '<60s';
+  if (seconds < 300) return '60-300s';
+  if (seconds < 540) return '300-540s';
+  if (seconds <= 660) return '540-660s';
+  if (seconds < 1800) return '660-1800s';
+  return '>1800s';
+}
+
+/** Bucket the superseded-gate count so the tag stays bounded. */
+export function bucketPriorGateCount(count: number): string {
+  if (count <= 0) return '0';
+  if (count >= 3) return '3+';
+  return String(count);
+}
+
+/**
+ * Build the bounded Sentry tags describing a gate self-heal.
+ *
+ * Detail rides in TAGS, never in the beacon's message: telemetrySink scrubs the
+ * Sentry `extra` bag, and the message is the issue's grouping key — varying it
+ * per occurrence would fragment one wedge into a new issue every time. Every
+ * value here is a fixed-vocabulary label; no ids, paths, or prompts (the
+ * wedged gate's `tool_use_id` is deliberately NOT reported — it is unbounded
+ * and identifies nothing reusable across occurrences).
+ *
+ * @param wedgedCreatedAt - Raw `created_at` of every pending gate found wedged.
+ * @param inMemoryCount   - How many had a live `this.pending` entry.
+ * @param nowMs           - Heal timestamp, for the age computation.
+ */
+export function buildSelfHealTags(
+  wedgedCreatedAt: unknown[],
+  inMemoryCount: number,
+  nowMs: number,
+): Record<string, string> {
+  const total = wedgedCreatedAt.length;
+  const orphanCount = Math.max(0, total - inMemoryCount);
+
+  // 'none' is a real, distinct shape: the run sat at awaiting_input with no
+  // pending question row at all, so the wedge was in the run status rather
+  // than in a surviving gate.
+  const healSource =
+    total === 0
+      ? 'none'
+      : inMemoryCount > 0 && orphanCount > 0
+        ? 'mixed'
+        : inMemoryCount > 0
+          ? 'in-memory'
+          : 'orphan-sweep';
+
+  const parsed = wedgedCreatedAt
+    .map(parseGateCreatedAtMs)
+    .filter((ms): ms is number => ms !== null);
+  const oldestMs = parsed.length > 0 ? Math.min(...parsed) : null;
+  const priorGateAge =
+    total === 0
+      ? 'none'
+      : oldestMs === null
+        ? 'unknown'
+        : bucketGateAgeSeconds(Math.max(0, (nowMs - oldestMs) / 1000));
+
+  return {
+    healSource,
+    priorGateCount: bucketPriorGateCount(total),
+    priorGateAge,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -388,16 +487,21 @@ export class QuestionRouter extends EventEmitter {
     // self-heal (in-memory folds + orphan sweep), for the post-commit emits.
     let resolvedSupersededReviewItemIds: string[] = [];
     // True when the self-heal branch fired — a prior gate was wedged at
-    // awaiting_input (the recurring 600s PreToolUse hook-timeout). Reported to
-    // Sentry post-commit (the orphan-sweep case leaves supersededEntries empty,
-    // so this dedicated flag is the reliable signal).
+    // awaiting_input. Reported to Sentry post-commit (the orphan-sweep case
+    // leaves supersededEntries empty, so this dedicated flag is the reliable
+    // signal).
     let gateSelfHealed = false;
+    // Bounded diagnostic tags describing the wedge, captured inside the
+    // transaction and attached to the post-commit Sentry beacon. See
+    // buildSelfHealTags for why the detail rides in tags and not the message.
+    let selfHealTags: Record<string, string> = {};
 
     await this.getQuestionQueue(runId).add(async () => {
       // Reset per-attempt (the closure captures the outer refs).
       supersededEntries = [];
       resolvedSupersededReviewItemIds = [];
       gateSelfHealed = false;
+      selfHealTags = {};
 
       // Atomic: UPDATE workflow_runs + INSERT questions in one transaction. On a
       // running→awaiting_input guard miss the transaction either throws (the run
@@ -421,6 +525,16 @@ export class QuestionRouter extends EventEmitter {
             throw new RunNotRunningError(runId);
           }
           gateSelfHealed = true;
+
+          // Snapshot the wedged gate(s) BEFORE the sweeps below flip them to
+          // 'timed_out' — this is the only point at which their original
+          // created_at is still observable, and it is what dates the wedge.
+          const wedgedRows = this.db
+            .prepare(
+              `SELECT created_at AS createdAt FROM questions
+                WHERE run_id = ? AND status = 'pending'`,
+            )
+            .all(runId) as Array<{ createdAt: unknown }>;
 
           // SELF-HEAL: supersede every prior gate for this run, then open the new
           // one below. Collect the in-memory entries first (deletion + promise
@@ -472,6 +586,12 @@ export class QuestionRouter extends EventEmitter {
               if (resolved !== null) resolvedSupersededReviewItemIds.push(resolved);
             }
           }
+
+          selfHealTags = buildSelfHealTags(
+            wedgedRows.map((r) => r.createdAt),
+            supersededEntries.length,
+            nowMs,
+          );
         }
 
         const insertStmt = this.db.prepare(
@@ -497,15 +617,19 @@ export class QuestionRouter extends EventEmitter {
       // guard miss (the run moved on).
       (txn as () => void)();
 
-      // Report the self-heal to Sentry — this path only runs when a prior gate was
-      // found wedged at awaiting_input, the signature of the recurring 600s
-      // PreToolUse hook-timeout that leaves a run silently stuck. Post-commit +
-      // fire-and-forget (emitSeamError never throws).
+      // Report the self-heal to Sentry — this path only runs when a prior gate
+      // was found wedged at awaiting_input, leaving a run silently stuck until
+      // this heal. The MESSAGE is deliberately constant (it is the Sentry
+      // grouping key) and deliberately claims no cause: the wedge's shape rides
+      // in the bounded healSource / priorGateAge / priorGateCount tags, which
+      // are what distinguish a 600s PreToolUse hook timeout from the other ways
+      // a gate can die. Post-commit + fire-and-forget (emitSeamError never
+      // throws).
       if (gateSelfHealed) {
         emitSeamError(
           'gate-hook-timeout',
-          new Error('AskUserQuestion gate self-heal: a prior gate was wedged at awaiting_input (likely a 600s PreToolUse hook timeout)'),
-          { gateKind: 'question', errorClass: 'gate-hook-timeout' },
+          new Error('AskUserQuestion gate self-heal: a prior gate was wedged at awaiting_input'),
+          { gateKind: 'question', errorClass: 'gate-hook-timeout', ...selfHealTags },
         );
       }
 
