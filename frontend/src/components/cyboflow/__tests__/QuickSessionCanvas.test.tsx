@@ -6,7 +6,7 @@
  * IdeaPickerModal is stubbed so the Planner idea-gate is observable.
  */
 import '@testing-library/jest-dom';
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession, mockUseSessionSummary } =
@@ -358,11 +358,38 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(screen.getByTestId('quick-session-summary')).toHaveTextContent(
       'Refactoring the auth middleware and adding tests.',
     );
+    // The summary well moved OUT of the session node (TASK-144) — it must not
+    // still be reachable inside quick-session-node.
+    expect(
+      within(screen.getByTestId('quick-session-node')).queryByTestId('quick-session-summary'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps the summary well INSIDE the summary-history node, not the session node', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'Refactoring the auth middleware and adding tests.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('quick-session-node')).queryByTestId('quick-session-summary'),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId('quick-session-summary-history')).getByTestId('quick-session-summary'),
+    ).toBeInTheDocument();
   });
 
   it('renders nothing when the summary is null', () => {
     renderCanvas();
     expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
   });
 
   it('renders nothing when the feature is disabled, even with a summary present', () => {
@@ -378,6 +405,112 @@ describe('QuickSessionCanvas — session summary + history', () => {
     });
     renderCanvas();
     expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+  });
+
+  it('both gates false → the summary/history node and its leading edge are absent (only the trailing edge remains)', () => {
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(1);
+  });
+
+  it('either gate true → the summary/history node renders with two edges (leading + trailing)', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary-history')).toBeInTheDocument();
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
+  });
+
+  it('history-only state (no summary text): renders the history list, no summary block, header reads "Summary & History"', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: null,
+        updatedAt: null,
+        entries: [
+          { id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' },
+          { id: 2, entry: 'Did B.', createdAt: '2026-01-06T11:00:00.000Z' },
+        ],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    const node = screen.getByTestId('quick-session-summary-history');
+    expect(node).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
+    expect(screen.getByTestId('quick-session-history-list')).toBeInTheDocument();
+    expect(node).toHaveTextContent('Summary & History');
+    expect(node).toHaveTextContent('2 sittings');
+  });
+
+  it('header label + sitting count: summary-only omits "History" and any sitting count; a single entry reads "1 sitting" not "1 sittings"', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      loading: false,
+      error: null,
+    });
+    const { unmount } = renderCanvas();
+    let node = screen.getByTestId('quick-session-summary-history');
+    let header = node.firstElementChild as HTMLElement;
+    expect(header.textContent).toContain('Summary');
+    expect(header.textContent).not.toContain('History');
+    expect(header.textContent).not.toMatch(/sittings?/);
+    unmount();
+
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-01-06T12:00:00.000Z',
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    node = screen.getByTestId('quick-session-summary-history');
+    header = node.firstElementChild as HTMLElement;
+    expect(header.textContent).toContain('1 sitting');
+    expect(header.textContent).not.toContain('1 sittings');
+  });
+
+  it('a11y: the history toggle exposes aria-expanded reflecting open state, and type="button"', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-01-06T12:00:00.000Z',
+        entries: [
+          { id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' },
+          { id: 2, entry: 'Did B.', createdAt: '2026-01-06T11:00:00.000Z' },
+        ],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+
+    const toggle = screen.getByTestId('quick-session-history-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(toggle).toHaveAttribute('type', 'button');
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('shows the Summary & History node with no toggle/list and no sitting count when there are zero entries', () => {
