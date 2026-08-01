@@ -727,6 +727,48 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    // Bootstrap rung (dogfood finding 0c, 2026-07-31): a verify-setup run stamps
+    // verify_enabled=1 with NO config injected — i.e. with the master switch at
+    // its shipped-off default — because the setup_proof it fires is the whole
+    // deliverable of the flow, and gating it behind the switch it exists to make
+    // worth turning on is a bootstrap deadlock. Every OTHER workflow keeps the
+    // zero-behavior-change floor.
+    it('stamps verify_enabled=1 for a verify-setup run even with the master switch off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'verify-setup.md', '---\n---\n');
+        registry.seed(1, [{ name: 'verify-setup', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('verify-setup') as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        interface VerifyRow { verify_enabled: number; verify_type: string | null }
+        const row = db
+          .prepare('SELECT verify_enabled, verify_type FROM workflow_runs WHERE id = ?')
+          .get(runId) as VerifyRow;
+        expect(row.verify_enabled).toBe(1);
+        expect(row.verify_type).toBe('static-render-snapshot');
+      });
+    });
+
+    it('keeps verify_enabled=0 for a non-setup workflow with the master switch off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'sprint.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        interface VerifyRow { verify_enabled: number; verify_type: string | null }
+        const row = db
+          .prepare('SELECT verify_enabled, verify_type FROM workflow_runs WHERE id = ?')
+          .get(runId) as VerifyRow;
+        expect(row.verify_enabled).toBe(0);
+        expect(row.verify_type).toBeNull();
+      });
+    });
+
     it('returns a 32-character hex runId', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'default.md', '---\n---\n');

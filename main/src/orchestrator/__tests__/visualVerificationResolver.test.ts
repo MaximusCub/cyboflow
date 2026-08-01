@@ -44,6 +44,48 @@ describe('resolveVisualVerification — disabled posture (zero-behavior-change f
   });
 });
 
+describe('resolveVisualVerification — verify-setup bootstrap rung', () => {
+  // The verification setup flow's own run is not expressing a preference: its
+  // only verification is the setup_proof that PROVES the project's runbook, and
+  // the master switch it would otherwise be gated behind is the switch that
+  // proof exists to make worth turning on. Live dogfood run 2026-07-31: the run
+  // registered its runbook, then the proof no-op-skipped on verify_enabled=0.
+  it('enables the run even with every preference rung explicitly off', () => {
+    expect(
+      resolveVisualVerification({
+        setupFlowBootstrap: true,
+        requestedEnabled: false,
+        projectConfigEnabled: false,
+        globalDefaultEnabled: false,
+      }).enabled,
+    ).toBe(true);
+  });
+
+  it('enables the run when no rung is set at all (the shipped default posture)', () => {
+    // getVisualVerifyConfig floors `enabled` to an EXPLICIT boolean, so the
+    // ordinary ladder always terminates at the global rung — a low-priority
+    // bootstrap floor would never have fired.
+    const resolved = resolveVisualVerification({ setupFlowBootstrap: true });
+    expect(resolved.enabled).toBe(true);
+    expect(resolved.type).toBe(DEFAULT_VERIFICATION_TYPE);
+  });
+
+  it('is inert when false — the ordinary ladder decides, unchanged', () => {
+    expect(resolveVisualVerification({ setupFlowBootstrap: false })).toEqual({
+      enabled: false,
+      type: null,
+      chain: [],
+    });
+    expect(resolveVisualVerification({ setupFlowBootstrap: false, globalDefaultEnabled: true }).enabled).toBe(true);
+  });
+
+  it('grants enablement only — the resolved type still comes from the type ladder', () => {
+    expect(
+      resolveVisualVerification({ setupFlowBootstrap: true, requestedType: 'interactive-web-behavior' }).type,
+    ).toBe('interactive-web-behavior');
+  });
+});
+
 describe('resolveVisualVerification — enablement override ladder', () => {
   it('per-run override wins over every lower level', () => {
     // requested true beats project false beats global false.

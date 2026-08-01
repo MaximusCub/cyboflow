@@ -25,10 +25,12 @@
  *      fail).
  *
  * With the global master switch OFF (the default — getVisualVerifyEnabled floors
- * false), EVERY run resolves { enabled:false, type:null, chain:[] } and stamps
+ * false), every run resolves { enabled:false, type:null, chain:[] } and stamps
  * verify_enabled=0 / verify_type=NULL / verify_chain=NULL — the
  * zero-behavior-change invariant this seam guarantees, exactly as `substrate`
- * was stamped-but-dormant when migration 013 introduced it.
+ * was stamped-but-dormant when migration 013 introduced it. The ONE exception is
+ * a `verify-setup` run (`setupFlowBootstrap`), which is the flow that makes the
+ * switch worth turning on and so cannot be gated behind it.
  */
 import {
   type VerificationType,
@@ -88,8 +90,35 @@ export const SHIPPED_VERIFY_BACKENDS: readonly VisualBackendId[] = [
  */
 export interface VisualVerificationResolverInputs {
   /**
+   * The run IS the verification bootstrap (`verify-setup`). Sits ABOVE the whole
+   * enablement ladder — the one rung that is not a preference.
+   *
+   * WHY IT OUTRANKS EVERYTHING. Every other rung answers "should this run's work
+   * be visually verified?", and the honest default for that is off. A
+   * verify-setup run asks a different question: its only verification is the
+   * `setup_proof` that PROVES the project's runbook, which is the whole
+   * deliverable of the flow and the precondition for every other run's
+   * verification ever becoming useful. Resolving it through the ordinary ladder
+   * is a bootstrap deadlock in the same shape §3.6 already exempts setup proofs
+   * from at the degrade gate: with the master switch off (the shipped default,
+   * and `getVisualVerifyConfig` floors it to an EXPLICIT boolean so the ladder
+   * always terminates there) the flow can only ever produce an unproven draft,
+   * and the switch it is gated on is the switch it exists to make worth turning
+   * on. Observed live 2026-07-31: the dogfood run registered its runbook, then
+   * its proof no-op-skipped on `verify_enabled = 0`.
+   *
+   * Narrow by construction: it enables the RUN, not the project. Firing a
+   * `setup_proof` request still requires the run's frozen workflow identity to
+   * be verify-setup AND a pin resolving to a registered draft (the MCP
+   * authorization gate), and setup-proof rows are already budget-exempt and
+   * drain behind live lanes. A verify-setup run that fires an ORDINARY request
+   * gets an ordinary one — enablement is all this grants.
+   */
+  setupFlowBootstrap?: boolean;
+  /**
    * Explicit per-run enablement override (e.g. from the run-launch UI). HIGHEST
-   * precedence — a deliberate per-launch choice beats any standing default.
+   * precedence among the preference rungs — a deliberate per-launch choice beats
+   * any standing default.
    */
   requestedEnabled?: boolean | null;
   /** Per-project config override (project `.cyboflow/verify.json:enabled`). */
@@ -170,8 +199,13 @@ const DISABLED: ResolvedVisualVerification = { enabled: false, type: null, chain
  * first level that is an explicit boolean (true OR false); a level set to
  * `false` is a deliberate opt-OUT that wins over lower levels, exactly as a
  * `true` opt-in does. Floors to false when no level is set.
+ *
+ * The bootstrap rung is checked FIRST and is not part of that ladder — see
+ * {@link VisualVerificationResolverInputs.setupFlowBootstrap} for why a
+ * verify-setup run is not expressing a preference that a preference can outrank.
  */
 function resolveEnabled(inputs: VisualVerificationResolverInputs): boolean {
+  if (inputs.setupFlowBootstrap === true) return true;
   const candidates: Array<boolean | null | undefined> = [
     inputs.requestedEnabled,
     inputs.projectConfigEnabled,
@@ -248,6 +282,8 @@ function resolveType(inputs: VisualVerificationResolverInputs): VerificationType
  * Resolve a run's visual-verification posture.
  *
  * Enablement precedence (highest wins; first explicit boolean level):
+ *   0. setupFlowBootstrap — the verify-setup flow's own run, which is not
+ *      expressing a preference; see the field's doc for the deadlock it breaks.
  *   1. requestedEnabled (explicit per-run override)
  *   2. projectConfigEnabled (project config)
  *   3. globalDefaultEnabled (global AppConfig master switch)

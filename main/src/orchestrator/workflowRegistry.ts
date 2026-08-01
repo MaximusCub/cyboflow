@@ -16,7 +16,12 @@ import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isCyboflowWorkflowName, resolveWorkflowDefinition, parseWorkflowDefinition } from '../../../shared/types/workflows';
+import {
+  isCyboflowWorkflowName,
+  resolveWorkflowDefinition,
+  parseWorkflowDefinition,
+  VERIFY_SETUP_WORKFLOW_NAME,
+} from '../../../shared/types/workflows';
 import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
 import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
 import { loadBuiltInAgents } from './agents/agentCatalogue';
@@ -1395,6 +1400,13 @@ export class WorkflowRegistry {
     const visualVerifyConfig = this.config?.getVisualVerifyConfig?.();
     const projectVerifyConfig = opts?.projectVerifyConfig ?? null;
     const verify = resolveVisualVerification({
+      // BOOTSTRAP RUNG (above the whole ladder): this run IS the verification
+      // setup flow, whose only verification is the `setup_proof` that proves the
+      // project's runbook. Resolving it through the ordinary ladder deadlocks the
+      // bootstrap — with the master switch off (the shipped default) the flow can
+      // only ever produce an unproven draft, and the switch it is gated behind is
+      // the one it exists to make worth turning on. Observed live 2026-07-31.
+      setupFlowBootstrap: workflow.name === VERIFY_SETUP_WORKFLOW_NAME,
       requestedEnabled: opts?.requestedVerifyEnabled ?? null,
       projectConfigEnabled: projectVerifyConfig?.enabled ?? null,
       globalDefaultEnabled: visualVerifyConfig?.enabled ?? null,

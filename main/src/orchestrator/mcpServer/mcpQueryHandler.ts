@@ -90,7 +90,12 @@ import {
 import BetterSqlite3Database from 'better-sqlite3';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
-import { resolveWorkflowDefinition, isPermissionMode, isCyboflowWorkflowName } from '../../../../shared/types/workflows';
+import {
+  resolveWorkflowDefinition,
+  isPermissionMode,
+  isCyboflowWorkflowName,
+  VERIFY_SETUP_WORKFLOW_NAME,
+} from '../../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
 import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../../shared/types/workflows';
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
@@ -4322,12 +4327,12 @@ export class McpQueryHandler {
       // denied rather than guessing.
       const frozen = resolveRunFrozenSpec(this.db, msg.runId);
       const actualWorkflow = frozen?.workflowName ?? 'unknown';
-      if (actualWorkflow !== 'verify-setup') {
+      if (actualWorkflow !== VERIFY_SETUP_WORKFLOW_NAME) {
         this.writeResponse(client, {
           type: 'mcp-query-response',
           requestId: msg.requestId,
           ok: false,
-          error: `setup_proof_not_authorized: this run's workflow is '${actualWorkflow}', not 'verify-setup' — setup_proof is verify-setup-flow-only`,
+          error: `setup_proof_not_authorized: this run's workflow is '${actualWorkflow}', not '${VERIFY_SETUP_WORKFLOW_NAME}' — setup_proof is verify-setup-flow-only`,
         });
         return;
       }

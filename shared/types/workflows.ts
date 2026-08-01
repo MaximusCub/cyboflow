@@ -381,6 +381,18 @@ export const CYBOFLOW_WORKFLOW_NAMES = [
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
+/**
+ * The verification-bootstrap flow's name, as a single constant rather than a
+ * literal re-spelled per seam. Two independent authorities key on this identity
+ * and MUST agree: `WorkflowRegistry.createRun` (which stamps such a run
+ * verify-enabled regardless of the master switch — the flow that makes
+ * verification usable cannot be gated behind it) and the MCP `setup_proof`
+ * authorization gate (which grants the degrade-gate + budget exemption only to
+ * a run whose FROZEN workflow identity is this one). A typo in either used to
+ * be a silent no-op on one side of that pair.
+ */
+export const VERIFY_SETUP_WORKFLOW_NAME: CyboflowWorkflowName = 'verify-setup';
+
 // ─── Phase / Step data model ─────────────────────────────────────────────────
 
 /**
