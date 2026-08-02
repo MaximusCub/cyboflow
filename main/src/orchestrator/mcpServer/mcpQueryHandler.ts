@@ -1565,7 +1565,18 @@ export class McpQueryHandler {
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      console.error(`[Cyboflow MCP Query] Unhandled error in handleMessage:`, err);
+      // NOT "unhandled" — every throw reaching here is converted into the
+      // structured ok:false response written immediately below, and several
+      // handlers rely on that conversion for EXPECTED input errors. The clearest
+      // case is handleAgentDbQuery, whose SQL is AGENT-authored: a bad column
+      // name in an ad-hoc cyboflow_db_query is a query error the caller is told
+      // about, not an app fault. Reporting those as "Unhandled error" labelled a
+      // designed path as a crash — it cost a 2026-08-01 smoke run a false
+      // medium-severity app finding before the handler's own source comment
+      // reclassified it. This message states what is true of BOTH classes (the
+      // handler threw; the client got ok:false) and names the message type so
+      // triage knows which handler without decoding the stack.
+      console.error(`[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`, err);
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
