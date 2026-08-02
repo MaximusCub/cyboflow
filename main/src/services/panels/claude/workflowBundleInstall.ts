@@ -40,18 +40,45 @@ const CYBOFLOW_EXCLUDE_PATTERNS = [
 ];
 
 /**
+ * True when a failed `git` invocation failed *because the cwd is not a git
+ * repository* — the expected, uninteresting case (see ensureBundleExcluded).
+ * Node puts the child's stderr on `err.stderr` when it is piped, and also folds
+ * it into `err.message` ("Command failed: <cmd>\n<stderr>"); both are checked so
+ * this holds regardless of how the spawn's stdio is configured. `LC_ALL=C` at
+ * the call site pins git's wording to English so this match is locale-stable.
+ */
+function isNotAGitRepositoryError(err: unknown): boolean {
+  const candidate = err as { stderr?: unknown; message?: unknown } | null;
+  const stderr = typeof candidate?.stderr === 'string' ? candidate.stderr : '';
+  const message = typeof candidate?.message === 'string' ? candidate.message : '';
+  return /not a git repository/i.test(stderr) || /not a git repository/i.test(message);
+}
+
+/**
  * Add the cyboflow bundle globs to the worktree's LOCAL git exclude
  * (`$GIT_DIR/info/exclude`, NOT the tracked `.gitignore`) so the generated
  * `cyboflow-*.md` files never surface in the run diff (`git ls-files --others
  * --exclude-standard` / `git status` both honor it) or get accidentally
  * committed. Idempotent (skips patterns already present) and fail-soft — a git
  * or fs error here must not break a spawn.
+ *
+ * A NON-REPO target is expected, not a fault: the global-agent chat thread's
+ * home (`<dataDir>/agent-home/<threadId>`, AgentThreadService's `homeDirBase`)
+ * goes through this same install seam and is deliberately a neutral directory
+ * with no repo. It has no run diff to keep the bundle out of, so there is
+ * nothing to exclude. That case is logged at debug and returns; every OTHER git
+ * or fs failure still warns, because those are real and worth seeing.
  */
 function ensureBundleExcluded(worktreePath: string, logger?: LoggerLike): void {
   try {
     const raw = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
       cwd: worktreePath,
       encoding: 'utf8',
+      // Pin git's message language for isNotAGitRepositoryError, and capture
+      // stderr rather than letting the child's `fatal:` line leak to the app's
+      // own stderr on the (expected) non-repo path.
+      env: { ...process.env, LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
     if (raw.length === 0) return;
     const excludePath = path.isAbsolute(raw) ? raw : path.join(worktreePath, raw);
@@ -78,6 +105,12 @@ function ensureBundleExcluded(worktreePath: string, logger?: LoggerLike): void {
       added: missing,
     });
   } catch (err) {
+    if (isNotAGitRepositoryError(err)) {
+      logger?.debug('[WorkflowBundleInstall] skipped git exclude — not a git repository', {
+        worktreePath,
+      });
+      return;
+    }
     logger?.warn(
       `[WorkflowBundleInstall] could not update git exclude for ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`,
     );

@@ -27,6 +27,25 @@ import type Database from 'better-sqlite3';
 // these tests isolate the exclude + fail-soft seam.
 vi.mock('../agentOverlayWriter', () => ({ installAgentOverlay: vi.fn() }));
 
+/**
+ * child_process is mocked ONLY so a single test can force a git failure that is
+ * NOT "not a git repository" (the one class ensureBundleExcluded still warns
+ * about). `impl` is null everywhere else, in which case the real execFileSync
+ * runs — this file's own `git init` helper depends on that pass-through, so the
+ * reset belongs at the TOP of each beforeEach, ahead of initGitRepo.
+ */
+const execFileSyncOverride = vi.hoisted(() => ({ impl: null as (() => never) | null }));
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    execFileSync: (...args: unknown[]) =>
+      execFileSyncOverride.impl
+        ? execFileSyncOverride.impl()
+        : (actual.execFileSync as unknown as (...a: unknown[]) => unknown)(...args),
+  };
+});
+
 import { installWorkflowBundle } from '../workflowBundleInstall';
 import { installAgentOverlay } from '../agentOverlayWriter';
 import { WorkflowBundleWriter } from '../workflowBundleWriter';
@@ -79,6 +98,7 @@ describe('workflowBundleInstall — ensureBundleExcluded', () => {
   let worktree: string;
 
   beforeEach(() => {
+    execFileSyncOverride.impl = null;
     worktree = tmpDir('cyboflow-bundle-install-');
     initGitRepo(worktree);
     vi.clearAllMocks();
@@ -120,7 +140,11 @@ describe('workflowBundleInstall — ensureBundleExcluded', () => {
     for (const glob of GLOBS) expect(contents).toContain(glob);
   });
 
-  it('fails soft (logs, does not throw) when the worktree is not a git repo', () => {
+  it('skips quietly (debug, no warn) when the worktree is not a git repo', () => {
+    // The global-agent chat thread's home (`<dataDir>/agent-home/<threadId>`) is
+    // deliberately NOT a repo and goes through this same seam on every cold
+    // spawn, so a warn here fires structurally-forever for a case with nothing
+    // to exclude. Pinned as debug after a 2026-08-01 smoke run filed the WARN.
     const nonGit = tmpDir('cyboflow-bundle-nongit-');
     const logger = makeSpyLogger();
 
@@ -128,13 +152,32 @@ describe('workflowBundleInstall — ensureBundleExcluded', () => {
       installWorkflowBundle(makeDbStub(undefined), new WorkflowBundleWriter(), 'run-1', nonGit, logger),
     ).not.toThrow();
 
-    // The exclude-update failure is warned, not thrown.
-    expect(logger.warn).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    const skipped = logger.calls.some(
+      (c) => c.level === 'debug' && c.message.includes('skipped git exclude'),
+    );
+    expect(skipped).toBe(true);
+    fs.rmSync(nonGit, { recursive: true, force: true });
+  });
+
+  it('still warns when git fails for a reason OTHER than a missing repo', () => {
+    // The non-repo path above is quiet by design; this pins that the quieting is
+    // NARROW — a genuine git/fs failure must not be swallowed with it.
+    const logger = makeSpyLogger();
+    execFileSyncOverride.impl = () => {
+      throw Object.assign(new Error('Command failed: git rev-parse --git-path info/exclude'), {
+        stderr: 'fatal: detected dubious ownership in repository\n',
+      });
+    };
+
+    expect(() =>
+      installWorkflowBundle(makeDbStub(undefined), new WorkflowBundleWriter(), 'run-1', worktree, logger),
+    ).not.toThrow();
+
     const warned = logger.calls.some(
       (c) => c.level === 'warn' && c.message.includes('could not update git exclude'),
     );
     expect(warned).toBe(true);
-    fs.rmSync(nonGit, { recursive: true, force: true });
   });
 });
 
@@ -142,6 +185,7 @@ describe('workflowBundleInstall — installWorkflowBundle fail-soft', () => {
   let worktree: string;
 
   beforeEach(() => {
+    execFileSyncOverride.impl = null;
     worktree = tmpDir('cyboflow-bundle-install-fs-');
     initGitRepo(worktree);
     vi.clearAllMocks();
