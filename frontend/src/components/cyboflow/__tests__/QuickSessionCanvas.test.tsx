@@ -386,7 +386,7 @@ describe('QuickSessionCanvas — session summary + history', () => {
     ).toBeInTheDocument();
   });
 
-  it('paints the summary well tint with slash-alpha rgb(), not the invalid legacy rgba() form', () => {
+  it('paints every --color-interactive-rgb tint with slash-alpha rgb(), not the invalid legacy rgba() form', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: {
         enabled: true,
@@ -401,6 +401,12 @@ describe('QuickSessionCanvas — session summary + history', () => {
     const style = screen.getByTestId('quick-session-summary').getAttribute('style');
     expect(style).toContain('rgb(var(--color-interactive-rgb) / 0.045)');
     expect(style).not.toContain('rgba(var(--color-interactive-rgb),');
+
+    // The add-workflow node's ghost fill is the sibling declaration and must use
+    // the same form — `rgba(<space triple>, a)` is dropped outright by Chromium.
+    const addStyle = screen.getByTestId('quick-session-add-workflow').getAttribute('style');
+    expect(addStyle).toContain('rgb(var(--color-interactive-rgb) / 0.06)');
+    expect(addStyle).not.toContain('rgba(var(--color-interactive-rgb),');
   });
 
   it('renders nothing when the summary is null', () => {

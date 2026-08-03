@@ -950,7 +950,9 @@ export function QuickSessionCanvas({
               border: `1.4px dashed ${addHovered ? 'var(--color-phase-execute)' : 'var(--color-text-disabled)'}`,
               // Faint translucent "ghost" fill that stays visible across themes
               // (the design's rgba(255,255,255,.4) vanishes on a dark canvas).
-              background: addHovered ? 'var(--color-surface-primary)' : 'rgba(var(--color-interactive-rgb), 0.06)',
+              // Slash-alpha for the same reason as the summary well above: the
+              // legacy `rgba(<space triple>, a)` form is invalid and gets dropped.
+              background: addHovered ? 'var(--color-surface-primary)' : 'rgb(var(--color-interactive-rgb) / 0.06)',
               padding: '18px 16px',
               transition: 'border-color .12s, background .12s',
             }}
