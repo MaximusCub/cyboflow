@@ -797,10 +797,6 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-a', 'sess-a'));
   });
 
-  // -------------------------------------------------------------------------
-  // Quick-arm "Done" affordance (settleQuickArm) — TASK-117
-  // -------------------------------------------------------------------------
-
   it('renders "Done" for a live (unsettled) quick arm and calls settleQuickArm with the correct arm — the non-quick sibling arm has no such control', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
     getComparisonQuery.mockResolvedValue(
@@ -927,7 +923,6 @@ describe('ExperimentComparisonView', () => {
     settleQuickArmMutate.mockResolvedValue({ experimentId: 'exp_1', arm: 'A', status: 'awaiting_review' });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    // Before Done: still in the running-state layout, no decide CTAs yet.
     const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
     expect(screen.queryByTestId('experiment-accept-a')).not.toBeInTheDocument();
 
@@ -935,7 +930,6 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() =>
       expect(settleQuickArmMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'A' }),
     );
-    // Both arms now settled — the full verdict layout renders with enabled decide CTAs.
     await waitFor(() => expect(screen.getByTestId('experiment-accept-a')).not.toBeDisabled());
   });
 

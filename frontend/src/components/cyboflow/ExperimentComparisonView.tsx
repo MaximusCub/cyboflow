@@ -520,7 +520,13 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
       await trpc.cyboflow.experiments.settleQuickArm.mutate({ experimentId, arm });
       // Re-run the shared poll step so `payload`/`exp` refresh and the arm's
       // status flips to 'awaiting_review' — the existing bothSettled/canDecide
-      // gating (derived from payload.armA/B.status) then reacts on its own.
+      // gating (derived from payload.armA/B.status) then reacts on its own. Clear
+      // any outstanding scheduled tick first so we don't fork a second concurrent
+      // poll chain and orphan the tracked handle (mirrors handleRerunComparison).
+      if (pollTimerRef.current !== undefined) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = undefined;
+      }
       tick();
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : 'Failed to mark the quick session done');

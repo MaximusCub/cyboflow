@@ -708,14 +708,27 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   const baseBranch = await deps.worktreeManager.getProjectMainBranch(projectPath);
   const baseSha = await deps.worktreeManager.getHeadCommit(projectPath);
 
-  // 3. Create the two SHA-pinned arm sessions (A then B). If B fails before the
+  // 3. Create the two SHA-pinned arm sessions (A then B). Arm A is created inside a
+  //    try so a mid-creation failure surfaces a consistent error: a quick arm's
+  //    config can carry a substrate/runtime combo createRun rejects AFTER the
+  //    worktree + session were provisioned — that half-created session is swept
+  //    inside createArmSession/createQuickSessionCore (the only layer that holds its
+  //    id, since the throw pre-empts the return here). If B fails before the
   //    experiments row exists, dismiss A + throw (clean — no row, no runs).
-  const sessionA = await deps.createArmSession({
-    projectId: input.projectId,
-    baseCommittish: baseSha,
-    nameHint: armNameHint('A'),
-    quickConfig: aIsQuick ? input.quickConfigA : undefined,
-  });
+  let sessionA: { sessionId: string; worktreePath: string; runId: string };
+  try {
+    sessionA = await deps.createArmSession({
+      projectId: input.projectId,
+      baseCommittish: baseSha,
+      nameHint: armNameHint('A'),
+      quickConfig: aIsQuick ? input.quickConfigA : undefined,
+    });
+  } catch (err) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `failed to create arm A session: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
   let sessionB: { sessionId: string; worktreePath: string; runId: string };
   try {
     sessionB = await deps.createArmSession({

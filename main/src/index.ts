@@ -253,6 +253,7 @@ import {
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
+import { panelManager } from './services/panelManager';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -4642,6 +4643,10 @@ app.whenReady().then(async () => {
             sessionManager,
             workflowRegistry,
             getDb: () => databaseService.getDb(),
+            // A quick arm's config can pass an invalid substrate/runtime combo (the
+            // wire schema permits cross-field combos createRun rejects), which throws
+            // AFTER the worktree + session row are provisioned — sweep that orphan.
+            dismissHalfCreatedSession: dismissSessionFully,
           },
           quickConfig
             ? {
@@ -4661,6 +4666,44 @@ app.whenReady().then(async () => {
               // 'sdk' exactly as before that default existed.
               { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
         );
+        // Seed the quick arm's chat config onto its Claude panel. A quick arm is
+        // an interactive session the user drives, but its per-turn model / fast-mode
+        // / reasoning-effort are read from PANEL settings at sessions:input spawn
+        // time (never from the session row) — and the arm's Claude panel is created
+        // bare (lazily, by bootstrapArmSessionPanels). Without seeding it here, the
+        // whole quickConfig (including fastMode + reasoningEffort, which are threaded
+        // all the way from the tRPC input but had no production consumer) would fall
+        // back to the SDK/CLI defaults. Mirrors the quick handler's updatePanelSettings
+        // seeding; bootstrapArmSessionPanels is idempotent so it reuses this panel.
+        if (
+          quickConfig &&
+          (quickConfig.model !== undefined ||
+            quickConfig.fastMode !== undefined ||
+            quickConfig.reasoningEffort !== undefined)
+        ) {
+          try {
+            const chatPanel = await panelManager.createPanel({
+              sessionId: session.id,
+              type: 'claude',
+              title: 'Chat',
+            });
+            databaseService.updatePanelSettings(chatPanel.id, {
+              ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
+              ...(quickConfig.fastMode !== undefined ? { fastMode: quickConfig.fastMode } : {}),
+              ...(quickConfig.reasoningEffort !== undefined
+                ? { reasoningEffort: quickConfig.reasoningEffort }
+                : {}),
+            });
+          } catch (err) {
+            // Fail-soft: a seeding failure leaves the arm usable (it falls back to
+            // SDK/CLI defaults, exactly as before this seed existed) — never abort
+            // arm creation over a per-turn config pin.
+            loggerLike.warn('[Main] experiment arm: chat-panel config seed failed', {
+              sessionId: session.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         return { sessionId: session.id, worktreePath: session.worktreePath, runId };
       },
       taskChangeRouter: TaskChangeRouter.getInstance(),

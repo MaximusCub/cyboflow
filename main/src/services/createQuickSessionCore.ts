@@ -85,6 +85,17 @@ export interface CreateQuickSessionCoreDeps {
     // site (cyboflow.workflowRegistry in ipc/session.ts).
   };
   getDb(): Database.Database;
+  /**
+   * Optional FULL session-dismiss (cancel hosted runs + remove worktree) used to
+   * COMPENSATE a half-created session. The worktree + session row are provisioned
+   * (taskQueue.createSession) BEFORE the sentinel `createRun` validates the
+   * substrate/runtime combo, so a rejected combo (e.g. substrate 'interactive'
+   * with agentRuntime 'codex-sdk') throws AFTER provisioning. Without this the
+   * session + worktree leak — the caller never receives the id (the throw pre-empts
+   * the return), so only the core, which holds the id, can clean it up. Wired to
+   * dismissSessionFully by the boot layer; an absent callback keeps prior behavior.
+   */
+  dismissHalfCreatedSession?: (sessionId: string) => Promise<void>;
 }
 
 export interface CreateQuickSessionCoreOptions {
@@ -213,48 +224,60 @@ export async function createQuickSessionCore(
     sessionManager.on('session-created', onCreated);
   });
 
-  // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
-  const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
-  const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
-    ? opts.agentRuntime
-    : undefined;
-  const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(
-    sentinelWorkflowId,
-    opts.requestedSubstrate,
-    session.id,
-    opts.requestedAgentMode,
-    {
-      ...(sentinelAgentRuntime && opts.agentModel ? { requestedModel: opts.agentModel } : {}),
-      ...(sentinelAgentRuntime && opts.agentProvider
-        ? { requestedAgentProvider: opts.agentProvider }
-        : {}),
-      ...(sentinelAgentRuntime ? { requestedAgentRuntime: sentinelAgentRuntime } : {}),
-      ...(opts.requireSdkSubstrate ? { requireSdkSubstrate: true } : {}),
-    },
-  );
+  // Everything past here runs AFTER the worktree + session row are provisioned, so
+  // any throw (notably createRun rejecting an invalid substrate/runtime combo) would
+  // leak the half-created session + worktree. Compensate via dismissHalfCreatedSession
+  // (best-effort) before rethrowing — the caller never sees the id on a throw, so this
+  // is the only layer that can sweep the orphan.
+  try {
+    // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
+    const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
+    const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
+      ? opts.agentRuntime
+      : undefined;
+    const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(
+      sentinelWorkflowId,
+      opts.requestedSubstrate,
+      session.id,
+      opts.requestedAgentMode,
+      {
+        ...(sentinelAgentRuntime && opts.agentModel ? { requestedModel: opts.agentModel } : {}),
+        ...(sentinelAgentRuntime && opts.agentProvider
+          ? { requestedAgentProvider: opts.agentProvider }
+          : {}),
+        ...(sentinelAgentRuntime ? { requestedAgentRuntime: sentinelAgentRuntime } : {}),
+        ...(opts.requireSdkSubstrate ? { requireSdkSubstrate: true } : {}),
+      },
+    );
 
-  const db = deps.getDb();
+    const db = deps.getDb();
 
-  // queued -> starting (guarded UPDATE) -> running (guarded helper).
-  assertTransitionAllowed('queued', 'starting', runId);
-  const startingResult = db
-    .prepare(
-      `UPDATE workflow_runs SET status = 'starting', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status = 'queued'`,
-    )
-    .run(runId);
-  if (startingResult.changes === 0) {
-    throw new Error(`Failed to advance run ${runId} from queued to starting`);
+    // queued -> starting (guarded UPDATE) -> running (guarded helper).
+    assertTransitionAllowed('queued', 'starting', runId);
+    const startingResult = db
+      .prepare(
+        `UPDATE workflow_runs SET status = 'starting', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'queued'`,
+      )
+      .run(runId);
+    if (startingResult.changes === 0) {
+      throw new Error(`Failed to advance run ${runId} from queued to starting`);
+    }
+    transitionToRunning(db, { runId });
+
+    // Stamp the session worktree onto the sentinel run (mcpQueryHandler per-run
+    // worktree allow-list keys off this) + backfill run_id/chat_run_id.
+    db.prepare(`UPDATE workflow_runs SET worktree_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(
+      session.worktreePath,
+      runId,
+    );
+    db.prepare(`UPDATE sessions SET run_id = ?, chat_run_id = ? WHERE id = ?`).run(runId, runId, session.id);
+
+    return { session, runId, resolvedSubstrate, jobId: job.id };
+  } catch (err) {
+    if (deps.dismissHalfCreatedSession) {
+      await deps.dismissHalfCreatedSession(session.id).catch(() => {});
+    }
+    throw err;
   }
-  transitionToRunning(db, { runId });
-
-  // Stamp the session worktree onto the sentinel run (mcpQueryHandler per-run
-  // worktree allow-list keys off this) + backfill run_id/chat_run_id.
-  db.prepare(`UPDATE workflow_runs SET worktree_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(
-    session.worktreePath,
-    runId,
-  );
-  db.prepare(`UPDATE sessions SET run_id = ?, chat_run_id = ? WHERE id = ?`).run(runId, runId, session.id);
-
-  return { session, runId, resolvedSubstrate, jobId: job.id };
 }

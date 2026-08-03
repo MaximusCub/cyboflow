@@ -45,9 +45,9 @@ import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_QUICK_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
-import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
 
 /**
  * Per-arm quick-session config, local to the modal. Mirrors the subset of the
@@ -89,6 +89,32 @@ function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive
   return undefined;
 }
 
+/**
+ * Fold a runtime change into an arm's quick config. When the change crosses the
+ * Claude/Codex PROVIDER boundary, reset `model` + `reasoningEffort` to the new
+ * provider's defaults: the two model catalogs and effort scales (Claude low..max
+ * vs Codex none..xhigh) are disjoint, so carrying the prior provider's selection
+ * across would submit an invalid cross-provider value (e.g. `opus`/`max` into a
+ * Codex arm). A same-provider runtime flip (claude-sdk ↔ claude-interactive)
+ * keeps the model/effort — the catalog + scale are identical. Mirrors
+ * SessionStartWizard's reset-on-provider-transition behaviour.
+ */
+function applyQuickArmRuntimeChange(
+  config: ArmQuickConfig,
+  runtime: LaunchAgentRuntime,
+): ArmQuickConfig {
+  if (runtime === config.runtime) return config;
+  if (providerForRuntime(runtime) === providerForRuntime(config.runtime)) {
+    return { ...config, runtime };
+  }
+  return {
+    ...config,
+    runtime,
+    model: isCodexRuntime(runtime) ? DEFAULT_CODEX_MODEL : DEFAULT_QUICK_MODEL,
+    reasoningEffort: null,
+  };
+}
+
 /** One arm's quick-session config sub-form — reused for A and B. */
 function QuickArmConfigForm({
   arm,
@@ -109,7 +135,7 @@ function QuickArmConfigForm({
       <span className="text-xs font-semibold text-text-primary">Quick session config</span>
       <SubstrateSelector
         value={config.runtime}
-        onChange={(runtime) => onChange({ ...config, runtime })}
+        onChange={(runtime) => onChange(applyQuickArmRuntimeChange(config, runtime))}
         id={`${testIdPrefix}-runtime`}
         runtimeScope="workflow"
       />
