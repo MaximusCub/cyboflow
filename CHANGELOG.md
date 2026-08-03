@@ -6,6 +6,19 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.36] — 2026-08-03
+
+### Added
+
+- **Design tier promotion (static → interactive)**: the design surface can promote a static prototype to a live interactive one. A `design.md` tier-promotion contract with a style-kit freshness check governs the transition, a "Make it interactive" control drives it, superseded static prototype tabs hide once a live interactive prototype exists (applied in `RunCenterPane` too), and the canvas auto-refreshes on each prototype revision.
+- **Summary & History quick-session node**: extracted into its own node on the quick-session canvas, with its gate, structure, and accessibility contract locked by tests.
+- **Post-approve planner launch choice**: after approving a design, launch the planner either in the same design session or in a new one.
+
+### Fixed
+
+- A same-session planner launch now inherits the design session's permission mode.
+- Design well and add-workflow tints paint via the `rgb()` slash-alpha form so they render correctly across all palettes.
+
 ## [0.1.35] — 2026-08-01
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "cyboflow",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "private": true,
   "description": "Cyboflow - Multi-session AI code assistant manager",
   "author": {
