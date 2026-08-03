@@ -210,6 +210,63 @@ describe('DefaultProgrammaticRunner', () => {
     expect(passed.agentPermissionMode).toBe('dontAsk');
   });
 
+  // The WIRING half of dogfood finding 0. The predicate and the SpawnStepRunner
+  // option are each unit-tested elsewhere; what broke in production was the SEAM
+  // between components that were individually correct, so pin the seam itself:
+  // the runner must derive the deny list from THIS run's definition.
+  it('derives the step deny list from the run definition — denies the enqueue tool only when the chain owns it', async () => {
+    const withVisualVerify: WorkflowDefinition = {
+      id: 'd',
+      phases: [
+        {
+          id: 'p',
+          label: 'P',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'a',
+              name: 'A',
+              agent: 'executor',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'implement', agent: 'executor', name: 'Impl' },
+                  { id: 'visual-verify', agent: 'executor', name: 'Visual verify' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    // A chain WITHOUT a controller-owned visual-verify step (the verify-setup
+    // shape): nobody else can enqueue, so the step turn must not be denied.
+    const openSpawner = makeSpawner();
+    await new DefaultProgrammaticRunner({ spawner: openSpawner, reporter, gate: gateOf('approve') }).run(
+      ctxFor(oneStepDef()),
+    );
+    const openCall = (openSpawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as ClaudeSpawnerOptions;
+    expect(openCall.disallowedTools).toEqual([]);
+
+    // A chain WITH one: the controller owns the enqueue, so every step turn is
+    // denied (the 2026-07-22 merge-gate hijack this list exists to prevent).
+    const deniedSpawner = makeSpawner();
+    await new DefaultProgrammaticRunner({
+      spawner: deniedSpawner,
+      reporter,
+      gate: gateOf('approve'),
+    }).run(ctxFor(withVisualVerify));
+    for (const [passed] of (deniedSpawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls as Array<
+      [ClaudeSpawnerOptions]
+    >) {
+      expect(passed.disallowedTools).toEqual(['mcp__cyboflow__cyboflow_request_verification']);
+    }
+  });
+
   it('throws when the run has no resolvable workflow definition', async () => {
     const ctx = ctxFor(oneStepDef());
     const badCtx: ProgrammaticRunContext = {
