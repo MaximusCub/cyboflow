@@ -100,6 +100,16 @@ export interface PtyPanelDispatchDeps {
   codexPtyManager: CodexPtyManagerLike;
   registerLivePanel(runId: string, panelId: string): void;
   registerCodexPtyPanel(runId: string, panelId: string): void;
+  /**
+   * Chat-gate sentinel resolver. Only the CODEX branch needs it: the interactive
+   * manager resolves its own gate inside startPanel (resolveGateRunId), while
+   * codexPtyManager takes the runId from THIS caller. Resolving it here revives a
+   * `__quick__` sentinel that boot recovery force-failed on app restart —
+   * otherwise a resumed Codex terminal spawns bound to a terminal run and loses
+   * both its cyboflow_* MCP writes (`run_not_active`) and its approval gate.
+   * Optional: the stub-manager tests fall back to the raw `chat_run_id` read.
+   */
+  chatSentinelProvider?: (sessionId: string) => string;
 }
 
 /** Minimal panel shape (a ToolPanel satisfies it). */
@@ -188,6 +198,14 @@ export async function relayOrSpawnPtyPanel(
   const firstPrompt = input ?? (isCodexPty ? QUICK_CODEX_PTY_BRIEFING : QUICK_PTY_BRIEFING);
   if (isCodexPty) {
     deps.registerCodexPtyPanel(panel.id, panel.id);
+    // runId — align the Codex gate/MCP id with the session's chat sentinel
+    // (matches the primary panel); the live channel is keyed by panelId. Resolve
+    // it through the provider, NOT a raw `chat_run_id` read, so a sentinel parked
+    // by app-restart boot recovery is revived to 'running' before the spawn bakes
+    // it into CYBOFLOW_RUN_ID (see PtyPanelDispatchDeps.chatSentinelProvider).
+    const codexGateRunId = deps.chatSentinelProvider
+      ? deps.chatSentinelProvider(panel.sessionId)
+      : (dbSession?.chat_run_id ?? panel.id); // uninjected fallback (tests/boot)
     void deps.codexPtyManager
       .startPanel(
         panel.id,
@@ -196,9 +214,7 @@ export async function relayOrSpawnPtyPanel(
         firstPrompt,
         session.permissionMode,
         model,
-        // runId — align the Codex gate/MCP id with the session's chat sentinel
-        // (matches the primary panel); the live channel is keyed by panelId.
-        dbSession?.chat_run_id ?? panel.id,
+        codexGateRunId,
         reasoningEffort,
       )
       .catch((err: unknown) => {

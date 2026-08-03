@@ -20,6 +20,7 @@ import type { ArchiveProgressManager } from '../services/archiveProgressManager'
 import type { WorkflowRegistry } from '../orchestrator/workflowRegistry';
 import type { RunLauncher } from '../orchestrator/runLauncher';
 import type { SessionSummarySchedulerLike } from '../orchestrator/sessionSummary/sessionSummaryScheduler';
+import type { ChatSentinelProvider } from '../orchestrator/chatSentinelProvider';
 
 export interface AppServices {
   app: App;
@@ -77,6 +78,22 @@ export interface AppServices {
    * AppServices need not stub it.
    */
   sessionSummaryScheduler?: SessionSummarySchedulerLike;
+  /**
+   * Chat-gate sentinel resolver (orchestrator/chatSentinelProvider). The CLAUDE
+   * lanes reach it through their managers' injected `resolveGateRunId`; the CODEX
+   * lanes spawn from the IPC layer with a caller-supplied runId, so they resolve
+   * it HERE instead. Both must, because the provider is what REVIVES a `__quick__`
+   * sentinel that boot recovery force-failed on app restart
+   * (`error_message='app_restart'`) — a raw `chat_run_id` read hands the spawn a
+   * terminal run, and then every run-scoped MCP write rejects with
+   * `run_not_active` and every approval-gate grab
+   * (`UPDATE … WHERE status='running'`) silently misses.
+   *
+   * Optional so the IPC test harnesses that build a partial AppServices need not
+   * stub it; the Codex seams fall back to the raw read exactly like
+   * `resolveGateRunId`'s uninjected arm. Production always injects it.
+   */
+  chatSentinelProvider?: ChatSentinelProvider;
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;

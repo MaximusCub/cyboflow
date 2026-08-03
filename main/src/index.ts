@@ -3077,6 +3077,12 @@ async function initializeServices(): Promise<boolean> {
       substrateFacade.registerInteractivePanel(runId, panelId),
     registerCodexPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
+    // The SAME provider the Claude managers were injected with above, handed to
+    // the IPC layer for the CODEX lanes: those spawn from ipc/ with a
+    // caller-supplied runId instead of resolving the gate inside the manager, so
+    // without this they read `chat_run_id` raw and never reach the revive that
+    // heals an app_restart-parked sentinel.
+    chatSentinelProvider,
     // Idle-debounced quick-session summarizer — the sessions:input handler calls
     // noteTurnStart on it (the PTY relay input-seam clear, §2.2) and
     // sessions:get-summary kicks lazy catch-up (§2.7).

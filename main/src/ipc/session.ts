@@ -263,6 +263,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     gitStatusManager,
     archiveProgressManager,
     configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
+    chatSentinelProvider, // chat-gate vehicle resolver (revives an app_restart-parked sentinel)
     cyboflow
   } = services;
 
@@ -344,7 +345,19 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
     const session = await sessionManager.getSession(panel.sessionId);
     if (!session) throw new Error(`Session ${panel.sessionId} not found`);
-    const runId = dbSession.chat_run_id ?? dbSession.run_id;
+    // Resolve the gate vehicle through the chat-sentinel provider, NOT a raw
+    // `chat_run_id` read. The provider revives a `__quick__` sentinel that boot
+    // recovery force-failed on app restart; without it a RESUMED Codex chat is
+    // stamped with a terminal CYBOFLOW_RUN_ID, so every run-scoped cyboflow_*
+    // MCP write rejects with `run_not_active` and every approval-gate grab
+    // (`UPDATE … WHERE status='running'`) silently misses. The Claude lanes get
+    // this via resolveGateRunId inside their managers; Codex spawns from here
+    // with a caller-supplied runId, so it resolves at this seam instead.
+    // Called BEFORE the user turn is persisted and the session flips 'running',
+    // so a ChatDuringActiveFlowError refusal leaves no phantom turn behind.
+    const runId = chatSentinelProvider
+      ? chatSentinelProvider(panel.sessionId)
+      : (dbSession.chat_run_id ?? dbSession.run_id); // uninjected fallback (tests/boot)
     if (!runId) throw new Error('Session is missing its chat run');
 
     const settings = databaseService.getPanelSettings(panelId);

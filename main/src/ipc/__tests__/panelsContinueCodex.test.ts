@@ -86,7 +86,7 @@ const CODEX_PANEL = { id: 'panel-1', sessionId: 's1', type: 'claude' } as never;
 
 type CodexHandler = (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => void;
 
-function makeServices(over: { isPanelRunning: boolean }) {
+function makeServices(over: { isPanelRunning: boolean; chatSentinelProvider?: (sessionId: string) => string }) {
   // Mutable so a test can flip the panel idle (as the real 'exit' does) and then
   // drive the queue flush.
   const state = { running: over.isPanelRunning };
@@ -131,6 +131,7 @@ function makeServices(over: { isPanelRunning: boolean }) {
     registerLivePanel: vi.fn(),
     registerCodexPtyPanel: vi.fn(),
     configManager: { isDemoMode: () => false },
+    ...(over.chatSentinelProvider ? { chatSentinelProvider: over.chatSentinelProvider } : {}),
   } as unknown as AppServices;
   return { services, isPanelRunning, stopPanel, spawnCliProcess, codexHandlers, state };
 }
@@ -266,6 +267,39 @@ describe('panels:continue — lane routing', () => {
     expect(spawnCliProcess.mock.calls[0][0]).toMatchObject({ panelId: 'panel-1', prompt: 'hello' });
     const codexPty = services.codexPtyManager as unknown as { startPanel: ReturnType<typeof vi.fn> };
     expect(codexPty.startPanel).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The turn's gate vehicle must come from the chat-sentinel PROVIDER, not a raw
+   * `chat_run_id` read. The provider revives a `__quick__` sentinel that boot
+   * recovery force-failed on app restart (`error_message='app_restart'`); reading
+   * the column directly stamped a TERMINAL run onto the app-server's
+   * CYBOFLOW_RUN_ID, so a RESUMED Codex chat lost every run-scoped cyboflow_*
+   * write (`run_not_active`) and its approval gate
+   * (`UPDATE … WHERE status='running'` matched nothing). The Claude lanes resolve
+   * the same vehicle inside their managers via resolveGateRunId.
+   */
+  it('resolves the turn runId through the chat-sentinel provider, not the raw column', async () => {
+    const chatSentinelProvider = vi.fn(() => 'revived-run');
+    const { services, spawnCliProcess } = makeServices({ isPanelRunning: false, chatSentinelProvider });
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'panels:continue', 'panel-1', 'hello', undefined, false, 'p-3')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(chatSentinelProvider).toHaveBeenCalledWith('s1');
+    expect(spawnCliProcess.mock.calls[0][0]).toMatchObject({ runId: 'revived-run' });
+  });
+
+  it('falls back to the raw chat_run_id when no provider is injected (tests/boot)', async () => {
+    const { services, spawnCliProcess } = makeServices({ isPanelRunning: false });
+    const handlers = register(services);
+
+    await invoke(handlers, 'panels:continue', 'panel-1', 'hello', undefined, false, 'p-4');
+
+    expect(spawnCliProcess.mock.calls[0][0]).toMatchObject({ runId: 'quick-run-1' });
   });
 });
 

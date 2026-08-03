@@ -29,7 +29,12 @@ interface DbSessionStub {
 
 function makeDeps(
   dbSession: DbSessionStub,
-  overrides: { demoMode?: boolean; worktreePath?: string | null; running?: Set<string> } = {},
+  overrides: {
+    demoMode?: boolean;
+    worktreePath?: string | null;
+    running?: Set<string>;
+    chatSentinelProvider?: (sessionId: string) => string;
+  } = {},
 ): {
   deps: PtyPanelDispatchDeps;
   interactive: { isPanelRunning: ReturnType<typeof vi.fn>; relayUserTurn: ReturnType<typeof vi.fn>; startPanel: ReturnType<typeof vi.fn> };
@@ -70,6 +75,7 @@ function makeDeps(
     codexPtyManager: codex,
     registerLivePanel,
     registerCodexPtyPanel,
+    ...(overrides.chatSentinelProvider ? { chatSentinelProvider: overrides.chatSentinelProvider } : {}),
   };
   return { deps, interactive, codex, registerLivePanel, registerCodexPtyPanel, updateSession };
 }
@@ -164,6 +170,36 @@ describe('relayOrSpawnPtyPanel — Codex PTY', () => {
     const handled = await relayOrSpawnPtyPanel(deps, panel('legacy-P'), 'ping');
     expect(handled).toBe(true);
     expect(codex.startPanel).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The Codex gate vehicle must come from the chat-sentinel PROVIDER, not a raw
+   * `chat_run_id` read — the provider is what revives a `__quick__` sentinel that
+   * boot recovery force-failed on app restart. Reading the column directly baked a
+   * TERMINAL run into the spawn's CYBOFLOW_RUN_ID, so a resumed Codex terminal
+   * lost its cyboflow_* MCP writes (`run_not_active`) and its approval gate
+   * (`UPDATE … WHERE status='running'` matched nothing). The Claude lanes never
+   * had this hole: their managers resolve the gate via resolveGateRunId.
+   */
+  it('resolves the codex runId through the chat-sentinel provider, not the raw column', async () => {
+    const chatSentinelProvider = vi.fn(() => 'revived-run');
+    const { deps, codex } = makeDeps(
+      { agent_runtime: 'codex-pty', chat_run_id: 'parked-run' },
+      { chatSentinelProvider },
+    );
+
+    await relayOrSpawnPtyPanel(deps, panel('codex-P', 'sess-42'), 'ping');
+
+    expect(chatSentinelProvider).toHaveBeenCalledWith('sess-42');
+    expect(codex.startPanel.mock.calls[0][6]).toBe('revived-run');
+  });
+
+  it('falls back to the raw chat_run_id when no provider is injected (tests/boot)', async () => {
+    const { deps, codex } = makeDeps({ agent_runtime: 'codex-pty', chat_run_id: 'chat-run' });
+
+    await relayOrSpawnPtyPanel(deps, panel('codex-P'), 'ping');
+
+    expect(codex.startPanel.mock.calls[0][6]).toBe('chat-run');
   });
 });
 
