@@ -83,9 +83,28 @@ function basename(p: string): string {
  * Matches the prefix only; the trailing path (which may itself be sensitive,
  * e.g. a repo name) is preserved relative to '~' so the trace stays useful.
  */
-function redactHomePath(input: string): string {
+export function redactHomePath(input: string): string {
   return input.replace(/(?:\/Users|\/home)\/[^/\s]+\//g, '~/');
 }
+
+/**
+ * NOT A GENERAL-PURPOSE SCRUBBER — read this before reusing `redactHomePath`.
+ *
+ * `redactHomePath` removes the USERNAME segment and nothing else. By design it
+ * PRESERVES everything after it, so `/Users/alice/private-repo/src/x.ts`
+ * becomes `~/private-repo/src/x.ts`. That is the right trade for a stack trace
+ * (the path stays diagnostic) and the WRONG trade for arbitrary text: repo
+ * names, source lines, prompts, commands, and API tokens all survive it.
+ *
+ * It is therefore safe on stack frames and exception messages — the closed set
+ * of values `scrubSentryEvent` feeds it — and unsafe on log output, command
+ * stderr, or anything else free-form.
+ *
+ * Consequence for user-submitted bug reports: raw log text can never be made
+ * safe by passing it through here. The bug reporter treats a log tail as
+ * opt-in content the USER reviews before sending, rather than something an
+ * automated pass can sanitize (see services/telemetry/bugReport.ts).
+ */
 
 /**
  * Scrub a Sentry error event in place and return it (or null to drop).

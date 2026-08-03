@@ -1,10 +1,9 @@
 import * as Sentry from '@sentry/electron/main';
 import { initialize as aptabaseInitialize, trackEvent as aptabaseTrack } from '@aptabase/electron/main';
 import { app } from 'electron';
-import * as fs from 'fs';
-import * as path from 'path';
 import { scrubSentryEvent, scrubBreadcrumb, isBenignStreamWriteEpipe } from './scrub';
-import { environmentFromBuildInfo } from './environment';
+import { resolveTelemetryCredentials } from './credentials';
+import { recordLocalError } from './diagnostics';
 import type { TelemetryEventMap, TelemetryEventName } from '../../../../shared/types/telemetry';
 
 export type { TelemetryEnvironment } from './environment';
@@ -14,48 +13,6 @@ export type { TelemetryEnvironment } from './environment';
 // every telemetry entry point is a silent no-op when credentials are absent.
 let sentryActive = false;
 let aptabaseActive = false;
-
-interface BakedBuildInfo {
-  environment?: unknown;
-  sentryDsn?: unknown;
-  aptabaseAppKey?: unknown;
-}
-
-/**
- * Read the packaged buildInfo.json — the source of the telemetry environment AND
- * the client credentials baked at build time. Returns null under `pnpm dev`
- * (unpackaged, no bundle) where creds come from process.env instead.
- */
-function readBuildInfo(): BakedBuildInfo | null {
-  if (!app.isPackaged) return null;
-  // buildInfo.json ships at main/dist/buildInfo.json. With asar enabled (the
-  // electron-builder default) it lives INSIDE app.asar — Electron patches fs to
-  // read archive member paths transparently — so the resource path is
-  // `app.asar/...`, NOT a loose `app/` directory (which only exists when asar is
-  // off). Reading the wrong one returns null and SILENTLY disables telemetry: that
-  // was the real "zero usage from installed apps" bug — creds baked fine but the
-  // packaged app could never find them. Try the asar path first, then the loose
-  // fallback.
-  const candidates = [
-    path.join(process.resourcesPath, 'app.asar', 'main', 'dist', 'buildInfo.json'),
-    path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json'),
-  ];
-  for (const buildInfoPath of candidates) {
-    try {
-      if (fs.existsSync(buildInfoPath)) {
-        return JSON.parse(fs.readFileSync(buildInfoPath, 'utf8')) as BakedBuildInfo;
-      }
-    } catch {
-      // Corrupt/unreadable candidate — fall through to the next, then null.
-    }
-  }
-  return null;
-}
-
-/** Non-empty string or undefined (treats '' / non-strings as absent). */
-function asCred(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
 
 /**
  * Initialize error reporting (Sentry) and usage metrics (Aptabase) from the
@@ -75,17 +32,9 @@ export function initTelemetry(cfg: {
   usageMetricsEnabled: boolean;
   installId: string;
 }): void {
-  const buildInfo = readBuildInfo();
-  const environment = environmentFromBuildInfo(app.isPackaged, buildInfo);
-
-  // Resolve credentials: a runtime env var WINS (pnpm dev with .envrc.local
-  // loaded, or an explicit override), otherwise fall back to the key BAKED into
-  // buildInfo.json at build time. The baked key is the ONLY source in a
-  // distributed packaged app, whose runtime env has none of the build shell's
-  // vars — without it both SDKs silently no-op (the "zero usage from installed
-  // apps" bug).
-  const sentryDsn = asCred(process.env.SENTRY_DSN) ?? asCred(buildInfo?.sentryDsn);
-  const aptabaseAppKey = asCred(process.env.APTABASE_APP_KEY) ?? asCred(buildInfo?.aptabaseAppKey);
+  // Credential + environment resolution lives in ./credentials so the in-app bug
+  // reporter can resolve the same DSN without duplicating the asar-path lookup.
+  const { sentryDsn, aptabaseAppKey, environment } = resolveTelemetryCredentials();
 
   // Gated purely on the config flag + credential presence. Local builds default
   // the flag off, but an opted-in developer (flag on + DSN present) gets it.
@@ -180,6 +129,12 @@ export function captureSeamError(
   error: unknown,
   tags?: Record<string, string>,
 ): void {
+  // Record locally FIRST, unconditionally. The Sentry guard below returns early
+  // when reporting is off — and that is precisely when a user is most likely to
+  // file a bug report by hand, so a buffer fed after the guard would always be
+  // empty in the case it exists to serve.
+  recordLocalError(seam, error, new Date().toISOString());
+
   if (!sentryActive) return;
   try {
     const err = error instanceof Error ? error : new Error(String(error));
