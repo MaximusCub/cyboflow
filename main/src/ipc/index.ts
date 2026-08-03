@@ -24,6 +24,7 @@ import { registerTelemetryHandlers } from './telemetry';
 import { registerModelHandlers } from './models';
 import { registerClaudeDetectionHandlers } from './claudeDetection';
 import { registerCodexDetectionHandlers } from './codexDetection';
+import { registerBugReportHandlers } from './bugReport';
 
 
 export function registerIpcHandlers(services: AppServices): void {
@@ -48,6 +49,7 @@ export function registerIpcHandlers(services: AppServices): void {
   registerCyboflowHandlers(ipcMain, services);
   registerIdeaAttachmentHandlers(ipcMain, services);
   registerTelemetryHandlers(ipcMain, services);
+  registerBugReportHandlers(ipcMain, services);
   registerModelHandlers(ipcMain, services);
   registerClaudeDetectionHandlers(ipcMain, services);
   registerCodexDetectionHandlers(ipcMain, services);

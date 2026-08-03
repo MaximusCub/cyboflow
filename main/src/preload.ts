@@ -17,6 +17,11 @@ import type {
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../shared/types/sessionDefaults';
+import type {
+  BugReportPreview,
+  BugReportSubmitRequest,
+  BugReportSubmitResponse,
+} from '../../shared/types/bugReport';
 import {
   DESIGN_PROTO_SERVER_ENSURE_CHANNEL,
   DESIGN_PROTO_SERVER_STOP_CHANNEL,
@@ -473,6 +478,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         return false;
       }
     },
+  },
+
+  // In-app bug reporting (user-initiated; independent of the telemetry toggle)
+  bugReport: {
+    getPreview: (): Promise<IPCResponse<BugReportPreview>> =>
+      ipcRenderer.invoke('bugReport:getPreview'),
+    submit: (request: BugReportSubmitRequest): Promise<IPCResponse<BugReportSubmitResponse>> =>
+      ipcRenderer.invoke('bugReport:submit', request),
   },
 
   // Prompts

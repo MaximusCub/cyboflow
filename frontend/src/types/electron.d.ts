@@ -12,6 +12,11 @@ import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type {
+  BugReportPreview,
+  BugReportSubmitRequest,
+  BugReportSubmitResponse,
+} from '../../../shared/types/bugReport';
+import type {
   LoadArtifactHtmlRequest,
   LoadArtifactHtmlResult,
   OpenArtifactHtmlExternalRequest,
@@ -334,6 +339,13 @@ interface ElectronAPI {
   telemetry: {
     track(eventName: string, properties?: Record<string, string | number | boolean>): void;
     isSentryActive(): boolean;
+  };
+
+  // In-app bug reporting. Explicit T on both responses per the IPC type-parity
+  // rules — the handler shapes live in shared/types/bugReport.ts.
+  bugReport: {
+    getPreview(): Promise<IPCResponse<BugReportPreview>>;
+    submit(request: BugReportSubmitRequest): Promise<IPCResponse<BugReportSubmitResponse>>;
   };
 
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
