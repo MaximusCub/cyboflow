@@ -86,6 +86,22 @@ describe('useLaunchWorkflow', () => {
     expect(useCyboflowStore.getState().selectedSessionId).toBe('design-sess-1');
   });
 
+  it('launchOpts.permissionMode overrides the global default in the run payload', async () => {
+    // Same-session launches carry the host session's live agentPermissionMode
+    // so the run keeps behaving like the session it lands in.
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch(
+        'wf-planner',
+        { ideaId: 'idea-1' },
+        { hostSessionId: 'design-sess-1', permissionMode: 'dontAsk' },
+      );
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'design-sess-1', permissionMode: 'dontAsk' }),
+    );
+  });
+
   it('threads forceNew:true into ensureSessionForLaunch when the hook opts in', async () => {
     // In-place / main-repo host sessions must never absorb the current selection —
     // the canvas passes forceNew so the run lands in a fresh worktree-backed session.

@@ -123,6 +123,28 @@ describe('DesignPlannerPrompt', () => {
     expect(useDesignModeStore.getState().plannerPrompt).toBeNull();
   });
 
+  it('same-session click carries the host session live agentPermissionMode into the launch', async () => {
+    // A "Don't ask" design session must continue as "Don't ask" — otherwise the
+    // planner parks on a tool-permission gate seconds after "In this session".
+    workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
+    launchMock.mockResolvedValue('run-1');
+    useSessionStore.setState({ sessions: [makeSession({ agentPermissionMode: 'dontAsk' })] });
+    useDesignModeStore.setState({
+      plannerPrompt: { projectId: 7, ideaId: 'idea-1', ideaTitle: 'Nice Idea', sessionId: 'sess-1' },
+    });
+    render(<DesignPlannerPrompt />);
+
+    const startSame = screen.getByTestId('design-planner-prompt-start-same');
+    await waitFor(() => expect(startSame).not.toBeDisabled());
+    fireEvent.click(startSame);
+
+    expect(launchMock).toHaveBeenCalledWith(
+      'wf-3-planner',
+      { ideaId: 'idea-1' },
+      { hostSessionId: 'sess-1', permissionMode: 'dontAsk' },
+    );
+  });
+
   it('new-session click launches with forceNewSession', async () => {
     workflowsListQuery.mockResolvedValue([{ id: 'wf-3-planner', name: 'planner' }]);
     launchMock.mockResolvedValue('run-1');

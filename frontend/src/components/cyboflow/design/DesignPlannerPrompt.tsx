@@ -93,8 +93,20 @@ function DesignPlannerPromptInner({ prompt }: { prompt: PlannerPromptState }): R
     if (plannerId === null || isLaunching || !sameSessionEligible) return;
     setPendingChoice('same');
     // The design session is already SDK-pinned and free — continue the run
-    // there instead of spinning up a new worktree.
-    void launch(plannerId, { ideaId: prompt.ideaId }, { hostSessionId: prompt.sessionId });
+    // there instead of spinning up a new worktree. Carry the session's live
+    // agent permission mode into the run snapshot so the continuation stays
+    // seamless (a "Don't ask" design session must not park the planner on a
+    // permission gate seconds after launch).
+    void launch(
+      plannerId,
+      { ideaId: prompt.ideaId },
+      {
+        hostSessionId: prompt.sessionId,
+        ...(session?.agentPermissionMode !== undefined
+          ? { permissionMode: session.agentPermissionMode }
+          : {}),
+      },
+    );
   };
 
   const handleStartNew = (): void => {

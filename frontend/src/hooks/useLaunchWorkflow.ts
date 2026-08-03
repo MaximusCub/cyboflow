@@ -29,6 +29,7 @@ import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import { DEFAULT_WORKFLOW_MODEL } from '../components/cyboflow/ModelSelector';
 import { trackEvent } from '../utils/telemetry';
 import { notifyWorkflowRunStarted } from '../utils/onboarding';
+import type { PermissionMode } from '../../../shared/types/workflows';
 
 /**
  * Pre-launch seed — at most one of ideaId (planner, single-select) / ideaIds
@@ -60,11 +61,21 @@ export interface UseLaunchWorkflowResult {
    * (no runs on an in-place/main-repo session, one-active-workflow-per-session)
    * remain the backstop and surface as this hook's normal `error` on rejection.
    * Takes precedence over `forceNewSession` when both are set.
+   *
+   * `launchOpts.permissionMode` overrides the global default for the run's
+   * permission snapshot. A same-session launch passes the host session's live
+   * `agentPermissionMode` so the run keeps behaving like the session it lands
+   * in (e.g. a "Don't ask" design session doesn't park on a permission gate
+   * seconds after "In this session").
    */
   launch: (
     workflowId: string,
     seed?: LaunchSeed,
-    launchOpts?: { forceNewSession?: boolean; hostSessionId?: string },
+    launchOpts?: {
+      forceNewSession?: boolean;
+      hostSessionId?: string;
+      permissionMode?: PermissionMode;
+    },
   ) => Promise<string | null>;
   isLaunching: boolean;
   error: string | null;
@@ -105,7 +116,11 @@ export function useLaunchWorkflow(
     async (
       workflowId: string,
       seed?: LaunchSeed,
-      launchOpts?: { forceNewSession?: boolean; hostSessionId?: string },
+      launchOpts?: {
+        forceNewSession?: boolean;
+        hostSessionId?: string;
+        permissionMode?: PermissionMode;
+      },
     ): Promise<string | null> => {
       if (inFlightRef.current) return null;
       inFlightRef.current = true;
@@ -131,7 +146,7 @@ export function useLaunchWorkflow(
           projectId,
           substrate: forced ?? DEFAULT_SUBSTRATE,
           sessionId,
-          permissionMode: globalPermissionMode,
+          permissionMode: launchOpts?.permissionMode ?? globalPermissionMode,
           // This one-click lane has no Configure screen, so it pins the same
           // default the wizard/picker default to (Opus) → workflow_runs.model
           // (migration 037), keeping every UI-initiated launch consistent.
@@ -150,7 +165,7 @@ export function useLaunchWorkflow(
         trackEvent('workflow_run_started', {
           launch_surface: 'in_session',
           substrate: base.substrate,
-          permission_mode: globalPermissionMode,
+          permission_mode: base.permissionMode,
         });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'in_session' });
         onLaunched?.(result.runId);
