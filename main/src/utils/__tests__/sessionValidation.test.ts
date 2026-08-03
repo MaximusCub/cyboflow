@@ -27,6 +27,7 @@ import {
   validateEventContext,
   validatePanelEventContext,
   createValidationError,
+  logValidationFailure,
 } from '../sessionValidation';
 
 type SessionRow = { id: string; archived?: boolean; status?: string };
@@ -55,11 +56,14 @@ describe('validateSessionExists', () => {
     expect(r.error).toBe('Session s1 not found');
   });
 
-  it('rejects an archived session', () => {
+  it('rejects an archived session, flagging it as an EXPECTED rejection', () => {
     dbMock.getSession.mockReturnValue(session({ id: 's1', archived: true }));
     const r = validateSessionExists('s1');
     expect(r.valid).toBe(false);
     expect(r.error).toBe('Session s1 is archived');
+    // Archiving races the manager's in-flight output events; the drop is correct,
+    // the ERROR-level log was not.
+    expect(r.expected).toBe(true);
   });
 
   it('accepts a live, non-archived session', () => {
@@ -181,6 +185,49 @@ describe('validatePanelEventContext', () => {
     const r = validatePanelEventContext({});
     expect(r.valid).toBe(false);
     expect(r.error).toBe('Event must contain either panelId or sessionId');
+  });
+});
+
+describe('logValidationFailure', () => {
+  it('logs an unexpected rejection at ERROR', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    logValidationFailure('session-output event', { valid: false, error: 'Session s1 not found', sessionId: 's1' });
+
+    expect(err).toHaveBeenCalledTimes(1);
+    expect(log).not.toHaveBeenCalled();
+    err.mockRestore();
+    log.mockRestore();
+  });
+
+  it('demotes an EXPECTED rejection off ERROR (archived-session output race)', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    logValidationFailure('session-output event', {
+      valid: false,
+      error: 'Session s1 is archived',
+      sessionId: 's1',
+      expected: true,
+    });
+
+    expect(err).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
+    err.mockRestore();
+    log.mockRestore();
+  });
+
+  it('logs nothing for a passing validation', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    logValidationFailure('session-output event', { valid: true, sessionId: 's1' });
+
+    expect(err).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    err.mockRestore();
+    log.mockRestore();
   });
 });
 

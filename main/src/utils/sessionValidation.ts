@@ -6,6 +6,16 @@ export interface ValidationResult {
   error?: string;
   sessionId?: string;
   panelId?: string;
+  /**
+   * Set when the rejection is an EXPECTED lifecycle race rather than a defect,
+   * so {@link logValidationFailure} can drop the log level. Archiving a session
+   * flips `archived` while its manager still has output events in flight; those
+   * trailing events are correctly dropped here, but logging each one at ERROR
+   * reported a bug that isn't one (4× per archive in the 2026-08-03 smoke run,
+   * found independently by both arms). The rejection itself is unchanged — only
+   * how loudly it is reported.
+   */
+  expected?: boolean;
 }
 
 /**
@@ -22,7 +32,7 @@ export function validateSessionExists(sessionId: string): ValidationResult {
   }
 
   if (session.archived) {
-    return { valid: false, error: `Session ${sessionId} is archived`, sessionId };
+    return { valid: false, error: `Session ${sessionId} is archived`, sessionId, expected: true };
   }
 
   return { valid: true, sessionId };
@@ -201,15 +211,24 @@ export function validatePanelEventContext(
 }
 
 /**
- * Helper to log validation failures
+ * Helper to log validation failures.
+ *
+ * An `expected` rejection (a lifecycle race — see {@link ValidationResult}) is
+ * still a rejection and still drops the event, but it is logged at INFO: only
+ * unexpected rejections indicate something worth investigating.
  */
 export function logValidationFailure(context: string, validation: ValidationResult): void {
   if (!validation.valid) {
-    console.error(`[Validation] ${context} failed:`, {
+    const detail = {
       error: validation.error,
       sessionId: validation.sessionId,
       panelId: validation.panelId
-    });
+    };
+    if (validation.expected) {
+      console.log(`[Validation] ${context} skipped:`, detail);
+      return;
+    }
+    console.error(`[Validation] ${context} failed:`, detail);
   }
 }
 
