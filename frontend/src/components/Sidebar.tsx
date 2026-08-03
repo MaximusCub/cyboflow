@@ -2,7 +2,8 @@ import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye } from 'lucide-react';
+import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug } from 'lucide-react';
+import { BugReportDialog } from './BugReportDialog';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
@@ -99,6 +100,7 @@ export const Sidebar = memo(function Sidebar({
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
+  const [showBugReport, setShowBugReport] = useState(false);
   const [version, setVersion] = useState<string>('');
   const [gitCommit, setGitCommit] = useState<string>('');
   const [worktreeName, setWorktreeName] = useState<string>('');
@@ -452,7 +454,22 @@ export const Sidebar = memo(function Sidebar({
         <div className="flex-shrink-0">
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
-          
+
+          {/* Bug reporting. Deliberately prominent and always present — it sits
+              above the version line because that is where users already look
+              when something is wrong, and it must not be gated on `version`
+              loading or on the update pill's state. */}
+          <div className="px-4 pt-2">
+            <button
+              onClick={() => setShowBugReport(true)}
+              title="Report a problem with Cyboflow"
+              className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
+            >
+              <Bug className="w-4 h-4" />
+              <span>Report a bug</span>
+            </button>
+          </div>
+
           {/* Version display at bottom — flips to an update pill when the
               auto-updater has news, otherwise shows the muted version line. */}
           {version && (
@@ -503,6 +520,8 @@ export const Sidebar = memo(function Sidebar({
     </div>
 
       <Settings isOpen={isSettingsOpen} onClose={closeSettings} initialTab={settingsInitialTab} />
+
+      <BugReportDialog isOpen={showBugReport} onClose={() => setShowBugReport(false)} />
       
       {/* Status Guide Modal */}
       <Modal 
