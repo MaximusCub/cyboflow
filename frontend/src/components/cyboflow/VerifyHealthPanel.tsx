@@ -46,7 +46,11 @@ import {
   runbookLine,
 } from './verifyHealthModel';
 
-/** Health polls far slower than the request list: these numbers move per verification, not per tick. */
+/**
+ * Health polls far slower than the request list: these numbers move per
+ * verification, not per tick. The host probes do NOT ride this interval — see
+ * the probe effect.
+ */
 const HEALTH_REFETCH_INTERVAL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
@@ -220,18 +224,18 @@ export function VerifyHealthPanel({
   const [probes, setProbes] = useState<VerifyHostProbeReport | null>(null);
   const [fixInFlight, setFixInFlight] = useState(false);
 
-  // Health + probes poll together on a slow cadence. Both degrade to `null`
-  // (section hidden) on failure rather than raising a second error surface —
-  // the queue's own banner already covers the primary failure mode, and a
-  // missing health section is never worth an alarm of its own.
+  // HEALTH is project-scoped and cheap (one indexed read), so it polls. Cleared
+  // synchronously when the project changes, so the new project never renders a
+  // moment of the previous one's numbers.
+  //
+  // Failure degrades to `null` (tables omitted) rather than raising a second
+  // error surface — the queue's own banner already covers the primary failure
+  // mode, and a missing health table is never worth an alarm of its own.
   useEffect(() => {
-    if (projectId === null) {
-      setHealth(null);
-      setProbes(null);
-      return;
-    }
+    setHealth(null);
+    if (projectId === null) return;
     let cancelled = false;
-    const fetchAll = (): void => {
+    const fetchHealth = (): void => {
       void trpc.cyboflow.verificationRequests.health
         .query({ projectId })
         .then((res) => {
@@ -240,22 +244,40 @@ export function VerifyHealthPanel({
         .catch(() => {
           if (!cancelled) setHealth(null);
         });
-      void trpc.cyboflow.verificationRequests.hostProbes
-        .query()
-        .then((res) => {
-          if (!cancelled) setProbes(res);
-        })
-        .catch(() => {
-          if (!cancelled) setProbes(null);
-        });
     };
-    fetchAll();
-    const timer = setInterval(fetchAll, HEALTH_REFETCH_INTERVAL_MS);
+    fetchHealth();
+    const timer = setInterval(fetchHealth, HEALTH_REFETCH_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
   }, [projectId]);
+
+  // PROBES run ONCE per panel open, deliberately NOT on the health interval.
+  // Each pass shells out — resolving a Playwright browser path and asking the
+  // OS about the screen-recording grant — and none of it is project-scoped or
+  // fast-moving: a TCC grant or an installed binary changes when a human does
+  // something about it, not every fifteen seconds. §6 asks for "probed at call
+  // time, no remembered state", and an open is a call; a background poll of
+  // subprocess work is a different thing wearing the same words.
+  //
+  // No race with the fix-it mutation: the fix button only exists once these
+  // rows have rendered, so there is never an in-flight probe to overwrite the
+  // mutation's fresher report.
+  useEffect(() => {
+    let cancelled = false;
+    void trpc.cyboflow.verificationRequests.hostProbes
+      .query()
+      .then((res) => {
+        if (!cancelled) setProbes(res);
+      })
+      .catch(() => {
+        if (!cancelled) setProbes(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleFix = useCallback((row: VerifyProbeRow) => {
     if (row.fix !== 'provision-chromium') return;

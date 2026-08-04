@@ -12,7 +12,7 @@
  * are mocked so the test exercises the view's rendering contract in isolation.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { VerificationRequest } from '../../../hooks/useVerificationRequests';
@@ -831,6 +831,36 @@ describe('VerifyQueueView — health panel', () => {
     expect(cta).toHaveTextContent('Set up verification');
     expect(screen.queryByTestId('verify-health-modality-web')).not.toBeInTheDocument();
     expect(screen.queryByTestId('verify-probe-node')).not.toBeInTheDocument();
+  });
+
+  it('probes the host ONCE per open — the probes do not ride the health poll', async () => {
+    // Every probe pass shells out (resolving a Playwright browser path, asking
+    // the OS about the screen-recording grant). None of it is fast-moving: a
+    // grant or an installed binary changes when a human does something, not on
+    // a fifteen-second tick.
+    vi.useFakeTimers();
+    try {
+      useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+      render(<VerifyQueueView />);
+
+      // Flush the mount effects' promises without waitFor, which would itself
+      // be waiting on the timers we control here.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(hostProbesQuerySpy).toHaveBeenCalledTimes(1);
+      const healthCallsBefore = healthQuerySpy.mock.calls.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      // Health kept polling; the probes did not.
+      expect(healthQuerySpy.mock.calls.length).toBeGreaterThan(healthCallsBefore);
+      expect(hostProbesQuerySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('launches the wizard preselected from the health CTA', async () => {
