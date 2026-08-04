@@ -21,6 +21,7 @@ import type Database from 'better-sqlite3';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import {
+  claudeRuntimeFromSubstrate,
   isWorkflowRuntimeSupported,
   type AgentProvider,
   type SessionAgentRuntime,
@@ -280,4 +281,56 @@ export async function createQuickSessionCore(
     }
     throw err;
   }
+}
+
+/** Input for {@link stampQuickSessionRuntimeConfig}. */
+export interface QuickSessionRuntimeStampInput {
+  /** The RESOLVED substrate returned by the core's sentinel createRun. */
+  resolvedSubstrate: CliSubstrate;
+  useCodexSdk: boolean;
+  useCodexPty: boolean;
+  /** Only stamped when explicitly chosen — undefined keeps the global default (NULL). */
+  requestedAgentMode?: PermissionMode;
+}
+
+/**
+ * Persist the per-session runtime config BOTH quick-session callers must stamp
+ * after {@link createQuickSessionCore} returns — the SHARED chokepoint for the
+ * `sessions:create-quick` IPC handler AND the experiment quick-arm path
+ * (index.ts createArmSession), so the two can never drift:
+ *
+ * - `sessions.agent_permission_mode` (migration 021): read by the quick Claude
+ *   panel spawn (resolveSessionAgentPermissionMode → getDbSession) and any
+ *   restart. Only written when explicitly chosen — NULL keeps the global default.
+ * - `sessions.substrate` + `sessions.agent_runtime` (migrations 027 + 059-064):
+ *   read by the sessions:input relay branch, frontend substrate gates, and any
+ *   REPL re-spawn. ALWAYS stamped with the RESOLVED values — a request without an
+ *   explicit substrate can still resolve 'interactive' via the global default or
+ *   CYBOFLOW_SUBSTRATE, and stamping only on explicit request would leave the
+ *   run row saying interactive while the session behaved SDK. NULL remains the
+ *   legacy/SDK meaning for pre-migration rows only.
+ */
+export function stampQuickSessionRuntimeConfig(
+  db: Database.Database,
+  sessionId: string,
+  input: QuickSessionRuntimeStampInput,
+): void {
+  if (input.requestedAgentMode !== undefined) {
+    db.prepare(`UPDATE sessions SET agent_permission_mode = ? WHERE id = ?`).run(
+      input.requestedAgentMode,
+      sessionId,
+    );
+  }
+  const resolvedSessionAgentRuntime = input.useCodexSdk
+    ? 'codex-sdk'
+    : input.useCodexPty
+      ? 'codex-pty'
+      : claudeRuntimeFromSubstrate(input.resolvedSubstrate);
+  const resolvedSessionSubstrate = input.useCodexPty ? 'interactive' : input.resolvedSubstrate;
+  db.prepare(
+    `UPDATE sessions
+        SET substrate = ?,
+            agent_runtime = ?
+      WHERE id = ?`,
+  ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, sessionId);
 }

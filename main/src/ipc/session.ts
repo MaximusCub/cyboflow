@@ -31,7 +31,7 @@ import type { SessionOutput, Session as SessionType } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
-import { createQuickSessionCore } from '../services/createQuickSessionCore';
+import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from '../services/createQuickSessionCore';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -1113,38 +1113,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // substrate='sdk')`); a transient SDK quick-turn double-count between the
       // 1a and 1b commits is expected and acceptable.
 
-      // Persist the per-session agent-permission override (migration 021) so the
-      // quick Claude panel spawn (resolveSessionAgentPermissionMode → getDbSession)
-      // and any restart read it. Only written when explicitly chosen — NULL keeps
-      // the session on the global default.
-      if (requestedAgentMode !== undefined) {
-        db.prepare(`UPDATE sessions SET agent_permission_mode = ? WHERE id = ?`).run(
-          requestedAgentMode,
-          session.id,
-        );
-      }
-
-      // Persist the per-session CLI substrate (migration 027) so the
-      // sessions:input relay branch, frontend substrate gates, and any REPL
-      // re-spawn read it. ALWAYS stamp the RESOLVED value from createRun — a
-      // request without an explicit substrate can still resolve 'interactive'
-      // via the global default or CYBOFLOW_SUBSTRATE, and stamping only on
-      // explicit request would leave the run row saying interactive while the
-      // session behaved SDK. NULL remains the legacy/SDK meaning for
-      // pre-migration rows only; new quick sessions always carry the resolved
-      // value.
-      const resolvedSessionAgentRuntime = useCodexSdk
-        ? 'codex-sdk'
-        : useCodexPty
-          ? 'codex-pty'
-          : claudeRuntimeFromSubstrate(resolvedSubstrate);
-      const resolvedSessionSubstrate = useCodexPty ? 'interactive' : resolvedSubstrate;
-      db.prepare(
-        `UPDATE sessions
-            SET substrate = ?,
-                agent_runtime = ?
-          WHERE id = ?`,
-      ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, session.id);
+      // Persist the per-session agent-permission override (migration 021) and the
+      // RESOLVED substrate + agent_runtime (migrations 027 + 059-064) via the
+      // SHARED stamp chokepoint (createQuickSessionCore.ts) — the experiment
+      // quick-arm path (index.ts createArmSession) stamps through the same helper
+      // so the two callers can never drift.
+      stampQuickSessionRuntimeConfig(db, session.id, {
+        resolvedSubstrate,
+        useCodexSdk,
+        useCodexPty,
+        requestedAgentMode,
+      });
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
       // mid-session change deferred). The only value is 'ultracode' (the

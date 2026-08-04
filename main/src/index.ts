@@ -252,7 +252,7 @@ import {
 } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
-import { createQuickSessionCore } from './services/createQuickSessionCore';
+import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from './services/createQuickSessionCore';
 import { panelManager } from './services/panelManager';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
@@ -4637,7 +4637,7 @@ app.whenReady().then(async () => {
         getHeadCommit: (p) => worktreeManager.getHeadCommit(p),
       },
       createArmSession: async ({ projectId, baseCommittish, nameHint, quickConfig }) => {
-        const { session, runId } = await createQuickSessionCore(
+        const { session, runId, resolvedSubstrate } = await createQuickSessionCore(
           {
             taskQueue: taskQueue!,
             sessionManager,
@@ -4666,6 +4666,28 @@ app.whenReady().then(async () => {
               // 'sdk' exactly as before that default existed.
               { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
         );
+        // Stamp parity with the quick IPC handler, via the SHARED chokepoint
+        // (stampQuickSessionRuntimeConfig): the arm's permission-mode pick and
+        // the RESOLVED substrate/agent_runtime must land on the SESSION row too
+        // — chat spawns read sessions.agent_permission_mode
+        // (resolveSessionAgentPermissionMode), and the sessions:input relay
+        // branch + frontend substrate gates read sessions.substrate/
+        // agent_runtime. Without this the sub-form's substrate and permission
+        // picks silently never applied: the arm ran as an SDK session on the
+        // global permission default while its run row claimed otherwise. Infra
+        // arms (no quickConfig) keep their pre-existing NULL stamps. useCodexSdk
+        // mirrors the quick handler's derivation; codex-pty is excluded from the
+        // arm wire schema so useCodexPty is always false here.
+        if (quickConfig) {
+          stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
+            resolvedSubstrate,
+            useCodexSdk:
+              quickConfig.agentRuntime === 'codex-sdk' ||
+              (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined),
+            useCodexPty: false,
+            requestedAgentMode: quickConfig.permissionMode,
+          });
+        }
         // Seed the quick arm's chat config onto its Claude panel. A quick arm is
         // an interactive session the user drives, but its per-turn model / fast-mode
         // / reasoning-effort are read from PANEL settings at sessions:input spawn
