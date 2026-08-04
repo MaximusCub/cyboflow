@@ -275,6 +275,48 @@ describe('HumanStepManager human gate (run-pause + aggregate-unblock)', () => {
     expect(rows[0].source).toBe('gate:human-step:plan-review');
   });
 
+  it('openHumanGate stamps the approve-ideas batch payload (ideaRefs) — and only for that step', async () => {
+    const db = buildDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedRun(db, 'run-h');
+    seedRun(db, 'run-plain');
+
+    // Two run-created ideas with content — the approve-ideas batch. Board/stage
+    // rows come from the migration-014/015 default-board seed for project 1.
+    const insertIdea = db.prepare(
+      `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id)
+       VALUES (?, 1, ?, ?, 'Spec body', 'board-1-default', 'stage-board-1-default-12')`,
+    );
+    insertIdea.run('ide_1', 'IDEA-001', 'First');
+    insertIdea.run('ide_2', 'IDEA-002', 'Second');
+    const insertCreated = db.prepare(
+      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id)
+       VALUES ('idea', ?, 1, 'created', 'orchestrator', 'run-h')`,
+    );
+    insertCreated.run('ide_1');
+    insertCreated.run('ide_2');
+
+    // The batch gate carries the refs the resolve fold validates verdicts against.
+    const gateId = await mgr.openHumanGate('run-h', 'approve-ideas', 'Approve ideas');
+    expect(gateId).not.toBeNull();
+    const payloadJson = (
+      db.prepare('SELECT payload_json AS p FROM review_items WHERE id = ?').get(gateId) as { p: string | null }
+    ).p;
+    expect(payloadJson).not.toBeNull();
+    expect(JSON.parse(payloadJson as string)).toEqual({
+      kind: 'decision',
+      gate: 'approve-ideas',
+      ideaRefs: ['IDEA-001', 'IDEA-002'],
+    });
+
+    // A scalar human step still mints with NO payload.
+    const plainId = await mgr.openHumanGate('run-plain', 'plan-review', 'Plan review');
+    const plainPayload = (
+      db.prepare('SELECT payload_json AS p FROM review_items WHERE id = ?').get(plainId) as { p: string | null }
+    ).p;
+    expect(plainPayload).toBeNull();
+  });
+
   it('openHumanGate is idempotent per (run, step) — a second open does NOT create a second gate', async () => {
     const db = buildDb();
     const mgr = HumanStepManager.initialize(dbAdapter(db));

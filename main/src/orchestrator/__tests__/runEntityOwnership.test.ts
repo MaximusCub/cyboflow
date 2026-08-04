@@ -26,6 +26,7 @@ import {
   listRunOwnedOrBatchIdeaIds,
   listRunBatchIdeaIds,
   resolveRunBatchIdeaId,
+  listApproveIdeasBatchRows,
 } from '../runEntityOwnership';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -484,5 +485,89 @@ describe('runEntityOwnership fail-soft contract', () => {
     const db = buildDb();
     expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-missing')).toEqual([]);
     expect(listRunCreatedTaskIds(dbAdapter(db), 'run-missing')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listApproveIdeasBatchRows — the SHARED approve-ideas batch-row derivation
+// (artifact tab rows AND the programmatic human-step gate's ideaRefs)
+// ---------------------------------------------------------------------------
+
+describe('runEntityOwnership.listApproveIdeasBatchRows', () => {
+  /** buildDb() plus a minimal ideas table (the columns the helper SELECTs). */
+  function buildDbWithIdeas(): Database.Database {
+    const db = buildDb();
+    db.exec(`
+      CREATE TABLE ideas (
+        id      TEXT PRIMARY KEY,
+        ref     TEXT NOT NULL,
+        title   TEXT NOT NULL,
+        summary TEXT,
+        body    TEXT,
+        scope   TEXT
+      );
+    `);
+    return db;
+  }
+
+  function insertIdea(
+    db: Database.Database,
+    id: string,
+    ref: string,
+    opts: { title?: string; summary?: string | null; body?: string | null; scope?: string | null } = {},
+  ): void {
+    db.prepare('INSERT INTO ideas (id, ref, title, summary, body, scope) VALUES (?, ?, ?, ?, ?, ?)').run(
+      id,
+      ref,
+      opts.title ?? `Idea ${ref}`,
+      opts.summary ?? null,
+      opts.body ?? null,
+      opts.scope ?? null,
+    );
+  }
+
+  function insertCreatedEvent(db: Database.Database, runId: string, ideaId: string, seq: number): void {
+    db.prepare(
+      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id)
+       VALUES ('idea', ?, ?, 'created', 'orchestrator', ?)`,
+    ).run(ideaId, seq, runId);
+  }
+
+  it('returns one row per run-owned idea with a ref and content, keyed by display ref', () => {
+    const db = buildDbWithIdeas();
+    insertRun(db, 'run-b', null);
+    insertIdea(db, 'ide_1', 'IDEA-001', { body: 'Spec body', scope: 'large' });
+    insertIdea(db, 'ide_2', 'IDEA-002', { summary: 'One-liner', title: 'Second' });
+    insertCreatedEvent(db, 'run-b', 'ide_1', 1);
+    insertCreatedEvent(db, 'run-b', 'ide_2', 1);
+
+    expect(listApproveIdeasBatchRows(dbAdapter(db), 'run-b')).toEqual([
+      { ref: 'IDEA-001', title: 'Idea IDEA-001', scope: 'large', summary: null },
+      { ref: 'IDEA-002', title: 'Second', scope: null, summary: 'One-liner' },
+    ]);
+  });
+
+  it('skips ideas with no content (empty body AND summary) and ideas with an empty ref', () => {
+    const db = buildDbWithIdeas();
+    insertRun(db, 'run-b', null);
+    insertIdea(db, 'ide_ok', 'IDEA-001', { body: 'has content' });
+    insertIdea(db, 'ide_stub', 'IDEA-002'); // no body, no summary — not renderable yet
+    insertIdea(db, 'ide_noref', '', { body: 'content but no ref' }); // no verdict-map key
+    insertCreatedEvent(db, 'run-b', 'ide_ok', 1);
+    insertCreatedEvent(db, 'run-b', 'ide_stub', 1);
+    insertCreatedEvent(db, 'run-b', 'ide_noref', 1);
+
+    expect(listApproveIdeasBatchRows(dbAdapter(db), 'run-b').map((r) => r.ref)).toEqual(['IDEA-001']);
+  });
+
+  it('is fail-soft: no ideas table, and an unknown run, both yield []', () => {
+    // buildDb() has NO ideas table — the per-idea read throws → [].
+    const noIdeas = buildDb();
+    insertRun(noIdeas, 'run-b', 'ide_seed');
+    expect(() => listApproveIdeasBatchRows(dbAdapter(noIdeas), 'run-b')).not.toThrow();
+    expect(listApproveIdeasBatchRows(dbAdapter(noIdeas), 'run-b')).toEqual([]);
+
+    const db = buildDbWithIdeas();
+    expect(listApproveIdeasBatchRows(dbAdapter(db), 'run-missing')).toEqual([]);
   });
 });

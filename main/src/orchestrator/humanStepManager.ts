@@ -29,6 +29,7 @@
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
+import type { DecisionPayload } from '../../../shared/types/reviews';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
@@ -38,6 +39,7 @@ import {
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 import { composePartialSprintGateBody } from './partialSprintGateSummary';
+import { listApproveIdeasBatchRows } from './runEntityOwnership';
 import { runStatusEvents } from './trpc/routers/events';
 
 /** Provenance source stamped on a human-gate decision review_item. */
@@ -166,7 +168,7 @@ export class HumanStepManager {
             enrichedBody ??
             `Workflow step '${stepId}' requires a human decision before the run can advance.`,
           source: this.sourceForStep(stepId),
-          payload: null,
+          payload: this.composeGatePayload(runId, stepId),
           now,
         });
       });
@@ -427,5 +429,24 @@ export class HumanStepManager {
    */
   private sourceForStep(stepId: string): string {
     return `${HUMAN_GATE_SOURCE}:${stepId}`;
+  }
+
+  /**
+   * Gate payload for the step being opened. Almost every human step is a scalar
+   * approve/reject gate and carries NO payload — but an `approve-ideas` step
+   * (the launch flow's batch gate) resolves by a per-idea verdict map that the
+   * shared fold validates against the gate's `DecisionPayload.ideaRefs`, so the
+   * mint MUST stash the batch refs or the gate can never be resolved
+   * (foldIdeaVerdicts refuses an empty ref list). Refs derive from the SAME
+   * helper the auto-minted Approve-ideas tab renders from
+   * (runEntityOwnership.listApproveIdeasBatchRows), so the submitted map always
+   * covers the gate's refs exactly. Fail-soft: no refs (helper fail-soft, or a
+   * run with no owned ideas) → null payload, the gate still opens.
+   */
+  private composeGatePayload(runId: string, stepId: string): DecisionPayload | null {
+    if (stepId !== 'approve-ideas') return null;
+    const ideaRefs = listApproveIdeasBatchRows(this.db, runId).map((row) => row.ref);
+    if (ideaRefs.length === 0) return null;
+    return { kind: 'decision', gate: 'approve-ideas', ideaRefs };
   }
 }

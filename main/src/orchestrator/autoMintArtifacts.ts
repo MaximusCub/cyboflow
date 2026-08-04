@@ -26,7 +26,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'node:path';
 import { ArtifactRouter } from './artifactRouter';
-import { listRunOwnedOrBatchIdeaIds } from './runEntityOwnership';
+import { listApproveIdeasBatchRows, listRunOwnedOrBatchIdeaIds } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
@@ -528,26 +528,12 @@ async function mintApproveIdeasForBatch(
   stepOrigin: string | null,
   logger?: LoggerLike,
 ): Promise<void> {
-  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
-  if (ideaIds.length <= 1) return; // joint gate is for a multi-idea batch only
+  if (listRunOwnedOrBatchIdeaIds(db, runId).length <= 1) return; // joint gate is for a multi-idea batch only
 
-  const ideas: ApproveIdeasArtifactPayload['ideas'] = [];
-  for (const ideaId of ideaIds) {
-    const row = readIdeaBatchRow(db, ideaId);
-    if (!row) continue;
-    const ref = typeof row.ref === 'string' && row.ref.length > 0 ? row.ref : null;
-    if (ref === null) continue; // rows are keyed by display ref (the verdict-map key)
-    const body = typeof row.body === 'string' ? row.body : '';
-    const summary = typeof row.summary === 'string' ? row.summary : '';
-    if (body.length === 0 && summary.length === 0) continue; // no stub content yet
-    const title = typeof row.title === 'string' && row.title.length > 0 ? row.title : ref;
-    ideas.push({
-      ref,
-      title,
-      scope: typeof row.scope === 'string' && row.scope.length > 0 ? row.scope : null,
-      summary: summary.length > 0 ? summary : null,
-    });
-  }
+  // SHARED row derivation (runEntityOwnership.listApproveIdeasBatchRows): the
+  // programmatic gate:human-step:approve-ideas payload's `ideaRefs` derive from
+  // the SAME helper, so the tab's rows and the gate's refs can never drift.
+  const ideas: ApproveIdeasArtifactPayload['ideas'] = listApproveIdeasBatchRows(db, runId);
   if (ideas.length <= 1) {
     logger?.debug('[autoMintArtifacts] approve-ideas skipped — fewer than 2 ideas with content', {
       runId,

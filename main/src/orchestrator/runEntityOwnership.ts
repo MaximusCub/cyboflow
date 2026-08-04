@@ -329,3 +329,57 @@ export function listRunOwnedOrBatchIdeaIds(db: DatabaseLike, runId: string): str
   if (ownedIds.length > 0) return ownedIds;
   return listRunBatchIdeaIds(db, runId);
 }
+
+/**
+ * One row of an approve-ideas BATCH surface — the projection BOTH batch-gate
+ * surfaces render from: the auto-minted Approve-ideas artifact tab (one
+ * Approve/Deny row per idea) and the programmatic `gate:human-step:approve-ideas`
+ * decision payload (`DecisionPayload.ideaRefs`). Keyed by display `ref` — the
+ * verdict-map key the resolve fold validates against.
+ */
+export interface ApproveIdeasBatchRow {
+  /** Display ref (e.g. 'IDEA-014') — the verdict-map key. */
+  ref: string;
+  /** Idea title; falls back to the ref when the row has no title. */
+  title: string;
+  /** Idea scope hint ('small' | 'large') when set. */
+  scope: string | null;
+  /** One-line summary when set. */
+  summary: string | null;
+}
+
+/**
+ * The run's approve-ideas batch rows: one row per owned idea (per
+ * {@link listRunOwnedOrBatchIdeaIds}) that has a display ref AND stub/spec
+ * content (a non-empty body OR summary). SINGLE HOME for the batch-row
+ * derivation so the artifact tab's rows and the human-step gate's `ideaRefs`
+ * can never drift — the fold refuses a verdict map that doesn't cover the
+ * gate's refs exactly, so both surfaces MUST agree on the row set.
+ *
+ * Fail-soft: a missing ideas table or any thrown query yields [].
+ */
+export function listApproveIdeasBatchRows(db: DatabaseLike, runId: string): ApproveIdeasBatchRow[] {
+  const rows: ApproveIdeasBatchRow[] = [];
+  try {
+    for (const ideaId of listRunOwnedOrBatchIdeaIds(db, runId)) {
+      const row = db
+        .prepare('SELECT ref AS ref, title AS title, scope AS scope, summary AS summary, body AS body FROM ideas WHERE id = ?')
+        .get(ideaId) as { ref: unknown; title: unknown; scope: unknown; summary: unknown; body: unknown } | undefined;
+      if (!row) continue;
+      const ref = typeof row.ref === 'string' && row.ref.length > 0 ? row.ref : null;
+      if (ref === null) continue; // rows are keyed by display ref (the verdict-map key)
+      const body = typeof row.body === 'string' ? row.body : '';
+      const summary = typeof row.summary === 'string' ? row.summary : '';
+      if (body.length === 0 && summary.length === 0) continue; // no stub content yet
+      rows.push({
+        ref,
+        title: typeof row.title === 'string' && row.title.length > 0 ? row.title : ref,
+        scope: typeof row.scope === 'string' && row.scope.length > 0 ? row.scope : null,
+        summary: summary.length > 0 ? summary : null,
+      });
+    }
+  } catch {
+    return [];
+  }
+  return rows;
+}

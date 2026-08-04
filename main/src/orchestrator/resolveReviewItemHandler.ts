@@ -53,6 +53,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
+import { listApproveIdeasBatchRows } from './runEntityOwnership';
 import {
   isIdeaVerdict,
   serializeIdeaVerdictMap,
@@ -525,7 +526,18 @@ export async function resolveReviewItem(
     // unaffected.
     if (input.verdicts !== undefined) {
       if (isIdeasBatchGate) {
-        resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
+        // Batch refs come from the gate's mint-time payload. FALLBACK for a
+        // programmatic `gate:human-step:approve-ideas` row minted WITHOUT them
+        // (pre-payload-stamp builds): derive the refs at resolve time from the
+        // run's owned ideas via the SAME helper the mint and the artifact tab
+        // use, so the legacy gate stays resolvable instead of hard-refusing
+        // every verdict map. Payload wins when present; the fold still
+        // validates the map against whichever ref list resolves.
+        let ideaRefs = parseApproveIdeasRefs(before?.payloadJson);
+        if (ideaRefs.length === 0 && gateStepId === APPROVE_IDEAS_STEP_ID && before?.runId) {
+          ideaRefs = listApproveIdeasBatchRows(db, before.runId).map((row) => row.ref);
+        }
+        resolution = foldIdeaVerdicts(ideaRefs, input.verdicts);
       } else if (isDesignsBatchGate) {
         resolution = foldDesignVerdicts(parseApproveDesignsRefs(before?.payloadJson), input.verdicts);
       }

@@ -503,6 +503,73 @@ describe('resolveReviewItem — approve-ideas verdict fold', () => {
     expect(itemStatus(db, 'rvw_norefs')).toBe('pending');
   });
 
+  it('derives the batch refs from the run for a payload-less human-step gate (legacy mint fallback)', async () => {
+    const db = buildDb();
+    // The run's owned-ideas projection the fallback derives refs from: ideas +
+    // entity_events 'created' rows (workflow_runs here has no seed columns —
+    // the per-source fail-soft skips those and the created-union still resolves).
+    db.exec(`
+      CREATE TABLE ideas (
+        id      TEXT PRIMARY KEY,
+        ref     TEXT NOT NULL,
+        title   TEXT NOT NULL,
+        summary TEXT,
+        body    TEXT,
+        scope   TEXT
+      );
+      CREATE TABLE entity_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        entity_id   TEXT NOT NULL,
+        seq         INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        actor       TEXT NOT NULL,
+        run_id      TEXT
+      );
+    `);
+    const insertIdea = db.prepare("INSERT INTO ideas (id, ref, title, body) VALUES (?, ?, ?, 'spec')");
+    insertIdea.run('ide_1', 'IDEA-1', 'First');
+    insertIdea.run('ide_2', 'IDEA-2', 'Second');
+    const insertCreated = db.prepare(
+      "INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id) VALUES ('idea', ?, 1, 'created', 'orchestrator', 'run-fb')",
+    );
+    insertCreated.run('ide_1');
+    insertCreated.run('ide_2');
+    // A pre-payload-stamp programmatic mint: human-step source, NO payload at all.
+    seedItem(db, {
+      id: 'rvw_fb',
+      kind: 'decision',
+      source: 'gate:human-step:approve-ideas',
+      blocking: true,
+      runId: 'run-fb',
+      payloadJson: null,
+    });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_fb', verdicts }), deps);
+
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-ideas' });
+    expect(parseIdeaVerdictMap(resolvedWith(deps))).toEqual(verdicts);
+    expect(itemStatus(db, 'rvw_fb')).toBe('resolved');
+
+    // The derived refs still validate strictly: a map missing one derived ref is refused.
+    seedItem(db, {
+      id: 'rvw_fb_partial',
+      kind: 'decision',
+      source: 'gate:human-step:approve-ideas',
+      blocking: true,
+      runId: 'run-fb',
+      runStatus: 'awaiting_review',
+      payloadJson: null,
+    });
+    const partial = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_fb_partial', verdicts: { 'IDEA-1': 'approve' } }),
+      deps,
+    );
+    expect(partial).toMatchObject({ ok: false, reason: 'invalid_payload' });
+  });
+
   it('mid-fold resolve failure leaves the gate unresolved (all-or-nothing)', async () => {
     const db = buildDb();
     seedApproveIdeasGate(db, { id: 'rvw_boom', runId: 'run-boom', ideaRefs: ['IDEA-1'] });
