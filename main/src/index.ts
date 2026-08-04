@@ -123,6 +123,10 @@ import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVeri
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PlaywrightInstaller } from './services/visualVerify/playwrightInstaller';
+import {
+  makeChromiumProvisioner,
+  makeDriverCliProbe,
+} from './services/visualVerify/hostProbeAdapters';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
 import { findNodeExecutable } from './utils/nodeFinder';
@@ -1895,42 +1899,19 @@ async function initializeServices(): Promise<boolean> {
   // point: a panel row and a preflight check that disagreed would make the
   // panel a decorative second opinion.
   //
-  // ensureChromium is memoized on a SETTLED promise, so a retry after a failed
-  // install would otherwise return the cached `false` forever and the panel's
-  // fix-it button would look broken on its second click. A user-initiated
-  // retry therefore gets a FRESH installer; `inFlight` keeps an impatient
-  // double-click from racing two `npx playwright install` spawns.
-  let chromiumInstaller = new PlaywrightInstaller({ logger: cyboflowLogger });
-  let chromiumInstallInFlight: Promise<boolean> | null = null;
+  // The two adapters with rules of their own (fail-open on the CLI probe,
+  // retry semantics over the memoizing installer) live in hostProbeAdapters.ts
+  // — this file boots Electron and cannot be imported by a unit test, so
+  // anything with a rule worth asserting does not belong inline here.
   verifyHostProbes = {
     resolveNode: findNodeExecutable,
     resolveChromium: probeChromiumExecutable,
-    probeDriverCli: async () => {
-      try {
-        await fs.promises.access(verifyDriverCliPath);
-        return { path: verifyDriverCliPath, exists: true };
-      } catch {
-        return { path: verifyDriverCliPath, exists: false };
-      }
-    },
+    probeDriverCli: makeDriverCliProbe(verifyDriverCliPath, (p) => fs.promises.access(p)),
     nativeCaptureAvailable: () => peekabooBackend.healthCheck(),
-    ensureChromium: async () => {
-      if (chromiumInstallInFlight) return chromiumInstallInFlight;
-      const attempt = chromiumInstaller
-        .ensureChromium()
-        .then(async (ok) => {
-          // Failed attempts are not cached across clicks: drop the memo so the
-          // next press genuinely re-tries (a transient network failure is the
-          // common case, and it is the user asking).
-          if (!ok) chromiumInstaller = new PlaywrightInstaller({ logger: cyboflowLogger });
-          return ok;
-        })
-        .finally(() => {
-          chromiumInstallInFlight = null;
-        });
-      chromiumInstallInFlight = attempt;
-      return attempt;
-    },
+    ensureChromium: makeChromiumProvisioner(
+      () => new PlaywrightInstaller({ logger: cyboflowLogger }),
+      cyboflowLogger,
+    ),
   };
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
   // 127.0.0.1:<port> means nothing is listening ⇒ the port is free; a successful

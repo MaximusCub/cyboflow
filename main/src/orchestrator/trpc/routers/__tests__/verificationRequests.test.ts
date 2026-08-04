@@ -1148,4 +1148,24 @@ describe('verificationRequests.hostProbes', () => {
     const after = await caller.cyboflow.verificationRequests.provisionChromium();
     expect(after.probes.find((p) => p.id === 'chromium')?.state).toBe('missing');
   });
+
+  it('provisionChromium still re-probes when the installer THROWS its contract', async () => {
+    // A rejection is a contract violation (provisioning is documented to
+    // resolve false), but the re-probe is the authority on whether chromium is
+    // now present — and it answers just as well after a throwing installer.
+    // Failing the mutation would leave the panel on its pre-attempt rows.
+    let installed = false;
+    const { caller } = setup({
+      probes: {
+        resolveChromium: async () => (installed ? '/chromium' : null),
+        ensureChromium: async () => {
+          installed = true;
+          throw new Error('installer exploded after succeeding');
+        },
+      },
+    });
+
+    const after = await caller.cyboflow.verificationRequests.provisionChromium();
+    expect(after.probes.find((p) => p.id === 'chromium')?.state).toBe('ok');
+  });
 });

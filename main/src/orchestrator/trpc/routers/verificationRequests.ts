@@ -800,6 +800,12 @@ export const verificationRequestsRouter = router({
    * learns that from the re-probed `chromium` row rather than from an
    * exception. Returning the fresh report (not just a boolean) means the panel
    * never renders a stale "missing" beside a success it just caused.
+   *
+   * A rejection is a CONTRACT VIOLATION rather than an outcome, and is still
+   * swallowed: the re-probe below is the authority on whether chromium is now
+   * present, and it answers that just as well after a throwing installer as
+   * after a false-returning one. Failing the mutation instead would leave the
+   * panel showing the pre-attempt rows.
    */
   provisionChromium: protectedProcedure.mutation(async ({ ctx }): Promise<VerifyHostProbeReport> => {
     const probes = ctx.verifyHostProbes;
@@ -809,7 +815,11 @@ export const verificationRequestsRouter = router({
         message: '[verificationRequests.provisionChromium] host probes not wired into tRPC context',
       });
     }
-    await probes.ensureChromium();
+    try {
+      await probes.ensureChromium();
+    } catch {
+      // Intentionally ignored — see the docblock; the re-probe reports reality.
+    }
     const includeNative = nativeScreenDeclared(ctx.db);
     return {
       probes: await runHostProbes(probes, includeNative),
