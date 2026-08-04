@@ -466,11 +466,13 @@ describe('quick-arm config persistence + rerun replay (migration 083)', () => {
 
   /** Migration 083's table shape, applied on top of buildDb()'s pre-083 schema. */
   function addQuickConfigsTable(h: Harness): void {
-    h.db.exec(`CREATE TABLE experiment_quick_configs (
-      experiment_id TEXT NOT NULL, arm TEXT NOT NULL CHECK (arm IN ('A','B')),
-      config_json TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      UNIQUE (experiment_id, arm));`);
+    // Execute the REAL migration file (not a duplicated CREATE TABLE) so a
+    // typo / missing index / non-idempotent change in 083 fails these tests.
+    const migPath = join(__dirname, '..', '..', 'database', 'migrations', '083_experiment_quick_configs.sql');
+    h.db.exec(readFileSync(migPath, 'utf-8'));
+    // Idempotence guard: the migration must be safe to re-apply (CREATE ... IF
+    // NOT EXISTS), matching the filename-keyed ledger's crash-replay behavior.
+    h.db.exec(readFileSync(migPath, 'utf-8'));
   }
 
   function quickConfigRows(h: Harness, experimentId: string): Array<{ arm: string; config_json: string }> {
