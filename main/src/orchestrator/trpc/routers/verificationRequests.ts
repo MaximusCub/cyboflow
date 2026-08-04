@@ -69,6 +69,7 @@ import {
   type VerificationModality,
   type VerificationModalityHealth,
   type VerificationOutcomeStats,
+  type VerificationRunbookState,
   type VerificationRequestListRow,
   type VerificationType,
   type VerifyHostProbeReport,
@@ -387,6 +388,39 @@ function readCapabilities(
   return out;
 }
 
+/**
+ * Read the project's runbook records (migration 096), keyed by modality.
+ * Fail-soft to empty on a pre-096 DB, same posture as the capability ledger.
+ */
+function readRunbooks(
+  db: DatabaseLike,
+  projectId: number,
+): Map<VerificationModality, VerificationRunbookState> {
+  const out = new Map<VerificationModality, VerificationRunbookState>();
+  let rows: { modality: string; status: string; version: number; portable_hash: string }[] = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT modality, status, version, portable_hash
+           FROM verify_runbook_local
+          WHERE project_id = ?`,
+      )
+      .all(projectId) as typeof rows;
+  } catch {
+    return out;
+  }
+  for (const row of rows) {
+    if (!isVerificationModality(row.modality)) continue;
+    if (row.status !== 'proven' && row.status !== 'unproven-draft') continue;
+    out.set(row.modality, {
+      status: row.status,
+      version: row.version,
+      portableHash: row.portable_hash,
+    });
+  }
+  return out;
+}
+
 /** The singleton host capability generation; 0 when the row/table is absent (fresh install — nothing is stale). */
 function readHostGeneration(db: DatabaseLike): number {
   try {
@@ -674,16 +708,22 @@ export const verificationRequestsRouter = router({
 
       const hostGeneration = readHostGeneration(db);
       const capabilities = readCapabilities(db, input.projectId, hostGeneration, Date.now());
+      const runbooks = readRunbooks(db, input.projectId);
 
-      // A modality earns a row if it has traffic OR a ledger entry — the latter
-      // matters because a capability suppressed before its first success has no
-      // requests to show yet, and that is exactly when a user needs to see it.
+      // A modality earns a row if it has traffic, a ledger entry, OR a runbook.
+      // The latter two matter because a capability suppressed before its first
+      // success — or a registered-but-unproven runbook — has no requests to
+      // show yet, and those are exactly the states a user needs to see: until a
+      // runbook is PROVEN the degrade gate skips every build/serve check for
+      // that modality, so "no traffic" is the symptom, not the absence of a
+      // problem.
       const modalities: VerificationModalityHealth[] = VERIFICATION_MODALITIES.filter(
-        (m) => byModality.has(m) || capabilities.has(m),
+        (m) => byModality.has(m) || capabilities.has(m) || runbooks.has(m),
       ).map((m) => ({
         modality: m,
         ...finalize(byModality.get(m) ?? newAccumulator()),
         capability: capabilities.get(m) ?? null,
+        runbook: runbooks.get(m) ?? null,
       }));
 
       return {

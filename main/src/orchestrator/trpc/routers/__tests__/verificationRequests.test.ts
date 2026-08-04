@@ -891,6 +891,27 @@ describe('verificationRequests.health', () => {
     expect(health.hostGeneration).toBe(0);
   });
 
+  it('surfaces an unproven runbook for a modality with no traffic at all', async () => {
+    // The most actionable state the panel carries, and the one that looks like
+    // silence: until a runbook is PROVEN the degrade gate skips every
+    // build/serve check for that modality, so "no requests" is the SYMPTOM
+    // rather than the absence of a problem.
+    const db = buildDb([...MIGRATIONS, '096_verify_runbook_local.sql']);
+    cleanups.push(db);
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, version, status)
+       VALUES (1, 'web', 'abc123', '{}', 4, 'unproven-draft')`,
+    ).run();
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const web = health.modalities.find((m) => m.modality === 'web');
+
+    expect(web).toBeDefined();
+    expect(web?.attempts).toBe(0);
+    expect(web?.runbook).toEqual({ status: 'unproven-draft', version: 4, portableHash: 'abc123' });
+  });
+
   it('rejects a non-positive projectId and PRECONDITION_FAILEDs without a db', async () => {
     const { caller } = setup();
     await expect(caller.cyboflow.verificationRequests.health({ projectId: 0 })).rejects.toThrow();

@@ -1682,11 +1682,30 @@ export interface VerificationCapabilityState {
   suppressionActive: boolean;
 }
 
-/** Per-modality health: outcome stats plus the capability ledger for that modality. */
+/**
+ * The runbook record for one modality (`verify_runbook_local`, migration 096).
+ *
+ * `status` is the single most actionable fact the panel carries: until a
+ * modality has a PROVEN runbook, the §3.2 degrade gate skips every build/serve
+ * verification for it — so a project can show a queue full of green skips while
+ * having verified nothing. An `unproven-draft` is the state the verify-setup
+ * flow exists to move out of.
+ */
+export interface VerificationRunbookState {
+  status: 'proven' | 'unproven-draft';
+  /** The machine-local CAS version. */
+  version: number;
+  /** Content hash of the committed portable half. */
+  portableHash: string;
+}
+
+/** Per-modality health: outcome stats plus the capability ledger and runbook record for that modality. */
 export interface VerificationModalityHealth extends VerificationOutcomeStats {
   modality: VerificationModality;
   /** The capability row, or `null` when the ledger has never recorded this modality. */
   capability: VerificationCapabilityState | null;
+  /** The runbook record, or `null` when this project has never registered one for the modality. */
+  runbook: VerificationRunbookState | null;
 }
 
 /**

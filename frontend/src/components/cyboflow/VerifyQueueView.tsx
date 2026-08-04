@@ -46,6 +46,7 @@ import {
   type VerificationRequest,
 } from '../../hooks/useVerificationRequests';
 import { VerifyRequestDetailModal } from './VerifyRequestDetailModal';
+import { VerifyHealthPanel, VerifySetupCta } from './VerifyHealthPanel';
 import {
   STATUS_PILL_CLASS,
   budgetLineText,
@@ -294,14 +295,31 @@ export function VerifyQueueView(): ReactElement {
       );
     }
     if (requests.length === 0) {
+      // The empty state is where a user who needs verification set up actually
+      // stands, so it carries the health panel + the setup CTA rather than a
+      // bare sentence. An empty queue is ambiguous on its own — it means either
+      // "nothing has needed verifying" or "every check silently skipped for
+      // want of a proven runbook", and the health rows are what tell them
+      // apart.
       return (
-        <div data-testid="verify-queue-empty" className="text-sm text-text-tertiary">
-          No verification requests for this project yet.
+        <div className="flex flex-col gap-6">
+          <div data-testid="verify-queue-empty" className="flex flex-col items-start gap-2">
+            <p className="text-sm text-text-tertiary">
+              No verification requests for this project yet.
+            </p>
+            <VerifySetupCta
+              projectId={projectId}
+              label="Set up verification"
+              testId="verify-queue-empty-setup-cta"
+            />
+          </div>
+          <VerifyHealthPanel projectId={projectId} />
         </div>
       );
     }
     return (
       <div data-testid="verify-queue-list" className="flex flex-col gap-6">
+        <VerifyHealthPanel projectId={projectId} />
         <QueueSection
           testId="verify-queue-pending-list"
           title="In flight"
