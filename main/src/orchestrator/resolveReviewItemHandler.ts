@@ -58,6 +58,7 @@ import {
   isIdeaVerdict,
   serializeIdeaVerdictMap,
   serializeDesignVerdictMap,
+  parseIdeaVerdictMap,
   type IdeaVerdictMap,
 } from '../../../shared/types/reviews';
 
@@ -251,6 +252,40 @@ export function renderApproveIdeasDecisions(ideaRefs: string[], verdicts: Record
     '',
     'Proceed with the APPROVED ideas only; denied ideas stay on the backlog untouched.',
   ].join('\n');
+}
+
+/**
+ * The PROGRAMMATIC plane's read-side of the decisions contract: the per-idea
+ * verdict lines (`- IDEA-014: approve`) of this run's RESOLVED
+ * `gate:human-step:approve-ideas` item, or undefined when the run has none (gate
+ * still pending, a non-launch run, or an unparseable resolution). The
+ * orchestrated plane DELIVERS {@link renderApproveIdeasDecisions} as the parked
+ * conversation's next turn — but each programmatic step is a FRESH agent turn
+ * that no delivery can reach, so the host re-reads the stored fold per step and
+ * `composeStepPrompt` renders the same `# Approve-ideas decisions` block into
+ * the step prompt instead. Without this, a post-gate step (expand-spec, epics,
+ * tasks) cannot tell which ideas were DENIED and gives every idea the full
+ * treatment. Fail-soft: a missing review_items table or any thrown query yields
+ * undefined (the section is simply omitted).
+ */
+export function readApproveIdeasDecisionLines(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT resolution FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'resolved'
+            AND source = 'gate:human-step:approve-ideas'
+          ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(runId) as { resolution?: string | null } | undefined;
+    const verdicts = parseIdeaVerdictMap(row?.resolution);
+    if (verdicts === null) return undefined;
+    return Object.entries(verdicts)
+      .map(([ref, verdict]) => `- ${ref}: ${verdict}`)
+      .join('\n');
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------

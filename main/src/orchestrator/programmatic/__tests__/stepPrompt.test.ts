@@ -411,4 +411,32 @@ describe('composeStepPrompt', () => {
     });
     expect(out).not.toContain('## Operator guidance');
   });
+
+  // -------------------------------------------------------------------------
+  // Approve-ideas decisions — the resolved batch-gate verdict lines threaded
+  // into every POST-gate step turn (launch's programmatic plane). Heading must
+  // stay byte-identical to APPROVE_IDEAS_DECISIONS_HEADING.
+  // -------------------------------------------------------------------------
+
+  it('renders the Approve-ideas decisions section with the verdict lines and the denied-refs directive', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'expand-spec', name: 'Expand spec', agent: 'context' }),
+      workflowName: 'launch',
+      attempt: 1,
+      approveIdeasDecisions: '- IDEA-001: approve\n- IDEA-002: deny',
+    });
+    expect(out).toContain('# Approve-ideas decisions');
+    expect(out).toContain('- IDEA-001: approve');
+    expect(out).toContain('- IDEA-002: deny');
+    expect(out).toContain('act on the APPROVED refs only');
+    expect(out).toContain('DENIED ideas stay on the backlog untouched');
+  });
+
+  it('omits the Approve-ideas decisions section when absent or empty', () => {
+    const base = { step: step({ id: 'a' }), workflowName: 'launch', attempt: 1 };
+    expect(composeStepPrompt(base)).not.toContain('# Approve-ideas decisions');
+    expect(composeStepPrompt({ ...base, approveIdeasDecisions: '  ' })).not.toContain(
+      '# Approve-ideas decisions',
+    );
+  });
 });

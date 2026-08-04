@@ -75,6 +75,17 @@ export interface ComposeStepPromptArgs {
    */
   runOwnedIdeaIds?: readonly string[];
   /**
+   * The human's per-idea approve-ideas gate decisions — the pre-rendered
+   * `- IDEA-014: approve` verdict lines the host read off the run's RESOLVED
+   * `gate:human-step:approve-ideas` item (readApproveIdeasDecisionLines).
+   * Present only AFTER that batch gate resolved; absent / empty ⇒ no section
+   * (output unchanged). The orchestrated plane DELIVERS these decisions into the
+   * parked conversation's next turn, but each programmatic step is a fresh agent
+   * turn no delivery can reach — so post-gate steps (expand-spec, epics, tasks)
+   * learn which ideas were DENIED only through this section.
+   */
+  approveIdeasDecisions?: string;
+  /**
    * Operator GUIDANCE for this step (RunDirectives live steering) — free-text the
    * operator added mid-run via the monitor to steer this step, appended as a tail
    * section when non-empty. Absent / empty ⇒ no guidance section (output
@@ -175,6 +186,13 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     runOwnedIdeaIds.length > 0
       ? `\n\n## Run-owned idea scope\n\nThis run owns only these idea ids: ${runOwnedIdeaIds.map((id) => `\`${id}\``).join(', ')}. This scope is authoritative for idea-specific work; do not inspect or select unrelated project ideas.`
       : '';
+  // Heading kept byte-identical to APPROVE_IDEAS_DECISIONS_HEADING
+  // (resolveReviewItemHandler) — the contract the flow prose keys the resumed
+  // agent on. Not imported: stepPrompt stays free of orchestrator-module imports.
+  const approveIdeasDecisions =
+    args.approveIdeasDecisions !== undefined && args.approveIdeasDecisions.trim().length > 0
+      ? `\n\n# Approve-ideas decisions\n\nThe human resolved this run's approve-ideas batch gate with these per-idea decisions:\n\n${args.approveIdeasDecisions.trim()}\n\nThis verdict list is authoritative for idea-specific work: act on the APPROVED refs only. DENIED ideas stay on the backlog untouched — never expand, design, decompose, or archive them.`
+      : '';
   const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
   // Task-verify relay contract (verification-agent redesign §5.1; live-smoke fix
   // 2026-07-22): this step turn's FINAL MESSAGE is the typed step-output channel
@@ -225,7 +243,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${runOwnedIdeaScope}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 

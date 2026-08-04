@@ -41,6 +41,7 @@ import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
+import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
@@ -219,6 +220,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // can create the idea whose flags later control ui-prototype / architecture.
     const runOwnedIdeaIds = (): readonly string[] => this.deps.runOwnedIdeaIdsProvider?.(ctx.runId) ?? [];
 
+    // Re-read the run's resolved approve-ideas gate verdicts per step (launch's
+    // batch gate). Undefined until the human resolves the gate — pre-gate steps
+    // get byte-identical prompts; post-gate steps carry the decisions block so
+    // they can honor DENIED refs (no delivery turn exists on this plane).
+    const approveIdeasDecisions = (): string | undefined =>
+      this.deps.db ? readApproveIdeasDecisionLines(this.deps.db, ctx.runId) : undefined;
+
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
     // empty no-op set so the walk is byte-identical. Read by reference at the
@@ -262,6 +270,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
         taskScope,
         runOwnedIdeaIds,
+        approveIdeasDecisions,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
       this.deps.logger,

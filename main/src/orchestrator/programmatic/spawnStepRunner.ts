@@ -140,6 +140,14 @@ export interface SpawnStepRunnerOptions {
    */
   runOwnedIdeaIds?: () => readonly string[];
   /**
+   * The run's resolved approve-ideas gate decisions, as pre-rendered verdict
+   * lines (readApproveIdeasDecisionLines). A thunk re-read per step: it returns
+   * undefined until the human resolves the batch gate, then every LATER step
+   * turn carries the `# Approve-ideas decisions` block so post-gate steps know
+   * which ideas were denied. Absent ⇒ no section (byte-identical prompts).
+   */
+  approveIdeasDecisions?: () => string | undefined;
+  /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
    */
@@ -196,6 +204,9 @@ export class SpawnStepRunner implements StepRunner {
     // steps from inspecting unrelated project ideas and picks up ideas context
     // creates mid-run.
     const runOwnedIdeaIds = this.opts.runOwnedIdeaIds?.();
+    // Re-read the approve-ideas gate decisions per step — undefined until the
+    // human resolves the batch gate, then every later step turn carries them.
+    const approveIdeasDecisions = this.opts.approveIdeasDecisions?.();
     // Re-resolve this step's agent RUNTIME per step (Codex-per-step mixing) —
     // never captured at construction, mirroring the resolvers above — so a
     // workflow-scoped agent config edited mid-run is honored on this step's next
@@ -236,6 +247,7 @@ export class SpawnStepRunner implements StepRunner {
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
+      ...(approveIdeasDecisions ? { approveIdeasDecisions } : {}),
       ...(userGuidance ? { userGuidance } : {}),
       // Per-attempt visual-verification threading (verification-agent redesign
       // §5.3): a task-verify contract re-run and a visual-FAIL implement

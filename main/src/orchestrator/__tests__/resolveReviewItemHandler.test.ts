@@ -23,6 +23,7 @@ import {
   parseApproveIdeasRefs,
   parseApproveDesignsRefs,
   renderApproveDesignsDecisions,
+  readApproveIdeasDecisionLines,
   APPROVE_DESIGNS_DECISIONS_HEADING,
   type ResolveReviewItemDeps,
   type ResolveReviewItemInput,
@@ -568,6 +569,37 @@ describe('resolveReviewItem — approve-ideas verdict fold', () => {
       deps,
     );
     expect(partial).toMatchObject({ ok: false, reason: 'invalid_payload' });
+  });
+
+  it('readApproveIdeasDecisionLines reads the resolved gate fold back as verdict lines', () => {
+    const db = buildDb();
+    const insert = db.prepare(
+      `INSERT INTO review_items (id, project_id, run_id, kind, source, blocking, status, resolution)
+       VALUES (?, 1, ?, 'decision', 'gate:human-step:approve-ideas', 1, ?, ?)`,
+    );
+
+    // Resolved fold → one line per ref.
+    insert.run(
+      'rvw_read',
+      'run-read',
+      'resolved',
+      serializeIdeaVerdictMap({ 'IDEA-1': 'approve', 'IDEA-2': 'deny' }),
+    );
+    expect(readApproveIdeasDecisionLines(dbAdapter(db), 'run-read')).toBe(
+      '- IDEA-1: approve\n- IDEA-2: deny',
+    );
+
+    // A still-PENDING gate contributes nothing.
+    insert.run('rvw_pend', 'run-pend', 'pending', null);
+    expect(readApproveIdeasDecisionLines(dbAdapter(db), 'run-pend')).toBeUndefined();
+
+    // A resolved gate whose resolution is not a serialized fold contributes nothing.
+    insert.run('rvw_scalar_res', 'run-scalar-res', 'resolved', 'approve');
+    expect(readApproveIdeasDecisionLines(dbAdapter(db), 'run-scalar-res')).toBeUndefined();
+
+    // No gate at all / fail-soft on a bare DB.
+    expect(readApproveIdeasDecisionLines(dbAdapter(db), 'run-none')).toBeUndefined();
+    expect(readApproveIdeasDecisionLines(dbAdapter(new Database(':memory:')), 'run-x')).toBeUndefined();
   });
 
   it('mid-fold resolve failure leaves the gate unresolved (all-or-nothing)', async () => {
