@@ -43,6 +43,12 @@
  * alternative to drag-reorder (WCAG 2.5.7), driving the SAME reorder core as
  * DnD. Without it (ListView, epic children) the Move items are hidden and the
  * menu renders exactly as before.
+ *
+ * When `onShowComponents` is wired (ideas with a resolved component ledger
+ * only — TaskCard.tsx), the menu also exposes "Show components", a
+ * discoverable keyboard-reachable alternative to the card's own small
+ * `ledger-expand` chevron. It only OPENS the ledger expand (never toggles it
+ * closed) — clicking it twice does nothing surprising.
  */
 import { useRef, useState } from 'react';
 import {
@@ -54,6 +60,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpToLine,
+  ListChecks,
 } from 'lucide-react';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
 import { useBacklogStore } from '../../stores/backlogStore';
@@ -86,6 +93,12 @@ interface CardActionsMenuProps {
   canMoveUp?: boolean;
   /** False on the column's last card — disables Move down. */
   canMoveDown?: boolean;
+  /**
+   * Open the card's ledger-expand section. Omitted (the common case: non-idea
+   * cards, or an idea whose components haven't resolved yet) hides the
+   * "Show components" item entirely — mirrors `onReorder`'s convention.
+   */
+  onShowComponents?: () => void;
 }
 
 export function CardActionsMenu({
@@ -93,6 +106,7 @@ export function CardActionsMenu({
   onReorder,
   canMoveUp = false,
   canMoveDown = false,
+  onShowComponents,
 }: CardActionsMenuProps): React.JSX.Element | null {
   const boards = useBacklogStore((s) => s.boards);
   const [stageOpen, setStageOpen] = useState(false);
@@ -259,6 +273,16 @@ export function CardActionsMenu({
         onClick: () => onReorder(task, 'top'),
       },
     );
+  }
+  if (onShowComponents !== undefined) {
+    // Informational only — never gated on hasActiveRun, unlike the
+    // destructive/stage-changing items below.
+    items.push({
+      id: 'show-components',
+      label: 'Show components',
+      icon: ListChecks,
+      onClick: onShowComponents,
+    });
   }
   items.push(
     {

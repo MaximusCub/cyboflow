@@ -21,10 +21,18 @@
  *
  * Launch state is threaded as `launchingTaskId` (not a pre-computed boolean) so
  * nested epic children also reflect their own in-flight launch correctly.
+ *
+ * Idea component ledger (shared/types/ideaComponents.ts): ideas render five
+ * LedgerChips (always all five, including skipped ones, so the row reads as a
+ * checklist) plus a SECOND, sibling expand block — `ledger-expand` — next to
+ * the epic's `epic-expand`. Gated on `task.type === 'idea'` so the strip never
+ * reaches a nested child in TaskChildren (children are always epics/tasks,
+ * never ideas, but the guard is the thing that keeps it that way).
  */
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Play, Loader2, Pencil, Lightbulb } from 'lucide-react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { useSessionStore } from '../../stores/sessionStore';
@@ -40,9 +48,11 @@ import {
   FlowMarker,
   ReviewMarker,
   DoneFlag,
+  LedgerChip,
 } from './markers';
 import { compactAgo, isArchived, hasRunningFlow } from './backlogSelectors';
 import { CardActionsMenu, type ReorderDirection } from './CardActionsMenu';
+import { LedgerExpand } from './LedgerExpand';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
 import { TaskDetailModal } from '../cyboflow/TaskDetailModal';
@@ -117,12 +127,15 @@ function CardFooter({
   onReorder,
   canMoveUp,
   canMoveDown,
+  onShowComponents,
 }: TaskBodyProps & {
   onEdit: (e: React.MouseEvent) => void;
   /** Open the originating idea's detail; rendered only when the card has one. */
   onOpenRootIdea: (e: React.MouseEvent) => void;
   /** True while the root-idea fetch is in flight (spins the back-link icon). */
   loadingRootIdea: boolean;
+  /** Open the ledger expand (ideas with a resolved component set only). */
+  onShowComponents?: () => void;
 }): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
   // A live run association = the task is In development — the backend rejects a
@@ -191,6 +204,7 @@ function CardFooter({
           onReorder={onReorder}
           canMoveUp={canMoveUp}
           canMoveDown={canMoveDown}
+          onShowComponents={onShowComponents}
         />
       </div>
     </div>
@@ -231,6 +245,9 @@ export function TaskBody({
   canMoveDown,
 }: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
+  // Sibling to the epic `expanded` state above — ideas have no expanded state
+  // today, so this is a SECOND, independently-toggled expand (see file header).
+  const [ledgerExpanded, setLedgerExpanded] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   // Root-idea back-link: the fetched originating idea (with its decomposition
   // children) shown in a read-only detail modal; null = closed.
@@ -299,6 +316,18 @@ export function TaskBody({
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
 
+      {/* Idea component ledger chips — ALWAYS all five (including skipped ones)
+          so the row reads as a checklist, not a variable badge pile. May wrap
+          to a second line in a narrow kanban column. */}
+      {task.type === 'idea' && task.components && (
+        <div className="flex flex-wrap items-center gap-1.5" data-testid="ledger-chips-row">
+          {IDEA_COMPONENT_KEYS.map((key) => {
+            const entry = task.components?.find((c) => c.component === key);
+            return entry ? <LedgerChip key={key} component={entry} /> : null;
+          })}
+        </div>
+      )}
+
       <MarkerRow task={task} />
 
       {/* Title */}
@@ -320,6 +349,9 @@ export function TaskBody({
         onReorder={onReorder}
         canMoveUp={canMoveUp}
         canMoveDown={canMoveDown}
+        onShowComponents={
+          task.type === 'idea' && task.components ? () => setLedgerExpanded(true) : undefined
+        }
       />
 
       {/* Type-appropriate detail editor — opened by the dedicated Edit affordance. */}
@@ -344,6 +376,31 @@ export function TaskBody({
           {expanded && task.children && task.children.length > 0 && (
             <TaskChildren tasks={task.children} onRun={onRun} launchingTaskId={launchingTaskId} now={now} />
           )}
+        </div>
+      )}
+
+      {/* Idea component ledger expand — a SECOND, sibling expand block to the
+          epic one above (ideas have no expanded state today). Distinct
+          data-testid ('ledger-expand') so it can't collide with the
+          epic-expand / task-children tests. */}
+      {task.type === 'idea' && task.components && task.components.length > 0 && (
+        <div className="mt-1 border-t border-border-tertiary pt-1.5">
+          <button
+            type="button"
+            onClick={(e) => {
+              // stopPropagation: mirrors every other interactive addition on
+              // this card — it sits inside draggable/clickable ancestors.
+              e.stopPropagation();
+              setLedgerExpanded((v) => !v);
+            }}
+            aria-expanded={ledgerExpanded}
+            data-testid="ledger-expand"
+            className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-text-secondary hover:text-text-primary"
+          >
+            {ledgerExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            Components
+          </button>
+          {ledgerExpanded && <LedgerExpand ideaId={task.id} components={task.components} now={now} />}
         </div>
       )}
     </div>
