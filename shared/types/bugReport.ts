@@ -16,10 +16,11 @@ import type { TelemetryEnvironment } from './telemetry';
 
 /**
  * Outcome of a submission attempt.
- *   - `accepted`    — flushed to Sentry within the timeout.
- *   - `queued`      — held by the offline transport; retried on a later boot.
+ *   - `accepted`    — the transport got a success response from Sentry.
+ *   - `queued`      — not delivered; held on disk and retried on a later boot,
+ *                     or still in flight when we stopped waiting.
  *   - `unavailable` — this build has no DSN, so reports can never be delivered.
- *   - `failed`      — the SDK threw.
+ *   - `failed`      — Sentry rejected it, or the SDK threw.
  *   - `rate-limited`— refused by the main-process limiter.
  */
 export type BugReportDelivery = 'accepted' | 'queued' | 'unavailable' | 'failed' | 'rate-limited';
@@ -78,6 +79,15 @@ export interface BugReportSubmitRequest {
    * gets sent. Absent when they did not opt in. Size-capped by the handler.
    */
   logText?: string;
+  /**
+   * The recent-error list from the preview, echoed back for the same reason as
+   * `logText`: it is the one part of the diagnostics payload that can change
+   * between opening the dialog and pressing send, so re-collecting it in the
+   * handler would attach failures the user never reviewed. Every other
+   * diagnostics field is fixed for the life of the process and is re-derived in
+   * the main process rather than trusted from here.
+   */
+  recentErrors?: BugReportRecentError[];
   /** Client-generated key so a retried submit does not file a duplicate. */
   idempotencyKey: string;
 }
@@ -97,6 +107,10 @@ export const BUG_REPORT_LIMITS = {
   expectedMax: 5_000,
   emailMax: 254,
   logTextMax: 128 * 1024,
+  /** Ceiling on the echoed recent-error list; the buffer itself holds 20. */
+  recentErrorsMax: 50,
+  /** Ceiling on one echoed recent-error message; the recorder truncates at 500. */
+  recentErrorMessageMax: 2_000,
   /** Minimum gap between accepted submissions. */
   minIntervalMs: 30_000,
   /** Rolling hourly ceiling. */

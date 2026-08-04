@@ -25,6 +25,7 @@ import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
+import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
@@ -754,6 +755,13 @@ function runDeferredStartupWork(): void {
   // Git status polling is comparatively expensive (spawns git per session), so it
   // is held back until the window is visible instead of started during init.
   gitStatusManager.startPolling();
+
+  // Bug reports use their own Sentry client, built lazily on first submission, so
+  // a report the offline transport queued in an earlier session would otherwise
+  // sit on disk until the user happened to file another one. This constructs that
+  // client (which flushes its queue at startup) only when the queue is non-empty.
+  // Deliberately outside the telemetry toggle: bug reporting is decoupled from it.
+  drainQueuedBugReports();
 
   // Boot sweep (TASK-057): kill detached ui-prototype `http.server` processes
   // pointing under THIS instance's artifacts/runs root that a prior session or a
