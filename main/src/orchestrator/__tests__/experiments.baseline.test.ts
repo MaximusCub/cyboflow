@@ -449,3 +449,148 @@ describe('quick-arm launch (TASK-120)', () => {
     expect(h.armSessionCalls[1]!.quickConfig).toBeUndefined();
   });
 });
+
+/**
+ * Quick-arm config persistence + rerun replay (migration 083) — startExperiment
+ * records each quick arm's config in experiment_quick_configs so
+ * experiments.rerun (which forwards only the variant ids) can replay the SAME
+ * matchup instead of silently launching a default Claude-SDK quick arm. Reads
+ * and writes are both fail-soft: a pre-083 DB / missing row / garbage payload
+ * degrades to launch-defaults, never a throw.
+ */
+describe('quick-arm config persistence + rerun replay (migration 083)', () => {
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+  });
+
+  /** Migration 083's table shape, applied on top of buildDb()'s pre-083 schema. */
+  function addQuickConfigsTable(h: Harness): void {
+    h.db.exec(`CREATE TABLE experiment_quick_configs (
+      experiment_id TEXT NOT NULL, arm TEXT NOT NULL CHECK (arm IN ('A','B')),
+      config_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE (experiment_id, arm));`);
+  }
+
+  function quickConfigRows(h: Harness, experimentId: string): Array<{ arm: string; config_json: string }> {
+    return h.db
+      .prepare('SELECT arm, config_json FROM experiment_quick_configs WHERE experiment_id = ? ORDER BY arm')
+      .all(experimentId) as Array<{ arm: string; config_json: string }>;
+  }
+
+  it("startExperiment persists each quick arm's config (and only the quick arms')", async () => {
+    const h = makeHarness();
+    addQuickConfigsTable(h);
+    const quickConfigA: ExperimentArmQuickConfig = {
+      substrate: 'interactive',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-interactive',
+      model: 'opus',
+      permissionMode: 'acceptEdits',
+    };
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA,
+    });
+
+    const rows = quickConfigRows(h, res.experimentId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.arm).toBe('A');
+    expect(JSON.parse(rows[0]!.config_json)).toEqual(quickConfigA);
+  });
+
+  it('startExperiment on a pre-083 DB (no table) still succeeds — the persist is fail-soft', async () => {
+    const h = makeHarness(); // buildDb() has no experiment_quick_configs table
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA: { model: 'opus' },
+    });
+    expect(res.experimentId).toBeTruthy();
+    expect(h.armSessionCalls[0]!.quickConfig).toEqual({ model: 'opus' });
+  });
+
+  it('rerun replays the persisted quick config into the new experiment and re-persists it (chains further reruns)', async () => {
+    const h = makeHarness();
+    addQuickConfigsTable(h);
+    setExperimentsDeps(h.deps);
+    const quickConfigA: ExperimentArmQuickConfig = {
+      substrate: 'sdk',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+      reasoningEffort: 'high',
+    };
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA,
+    });
+    updateExperimentStatus(h.deps.db, res.experimentId, 'decided');
+
+    const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
+    const out = await caller.rerun({ experimentId: res.experimentId });
+
+    // Two arm sessions for the source + two for the rerun; the rerun's quick arm
+    // (call index 2) received the ORIGINAL config, the variant arm none.
+    expect(h.armSessionCalls).toHaveLength(4);
+    expect(h.armSessionCalls[2]!.quickConfig).toEqual(quickConfigA);
+    expect(h.armSessionCalls[3]!.quickConfig).toBeUndefined();
+
+    // Re-persisted under the NEW experiment so a rerun-of-a-rerun still replays.
+    const rows = quickConfigRows(h, out.experimentId);
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.config_json)).toEqual(quickConfigA);
+  });
+
+  it('rerun of a source with NO persisted config (legacy pre-083 experiment) launches the quick arm with defaults', async () => {
+    const h = makeHarness();
+    addQuickConfigsTable(h);
+    setExperimentsDeps(h.deps);
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      // no quickConfigA — mirrors a pre-083 experiment with nothing persisted
+    });
+    updateExperimentStatus(h.deps.db, res.experimentId, 'abandoned');
+
+    const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
+    await caller.rerun({ experimentId: res.experimentId });
+
+    expect(h.armSessionCalls).toHaveLength(4);
+    expect(h.armSessionCalls[2]!.quickConfig).toBeUndefined();
+  });
+
+  it('rerun ignores an unparseable persisted config (defaults, no throw)', async () => {
+    const h = makeHarness();
+    addQuickConfigsTable(h);
+    setExperimentsDeps(h.deps);
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA: { model: 'opus' },
+    });
+    updateExperimentStatus(h.deps.db, res.experimentId, 'decided');
+    h.db
+      .prepare('UPDATE experiment_quick_configs SET config_json = ? WHERE experiment_id = ?')
+      .run('{not json', res.experimentId);
+
+    const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
+    await caller.rerun({ experimentId: res.experimentId });
+
+    expect(h.armSessionCalls).toHaveLength(4);
+    expect(h.armSessionCalls[2]!.quickConfig).toBeUndefined();
+  });
+});

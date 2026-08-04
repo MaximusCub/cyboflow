@@ -164,6 +164,59 @@ export function deleteExperimentSeedTasks(db: DatabaseLike, experimentId: string
   }
 }
 
+// ---------------------------------------------------------------------------
+// experiment_quick_configs (migration 083) — per-arm QUICK-SESSION config
+// persistence for the '__quick__' arm sentinel. NOT an entity table (precedent:
+// experiment_seed_tasks): these direct helpers own its writes. Rows survive
+// decide/abandon deliberately — rerun REQUIRES a settled experiment, and this
+// table exists precisely so rerun can replay the original quick-arm config.
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one quick arm's config (JSON-encoded ExperimentArmQuickConfig) at
+ * experiment start. Fail-soft on a pre-083 DB (no table): startExperiment must
+ * never fail over a nice-to-have persistence — a missed write only degrades a
+ * LATER rerun to the pre-083 behavior (default quick arm).
+ */
+export function insertExperimentQuickConfig(
+  db: DatabaseLike,
+  experimentId: string,
+  arm: ExperimentArm,
+  configJson: string,
+  logger?: Pick<LoggerLike, 'warn'>,
+): void {
+  try {
+    db.prepare(
+      `INSERT INTO experiment_quick_configs (experiment_id, arm, config_json) VALUES (?, ?, ?)`,
+    ).run(experimentId, arm, configJson);
+  } catch (err) {
+    logger?.warn('[experiments] quick-arm config persist failed (rerun will use defaults)', {
+      experimentId,
+      arm,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * The persisted quick-arm config JSON for one arm; null when absent (non-quick
+ * arm, pre-083 experiment, or pre-083 DB). Fail-soft like listExperimentSeedTasks.
+ */
+export function getExperimentQuickConfigJson(
+  db: DatabaseLike,
+  experimentId: string,
+  arm: ExperimentArm,
+): string | null {
+  try {
+    const row = db
+      .prepare('SELECT config_json FROM experiment_quick_configs WHERE experiment_id = ? AND arm = ?')
+      .get(experimentId, arm) as { config_json?: unknown } | undefined;
+    return typeof row?.config_json === 'string' ? row.config_json : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Stamp the mutable per-arm links (run ids / session ids / clone ids) — only the provided fields. */
 export function setExperimentRuns(db: DatabaseLike, experimentId: string, links: ExperimentRunLinks): void {
   const sets: string[] = [];

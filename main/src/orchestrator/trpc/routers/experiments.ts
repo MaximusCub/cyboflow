@@ -62,6 +62,8 @@ import { displayRationaleForVerdict } from '../../eval/pairwiseScoring';
 import {
   insertExperiment,
   getExperiment,
+  getExperimentQuickConfigJson,
+  insertExperimentQuickConfig,
   listExperimentsForProject,
   setExperimentRuns,
   stampQuickArmRunExperimentTag,
@@ -758,6 +760,18 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     seedIdeaId: input.seedIdeaId ?? null,
     rerunOfExperimentId: input.rerunOfExperimentId ?? null,
   });
+
+  // Persist each quick arm's config (migration 083) so experiments.rerun can
+  // replay the same matchup — rerun forwards only the variant ids, and the arm
+  // sessions (the only other place the config's effects live) may already be
+  // dismissed by the time a settled experiment is rerun. Fail-soft inside the
+  // helper: a persist failure only degrades a LATER rerun to launch-defaults.
+  if (aIsQuick && input.quickConfigA) {
+    insertExperimentQuickConfig(db, exp.id, 'A', JSON.stringify(input.quickConfigA));
+  }
+  if (bIsQuick && input.quickConfigB) {
+    insertExperimentQuickConfig(db, exp.id, 'B', JSON.stringify(input.quickConfigB));
+  }
 
   // Seed-clone ids created in step 5, tracked in FUNCTION scope so the rollback
   // ladder can sweep clones that were created but whose ids are not yet persisted
@@ -2185,6 +2199,28 @@ const experimentArmQuickConfigSchema = z.object({
   permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
 });
 
+/**
+ * The persisted quick-arm config for one arm of a source experiment (migration
+ * 083), re-validated through the SAME wire schema startSideBySide accepts —
+ * a pre-083 experiment (no row) or an unparseable/mis-shaped payload yields
+ * undefined, degrading the rerun arm to launch-defaults (the pre-083 behavior)
+ * rather than throwing a settled experiment's rerun away.
+ */
+function persistedQuickConfig(
+  db: DatabaseLike,
+  experimentId: string,
+  arm: ExperimentArm,
+): ExperimentArmQuickConfig | undefined {
+  const json = getExperimentQuickConfigJson(db, experimentId, arm);
+  if (json === null) return undefined;
+  try {
+    const parsed = experimentArmQuickConfigSchema.safeParse(JSON.parse(json));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export const experimentsRouter = router({
   startSideBySide: protectedProcedure
     .input(
@@ -2266,6 +2302,16 @@ export const experimentsRouter = router({
         seedIdeaId: input.seedIdeaId,
         seedTaskIds: input.seedTaskIds,
         rerunOfExperimentId: src.id,
+        // Replay each quick arm's ORIGINAL config (migration 083) — without
+        // this a quick-arm rerun silently launched a default Claude-SDK quick
+        // session, a different matchup than the one being "repeated". A pre-083
+        // source (no persisted row) still degrades to launch-defaults.
+        quickConfigA: isQuickArm(sb.variantAId)
+          ? persistedQuickConfig(deps.db, src.id, 'A')
+          : undefined,
+        quickConfigB: isQuickArm(sb.variantBId)
+          ? persistedQuickConfig(deps.db, src.id, 'B')
+          : undefined,
       });
     }),
 
