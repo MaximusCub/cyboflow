@@ -35,9 +35,15 @@
  *              `budget` is one: each has its own shape and its own refresh
  *              cadence in the panel.
  *
- * The panel performs NO mutations (Accept-as-baseline lives on the artifact
- * verdict banner, S6) — this router stays read-only over the existing schema, so
- * there is no new migration and no chokepoint write path here.
+ *   - hostProbes / provisionChromium : the §6 live host-capability probes and
+ *              the chromium fix-it action. `provisionChromium` is the only
+ *              mutation here and is NOT an entity write — it touches the host's
+ *              browser cache, never the DB — so the read-only-over-the-schema
+ *              property below is unaffected.
+ *
+ * The panel performs NO entity mutations (Accept-as-baseline lives on the
+ * artifact verdict banner, S6) — this router stays read-only over the existing
+ * schema, so there is no new migration and no chokepoint write path here.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*.
@@ -46,6 +52,7 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { DatabaseLike } from '../../types';
+import type { VerifyHostProbesLike } from '../context';
 import {
   REQUEST_STATUS,
   TERMINAL_REQUEST_STATUSES,
@@ -64,6 +71,8 @@ import {
   type VerificationOutcomeStats,
   type VerificationRequestListRow,
   type VerificationType,
+  type VerifyHostProbeReport,
+  type VerifyProbeRow,
   type VisualBackendId,
 } from '../../../../../shared/types/visualVerification';
 
@@ -390,6 +399,135 @@ function readHostGeneration(db: DatabaseLike): number {
   }
 }
 
+/**
+ * Whether ANY project's runbook declares `native-screen` — the §6 conditional
+ * grants branch. Fail-soft to `false` on a pre-096 DB (table absent): showing a
+ * permissions row nobody needs is a worse default than omitting one, since the
+ * grant it asks for is irreversible-ish and host-wide.
+ */
+function nativeScreenDeclared(db: DatabaseLike | undefined): boolean {
+  if (!db) return false;
+  try {
+    const row = db
+      .prepare(`SELECT 1 AS present FROM verify_runbook_local WHERE modality = 'native-screen' LIMIT 1`)
+      .get() as { present: number } | undefined;
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** Bound a probe's detail string so a pathological error message cannot bloat the response. */
+function detail(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 200 ? `${flat.slice(0, 197)}…` : flat;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Run the host probes and shape them into panel rows.
+ *
+ * The fail-open rule from `preflight.ts` is reproduced EXACTLY here: a probe
+ * that rejects is `'inconclusive'`, never `'missing'`. The single exception is
+ * `resolveNode` — "node is unresolvable" is itself the fact being checked, and
+ * there is no state in which the harness could proceed without it.
+ */
+async function runHostProbes(
+  probes: VerifyHostProbesLike,
+  includeNative: boolean,
+): Promise<VerifyProbeRow[]> {
+  const rows: VerifyProbeRow[] = [];
+
+  // node — the one probe whose rejection IS affirmative evidence.
+  try {
+    const path = await probes.resolveNode();
+    rows.push({ id: 'node', state: 'ok', detail: detail(path), fix: null });
+  } catch (err) {
+    rows.push({ id: 'node', state: 'missing', detail: detail(errorText(err)), fix: null });
+  }
+
+  // chromium — provisioning, not consent: a miss is fixable in place (§6).
+  try {
+    const chromium = await probes.resolveChromium();
+    rows.push(
+      chromium === null
+        ? {
+            id: 'chromium',
+            state: 'missing',
+            detail: 'no chromium binary resolved',
+            fix: 'provision-chromium',
+          }
+        : { id: 'chromium', state: 'ok', detail: detail(chromium), fix: null },
+    );
+  } catch (err) {
+    rows.push({ id: 'chromium', state: 'inconclusive', detail: detail(errorText(err)), fix: null });
+  }
+
+  try {
+    const cli = await probes.probeDriverCli();
+    rows.push({
+      id: 'driver-cli',
+      state: cli.exists ? 'ok' : 'missing',
+      detail: detail(cli.path),
+      fix: null,
+    });
+  } catch (err) {
+    rows.push({ id: 'driver-cli', state: 'inconclusive', detail: detail(errorText(err)), fix: null });
+  }
+
+  // The §6 conditional grants branch — a CDP-only user never sees these rows.
+  if (includeNative) {
+    if (probes.nativeCaptureAvailable === undefined) {
+      rows.push({
+        id: 'native-capture',
+        state: 'inconclusive',
+        detail: 'no native capture backend wired on this host',
+        fix: null,
+      });
+    } else {
+      try {
+        const capable = await probes.nativeCaptureAvailable();
+        rows.push(
+          capable
+            ? { id: 'native-capture', state: 'ok', detail: 'screen capture permitted', fix: null }
+            : {
+                id: 'native-capture',
+                state: 'missing',
+                detail: 'screen capture unavailable — the grant is missing or has rotted',
+                fix: 'grant-screen-recording',
+              },
+        );
+      } catch (err) {
+        rows.push({
+          id: 'native-capture',
+          state: 'inconclusive',
+          detail: detail(errorText(err)),
+          fix: null,
+        });
+      }
+    }
+
+    // NOT BUILT, and reported as such rather than faked. §6 specifies a
+    // consent-gated drive round-trip ("Test driving now"), but §8 still lists
+    // the native-screen drive API shape as an OPEN QUESTION — extend
+    // DriverCommand vs a scoped Peekaboo tool grant — so there is no audited
+    // API to round-trip through. A green row here would assert a capability
+    // nothing has demonstrated; a red one would blame a host for missing
+    // machinery that was never written.
+    rows.push({
+      id: 'native-drive',
+      state: 'blocked',
+      detail: 'no drive API yet (proposal §8 open question) — capture is observe-only',
+      fix: null,
+    });
+  }
+
+  return rows;
+}
+
 export const verificationRequestsRouter = router({
   /**
    * List a project's verification requests (newest enqueued first), optionally
@@ -557,4 +695,63 @@ export const verificationRequestsRouter = router({
         hostGeneration,
       };
     }),
+
+  /**
+   * Live host-capability probes for the health panel (§6 "probes, not
+   * checkboxes"). Every row is probed AT CALL TIME — no remembered state, no
+   * cache — because a TCC grant rots silently on any app-path or version
+   * change while a wizard's checkmark keeps insisting it is configured.
+   *
+   * Runs the SAME implementations the verification preflight wires, so a panel
+   * row and a preflight check can never disagree.
+   *
+   * PRECONDITION_FAILED (rather than an all-missing report) when the probes are
+   * not wired: a host that was never asked is not a host with nothing
+   * installed, and rendering the second would send users chasing binaries that
+   * are already there.
+   */
+  hostProbes: protectedProcedure.query(async ({ ctx }): Promise<VerifyHostProbeReport> => {
+    const probes = ctx.verifyHostProbes;
+    if (!probes) {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: '[verificationRequests.hostProbes] host probes not wired into tRPC context',
+      });
+    }
+    const includeNative = nativeScreenDeclared(ctx.db);
+    return {
+      probes: await runHostProbes(probes, includeNative),
+      nativeScreenDeclared: includeNative,
+    };
+  }),
+
+  /**
+   * Provision chromium from the panel's fix-it row (§6 "chromium is
+   * provisioning, not consent") and return the REPROBED rows.
+   *
+   * The one mutation on this router, and deliberately not an entity write: it
+   * touches the host's browser cache, never the DB, so the no-direct-write /
+   * chokepoint rules the file header describes are untouched.
+   *
+   * Soft-fail is preserved end to end — `ensureChromium` resolves `false`
+   * rather than throwing when the download is unavailable, and the caller
+   * learns that from the re-probed `chromium` row rather than from an
+   * exception. Returning the fresh report (not just a boolean) means the panel
+   * never renders a stale "missing" beside a success it just caused.
+   */
+  provisionChromium: protectedProcedure.mutation(async ({ ctx }): Promise<VerifyHostProbeReport> => {
+    const probes = ctx.verifyHostProbes;
+    if (!probes) {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: '[verificationRequests.provisionChromium] host probes not wired into tRPC context',
+      });
+    }
+    await probes.ensureChromium();
+    const includeNative = nativeScreenDeclared(ctx.db);
+    return {
+      probes: await runHostProbes(probes, includeNative),
+      nativeScreenDeclared: includeNative,
+    };
+  }),
 });

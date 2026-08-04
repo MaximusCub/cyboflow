@@ -1720,3 +1720,60 @@ export interface VerificationHealthSummary {
   /** `verify_host_state.capability_generation` — bumped whenever any probe observes a changed host fact. */
   hostGeneration: number;
 }
+
+/**
+ * A host-capability probe the health panel runs (§6 "probes, not checkboxes").
+ *
+ * `'native-drive'` is the consent-gated drive round-trip. It is declared here
+ * but is NOT currently runnable — see {@link VerifyProbeState}'s `'blocked'`.
+ */
+export type VerifyProbeId = 'node' | 'chromium' | 'driver-cli' | 'native-capture' | 'native-drive';
+
+/**
+ * The outcome of one probe.
+ *
+ * `'inconclusive'` is NOT a failure and must never be rendered as one. It
+ * mirrors the fail-open rule the preflight module enforces (`preflight.ts`): a
+ * probe that merely COULDN'T ANSWER — a permission denial, an unexpected
+ * exception shape — is not evidence of absence, and treating it as such is
+ * what lets a verification skip on no real evidence.
+ *
+ * `'blocked'` means no probe exists to run yet, as distinct from one that ran
+ * and found nothing. It carries its reason in `detail`.
+ */
+export type VerifyProbeState = 'ok' | 'missing' | 'inconclusive' | 'blocked';
+
+/** A remediation the panel can offer for a probe row; `null` when the user must fix it outside the app. */
+export type VerifyProbeFix = 'provision-chromium' | 'grant-screen-recording' | null;
+
+/** One row of the health panel's probe table. */
+export interface VerifyProbeRow {
+  id: VerifyProbeId;
+  state: VerifyProbeState;
+  /** Bounded human-readable detail — what resolved, or why the probe could not answer. */
+  detail: string;
+  /** The remediation this row offers, if any. */
+  fix: VerifyProbeFix;
+}
+
+/**
+ * The live host-probe report behind the health panel (§6).
+ *
+ * Every row is probed AT CALL TIME, never read from remembered state: TCC
+ * grants rot silently on any app-path or version change while a wizard's
+ * checkmark keeps claiming "configured", which is the precise failure this
+ * replaces.
+ */
+export interface VerifyHostProbeReport {
+  probes: VerifyProbeRow[];
+  /**
+   * Whether ANY project's runbook declares the `native-screen` modality
+   * (`verify_runbook_local`). Gates the Peekaboo grant rows — a CDP-only user
+   * never sees a permissions screen (§6 "conditional grants branch").
+   *
+   * Deliberately global rather than per-project: a permissions row that
+   * appeared and vanished as the user switched projects would read as a bug,
+   * and the grant it describes is itself host-wide.
+   */
+  nativeScreenDeclared: boolean;
+}

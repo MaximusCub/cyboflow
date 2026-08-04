@@ -171,6 +171,39 @@ export interface AgentProposalExecutorLike {
 }
 
 /**
+ * Narrow structural slice of the host-capability probes the phase-3 health
+ * panel runs (verification-setup-flow.md §6).
+ *
+ * These are the SAME implementations the verification path wires as its
+ * preflight deps (`main/src/index.ts` — Playwright chromium resolution,
+ * `peekabooBackend.healthCheck`, the resolved node binary and driver CLI
+ * path). Sharing them is the point: a panel row and a preflight check that
+ * disagreed would make the panel a decorative second opinion, which is exactly
+ * the checkbox-vs-probe failure §6 sets out to remove.
+ *
+ * Declared here rather than imported so the tRPC subtree keeps its
+ * standalone-typecheck invariant (no 'electron' / 'main/src/services/*').
+ *
+ * FAIL-OPEN CONTRACT, inherited from `preflight.ts`: a probe that cannot
+ * answer must REJECT (or resolve its "unknown" value) rather than resolving a
+ * confident negative. The router maps a rejection to `'inconclusive'`, never
+ * to `'missing'` — a false "absent" here is what would send a user chasing a
+ * binary that is present.
+ */
+export interface VerifyHostProbesLike {
+  /** Resolve a launchable chromium binary path, or `null` when none is installed. Rejecting = inconclusive. */
+  resolveChromium(): Promise<string | null>;
+  /** Resolve the node binary the driver wrapper runs under. Rejecting = unresolvable (an affirmative negative, per preflight's one exception). */
+  resolveNode(): Promise<string>;
+  /** Absolute path of the driver CLI, plus whether it is present on disk. */
+  probeDriverCli(): Promise<{ path: string; exists: boolean }>;
+  /** Whether native screen capture is currently permitted (Peekaboo health check). Absent when no native backend is wired. */
+  nativeCaptureAvailable?: () => Promise<boolean>;
+  /** Provision chromium (idempotent, memoized, soft-fails to `false` — never throws). Backs the panel's fix-it action. */
+  ensureChromium(): Promise<boolean>;
+}
+
+/**
  * Injectable dependencies for the tRPC context.
  *
  * All fields are optional so callers (and unit tests) that do not need a
@@ -282,6 +315,15 @@ export interface ContextDeps {
    * throws PRECONDITION_FAILED.
    */
   agentProposalExecutor?: AgentProposalExecutorLike;
+
+  /**
+   * Live host-capability probes for the phase-3 health panel (§6). Injected
+   * from `main/src/index.ts` as a closure over the same Playwright / Peekaboo
+   * / driver-path implementations the verification preflight uses. `undefined`
+   * ⇒ the `hostProbes` procedure throws PRECONDITION_FAILED (rather than
+   * reporting a host with nothing installed, which would be a lie).
+   */
+  verifyHostProbes?: VerifyHostProbesLike;
 }
 
 /**
@@ -307,6 +349,7 @@ export function createContext(deps: ContextDeps = {}): {
   agentThreadService?: AgentThreadServiceLike;
   agentThreadStore?: AgentThreadStoreLike;
   agentProposalExecutor?: AgentProposalExecutorLike;
+  verifyHostProbes?: VerifyHostProbesLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -318,6 +361,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadService,
     agentThreadStore,
     agentProposalExecutor,
+    verifyHostProbes,
   } = deps;
   return {
     userId: 'local' as const,
@@ -330,6 +374,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadService,
     agentThreadStore,
     agentProposalExecutor,
+    verifyHostProbes,
   };
 }
 

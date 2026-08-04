@@ -33,6 +33,12 @@
  *      the proof-spend/budget overlap made visible), capability suppressions
  *      resolved through their TTL + host-generation rules, and pre-095
  *      degradation.
+ *  13. hostProbes / provisionChromium (§6): the fail-open mapping (a REJECTING
+ *      probe is 'inconclusive', never 'missing'; only node's rejection is
+ *      affirmative), the conditional grants branch (native rows appear only
+ *      when a runbook declares native-screen), the drive round-trip reported
+ *      as 'blocked' rather than faked, PRECONDITION_FAILED when unwired, and
+ *      provisioning returning a RE-PROBED report.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -891,5 +897,180 @@ describe('verificationRequests.health', () => {
 
     const noDb = appRouter.createCaller(createContext({}));
     await expect(noDb.cyboflow.verificationRequests.health({ projectId: 1 })).rejects.toThrow(TRPCError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hostProbes / provisionChromium — the §6 live probe table
+// ---------------------------------------------------------------------------
+
+type ProbeOverrides = Partial<{
+  resolveNode: () => Promise<string>;
+  resolveChromium: () => Promise<string | null>;
+  probeDriverCli: () => Promise<{ path: string; exists: boolean }>;
+  nativeCaptureAvailable: (() => Promise<boolean>) | undefined;
+  ensureChromium: () => Promise<boolean>;
+}>;
+
+function probeStub(overrides: ProbeOverrides = {}): {
+  resolveNode: () => Promise<string>;
+  resolveChromium: () => Promise<string | null>;
+  probeDriverCli: () => Promise<{ path: string; exists: boolean }>;
+  nativeCaptureAvailable?: () => Promise<boolean>;
+  ensureChromium: () => Promise<boolean>;
+} {
+  const base = {
+    resolveNode: async () => '/usr/bin/node',
+    resolveChromium: async () => '/chromium',
+    probeDriverCli: async () => ({ path: '/driver/cli.js', exists: true }),
+    nativeCaptureAvailable: async () => true,
+    ensureChromium: async () => true,
+  };
+  const merged = { ...base, ...overrides };
+  // An explicit `undefined` means "no native backend wired" — the key must be
+  // ABSENT, not present-and-undefined, for the router's `=== undefined` check.
+  if (merged.nativeCaptureAvailable === undefined) {
+    const { nativeCaptureAvailable: _drop, ...rest } = merged;
+    return rest;
+  }
+  return merged as ReturnType<typeof probeStub>;
+}
+
+describe('verificationRequests.hostProbes', () => {
+  const cleanups: Database.Database[] = [];
+  afterEach(() => {
+    while (cleanups.length) cleanups.pop()?.close();
+  });
+
+  /** A caller whose context carries stub probes + a 095/096-capable DB. */
+  function setup(opts: { probes?: ProbeOverrides; declareNativeScreen?: boolean } = {}): {
+    caller: ReturnType<typeof appRouter.createCaller>;
+    db: Database.Database;
+  } {
+    const db = buildDb([...MIGRATIONS, '096_verify_runbook_local.sql']);
+    cleanups.push(db);
+    if (opts.declareNativeScreen === true) {
+      db.prepare(
+        `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, status)
+         VALUES (1, 'native-screen', 'h1', '{}', 'proven')`,
+      ).run();
+    }
+    const caller = appRouter.createCaller(
+      createContext({ db: dbAdapter(db), verifyHostProbes: probeStub(opts.probes) }),
+    );
+    return { caller, db };
+  }
+
+  it('reports a healthy host and omits the grant rows when no runbook declares native-screen', async () => {
+    const { caller } = setup();
+    const report = await caller.cyboflow.verificationRequests.hostProbes();
+
+    expect(report.nativeScreenDeclared).toBe(false);
+    expect(report.probes.map((p) => p.id)).toEqual(['node', 'chromium', 'driver-cli']);
+    expect(report.probes.every((p) => p.state === 'ok')).toBe(true);
+  });
+
+  it('adds the grant + drive rows only when some runbook declares native-screen', async () => {
+    const { caller } = setup({ declareNativeScreen: true });
+    const report = await caller.cyboflow.verificationRequests.hostProbes();
+
+    expect(report.nativeScreenDeclared).toBe(true);
+    expect(report.probes.map((p) => p.id)).toContain('native-capture');
+    // The drive round-trip is DECLARED but not runnable — §8 leaves the drive
+    // API shape open, so there is nothing to round-trip through.
+    const drive = report.probes.find((p) => p.id === 'native-drive');
+    expect(drive?.state).toBe('blocked');
+    expect(drive?.detail).toMatch(/no drive API/i);
+  });
+
+  it('maps a REJECTING chromium probe to inconclusive, never to missing', async () => {
+    // The fail-open rule from preflight.ts: a probe that could not answer is
+    // not evidence of absence, and rendering it as "missing" would send a user
+    // chasing a binary that is already installed.
+    const { caller } = setup({ probes: { resolveChromium: async () => { throw new Error('EPERM'); } } });
+    const report = await caller.cyboflow.verificationRequests.hostProbes();
+    const chromium = report.probes.find((p) => p.id === 'chromium');
+
+    expect(chromium?.state).toBe('inconclusive');
+    expect(chromium?.fix).toBeNull();
+  });
+
+  it('maps a NULL chromium resolution to missing, with the provisioning fix offered', async () => {
+    const { caller } = setup({ probes: { resolveChromium: async () => null } });
+    const chromium = (await caller.cyboflow.verificationRequests.hostProbes()).probes.find(
+      (p) => p.id === 'chromium',
+    );
+
+    expect(chromium?.state).toBe('missing');
+    expect(chromium?.fix).toBe('provision-chromium');
+  });
+
+  it('treats an unresolvable node as affirmative evidence (preflight\'s one exception)', async () => {
+    const { caller } = setup({ probes: { resolveNode: async () => { throw new Error('no node on PATH'); } } });
+    const node = (await caller.cyboflow.verificationRequests.hostProbes()).probes.find((p) => p.id === 'node');
+
+    expect(node?.state).toBe('missing');
+    expect(node?.detail).toMatch(/no node on PATH/);
+  });
+
+  it('reports an absent native backend as inconclusive rather than as a missing grant', async () => {
+    const { caller } = setup({ declareNativeScreen: true, probes: { nativeCaptureAvailable: undefined } });
+    const native = (await caller.cyboflow.verificationRequests.hostProbes()).probes.find(
+      (p) => p.id === 'native-capture',
+    );
+
+    // "Nothing asked" is not "permission denied" — offering a grant CTA here
+    // would ask the user to fix something that is not broken.
+    expect(native?.state).toBe('inconclusive');
+    expect(native?.fix).toBeNull();
+  });
+
+  it('offers the grant fix when capture is genuinely unavailable', async () => {
+    const { caller } = setup({ declareNativeScreen: true, probes: { nativeCaptureAvailable: async () => false } });
+    const native = (await caller.cyboflow.verificationRequests.hostProbes()).probes.find(
+      (p) => p.id === 'native-capture',
+    );
+
+    expect(native?.state).toBe('missing');
+    expect(native?.fix).toBe('grant-screen-recording');
+  });
+
+  it('PRECONDITION_FAILEDs when probes are unwired instead of reporting a bare host', async () => {
+    const db = buildDb();
+    cleanups.push(db);
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    // A host that was never asked is not a host with nothing installed.
+    await expect(caller.cyboflow.verificationRequests.hostProbes()).rejects.toThrow(TRPCError);
+  });
+
+  it('provisionChromium re-probes and returns the fresh report, soft-failing on a failed install', async () => {
+    let installed = false;
+    const { caller } = setup({
+      probes: {
+        resolveChromium: async () => (installed ? '/chromium' : null),
+        ensureChromium: async () => {
+          installed = true;
+          return true;
+        },
+      },
+    });
+
+    const before = await caller.cyboflow.verificationRequests.hostProbes();
+    expect(before.probes.find((p) => p.id === 'chromium')?.state).toBe('missing');
+
+    // Returns the RE-PROBED report, so the panel never renders a stale
+    // "missing" beside the success it just caused.
+    const after = await caller.cyboflow.verificationRequests.provisionChromium();
+    expect(after.probes.find((p) => p.id === 'chromium')?.state).toBe('ok');
+  });
+
+  it('provisionChromium reports a still-missing binary rather than throwing', async () => {
+    const { caller } = setup({
+      probes: { resolveChromium: async () => null, ensureChromium: async () => false },
+    });
+
+    const after = await caller.cyboflow.verificationRequests.provisionChromium();
+    expect(after.probes.find((p) => p.id === 'chromium')?.state).toBe('missing');
   });
 });

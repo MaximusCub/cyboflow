@@ -100,6 +100,7 @@ import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
+import type { VerifyHostProbesLike } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -121,6 +122,7 @@ import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAg
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
+import { PlaywrightInstaller } from './services/visualVerify/playwrightInstaller';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
 import { findNodeExecutable } from './utils/nodeFinder';
@@ -616,6 +618,17 @@ if (!gotSingleInstanceLock) {
 }
 
 /**
+ * Late-bound host-capability probes for the phase-3 verify health panel (§6).
+ *
+ * Set at the end of initializeServices(), where the Playwright / Peekaboo
+ * backends and the resolved driver-CLI path live; read LAZILY by the per-request
+ * context factory below (same shape as the proposal-executor holder). Undefined
+ * before services come up, which the `hostProbes` procedure reports as
+ * PRECONDITION_FAILED rather than as a host with nothing installed.
+ */
+let verifyHostProbes: VerifyHostProbesLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -661,6 +674,10 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         agentProposalExecutor: {
           execute: (proposalId: string) => executeProposal(getProposalExecutorDeps(), proposalId),
         },
+        // Read from the module-scope holder at REQUEST time, so a window
+        // attached before initializeServices finished still sees the probes
+        // once they exist.
+        verifyHostProbes,
       }),
   });
 }
@@ -1872,6 +1889,49 @@ async function initializeServices(): Promise<boolean> {
       verifyRunbookStore.getByHash(projectId, modality, hash),
     logger: cyboflowLogger,
   });
+
+  // §6 health panel — the SAME probe implementations the preflight above wires,
+  // exposed to the renderer through the tRPC context. Sharing them is the
+  // point: a panel row and a preflight check that disagreed would make the
+  // panel a decorative second opinion.
+  //
+  // ensureChromium is memoized on a SETTLED promise, so a retry after a failed
+  // install would otherwise return the cached `false` forever and the panel's
+  // fix-it button would look broken on its second click. A user-initiated
+  // retry therefore gets a FRESH installer; `inFlight` keeps an impatient
+  // double-click from racing two `npx playwright install` spawns.
+  let chromiumInstaller = new PlaywrightInstaller({ logger: cyboflowLogger });
+  let chromiumInstallInFlight: Promise<boolean> | null = null;
+  verifyHostProbes = {
+    resolveNode: findNodeExecutable,
+    resolveChromium: probeChromiumExecutable,
+    probeDriverCli: async () => {
+      try {
+        await fs.promises.access(verifyDriverCliPath);
+        return { path: verifyDriverCliPath, exists: true };
+      } catch {
+        return { path: verifyDriverCliPath, exists: false };
+      }
+    },
+    nativeCaptureAvailable: () => peekabooBackend.healthCheck(),
+    ensureChromium: async () => {
+      if (chromiumInstallInFlight) return chromiumInstallInFlight;
+      const attempt = chromiumInstaller
+        .ensureChromium()
+        .then(async (ok) => {
+          // Failed attempts are not cached across clicks: drop the memo so the
+          // next press genuinely re-tries (a transient network failure is the
+          // common case, and it is the user asking).
+          if (!ok) chromiumInstaller = new PlaywrightInstaller({ logger: cyboflowLogger });
+          return ok;
+        })
+        .finally(() => {
+          chromiumInstallInFlight = null;
+        });
+      chromiumInstallInFlight = attempt;
+      return attempt;
+    },
+  };
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
   // 127.0.0.1:<port> means nothing is listening ⇒ the port is free; a successful
   // connect means a leaked server ⇒ NOT free (quarantine the lease).
