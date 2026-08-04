@@ -27,6 +27,10 @@
  *    transport's own send result, which this module owns by wrapping the
  *    transport it hands to its client (see `makeTrackedTransport`).
  *
+ * 5. THAT `{}` IS NOT PROOF OF QUEUEING EITHER. Several paths resolve with it
+ *    while storing nothing, so "queued" is confirmed against the store's own
+ *    on-disk index rather than inferred (see `isDurablyQueued`).
+ *
  * That last point is why bug reports always go through a dedicated client rather
  * than the globally initialized one: the global client's transport is built by
  * `Sentry.init` and cannot be observed. The dedicated client also gets its own
@@ -99,6 +103,7 @@ type SendResponse = Awaited<ReturnType<SentryTransport['send']>>;
 type SendOutcome =
   | { kind: 'accepted' }
   | { kind: 'queued' }
+  | { kind: 'dropped' }
   | { kind: 'rejected'; status: number }
   | { kind: 'threw'; message: string }
   | { kind: 'unknown' };
@@ -160,19 +165,71 @@ function envelopeEventId(envelope: SentryEnvelope): string | undefined {
   return undefined;
 }
 
+/** The offline store's index file, written alongside the envelope bodies. */
+const QUEUE_INDEX_FILE = 'queue-v2.json';
+
+/** Ids of the envelope bodies the offline store currently claims to hold. */
+function readQueuedEnvelopeIds(): Set<string> {
+  const ids = new Set<string>();
+  try {
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(path.join(queuePath(), QUEUE_INDEX_FILE), 'utf8'),
+    );
+    if (!Array.isArray(parsed)) return ids;
+    for (const entry of parsed) {
+      if (typeof entry === 'object' && entry !== null && 'id' in entry) {
+        if (typeof entry.id === 'string') ids.add(entry.id);
+      }
+    }
+  } catch {
+    // No index yet, or unreadable — either way nothing is known to be stored.
+  }
+  return ids;
+}
+
 /**
- * Classify a transport response.
+ * Whether the offline store actually committed this envelope.
  *
- * An absent status code means the request never completed: the offline transport
- * resolves with `{}` after writing the envelope to disk. (The same `{}` is
- * returned in two much rarer cases — a full 64-deep send buffer, or an envelope
- * emptied by a prior rate-limit header — where nothing is stored either. Both
- * report as `queued`, which overstates the retry but never overstates delivery.)
+ * An absent status code does NOT by itself mean "held for retry". The SDK
+ * resolves with `{}` on several paths, and most of them store nothing: the
+ * store's `insert` swallows a failed body write, it discards the envelope
+ * outright once the queue is at `maxQueueSize` (default 30), and the base
+ * transport returns `{}` for a full send buffer or an envelope emptied by a
+ * prior rate-limit header. Telling the user their report "will be retried
+ * automatically" in those cases is untrue, and it also costs them the retry —
+ * the IPC handler remembers the idempotency key of anything it believes was
+ * filed.
+ *
+ * The index write is awaited before `send` resolves, so a new entry whose body
+ * file is on disk is proof of storage. Anything else is treated as dropped.
  */
-function classifySendResponse(response: SendResponse): SendOutcome {
+function isDurablyQueued(before: ReadonlySet<string>): boolean {
+  const dir = queuePath();
+  for (const id of readQueuedEnvelopeIds()) {
+    if (before.has(id)) continue;
+    try {
+      if (fs.existsSync(path.join(dir, id))) return true;
+    } catch {
+      // Unreadable queue directory: no proof, so no claim.
+    }
+  }
+  return false;
+}
+
+/**
+ * Classify a transport response. `queuedBefore` is the store's index as it stood
+ * before this envelope was handed over, which is what makes a new entry
+ * attributable to it.
+ */
+function classifySendResponse(
+  response: SendResponse,
+  queuedBefore: ReadonlySet<string>,
+): SendOutcome {
   const status = response?.statusCode;
-  if (status === undefined) return { kind: 'queued' };
-  return status >= 400 ? { kind: 'rejected', status } : { kind: 'accepted' };
+  if (status !== undefined) {
+    return status >= 400 ? { kind: 'rejected', status } : { kind: 'accepted' };
+  }
+  return isDurablyQueued(queuedBefore) ? { kind: 'queued' } : { kind: 'dropped' };
 }
 
 /**
@@ -188,9 +245,12 @@ function makeTrackedTransport(): TransportFactory {
       send: async (envelope: SentryEnvelope) => {
         const id = envelopeEventId(envelope);
         const tracker = activeTracker && id && activeTracker.eventId === id ? activeTracker : null;
+        // Only snapshotted for a tracked envelope: background retries pass
+        // through here too, and reading the index costs a file read.
+        const queuedBefore = tracker ? readQueuedEnvelopeIds() : new Set<string>();
         try {
           const response = await inner.send(envelope);
-          tracker?.settle(classifySendResponse(response));
+          tracker?.settle(classifySendResponse(response, queuedBefore));
           return response;
         } catch (error) {
           tracker?.settle({ kind: 'threw', message: describeError(error) });
@@ -231,6 +291,11 @@ function toResult(outcome: SendOutcome): { delivery: BugReportServiceDelivery; e
       };
     case 'threw':
       return { delivery: 'failed', error: outcome.message };
+    case 'dropped':
+      return {
+        delivery: 'failed',
+        error: "The report couldn't be delivered, and couldn't be saved for a later retry either.",
+      };
     case 'queued':
     case 'unknown':
       // Not confirmed delivered. `queued` is the honest label for both the

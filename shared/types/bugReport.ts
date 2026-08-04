@@ -17,10 +17,11 @@ import type { TelemetryEnvironment } from './telemetry';
 /**
  * Outcome of a submission attempt.
  *   - `accepted`    — the transport got a success response from Sentry.
- *   - `queued`      — not delivered; held on disk and retried on a later boot,
- *                     or still in flight when we stopped waiting.
+ *   - `queued`      — not delivered, but CONFIRMED on disk and retried on a later
+ *                     boot; or still in flight when we stopped waiting.
  *   - `unavailable` — this build has no DSN, so reports can never be delivered.
- *   - `failed`      — Sentry rejected it, or the SDK threw.
+ *   - `failed`      — Sentry rejected it, the SDK threw, or the send was
+ *                     swallowed without being stored for retry.
  *   - `rate-limited`— refused by the main-process limiter.
  */
 export type BugReportDelivery = 'accepted' | 'queued' | 'unavailable' | 'failed' | 'rate-limited';

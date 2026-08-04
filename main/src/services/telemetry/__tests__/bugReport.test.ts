@@ -92,8 +92,10 @@ const creds = vi.hoisted(() => ({
 }));
 
 const files = vi.hoisted(() => ({
-  existsSync: vi.fn(() => false),
+  existsSync: vi.fn((..._args: unknown[]) => false),
   readdirSync: vi.fn((): string[] => []),
+  /** The offline store's index file; `[]` means it is holding nothing. */
+  readFileSync: vi.fn((..._args: unknown[]) => '[]'),
 }));
 
 vi.mock('electron', () => ({
@@ -107,6 +109,7 @@ vi.mock('electron', () => ({
 vi.mock('fs', () => ({
   existsSync: files.existsSync,
   readdirSync: files.readdirSync,
+  readFileSync: files.readFileSync,
 }));
 
 vi.mock('../credentials', () => creds);
@@ -143,6 +146,7 @@ beforeEach(() => {
   sentry.innerSend.mockResolvedValue({ statusCode: 200 });
   files.existsSync.mockReturnValue(false);
   files.readdirSync.mockReturnValue([]);
+  files.readFileSync.mockReturnValue('[]');
   creds.resolveTelemetryCredentials.mockReturnValue({
     sentryDsn: 'https://key@example.ingest.sentry.io/1',
     aptabaseAppKey: undefined,
@@ -152,6 +156,18 @@ beforeEach(() => {
 
 function ctorOptions(): Record<string, unknown> {
   return sentry.nodeClientCtor.mock.calls[0]?.[0] as Record<string, unknown>;
+}
+
+/**
+ * Drive the mocked offline store the way the real one behaves on a queued send:
+ * the body is written first, then the index entry, both before `send` resolves.
+ * `withBody: false` models the swallowed write failure in the store's `insert`.
+ */
+function storeCommits(bodyId: string, withBody = true): void {
+  files.readFileSync.mockReturnValue(
+    JSON.stringify([{ id: bodyId, date: '2026-08-04T00:00:00.000Z' }]),
+  );
+  files.existsSync.mockImplementation((p: unknown) => withBody && String(p).endsWith(bodyId));
 }
 
 /** The event id the module minted and passed to Sentry via the hint. */
@@ -269,12 +285,59 @@ describe('delivery reporting', () => {
    * success and `flush` returns true for a report that never left the machine.
    */
   it('reports queued — not accepted — when the offline transport swallowed the send', async () => {
-    sentry.innerSend.mockResolvedValue({});
+    sentry.innerSend.mockImplementation(async () => {
+      storeCommits('body-1');
+      return {};
+    });
 
     const result = await submitBugReport(REPORT, DIAGNOSTICS);
 
     expect(result.delivery).toBe('queued');
     expect(result.eventId).toBe(capturedEventId());
+  });
+
+  /**
+   * The same `{}` comes back from paths that store NOTHING: a send buffer at
+   * capacity, an envelope emptied by a rate-limit header, and the store's own
+   * discard once the queue is at maxQueueSize. Calling those "queued" promises a
+   * retry that will never happen and burns the user's idempotency key with it.
+   */
+  it('reports failed — not queued — when nothing was written to the offline queue', async () => {
+    sentry.innerSend.mockResolvedValue({});
+
+    const result = await submitBugReport(REPORT, DIAGNOSTICS);
+
+    expect(result.delivery).toBe('failed');
+    expect(result.error).toContain('saved for a later retry');
+  });
+
+  /**
+   * `insert` catches its own `writeFile` failure and still appends the index
+   * entry, so the index alone is not proof — the body has to be on disk.
+   */
+  it('reports failed when the index gained an entry whose body was never written', async () => {
+    sentry.innerSend.mockImplementation(async () => {
+      storeCommits('body-1', false);
+      return {};
+    });
+
+    const result = await submitBugReport(REPORT, DIAGNOSTICS);
+
+    expect(result.delivery).toBe('failed');
+  });
+
+  /**
+   * A background retry of an OLDER envelope can be in the index already. Only an
+   * entry that appeared across this send is attributable to this report.
+   */
+  it('does not credit a queue entry that was already there before the send', async () => {
+    files.readFileSync.mockReturnValue(JSON.stringify([{ id: 'older-body' }]));
+    files.existsSync.mockImplementation((p: unknown) => String(p).endsWith('older-body'));
+    sentry.innerSend.mockResolvedValue({});
+
+    const result = await submitBugReport(REPORT, DIAGNOSTICS);
+
+    expect(result.delivery).toBe('failed');
   });
 
   it('reports failed, with the status, when Sentry rejected the envelope', async () => {
