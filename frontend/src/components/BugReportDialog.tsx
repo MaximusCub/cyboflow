@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, Bug, ChevronRight, ChevronDown, AlertTriangle, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { useSessionStore } from '../stores/sessionStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
@@ -92,6 +92,29 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     [allRuns, sessionId],
   );
 
+  /**
+   * The dialog stays mounted while closed, so anything resolving after a close —
+   * an in-flight submit, a slow preview — must not write state that would be
+   * visible on the next open.
+   */
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
+
+  /**
+   * Read at open time only. Seeding the session picker from a live subscription
+   * would silently overwrite the user's choice whenever the app switched
+   * sessions behind the dialog.
+   */
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+
+  /**
+   * One key per dialog session, deliberately stable across retries: the handler
+   * only remembers keys it actually filed, so reusing the key is what stops a
+   * retry-after-timeout from filing the same report twice.
+   */
+  const idempotencyKeyRef = useRef('');
+
   const resetForm = useCallback(() => {
     setWhatHappened('');
     setSteps('');
@@ -108,7 +131,8 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
       resetForm();
       return;
     }
-    setSessionId(activeSessionId ?? '');
+    setSessionId(activeSessionIdRef.current ?? '');
+    idempotencyKeyRef.current = crypto.randomUUID();
     let cancelled = false;
     void (async () => {
       try {
@@ -123,7 +147,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [isOpen, activeSessionId, resetForm]);
+  }, [isOpen, resetForm]);
 
   const canSubmit =
     whatHappened.trim().length > 0 &&
@@ -142,17 +166,22 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         contactConsent,
         runId: linkedRun?.id ?? (sessionId || undefined),
         flowName: linkedRun?.workflowName,
-        // Send exactly the text the user previewed, so what they read is what
-        // leaves the machine.
+        // Send exactly what the user previewed, so what they read is what leaves
+        // the machine — both the log text and the recorded-failure list, which is
+        // the one part of the diagnostics payload that can change while the
+        // dialog is open.
         logText: includeLogs ? preview?.logTail.text : undefined,
-        idempotencyKey: crypto.randomUUID(),
+        recentErrors: preview?.diagnostics.recentErrors ?? [],
+        idempotencyKey: idempotencyKeyRef.current,
       });
+      if (!isOpenRef.current) return;
       if (result.success && result.data) {
         setSend({ phase: 'done', response: result.data });
       } else {
         setSend({ phase: 'error', message: result.error ?? 'Failed to send report.' });
       }
     } catch (error) {
+      if (!isOpenRef.current) return;
       setSend({
         phase: 'error',
         message: error instanceof Error ? error.message : String(error),
@@ -186,7 +215,13 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         {/* Content */}
         <div className="p-6 space-y-5 overflow-y-auto">
           {send.phase === 'done' ? (
-            <ResultPanel response={send.response} onClose={onClose} onAgain={resetForm} />
+            <ResultPanel
+              response={send.response}
+              onClose={onClose}
+              // Return to the filled-in form, not a blank one: the report is
+              // still there and retrying is the whole point of the button.
+              onAgain={() => setSend({ phase: 'idle' })}
+            />
           ) : (
             <>
               <Field
@@ -252,7 +287,8 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                   <span className="text-sm text-text-secondary">
                     You can contact me about this report
                     <span className="block text-xs text-text-tertiary">
-                      Optional. Your email is the only thing in this report that identifies you.
+                      Optional, and only used to follow up on this report. See
+                      &ldquo;What&apos;s included&rdquo; below for everything else the report carries.
                     </span>
                   </span>
                 </label>
@@ -321,15 +357,19 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                     type="checkbox"
                     checked={includeLogs}
                     onChange={(e) => setIncludeLogs(e.target.checked)}
-                    disabled={logTail?.unavailable}
+                    // Ticking this before the preview arrives would attach
+                    // nothing while telling the user their logs were included.
+                    disabled={!logTail || logTail.unavailable}
                     className="mt-0.5"
                   />
                   <span className="text-sm text-text-secondary">
                     Include recent log output
                     <span className="block text-xs text-text-tertiary">
-                      {logTail?.unavailable
-                        ? 'No log file is available in this build.'
-                        : 'Off by default. Read it below before including it.'}
+                      {!logTail
+                        ? 'Loading…'
+                        : logTail.unavailable
+                          ? 'No log file is available in this build.'
+                          : 'Off by default. Read it below before including it.'}
                     </span>
                   </span>
                 </label>
