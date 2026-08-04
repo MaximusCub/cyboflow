@@ -192,6 +192,7 @@ export function recoverActiveStateOrphans(
   const candidates = db
     .prepare(
       `SELECT r.id, r.status, r.execution_model, r.current_step_id, r.substrate, r.worktree_path,
+              r.experiment_id,
               CASE WHEN w.name = '__quick__' THEN 1 ELSE 0 END AS is_quick,
               CASE WHEN julianday('now') - julianday(r.updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
          FROM workflow_runs r
@@ -205,6 +206,7 @@ export function recoverActiveStateOrphans(
     current_step_id: string | null;
     substrate: string | null;
     worktree_path: string | null;
+    experiment_id: string | null;
     is_quick: number;
     is_fresh: number;
   }[];
@@ -225,7 +227,21 @@ export function recoverActiveStateOrphans(
   //  - NON-programmatic awaiting_review orphans → leave untouched.
   const programmatic = orphans.filter((r) => r.execution_model === 'programmatic');
   const nonProgActive = orphans.filter(
-    (r) => r.execution_model !== 'programmatic' && (r.status === 'running' || r.status === 'starting'),
+    (r) =>
+      r.execution_model !== 'programmatic' &&
+      (r.status === 'running' || r.status === 'starting') &&
+      // EXPERIMENT-ARM quick sentinels (workflow_runs.experiment_id stamped by
+      // stampQuickArmRunExperimentTag) are exempt from the sweep entirely — left
+      // 'running', like non-programmatic awaiting_review orphans. Force-failing
+      // one counts as SETTLED (isExperimentArmSettled includes 'failed'), so a
+      // restart would prematurely flip the experiment to 'grading' and capture a
+      // pairwise verdict over the arm's half-finished work; and once that verdict
+      // exists the revive heal is deliberately blocked (transitions.ts settlement
+      // guard), stranding the arm. A quick arm is chat-driven — idling at
+      // 'running' across a restart is its normal steady state, and the next chat
+      // turn needs no boot-side repair. Plain (untagged) quick sentinels keep the
+      // documented force-fail + revive-on-next-chat contract below.
+      !(r.is_quick === 1 && r.experiment_id !== null),
   );
 
   // Resumability predicate for an orchestrated orphan. Mirrors
@@ -243,7 +259,10 @@ export function recoverActiveStateOrphans(
   // the prompt read and convert restart noise into a genuine-looking failure —
   // and even a successful spawn would be an unrequested autonomous turn. Quick
   // orphans take the force-fail path; reviveQuickRunToRunning heals them on the
-  // next chat turn (the documented recovery contract, transitions.ts).
+  // next chat turn (the documented recovery contract, transitions.ts). EXPERIMENT
+  // -ARM quick sentinels never reach this predicate — they are excluded from
+  // nonProgActive above (force-failing one would prematurely settle + grade its
+  // experiment).
   const invocationStore = new AgentInvocationStore(db);
   const isResumable = (r: { id: string; substrate: string | null; worktree_path: string | null; is_quick: number; is_fresh: number }): boolean => {
     if (r.is_quick === 1) return false;

@@ -503,6 +503,32 @@ describe('recoverActiveStateOrphans', () => {
     expect(row.status).toBe('failed');
     expect(row.outcome).toBe('interrupted');
   });
+
+  it('leaves an EXPERIMENT-ARM __quick__ sentinel untouched (no force-fail, no resume)', () => {
+    // A quick sentinel serving as an A/B experiment arm (workflow_runs.
+    // experiment_id stamped by stampQuickArmRunExperimentTag) idles at 'running'
+    // across restarts by design. Force-failing it would count as SETTLED
+    // (isExperimentArmSettled includes 'failed') and prematurely flip the
+    // experiment to 'grading' over half-finished work — so the sweep must skip
+    // it entirely, leaving 'running' intact for the user's next chat turn.
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-QE1', status: 'running', workflowName: '__quick__', worktreePath: process.cwd() });
+    db.prepare("UPDATE workflow_runs SET experiment_id = 'exp-1' WHERE id = ?").run('run-QE1');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.runningRecovered).toBe(0);
+    expect(result.orchestratedToResume).toEqual([]);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-QE1') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('running');
+    expect(row.outcome).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -519,10 +545,12 @@ describe('recoverActiveStateOrphans — review_items reconciliation', () => {
   function makeInboxDb(): ReturnType<typeof buildReviewInboxDb> {
     const db = buildReviewInboxDb();
     // Columns the recovery sweep reads that the fixture's migration set (006..016)
-    // predates: substrate (013), execution_model (031), claude_session_id (018).
+    // predates: substrate (013), execution_model (031), claude_session_id (018),
+    // experiment_id (048 — the experiment-arm quick-sentinel exemption).
     db.exec("ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk'");
     db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
     db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
     return db;
   }
 
