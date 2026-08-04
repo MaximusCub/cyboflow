@@ -156,7 +156,6 @@ function emptyStats(): {
   outcomes: Record<string, number>;
   failures: Record<string, number>;
   medianDurationMs: number | null;
-  lastAt: string | null;
 } {
   return {
     attempts: 0,
@@ -166,7 +165,6 @@ function emptyStats(): {
     outcomes: {},
     failures: { env: 0, deliverable: 0, ambiguous: 0, unclassified: 0 },
     medianDurationMs: null,
-    lastAt: null,
   };
 }
 

@@ -225,7 +225,6 @@ interface StatsAccumulator {
   failures: Record<VerificationFailureHistogramKey, number>;
   /** Every observed `leased_at → ended_at` span, unsorted; the median is taken at finalize. */
   durations: number[];
-  lastAt: string | null;
 }
 
 function newAccumulator(): StatsAccumulator {
@@ -234,7 +233,7 @@ function newAccumulator(): StatsAccumulator {
   const failures = {} as Record<VerificationFailureHistogramKey, number>;
   for (const c of VERIFICATION_FAILURE_CLASSES) failures[c] = 0;
   failures.unclassified = 0;
-  return { attempts: 0, inFlight: 0, passed: 0, outcomes, failures, durations: [], lastAt: null };
+  return { attempts: 0, inFlight: 0, passed: 0, outcomes, failures, durations: [] };
 }
 
 /**
@@ -277,9 +276,6 @@ function accumulate(acc: StatsAccumulator, row: HealthDbRow): void {
   if (typeof row.duration_ms === 'number' && Number.isFinite(row.duration_ms) && row.duration_ms >= 0) {
     acc.durations.push(row.duration_ms);
   }
-  if (row.ended_at !== null && (acc.lastAt === null || row.ended_at > acc.lastAt)) {
-    acc.lastAt = row.ended_at;
-  }
 }
 
 /** Median of a non-empty numeric list (mean of the middle pair when even), rounded to an integer ms. */
@@ -303,7 +299,6 @@ function finalize(acc: StatsAccumulator): VerificationOutcomeStats {
     outcomes: acc.outcomes,
     failures: acc.failures,
     medianDurationMs: median(acc.durations),
-    lastAt: acc.lastAt,
   };
 }
 

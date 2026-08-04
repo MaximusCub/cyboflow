@@ -40,7 +40,6 @@ function stats(over: Partial<VerificationOutcomeStats> = {}): VerificationOutcom
     },
     failures: { env: 0, deliverable: 0, ambiguous: 0, unclassified: 0 },
     medianDurationMs: null,
-    lastAt: null,
     ...over,
   };
 }

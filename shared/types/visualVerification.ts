@@ -1648,8 +1648,6 @@ export interface VerificationOutcomeStats {
   failures: Record<VerificationFailureHistogramKey, number>;
   /** Median `leased_at → ended_at` across terminal rows carrying both stamps; `null` when none do. */
   medianDurationMs: number | null;
-  /** The newest `ended_at` among terminal rows, or `null`. */
-  lastAt: string | null;
 }
 
 /**
