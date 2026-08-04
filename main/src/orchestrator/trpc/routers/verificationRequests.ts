@@ -319,28 +319,46 @@ interface HealthDbRow {
 /** Raw `verify_capability_state` row plus the current host generation for the derived `suppressionActive` bit. */
 interface CapabilityDbRow {
   modality: string;
+  runbook_hash: string;
   status: string;
   reason: string;
   consecutive_env_failures: number;
   host_generation: number;
   suppressed_until: string | null;
-  updated_at: string | null;
 }
 
 /**
- * Read the capability ledger for a project, newest row per modality.
+ * The ledger key the ENGINE will use for a modality's next request.
+ *
+ * `verify_capability_state` is keyed `(project, modality, runbook_hash)`, and
+ * the scheduler looks up exactly one of those triples: the request's PIN hash
+ * (`capabilityRunbookKey` → `runbookPinForRow(...).hash ?? ''`). A pin only
+ * ever resolves to a PROVEN revision, so an unproven-draft or absent runbook
+ * means the engine reads the phase-0 `''` key — migration 095's column default.
+ *
+ * Selecting any other row (e.g. "the most recently updated one") reports a
+ * suppression the engine will not honour, or hides one it will: a stale
+ * revision's row can be written LAST when an old pinned request finishes after
+ * a new runbook is registered.
+ */
+function capabilityLedgerKey(runbook: VerificationRunbookState | undefined): string {
+  return runbook?.status === 'proven' ? runbook.portableHash : '';
+}
+
+/**
+ * Read the capability ledger for a project, taking the row the engine reads.
  *
  * FAIL-SOFT to an empty map, mirroring `VerifyCapabilityStore`'s own posture:
  * on a pre-095 DB the tables do not exist, and a ledger hiccup must degrade the
  * panel to "nothing recorded" rather than fail the whole health query.
  *
- * A modality can hold several rows (one per `runbook_hash`); the most recently
- * updated one is the live answer, since that is the revision the engine last
- * acted on.
+ * A modality can hold several rows (one per `runbook_hash`) and only ONE of
+ * them is live — see {@link capabilityLedgerKey}.
  */
 function readCapabilities(
   db: DatabaseLike,
   projectId: number,
+  runbooks: Map<VerificationModality, VerificationRunbookState>,
   hostGeneration: number,
   now: number,
 ): Map<VerificationModality, VerificationCapabilityState> {
@@ -349,10 +367,9 @@ function readCapabilities(
   try {
     rows = db
       .prepare(
-        `SELECT modality, status, reason, consecutive_env_failures, host_generation, suppressed_until, updated_at
+        `SELECT modality, runbook_hash, status, reason, consecutive_env_failures, host_generation, suppressed_until
            FROM verify_capability_state
-          WHERE project_id = ?
-          ORDER BY updated_at ASC`,
+          WHERE project_id = ?`,
       )
       .all(projectId) as CapabilityDbRow[];
   } catch {
@@ -361,6 +378,9 @@ function readCapabilities(
 
   for (const row of rows) {
     if (!isVerificationModality(row.modality)) continue;
+    // The PK is (project, modality, runbook_hash), so this admits at most one
+    // row per modality — the same one `getActiveSuppression` will read.
+    if (row.runbook_hash !== capabilityLedgerKey(runbooks.get(row.modality))) continue;
     const status =
       row.status === 'suppressed' || row.status === 'unsupported' || row.status === 'active'
         ? row.status
@@ -375,7 +395,6 @@ function readCapabilities(
     const suppressionActive =
       status !== 'active' && ttlLive && row.host_generation === hostGeneration;
 
-    // ORDER BY updated_at ASC + unconditional set ⇒ the newest row per modality wins.
     out.set(row.modality, {
       status,
       reason: row.reason,
@@ -707,8 +726,9 @@ export const verificationRequestsRouter = router({
       }
 
       const hostGeneration = readHostGeneration(db);
-      const capabilities = readCapabilities(db, input.projectId, hostGeneration, Date.now());
+      // Runbooks FIRST: they decide which capability row is the live one.
       const runbooks = readRunbooks(db, input.projectId);
+      const capabilities = readCapabilities(db, input.projectId, runbooks, hostGeneration, Date.now());
 
       // A modality earns a row if it has traffic, a ledger entry, OR a runbook.
       // The latter two matter because a capability suppressed before its first

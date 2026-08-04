@@ -755,16 +755,21 @@ describe('verificationRequests.health', () => {
     expect(web?.medianDurationMs).toBe(30_000);
   });
 
-  it('mixed SQLite and ISO timestamp formats produce the same span (julianday, not Date.parse)', async () => {
+  it('a span MIXING the two timestamp formats is exact (julianday, not Date.parse)', async () => {
     // The regression this guards: these columns hold BOTH 'YYYY-MM-DD HH:MM:SS'
     // and ISO-8601, and Date.parse reads the first as LOCAL and the second as
-    // UTC — mixing them would skew every span by the host's offset.
+    // UTC. Note the mixing has to be WITHIN a row to bite — two same-format
+    // stamps subtract their (identical) offset away, so a per-row-consistent
+    // fixture passes under Date.parse too and guards nothing.
     const { caller, db } = setup();
     seedRun(db, 'run-1', 1);
-    seedRequest(db, { id: 'iso', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'web' });
-    stampSpan(db, 'iso', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:20.000Z');
-    seedRequest(db, { id: 'sqlite', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'cdp-app' });
-    stampSpan(db, 'sqlite', '2026-08-01 00:00:00', '2026-08-01 00:00:20');
+    // leased_at SQLite-naive, ended_at ISO-UTC: under Date.parse this reads as
+    // 20s ± the host's UTC offset (an HOUR or more off outside UTC).
+    seedRequest(db, { id: 'mixed', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'web' });
+    stampSpan(db, 'mixed', '2026-08-01 00:00:00', '2026-08-01T00:00:20.000Z');
+    // ...and the reverse ordering of the two formats.
+    seedRequest(db, { id: 'mixed-rev', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'cdp-app' });
+    stampSpan(db, 'mixed-rev', '2026-08-01T00:00:00.000Z', '2026-08-01 00:00:20');
 
     const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
 
@@ -844,6 +849,55 @@ describe('verificationRequests.health', () => {
     expect(byModality.get('web')?.capability).toMatchObject({ status: 'suppressed', reason: 'port taken', consecutiveEnvFailures: 5, suppressionActive: true });
     expect(byModality.get('cdp-app')?.capability?.suppressionActive).toBe(false);
     expect(byModality.get('native-screen')?.capability?.suppressionActive).toBe(false);
+  });
+
+  it('reads the capability row the ENGINE reads — keyed by the proven runbook hash, not the newest row', async () => {
+    // verify_capability_state is keyed (project, modality, runbook_hash) and the
+    // scheduler looks up exactly the request's PIN hash. An old revision's row
+    // can be UPDATED last (a request pinned to it finishing after a new runbook
+    // is registered), so "newest updated_at wins" reports a suppression the
+    // engine will never honour.
+    const db = buildDb([...MIGRATIONS, '096_verify_runbook_local.sql']);
+    cleanups.push(db);
+    setHostGeneration(db, 2);
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, version, status)
+       VALUES (1, 'web', 'hash-new', '{}', 2, 'proven')`,
+    ).run();
+    // The live row: keyed to the proven hash, and NOT suppressed.
+    seedCapability(db, { projectId: 1, modality: 'web', runbookHash: 'hash-new', status: 'active', envFailures: 1, hostGeneration: 2, updatedAt: '2026-08-01T00:00:00.000Z' });
+    // The stale row: a superseded revision, tripped, and updated MORE recently.
+    seedCapability(db, { projectId: 1, modality: 'web', runbookHash: 'hash-old', status: 'suppressed', reason: 'port taken', envFailures: 5, hostGeneration: 2, suppressedUntil: future, updatedAt: '2026-08-02T00:00:00.000Z' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const web = health.modalities.find((m) => m.modality === 'web');
+
+    expect(web?.capability?.status).toBe('active');
+    expect(web?.capability?.consecutiveEnvFailures).toBe(1);
+    expect(web?.capability?.suppressionActive).toBe(false);
+  });
+
+  it("falls back to the phase-0 '' key when no runbook is proven", async () => {
+    // A pin only ever resolves to a PROVEN revision, so an unproven draft leaves
+    // the engine reading migration 095's default key. A suppression stamped
+    // against the draft's hash is therefore inert and must not be reported.
+    const db = buildDb([...MIGRATIONS, '096_verify_runbook_local.sql']);
+    cleanups.push(db);
+    setHostGeneration(db, 2);
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, version, status)
+       VALUES (1, 'web', 'hash-draft', '{}', 1, 'unproven-draft')`,
+    ).run();
+    seedCapability(db, { projectId: 1, modality: 'web', runbookHash: 'hash-draft', status: 'suppressed', reason: 'draft-era trip', hostGeneration: 2, suppressedUntil: future });
+    seedCapability(db, { projectId: 1, modality: 'web', runbookHash: '', status: 'suppressed', reason: 'phase-0 trip', envFailures: 3, hostGeneration: 2, suppressedUntil: future });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+
+    expect(health.modalities.find((m) => m.modality === 'web')?.capability?.reason).toBe('phase-0 trip');
   });
 
   it('lists a modality that has a capability row but no traffic yet', async () => {
