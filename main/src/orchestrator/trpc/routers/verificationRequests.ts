@@ -26,6 +26,15 @@
  *              (migration 056), so the number the panel shows can never
  *              silently diverge from the number the scheduler acts on.
  *
+ *   - health : query -> VerificationHealthSummary (§6, the phase-3 health panel)
+ *              — per-modality attempts / pass rate / failure-class histogram /
+ *              median duration, the capability ledger (migration 095) with its
+ *              re-probe TTLs resolved into a live `suppressionActive` bit, and
+ *              setup-proof traffic counted APART from lane traffic (§8's
+ *              "separate counter"). A third sibling query for the same reason
+ *              `budget` is one: each has its own shape and its own refresh
+ *              cadence in the panel.
+ *
  * The panel performs NO mutations (Accept-as-baseline lives on the artifact
  * verdict banner, S6) — this router stays read-only over the existing schema, so
  * there is no new migration and no chokepoint write path here.
@@ -39,11 +48,20 @@ import { router, protectedProcedure } from '../trpc';
 import type { DatabaseLike } from '../../types';
 import {
   REQUEST_STATUS,
+  TERMINAL_REQUEST_STATUSES,
+  VERIFICATION_FAILURE_CLASSES,
+  VERIFICATION_MODALITIES,
   isVerificationFailureClass,
   isVerificationModality,
   type RequestStatus,
   type VerificationBudgetSummary,
+  type VerificationCapabilityState,
   type VerificationFailureEvidence,
+  type VerificationFailureHistogramKey,
+  type VerificationHealthSummary,
+  type VerificationModality,
+  type VerificationModalityHealth,
+  type VerificationOutcomeStats,
   type VerificationRequestListRow,
   type VerificationType,
   type VisualBackendId,
@@ -182,6 +200,196 @@ function shapeRow(r: VerificationRequestDbRow): VerificationRequestListRow {
   };
 }
 
+// ---------------------------------------------------------------------------
+// health — the phase-3 panel's aggregation (§6)
+// ---------------------------------------------------------------------------
+
+const TERMINAL_SET: ReadonlySet<string> = new Set<string>(TERMINAL_REQUEST_STATUSES);
+
+/** Mutable accumulator behind one {@link VerificationOutcomeStats} bucket. */
+interface StatsAccumulator {
+  attempts: number;
+  inFlight: number;
+  passed: number;
+  outcomes: Record<RequestStatus, number>;
+  failures: Record<VerificationFailureHistogramKey, number>;
+  /** Every observed `leased_at → ended_at` span, unsorted; the median is taken at finalize. */
+  durations: number[];
+  lastAt: string | null;
+}
+
+function newAccumulator(): StatsAccumulator {
+  const outcomes = {} as Record<RequestStatus, number>;
+  for (const s of REQUEST_STATUS) outcomes[s] = 0;
+  const failures = {} as Record<VerificationFailureHistogramKey, number>;
+  for (const c of VERIFICATION_FAILURE_CLASSES) failures[c] = 0;
+  failures.unclassified = 0;
+  return { attempts: 0, inFlight: 0, passed: 0, outcomes, failures, durations: [], lastAt: null };
+}
+
+/**
+ * Fold one request row into a bucket.
+ *
+ * A row is an ATTEMPT only once terminal; the three in-flight states are
+ * counted apart so a busy queue cannot depress the pass rate. `failure_class`
+ * is tallied for every NON-PASSING terminal row — an unstamped one lands in
+ * `unclassified` rather than vanishing, so the histogram always reconciles
+ * against `attempts - passed`.
+ */
+function accumulate(acc: StatsAccumulator, row: HealthDbRow): void {
+  const status = row.status;
+  if (!TERMINAL_SET.has(status)) {
+    acc.inFlight += 1;
+    return;
+  }
+  acc.attempts += 1;
+  if (status in acc.outcomes) acc.outcomes[status as RequestStatus] += 1;
+
+  if (status === 'passed') {
+    acc.passed += 1;
+  } else {
+    const cls = isVerificationFailureClass(row.failure_class) ? row.failure_class : 'unclassified';
+    acc.failures[cls] += 1;
+  }
+
+  // `duration_ms` is computed in SQL via julianday() rather than parsed here:
+  // these columns hold BOTH SQLite's 'YYYY-MM-DD HH:MM:SS' default and ISO-8601
+  // strings depending on the writer, and Date.parse reads the former as LOCAL
+  // time and the latter as UTC — mixing them would silently skew every span by
+  // the host's offset. julianday() treats both as UTC.
+  if (typeof row.duration_ms === 'number' && Number.isFinite(row.duration_ms) && row.duration_ms >= 0) {
+    acc.durations.push(row.duration_ms);
+  }
+  if (row.ended_at !== null && (acc.lastAt === null || row.ended_at > acc.lastAt)) {
+    acc.lastAt = row.ended_at;
+  }
+}
+
+/** Median of a non-empty numeric list (mean of the middle pair when even), rounded to an integer ms. */
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+function finalize(acc: StatsAccumulator): VerificationOutcomeStats {
+  return {
+    attempts: acc.attempts,
+    inFlight: acc.inFlight,
+    passed: acc.passed,
+    // null, never 0, when there is nothing to divide — "no data" and "never
+    // passed" are different facts and the panel renders them differently.
+    passRate: acc.attempts === 0 ? null : acc.passed / acc.attempts,
+    outcomes: acc.outcomes,
+    failures: acc.failures,
+    medianDurationMs: median(acc.durations),
+    lastAt: acc.lastAt,
+  };
+}
+
+/**
+ * The columns `health` reads. Selected as `*` plus a computed span (see the
+ * query) so a PRE-095 database — where `modality` / `failure_class` /
+ * `setup_proof` do not exist yet — returns `undefined` for them rather than
+ * throwing "no such column", exactly as the `list` query already relies on.
+ */
+interface HealthDbRow {
+  status: string;
+  ended_at: string | null;
+  judge_calls_used: number | undefined;
+  duration_ms: number | null;
+  modality: string | null | undefined;
+  failure_class: string | null | undefined;
+  setup_proof: number | undefined;
+}
+
+/** Raw `verify_capability_state` row plus the current host generation for the derived `suppressionActive` bit. */
+interface CapabilityDbRow {
+  modality: string;
+  status: string;
+  reason: string;
+  consecutive_env_failures: number;
+  host_generation: number;
+  suppressed_until: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * Read the capability ledger for a project, newest row per modality.
+ *
+ * FAIL-SOFT to an empty map, mirroring `VerifyCapabilityStore`'s own posture:
+ * on a pre-095 DB the tables do not exist, and a ledger hiccup must degrade the
+ * panel to "nothing recorded" rather than fail the whole health query.
+ *
+ * A modality can hold several rows (one per `runbook_hash`); the most recently
+ * updated one is the live answer, since that is the revision the engine last
+ * acted on.
+ */
+function readCapabilities(
+  db: DatabaseLike,
+  projectId: number,
+  hostGeneration: number,
+  now: number,
+): Map<VerificationModality, VerificationCapabilityState> {
+  const out = new Map<VerificationModality, VerificationCapabilityState>();
+  let rows: CapabilityDbRow[] = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT modality, status, reason, consecutive_env_failures, host_generation, suppressed_until, updated_at
+           FROM verify_capability_state
+          WHERE project_id = ?
+          ORDER BY updated_at ASC`,
+      )
+      .all(projectId) as CapabilityDbRow[];
+  } catch {
+    return out;
+  }
+
+  for (const row of rows) {
+    if (!isVerificationModality(row.modality)) continue;
+    const status =
+      row.status === 'suppressed' || row.status === 'unsupported' || row.status === 'active'
+        ? row.status
+        : 'active';
+    // Mirrors VerifyCapabilityStore.getActiveSuppression (§3.3): a tripped row
+    // is only IN FORCE while its TTL is unexpired AND its stamped generation
+    // still matches the host's. Either condition lapsing makes it inert, and
+    // the next request re-attempts freely — showing raw `status` alone would
+    // report a modality as blocked that the engine has already moved past.
+    const untilMs = row.suppressed_until === null ? null : Date.parse(row.suppressed_until);
+    const ttlLive = untilMs !== null && Number.isFinite(untilMs) && untilMs > now;
+    const suppressionActive =
+      status !== 'active' && ttlLive && row.host_generation === hostGeneration;
+
+    // ORDER BY updated_at ASC + unconditional set ⇒ the newest row per modality wins.
+    out.set(row.modality, {
+      status,
+      reason: row.reason,
+      consecutiveEnvFailures: row.consecutive_env_failures,
+      suppressedUntil: row.suppressed_until,
+      hostGeneration: row.host_generation,
+      suppressionActive,
+    });
+  }
+  return out;
+}
+
+/** The singleton host capability generation; 0 when the row/table is absent (fresh install — nothing is stale). */
+function readHostGeneration(db: DatabaseLike): number {
+  try {
+    const row = db
+      .prepare('SELECT capability_generation FROM verify_host_state WHERE id = 1')
+      .get() as { capability_generation: number } | undefined;
+    return row?.capability_generation ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 export const verificationRequestsRouter = router({
   /**
    * List a project's verification requests (newest enqueued first), optionally
@@ -259,6 +467,94 @@ export const verificationRequestsRouter = router({
         projectName: proj?.name,
         budgetCalls: typeof proj?.budget === 'number' ? proj.budget : null,
         usedCalls: usedRow?.used ?? 0,
+      };
+    }),
+
+  /**
+   * Per-project verification health (§6) — the phase-3 panel's aggregation:
+   * per-modality attempts / pass rate / failure-class histogram / median
+   * duration, the capability ledger with its re-probe TTLs, and setup-proof
+   * traffic counted apart from lane traffic.
+   *
+   * Read-only over the EXISTING schema (055 / 056 / 078 / 095) — no migration.
+   * One pass over the project's requests, bucketed in TypeScript rather than by
+   * several GROUP BY round-trips, because the same row must land in exactly one
+   * of {modality, unattributed, setup-proof} and SQLite has no median anyway.
+   *
+   * Deliberately a SIBLING of `budget` rather than a superset: the panel shows
+   * both, and folding them would duplicate the `SUM(judge_calls_used)` the
+   * scheduler's exhaustion check reads — the one number that must not drift.
+   */
+  health: protectedProcedure
+    .input(z.object({ projectId: z.number().int().positive() }))
+    .query(async ({ input, ctx }): Promise<VerificationHealthSummary> => {
+      const db = requireDb(ctx.db, 'health');
+
+      // `SELECT *` (not a named column list) so a pre-095 DB — no `modality` /
+      // `failure_class` / `setup_proof` columns — yields `undefined` for them
+      // instead of throwing, the same contract the `list` query depends on. The
+      // computed span references only 055 columns, so it is always safe.
+      const rows = db
+        .prepare(
+          // ROUND before CAST: julianday() returns a float, so the scaled
+          // difference lands a hair under the true value (a 30s span computes
+          // as 29999.999…) and CAST truncates toward zero — every duration
+          // would read 1ms short without this.
+          `SELECT *,
+                  CAST(ROUND((julianday(ended_at) - julianday(leased_at)) * 86400000) AS INTEGER) AS duration_ms
+             FROM verification_requests
+            WHERE project_id = ?`,
+        )
+        .all(input.projectId) as HealthDbRow[];
+
+      const byModality = new Map<VerificationModality, StatsAccumulator>();
+      const unattributed = newAccumulator();
+      const setupProof = newAccumulator();
+      let setupProofCallsUsed = 0;
+
+      for (const row of rows) {
+        // Setup-proof rows are their own bucket and appear in NO other one
+        // (§8's "separate counter"): a proof run is the flow that makes
+        // verification work, so folding its attempts into the lane pass rate
+        // would show a project as unhealthy exactly while it is being fixed.
+        if (row.setup_proof === 1) {
+          accumulate(setupProof, row);
+          setupProofCallsUsed += typeof row.judge_calls_used === 'number' ? row.judge_calls_used : 0;
+          continue;
+        }
+        if (isVerificationModality(row.modality)) {
+          let acc = byModality.get(row.modality);
+          if (!acc) {
+            acc = newAccumulator();
+            byModality.set(row.modality, acc);
+          }
+          accumulate(acc, row);
+          continue;
+        }
+        accumulate(unattributed, row);
+      }
+
+      const hostGeneration = readHostGeneration(db);
+      const capabilities = readCapabilities(db, input.projectId, hostGeneration, Date.now());
+
+      // A modality earns a row if it has traffic OR a ledger entry — the latter
+      // matters because a capability suppressed before its first success has no
+      // requests to show yet, and that is exactly when a user needs to see it.
+      const modalities: VerificationModalityHealth[] = VERIFICATION_MODALITIES.filter(
+        (m) => byModality.has(m) || capabilities.has(m),
+      ).map((m) => ({
+        modality: m,
+        ...finalize(byModality.get(m) ?? newAccumulator()),
+        capability: capabilities.get(m) ?? null,
+      }));
+
+      return {
+        projectId: input.projectId,
+        modalities,
+        unattributed: finalize(unattributed),
+        setupProof: finalize(setupProof),
+        setupProofCallsUsed,
+        hostGeneration,
       };
     }),
 });

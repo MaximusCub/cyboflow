@@ -26,6 +26,13 @@
  *  11. budget: sums judge_calls_used per project, reads
  *      visual_verify_budget_calls (null = unlimited), zod validation, and
  *      PRECONDITION_FAILED parity with list.
+ *  12. health (verification-setup-flow.md §6): per-modality bucketing, a pass
+ *      rate whose denominator INCLUDES skips, a failure histogram that
+ *      reconciles against attempts - passed, median duration across mixed
+ *      SQLite/ISO timestamp formats, setup-proof traffic counted apart (plus
+ *      the proof-spend/budget overlap made visible), capability suppressions
+ *      resolved through their TTL + host-generation rules, and pre-095
+ *      degradation.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -612,5 +619,277 @@ describe('cyboflow.verificationRequests.budget', () => {
     ).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// health — the phase-3 panel aggregation (verification-setup-flow.md §6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stamp the lifecycle timestamps the median-duration span is computed from.
+ * Kept local (rather than widened onto `seedRequest`) so the pre-095 tests and
+ * every existing caller stay byte-identical.
+ */
+function stampSpan(db: Database.Database, id: string, leasedAt: string, endedAt: string): void {
+  db.prepare('UPDATE verification_requests SET leased_at = ?, ended_at = ? WHERE id = ?').run(
+    leasedAt,
+    endedAt,
+    id,
+  );
+}
+
+function seedCapability(
+  db: Database.Database,
+  opts: {
+    projectId: number;
+    modality: string;
+    status: 'active' | 'suppressed' | 'unsupported';
+    reason?: string;
+    envFailures?: number;
+    hostGeneration?: number;
+    suppressedUntil?: string | null;
+    updatedAt?: string;
+    runbookHash?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO verify_capability_state
+       (project_id, modality, runbook_hash, status, reason, consecutive_env_failures, host_generation, suppressed_until, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.projectId,
+    opts.modality,
+    opts.runbookHash ?? '',
+    opts.status,
+    opts.reason ?? '',
+    opts.envFailures ?? 0,
+    opts.hostGeneration ?? 0,
+    opts.suppressedUntil ?? null,
+    opts.updatedAt ?? '2026-08-01T00:00:00.000Z',
+  );
+}
+
+function setHostGeneration(db: Database.Database, generation: number): void {
+  db.prepare(
+    `INSERT INTO verify_host_state (id, capability_generation) VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET capability_generation = excluded.capability_generation`,
+  ).run(generation);
+}
+
+describe('verificationRequests.health', () => {
+  const cleanups: Database.Database[] = [];
+  afterEach(() => {
+    while (cleanups.length) cleanups.pop()?.close();
+  });
+
+  function setup(migrations?: readonly string[]): ReturnType<typeof buildCaller> {
+    const built = buildCaller(migrations);
+    cleanups.push(built.db);
+    return built;
+  }
+
+  it('buckets attempts per modality and computes the pass rate over ALL terminal rows', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    // web: 2 passed, 1 failed, 1 skipped -> 4 attempts, 0.5 pass rate.
+    seedRequest(db, { id: 'r1', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z', modality: 'web' });
+    seedRequest(db, { id: 'r2', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:02Z', modality: 'web' });
+    seedRequest(db, { id: 'r3', runId: 'run-1', projectId: 1, status: 'failed', enqueuedAt: '2026-08-01T00:00:03Z', modality: 'web', failureClass: 'deliverable' });
+    seedRequest(db, { id: 'r4', runId: 'run-1', projectId: 1, status: 'skipped', enqueuedAt: '2026-08-01T00:00:04Z', modality: 'web', failureClass: 'env' });
+    // An in-flight row must NOT dilute the pass rate.
+    seedRequest(db, { id: 'r5', runId: 'run-1', projectId: 1, status: 'running', enqueuedAt: '2026-08-01T00:00:05Z', modality: 'web' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const web = health.modalities.find((m) => m.modality === 'web');
+
+    expect(web?.attempts).toBe(4);
+    expect(web?.inFlight).toBe(1);
+    expect(web?.passed).toBe(2);
+    // Skips are IN the denominator on purpose — a project whose verifications
+    // all skip must not report a healthy pass rate (§3.2 degrade path).
+    expect(web?.passRate).toBe(0.5);
+    expect(web?.outcomes.passed).toBe(2);
+    expect(web?.outcomes.skipped).toBe(1);
+    expect(web?.failures).toMatchObject({ env: 1, deliverable: 1, ambiguous: 0, unclassified: 0 });
+  });
+
+  it('the failure histogram reconciles against attempts - passed, unclassified included', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'r1', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z', modality: 'web' });
+    seedRequest(db, { id: 'r2', runId: 'run-1', projectId: 1, status: 'failed', enqueuedAt: '2026-08-01T00:00:02Z', modality: 'web', failureClass: 'env' });
+    // Terminal, non-passing, never classified -> 'unclassified', not dropped.
+    seedRequest(db, { id: 'r3', runId: 'run-1', projectId: 1, status: 'timeout', enqueuedAt: '2026-08-01T00:00:03Z', modality: 'web' });
+    // A garbage class value fail-softs into 'unclassified' too.
+    seedRequest(db, { id: 'r4', runId: 'run-1', projectId: 1, status: 'failed', enqueuedAt: '2026-08-01T00:00:04Z', modality: 'web', failureClass: 'not-a-class' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const web = health.modalities.find((m) => m.modality === 'web');
+    const histogramTotal = Object.values(web?.failures ?? {}).reduce((a, b) => a + b, 0);
+
+    expect(web?.failures.unclassified).toBe(2);
+    expect(histogramTotal).toBe((web?.attempts ?? 0) - (web?.passed ?? 0));
+  });
+
+  it('median duration is the middle leased->ended span, ignoring rows without both stamps', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    for (const [id, secs] of [['r1', 10], ['r2', 30], ['r3', 110]] as const) {
+      seedRequest(db, { id, runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'web' });
+      stampSpan(db, id, '2026-08-01T00:00:00Z', `2026-08-01T00:0${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}Z`);
+    }
+    // No leased_at/ended_at -> contributes an attempt but no span.
+    seedRequest(db, { id: 'r4', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'web' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const web = health.modalities.find((m) => m.modality === 'web');
+
+    expect(web?.attempts).toBe(4);
+    expect(web?.medianDurationMs).toBe(30_000);
+  });
+
+  it('mixed SQLite and ISO timestamp formats produce the same span (julianday, not Date.parse)', async () => {
+    // The regression this guards: these columns hold BOTH 'YYYY-MM-DD HH:MM:SS'
+    // and ISO-8601, and Date.parse reads the first as LOCAL and the second as
+    // UTC — mixing them would skew every span by the host's offset.
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'iso', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'web' });
+    stampSpan(db, 'iso', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:20.000Z');
+    seedRequest(db, { id: 'sqlite', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:00Z', modality: 'cdp-app' });
+    stampSpan(db, 'sqlite', '2026-08-01 00:00:00', '2026-08-01 00:00:20');
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+
+    expect(health.modalities.find((m) => m.modality === 'web')?.medianDurationMs).toBe(20_000);
+    expect(health.modalities.find((m) => m.modality === 'cdp-app')?.medianDurationMs).toBe(20_000);
+  });
+
+  it('setup-proof rows are counted APART from lane traffic, with their own call spend', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'lane', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z', modality: 'web', judgeCallsUsed: 1 });
+    seedRequest(db, { id: 'proof1', runId: 'run-1', projectId: 1, status: 'failed', enqueuedAt: '2026-08-01T00:00:02Z', modality: 'web', setupProof: 1, judgeCallsUsed: 2 });
+    seedRequest(db, { id: 'proof2', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:03Z', modality: 'web', setupProof: 1, judgeCallsUsed: 3 });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+
+    // The lane bucket sees ONLY the lane row — a project being FIXED must not
+    // read as unhealthy because its proof attempts failed on the way there.
+    const web = health.modalities.find((m) => m.modality === 'web');
+    expect(web?.attempts).toBe(1);
+    expect(web?.passRate).toBe(1);
+
+    expect(health.setupProof.attempts).toBe(2);
+    expect(health.setupProof.passed).toBe(1);
+    expect(health.setupProofCallsUsed).toBe(5);
+  });
+
+  it('surfaces the proof spend that budget enforcement still counts (the known overlap)', async () => {
+    // Proof runs skip the budget CHECK but their judge_calls_used remains in
+    // the SUM that check reads, so it consumes the allowance ordinary lanes are
+    // measured against. The panel shows the overlap rather than hiding it.
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'lane', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z', judgeCallsUsed: 4 });
+    seedRequest(db, { id: 'proof', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:02Z', setupProof: 1, judgeCallsUsed: 6 });
+
+    const [health, budget] = await Promise.all([
+      caller.cyboflow.verificationRequests.health({ projectId: 1 }),
+      caller.cyboflow.verificationRequests.budget({ projectId: 1 }),
+    ]);
+
+    expect(budget.usedCalls).toBe(10);
+    expect(health.setupProofCallsUsed).toBe(6);
+    // i.e. 6 of the 10 calls the scheduler will measure lanes against came from
+    // proof traffic the tool contract calls exempt.
+  });
+
+  it('rows with no modality land in the unattributed bucket, not silently in web', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'r1', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z' });
+    seedRequest(db, { id: 'r2', runId: 'run-1', projectId: 1, status: 'failed', enqueuedAt: '2026-08-01T00:00:02Z', modality: 'bogus' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+
+    expect(health.unattributed.attempts).toBe(2);
+    expect(health.modalities).toHaveLength(0);
+  });
+
+  it('resolves a suppression as IN FORCE only while its TTL and host generation both hold', async () => {
+    const { caller, db } = setup();
+    setHostGeneration(db, 7);
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    // In force: unexpired TTL + matching generation.
+    seedCapability(db, { projectId: 1, modality: 'web', status: 'suppressed', reason: 'port taken', envFailures: 5, hostGeneration: 7, suppressedUntil: future });
+    // TTL lapsed -> inert, the next request re-attempts freely.
+    seedCapability(db, { projectId: 1, modality: 'cdp-app', status: 'suppressed', reason: 'stale', hostGeneration: 7, suppressedUntil: past });
+    // Host moved on -> inert even though the TTL is live.
+    seedCapability(db, { projectId: 1, modality: 'native-screen', status: 'unsupported', reason: 'no grant', hostGeneration: 3, suppressedUntil: future });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const byModality = new Map(health.modalities.map((m) => [m.modality, m]));
+
+    expect(health.hostGeneration).toBe(7);
+    expect(byModality.get('web')?.capability).toMatchObject({ status: 'suppressed', reason: 'port taken', consecutiveEnvFailures: 5, suppressionActive: true });
+    expect(byModality.get('cdp-app')?.capability?.suppressionActive).toBe(false);
+    expect(byModality.get('native-screen')?.capability?.suppressionActive).toBe(false);
+  });
+
+  it('lists a modality that has a capability row but no traffic yet', async () => {
+    // A capability suppressed before its first success has no requests to show
+    // — exactly when a user most needs to see it.
+    const { caller, db } = setup();
+    seedCapability(db, { projectId: 1, modality: 'native-screen', status: 'unsupported', reason: 'screen recording not granted' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+    const native = health.modalities.find((m) => m.modality === 'native-screen');
+
+    expect(native).toBeDefined();
+    expect(native?.attempts).toBe(0);
+    // null, never 0 — "no data" is not "never passed".
+    expect(native?.passRate).toBeNull();
+    expect(native?.capability?.reason).toBe('screen recording not granted');
+  });
+
+  it('scopes to the project and returns an empty summary for one with no traffic', async () => {
+    const { caller, db } = setup();
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'r1', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z', modality: 'web' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 2 });
+
+    expect(health.projectId).toBe(2);
+    expect(health.modalities).toHaveLength(0);
+    expect(health.unattributed.attempts).toBe(0);
+    expect(health.unattributed.passRate).toBeNull();
+    expect(health.setupProofCallsUsed).toBe(0);
+  });
+
+  it('degrades on a pre-095 DB instead of throwing on the absent columns/tables', async () => {
+    const { caller, db } = setup(MIGRATIONS_PRE_095);
+    seedRun(db, 'run-1', 1);
+    seedRequest(db, { id: 'r1', runId: 'run-1', projectId: 1, status: 'passed', enqueuedAt: '2026-08-01T00:00:01Z' });
+
+    const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
+
+    // No modality/setup_proof columns and no ledger tables: everything lands in
+    // unattributed, capabilities read empty, generation reads 0.
+    expect(health.unattributed.attempts).toBe(1);
+    expect(health.unattributed.passed).toBe(1);
+    expect(health.modalities).toHaveLength(0);
+    expect(health.hostGeneration).toBe(0);
+  });
+
+  it('rejects a non-positive projectId and PRECONDITION_FAILEDs without a db', async () => {
+    const { caller } = setup();
+    await expect(caller.cyboflow.verificationRequests.health({ projectId: 0 })).rejects.toThrow();
+
+    const noDb = appRouter.createCaller(createContext({}));
+    await expect(noDb.cyboflow.verificationRequests.health({ projectId: 1 })).rejects.toThrow(TRPCError);
   });
 });

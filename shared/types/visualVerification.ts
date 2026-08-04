@@ -1593,3 +1593,130 @@ export interface VerificationBudgetSummary {
   /** `SUM(verification_requests.judge_calls_used)` for the project's lifetime — every request, `setup_proof` included (§8 open question: exempting proof runs from this sum is undecided). */
   usedCalls: number;
 }
+
+// ---------------------------------------------------------------------------
+// Phase-3 health panel (docs/proposals/verification-setup-flow.md §6)
+// ---------------------------------------------------------------------------
+
+/**
+ * The terminal request statuses, i.e. the ones an ATTEMPT can end in. Excludes
+ * the three in-flight states (`queued` / `leased` / `running`), which are
+ * counted separately as {@link VerificationOutcomeStats.inFlight} — a request
+ * still running is not yet an attempt and must not dilute a pass rate.
+ */
+export const TERMINAL_REQUEST_STATUSES: readonly RequestStatus[] = [
+  'passed',
+  'failed',
+  'low_confidence',
+  'skipped',
+  'timeout',
+] as const;
+
+/**
+ * A failure-class histogram key. `'unclassified'` is NOT a
+ * {@link VerificationFailureClass} member — it counts non-passing terminal rows
+ * the §3.1 classifier never stamped (a pre-095 row, or a `skipped`/`timeout`
+ * that ended before classification). Kept as an explicit bucket rather than
+ * dropped, so the histogram's parts always sum to the non-passing total and a
+ * gap in attribution is visible instead of silently absorbed.
+ */
+export type VerificationFailureHistogramKey = VerificationFailureClass | 'unclassified';
+
+/**
+ * Outcome statistics over one set of verification requests.
+ *
+ * `passRate` uses ALL terminal attempts as its denominator — `skipped`
+ * included. That is deliberate and is the number §6 asks for: the proposal's
+ * motivating "2 for 28" baseline counted every attempt, and the degrade path
+ * (§3.2) makes a SKIP the most common way verification fails to happen at all.
+ * A denominator that excluded skips would report a healthy pass rate for a
+ * project whose verifications never actually run — precisely the blindness the
+ * health panel exists to remove.
+ */
+export interface VerificationOutcomeStats {
+  /** Terminal requests ({@link TERMINAL_REQUEST_STATUSES}). */
+  attempts: number;
+  /** Requests currently `queued` / `leased` / `running` — not part of `attempts`. */
+  inFlight: number;
+  /** Terminal requests with status `passed`. */
+  passed: number;
+  /** `passed / attempts`, or `null` when there are no attempts (never `0` — "no data" and "never passed" are different facts). */
+  passRate: number | null;
+  /** Count per terminal status; every {@link TERMINAL_REQUEST_STATUSES} key present, zeros included. */
+  outcomes: Record<RequestStatus, number>;
+  /** Count per failure class over NON-PASSING terminal rows; every key present, zeros included. */
+  failures: Record<VerificationFailureHistogramKey, number>;
+  /** Median `leased_at → ended_at` across terminal rows carrying both stamps; `null` when none do. */
+  medianDurationMs: number | null;
+  /** The newest `ended_at` among terminal rows, or `null`. */
+  lastAt: string | null;
+}
+
+/**
+ * A capability-ledger row as the panel shows it — the persisted state from
+ * `verify_capability_state` (migration 095) PLUS the derived `active` bit.
+ *
+ * `suppressionActive` is the load-bearing field: a `suppressed`/`unsupported` row whose
+ * TTL has elapsed or whose `hostGeneration` no longer matches the current host
+ * generation is INERT — the next request re-attempts freely
+ * (`VerifyCapabilityStore.getActiveSuppression`, §3.3). Showing raw `status`
+ * alone would tell a user a modality is suppressed when the engine has already
+ * moved on, which is the checkbox-vs-probe failure mode in miniature.
+ */
+export interface VerificationCapabilityState {
+  status: 'active' | 'suppressed' | 'unsupported';
+  reason: string;
+  consecutiveEnvFailures: number;
+  /** When the suppression lapses (`suppressed_until`); `null` when never suppressed. */
+  suppressedUntil: string | null;
+  /** The host generation this row was stamped at. */
+  hostGeneration: number;
+  /**
+   * Whether a suppression is CURRENTLY in force — see the interface doc.
+   *
+   * Named apart from `status` on purpose: `status: 'active'` means the
+   * capability is HEALTHY (counting failures, breaker not tripped), whereas
+   * `suppressionActive: true` means it is BLOCKED. One field's "active" is the
+   * other's opposite, so they must never share a name.
+   */
+  suppressionActive: boolean;
+}
+
+/** Per-modality health: outcome stats plus the capability ledger for that modality. */
+export interface VerificationModalityHealth extends VerificationOutcomeStats {
+  modality: VerificationModality;
+  /** The capability row, or `null` when the ledger has never recorded this modality. */
+  capability: VerificationCapabilityState | null;
+}
+
+/**
+ * The phase-3 health summary for one project (§6).
+ *
+ * Setup-proof traffic is reported SEPARATELY from lane traffic throughout —
+ * §8's stated leaning ("separate counter surfaced in the health panel"). A
+ * proof run is the flow that MAKES verification work; folding its attempts
+ * into the lane pass rate would make a project look unhealthy precisely while
+ * it is being fixed.
+ */
+export interface VerificationHealthSummary {
+  projectId: number;
+  /** One entry per modality that has traffic or a capability row, in {@link VERIFICATION_MODALITIES} order. */
+  modalities: VerificationModalityHealth[];
+  /** Lane requests whose `modality` column is NULL (pre-095 rows, or rows the resolver never stamped). */
+  unattributed: VerificationOutcomeStats;
+  /** Setup-proof requests (`setup_proof = 1`), excluded from every other bucket here. */
+  setupProof: VerificationOutcomeStats;
+  /**
+   * `SUM(judge_calls_used)` over setup-proof rows only.
+   *
+   * KNOWN DIVERGENCE, surfaced rather than hidden: proof runs are exempt from
+   * the budget CHECK (`verificationScheduler.ts` gates on `!setupProof`) but
+   * their spend is still INCLUDED in the SUM that check reads, so it consumes
+   * the allowance ordinary lanes are measured against — despite the
+   * `cyboflow_request_verification` tool contract promising a proof run is
+   * "never counted against it". This field is that overlap, made visible.
+   */
+  setupProofCallsUsed: number;
+  /** `verify_host_state.capability_generation` — bumped whenever any probe observes a changed host fact. */
+  hostGeneration: number;
+}
