@@ -317,22 +317,29 @@ function queuePath(): string {
 }
 
 /**
- * Strip identifying context that feedback events would otherwise carry.
+ * Strip identifying context that feedback events would otherwise carry, and pin
+ * the tags to the bag this module built.
  *
  * Runs as a scope event processor because `beforeSend` does not fire for
  * feedback (see file header). `includeServerName: false` should already prevent
  * `server_name`, but this is the single enforcement point.
  */
-function stripIdentifyingContext(event: Event): Event {
-  event.server_name = undefined;
-  delete event.user;
-  // Breadcrumbs accumulate app-wide and can contain paths, commands, and prompts.
-  // A bug report must carry only what the user reviewed.
-  delete event.breadcrumbs;
-  // `extra` is dropped from error events by scrubSentryEvent; feedback bypasses
-  // that hook entirely, so it is dropped here for the same reason.
-  delete event.extra;
-  return event;
+function makeSanitizingEventProcessor(tags: Record<string, string>): (event: Event) => Event {
+  return (event) => {
+    event.server_name = undefined;
+    delete event.user;
+    // Breadcrumbs accumulate app-wide and can contain paths, commands, and prompts.
+    // A bug report must carry only what the user reviewed.
+    delete event.breadcrumbs;
+    // `extra` is dropped from error events by scrubSentryEvent; feedback bypasses
+    // that hook entirely, so it is dropped here for the same reason.
+    delete event.extra;
+    // REPLACED, not merged. Nothing sets global tags today, but a `setTag` added
+    // anywhere later would otherwise ride out on every bug report unscrubbed —
+    // and tags are the one field that looks harmless enough to add casually.
+    event.tags = { ...tags };
+    return event;
+  };
 }
 
 /**
@@ -462,9 +469,10 @@ export async function submitBugReport(
   const eventId = newEventId();
   const tracker = beginTracking(eventId);
   try {
+    const tags = buildFeedbackTags(input, diagnostics);
     const scope = new Scope();
     scope.setClient(client);
-    scope.addEventProcessor(stripIdentifyingContext);
+    scope.addEventProcessor(makeSanitizingEventProcessor(tags));
 
     const attachments = [
       {
@@ -485,7 +493,7 @@ export async function submitBugReport(
         message: composeFeedbackMessage(input),
         email: input.email,
         source: 'bug-report-dialog',
-        tags: buildFeedbackTags(input, diagnostics),
+        tags,
       },
       // `event_id` is ours, not Sentry's — see beginTracking for why.
       { event_id: eventId, attachments },

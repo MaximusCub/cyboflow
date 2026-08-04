@@ -234,6 +234,24 @@ describe('scope event processor', () => {
     // The report itself must survive scrubbing.
     expect(processed.contexts?.feedback?.message).toBe('kept');
   });
+
+  /**
+   * Tags look harmless enough to add globally, and a global one would ride out
+   * on every bug report. The processor replaces the bag rather than merging it,
+   * so only what this module built can leave.
+   */
+  it('replaces the tag bag rather than letting ambient tags through', async () => {
+    await submitBugReport(REPORT, DIAGNOSTICS);
+
+    const processor = sentry.addEventProcessor.mock.calls[0][0] as (e: Event) => Event;
+    const processed = processor({
+      tags: { project_path: '/Users/krishna/private-repo', report_source: 'forged' },
+    } as Event);
+
+    expect(processed.tags?.project_path).toBeUndefined();
+    expect(processed.tags?.report_source).toBe('sidebar');
+    expect(processed.tags?.app_version).toBe('0.1.35');
+  });
 });
 
 describe('delivery reporting', () => {
