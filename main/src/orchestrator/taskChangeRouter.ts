@@ -57,7 +57,9 @@ import type {
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { ExperimentArm } from '../../../shared/types/experiments';
+import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
+import { resolveIdeaComponents } from './ideaComponents/resolveIdeaComponents';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -3183,9 +3185,34 @@ export class TaskChangeRouter {
       // original while its arms run. Only a `tasks` row can be a seed, so this is
       // naturally false for ideas/epics.
       experimentSeed: type === 'task' ? this.isLiveExperimentSeed(taskId) : false,
+      // Idea component ledger (migration 098): stamped on the emit path for the
+      // SAME "emit-path stamp parity" reason as decomposed_at/approved_at above —
+      // a field present on the seed-query path (taskListing.ts) but absent here
+      // would make the card chips vanish the instant anything touches the card.
+      // Ideas-only; epics/tasks have no ledger and stay `undefined` ("not
+      // computed", per the shared type's doc).
+      components: type === 'idea' ? this.resolveIdeaComponentsSafe(taskId) : undefined,
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
+  }
+
+  /**
+   * Fail-soft `resolveIdeaComponents` wrapper for the emit path — mirrors
+   * `isLiveExperimentSeed` above. `idea_components`/`approved_designs`
+   * (migrations 098/082) are recent additions; a schema predating them (an
+   * older on-disk DB mid-migration, or one of this repo's many hand-rolled
+   * test fixtures that hasn't been updated for 098 yet) degrades PERMISSIVELY
+   * to `undefined` ("not computed") instead of throwing 'no such table' on
+   * every idea create/update.
+   */
+  private resolveIdeaComponentsSafe(taskId: string): IdeaComponentState[] | undefined {
+    try {
+      return resolveIdeaComponents(this.db, taskId);
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) return undefined;
+      throw err;
+    }
   }
 
   /** Cheap project_id lookup for the post-commit emit read (the row exists). */

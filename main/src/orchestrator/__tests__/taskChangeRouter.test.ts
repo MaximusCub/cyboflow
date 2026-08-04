@@ -46,8 +46,10 @@ import {
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { selectTaskById } from '../taskListing';
 import type { DatabaseLike } from '../types';
 import type { EntityCategory, TaskChangedEvent } from '../../../../shared/types/tasks';
+import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
 
 // ---------------------------------------------------------------------------
 // Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 024, default board seeded.
@@ -186,6 +188,38 @@ function buildDbWithSeedIdeaColumns(): Database.Database {
   } catch {
     // column already present — no-op.
   }
+  return db;
+}
+
+/**
+ * buildDb() variant carrying the idea component ledger table (migration 098)
+ * plus the minimal `approved_designs`/`artifacts` columns
+ * resolveIdeaComponentsBatch's 'prototype' derivation arm reads (mirrors
+ * resolveIdeaComponents.test.ts's own ad-hoc schema, and taskListing.test.ts's
+ * identical addition) — neither is part of buildDb()'s base migration chain.
+ */
+function buildDbWithIdeaComponents(): Database.Database {
+  const db = buildDb();
+  const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  // taskListing.selectTaskById's UNION also reads experiment_id (migration 049)
+  // unconditionally; buildDb() above doesn't carry it (this file's own fixtures
+  // never previously exercised taskListing's read side against this DB).
+  db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT;');
+  db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT;');
+  db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT;');
+  db.exec(`
+    CREATE TABLE approved_designs (
+      id TEXT PRIMARY KEY,
+      idea_id TEXT NOT NULL,
+      superseded_at TEXT
+    );
+    CREATE TABLE artifacts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      atype TEXT NOT NULL
+    );
+  `);
   return db;
 }
 
@@ -621,6 +655,74 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       };
       expect(task.category).toBe('feature');
       expect(task.version).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // idea component ledger (migration 098) — emit-path stamp parity
+  // -------------------------------------------------------------------------
+
+  describe('idea component ledger (migration 098) — buildBacklogTaskItem emit-path parity', () => {
+    it('the emitted event snapshot stamps all FIVE components for an idea, matching the seed-query path', async () => {
+      const db = buildDbWithIdeaComponents();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const events: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Idea spec\n\nSpec text.',
+      });
+
+      // The create itself already emits — this is the live-emit path under test.
+      expect(events).toHaveLength(1);
+      const emitted = events[0].task?.components;
+      expect(emitted).toBeDefined();
+      expect(emitted!.map((c) => c.component)).toEqual([...IDEA_COMPONENT_KEYS]);
+      expect(emitted!.find((c) => c.component === 'idea-spec')!.state).toBe('complete');
+
+      // The seed-query path (taskListing.selectTaskById) must agree exactly —
+      // the emit-path stamp-parity guard (docs/CODE-PATTERNS.md), same
+      // precedent as decomposed_at/approved_at: a field present on one path but
+      // absent on the other makes the card chips vanish the instant anything
+      // touches the card.
+      const seeded = selectTaskById(dbAdapter(db), taskId);
+      expect(seeded!.components).toEqual(emitted);
+    });
+
+    it('the emitted event snapshot leaves components undefined for epics/tasks — ledger is ideas-only', async () => {
+      const db = buildDbWithIdeaComponents();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const events: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+
+      await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'An epic' });
+      await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'A task' });
+
+      expect(events).toHaveLength(2);
+      expect(events[0].task?.components).toBeUndefined();
+      expect(events[1].task?.components).toBeUndefined();
+    });
+
+    it('degrades to components: undefined (never throws) on a pre-098 schema lacking idea_components', async () => {
+      // buildDb() (NOT the ...WithIdeaComponents variant) has no idea_components/
+      // approved_designs tables — the fail-soft wrapper must degrade permissively
+      // rather than throw 'no such table' on every idea create.
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const events: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Pre-098 idea' }),
+      ).resolves.toBeDefined();
+      expect(events).toHaveLength(1);
+      expect(events[0].task?.components).toBeUndefined();
     });
   });
 
