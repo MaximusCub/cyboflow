@@ -4729,6 +4729,26 @@ app.whenReady().then(async () => {
               type: 'claude',
               title: 'Chat',
             });
+            // Server-side createPanel skips the frontend panels:create
+            // auto-registration (ipc/panels.ts) — but an SDK-substrate arm's
+            // chat is driven through the panel-scoped claudePanels/panels IPC,
+            // whose manager throws "Panel not registered" for an unregistered
+            // panel, and bootstrapArmSessionPanels sees this panel and skips
+            // the registering create. Register here (lazy require, mirroring
+            // ipc/panels.ts — the handler assigns the export at boot, long
+            // before any arm launch) so the arm's FIRST chat turn dispatches.
+            // Interactive arms stay unregistered on purpose: the PTY surface
+            // never uses the structured claudePanels IPC (same asymmetry as
+            // the quick handler's eager PTY panel).
+            if (resolvedSubstrate !== 'interactive') {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { claudePanelManager } = require('./ipc/claudePanel') as {
+                claudePanelManager?: {
+                  registerPanel(panelId: string, sessionId: string): void;
+                };
+              };
+              claudePanelManager?.registerPanel(chatPanel.id, session.id);
+            }
             databaseService.updatePanelSettings(chatPanel.id, {
               ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
               ...(quickConfig.reasoningEffort !== undefined
