@@ -360,12 +360,14 @@ export interface ApproveIdeasBatchRow {
  */
 /**
  * Whether the run produced ANY reviewable design surface: a prototype artifact
- * (`ui-prototype` / `interactive-prototype`) OR an owned idea whose body carries
- * an `## Architecture design` section. Consulted by the programmatic
- * controller's optional approve-design human gate — when BOTH design steps
- * self-skipped (no idea carried the flags), the gate has literally nothing to
- * review and should skip instead of parking the run (2026-08-04, first launch
- * smoke: the run parked at approve-design over an empty surface).
+ * (`ui-prototype` / `interactive-prototype`), a project-brief artifact carrying
+ * an `## Architecture design` section (launch designs the whole concept BEFORE
+ * ideas exist, so the brief holds the architecture until decomposition), OR an
+ * owned idea whose body carries that section. Consulted by the programmatic
+ * controller's optional approve-design human gate — when the design steps
+ * self-skipped, the gate has literally nothing to review and should skip
+ * instead of parking the run (2026-08-04, first launch smoke: the run parked
+ * at approve-design over an empty surface).
  *
  * FAIL-OPEN toward the gate: any thrown query returns true, so a read error
  * opens the human gate rather than silently skipping a review step.
@@ -380,6 +382,15 @@ export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boo
       )
       .get(runId) as { present?: number } | undefined;
     if (artifactRow?.present === 1) return true;
+    const briefRow = db
+      .prepare(
+        `SELECT 1 AS present FROM artifacts
+          WHERE run_id = ? AND atype = 'project-brief'
+            AND payload_json LIKE '%## Architecture design%'
+          LIMIT 1`,
+      )
+      .get(runId) as { present?: number } | undefined;
+    if (briefRow?.present === 1) return true;
     for (const ideaId of listRunOwnedOrBatchIdeaIds(db, runId)) {
       const row = db
         .prepare('SELECT body AS body FROM ideas WHERE id = ?')

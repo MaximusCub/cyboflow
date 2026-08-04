@@ -93,13 +93,32 @@ Sections, in order:
 - `### Build sequence` — 3–6 numbered stages from empty repo to MVP, each one
   line; stage 1 is always the walking skeleton.
 
+End the brief with two concept-level design flag lines (each on its own line,
+after the last section):
+
+- `UI_PROTOTYPE: yes|no` — `yes` when the product has user-facing UI worth
+  mocking up as a whole-product concept (most apps); `no` for CLIs, APIs,
+  libraries, and pure services.
+- `ARCH_DESIGN: yes|no` — `yes` when the project warrants an explicit
+  project-level architecture pass (more than one viable stack, a novel data
+  model, multiple services) — for most new projects it does; `no` only for a
+  trivially small single-file tool.
+
+These flags drive the flow's design phase, which runs on the WHOLE concept
+before any decomposition — so they describe the product, never an individual
+feature.
+
 Never introduce a decision the interview didn't cover without flagging it as an
 assumption. On a revision request, change what the feedback asks and leave the
 rest byte-stable.
 
 ## MODE: IDEAS — decompose the brief
 
-Split the approved brief into an ordered idea set. Aim for **4–8 ideas** (hard
+Split the approved brief into an ordered idea set. The brief you receive may
+already carry an `## Architecture design` section and reference a concept
+prototype — the design phase ran on the whole concept BEFORE this
+decomposition, so honor those decisions: slice along the architecture's seams
+and never contradict an approved design call. Aim for **4–8 ideas** (hard
 cap 10): each a coherent, independently valuable slice of the project, sized so
 a dedicated planner run could decompose it. Order them by `BUILD_ORDER` — the
 dependency-honoring sequence from the brief's build sequence — and mark the
@@ -109,10 +128,7 @@ will decompose into tasks. Everything else is `INITIAL_BUILD: no`.
 
 Sizing: `small` = shippable in roughly one focused session; `large` = needs
 decomposition into multiple coordinated tasks. Foundation ideas are usually
-`large`. Flags: `UI_PROTOTYPE: yes` when the idea has meaningful user-facing UI
-where a mockup sharpens review; `ARCH_DESIGN: yes` on the foundation idea when
-the project warrants an explicit architecture decision (multi-service, novel
-data model, more than one viable stack) — for most new projects it does.
+`large`.
 
 ## Result
 
@@ -142,7 +158,5 @@ data model, more than one viable stack) — for most new projects it does.
   - `#### Problem definition` — at most five bullets.
   - `#### Proposed solution` — at most five bullets.
   - `SCOPE: small|large`
-  - `UI_PROTOTYPE: yes|no`
-  - `ARCH_DESIGN: yes|no`
   - `BUILD_ORDER: <N>`
   - `INITIAL_BUILD: yes|no`

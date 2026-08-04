@@ -148,6 +148,14 @@ export interface SpawnStepRunnerOptions {
    */
   approveIdeasDecisions?: () => string | undefined;
   /**
+   * The run's approved project-brief artifact markdown (launch flow). A thunk
+   * re-read per step: undefined until the brief is reported (pre-brief steps
+   * and non-launch flows), then every later step turn carries the
+   * `# Project brief` grounding section — a programmatic step agent has no MCP
+   * surface to read artifacts. Absent ⇒ no section (byte-identical prompts).
+   */
+  projectBrief?: () => string | undefined;
+  /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
    */
@@ -207,6 +215,9 @@ export class SpawnStepRunner implements StepRunner {
     // Re-read the approve-ideas gate decisions per step — undefined until the
     // human resolves the batch gate, then every later step turn carries them.
     const approveIdeasDecisions = this.opts.approveIdeasDecisions?.();
+    // Re-read the project brief per step — undefined until the brief artifact
+    // is reported, then every later step turn carries the grounding section.
+    const projectBrief = this.opts.projectBrief?.();
     // Re-resolve this step's agent RUNTIME per step (Codex-per-step mixing) —
     // never captured at construction, mirroring the resolvers above — so a
     // workflow-scoped agent config edited mid-run is honored on this step's next
@@ -248,6 +259,7 @@ export class SpawnStepRunner implements StepRunner {
       ...(taskScope ? { taskScope } : {}),
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(approveIdeasDecisions ? { approveIdeasDecisions } : {}),
+      ...(projectBrief ? { projectBrief } : {}),
       ...(userGuidance ? { userGuidance } : {}),
       // Per-attempt visual-verification threading (verification-agent redesign
       // §5.3): a task-verify contract re-run and a visual-FAIL implement

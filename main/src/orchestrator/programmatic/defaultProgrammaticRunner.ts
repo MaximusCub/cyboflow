@@ -176,6 +176,29 @@ export interface DefaultProgrammaticRunnerDeps {
   logger?: LoggerLike;
 }
 
+/**
+ * Read the run's `project-brief` artifact markdown (the launch flow's approved
+ * brief), or undefined when the brief has not been reported yet. Fail-soft: a
+ * missing artifacts table or unparseable payload yields undefined — the step
+ * prompt simply omits its `# Project brief` section.
+ */
+export function readProjectBriefMarkdown(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'project-brief' LIMIT 1",
+      )
+      .get(runId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const markdown = (parsed as { markdown?: unknown }).markdown;
+    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class DefaultProgrammaticRunner implements ProgrammaticRunner {
   constructor(private readonly deps: DefaultProgrammaticRunnerDeps) {}
 
@@ -228,6 +251,15 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const approveIdeasDecisions = (): string | undefined =>
       this.deps.db ? readApproveIdeasDecisionLines(this.deps.db, ctx.runId) : undefined;
 
+    // Re-read the run's project-brief artifact per step (launch flow). A
+    // programmatic step agent cannot read artifacts via MCP, so every
+    // post-brief step turn carries the brief as its grounding section.
+    // Undefined pre-brief and on every non-launch flow ⇒ no section.
+    const projectBrief = (): string | undefined => {
+      if (ctx.workflow.name !== 'launch' || !this.deps.db) return undefined;
+      return readProjectBriefMarkdown(this.deps.db, ctx.runId);
+    };
+
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
     // empty no-op set so the walk is byte-identical. Read by reference at the
@@ -272,6 +304,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         taskScope,
         runOwnedIdeaIds,
         approveIdeasDecisions,
+        projectBrief,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
       this.deps.logger,

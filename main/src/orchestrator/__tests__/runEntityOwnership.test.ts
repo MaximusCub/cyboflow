@@ -588,9 +588,10 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
         body TEXT
       );
       CREATE TABLE artifacts (
-        id     TEXT PRIMARY KEY,
-        run_id TEXT,
-        atype  TEXT NOT NULL
+        id           TEXT PRIMARY KEY,
+        run_id       TEXT,
+        atype        TEXT NOT NULL,
+        payload_json TEXT
       );
     `);
     return db;
@@ -610,6 +611,24 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
       'Spec…\n\n## Architecture design\n\nStack: …',
     );
     expect(hasReviewableDesignSurface(dbAdapter(db), 'run-b')).toBe(true);
+  });
+
+  it('true only when the project-brief artifact carries an Architecture design section (launch, pre-ideas)', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-brief', null);
+    const insert = db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)');
+    // A plain brief (no architecture section) is NOT a design surface.
+    insert.run('art_plain', 'run-brief', 'project-brief', JSON.stringify({ markdown: '## Project brief\n…' }));
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-brief')).toBe(false);
+    // The architecture step appended its section → reviewable.
+    insertRun(db, 'run-brief-arch', null);
+    insert.run(
+      'art_arch',
+      'run-brief-arch',
+      'project-brief',
+      JSON.stringify({ markdown: '## Project brief\n…\n\n## Architecture design\n\nStack: …' }),
+    );
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-brief-arch')).toBe(true);
   });
 
   it('false when the run has neither (empty design surface)', () => {

@@ -75,6 +75,17 @@ export interface ComposeStepPromptArgs {
    */
   runOwnedIdeaIds?: readonly string[];
   /**
+   * The run's approved PROJECT BRIEF markdown (launch flow) — the payload of
+   * the run's `project-brief` artifact, resolved live by the host for each
+   * fresh step turn. Launch's post-brief steps (design, ideas, expand-spec,
+   * epics, tasks) all ground in the brief, but a programmatic step agent has
+   * no MCP surface to read artifacts — without this section it would probe
+   * the (usually empty) worktree and improvise. Absent / empty ⇒ no section
+   * (byte-identical prompts; also naturally absent on pre-brief steps and
+   * every non-launch flow).
+   */
+  projectBrief?: string;
+  /**
    * The human's per-idea approve-ideas gate decisions — the pre-rendered
    * `- IDEA-014: approve` verdict lines the host read off the run's RESOLVED
    * `gate:human-step:approve-ideas` item (readApproveIdeasDecisionLines).
@@ -132,11 +143,20 @@ export interface ComposeStepPromptArgs {
  * to be told explicitly. Any future atype defaults to no addendum (the `default` branch)
  * unless it is proven to need one and added here deliberately.
  */
-function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifact']>): string {
+function artifactFollowUp(
+  outputArtifact: NonNullable<WorkflowStep['outputArtifact']>,
+  workflowName: string,
+): string {
   switch (outputArtifact.atype) {
     case 'ui-prototype':
       return `\n\n## Artifact to report\n\nYour \`cyboflow-ui-prototype\` subagent writes ONE self-contained static HTML+CSS document — no \`<script>\`, no JS, no dev server — to \`$CYBOFLOW_RUN_ARTIFACTS_DIR/${PROTOTYPE_HTML_RELPATH}\`. When it returns its \`## Prototype\` section confirming that file, call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"fileName": "${PROTOTYPE_HTML_RELPATH}"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
     case 'arch-design':
+      // Launch designs the whole concept BEFORE ideas exist, so the section
+      // cannot fold into an idea yet — it lives in the project-brief artifact
+      // until the ideas step folds it into the foundation idea.
+      if (workflowName === 'launch') {
+        return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, no idea exists yet to fold it into — the brief carries it. Take the \`# Project brief\` section above, append the returned \`## Architecture design\` section to it (REPLACE any existing \`## Architecture design\` section, never stack a second copy), and re-report the brief artifact: \`cyboflow_report_artifact\` with \`atype: 'project-brief'\`, label \`"Project brief"\`, and \`payload_json\` \`{"markdown": "<the full updated brief>"}\`. The later ideas step folds this section into the foundation idea, which is what derives the arch-design tab.`;
+      }
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
     case 'project-brief':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-interview\` subagent returns its \`## Project brief\`, call \`cyboflow_report_artifact\` yourself with \`atype: 'project-brief'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the full brief markdown>"}\` — that call is the ONLY thing that mints this run's Project brief tab, and the approve-brief gate has nothing to review without it. Re-report the same atype after any revision to enrich the same tab.`;
@@ -163,9 +183,9 @@ function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifa
 function ideaFlagContract(step: WorkflowStep): string {
   switch (step.id) {
     case 'ideas':
-      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`UI_PROTOTYPE:\`, \`ARCH_DESIGN:\`, \`BUILD_ORDER:\`, \`INITIAL_BUILD:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps in this workflow read the flags off the persisted body to decide whether to run at all — an idea saved without its flag lines silently disables its UI prototype and architecture design downstream.`;
+      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`, \`INITIAL_BUILD:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering and initial-build tier. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` initial-build idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
     case 'expand-spec':
-      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (\`SCOPE:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\` / \`BUILD_ORDER:\` / \`INITIAL_BUILD:\`), the expanded body you write back via \`cyboflow_update_task\` MUST preserve those lines VERBATIM. Later steps read the flags off the persisted body to decide whether to run — dropping them during expansion silently disables the UI prototype and architecture design steps.`;
+      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`INITIAL_BUILD:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
     default:
       return '';
   }
@@ -176,8 +196,22 @@ function ideaFlagContract(step: WorkflowStep): string {
  * context persisted into the idea body. Each programmatic step gets a fresh
  * turn, so mirror that decision here before it can delegate or create an
  * artifact. Other optional steps have no equivalent persisted prerequisite.
+ *
+ * LAUNCH is the exception: its design phase runs on the WHOLE CONCEPT before
+ * any idea exists, so the flags live at the end of the approved project brief
+ * (threaded into the prompt as the `# Project brief` section), never on ideas.
  */
-function conditionalExecution(step: WorkflowStep, hasRunOwnedIdeas: boolean): string {
+function conditionalExecution(step: WorkflowStep, workflowName: string, hasRunOwnedIdeas: boolean): string {
+  if (workflowName === 'launch') {
+    switch (step.id) {
+      case 'ui-prototype':
+        return `\n\n## Conditional execution\n\nThis flow designs the WHOLE concept before decomposition — condition on the \`# Project brief\` section above, never on ideas. Run this step ONLY when the brief carries \`UI_PROTOTYPE: yes\` (when the brief has no such flag line, judge from the brief itself whether the product has user-facing UI — a CLI/API/library does not). On yes: build ONE whole-product concept mockup from the full brief, showing the core loop end to end. Otherwise skip cleanly: do not delegate, do not write prototype files, do not report an artifact, and end with a one-line skip summary.`;
+      case 'architecture':
+        return `\n\n## Conditional execution\n\nThis flow designs the WHOLE concept before decomposition — condition on the \`# Project brief\` section above, never on ideas. Run this step ONLY when the brief carries \`ARCH_DESIGN: yes\` (when the brief has no such flag line, run it unless the project is a trivially small single-file tool — most new projects warrant it). On yes: design the PROJECT-LEVEL architecture (stack, repo layout, data model, service seams) from the full brief. Otherwise skip cleanly: do not delegate, do not report anything, and end with a one-line skip summary.`;
+      default:
+        return '';
+    }
+  }
   const scope = hasRunOwnedIdeas
     ? 'Read each id in the `## Run-owned idea scope` section directly with `cyboflow_get_task`. Do NOT enumerate project ideas or infer an active idea from other project ideas. Evaluate flags only on these run-owned ideas; when more than one is eligible, handle each eligible idea rather than choosing one.'
     : 'This run has no owned idea yet. Skip this step cleanly: do not list project ideas, infer an active idea, delegate, or create an artifact.';
@@ -217,7 +251,12 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.approveIdeasDecisions !== undefined && args.approveIdeasDecisions.trim().length > 0
       ? `\n\n# Approve-ideas decisions\n\nThe human resolved this run's approve-ideas batch gate with these per-idea decisions:\n\n${args.approveIdeasDecisions.trim()}\n\nThis verdict list is authoritative for idea-specific work: act on the APPROVED refs only. DENIED ideas stay on the backlog untouched — never expand, design, decompose, or archive them.`
       : '';
-  const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
+  const projectBrief =
+    args.projectBrief !== undefined && args.projectBrief.trim().length > 0
+      ? `\n\n# Project brief\n\nThe run's APPROVED project brief — the constitution every post-brief step grounds in (a programmatic step turn cannot read artifacts, so it is threaded here):\n\n${args.projectBrief.trim()}`
+      : '';
+  const artifactNote =
+    step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact, workflowName) : '';
   // Task-verify relay contract (verification-agent redesign §5.1; live-smoke fix
   // 2026-07-22): this step turn's FINAL MESSAGE is the typed step-output channel
   // the controller parses for the VERDICT line + the visual-verification
@@ -230,7 +269,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     step.agent === 'task-verify' || step.id === 'task-verify'
       ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
       : '';
-  const conditionalExecutionNote = conditionalExecution(step, runOwnedIdeaIds.length > 0);
+  const conditionalExecutionNote = conditionalExecution(step, workflowName, runOwnedIdeaIds.length > 0);
   const ideaFlagContractNote = ideaFlagContract(step);
   // Compound review-queue discipline — applies to EVERY compound step, not just
   // the one that reports the artifact. The compounder surfaces below-bar
@@ -268,7 +307,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${runOwnedIdeaScope}${approveIdeasDecisions}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${projectBrief}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 

@@ -446,16 +446,19 @@ describe('composeStepPrompt', () => {
   // self-skip on every programmatic run.
   // -------------------------------------------------------------------------
 
-  it('renders the flag persistence contract on the ideas step', () => {
+  it('renders the flag persistence contract on the ideas step (flags + arch fold)', () => {
     const out = composeStepPrompt({
       step: step({ id: 'ideas', name: 'Decompose into ideas', agent: 'interview' }),
       workflowName: 'launch',
       attempt: 1,
     });
     expect(out).toContain('## Idea persistence contract');
-    expect(out).toContain('UI_PROTOTYPE');
-    expect(out).toContain('ARCH_DESIGN');
+    expect(out).toContain('BUILD_ORDER');
+    expect(out).toContain('INITIAL_BUILD');
     expect(out).toContain('VERBATIM');
+    // The brief-carried architecture folds into the foundation idea here.
+    expect(out).toContain('## Architecture design');
+    expect(out).toContain('LOWEST `BUILD_ORDER`');
   });
 
   it('renders the flag preservation contract on the expand-spec step', () => {
@@ -465,7 +468,7 @@ describe('composeStepPrompt', () => {
       attempt: 1,
     });
     expect(out).toContain('## Idea persistence contract');
-    expect(out).toContain('MUST preserve those lines VERBATIM');
+    expect(out).toContain('MUST preserve those VERBATIM');
   });
 
   it('omits the persistence contract on unrelated steps', () => {
@@ -475,5 +478,82 @@ describe('composeStepPrompt', () => {
       attempt: 1,
     });
     expect(out).not.toContain('## Idea persistence contract');
+  });
+
+  // -------------------------------------------------------------------------
+  // Project brief threading + launch concept-level design conditioning
+  // -------------------------------------------------------------------------
+
+  it('renders the Project brief section when the host threads it', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'ideas', name: 'Decompose into ideas', agent: 'interview' }),
+      workflowName: 'launch',
+      attempt: 1,
+      projectBrief: '## Project brief\n\n### Vision\nA habit tracker.\n\nUI_PROTOTYPE: yes\nARCH_DESIGN: yes',
+    });
+    expect(out).toContain('# Project brief');
+    expect(out).toContain('A habit tracker.');
+    // Absent / empty ⇒ no section (a neutral step: the ideas contract itself
+    // mentions the backticked section name, so assert on the heading form).
+    const bare = composeStepPrompt({ step: step({ id: 'epics' }), workflowName: 'launch', attempt: 1 });
+    expect(bare).not.toContain('\n# Project brief\n');
+  });
+
+  it('launch design steps condition on the BRIEF flags, not idea flags', () => {
+    const ui = composeStepPrompt({
+      step: step({ id: 'ui-prototype', name: 'Concept prototype', agent: 'ui-prototype' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(ui).toContain('## Conditional execution');
+    expect(ui).toContain('brief carries `UI_PROTOTYPE: yes`');
+    expect(ui).toContain('whole-product concept mockup');
+    expect(ui).not.toContain('Run-owned idea scope');
+
+    const arch = composeStepPrompt({
+      step: step({ id: 'architecture', name: 'Architecture design', agent: 'architecture' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(arch).toContain('brief carries `ARCH_DESIGN: yes`');
+    expect(arch).toContain('PROJECT-LEVEL architecture');
+  });
+
+  it('planner/ship design steps keep the per-idea flag conditioning', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'ui-prototype', name: 'UI prototype', agent: 'ui-prototype' }),
+      workflowName: 'planner',
+      attempt: 1,
+      runOwnedIdeaIds: ['ide_1'],
+    });
+    expect(out).toContain('persisted spec contains `UI_PROTOTYPE: yes`');
+  });
+
+  it('launch architecture artifact follow-up re-reports the brief (no idea exists yet)', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'architecture',
+        name: 'Architecture design',
+        agent: 'architecture',
+        outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+      }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain("atype: 'project-brief'");
+    expect(out).not.toContain("fold it into the IDEA's body");
+
+    // Planner keeps the fold-into-idea follow-up.
+    const planner = composeStepPrompt({
+      step: step({
+        id: 'architecture',
+        name: 'Architecture design',
+        agent: 'architecture',
+        outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(planner).toContain("fold it into the IDEA's body");
   });
 });

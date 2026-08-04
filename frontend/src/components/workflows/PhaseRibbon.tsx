@@ -52,6 +52,8 @@ function phaseAbbrev(label: string): string {
       return 'PRUNE';
     case 'ideas':
       return 'IDEAS';
+    case 'design':
+      return 'DESGN';
     default:
       return label.toUpperCase().slice(0, 5);
   }
