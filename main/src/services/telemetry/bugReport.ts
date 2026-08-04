@@ -46,6 +46,7 @@ import {
 import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { resolveTelemetryCredentials } from './credentials';
 import type { BugReportDiagnostics } from './diagnostics';
 import type { BugReportDelivery } from '../../../../shared/types/bugReport';
@@ -103,8 +104,8 @@ type SendOutcome =
   | { kind: 'unknown' };
 
 interface SendTracker {
-  /** Set once `captureFeedback` returns; only this envelope is tracked. */
-  eventId?: string;
+  /** The one envelope this tracker accepts a result for. */
+  eventId: string;
   settle: (outcome: SendOutcome) => void;
   settled: Promise<SendOutcome>;
 }
@@ -118,14 +119,31 @@ interface SendTracker {
  */
 let activeTracker: SendTracker | null = null;
 
-function beginTracking(): SendTracker {
+/**
+ * Arm a tracker for an event id we mint OURSELVES.
+ *
+ * The id cannot be taken from `captureFeedback`'s return value: Sentry's
+ * internal promise is a `SyncPromise`, whose `.then` handlers run synchronously
+ * when the value is already settled, so with no async event processor the whole
+ * prepare→send chain — including `transport.send` — completes BEFORE
+ * `captureFeedback` returns. Assigning the id afterwards is always too late; the
+ * envelope has already passed the wrapper unmatched. Sentry honours
+ * `hint.event_id` (a feedback event carries no `event_id` of its own), so
+ * minting it here is what makes the match deterministic.
+ */
+function beginTracking(eventId: string): SendTracker {
   let settle: (outcome: SendOutcome) => void = () => {};
   const settled = new Promise<SendOutcome>((resolve) => {
     settle = resolve;
   });
-  const tracker: SendTracker = { settle, settled };
+  const tracker: SendTracker = { eventId, settle, settled };
   activeTracker = tracker;
   return tracker;
+}
+
+/** Sentry event ids are 32 lowercase hex characters, no dashes. */
+function newEventId(): string {
+  return randomUUID().replace(/-/g, '');
 }
 
 function endTracking(tracker: SendTracker): void {
@@ -376,7 +394,8 @@ export async function submitBugReport(
     };
   }
 
-  const tracker = beginTracking();
+  const eventId = newEventId();
+  const tracker = beginTracking(eventId);
   try {
     const scope = new Scope();
     scope.setClient(client);
@@ -396,17 +415,17 @@ export async function submitBugReport(
       });
     }
 
-    const eventId = captureFeedback(
+    captureFeedback(
       {
         message: composeFeedbackMessage(input),
         email: input.email,
         source: 'bug-report-dialog',
         tags: buildFeedbackTags(input, diagnostics),
       },
-      { attachments },
+      // `event_id` is ours, not Sentry's — see beginTracking for why.
+      { event_id: eventId, attachments },
       scope,
     );
-    tracker.eventId = eventId;
 
     // `flush` gets the event processed and handed to the transport, but resolves
     // whether or not the envelope reached Sentry (file header, point 4). The

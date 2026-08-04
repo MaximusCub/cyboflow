@@ -16,19 +16,29 @@
  *     machine, and delivery has to be read off the transport's own send result.
  *
  * The mock therefore models the real call shape rather than stubbing `flush`: a
- * client that builds its transport from the options it was given, and hands the
- * captured envelope to it WITHOUT awaiting (as the real client does — see
- * `Client.sendEvent`, where `sendEnvelope(...)` is deliberately floating).
+ * client that builds its transport from the options it was given, and reaches
+ * `transport.send` from INSIDE `captureFeedback` — which is what actually
+ * happens, because Sentry's internal `SyncPromise` runs `.then` handlers
+ * synchronously when already settled. A live smoke caught that: keying the
+ * tracker on `captureFeedback`'s RETURN value never matched, so a report the
+ * server accepted was reported to the user as queued.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Event } from '@sentry/electron/main';
 
-const EVENT_ID = 'event-id-123';
-
 const sentry = vi.hoisted(() => ({
   nodeClientCtor: vi.fn(),
   clientInit: vi.fn(),
-  captureFeedback: vi.fn((..._args: unknown[]) => EVENT_ID),
+  /**
+   * Reaches the transport SYNCHRONOUSLY, before returning — the SyncPromise
+   * behaviour above. The id comes from `hint.event_id`, which Sentry honours for
+   * feedback events (they carry no `event_id` of their own).
+   */
+  captureFeedback: vi.fn((_params: unknown, hint: { event_id?: string }) => {
+    const id = hint?.event_id ?? 'sentry-generated-id';
+    void sentry.transport.current?.send([{ event_id: id }, []]);
+    return id;
+  }),
   addEventProcessor: vi.fn(),
   setClient: vi.fn(),
   /** The innermost (offline) transport send the tracked wrapper delegates to. */
@@ -50,14 +60,10 @@ vi.mock('@sentry/electron/main', () => ({
     }
     init = sentry.clientInit;
     /**
-     * Models `Client.flush`: the event is processed and handed to the transport,
-     * but the send is NOT awaited, so flush can resolve long before the envelope
-     * has reached Sentry — or after it has quietly gone to the disk queue.
+     * Models `Client.flush`: it resolves whether or not the envelope reached
+     * Sentry, so it carries no delivery information at all.
      */
-    flush = async (): Promise<boolean> => {
-      void sentry.transport.current?.send([{ event_id: EVENT_ID }, []]);
-      return true;
-    };
+    flush = async (): Promise<boolean> => true;
   },
   Scope: class {
     setClient = sentry.setClient;
@@ -135,7 +141,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   sentry.transport.current = null;
   sentry.innerSend.mockResolvedValue({ statusCode: 200 });
-  sentry.captureFeedback.mockReturnValue(EVENT_ID);
   files.existsSync.mockReturnValue(false);
   files.readdirSync.mockReturnValue([]);
   creds.resolveTelemetryCredentials.mockReturnValue({
@@ -147,6 +152,12 @@ beforeEach(() => {
 
 function ctorOptions(): Record<string, unknown> {
   return sentry.nodeClientCtor.mock.calls[0]?.[0] as Record<string, unknown>;
+}
+
+/** The event id the module minted and passed to Sentry via the hint. */
+function capturedEventId(): string | undefined {
+  const hint = sentry.captureFeedback.mock.calls[0]?.[1] as { event_id?: string } | undefined;
+  return hint?.event_id;
 }
 
 describe('client construction', () => {
@@ -231,7 +242,25 @@ describe('delivery reporting', () => {
     const result = await submitBugReport(REPORT, DIAGNOSTICS);
 
     expect(result.delivery).toBe('accepted');
-    expect(result.eventId).toBe(EVENT_ID);
+    expect(result.eventId).toBe(capturedEventId());
+  });
+
+  /**
+   * Live-smoke regression. Sentry reaches the transport from INSIDE
+   * `captureFeedback` (SyncPromise), so an event id read from its return value is
+   * assigned too late to match the envelope already in flight — every delivered
+   * report then fell through to the settle timeout and was reported as queued.
+   * The id must be minted up front and handed to Sentry via `hint.event_id`.
+   */
+  it('matches the envelope even though the send starts before captureFeedback returns', async () => {
+    sentry.innerSend.mockResolvedValue({ statusCode: 200 });
+
+    const result = await submitBugReport(REPORT, DIAGNOSTICS);
+
+    const hint = sentry.captureFeedback.mock.calls[0][1] as { event_id?: string };
+    expect(hint.event_id).toMatch(/^[0-9a-f]{32}$/);
+    // Resolved from the send, not from the 10s "unknown" fallback.
+    expect(result.delivery).toBe('accepted');
   });
 
   /**
@@ -245,7 +274,7 @@ describe('delivery reporting', () => {
     const result = await submitBugReport(REPORT, DIAGNOSTICS);
 
     expect(result.delivery).toBe('queued');
-    expect(result.eventId).toBe(EVENT_ID);
+    expect(result.eventId).toBe(capturedEventId());
   });
 
   it('reports failed, with the status, when Sentry rejected the envelope', async () => {

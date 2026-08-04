@@ -644,8 +644,9 @@ function describeInstanceKind(dataDir: string): string {
 // launches could both acquire). Runs at module load, before app 'ready' and
 // before anything touches userData, as setPath('userData') and the lock both
 // require. The data dir is read AFTER arg parsing so a --cyboflow-dir override is
-// honored. Nothing in the app reads app.getPath('userData'), so relocating it is
-// side-effect-free beyond Electron's own per-kind state isolation.
+// honored. The only app code that reads app.getPath('userData') is the bug
+// reporter's offline queue, which WANTS to land under the kind's data dir, so
+// relocating it is side-effect-free beyond Electron's own state isolation.
 const kindDataDir = getCyboflowDirectory();
 try {
   const electronUserData = path.join(kindDataDir, 'electron');
