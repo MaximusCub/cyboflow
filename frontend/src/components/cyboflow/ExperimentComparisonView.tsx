@@ -469,8 +469,22 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
         experimentId,
         ...(seedIdeaId !== null ? { seedIdeaId } : {}),
       });
-      await bootstrapArmSessionPanels(result.armA.sessionId);
-      useCyboflowStore.getState().setActiveRun(result.armA.runId, result.armA.sessionId);
+      // Same arm-targeting rule as ABTestLaunchModal's launch navigation: the
+      // sole quick arm wins (its replayed config is what the user is watching),
+      // arm A otherwise. The rerun replays the SAME variant pair, so the source
+      // experiment's arm kinds decide.
+      const aIsQuick = isQuickArm(armVariantId(exp, 'A'));
+      const bIsQuick = isQuickArm(armVariantId(exp, 'B'));
+      const targetArm = bIsQuick && !aIsQuick ? result.armB : result.armA;
+      await bootstrapArmSessionPanels(targetArm.sessionId);
+      if (aIsQuick || bIsQuick) {
+        // Quick arm = chat session; the `__quick__` sentinel resolves no
+        // workflow, so route through the quick-session host (see
+        // handleOpenArmSession).
+        useCyboflowStore.getState().setActiveQuickSession(targetArm.sessionId, targetArm.runId);
+      } else {
+        useCyboflowStore.getState().setActiveRun(targetArm.runId, targetArm.sessionId);
+      }
       useNavigationStore.getState().setActiveProjectId(exp.project_id);
       // goToSession also clears experimentComparisonId (mutual-exclusion contract).
       useNavigationStore.getState().goToSession();
@@ -500,9 +514,18 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     if (sessionId === null) return;
     // Arm B is created headless, so bootstrap its panels BEFORE navigating —
     // mirrors ABTestLaunchModal's post-start sequence exactly (bootstrap →
-    // setActiveRun → setActiveProjectId → goToSession).
+    // navigate → setActiveProjectId → goToSession).
     await bootstrapArmSessionPanels(sessionId);
-    useCyboflowStore.getState().setActiveRun(runId, sessionId);
+    if (isQuickArm(armVariantId(exp, arm))) {
+      // A quick arm is a CHAT session, not a workflow run: its runId is the
+      // `__quick__` sentinel, which resolves no workflow (activeRunsStore drops
+      // it and workflows.list excludes it) — setActiveRun would render the
+      // workflow-only pane with a disabled composer. Route through the
+      // quick-session host instead (activeRunId stays null, chat composer live).
+      useCyboflowStore.getState().setActiveQuickSession(sessionId, runId);
+    } else {
+      useCyboflowStore.getState().setActiveRun(runId, sessionId);
+    }
     useNavigationStore.getState().setActiveProjectId(exp.project_id);
     useNavigationStore.getState().goToSession();
   };

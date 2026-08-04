@@ -497,11 +497,22 @@ export function ABTestLaunchModal({
       // Navigate to whichever arm is the quick one when exactly one is quick;
       // arm A otherwise (quick-vs-quick and the non-quick default both land on A).
       const targetArm = bIsQuick && !aIsQuick ? result.armB : result.armA;
+      // By that selection rule the target is a quick arm exactly when ANY arm is.
+      const targetIsQuick = aIsQuick || bIsQuick;
 
       // Bootstrap the target arm's panels (server created the session headless),
       // then navigate straight to it.
       await bootstrapArmSessionPanels(targetArm.sessionId);
-      useCyboflowStore.getState().setActiveRun(targetArm.runId, targetArm.sessionId);
+      if (targetIsQuick) {
+        // A quick arm is a CHAT session, not a workflow run: its runId is the
+        // `__quick__` sentinel, which resolves no workflow (activeRunsStore
+        // drops it and workflows.list excludes it) — setActiveRun would render
+        // the workflow-only pane with a disabled composer. Route through the
+        // quick-session host instead (activeRunId stays null, chat composer live).
+        useCyboflowStore.getState().setActiveQuickSession(targetArm.sessionId, targetArm.runId);
+      } else {
+        useCyboflowStore.getState().setActiveRun(targetArm.runId, targetArm.sessionId);
+      }
       useNavigationStore.getState().setActiveProjectId(selectedProjectId);
       useNavigationStore.getState().goToSession();
 

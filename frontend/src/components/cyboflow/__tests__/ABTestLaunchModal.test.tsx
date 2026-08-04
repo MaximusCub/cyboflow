@@ -88,9 +88,14 @@ vi.mock('../../../utils/bootstrapArmSessionPanels', () => ({
   bootstrapArmSessionPanels: mockBootstrapArmSessionPanels,
 }));
 
-const { mockSetActiveRun } = vi.hoisted(() => ({ mockSetActiveRun: vi.fn() }));
+const { mockSetActiveRun, mockSetActiveQuickSession } = vi.hoisted(() => ({
+  mockSetActiveRun: vi.fn(),
+  mockSetActiveQuickSession: vi.fn(),
+}));
 vi.mock('../../../stores/cyboflowStore', () => ({
-  useCyboflowStore: { getState: () => ({ setActiveRun: mockSetActiveRun }) },
+  useCyboflowStore: {
+    getState: () => ({ setActiveRun: mockSetActiveRun, setActiveQuickSession: mockSetActiveQuickSession }),
+  },
 }));
 
 const { mockSetActiveProjectId, mockGoToSession } = vi.hoisted(() => ({
@@ -137,6 +142,7 @@ beforeEach(() => {
   mockBoardsForProject.mockReset();
   mockBootstrapArmSessionPanels.mockReset();
   mockSetActiveRun.mockReset();
+  mockSetActiveQuickSession.mockReset();
   mockSetActiveProjectId.mockReset();
   mockGoToSession.mockReset();
 
@@ -289,6 +295,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
     expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockGoToSession).toHaveBeenCalledTimes(1);
   });
@@ -411,7 +418,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
     expect(args.quickConfigB).toEqual(expectedQuickConfig);
   });
 
-  it('navigation targets arm B (the quick arm) when only arm B is quick', async () => {
+  it('navigation targets arm B (the quick arm) via the quick-session host when only arm B is quick', async () => {
     const onClose = vi.fn();
     render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
@@ -420,10 +427,14 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-b');
-    expect(mockSetActiveRun).toHaveBeenCalledWith('run-b', 'sess-b');
+    // Quick arm ⇒ setActiveQuickSession (chat host), NEVER setActiveRun — the
+    // `__quick__` sentinel resolves no workflow and would render the
+    // workflow-only pane with a disabled composer.
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-b', 'run-b');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
-  it('navigation targets arm A when only arm A is quick', async () => {
+  it('navigation targets arm A via the quick-session host when only arm A is quick', async () => {
     const onClose = vi.fn();
     render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
@@ -432,10 +443,11 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
-    expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-a', 'run-a');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
-  it('navigation targets arm A (the default) for quick-vs-quick', async () => {
+  it('navigation targets arm A (the default) via the quick-session host for quick-vs-quick', async () => {
     const onClose = vi.fn();
     render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
@@ -445,7 +457,8 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(mockBootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a');
-    expect(mockSetActiveRun).toHaveBeenCalledWith('run-a', 'sess-a');
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-a', 'run-a');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
   it("selecting quick for arm B reveals ONLY arm B's config sub-form", () => {

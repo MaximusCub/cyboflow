@@ -37,6 +37,7 @@ const closeExperimentComparison = vi.fn();
 const setActiveProjectId = vi.fn();
 const goToSession = vi.fn();
 const setActiveRun = vi.fn();
+const setActiveQuickSession = vi.fn();
 const bootstrapArmSessionPanels = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../../trpc/client', () => ({
@@ -67,7 +68,7 @@ vi.mock('../../../stores/navigationStore', () => ({
 }));
 
 vi.mock('../../../stores/cyboflowStore', () => ({
-  useCyboflowStore: { getState: () => ({ setActiveRun }) },
+  useCyboflowStore: { getState: () => ({ setActiveRun, setActiveQuickSession }) },
 }));
 
 vi.mock('../../../utils/bootstrapArmSessionPanels', () => ({
@@ -795,6 +796,49 @@ describe('ExperimentComparisonView', () => {
     fireEvent.click(screen.getByTestId('experiment-open-session-a'));
     await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
     await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-a', 'sess-a'));
+  });
+
+  it('"Open session" on a QUICK arm routes through the quick-session host, never setActiveRun', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(makeRunningPayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    // Quick arm A: its runId is the `__quick__` sentinel, which resolves no
+    // workflow — setActiveRun would render the workflow-only pane. The route
+    // must go through setActiveQuickSession (chat host).
+    fireEvent.click(await screen.findByTestId('experiment-open-session-a'));
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
+    await waitFor(() => expect(setActiveQuickSession).toHaveBeenCalledWith('sess-a', 'run-a'));
+    expect(setActiveRun).not.toHaveBeenCalled();
+
+    // The non-quick sibling arm still routes through setActiveRun.
+    fireEvent.click(screen.getByTestId('experiment-open-session-b'));
+    await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-b', 'sess-b'));
+    expect(setActiveQuickSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Run another experiment" with a quick arm B navigates to the NEW quick arm B via the quick-session host', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'decided', variant_b_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    rerunMutate.mockResolvedValue({
+      experimentId: 'exp_2',
+      armA: { runId: 'run-a2', sessionId: 'sess-a2' },
+      armB: { runId: 'run-b2', sessionId: 'sess-b2' },
+    });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    fireEvent.click(await screen.findByTestId('experiment-run-again-open'));
+    fireEvent.click(screen.getByTestId('experiment-run-again-start'));
+
+    await waitFor(() => expect(rerunMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
+    // The sole quick arm (B) wins the navigation target — mirroring the launch
+    // rule — and routes through the quick-session host.
+    await waitFor(() => expect(setActiveQuickSession).toHaveBeenCalledWith('sess-b2', 'run-b2'));
+    expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-b2');
+    expect(setActiveRun).not.toHaveBeenCalled();
   });
 
   it('renders "Done" for a live (unsettled) quick arm and calls settleQuickArm with the correct arm — the non-quick sibling arm has no such control', async () => {
