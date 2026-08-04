@@ -2277,12 +2277,24 @@ function persistedQuickConfig(
   arm: ExperimentArm,
 ): ExperimentArmQuickConfig | undefined {
   const json = getExperimentQuickConfigJson(db, experimentId, arm);
+  // Absent row (pre-083 experiment / pre-083 DB): silent degrade is correct —
+  // there is nothing to replay. A row that EXISTS but cannot be read is a
+  // different case: the rerun still succeeds on launch defaults (a settled
+  // experiment's rerun must not be thrown away over a nice-to-have replay),
+  // but it silently recreates the different-matchup behavior migration 083
+  // exists to eliminate — so make that path loud.
   if (json === null) return undefined;
+  const degrade = (reason: string): undefined => {
+    console.warn(
+      `[experiments] stored quick-arm config for ${experimentId} arm ${arm} is unreadable (${reason}) — rerun uses launch defaults`,
+    );
+    return undefined;
+  };
   try {
     const parsed = experimentArmQuickConfigSchema.safeParse(JSON.parse(json));
-    return parsed.success ? parsed.data : undefined;
+    return parsed.success ? parsed.data : degrade('failed schema validation');
   } catch {
-    return undefined;
+    return degrade('unparseable JSON');
   }
 }
 
