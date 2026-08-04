@@ -778,12 +778,15 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   // replay the same matchup — rerun forwards only the variant ids, and the arm
   // sessions (the only other place the config's effects live) may already be
   // dismissed by the time a settled experiment is rerun. Fail-soft inside the
-  // helper: a persist failure only degrades a LATER rerun to launch-defaults.
+  // helper: a persist failure only degrades a LATER rerun to launch-defaults —
+  // but it must not be SILENT (the launch looks successful either way), so give
+  // the helper a real sink for its warn.
+  const persistLogger = { warn: (m: string, meta?: Record<string, unknown>) => console.warn(m, meta) };
   if (aIsQuick && input.quickConfigA) {
-    insertExperimentQuickConfig(db, exp.id, 'A', JSON.stringify(input.quickConfigA));
+    insertExperimentQuickConfig(db, exp.id, 'A', JSON.stringify(input.quickConfigA), persistLogger);
   }
   if (bIsQuick && input.quickConfigB) {
-    insertExperimentQuickConfig(db, exp.id, 'B', JSON.stringify(input.quickConfigB));
+    insertExperimentQuickConfig(db, exp.id, 'B', JSON.stringify(input.quickConfigB), persistLogger);
   }
 
   // Seed-clone ids created in step 5, tracked in FUNCTION scope so the rollback
