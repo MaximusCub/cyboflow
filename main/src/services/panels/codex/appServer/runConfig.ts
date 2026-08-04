@@ -40,6 +40,13 @@ function buildMcpConfig(
         },
         required: true,
         default_tools_approval_mode: 'approve',
+        // Codex's MCP client aborts any tools/call after 300s by default — fatal
+        // for cyboflow_request_user_input, which legitimately blocks until a
+        // human answers (a 5-minute-away user kills the interview). Must stay
+        // ABOVE the bridge's own request-user-input cap (24h, cyboflowMcpServer)
+        // so an over-waited gate surfaces the bridge's structured
+        // orchestrator_timeout instead of a Codex channel error.
+        tool_timeout_sec: 25 * 60 * 60,
       },
     },
   };

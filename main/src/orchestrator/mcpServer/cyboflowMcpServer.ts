@@ -1611,7 +1611,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
       }
 
-      return executeMcpQuery('mcp-request-user-input', { questions }, 30 * 60_000);
+      // Human question gates legitimately block for hours (e.g. an interview
+      // while the user steps away) — 24h is a leak backstop, not an interaction
+      // budget. Substrate MCP clients must allow MORE than this (Codex:
+      // tool_timeout_sec in runConfig.buildMcpConfig) so the agent sees this
+      // structured orchestrator_timeout rather than a client channel error.
+      return executeMcpQuery('mcp-request-user-input', { questions }, 24 * 60 * 60_000);
     }
 
     case 'cyboflow_create_task': {
