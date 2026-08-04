@@ -2170,3 +2170,84 @@ describe('WorkflowController', () => {
     });
   });
 });
+
+// ── shouldSkipHumanGate — optional-human-gate precondition seam ─────────────
+
+describe('WorkflowController shouldSkipHumanGate (optional human gates)', () => {
+  const gateDef = (opts: { optional?: boolean } = {}) =>
+    def([
+      phase('p1', [
+        step({ id: 'work' }),
+        step({ id: 'approve-design', agent: 'human', human: true, ...(opts.optional === false ? {} : { optional: true }) }),
+        step({ id: 'after' }),
+      ]),
+    ]);
+
+  it('skips an optional pure human gate when the seam returns a reason (gate never opens)', async () => {
+    const host = makeHost();
+    const withSkip: ControllerHost = {
+      ...host,
+      shouldSkipHumanGate: (s) => (s.id === 'approve-design' ? 'no design surface to review' : null),
+    };
+    const runner = makeRunner();
+
+    const result = await new WorkflowController(runner, withSkip).run('run-gs', gateDef());
+
+    expect(result.outcome).toBe('completed');
+    const gateStep = result.steps.find((s) => s.stepId === 'approve-design');
+    expect(gateStep).toMatchObject({ outcome: 'skipped', error: 'no design surface to review' });
+    expect(host.gateCalls).toEqual([]); // the gate never opened
+    // Timeline: skipped, with NO 'running' report for the gate.
+    expect(host.reports.filter((r) => r.id === 'approve-design')).toEqual([
+      { id: 'approve-design', status: 'skipped' },
+    ]);
+    // The walk continued past the gate.
+    expect(runner.calls.map((c) => c.id)).toEqual(['work', 'after']);
+  });
+
+  it('opens the gate normally when the seam returns null', async () => {
+    const host = makeHost();
+    const withSkip: ControllerHost = { ...host, shouldSkipHumanGate: () => null };
+
+    const result = await new WorkflowController(makeRunner(), withSkip).run('run-gn', gateDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('never consults the seam for a REQUIRED pure human gate', async () => {
+    const host = makeHost();
+    let consulted = 0;
+    const withSkip: ControllerHost = {
+      ...host,
+      shouldSkipHumanGate: () => {
+        consulted += 1;
+        return 'would skip';
+      },
+    };
+
+    const result = await new WorkflowController(makeRunner(), withSkip).run(
+      'run-gr',
+      gateDef({ optional: false }),
+    );
+
+    expect(consulted).toBe(0);
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('fail-open: a throwing seam opens the gate instead of skipping it', async () => {
+    const host = makeHost();
+    const withSkip: ControllerHost = {
+      ...host,
+      shouldSkipHumanGate: () => {
+        throw new Error('db read failed');
+      },
+    };
+
+    const result = await new WorkflowController(makeRunner(), withSkip).run('run-gt', gateDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+});

@@ -370,6 +370,18 @@ export interface ControllerHost {
   requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision>;
 
   /**
+   * Optional precondition seam for an OPTIONAL pure human-gate step. Consulted
+   * ONLY when the step is both `human: true` (pure gate) and `optional: true`,
+   * BEFORE the gate opens: return a one-line skip REASON when the gate's
+   * reviewable precondition is absent (e.g. launch's approve-design when both
+   * design steps self-skipped and there is no prototype or architecture to
+   * review), or null to open the gate normally. Absent ⇒ every gate opens
+   * (today's behavior). A thrown consult is treated as null (fail-open toward
+   * the gate — never silently skip a human review on an error).
+   */
+  shouldSkipHumanGate?(step: WorkflowStep, runId: string): string | null;
+
+  /**
    * Optional monitor feed. The controller calls this at run/step boundaries.
    * Fail-soft (never throws); the production host no longer implements it (no
    * continuous chat feed), so absent ⇒ the feed is dropped.

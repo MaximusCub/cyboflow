@@ -148,6 +148,30 @@ function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifa
 }
 
 /**
+ * Idea-flag persistence contract for the steps that CREATE or REWRITE idea
+ * bodies. The conditional design steps below (ui-prototype / architecture) and
+ * the flow's build ordering key on flag lines (`SCOPE:` / `UI_PROTOTYPE:` /
+ * `ARCH_DESIGN:` / `BUILD_ORDER:` / `INITIAL_BUILD:`) PERSISTED in each idea's
+ * body — the long-form flow prose spells this out for the orchestrated plane,
+ * but a scoped step turn never sees that prose. Without the contract inlined
+ * here, the launch `ideas` step persisted stubs WITHOUT the subagent's flag
+ * lines, so ui-prototype and architecture silently self-skipped on every
+ * programmatic launch run (2026-08-04, first launch smoke). `expand-spec`
+ * (planner / ship / launch) is the rewrite half: it replaces the body and must
+ * carry the flag lines through.
+ */
+function ideaFlagContract(step: WorkflowStep): string {
+  switch (step.id) {
+    case 'ideas':
+      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`UI_PROTOTYPE:\`, \`ARCH_DESIGN:\`, \`BUILD_ORDER:\`, \`INITIAL_BUILD:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps in this workflow read the flags off the persisted body to decide whether to run at all — an idea saved without its flag lines silently disables its UI prototype and architecture design downstream.`;
+    case 'expand-spec':
+      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (\`SCOPE:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\` / \`BUILD_ORDER:\` / \`INITIAL_BUILD:\`), the expanded body you write back via \`cyboflow_update_task\` MUST preserve those lines VERBATIM. Later steps read the flags off the persisted body to decide whether to run — dropping them during expansion silently disables the UI prototype and architecture design steps.`;
+    default:
+      return '';
+  }
+}
+
+/**
  * The long-form planner/ship prompts condition these design steps on flags that
  * context persisted into the idea body. Each programmatic step gets a fresh
  * turn, so mirror that decision here before it can delegate or create an
@@ -207,6 +231,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
       : '';
   const conditionalExecutionNote = conditionalExecution(step, runOwnedIdeaIds.length > 0);
+  const ideaFlagContractNote = ideaFlagContract(step);
   // Compound review-queue discipline — applies to EVERY compound step, not just
   // the one that reports the artifact. The compounder surfaces below-bar
   // candidates in a `## Discarded` list; a step agent that faithfully "records
@@ -251,5 +276,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
 }

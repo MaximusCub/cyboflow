@@ -24,7 +24,7 @@
  * The stateless collaborators (spawner, reporter, gate) are injected once at the
  * composition root; per-run state is bound inside run().
  */
-import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
+import { resolveWorkflowDefinition, type WorkflowStep } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
@@ -42,6 +42,7 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
+import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
@@ -329,11 +330,24 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
           })
       : undefined;
 
+    // Optional-human-gate precondition (approve-design): when BOTH design steps
+    // self-skipped (no idea carried the UI_PROTOTYPE/ARCH_DESIGN flags), the run
+    // has no prototype artifact and no architecture section — the gate would
+    // park the run over an empty review surface. hasReviewableDesignSurface is
+    // fail-open (any read error opens the gate).
+    const humanGateSkip = (step: WorkflowStep): string | null => {
+      if (step.id !== 'approve-design' || !this.deps.db) return null;
+      return hasReviewableDesignSurface(this.deps.db, ctx.runId)
+        ? null
+        : 'no design surface to review — no prototype artifact and no architecture design section';
+    };
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
       projectId: ctx.run.project_id,
       reporter: this.deps.reporter,
       gate: this.deps.gate,
+      humanGateSkip,
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),

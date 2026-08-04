@@ -451,6 +451,35 @@ export class WorkflowController {
           // No items resolved ⇒ fall through to the normal agent-step path.
         }
 
+        // ── Optional human gate with an absent precondition ──────────────────
+        // An `optional: true` pure gate whose reviewable surface never
+        // materialized (e.g. launch's approve-design when both design steps
+        // self-skipped) skips instead of parking the run over nothing. Consulted
+        // via the host seam; a thrown consult opens the gate (fail-open — never
+        // silently skip a human review on an error).
+        if (isPureHumanGate(step) && step.optional === true && this.host.shouldSkipHumanGate) {
+          let gateSkipReason: string | null = null;
+          try {
+            gateSkipReason = this.host.shouldSkipHumanGate(step, runId);
+          } catch {
+            gateSkipReason = null;
+          }
+          if (gateSkipReason !== null) {
+            this.pushStep(steps, {
+              stepId: step.id,
+              phaseId: phase.id,
+              outcome: 'skipped',
+              attempts: 0,
+              error: gateSkipReason,
+              deliberate: true,
+            });
+            this.host.log?.('info', `optional human gate '${step.id}' skipped: ${gateSkipReason}`);
+            this.host.reportStep(step.id, 'skipped');
+            i += 1;
+            continue;
+          }
+        }
+
         const baseCtx = { runId, phaseId: phase.id, stepIndex: i, signal };
         this.host.reportStep(step.id, 'running');
 

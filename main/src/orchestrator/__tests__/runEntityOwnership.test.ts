@@ -27,6 +27,7 @@ import {
   listRunBatchIdeaIds,
   resolveRunBatchIdeaId,
   listApproveIdeasBatchRows,
+  hasReviewableDesignSurface,
 } from '../runEntityOwnership';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -569,5 +570,58 @@ describe('runEntityOwnership.listApproveIdeasBatchRows', () => {
 
     const db = buildDbWithIdeas();
     expect(listApproveIdeasBatchRows(dbAdapter(db), 'run-missing')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasReviewableDesignSurface — the approve-design gate's precondition
+// ---------------------------------------------------------------------------
+
+describe('runEntityOwnership.hasReviewableDesignSurface', () => {
+  /** buildDb() plus minimal ideas + artifacts tables (the columns read here). */
+  function buildDesignDb(): Database.Database {
+    const db = buildDb();
+    db.exec(`
+      CREATE TABLE ideas (
+        id   TEXT PRIMARY KEY,
+        ref  TEXT NOT NULL,
+        body TEXT
+      );
+      CREATE TABLE artifacts (
+        id     TEXT PRIMARY KEY,
+        run_id TEXT,
+        atype  TEXT NOT NULL
+      );
+    `);
+    return db;
+  }
+
+  it('true when the run has a prototype or arch-design artifact', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-a', null);
+    db.prepare("INSERT INTO artifacts (id, run_id, atype) VALUES ('art_1', 'run-a', 'ui-prototype')").run();
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-a')).toBe(true);
+  });
+
+  it('true when an owned idea body carries an Architecture design section', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-b', 'ide_arch');
+    db.prepare("INSERT INTO ideas (id, ref, body) VALUES ('ide_arch', 'IDEA-1', ?)").run(
+      'Spec…\n\n## Architecture design\n\nStack: …',
+    );
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-b')).toBe(true);
+  });
+
+  it('false when the run has neither (empty design surface)', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-c', 'ide_plain');
+    db.prepare("INSERT INTO ideas (id, ref, body) VALUES ('ide_plain', 'IDEA-1', 'just a spec')").run();
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-c')).toBe(false);
+  });
+
+  it('FAIL-OPEN: a missing artifacts table yields true (the gate opens)', () => {
+    const db = buildDb(); // no artifacts, no ideas tables
+    insertRun(db, 'run-d', null);
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-d')).toBe(true);
   });
 });

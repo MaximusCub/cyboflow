@@ -358,6 +358,40 @@ export interface ApproveIdeasBatchRow {
  *
  * Fail-soft: a missing ideas table or any thrown query yields [].
  */
+/**
+ * Whether the run produced ANY reviewable design surface: a prototype artifact
+ * (`ui-prototype` / `interactive-prototype`) OR an owned idea whose body carries
+ * an `## Architecture design` section. Consulted by the programmatic
+ * controller's optional approve-design human gate — when BOTH design steps
+ * self-skipped (no idea carried the flags), the gate has literally nothing to
+ * review and should skip instead of parking the run (2026-08-04, first launch
+ * smoke: the run parked at approve-design over an empty surface).
+ *
+ * FAIL-OPEN toward the gate: any thrown query returns true, so a read error
+ * opens the human gate rather than silently skipping a review step.
+ */
+export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boolean {
+  try {
+    const artifactRow = db
+      .prepare(
+        `SELECT 1 AS present FROM artifacts
+          WHERE run_id = ? AND atype IN ('ui-prototype', 'interactive-prototype', 'arch-design')
+          LIMIT 1`,
+      )
+      .get(runId) as { present?: number } | undefined;
+    if (artifactRow?.present === 1) return true;
+    for (const ideaId of listRunOwnedOrBatchIdeaIds(db, runId)) {
+      const row = db
+        .prepare('SELECT body AS body FROM ideas WHERE id = ?')
+        .get(ideaId) as { body?: unknown } | undefined;
+      if (typeof row?.body === 'string' && row.body.includes('## Architecture design')) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export function listApproveIdeasBatchRows(db: DatabaseLike, runId: string): ApproveIdeasBatchRow[] {
   const rows: ApproveIdeasBatchRow[] = [];
   try {

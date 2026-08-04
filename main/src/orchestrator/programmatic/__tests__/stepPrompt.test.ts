@@ -439,4 +439,41 @@ describe('composeStepPrompt', () => {
       '# Approve-ideas decisions',
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Idea persistence contract — flag lines must land in (ideas) / survive
+  // (expand-spec) the persisted body, or the conditional design steps
+  // self-skip on every programmatic run.
+  // -------------------------------------------------------------------------
+
+  it('renders the flag persistence contract on the ideas step', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'ideas', name: 'Decompose into ideas', agent: 'interview' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('## Idea persistence contract');
+    expect(out).toContain('UI_PROTOTYPE');
+    expect(out).toContain('ARCH_DESIGN');
+    expect(out).toContain('VERBATIM');
+  });
+
+  it('renders the flag preservation contract on the expand-spec step', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'expand-spec', name: 'Complete idea specs', agent: 'context' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('## Idea persistence contract');
+    expect(out).toContain('MUST preserve those lines VERBATIM');
+  });
+
+  it('omits the persistence contract on unrelated steps', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'epics', name: 'Epics', agent: 'epics' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).not.toContain('## Idea persistence contract');
+  });
 });

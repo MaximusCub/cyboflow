@@ -137,6 +137,13 @@ export interface ProgrammaticRunHostArgs {
    * enqueues (the visual-verify step is a clean skip — byte-identical).
    */
   enqueueVisualVerification?: ControllerHost['enqueueVisualVerification'];
+  /**
+   * Optional precondition predicate for OPTIONAL pure human-gate steps
+   * (ControllerHost.shouldSkipHumanGate, run-bound by the runner). Returns a
+   * skip reason when the gate's reviewable surface is absent, null to open the
+   * gate. Absent ⇒ every gate opens.
+   */
+  humanGateSkip?: (step: WorkflowStep) => string | null;
   logger?: LoggerLike;
 }
 
@@ -164,6 +171,10 @@ export class ProgrammaticRunHost implements ControllerHost {
       step,
       signal: ctx.signal,
     });
+  }
+
+  shouldSkipHumanGate(step: WorkflowStep): string | null {
+    return this.args.humanGateSkip?.(step) ?? null;
   }
 
   /**
