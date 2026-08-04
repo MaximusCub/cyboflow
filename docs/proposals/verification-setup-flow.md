@@ -1,9 +1,12 @@
 # Verification Setup Flow
 
-Status: PHASES 0–2 IMPLEMENTED (2026-07-30, this branch — 15 commits from
-`504aef09` "failure taxonomy" through `e284c210` "acceptance matrix"). Phase 3
-(onboarding + health panel) remains design-only. Implementation deltas from the
-spec as written, all deliberate:
+Status: PHASES 0–3 IMPLEMENTED (2026-07-30 → 2026-08-04, this branch). Phase 3
+(onboarding + health panel) landed 2026-08-04 with ONE deliberate deferral —
+the consent-gated drive round-trip probe, which cannot be built until §8's
+native-screen drive API question is answered (there is nothing to round-trip
+through); it renders as an explicit `blocked` row rather than a faked green or
+a red that blames the host for machinery we never wrote. Implementation deltas
+from the spec as written, all deliberate:
 - The "no attestation ⇒ no `passed`" invariant is enforced for DECLARED specs
   (missing/mismatched driver record ⇒ failed-ambiguous-blocking) and for the
   implicit file-identity case; a task with NO spec caps a pass at
@@ -423,6 +426,43 @@ Generated from the phase-1 roster; nearly invisible for most users.
   (`Settings.tsx:999-1015`; the six advanced config fields have no UI),
   `VerifyQueueView` empty state, an onboarding-carousel step, the session
   wizard's Advanced verification radio.
+
+**IMPLEMENTED 2026-08-04.** What landed, and the two places reality diverged
+from the section above:
+
+- `cyboflow.verificationRequests.health` — per-modality attempts, pass rate,
+  failure-class histogram, median duration, capability ledger, runbook state;
+  and `hostProbes` / `provisionChromium` for the live probe table. All
+  read-only over the existing 055/056/078/095/096 schema: **no migration was
+  needed**, because every number this section asks for was already derivable
+  and simply never reported.
+- The panel renders on `VerifyQueueView` (both the populated and the empty
+  state). The empty state also carries the setup CTA, which is now
+  verify-setup's ONLY entry point — the flow is hidden from the session
+  wizard's list as a "setup flow" (it configures the project rather than doing
+  project work). Hiding is presentation-only: the registry still lists the row,
+  or the Workflows editor and the run rail's name map would lose it.
+- **Pass rate counts skips in its denominator.** Not stated above, but forced
+  by §3.2: a SKIP is the most common way verification fails to happen, so a
+  skip-excluding rate would report a healthy project whose checks never ran.
+  This is also what reproduces the "2 for 28" baseline honestly.
+- **The runbook row leads each modality**, ahead of the outcome numbers. This
+  section listed runbook state nowhere, but without it the rest of the panel
+  misleads: until a runbook is proven the degrade gate skips everything for
+  that modality, so an empty queue is the symptom rather than the all-clear.
+- **Deferred: the drive round-trip probe.** §6 specifies a consent-gated
+  "Test driving now" under a screen lease against an owned probe window. §8
+  still lists the drive API shape as open, so there is no audited API to drive
+  through and the safety machinery the bullet describes has nothing to wrap.
+  Reported as a `blocked` probe row; the acceptance-matrix `it.todo` stays.
+- **Found while building (not fixed here):** setup-proof runs are exempt from
+  the budget CHECK (`!setupProof && isProjectBudgetExhausted(...)`) but their
+  `judge_calls_used` remains inside the `SUM` that check reads — so proof spend
+  consumes the allowance ordinary lanes are measured against, despite the
+  `cyboflow_request_verification` contract promising a proof run is "never
+  counted against it". The panel surfaces the overlap
+  (`setupProofCallsUsed`) rather than silently changing enforcement, since §8
+  lists proof-run cost accounting as an open question.
 
 ## 7. Cross-cutting hazards (fix regardless of phases)
 
