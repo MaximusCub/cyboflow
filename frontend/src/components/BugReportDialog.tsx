@@ -164,7 +164,10 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         expectedBehavior: expected,
         email: contactConsent && email.trim() ? email.trim() : undefined,
         contactConsent,
-        runId: linkedRun?.id ?? (sessionId || undefined),
+        // Two id spaces, two tags. A session id sent as `run_id` reads as a run
+        // that does not exist.
+        runId: linkedRun?.id,
+        sessionId: sessionId || undefined,
         flowName: linkedRun?.workflowName,
         // Send exactly what the user previewed, so what they read is what leaves
         // the machine — both the log text and the recorded-failure list, which is

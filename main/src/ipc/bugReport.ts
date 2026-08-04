@@ -32,6 +32,7 @@ const submitSchema = z.object({
   email: z.string().max(BUG_REPORT_LIMITS.emailMax).optional(),
   contactConsent: z.boolean(),
   runId: z.string().max(200).optional(),
+  sessionId: z.string().max(200).optional(),
   flowName: z.string().max(200).optional(),
   logText: z.string().max(BUG_REPORT_LIMITS.logTextMax).optional(),
   // Echoed back from the preview so the report carries the failures the user
@@ -203,6 +204,7 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
           // the field happens to hold text.
           email: request.contactConsent ? request.email : undefined,
           runId: request.runId,
+          sessionId: request.sessionId,
           flowName: request.flowName,
           logText: request.logText,
         },

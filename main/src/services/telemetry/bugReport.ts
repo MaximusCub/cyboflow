@@ -68,6 +68,7 @@ export interface BugReportSubmission {
   /** Only populated when the user ticked the contact-consent box. */
   email?: string;
   runId?: string;
+  sessionId?: string;
   flowName?: string;
   /** The exact log text the user previewed and opted to include, if any. */
   logText?: string;
@@ -436,7 +437,10 @@ export function buildFeedbackTags(
     has_logs: input.logText ? 'yes' : 'no',
     has_contact: input.email ? 'yes' : 'no',
   };
+  // Separate tags on purpose: a session id in `run_id` cannot be joined against
+  // the runs table, and reads as a run that does not exist.
   if (input.runId) tags.run_id = input.runId;
+  if (input.sessionId) tags.session_id = input.sessionId;
   if (input.flowName) tags.flow = input.flowName;
   return tags;
 }

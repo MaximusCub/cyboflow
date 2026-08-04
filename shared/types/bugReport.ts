@@ -73,7 +73,15 @@ export interface BugReportSubmitRequest {
   /** Present only when `contactConsent` is true. */
   email?: string;
   contactConsent: boolean;
+  /**
+   * The flow run the report is about. Kept distinct from `sessionId`: they are
+   * different id spaces, and folding one into the other makes the `run_id` tag
+   * unjoinable against the runs table for every report filed from a session with
+   * no run.
+   */
   runId?: string;
+  /** The session the report is about, whether or not it has a run. */
+  sessionId?: string;
   flowName?: string;
   /**
    * The exact log text the user previewed, echoed back so what they read is what

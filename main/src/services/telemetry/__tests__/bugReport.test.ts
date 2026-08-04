@@ -481,7 +481,14 @@ describe('payload composition', () => {
 
   it('builds filterable, non-PII tags', () => {
     const tags = buildFeedbackTags(
-      { ...REPORT, runId: 'run-7', flowName: 'sprint', email: 'a@b.com', logText: 'x' },
+      {
+        ...REPORT,
+        runId: 'run-7',
+        sessionId: 'session-3',
+        flowName: 'sprint',
+        email: 'a@b.com',
+        logText: 'x',
+      },
       DIAGNOSTICS,
     );
 
@@ -490,12 +497,24 @@ describe('payload composition', () => {
       environment: 'stable',
       platform: 'darwin',
       run_id: 'run-7',
+      session_id: 'session-3',
       flow: 'sprint',
       has_logs: 'yes',
       has_contact: 'yes',
     });
     // The address itself is a native feedback field, never a tag value.
     expect(Object.values(tags)).not.toContain('a@b.com');
+  });
+
+  /**
+   * A session with no flow run used to have its session id sent as `run_id`,
+   * which cannot be joined against the runs table and reads as a missing run.
+   */
+  it('leaves run_id unset for a session that has no run', () => {
+    const tags = buildFeedbackTags({ ...REPORT, sessionId: 'session-3' }, DIAGNOSTICS);
+
+    expect(tags.run_id).toBeUndefined();
+    expect(tags.session_id).toBe('session-3');
   });
 });
 
