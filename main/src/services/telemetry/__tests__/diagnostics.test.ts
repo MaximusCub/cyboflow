@@ -72,14 +72,25 @@ describe('recent-error ring buffer', () => {
     expect(entries[19].message).toBe('failure 49');
   });
 
-  it('never throws, even on a value with a throwing message getter', () => {
-    const hostile = {
-      get message() {
+  /**
+   * It has to be a real `Error` to reach the guard at all: a plain object is
+   * coerced with `new Error(String(error))`, which never touches `message`, so
+   * an object literal with a throwing getter exercises nothing. The class also
+   * has to be constructed WITHOUT a message — the `Error` constructor defines an
+   * own `message` property that would shadow the prototype getter.
+   */
+  it('never throws, even on an Error whose message getter throws', () => {
+    class HostileError extends Error {
+      get message(): string {
         throw new Error('boom');
-      },
-    };
+      }
+    }
+    const hostile = new HostileError();
+    expect(() => hostile.message).toThrow();
 
     expect(() => recordLocalError('seam', hostile, AT)).not.toThrow();
+    // Nothing half-written either: the entry is built before it is pushed.
+    expect(getRecentErrors()).toEqual([]);
   });
 });
 
