@@ -437,11 +437,17 @@ from the section above:
   needed**, because every number this section asks for was already derivable
   and simply never reported.
 - The panel renders on `VerifyQueueView` (both the populated and the empty
-  state). The empty state also carries the setup CTA, which is now
-  verify-setup's ONLY entry point — the flow is hidden from the session
-  wizard's list as a "setup flow" (it configures the project rather than doing
-  project work). Hiding is presentation-only: the registry still lists the row,
-  or the Workflows editor and the run rail's name map would lose it.
+  state), and carries the setup CTA — the primary entry point for verify-setup,
+  which is hidden from the session wizard's list as a "setup flow" (it
+  configures the project rather than doing project work). Hiding is
+  presentation-only: the registry still lists the row, or the Workflows editor
+  and the run rail's name map would lose it, and the gallery's Run action still
+  launches it by row id.
+- **The CTA is unconditional; only its label tracks state.** First written to
+  appear only when the health query succeeded AND no modality was proven, which
+  inverted the requirement: it vanished on a failed health query, and one
+  proven modality hid the affordance for repairing the others. For a flow
+  hidden from the launcher, a conditional entry point is no entry point.
 - **Pass rate counts skips in its denominator.** Not stated above, but forced
   by §3.2: a SKIP is the most common way verification fails to happen, so a
   skip-excluding rate would report a healthy project whose checks never ran.
@@ -455,6 +461,18 @@ from the section above:
   still lists the drive API shape as open, so there is no audited API to drive
   through and the safety machinery the bullet describes has nothing to wrap.
   Reported as a `blocked` probe row; the acceptance-matrix `it.todo` stays.
+- **The capability row shown is the one the ENGINE reads**, keyed by the
+  request pin's `runbook_hash` (a proven revision's hash, else migration 095's
+  `''`) — not the most recently updated row. `verify_capability_state` is keyed
+  `(project, modality, runbook_hash)` and holds a row per revision; an old
+  pinned request finishing after a new runbook is registered updates the stale
+  row LAST, so "newest wins" reported suppressions the scheduler would never
+  honour and hid ones it would.
+- **Host probes run once per panel open, not on the health poll.** Each pass
+  resolves a Playwright browser path and shells out for the screen-recording
+  grant; riding the 15s health interval turned "probed at call time" into
+  perpetual background subprocess work for facts that only change when a human
+  acts. Health still polls — it is one indexed read.
 - **Found while building (not fixed here):** setup-proof runs are exempt from
   the budget CHECK (`!setupProof && isProjectBudgetExhausted(...)`) but their
   `judge_calls_used` remains inside the `SUM` that check reads — so proof spend
@@ -463,6 +481,30 @@ from the section above:
   counted against it". The panel surfaces the overlap
   (`setupProofCallsUsed`) rather than silently changing enforcement, since §8
   lists proof-run cost accounting as an open question.
+
+**STILL OPEN after phase 3** — surfaced by the adversarial review of this work,
+each wider than the panel and deliberately not folded into it:
+
+1. **`bumpHostGeneration` has no production caller.** §3.3 says a suppression
+   self-refreshes when "the host generation moved on", but nothing moves it:
+   the only exit is the 24h TTL. So a user who installs the missing chromium,
+   watches the panel's row turn green, and re-runs gets skipped anyway until
+   the TTL lapses — the exact "green but lying" shape §1 is about. The fix
+   needs a decision the panel cannot make alone: WHERE the host fingerprint
+   lives, and which facts (chromium path, TCC grant, node major, app binary
+   path, ABI) constitute a change. `verify_runbook_local.host_fingerprint_json`
+   already stores one per runbook record, but a generation bump is host-wide.
+2. **Packaged chromium provisioning is best-effort.** The panel's Install
+   button drives `PlaywrightInstaller`, which spawns `npx playwright install
+   chromium`. A packaged app neither bundles `npx` nor puts it on PATH, and
+   where a system one exists it resolves a Playwright revision independent of
+   the app's pinned copy. Fails soft (the row stays `missing`), so the button
+   is reliable in a dev checkout and a coin flip in a packaged build.
+3. **The `node` probe's `missing` state is unreachable.** `findNodeExecutable`
+   falls back to `return 'node'` rather than throwing, so the one probe whose
+   rejection was declared affirmative evidence never rejects. Harmless today
+   (the row reads `ok` with a bare `node`, which is what the harness will
+   actually exec) but the row promises more than it checks.
 
 ## 7. Cross-cutting hazards (fix regardless of phases)
 
