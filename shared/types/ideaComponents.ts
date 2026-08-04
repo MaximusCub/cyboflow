@@ -57,6 +57,26 @@ export type IdeaComponentKey = (typeof IDEA_COMPONENT_KEYS)[number];
 export type IdeaComponentStateValue = 'complete' | 'incomplete' | 'skipped';
 
 /**
+ * The components that go STALE when an idea's `body` materially changes —
+ * every downstream component EXCEPT 'idea-spec'. The body IS the idea spec
+ * (see `extractIdeaSpecSection`), so an edit to it changes that component
+ * rather than invalidating it; everything built FROM the spec (the
+ * prototype, the architecture design, the epics, the stories) now needs
+ * re-verification against the new body, which is exactly what staleness
+ * (see the file header's "RESET MEANS RE-VERIFY" section) exists to flag.
+ * Consumed by the idea-body-change staleness hook (taskChangeRouter.ts,
+ * fired post-commit on a real `body` delta) as the `components` filter it
+ * passes to IdeaComponentRouter's `mark-stale` op — NOT that op's own
+ * default (which, left unset, is every component; see ideaComponentRouter.ts).
+ */
+export const IDEA_COMPONENTS_STALE_ON_BODY_CHANGE: readonly IdeaComponentKey[] = [
+  'prototype',
+  'architecture',
+  'epics',
+  'stories',
+];
+
+/**
  * Who/what last set a component's state. 'flow' and 'manual' persist to the
  * `idea_components` table; 'derived' NEVER persists — it is stamped only on
  * READ, for a (idea, component) pair with no ledger row (see file header).

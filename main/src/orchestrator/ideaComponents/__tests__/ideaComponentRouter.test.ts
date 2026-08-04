@@ -232,6 +232,45 @@ describe('IdeaComponentRouter', () => {
     expect(stories?.stale_at).toBeNull();
   });
 
+  it('markStale with a components filter only touches complete rows within that filter', async () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1');
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+
+    // Every component starts 'complete' — mimics an idea that finished a full pass.
+    for (const component of ['idea-spec', 'architecture', 'epics'] as const) {
+      await router.applyChange(1, {
+        op: 'set-component-state',
+        ideaId: 'idea-1',
+        component,
+        state: 'complete',
+        source: 'flow',
+      });
+    }
+
+    // Filtered mark-stale (the idea-body-change hook's shape): only 'architecture'
+    // and 'epics' are candidates — 'idea-spec' is excluded even though it is
+    // 'complete', because it is not in the filter.
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'body changed',
+      components: ['architecture', 'epics'],
+    });
+
+    const ideaSpec = rawRow(db, 'idea-1', 'idea-spec');
+    expect(ideaSpec?.state).toBe('complete');
+    expect(ideaSpec?.stale_at).toBeNull();
+
+    const architecture = rawRow(db, 'idea-1', 'architecture');
+    expect(architecture?.state).toBe('incomplete');
+    expect(architecture?.stale_at).not.toBeNull();
+
+    const epics = rawRow(db, 'idea-1', 'epics');
+    expect(epics?.state).toBe('incomplete');
+    expect(epics?.stale_at).not.toBeNull();
+  });
+
   it('markStale is a no-op when the idea has no complete rows', async () => {
     const db = buildDb();
     insertIdea(db, 'idea-1');

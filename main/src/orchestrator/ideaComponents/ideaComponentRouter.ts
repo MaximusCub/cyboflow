@@ -25,18 +25,6 @@
  *   - Staleness (`stale_at`/`stale_reason`) is a column, not a state. See
  *     `markStale`/`clearStale` below for exactly what each touches.
  *
- * PROJECT_ID TYPE NOTE (flag for the parent session): migration 098 declares
- * `idea_components.project_id` as `TEXT NOT NULL` (matching
- * `IdeaComponentRow.project_id: string` in `database/models.ts`), whereas
- * every other project-scoped table in this codebase (`ideas.project_id`,
- * `review_items.project_id`, ...) is `INTEGER`. This router keeps the SAME
- * `number` projectId surface every other chokepoint uses (PQueue keying, the
- * emitted event's `projectId`, the tRPC layer's resolved value) and only
- * stringifies at the two INSERT sites that touch the TEXT column, so callers
- * are never exposed to the inconsistency. Flagged as a probable schema slip
- * in the prior agent's landed migration rather than "fixed" here, since
- * altering a landed migration/row-type is out of this task's scope.
- *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*. The DB is
  * injected as the narrow DatabaseLike interface.
@@ -132,11 +120,20 @@ export interface IdeaComponentSetState {
  * body/children, which is already correct with no explicit flag needed. See
  * this router's class-level JSDoc on `runMarkStale` for the fuller rationale
  * and the flagged design choice this implies.
+ *
+ * `components`, when given, restricts which components are candidates (still
+ * subject to the same 'complete'-rows-only rule above) — e.g. the
+ * taskChangeRouter.ts idea-body-change hook passes
+ * `IDEA_COMPONENTS_STALE_ON_BODY_CHANGE` (the four downstream components,
+ * never 'idea-spec') rather than every component. Omitted (the default)
+ * preserves the original behavior of considering every component.
  */
 export interface IdeaComponentMarkStale {
   op: 'mark-stale';
   ideaId: string;
   staleReason: string;
+  /** Optional component filter; default (omitted) = all five components. */
+  components?: IdeaComponentKey[];
 }
 
 /**
@@ -351,10 +348,23 @@ export class IdeaComponentRouter {
     const txn = this.db.transaction(() => {
       // Only 'complete' rows are candidates — 'skipped' stays skipped,
       // 'incomplete' is left untouched (see the type's JSDoc for the full
-      // rationale on both exclusions).
-      const completeRows = this.db
-        .prepare(`SELECT component FROM idea_components WHERE idea_id = ? AND state = 'complete'`)
-        .all(change.ideaId) as CompleteComponentRow[];
+      // rationale on both exclusions). An optional `components` filter
+      // narrows the candidate set further (e.g. the four downstream
+      // components on an idea-body change) — omitted, every component is a
+      // candidate, preserving the original unfiltered behavior.
+      const completeRows = (
+        change.components && change.components.length > 0
+          ? (this.db
+              .prepare(
+                `SELECT component FROM idea_components
+                  WHERE idea_id = ? AND state = 'complete'
+                    AND component IN (${change.components.map(() => '?').join(', ')})`,
+              )
+              .all(change.ideaId, ...change.components))
+          : this.db
+              .prepare(`SELECT component FROM idea_components WHERE idea_id = ? AND state = 'complete'`)
+              .all(change.ideaId)
+      ) as CompleteComponentRow[];
 
       for (const row of completeRows) {
         this.db

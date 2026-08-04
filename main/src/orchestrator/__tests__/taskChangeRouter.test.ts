@@ -50,6 +50,8 @@ import { selectTaskById } from '../taskListing';
 import type { DatabaseLike } from '../types';
 import type { EntityCategory, TaskChangedEvent } from '../../../../shared/types/tasks';
 import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
+import { IdeaComponentRouter, ideaComponentChangeEvents } from '../ideaComponents/ideaComponentRouter';
+import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
 
 // ---------------------------------------------------------------------------
 // Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 024, default board seeded.
@@ -246,7 +248,9 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     TaskChangeRouter._resetForTesting();
     ArtifactRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();
+    IdeaComponentRouter._resetForTesting();
     taskChangeEvents.removeAllListeners();
+    ideaComponentChangeEvents.removeAllListeners();
   });
 
   // -------------------------------------------------------------------------
@@ -723,6 +727,134 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       ).resolves.toBeDefined();
       expect(events).toHaveLength(1);
       expect(events[0].task?.components).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // idea component STALENESS hook (migration 098) — a real `body` delta on an
+  // idea marks the four downstream components stale via IdeaComponentRouter's
+  // mark-stale op, fired post-commit from applyChange (see the hook's own
+  // comment there for the deadlock-safety rationale).
+  // -------------------------------------------------------------------------
+
+  describe('idea component staleness hook — body change marks downstream components stale', () => {
+    it('a real body change marks prototype/architecture/epics/stories stale, leaving idea-spec alone', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Idea spec\n\nOriginal.',
+      });
+
+      // Every component starts 'complete' — mimics an idea that finished a full pass.
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      // The body write that should trigger the hook.
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: '## Idea spec\n\nRevised.' },
+      });
+
+      const states = resolveIdeaComponents(dbAdapter(db), ideaId);
+      const byComponent = new Map(states.map((s) => [s.component, s]));
+
+      // idea-spec is left completely untouched — the body edit IS the idea-spec.
+      const ideaSpec = byComponent.get('idea-spec')!;
+      expect(ideaSpec.state).toBe('complete');
+      expect(ideaSpec.staleAt).toBeNull();
+
+      // The four downstream components are now 'incomplete' with staleAt set —
+      // "needs review", visibly distinct from a component that was never started.
+      for (const component of ['prototype', 'architecture', 'epics', 'stories'] as const) {
+        const s = byComponent.get(component)!;
+        expect(s.state).toBe('incomplete');
+        expect(s.staleAt).not.toBeNull();
+      }
+    });
+
+    it('an update that does not touch body marks nothing stale', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Idea spec\n\nOriginal.',
+      });
+
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      // Title-only update — no body delta, so the hook must not fire.
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { title: 'Renamed idea' },
+      });
+
+      const states = resolveIdeaComponents(dbAdapter(db), ideaId);
+      for (const s of states) {
+        expect(s.state).toBe('complete');
+        expect(s.staleAt).toBeNull();
+      }
+    });
+
+    it('a body no-op (unchanged value) marks nothing stale', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: 'same body',
+      });
+
+      await componentRouter.applyChange(1, {
+        op: 'set-component-state',
+        ideaId,
+        component: 'architecture',
+        state: 'complete',
+        source: 'flow',
+      });
+
+      // Same body value as already stored — deltas.length===0, no-op update.
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: 'same body' },
+      });
+
+      const states = resolveIdeaComponents(dbAdapter(db), ideaId);
+      const architecture = states.find((s) => s.component === 'architecture')!;
+      expect(architecture.state).toBe('complete');
+      expect(architecture.staleAt).toBeNull();
     });
   });
 

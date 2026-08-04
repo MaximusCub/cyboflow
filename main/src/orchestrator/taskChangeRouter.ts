@@ -58,8 +58,10 @@ import type {
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { ExperimentArm } from '../../../shared/types/experiments';
 import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
+import { IDEA_COMPONENTS_STALE_ON_BODY_CHANGE } from '../../../shared/types/ideaComponents';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
 import { resolveIdeaComponents } from './ideaComponents/resolveIdeaComponents';
+import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -529,6 +531,9 @@ export class TaskChangeRouter {
       event: { id: number; seq: number };
       previousParentEpicId?: string | null;
       wontDoRunIds?: string[];
+      /** Only present on the update path (runUpdate) — see the staleness hook below. */
+      entityType?: TaskType;
+      bodyChanged?: boolean;
     };
 
     // POST-COMMIT ARTIFACT FOLLOW-ON: parking an entity at Won't-do retires
@@ -585,6 +590,54 @@ export class TaskChangeRouter {
       const previousParentEpicId = result.previousParentEpicId ?? null;
       if (previousParentEpicId && previousParentEpicId !== newParentEpicId) {
         await this.recomputeEpicStage(previousParentEpicId).catch(() => {});
+      }
+    }
+
+    // POST-COMMIT STALENESS HOOK (idea component ledger, migration 098 /
+    // shared/types/ideaComponents.ts): an idea UPDATE that actually changed
+    // `body` marks the FOUR DOWNSTREAM components
+    // (IDEA_COMPONENTS_STALE_ON_BODY_CHANGE — prototype/architecture/epics/
+    // stories) stale, never 'idea-spec' (the body IS the idea-spec, so an edit
+    // to it changes that component rather than invalidating it). Gated on
+    // BOTH entityType==='idea' AND bodyChanged (runUpdate's hoisted flag,
+    // driven by its `deltas` array — never a string diff here) so an
+    // epic/task body edit, or an idea update that touched some other field,
+    // never fires this. markStale only flips currently-'complete' rows, so on
+    // a fresh idea (nothing complete yet) this is a harmless no-op.
+    //
+    // Placed HERE — same post-commit position as the wontDoRunIds reap and the
+    // epic-rollup hooks above, OUTSIDE this.getProjectQueue's concurrency-1
+    // block — for the identical reason: IdeaComponentRouter keys its OWN
+    // separate per-project PQueue, so calling it from THIS queue's task would
+    // block a lane that never releases (this queue is concurrency-1; a
+    // same-project re-entrant call from inside one of its tasks can never
+    // run). Calling it out here, after this queue's task has already
+    // returned, is deadlock-safe. Best-effort + fail-soft, exactly like its
+    // neighbours: a ledger write failure must never fail or roll back the
+    // entity update that already committed.
+    //
+    // ORDERING DEPENDENCY (see planner.md "Stamp every component..."): a flow
+    // is expected to write the idea body FIRST, then call
+    // cyboflow_set_idea_component SECOND — setComponentState clears staleness
+    // as a side effect, so a step that stamps its own component right after
+    // writing its section lands 'complete' with no stale flag, even though
+    // this hook just marked it stale moments earlier.
+    if (result.entityType === 'idea' && result.bodyChanged) {
+      try {
+        // getInstance() itself throws synchronously when the singleton was
+        // never initialized (e.g. a unit test exercising TaskChangeRouter in
+        // isolation) — a plain `.catch()` on the call below would NOT catch
+        // that, so the whole call is wrapped in try/catch rather than just
+        // chaining `.catch()` on the returned promise.
+        await IdeaComponentRouter.getInstance().applyChange(projectId, {
+          op: 'mark-stale',
+          ideaId: result.taskId,
+          staleReason: 'idea body changed',
+          components: [...IDEA_COMPONENTS_STALE_ON_BODY_CHANGE],
+        });
+      } catch {
+        // fail-soft: the entity write already committed above and must never
+        // be failed or rolled back by a ledger-side problem.
       }
     }
 
@@ -1465,6 +1518,8 @@ export class TaskChangeRouter {
     event: { id: number; seq: number };
     previousParentEpicId?: string | null;
     wontDoRunIds?: string[];
+    entityType: TaskType;
+    bodyChanged: boolean;
   } {
     const taskId = change.taskId as string;
     const now = new Date().toISOString();
@@ -1478,6 +1533,13 @@ export class TaskChangeRouter {
     // the one it joined). Stays null when the change is not an actual re-parent.
     let previousParentEpicId: string | null = null;
     let wontDoRunIds: string[] | undefined;
+    // Hoisted out of the txn closure (mirrors previousParentEpicId/wontDoRunIds
+    // above) so the STALENESS post-commit hook in applyChange can see whether
+    // this update actually changed `body` — deltas itself is txn-closure-local
+    // and never escapes. Idea-only in effect (the hook below also checks
+    // entityType==='idea'), but tracked for every entity type since a body
+    // delta is generic (epics/tasks carry a body field too).
+    let bodyChanged = false;
 
     const txn = this.db.transaction(() => {
       // Resolve the entity type: prefer the declared discriminator, else look up
@@ -1753,6 +1815,7 @@ export class TaskChangeRouter {
           sets.push('body = ?');
           params.push(f.body);
           deltas.push({ field: 'body', from: current.body, to: f.body });
+          bodyChanged = true;
         }
         if (f.priority !== undefined && f.priority !== current.priority) {
           sets.push('priority = ?');
@@ -1837,6 +1900,8 @@ export class TaskChangeRouter {
       event: { id: eventId, seq: eventSeq },
       previousParentEpicId,
       wontDoRunIds,
+      entityType: resolvedType,
+      bodyChanged,
     };
   }
 
