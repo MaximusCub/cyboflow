@@ -340,7 +340,12 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   // "Switch to randomized" turns the head-to-head into an ongoing A/B rotation between
   // the two arms — WHICHEVER they are, including "baseline vs variant" (the baseline
   // opts into rotation via migration 054). Available once the experiment is settled.
-  const canSwitchToRotation = exp !== null && expSettled;
+  // A quick-session arm can never rotate (rotation arms are real variants or the
+  // baseline only — the server categorically BAD_REQUESTs it), so hide the action
+  // instead of offering a confirmation flow that always fails.
+  const hasQuickArm =
+    exp !== null && (isQuickArm(armVariantId(exp, 'A')) || isQuickArm(armVariantId(exp, 'B')));
+  const canSwitchToRotation = exp !== null && expSettled && !hasQuickArm;
   // Variant-outcome (piece 2) is gated on the changes decision (piece 1) being
   // concluded, and is one-way — a settled experiment can promote at most once.
   const alreadyPromoted = exp !== null && exp.promoted_variant_id !== null;
@@ -842,7 +847,11 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                   <span className="text-sm text-text-secondary" data-testid="experiment-promoted-summary">
                     {exp.promoted_variant_id === BASELINE_VARIANT_SENTINEL
                       ? '✓ Kept the current baseline'
-                      : `✓ Promoted ${exp.promoted_arm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the workflow baseline`}
+                      : isQuickArm(exp.promoted_variant_id ?? '')
+                        ? // A quick arm has no variant row / spec — promotion records the
+                          // verdict only; claiming a baseline change would overstate it.
+                          `✓ Recorded ${exp.promoted_arm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the winner (workflow definition unchanged)`
+                        : `✓ Promoted ${exp.promoted_arm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the workflow baseline`}
                   </span>
                 )}
 
@@ -913,7 +922,11 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                   data-testid="experiment-switch-to-rotation"
                   disabled={!canSwitchToRotation || actionBusy !== null}
                   title={
-                    canSwitchToRotation ? undefined : 'Available once the experiment is decided or abandoned'
+                    canSwitchToRotation
+                      ? undefined
+                      : hasQuickArm
+                        ? 'A quick-session arm cannot join a rotation (rotation arms are variants or the baseline)'
+                        : 'Available once the experiment is decided or abandoned'
                   }
                   onClick={() => setRotationConfirmOpen(true)}
                   className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
@@ -970,14 +983,18 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
             ? ''
             : isBaselineArm(armVariantId(exp, promoteConfirm))
               ? 'Keep the current baseline?'
-              : `Promote variant ${promoteConfirm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the baseline?`
+              : isQuickArm(armVariantId(exp, promoteConfirm))
+                ? `Record ${promoteConfirm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the winner?`
+                : `Promote variant ${promoteConfirm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the baseline?`
         }
         message={
           promoteConfirm === null
             ? ''
             : isBaselineArm(armVariantId(exp, promoteConfirm))
               ? `Arm ${promoteConfirm} is the current workflow (baseline). Promoting it records the verdict and leaves the workflow definition unchanged.`
-              : "The winning variant's step definition is written into this workflow, so all future normal launches use it. If this variant only changes the step definition, it will be retired; if it also carries agent-prompt or model overrides, it is kept as a named version."
+              : isQuickArm(armVariantId(exp, promoteConfirm))
+                ? `Arm ${promoteConfirm} is a quick session — it has no workflow definition to adopt. Promoting it records the verdict and leaves the workflow definition unchanged.`
+                : "The winning variant's step definition is written into this workflow, so all future normal launches use it. If this variant only changes the step definition, it will be retired; if it also carries agent-prompt or model overrides, it is kept as a named version."
         }
         confirmText="Promote"
         cancelText="Cancel"

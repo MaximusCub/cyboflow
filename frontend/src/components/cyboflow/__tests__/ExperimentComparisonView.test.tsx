@@ -599,6 +599,42 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() => expect(switchToRotationMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
   });
 
+  it('"Switch to randomized" stays disabled for a SETTLED quick-arm experiment (server always rejects it)', async () => {
+    // A '__quick__' arm can never rotate (rotation arms are real variants or the
+    // baseline), so offering the confirmation flow would only end in BAD_REQUEST.
+    getQuery.mockResolvedValue(makeExp({ status: 'decided', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const btn = await screen.findByTestId('experiment-switch-to-rotation');
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', expect.stringContaining('quick-session arm'));
+  });
+
+  it('promoting a quick arm uses record-the-winner copy, never "as the workflow baseline"', async () => {
+    getQuery.mockResolvedValue(
+      makeExp({
+        status: 'decided',
+        variant_a_id: '__quick__',
+        promoted_variant_id: '__quick__',
+        promoted_arm: 'A',
+        promoted_at: '2026-07-03T00:00:00.000Z',
+      }),
+    );
+    getComparisonQuery.mockResolvedValue(
+      makePayload({ armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session' }) }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const summary = await screen.findByTestId('experiment-promoted-summary');
+    // Promotion of a quick arm records a verdict only — no spec adoption happens,
+    // so the summary must not claim the workflow baseline changed.
+    expect(summary).toHaveTextContent('Recorded Quick session as the winner');
+    expect(summary).not.toHaveTextContent('as the workflow baseline');
+  });
+
   it('"Run another experiment" is disabled until the experiment is settled', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'grading' }));
     getComparisonQuery.mockResolvedValue(makePayload());
