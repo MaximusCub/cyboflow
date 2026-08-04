@@ -12,7 +12,13 @@
  *   (e) spec_json overrides the built-in fallback
  */
 import { describe, it, expect } from 'vitest';
-import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from '../workflowMeta';
+import {
+  buildWorkflowMeta,
+  DEFAULT_WORKFLOW_NAME,
+  SETUP_WORKFLOW_NAMES,
+  VERIFY_SETUP_WORKFLOW_NAME,
+  launcherWorkflowMetas,
+} from '../workflowMeta';
 import type { WorkflowListRow, RunListRow } from '../workflowMeta';
 import { WORKFLOW_DEFINITIONS } from '../../../../../../shared/types/workflows';
 
@@ -249,8 +255,10 @@ describe('buildWorkflowMeta — setup flows', () => {
   });
 
   it('the launcher filter drops exactly the setup flows', () => {
-    // The expression the wizard renders with, asserted directly so a change to
-    // it has to break a test rather than silently strand or re-expose a flow.
+    // Calls the FUNCTION the wizard maps over, not a re-implementation of it.
+    // A copy of the predicate written here would keep passing while the render
+    // site lost its filter — which is how a hidden flow silently comes back, or
+    // a work flow silently disappears.
     const metas = buildWorkflowMeta(
       [
         makeWorkflow({ id: 'wf-sprint', name: 'sprint' }),
@@ -260,7 +268,13 @@ describe('buildWorkflowMeta — setup flows', () => {
       [],
     );
 
-    expect(metas.filter((m) => !m.hiddenFromLauncher).map((m) => m.name)).toEqual(['sprint', 'ship']);
+    expect(launcherWorkflowMetas(metas).map((m) => m.name)).toEqual(['sprint', 'ship']);
+  });
+
+  it('the hide-list and the CTA name the SAME flow', () => {
+    // Two copies of the literal could drift into a flow that is hidden from the
+    // launcher while the CTA preselects something else — hidden with no way in.
+    expect(SETUP_WORKFLOW_NAMES.has(VERIFY_SETUP_WORKFLOW_NAME)).toBe(true);
   });
 
   it('a custom flow that merely CONTAINS the name is not treated as setup', () => {

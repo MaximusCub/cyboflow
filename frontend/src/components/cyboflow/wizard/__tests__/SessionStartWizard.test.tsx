@@ -238,6 +238,17 @@ const SHIP_WORKFLOW_ROW: WorkflowRow = {
   created_at: '',
   archived_at: null,
 };
+/** The verify-setup built-in row — hidden from the launcher, launched from the Verify Queue. */
+const VERIFY_SETUP_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-verify-setup',
+  project_id: 1,
+  name: 'verify-setup',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+  archived_at: null,
+};
 /** The Compound built-in row (the Insights CTA preselect target). */
 const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
   id: 'wf-compound',
@@ -1542,6 +1553,55 @@ describe('SessionStartWizard — workflow preselect', () => {
 
     await screen.findByTestId('wizard-step3');
     expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Run /compound');
+  });
+
+  it('OMITS a setup flow from the launcher list while still preselecting it by name', async () => {
+    // The render site, asserted end to end: verify-setup must not appear among
+    // the flow cards (it configures the project rather than doing project
+    // work), yet the Verify Queue's CTA — which preselects it BY NAME — must
+    // still resolve it and advance. Reverting the filter, or filtering it out
+    // of the meta array instead, breaks exactly one of these two.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, VERIFY_SETUP_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({ view: 'wizard', wizardOpts: { lockProjectId: 1 } });
+    });
+    const { unmount } = render(<SessionStartWizard />);
+
+    await screen.findByTestId('workflow-list-row');
+    const listed = screen.getAllByTestId('workflow-list-row').map((el) => el.textContent ?? '');
+    expect(listed.some((t) => t.includes('/sprint'))).toBe(true);
+    expect(listed.some((t) => t.includes('/verify-setup'))).toBe(false);
+    unmount();
+
+    // ...and the hidden row is still reachable by the CTA's by-name preselect.
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: { lockProjectId: 1, preselectWorkflowName: 'verify-setup' },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    await screen.findByTestId('wizard-step3');
+    expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Run /verify-setup');
+  });
+
+  it('SAYS SO when a requested preselect does not resolve, instead of silently falling back', async () => {
+    // The silent fallback to sprint is merely confusing for a flow the user can
+    // still find in the list — but for a HIDDEN setup flow it is a dead end,
+    // since the list is exactly where it is not.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: { lockProjectId: 1, preselectWorkflowName: 'verify-setup' },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /"verify-setup" is not available for this project/i,
+    );
   });
 
   it('does NOT auto-advance the implicit default (sprint) preselect without the opt', async () => {

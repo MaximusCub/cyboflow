@@ -77,17 +77,40 @@ export interface WorkflowCardMeta {
 export const DEFAULT_WORKFLOW_NAME = 'sprint';
 
 /**
+ * The visual-verification setup flow, launched from the Verify Queue's health
+ * panel (docs/proposals/verification-setup-flow.md §6). Exported so the panel's
+ * CTA and this module's hide-list name the same string — the launcher hides
+ * exactly what that CTA is the entry point for, and two copies of the literal
+ * could drift into a flow that is hidden with no way in.
+ */
+export const VERIFY_SETUP_WORKFLOW_NAME = 'verify-setup';
+
+/**
  * Flows that configure the PROJECT rather than doing project work. They are
  * hidden from the wizard's flow list and launched from the surface they
  * configure — `verify-setup` from the Verify Queue, which is where a user who
  * needs it is already standing (docs/proposals/verification-setup-flow.md §6).
  *
- * Hiding a flow here REMOVES ITS ONLY LAUNCH PATH: `slashCommand` on this
- * model is a display eyebrow, not a command registry — nothing dispatches on
- * it. A name added to this set therefore MUST have a launch affordance on its
- * own surface first, or the flow becomes unreachable from the UI.
+ * Hiding a flow here removes it from the wizard, which is the launch path most
+ * users would reach for. `slashCommand` on this model is a display eyebrow, not
+ * a command registry — nothing dispatches on it — so the remaining ways in are
+ * the flow's OWN surface and the Workflows gallery's Run action (which
+ * preselects by unambiguous row id). A name added to this set MUST have an
+ * affordance on its own surface, and that affordance must not be conditional on
+ * state the flow itself is meant to repair.
  */
-export const SETUP_WORKFLOW_NAMES: ReadonlySet<string> = new Set(['verify-setup']);
+export const SETUP_WORKFLOW_NAMES: ReadonlySet<string> = new Set([VERIFY_SETUP_WORKFLOW_NAME]);
+
+/**
+ * The wizard's "or run a workflow" list: every meta EXCEPT the setup flows.
+ *
+ * A function rather than a filter written inline at the JSX, so the rule is
+ * assertable without mounting the wizard — and so the render site cannot
+ * quietly lose the filter while every test stays green.
+ */
+export function launcherWorkflowMetas(metas: WorkflowCardMeta[]): WorkflowCardMeta[] {
+  return metas.filter((meta) => !meta.hiddenFromLauncher);
+}
 
 /**
  * Static one-line subtitles keyed by built-in workflow name. Custom flows fall

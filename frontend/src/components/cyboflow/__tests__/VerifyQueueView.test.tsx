@@ -706,12 +706,32 @@ describe('VerifyQueueView — health panel', () => {
     expect(screen.getByTestId('verify-health-modality-web')).toHaveTextContent('50% pass');
     expect(screen.getByTestId('verify-health-modality-web')).toHaveTextContent('median 42s');
     expect(screen.getByTestId('verify-health-failures-web')).toHaveTextContent('env 2');
-    // With nothing proven, the panel's own setup CTA is offered too.
-    expect(screen.getByTestId('verify-health-setup-cta')).toBeInTheDocument();
   });
 
-  it('hides the health setup CTA once some modality has a proven runbook', async () => {
+  it('offers EXACTLY ONE setup CTA in the empty state', async () => {
+    // The empty state carries its own prominent CTA, so the panel suppresses
+    // its header one there — two buttons doing the same thing a few pixels
+    // apart read as two different actions.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-empty-setup-cta')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('verify-health-panel')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('verify-health-setup-cta')).not.toBeInTheDocument();
+  });
+
+  it('keeps the setup CTA on a POPULATED queue, and relabels it once something is proven', async () => {
+    // The reachability rule: verify-setup is hidden from the wizard's flow
+    // list, so this CTA is its entry point. A populated queue is precisely
+    // where the empty state's CTA is absent — if this one were conditional the
+    // flow would be unlaunchable.
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
+    });
     healthQuerySpy.mockResolvedValue({
       ...emptyHealth(),
       modalities: [
@@ -726,9 +746,30 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     expect(await screen.findByTestId('verify-health-runbook-web')).toHaveTextContent('proven');
-    await waitFor(() => {
-      expect(screen.queryByTestId('verify-health-setup-cta')).not.toBeInTheDocument();
+    // Present, but relabelled — presence tracks reachability, the label tracks
+    // state. "Proven" here means ONE modality is, which is not "done".
+    expect(screen.getByTestId('verify-health-setup-cta')).toHaveTextContent('Re-run setup');
+  });
+
+  it('still offers the setup CTA when only SOME modality is proven', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
     });
+    healthQuerySpy.mockResolvedValue({
+      ...emptyHealth(),
+      modalities: [
+        { modality: 'web', ...stats(), capability: null, runbook: { status: 'proven', version: 1, portableHash: 'h' } },
+        { modality: 'cdp-app', ...stats(), capability: null, runbook: null },
+      ],
+    });
+    render(<VerifyQueueView />);
+
+    // cdp-app has no runbook at all — its checks all skip, and repairing that
+    // is exactly what the CTA is for.
+    expect(await screen.findByTestId('verify-health-runbook-cdp-app')).toHaveTextContent(/will skip/i);
+    expect(screen.getByTestId('verify-health-setup-cta')).toBeInTheDocument();
   });
 
   it('shows an in-force suppression with its retry window', async () => {
@@ -772,18 +813,38 @@ describe('VerifyQueueView — health panel', () => {
     );
   });
 
-  it('hides the health section entirely when both queries fail', async () => {
-    // A missing health section is never worth a second error surface — the
-    // queue's own banner already covers the primary failure mode.
-    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+  it('drops the health TABLES but keeps the CTA when both queries fail', async () => {
+    // A failed health query is not a reason to remove the launch path for the
+    // flow that repairs verification — it is a reason to want it. The tables
+    // go (there is nothing to show), the affordance stays. No second error
+    // surface either: the queue's own banner covers the primary failure mode.
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
+    });
     healthQuerySpy.mockRejectedValue(new Error('nope'));
     hostProbesQuerySpy.mockRejectedValue(new Error('nope'));
     render(<VerifyQueueView />);
 
-    // The empty state (and its CTA) still render.
-    expect(await screen.findByTestId('verify-queue-empty-setup-cta')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.queryByTestId('verify-health-panel')).not.toBeInTheDocument();
+    const cta = await screen.findByTestId('verify-health-setup-cta');
+    expect(cta).toHaveTextContent('Set up verification');
+    expect(screen.queryByTestId('verify-health-modality-web')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('verify-probe-node')).not.toBeInTheDocument();
+  });
+
+  it('launches the wizard preselected from the health CTA', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
+      isLoading: false,
+      error: null,
     });
+    render(<VerifyQueueView />);
+
+    await userEvent.click(await screen.findByTestId('verify-health-setup-cta'));
+
+    expect(goToWizardSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ preselectWorkflowName: 'verify-setup', lockProjectId: 1 }),
+    );
   });
 });

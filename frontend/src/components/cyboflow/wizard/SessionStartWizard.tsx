@@ -105,7 +105,7 @@ import { WorkflowListRow } from './WorkflowListRow';
 import { QuickSessionCard } from './QuickSessionCard';
 import { UltracodeCard } from './UltracodeCard';
 import { DesignCard } from './DesignCard';
-import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
+import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME, launcherWorkflowMetas } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
@@ -589,6 +589,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           // `preselectWorkflowName` is kept for the Insights compound CTA.
           const preselectId = opts?.preselectWorkflowId;
           const preselectName = opts?.preselectWorkflowName;
+          const preselectRequested = preselectId !== undefined || preselectName !== undefined;
           const preselectTarget = preselectConsumedRef.current
             ? null
             : preselectId !== undefined
@@ -596,6 +597,17 @@ export default function SessionStartWizard(): React.JSX.Element {
               : preselectName !== undefined
                 ? metas.find((m) => m.name === preselectName) ?? null
                 : null;
+          // A preselect that was ASKED FOR and did not resolve must say so. The
+          // silent fallback to "sprint" is merely confusing for a flow the user
+          // can still find in the list below — but for a HIDDEN setup flow it
+          // is a dead end, since the list is exactly where it is not. Only
+          // report an unconsumed request: after the latch fires, a rerun has
+          // legitimately stopped looking.
+          if (preselectRequested && !preselectConsumedRef.current && preselectTarget === null) {
+            setWorkflowsError(
+              `Flow "${preselectName ?? preselectId ?? ''}" is not available for this project.`,
+            );
+          }
           // Selection priority: a just-saved flow (preferId, editor save) >
           // the existing pick > the EXPLICIT preselect > the default flow.
           setSelection((prev) => {
@@ -1328,7 +1340,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 CTA label, planner check), and a setup flow launched from its
                 own surface still has to resolve its meta through them. */}
             <div className="flex flex-col gap-2">
-              {workflowMetas.filter((meta) => !meta.hiddenFromLauncher).map((meta) => (
+              {launcherWorkflowMetas(workflowMetas).map((meta) => (
                 <WorkflowListRow
                   key={meta.id}
                   meta={meta}

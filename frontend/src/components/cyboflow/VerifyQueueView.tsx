@@ -313,7 +313,9 @@ export function VerifyQueueView(): ReactElement {
               testId="verify-queue-empty-setup-cta"
             />
           </div>
-          <VerifyHealthPanel projectId={projectId} />
+          {/* The prominent CTA above IS this state's setup affordance — the
+              panel must not render a second one right beneath it. */}
+          <VerifyHealthPanel projectId={projectId} showSetupCta={false} />
         </div>
       );
     }

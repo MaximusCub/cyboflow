@@ -25,6 +25,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { trpc } from '../../trpc/client';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { VERIFY_SETUP_WORKFLOW_NAME } from './wizard/workflowMeta';
 import type {
   VerificationHealthSummary,
   VerificationModalityHealth,
@@ -45,13 +46,6 @@ import {
   runbookLine,
 } from './verifyHealthModel';
 
-/**
- * The workflow launched by the setup CTA. Hidden from the session wizard's flow
- * list (it configures the project rather than doing project work), so THIS is
- * its entry point — see `wizard/workflowMeta.ts` SETUP_WORKFLOW_NAMES.
- */
-const VERIFY_SETUP_WORKFLOW_NAME = 'verify-setup';
-
 /** Health polls far slower than the request list: these numbers move per verification, not per tick. */
 const HEALTH_REFETCH_INTERVAL_MS = 15_000;
 
@@ -62,6 +56,13 @@ const HEALTH_REFETCH_INTERVAL_MS = 15_000;
 /**
  * Launches the verify-setup flow by opening the session wizard PRESELECTED to
  * it, rather than calling `runs.start` here.
+ *
+ * The flow is hidden from the wizard's own list (it configures the project
+ * rather than doing project work), so this CTA is its primary entry point —
+ * see `wizard/workflowMeta.ts` SETUP_WORKFLOW_NAMES. That is why the button is
+ * rendered UNCONDITIONALLY rather than only when setup looks needed: a health
+ * query that failed, or one modality already proven while another is not, must
+ * not be able to hide the only affordance for repairing the rest.
  *
  * A flow launch needs a host session, a resolved substrate/provider pair, a
  * model and a permission mode — all of which the wizard already owns. Starting
@@ -203,7 +204,18 @@ function ModalityRow({ row }: { row: VerificationModalityHealth }): ReactElement
 // Panel
 // ---------------------------------------------------------------------------
 
-export function VerifyHealthPanel({ projectId }: { projectId: number | null }): ReactElement | null {
+export function VerifyHealthPanel({
+  projectId,
+  showSetupCta = true,
+}: {
+  projectId: number | null;
+  /**
+   * Whether to render the header's setup CTA. The Verify Queue's EMPTY state
+   * carries its own prominent one directly above this panel, and two buttons
+   * doing the same thing a few pixels apart reads as two different actions.
+   */
+  showSetupCta?: boolean;
+}): ReactElement | null {
   const [health, setHealth] = useState<VerificationHealthSummary | null>(null);
   const [probes, setProbes] = useState<VerifyHostProbeReport | null>(null);
   const [fixInFlight, setFixInFlight] = useState(false);
@@ -264,20 +276,27 @@ export function VerifyHealthPanel({ projectId }: { projectId: number | null }): 
   }, []);
 
   if (projectId === null) return null;
-  if (health === null && probes === null) return null;
 
-  const needsSetup = health !== null && !hasProvenRunbook(health.modalities);
+  // The panel renders even when BOTH queries failed. It degrades to a header
+  // and its CTA rather than disappearing: this is the launch path for the flow
+  // that repairs verification, and a failing health query is not a reason to
+  // take it away — it is a reason to want it.
+  //
+  // The CTA's LABEL, not its presence, tracks how much is set up. `proven` here
+  // means at least one modality is proven, which is not the same as "done" on a
+  // project with several.
+  const proven = health !== null && hasProvenRunbook(health.modalities);
 
   return (
     <section data-testid="verify-health-panel" className="flex flex-col gap-3">
       <div className="flex items-baseline gap-2">
         <h2 className="eyebrow text-text-tertiary">Health</h2>
         <span className="text-[10px] text-text-tertiary">live probes · per-modality outcomes</span>
-        {needsSetup && (
+        {showSetupCta && (
           <span className="ml-auto">
             <VerifySetupCta
               projectId={projectId}
-              label="Set up verification"
+              label={proven ? 'Re-run setup' : 'Set up verification'}
               testId="verify-health-setup-cta"
             />
           </span>
