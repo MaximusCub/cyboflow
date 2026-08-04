@@ -34,6 +34,20 @@ const submitSchema = z.object({
   runId: z.string().max(200).optional(),
   flowName: z.string().max(200).optional(),
   logText: z.string().max(BUG_REPORT_LIMITS.logTextMax).optional(),
+  // Echoed back from the preview so the report carries the failures the user
+  // actually reviewed (see the request type). Bounded here because it arrives
+  // from the renderer like every other field on this channel.
+  recentErrors: z
+    .array(
+      z.object({
+        at: z.string().max(64),
+        seam: z.string().max(200),
+        errorClass: z.string().max(200),
+        message: z.string().max(BUG_REPORT_LIMITS.recentErrorMessageMax),
+      }),
+    )
+    .max(BUG_REPORT_LIMITS.recentErrorsMax)
+    .optional(),
   idempotencyKey: z.string().min(1).max(200),
 });
 
@@ -52,8 +66,10 @@ interface LimiterState {
 
 const limiter: LimiterState = { acceptedAt: [], inFlight: false, served: new Map() };
 
-const HOUR_MS = 60 * 60 * 1000;
-const SERVED_KEYS_MAX = 50;
+/** Width of the rolling window the hourly ceiling is counted over. */
+export const HOUR_MS = 60 * 60 * 1000;
+/** How many served idempotency keys are retained before oldest-first eviction. */
+export const SERVED_KEYS_MAX = 50;
 
 /**
  * Decide whether a submission may proceed. Returns null when allowed, or the
@@ -152,12 +168,20 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
     limiter.inFlight = true;
     try {
       const { environment } = resolveTelemetryCredentials();
-      const diagnostics = collectDiagnostics({
-        appVersion: app.getVersion(),
-        electronVersion: process.versions.electron ?? 'unknown',
-        environment,
-        installId: readTelemetryConfigSync().installId,
-      });
+      const diagnostics = {
+        ...collectDiagnostics({
+          appVersion: app.getVersion(),
+          electronVersion: process.versions.electron ?? 'unknown',
+          environment,
+          installId: readTelemetryConfigSync().installId,
+        }),
+        // Re-collecting here would attach failures recorded AFTER the user read
+        // the preview — the payload would no longer be the one they consented
+        // to. The reviewed list is echoed back instead, and its absence (a
+        // preview that failed to load) means the user reviewed nothing, so
+        // nothing is attached.
+        recentErrors: request.recentErrors ?? [],
+      };
 
       const result = await submitBugReport(
         {

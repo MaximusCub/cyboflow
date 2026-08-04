@@ -12,7 +12,16 @@ import type { IpcMain } from 'electron';
 import type { BugReportSubmitResponse } from '../../../../shared/types/bugReport';
 
 const service = vi.hoisted(() => ({
-  submitBugReport: vi.fn(async () => ({ delivery: 'accepted' as const, eventId: 'evt-1' })),
+  // Args are declared as `unknown[]` so `mock.calls[n][0]` is inspectable —
+  // an argless `vi.fn` types its call tuples as `[]`.
+  submitBugReport: vi.fn(
+    async (
+      ..._args: unknown[]
+    ): Promise<{ delivery: string; eventId?: string; error?: string }> => ({
+      delivery: 'accepted',
+      eventId: 'evt-1',
+    }),
+  ),
 }));
 
 vi.mock('electron', () => ({
@@ -55,7 +64,13 @@ vi.mock('../../services/configManager', () => ({
   })),
 }));
 
-import { registerBugReportHandlers, __resetBugReportLimiterForTests } from '../bugReport';
+import {
+  registerBugReportHandlers,
+  __resetBugReportLimiterForTests,
+  HOUR_MS,
+  SERVED_KEYS_MAX,
+} from '../bugReport';
+import { BUG_REPORT_LIMITS } from '../../../../shared/types/bugReport';
 import type { AppServices } from '../types';
 
 type Handler = (event: unknown, args: unknown) => Promise<unknown>;
@@ -146,6 +161,49 @@ describe('contact consent', () => {
   });
 });
 
+describe('contact echo', () => {
+  /**
+   * The recent-error list is echoed back from the preview rather than
+   * re-collected, so the report carries the failures the user actually read.
+   */
+  it('forwards the previewed recent errors instead of a freshly collected set', async () => {
+    const reviewed = [
+      { at: '2026-08-03T00:00:00.000Z', seam: 'run-start', errorClass: 'Error', message: 'boom' },
+    ];
+
+    await submit({ ...VALID, recentErrors: reviewed });
+
+    const diagnostics = service.submitBugReport.mock.calls[0][1] as {
+      recentErrors: unknown[];
+    };
+    expect(diagnostics.recentErrors).toEqual(reviewed);
+  });
+
+  it('attaches nothing when the preview never loaded, rather than unreviewed errors', async () => {
+    await submit(VALID);
+
+    const diagnostics = service.submitBugReport.mock.calls[0][1] as {
+      recentErrors: unknown[];
+    };
+    expect(diagnostics.recentErrors).toEqual([]);
+  });
+
+  it('rejects an oversized recent-error list instead of forwarding it', async () => {
+    const result = await submit({
+      ...VALID,
+      recentErrors: Array.from({ length: 200 }, () => ({
+        at: 'now',
+        seam: 's',
+        errorClass: 'Error',
+        message: 'm',
+      })),
+    });
+
+    expect(result.success).toBe(false);
+    expect(service.submitBugReport).not.toHaveBeenCalled();
+  });
+});
+
 describe('rate limiting', () => {
   it('refuses a second submission inside the minimum interval', async () => {
     const first = await submit({ ...VALID, idempotencyKey: 'key-1' });
@@ -171,6 +229,88 @@ describe('rate limiting', () => {
     // Not rate-limited: a DSN-less build must not lock the user out of retrying.
     expect(second.data?.delivery).toBe('unavailable');
     expect(service.submitBugReport).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * The minimum interval hides the hourly ceiling under real time, so this is the
+   * only way to reach it: step past the interval between each accepted report and
+   * stay inside the rolling hour.
+   */
+  it('refuses an eleventh report within the rolling hour', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-03T00:00:00Z'));
+      for (let i = 0; i < BUG_REPORT_LIMITS.maxPerHour; i++) {
+        const accepted = await submit({ ...VALID, idempotencyKey: `key-${i}` });
+        expect(accepted.data?.delivery).toBe('accepted');
+        vi.setSystemTime(Date.now() + BUG_REPORT_LIMITS.minIntervalMs + 1_000);
+      }
+
+      const refused = await submit({ ...VALID, idempotencyKey: 'one-too-many' });
+
+      expect(refused.data?.delivery).toBe('rate-limited');
+      expect(refused.data?.error).toContain('last hour');
+      expect(service.submitBugReport).toHaveBeenCalledTimes(BUG_REPORT_LIMITS.maxPerHour);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Single-flight is what stops a looping renderer from firing many concurrent
+   * submissions before any of them has consumed quota. Testing it requires a
+   * submission that is genuinely still in flight — sequential awaits pass whether
+   * or not the lock exists.
+   */
+  it('refuses a concurrent submission while one is still in flight', async () => {
+    let releaseFirst: (() => void) | undefined;
+    service.submitBugReport.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseFirst = () => resolve({ delivery: 'accepted', eventId: 'evt-1', error: undefined });
+        }),
+    );
+
+    const first = submit({ ...VALID, idempotencyKey: 'key-1' });
+    const concurrent = await submit({ ...VALID, idempotencyKey: 'key-2' });
+
+    expect(concurrent.data?.delivery).toBe('rate-limited');
+    expect(service.submitBugReport).toHaveBeenCalledTimes(1);
+
+    releaseFirst?.();
+    expect((await first).data?.delivery).toBe('accepted');
+  });
+});
+
+describe('idempotency-key retention', () => {
+  /**
+   * The served-key map is unbounded input from the renderer's perspective, so it
+   * evicts oldest-first. Crossing the cap has to drop the OLDEST key, not refuse
+   * new ones — an evicted key simply files again rather than replaying.
+   */
+  it('evicts the oldest served key once the cap is exceeded', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-03T00:00:00Z'));
+      // An hour per report keeps the rolling window empty, so only the served-key
+      // cap is under test here.
+      for (let i = 0; i <= SERVED_KEYS_MAX; i++) {
+        await submit({ ...VALID, idempotencyKey: `key-${i}` });
+        vi.setSystemTime(Date.now() + HOUR_MS + 1_000);
+      }
+      const filedSoFar = service.submitBugReport.mock.calls.length;
+      expect(filedSoFar).toBe(SERVED_KEYS_MAX + 1);
+
+      // The most recent key still replays from cache…
+      await submit({ ...VALID, idempotencyKey: `key-${SERVED_KEYS_MAX}` });
+      expect(service.submitBugReport).toHaveBeenCalledTimes(filedSoFar);
+
+      // …while the evicted first one files again instead of replaying.
+      await submit({ ...VALID, idempotencyKey: 'key-0' });
+      expect(service.submitBugReport).toHaveBeenCalledTimes(filedSoFar + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
