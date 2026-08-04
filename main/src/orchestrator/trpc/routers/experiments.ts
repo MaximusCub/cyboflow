@@ -2218,15 +2218,48 @@ export function listDashboardExperiments(deps: ExperimentsDeps, input: ListDashb
 // Router
 // ---------------------------------------------------------------------------
 
-/** Wire schema for one arm's optional quick-session config — mirrors {@link ExperimentArmQuickConfig}. */
-const experimentArmQuickConfigSchema = z.object({
-  substrate: z.enum(['sdk', 'interactive']).optional(),
-  agentProvider: z.enum(['claude', 'codex']).optional(),
-  agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
-  model: z.string().min(1).optional(),
-  reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
-  permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
-});
+/**
+ * Wire schema for one arm's optional quick-session config — mirrors
+ * {@link ExperimentArmQuickConfig}. Cross-field rules exist because the
+ * quick-session core silently DROPS agentProvider/model unless agentRuntime is
+ * also present (createQuickSessionCore's isWorkflowRuntimeSupported gate),
+ * while the arm-session stamp derives codex-sdk from provider alone — an
+ * independent-field schema let those two disagree (a Claude-interactive
+ * sentinel stamped as codex-sdk). Reject the inconsistent combos at the wire
+ * instead.
+ */
+const experimentArmQuickConfigSchema = z
+  .object({
+    substrate: z.enum(['sdk', 'interactive']).optional(),
+    agentProvider: z.enum(['claude', 'codex']).optional(),
+    agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
+    model: z.string().min(1).optional(),
+    reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
+    permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
+  })
+  .superRefine((cfg, ctx) => {
+    if ((cfg.agentProvider !== undefined || cfg.model !== undefined) && cfg.agentRuntime === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agentRuntime'],
+        message: 'agentRuntime is required when agentProvider or model is set',
+      });
+    }
+    if (cfg.agentProvider === 'codex' && cfg.agentRuntime !== undefined && cfg.agentRuntime !== 'codex-sdk') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agentRuntime'],
+        message: "agentProvider 'codex' requires agentRuntime 'codex-sdk'",
+      });
+    }
+    if (cfg.agentProvider === 'claude' && cfg.agentRuntime === 'codex-sdk') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agentRuntime'],
+        message: "agentProvider 'claude' cannot use agentRuntime 'codex-sdk'",
+      });
+    }
+  });
 
 /**
  * The persisted quick-arm config for one arm of a source experiment (migration

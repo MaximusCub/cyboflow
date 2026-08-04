@@ -571,6 +571,32 @@ describe('quick-arm config persistence + rerun replay (migration 083)', () => {
     expect(h.armSessionCalls[2]!.quickConfig).toBeUndefined();
   });
 
+  it('rerun degrades a persisted config that fails the wire cross-field rule (provider without runtime) to defaults', async () => {
+    const h = makeHarness();
+    addQuickConfigsTable(h);
+    setExperimentsDeps(h.deps);
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: QUICK_ARM_SENTINEL,
+      variantBId: 'vB',
+      quickConfigA: { model: 'opus', agentRuntime: 'claude-sdk' },
+    });
+    updateExperimentStatus(h.deps.db, res.experimentId, 'decided');
+    // A row written before the cross-field refine existed (or by hand): the
+    // core would drop the provider while the stamp derivation would claim
+    // codex-sdk — replay must reject it rather than recreate the inconsistency.
+    h.db
+      .prepare('UPDATE experiment_quick_configs SET config_json = ? WHERE experiment_id = ?')
+      .run(JSON.stringify({ substrate: 'interactive', agentProvider: 'codex' }), res.experimentId);
+
+    const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
+    await caller.rerun({ experimentId: res.experimentId });
+
+    expect(h.armSessionCalls).toHaveLength(4);
+    expect(h.armSessionCalls[2]!.quickConfig).toBeUndefined();
+  });
+
   it('rerun ignores an unparseable persisted config (defaults, no throw)', async () => {
     const h = makeHarness();
     addQuickConfigsTable(h);
