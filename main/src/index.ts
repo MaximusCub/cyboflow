@@ -86,6 +86,7 @@ import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
+import { IdeaComponentRouter } from './orchestrator/ideaComponents/ideaComponentRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
 import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
@@ -1575,6 +1576,12 @@ async function initializeServices(): Promise<boolean> {
   // (it binds makeRevisionQuery + TaskChangeRouter, both off-limits to the
   // standalone tRPC router) and read by sendFeedbackHandler via getRevisionLauncher.
   FeedbackRouter.initialize(cyboflowDb);
+
+  // Idea component ledger write chokepoint (migration 098) — the single
+  // serialized writer for `idea_components`; the cyboflow.ideaComponents tRPC
+  // router reaches it via getInstance() for the card's manual-override path.
+  IdeaComponentRouter.initialize(cyboflowDb);
+
   setRevisionLauncher((info) =>
     runRevisionBatch(
       {
