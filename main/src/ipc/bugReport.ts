@@ -56,15 +56,22 @@ const submitSchema = z.object({
 // ---------------------------------------------------------------------------
 
 interface LimiterState {
-  /** Epoch ms of accepted submissions within the rolling window. */
-  acceptedAt: number[];
+  /**
+   * Epoch ms of submissions that reached the network, within the rolling window.
+   *
+   * ATTEMPTS, not acceptances. Counting only what Sentry accepted leaves the
+   * failure path unthrottled — a rejecting endpoint or a dropped send would let
+   * a retry loop hammer it as fast as the round trip allows, which is the state
+   * a report is most likely to be filed from.
+   */
+  attemptedAt: number[];
   /** True while a submission is in flight. */
   inFlight: boolean;
   /** Idempotency keys already served, with their result. */
   served: Map<string, BugReportSubmitResponse>;
 }
 
-const limiter: LimiterState = { acceptedAt: [], inFlight: false, served: new Map() };
+const limiter: LimiterState = { attemptedAt: [], inFlight: false, served: new Map() };
 
 /** Width of the rolling window the hourly ceiling is counted over. */
 export const HOUR_MS = 60 * 60 * 1000;
@@ -85,9 +92,9 @@ function checkRateLimit(now: number): BugReportSubmitResponse | null {
   }
 
   // Drop entries that have aged out of the rolling window.
-  limiter.acceptedAt = limiter.acceptedAt.filter((t) => now - t < HOUR_MS);
+  limiter.attemptedAt = limiter.attemptedAt.filter((t) => now - t < HOUR_MS);
 
-  const last = limiter.acceptedAt[limiter.acceptedAt.length - 1];
+  const last = limiter.attemptedAt[limiter.attemptedAt.length - 1];
   if (last !== undefined && now - last < BUG_REPORT_LIMITS.minIntervalMs) {
     return {
       delivery: 'rate-limited',
@@ -96,8 +103,8 @@ function checkRateLimit(now: number): BugReportSubmitResponse | null {
     };
   }
 
-  if (limiter.acceptedAt.length >= BUG_REPORT_LIMITS.maxPerHour) {
-    const oldest = limiter.acceptedAt[0];
+  if (limiter.attemptedAt.length >= BUG_REPORT_LIMITS.maxPerHour) {
+    const oldest = limiter.attemptedAt[0];
     return {
       delivery: 'rate-limited',
       error: 'Too many reports sent in the last hour.',
@@ -120,7 +127,7 @@ function remember(key: string, response: BugReportSubmitResponse): void {
 
 /** Test seam: reset limiter state between cases. */
 export function __resetBugReportLimiterForTests(): void {
-  limiter.acceptedAt = [];
+  limiter.attemptedAt = [];
   limiter.inFlight = false;
   limiter.served.clear();
 }
@@ -166,6 +173,10 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
     if (refusal) return { success: true, data: refusal };
 
     limiter.inFlight = true;
+    // Assume the attempt reaches the network until proven otherwise, so a throw
+    // on the way out is throttled too. Only `unavailable` is free: it is decided
+    // from a missing DSN before anything is composed, let alone sent.
+    let reachedNetwork = true;
     try {
       const { environment } = resolveTelemetryCredentials();
       const diagnostics = {
@@ -204,10 +215,14 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
         error: result.error,
       };
 
-      // Only a real delivery consumes quota — a build with no DSN must not
-      // rate-limit a user out of retrying once it is configured.
+      // A build with no DSN must not rate-limit the user out of retrying once
+      // one is configured.
+      reachedNetwork = result.delivery !== 'unavailable';
+
+      // Only a report we believe was FILED becomes replayable. A failure has to
+      // stay retryable under its original key, or the one report the user cared
+      // enough to write by hand is the one they can never resend.
       if (result.delivery === 'accepted' || result.delivery === 'queued') {
-        limiter.acceptedAt.push(Date.now());
         remember(request.idempotencyKey, response);
       }
 
@@ -218,6 +233,7 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
         error: error instanceof Error ? error.message : String(error),
       };
     } finally {
+      if (reachedNetwork) limiter.attemptedAt.push(Date.now());
       limiter.inFlight = false;
     }
   });

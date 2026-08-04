@@ -232,6 +232,48 @@ describe('rate limiting', () => {
   });
 
   /**
+   * The throttle counts ATTEMPTS, not acceptances. Counting only what Sentry
+   * accepted left the failure path free of any interval at all — precisely the
+   * state a retry loop runs in.
+   */
+  it('throttles a failed delivery, so a rejecting endpoint cannot be hammered', async () => {
+    service.submitBugReport.mockResolvedValue({
+      delivery: 'failed',
+      error: 'HTTP 500',
+    } as never);
+
+    const first = await submit({ ...VALID, idempotencyKey: 'key-1' });
+    const second = await submit({ ...VALID, idempotencyKey: 'key-2' });
+
+    expect(first.data?.delivery).toBe('failed');
+    expect(second.data?.delivery).toBe('rate-limited');
+    expect(service.submitBugReport).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The other half of that: throttled is not the same as consumed. A failure must
+   * remain retryable under its own key once the interval has passed, or the user
+   * loses the report they hand-wrote.
+   */
+  it('leaves a failed report retryable under the same key once the interval passes', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-03T00:00:00Z'));
+      service.submitBugReport.mockResolvedValueOnce({ delivery: 'failed', error: 'HTTP 500' } as never);
+
+      await submit({ ...VALID, idempotencyKey: 'same-key' });
+      vi.setSystemTime(Date.now() + BUG_REPORT_LIMITS.minIntervalMs + 1_000);
+      const retry = await submit({ ...VALID, idempotencyKey: 'same-key' });
+
+      // Filed again rather than replaying the failure from the served-key cache.
+      expect(retry.data?.delivery).toBe('accepted');
+      expect(service.submitBugReport).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The minimum interval hides the hourly ceiling under real time, so this is the
    * only way to reach it: step past the interval between each accepted report and
    * stay inside the rolling hour.
@@ -336,12 +378,23 @@ describe('failure handling', () => {
   });
 
   it('releases the single-flight lock after a failure so the next attempt proceeds', async () => {
-    service.submitBugReport.mockRejectedValueOnce(new Error('boom'));
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-03T00:00:00Z'));
+      service.submitBugReport.mockRejectedValueOnce(new Error('boom'));
 
-    await submit({ ...VALID, idempotencyKey: 'key-1' });
-    const next = await submit({ ...VALID, idempotencyKey: 'key-2' });
+      await submit({ ...VALID, idempotencyKey: 'key-1' });
 
-    // Not 'rate-limited' — the failed attempt consumed no quota and left no lock.
-    expect(next.data?.delivery).toBe('accepted');
+      // A throw is still an attempt that may have put a request on the wire, so
+      // the interval applies — but the in-flight lock must not have leaked.
+      const immediate = await submit({ ...VALID, idempotencyKey: 'key-2' });
+      expect(immediate.data?.error).not.toContain('already being sent');
+
+      vi.setSystemTime(Date.now() + BUG_REPORT_LIMITS.minIntervalMs + 1_000);
+      const next = await submit({ ...VALID, idempotencyKey: 'key-3' });
+      expect(next.data?.delivery).toBe('accepted');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
