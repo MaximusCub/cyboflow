@@ -26,14 +26,28 @@
  * falls forward / SKIPs per never-silently-pass (missing precondition ⇒ SKIPPED,
  * never FAIL, never hang).
  *
- * @cyboflow-hidden: retired-in-place alongside its sole consumer,
- * playwrightBackend.ts (docs/proposals/verification-agent-redesign.md §3/§5.8)
- * — NOT dead code. It is exercised only when playwrightBackend.ts is (a
- * pre-upgrade run's legacy `verify_chain` stamp, or a NEW run started under the
- * `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch, §5.8). The default v1 engine
- * never needs a chromium binary provisioned this way — the agent path's own
- * driver CLI (driver/driverCore.ts) resolves the bundled `playwright` prod
- * dependency directly. Re-enable as the default alongside playwrightBackend.ts.
+ * TWO CONSUMERS, and no longer `@cyboflow-hidden` (the marker this file carried
+ * until the health panel landed):
+ *
+ *  1. playwrightBackend.ts — the legacy backend, itself retired-in-place
+ *     (docs/proposals/verification-agent-redesign.md §3/§5.8). Reached only by
+ *     a pre-upgrade run's legacy `verify_chain` stamp or a NEW run started
+ *     under the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (§5.8). The
+ *     default v1 engine never provisions a chromium binary this way — the
+ *     agent path's driver CLI (driver/driverCore.ts) resolves the bundled
+ *     `playwright` prod dependency directly.
+ *  2. The §6 health panel's chromium fix-it button
+ *     (docs/proposals/verification-setup-flow.md §6), wired in index.ts via
+ *     hostProbeAdapters.makeChromiumProvisioner. This one is USER-REACHABLE on
+ *     the default engine: a missing chromium row offers "Install", and this is
+ *     what runs.
+ *
+ * KNOWN LIMITATION of consumer 2 in a PACKAGED app: the install path below
+ * spawns `npx`, which a packaged build neither bundles nor puts on PATH, and
+ * which — where a system npx does exist — resolves a Playwright revision
+ * independent of the app's pinned one. The button is therefore reliable in a
+ * dev checkout and best-effort in a packaged app; the failure is soft (the row
+ * stays 'missing') but the fix is real work and is tracked separately.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';

@@ -44,6 +44,14 @@
  * so this stays the only live backend for those types on the legacy chain.
  * Re-enable as the default by reverting the isAgentStampedRun dispatch
  * (verificationScheduler.ts) or by leaving the kill switch set.
+ *
+ * SCOPE OF THE MARKER: the CAPTURE surface, not the whole class.
+ * {@link PeekabooBackend.healthCheck} is live on the DEFAULT engine — index.ts
+ * wires it as both the agent preflight's `nativeCaptureProbe` and the §6 health
+ * panel's `native-capture` probe row (docs/proposals/verification-setup-flow.md
+ * §4/§6), which is the point: the gate and the panel must read the TCC grant
+ * from the same source, and this is the one implementation that asks the OS.
+ * Keep it working when changing anything above.
  */
 import { mkdir } from 'node:fs/promises';
 import { join, basename } from 'node:path';
