@@ -844,6 +844,35 @@ export interface ApprovedDesignRow {
 }
 
 /**
+ * `idea_components` row (migration 098) — one row per (idea, component) pair
+ * tracking the idea component ledger's HYBRID truth model: when present, this
+ * row is authoritative; a (idea, component) pair with NO row falls back to
+ * derivation from the DB (body headings, approved_designs, child entities),
+ * which can only ever yield 'complete'|'incomplete' — never 'skipped', since
+ * that state is unfalsifiable from absence and only ever set explicitly (see
+ * migration 098's header comment). `source` therefore only ever persists
+ * 'flow'|'manual' here; 'derived' is a read-time-only marker for a component
+ * with no row (shared/types/ideaComponents.ts `IdeaComponentSource`).
+ * `stale_at` carries "reset means re-verify, NOT discard": non-NULL means
+ * prior work exists but needs re-verification against the idea's current
+ * `built_against_version`, rather than a fourth state.
+ */
+export interface IdeaComponentRow {
+  idea_id: string;
+  project_id: number;
+  component: 'idea-spec' | 'prototype' | 'architecture' | 'epics' | 'stories';
+  state: 'complete' | 'incomplete' | 'skipped';
+  source: 'flow' | 'manual';
+  source_run_id: string | null;
+  source_session_id: string | null;
+  built_against_version: number | null;
+  stale_at: string | null;
+  stale_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
  * `session_summaries` row (migration 083) — one row per session, upserted in
  * place by the idle-gated quick-session summarizer
  * (docs/proposals/session-summary-plan.md §4). `summary` is the current

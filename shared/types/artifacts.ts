@@ -672,6 +672,38 @@ export function replaceDesignSpecSection(body: string | null | undefined, newSec
   return replaceSection(body, DESIGN_SPEC_HEADING_LINE_RE, newSection);
 }
 
+// ===========================================================================
+// idea-spec — the templated idea-spec section extractor.
+//
+// The 'idea-spec' artifact re-derives its content on READ from the
+// originating idea's markdown `body` — specifically the '## Idea spec' H2
+// section, using the SAME fence-aware, last-heading-wins section grammar as
+// arch-design/design-spec so all three can coexist in one body without
+// reaching into each other's content (H2_LINE_RE terminates each at the
+// others' headings). Unlike arch-design, nothing REPLACES this section
+// through this path, so there is no replaceIdeaSpecSection wrapper.
+// ===========================================================================
+
+/** The H2 heading text that delimits the idea-spec section. */
+export const IDEA_SPEC_SECTION_HEADING = 'Idea spec';
+
+/**
+ * Matches the '## Idea spec' heading as a single LINE (case-insensitive;
+ * tolerates trailing whitespace). Deliberately uses `[ \t]` — never `\s`,
+ * which spans newlines and lets a bare '##' line plus a later 'Idea spec'
+ * text line spoof the heading.
+ */
+export const IDEA_SPEC_HEADING_LINE_RE = new RegExp(`^##[ \\t]+${IDEA_SPEC_SECTION_HEADING}[ \\t]*$`, 'i');
+
+/**
+ * Extract the '## Idea spec' section from an idea body. Thin wrapper around
+ * {@link extractSection} bound to {@link IDEA_SPEC_HEADING_LINE_RE} — see
+ * {@link extractArchDesignSection} for the shared grammar this rides on.
+ */
+export function extractIdeaSpecSection(body: string | null | undefined): string | null {
+  return extractSection(body, IDEA_SPEC_HEADING_LINE_RE);
+}
+
 /**
  * Default on-disk location for COMMITTED-artifact manifests, written when the
  * user explicitly commits an artifact (FEATURE #3 durability snapshot). A
