@@ -271,7 +271,13 @@ export function ABTestLaunchModal({
     if (!isOpen || !loaded) return;
     if (seededForWorkflowId.current === workflowId) return;
     seededForWorkflowId.current = workflowId;
-    if (options.length === 1) {
+    if (options.length === 0) {
+      // No variants at all: the only valid pairs involve the quick sentinel
+      // (baseline-vs-quick / quick-vs-quick), so seed the former — the modal is
+      // still submit-ready without a single variant row.
+      setVariantAId(BASELINE_VARIANT_SENTINEL);
+      setVariantBId(QUICK_ARM_SENTINEL);
+    } else if (options.length === 1) {
       setVariantAId(BASELINE_VARIANT_SENTINEL);
       setVariantBId(options[0].id);
     } else {
@@ -526,7 +532,10 @@ export function ABTestLaunchModal({
     }
   };
 
-  const insufficientVariants = loaded && options.length < 1;
+  // No variant rows exist. NOT a blocker: baseline-vs-quick and quick-vs-quick
+  // are valid server-side, so the pickers still render — this only gates an
+  // informational hint about creating variants.
+  const noVariants = loaded && options.length < 1;
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} size="md">
@@ -554,16 +563,16 @@ export function ABTestLaunchModal({
 
           {!loaded && <p className="text-xs text-text-secondary">Loading variants…</p>}
 
-          {insufficientVariants && (
+          {noVariants && (
             <p className="text-xs text-text-secondary" data-testid="ab-test-insufficient-variants">
-              This workflow needs at least one variant (draft or active) before you
-              can run a side-by-side test — an arm can be the current workflow
-              (baseline), but the other must be a variant. Create a variant from the
-              Workflows editor first.
+              This workflow has no variants yet — you can still compare the current
+              workflow (baseline) against a quick session, or two quick sessions.
+              Create a variant from the Workflows editor to test workflow-spec
+              changes head-to-head.
             </p>
           )}
 
-          {loaded && options.length >= 1 && (
+          {loaded && (
             <>
               <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
                 Variant A

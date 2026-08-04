@@ -158,7 +158,7 @@ beforeEach(() => {
 });
 
 describe('ABTestLaunchModal — no pickable variants', () => {
-  it('shows the explainer instead of selects, submit stays disabled', () => {
+  it('still renders the pickers (seeded baseline vs quick, submit-ready) with an informational hint', () => {
     mockUseWorkflowVariants.mockReturnValue({
       variants: [],
       loaded: true,
@@ -168,9 +168,14 @@ describe('ABTestLaunchModal — no pickable variants', () => {
     render(
       <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />,
     );
+    // Baseline-vs-quick and quick-vs-quick are valid server-side, so a
+    // zero-variant workflow must not be blocked — the hint is informational.
     expect(screen.getByTestId('ab-test-insufficient-variants')).toBeInTheDocument();
-    expect(screen.queryByTestId('ab-test-variant-a')).not.toBeInTheDocument();
-    expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
+    const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
+    const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
+    expect(selectA.value).toBe(BASELINE_VARIANT_SENTINEL);
+    expect(selectB.value).toBe(QUICK_ARM_SENTINEL);
+    expect(screen.getByTestId('ab-test-submit')).not.toBeDisabled();
   });
 });
 
