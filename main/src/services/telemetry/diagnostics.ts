@@ -21,39 +21,27 @@ import { redactHomePath } from './scrub';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import { getDevDebugLogPath } from '../../utils/devDebugLog';
 import type { TelemetryEnvironment } from './environment';
+import type {
+  BugReportDiagnostics,
+  BugReportLogTail,
+  BugReportRecentError,
+} from '../../../../shared/types/bugReport';
 
 /**
- * One locally recorded error. Deliberately narrow: a seam name, an error class,
- * a timestamp, and a bounded home-path-redacted message.
+ * The payload shapes live in `shared/types/bugReport.ts` — the same declarations
+ * the renderer and the IPC handler use. Re-exported here so main-process call
+ * sites can keep importing from the module that produces them, without a second
+ * declaration drifting out of sync across the IPC boundary
+ * (see docs/CODE-PATTERNS.md → "IPC / type-parity rules").
  *
- * The message is included because without it the buffer is close to useless for
- * diagnosis, and it is no broader a disclosure than what `captureSeamError`
- * already sends to Sentry when reporting is on. It is bounded and redacted here,
- * and — like every other field — rendered in the dialog's preview before send,
- * which is the consent seam.
+ * A recorded error is deliberately narrow: a seam name, an error class, a
+ * timestamp, and a bounded home-path-redacted message. The message is included
+ * because without it the buffer is close to useless for diagnosis, and it is no
+ * broader a disclosure than what `captureSeamError` already sends to Sentry when
+ * reporting is on. It is bounded and redacted here, and — like every other
+ * field — rendered in the dialog's preview before send, which is the consent seam.
  */
-export interface RecordedError {
-  /** ISO-8601 capture time. */
-  at: string;
-  /** The named seam that reported the failure (low-cardinality, non-PII). */
-  seam: string;
-  /** Constructor name of the thrown value, e.g. 'TypeError'. */
-  errorClass: string;
-  /** Home-path-redacted, truncated failure message. */
-  message: string;
-}
-
-/** The structured payload auto-attached to every bug report. */
-export interface BugReportDiagnostics {
-  appVersion: string;
-  platform: NodeJS.Platform;
-  arch: string;
-  electronVersion: string;
-  environment: TelemetryEnvironment;
-  /** Anonymous per-install UUID; the only stable identifier in the payload. */
-  installId: string;
-  recentErrors: RecordedError[];
-}
+export type { BugReportDiagnostics, BugReportLogTail, BugReportRecentError };
 
 const RECENT_ERROR_LIMIT = 20;
 const MESSAGE_MAX_CHARS = 500;
@@ -67,7 +55,7 @@ const MESSAGE_MAX_CHARS = 500;
  * reporting off and is now filing a report by hand. `recordLocalError` is
  * therefore called BEFORE that guard.
  */
-const recentErrors: RecordedError[] = [];
+const recentErrors: BugReportRecentError[] = [];
 
 /** Truncate to a hard ceiling, marking elision so a cut is never mistaken for the whole message. */
 function truncate(input: string, max: number): string {
@@ -97,7 +85,7 @@ export function recordLocalError(seam: string, error: unknown, at: string): void
 }
 
 /** Snapshot of the recent-error buffer, oldest first. */
-export function getRecentErrors(): RecordedError[] {
+export function getRecentErrors(): BugReportRecentError[] {
   return [...recentErrors];
 }
 
@@ -128,17 +116,7 @@ export function collectDiagnostics(input: {
 }
 
 /** Which on-disk log the tail should be read from. */
-export type LogSourceKind = 'dev-debug' | 'app-log';
-
-export interface LogTail {
-  kind: LogSourceKind;
-  /** Absolute path, for display in the preview so the user knows what they are sharing. */
-  filePath: string;
-  /** Bounded tail text, or '' when the file exists but is empty. */
-  text: string;
-  /** True when the file did not exist or could not be read. */
-  unavailable: boolean;
-}
+export type LogSourceKind = BugReportLogTail['kind'];
 
 const TAIL_MAX_BYTES = 64 * 1024;
 const TAIL_MAX_LINES = 200;
@@ -185,7 +163,7 @@ function newestAppLogFile(): string | null {
  * records may not have reached disk when this runs. The tail is a recent
  * snapshot, not a guaranteed-complete one.
  */
-export function readLogTail(isPackaged: boolean): LogTail {
+export function readLogTail(isPackaged: boolean): BugReportLogTail {
   const kind = resolveLogSourceKind(isPackaged);
   const filePath = kind === 'dev-debug' ? getDevDebugLogPath('backend') : (newestAppLogFile() ?? '');
 
@@ -200,8 +178,11 @@ export function readLogTail(isPackaged: boolean): LogTail {
     try {
       const length = size - start;
       const buffer = Buffer.alloc(length);
-      fs.readSync(fd, buffer, 0, length, start);
-      const lines = buffer.toString('utf8').split('\n');
+      // Decode only what was actually read. The file can be rotated or truncated
+      // between the stat and the read, and the unwritten remainder of the buffer
+      // is NUL bytes that would otherwise be appended to the preview as garbage.
+      const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+      const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
       // Drop a leading partial line produced by the byte-offset seek.
       if (start > 0 && lines.length > 1) lines.shift();
       return {
