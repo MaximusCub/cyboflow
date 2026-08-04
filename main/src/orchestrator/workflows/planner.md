@@ -110,6 +110,63 @@ omits the link lands with a NULL originating idea and a warning. So pass
 (tasks, and epics if any), attributing each to the idea it decomposes. This holds
 even when the batch collapsed to one surviving idea.
 
+## The component ledger — never redo finished work
+
+Every idea carries a **component ledger**: five pieces it can have, each in one of
+three states.
+
+| Component | Produced by | Counts as done when |
+|---|---|---|
+| `idea-spec` | step 3 `expand-spec` | the body carries a full `## Idea spec` |
+| `prototype` | step 4 `ui-prototype`, **or a design-mode session** | a mockup exists for the idea |
+| `architecture` | step 5 `architecture` | the body carries `## Architecture design` |
+| `epics` | step 8 `epics` | the idea has epics |
+| `stories` | step 9 `tasks` | the idea has tasks |
+
+`cyboflow_get_task` on an idea returns them. Each is `complete`, `incomplete`, or
+`skipped` — and an `incomplete` one may additionally be flagged **stale**, which is
+the distinction that matters most:
+
+- **not started** — no prior work. Run the step normally.
+- **stale / needs review** — the step DID run, then the idea's body moved under it.
+  **The prior work still exists and is usually still right.** Re-enter that step with
+  the existing deliverable *plus* what changed, and judge whether it needs adjusting.
+  Confirming it is still valid is a legitimate and common outcome — do not rebuild
+  from scratch out of reflex.
+- **skipped** — deliberately declared not-applicable, by a flow or by the user.
+  Leave it skipped. If you believe it should run after all, raise that at a gate
+  rather than silently overriding a human's call.
+
+**Stamp every component as you finish it**, with `cyboflow_set_idea_component`. Do it
+**after** the body write that completes it, never before — a body write marks
+downstream components stale, and stamping afterwards is what clears the flag. An
+unstamped component is indistinguishable from work never done, and the next run will
+redo it.
+
+### Resuming a partly-planned idea
+
+Ideas arrive mid-flight all the time — planned once, picked up again later. **Read the
+ledger before you plan anything.**
+
+If every component is `incomplete` and none is stale, this is a fresh idea: run the
+flow exactly as written below and ignore the rest of this section.
+
+Otherwise, **open with a resume gate before delegating to `cyboflow-context`** —
+inline **AskUserQuestion**, header `Resume`. Lay out in the option preview what is
+complete, what needs review, what was skipped, and what you intend to run, naming
+each piece plainly. Offer:
+
+- **Resume** — skip the complete pieces, re-verify the stale ones, run the rest.
+  *(recommended; put it first)*
+- **Redo a piece** — the user names what to rebuild from scratch; treat it as not
+  started.
+- **Start over** — ignore the ledger and run the full flow.
+
+Then honour the answer. On **Resume**, a `complete` component means **do not run its
+step at all** — do not re-delegate, do not "just double-check". Report the step, note
+that it was already complete, and move on. Redoing settled work is the exact failure
+this ledger exists to prevent.
+
 ### Phase 1 — Plan
 
 1. **context** → delegate to `cyboflow-context` with `MODE: STUB`. Pass the
@@ -127,7 +184,17 @@ even when the batch collapsed to one surviving idea.
    short `## Idea stub` with exactly `### Problem definition` (at most five bullets)
    and `### Proposed solution` (at most five bullets), plus a
    `SCOPE: small|large` line and the design flags `UI_PROTOTYPE: yes|no` /
-   `ARCH_DESIGN: yes|no` (remember them for the design steps).
+   `ARCH_DESIGN: yes|no` (remember them for the design steps), and a
+   `DESIGN_MODE: yes|no` routing recommendation (with a `DESIGN_MODE_REASON:` line
+   when `yes`) that you consume at the next gate — see step 2.
+   - **If the idea already has a `prototype` component that is `complete`** — the
+     common case being an idea that came out of a design-mode session — do **not**
+     ask for a prototype again. An approved design carries `### Baseline` /
+     `### Design` / `### Implementation notes`, which is real design work but not a
+     plannable spec: it has no problem statement and no acceptance criteria, and
+     decomposition needs both. So still run the spec pass to produce those, and
+     treat `UI_PROTOTYPE` as `no` for the rest of the run regardless of what context
+     returned. Persist the stub as usual and carry on to step 2.
    - Persist the complete stub plus flag lines in **`body`** and a SHORT one-line
      caption in `summary` — never the whole stub in `summary`.
    - If a `# Selected idea` block (or, in a batch, an `<idea>` element) IS present:
@@ -150,6 +217,27 @@ even when the batch collapsed to one surviving idea.
      `Approve idea`, options Approve / Revise / Reject; put the full short stub and
      its scope/design flags in the option markdown preview). Do **not** proceed to
      expansion until the user answers Approve.
+   - **The design fork.** This gate is where the human confirms you both mean the
+     same thing by the idea — so it is also where they choose *how* it gets designed.
+     **Only when context returned `DESIGN_MODE: yes`**, replace the plain `Approve`
+     option with two:
+     · **Approve → design mode** — hand this stub to a full design-mode session and
+       end the planner run there.
+     · **Approve → keep planning** — continue this run; a prototype still gets built
+       at step 4 as usual.
+     Put context's `DESIGN_MODE_REASON:` in the fork option's preview so the human
+     sees *why* it is being offered, and keep `Revise` / `Reject` unchanged. Note the
+     4-option cap on a question — these two plus Revise and Reject fill it exactly,
+     so do not add a fifth.
+     When `DESIGN_MODE: no`, present the plain three options and never mention design
+     mode; an unprompted offer on every idea trains the human to ignore the gate.
+     This is a *recommendation*, not a guard — a human who wants design mode on an
+     idea you did not flag can always open its prototype in design mode later.
+     If the user picks **Approve → design mode**, say plainly that design mode is
+     taking it from here and **end the run**. Do not expand the spec, do not
+     decompose, and do not mint tasks — a design session will produce the prototype
+     and spec, and a later planner run picks the idea back up with its `prototype`
+     component already complete (the resume path above).
    - **Batch (>1 surviving) — the `approve-ideas` gate:** you cannot AskUserQuestion
      per idea, so gate the batch once. The **`approve-ideas` artifact tab is
      auto-created** by the orchestrator from the run's owned ideas (one Approve/Deny
@@ -187,6 +275,7 @@ a summary held only in your context.
    `cyboflow_update_task`, preserving any research notes already present. This step
    is ungated. **Batch branch:** expand every APPROVED idea separately and update
    its existing row; never expand denied or guarded ideas.
+   - **Stamp** `idea-spec` `complete` after the body write lands.
    - **Research as needed — no standalone research step.** Judge the idea's scope and
      complexity: when it needs external context (a novel domain, unfamiliar
      libraries/APIs, external prior art) spin up `cyboflow-research` and fold its
@@ -204,6 +293,11 @@ a summary held only in your context.
    `atype: 'ui-prototype'`, a short label, and `payload_json`
    `{"fileName": "prototype/index.html"}` — the static mockup renders in a
    sandboxed frame from that file. Skip this step entirely when the flag is `no`.
+   **Stamp** `prototype` `complete` once the artifact is reported — or `skipped` when
+   you skip the step, which is how a deliberate "this idea needs no mockup" becomes
+   visible on the card instead of looking like unfinished work. The same applies to
+   an idea that arrived with an approved design: its `prototype` is already
+   `complete`, so leave it alone and do not run this step.
    **Batch branch:** when ANY surviving idea's context returned `UI_PROTOTYPE: yes`,
    delegate **once** to `cyboflow-ui-prototype` with ALL of those approved specs,
    instructing a **single combined mockup** (one `index.html`) clearly sectioned per
@@ -220,6 +314,9 @@ a summary held only in your context.
    otherwise append it. The arch-design deliverable tab derives from the body
    automatically, so you do **not** report an artifact for this step (one
    `arch-design` tab is auto-created per idea whose body carries the section).
+   **Stamp** `architecture` `complete` after the fold — or `skipped` whenever the step
+   does not run (a `small` idea, or `ARCH_DESIGN: no`), since for those it is a
+   deliberate not-applicable rather than something left undone.
    **Batch branch:** a small batch normally SKIPS this step (every batched idea is
    `small` — a `large` one was guarded out). But when a multi-idea run DOES run
    architecture for more than one owned idea (the user asked, or a surviving idea
@@ -292,6 +389,8 @@ a summary held only in your context.
      idea is `small` — a `large` one was guarded out), but the fallback rule applies
      **per idea**: each approved idea that yields >1 task gets its OWN epic named
      after it. Never pool two ideas' tasks under one epic.
+   - **Stamp** `epics` once step 9 settles the count: `complete` when the idea ended
+     up with an epic, `skipped` for a single-task idea that correctly got none.
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
    `cyboflow_create_task` **as its proposal arrives** (title, body, acceptance
    criteria, file/dependency hints, parent epic/idea linkage).
@@ -307,6 +406,8 @@ a summary held only in your context.
      each returned task as it arrives, passing `originating_idea_id` on EVERY create
      (mandatory — see **Multi-idea batches**) so it's attributed to the idea it
      decomposes. The fallback epic itself also carries `originating_idea_id`.
+   - **Stamp** `stories` `complete` for each idea once its tasks are created, and its
+     `epics` per step 8. Stamp per idea, not once for the batch.
 10. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve plan`, options **Approve** / **Revise** / **Reject** — labels exactly
    those words, since the backend matches an `'approve'` / `'reject'` prefix on the
@@ -376,6 +477,12 @@ a summary held only in your context.
   resolution, re-fetch the idea via `cyboflow_get_task` before folding its content
   into downstream work (decomposition briefs, design re-delegations, task specs);
   never quote a body you fetched before the gate.
+- **Read the ledger first, stamp it as you go.** Check an idea's components before
+  planning it and run the resume gate whenever any is complete, stale, or skipped —
+  redoing settled work is the failure this ledger exists to prevent. Stamp each
+  component with `cyboflow_set_idea_component` as you finish it, *after* the body
+  write that completes it, and stamp `skipped` for the steps you deliberately do not
+  run. An unstamped component looks exactly like work never done.
 - **Batch lineage is mandatory.** In a run seeded as a batch, pass
   `originating_idea_id` on every `cyboflow_create_task` (tasks and epics) — the write
   chokepoint refuses to guess and a missing link lands NULL with a warning.
