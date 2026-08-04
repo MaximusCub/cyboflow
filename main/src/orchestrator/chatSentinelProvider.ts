@@ -130,8 +130,19 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
   // parity with advanceRun above), subquery-guarded to the `__quick__` workflow so
   // a non-quick run can NEVER be force-flipped to `'running'`, and clears the stale
   // terminal stamps so the row is truthful.
-  const reviveChatSentinel = db.prepare(
-    `UPDATE workflow_runs
+  //
+  // EXPERIMENT-ARM settlement guard (kept in LOCKSTEP with transitions.ts's
+  // reviveQuickRunToRunning — this inlined mirror is the seam BOTH substrates
+  // actually funnel through, so a guard only in transitions.ts is bypassed here):
+  // once the sentinel's experiment has left 'running' (grading/decided/
+  // abandoned), the arm's settled status is an input the captured pairwise
+  // verdict/decision consumed — reviving would un-settle the arm post-verdict and
+  // strand the comparison view (Done renders only pre-verdict; decide requires
+  // both arms settled). The NOT EXISTS keeps an untagged sentinel (experiment_id
+  // NULL) reviving exactly as before. Prepared with a fallback: a pre-049 schema
+  // (no experiments table) cannot hold an experiment, so the unguarded shape is
+  // equivalent there.
+  const reviveChatSentinelGuardedSql = `UPDATE workflow_runs
         SET status = 'running',
             error_message = NULL,
             ended_at = NULL,
@@ -139,8 +150,30 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
             updated_at = CURRENT_TIMESTAMP
       WHERE id = @runId
         AND status != 'running'
-        AND workflow_id IN (SELECT id FROM workflows WHERE name = '${QUICK_WORKFLOW_NAME}')`,
-  );
+        AND workflow_id IN (SELECT id FROM workflows WHERE name = '${QUICK_WORKFLOW_NAME}')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM experiments e
+            JOIN workflow_runs r2 ON r2.id = @runId
+           WHERE e.id = r2.experiment_id
+             AND e.status != 'running'
+        )`;
+  let reviveChatSentinel: ReturnType<typeof db.prepare>;
+  try {
+    reviveChatSentinel = db.prepare(reviveChatSentinelGuardedSql);
+  } catch {
+    reviveChatSentinel = db.prepare(
+      `UPDATE workflow_runs
+          SET status = 'running',
+              error_message = NULL,
+              ended_at = NULL,
+              started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = @runId
+          AND status != 'running'
+          AND workflow_id IN (SELECT id FROM workflows WHERE name = '${QUICK_WORKFLOW_NAME}')`,
+    );
+  }
 
   return (sessionId: string): string => {
     const session = selectSession.get(sessionId) as SessionGateRow | undefined;

@@ -331,6 +331,59 @@ describe('chatSentinelProvider', () => {
     expect(after.updated_at).toBe(before.updated_at);
   });
 
+  describe('experiment-arm settlement guard (lockstep with transitions.ts reviveQuickRunToRunning)', () => {
+    // The guarded statement is chosen at PROVIDER CONSTRUCTION (prepare-time
+    // fallback), so these tests create the experiments table first and build
+    // their own provider — the outer beforeEach provider compiled the fallback.
+    function makeGuardedProvider(): ChatSentinelProvider {
+      return makeChatSentinelProvider({
+        db: dbAdapter(db),
+        workflowRegistry: registry,
+        logger: makeSpyLogger(),
+      });
+    }
+
+    beforeEach(() => {
+      db.exec('CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    });
+
+    function seedExperimentArm(runId: string, runStatusValue: string, experimentStatus: string): void {
+      seedQuickSentinel(db, runId, runStatusValue);
+      db.prepare('INSERT INTO experiments (id, status) VALUES (?, ?)').run('exp-guard', experimentStatus);
+      db.prepare('UPDATE workflow_runs SET experiment_id = ? WHERE id = ?').run('exp-guard', runId);
+    }
+
+    it.each(['grading', 'decided', 'abandoned'])(
+      "does NOT revive a settled experiment-arm sentinel out of 'awaiting_review' when its experiment is '%s'",
+      (experimentStatus) => {
+        seedExperimentArm('chat-arm-1', 'awaiting_review', experimentStatus);
+        seedSession(db, { id: 'sess-arm-1', runId: 'chat-arm-1', chatRunId: 'chat-arm-1' });
+
+        const guarded = makeGuardedProvider();
+        expect(guarded('sess-arm-1')).toBe('chat-arm-1'); // id still reused
+        expect(runStatus(db, 'chat-arm-1')).toBe('awaiting_review'); // NOT revived
+      },
+    );
+
+    it("still revives an experiment-arm sentinel while its experiment is 'running' (Done re-arms, no strand)", () => {
+      seedExperimentArm('chat-arm-2', 'awaiting_review', 'running');
+      seedSession(db, { id: 'sess-arm-2', runId: 'chat-arm-2', chatRunId: 'chat-arm-2' });
+
+      const guarded = makeGuardedProvider();
+      expect(guarded('sess-arm-2')).toBe('chat-arm-2');
+      expect(runStatus(db, 'chat-arm-2')).toBe('running');
+    });
+
+    it('still revives an UNTAGGED sentinel (experiment_id NULL) when the experiments table exists', () => {
+      seedQuickSentinel(db, 'chat-arm-3', 'failed');
+      seedSession(db, { id: 'sess-arm-3', runId: 'chat-arm-3', chatRunId: 'chat-arm-3' });
+
+      const guarded = makeGuardedProvider();
+      expect(guarded('sess-arm-3')).toBe('chat-arm-3');
+      expect(runStatus(db, 'chat-arm-3')).toBe('running');
+    });
+  });
+
   it('NEVER flips a non-__quick__ run to running (subquery guard) even if it is somehow the chat_run_id', () => {
     // Defensive: chat_run_id is a __quick__ run by construction, but the revive
     // must not force-flip a real flow run to 'running' if that invariant is ever
