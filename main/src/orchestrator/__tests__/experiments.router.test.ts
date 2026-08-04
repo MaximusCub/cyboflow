@@ -2085,6 +2085,63 @@ describe('experiments router orchestration (slice B)', () => {
       }
     });
 
+    it('write barrier: PRECONDITION_FAILED while the arm session has an agent turn in flight', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      h.db.prepare('UPDATE experiments SET session_a_id = ? WHERE id = ?').run('sess-quickA', res.experimentId);
+      const probed: string[] = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        hasActiveAgentTurn: (sid) => {
+          probed.push(sid);
+          return sid === 'sess-quickA';
+        },
+      };
+      expect(() => settleQuickArm(deps, res.experimentId, 'A')).toThrow(/agent turn in flight/);
+      expect(probed).toEqual(['sess-quickA']);
+      // The run is untouched — the settle never reached the guarded UPDATE.
+      expect(field(h.db, 'workflow_runs', res.armA.runId, 'status')).toBe('running');
+    });
+
+    it('write barrier: settles normally when the probe reports the session idle', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      h.db.prepare('UPDATE experiments SET session_a_id = ? WHERE id = ?').run('sess-quickA', res.experimentId);
+      const deps: ExperimentsDeps = { ...h.deps, hasActiveAgentTurn: () => false };
+      const out = settleQuickArm(deps, res.experimentId, 'A');
+      expect(out.changed).toBe(true);
+      expect(out.status).toBe('awaiting_review');
+    });
+
+    it('write barrier is skipped when the arm has no stamped session id (probe never called)', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      // A pre-migration-049 row (or a failed stamp) can leave session_a_id NULL;
+      // the barrier must skip rather than probe with a null id.
+      h.db.prepare('UPDATE experiments SET session_a_id = NULL WHERE id = ?').run(res.experimentId);
+      const probed: string[] = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        hasActiveAgentTurn: (sid) => {
+          probed.push(sid);
+          return true;
+        },
+      };
+      const out = settleQuickArm(deps, res.experimentId, 'A');
+      expect(out.changed).toBe(true);
+      expect(probed).toEqual([]);
+    });
+
+    it('write barrier does not disturb the idempotent already-settled path', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      h.db.prepare('UPDATE experiments SET session_a_id = ? WHERE id = ?').run('sess-quickA', res.experimentId);
+      setRunStatus(h.db, res.armA.runId, 'completed');
+      const deps: ExperimentsDeps = { ...h.deps, hasActiveAgentTurn: () => true };
+      const out = settleQuickArm(deps, res.experimentId, 'A');
+      expect(out).toMatchObject({ status: 'completed', changed: false });
+    });
+
     it('promoteVariant short-circuits a quick arm to the __quick__ sentinel with NO NOT_FOUND / adoptWorkflowSpec', async () => {
       const h = makeHarness();
       const res = await settledQuickExperiment(h);

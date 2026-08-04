@@ -3717,6 +3717,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * SDK override: a turn is in flight for the session when any registered SDK
+   * run (warm or lane) targeting it has an uncommitted turn. `turnInFlight` is
+   * set the moment a turn's prompt is committed to the query and cleared at the
+   * result boundary (finishTurn) or the process-death settle, so a warm-idle
+   * parked run correctly reports `false`.
+   */
+  override hasTurnInFlightForSession(sessionId: string): boolean {
+    for (const run of this.sdkRuns.values()) {
+      if (run.sessionId === sessionId && run.turnInFlight) return true;
+    }
+    return false;
+  }
+
+  /**
    * Override killProcess to abort the SDK run instead of killing a PTY.
    *
    * Fan-out dispatch: a programmatic fan-out run drives multiple lanes under ONE

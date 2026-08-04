@@ -52,6 +52,9 @@ class SpyManager extends EventEmitter {
   // writing. Default 'running' so the existing relay tests keep reaching sendInput;
   // the dead-REPL test overrides it to false.
   isPanelRunning = vi.fn<(panelId: string) => boolean>().mockReturnValue(true);
+  // In-flight-turn probe (settleQuickArm write barrier) — the facade ORs this
+  // across every manager. Default idle, matching AbstractCliManager's base.
+  hasTurnInFlightForSession = vi.fn<(sessionId: string) => boolean>().mockReturnValue(false);
 }
 
 /**
@@ -431,6 +434,48 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
     expect(sdk.killProcess).toHaveBeenCalledOnce();
     expect(sdk.killProcess).toHaveBeenCalledWith(run.id);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasTurnInFlightForSession — the settleQuickArm write barrier's probe. ORs the
+// per-manager AbstractCliManager.hasTurnInFlightForSession answers across every
+// manager the facade knows (sdk, interactive, codex-sdk, additional PTY).
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — hasTurnInFlightForSession ORs across managers', () => {
+  it('answers false when every manager reports idle, probing each with the session id', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const extraPty = makeSpyManager();
+    const codexSdk = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk), asManager(interactive), registry, makeSpyLogger(),
+      [asManager(extraPty)], asManager(codexSdk),
+    );
+
+    expect(facade.hasTurnInFlightForSession('sess-1')).toBe(false);
+    for (const spy of [sdk, interactive, codexSdk, extraPty]) {
+      expect(spy.hasTurnInFlightForSession).toHaveBeenCalledWith('sess-1');
+    }
+  });
+
+  it('answers true when ANY manager reports a turn in flight (codex-sdk here)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexSdk = makeSpyManager();
+    codexSdk.hasTurnInFlightForSession.mockImplementation((sid) => sid === 'sess-1');
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk), asManager(interactive), registry, makeSpyLogger(),
+      [], asManager(codexSdk),
+    );
+
+    expect(facade.hasTurnInFlightForSession('sess-1')).toBe(true);
+    expect(facade.hasTurnInFlightForSession('sess-other')).toBe(false);
   });
 });
 

@@ -202,6 +202,15 @@ export interface ExperimentsDeps {
    * Fail-soft when absent (pre-slice-C boot).
    */
   pairwiseMaybeSnapshot?: (experimentId: string) => Promise<void>;
+  /**
+   * Optional (settleQuickArm write barrier): whether any substrate manager has
+   * an agent turn in flight for the session
+   * (SubstrateDispatchFacade.hasTurnInFlightForSession). Settling mid-turn would
+   * snapshot + grade a partial worktree the agent keeps writing to. Best-effort:
+   * PTY substrates always answer false. When absent, the barrier is skipped
+   * (pre-existing behavior).
+   */
+  hasActiveAgentTurn?: (sessionId: string) => boolean;
 }
 
 let experimentsDeps: ExperimentsDeps | null = null;
@@ -1655,6 +1664,23 @@ export function settleQuickArm(
     return { experimentId, arm, runId, status, changed: false };
   }
   if (status === 'running') {
+    // WRITE BARRIER: refuse to settle while the arm's session has an agent turn
+    // mid-write — the settle would snapshot + grade a partial worktree, and the
+    // turn would keep mutating the "settled" arm afterwards. Session id comes
+    // from the experiment row (session_a_id/session_b_id, stamped at arm
+    // creation). Best-effort: the probe reports false for PTY substrates (no
+    // structural turn boundary), and the turn-starts-right-after-this-check
+    // TOCTOU is accepted — the barrier targets the human clicking Done during a
+    // minutes-long turn, not a perfectly race-free lock.
+    if (deps.hasActiveAgentTurn) {
+      const sessionId = arm === 'A' ? exp.session_a_id : exp.session_b_id;
+      if (sessionId !== null && deps.hasActiveAgentTurn(sessionId)) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `quick arm ${arm} of experiment ${experimentId} has an agent turn in flight — wait for the turn to finish before marking it done`,
+        });
+      }
+    }
     // Same guarded UPDATE shape as transitionRunningToAwaitingReview
     // (main/src/services/cyboflow/transitions.ts), inlined here to keep this
     // router import-light (no main/src/services/* imports).

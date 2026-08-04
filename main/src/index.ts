@@ -4632,6 +4632,10 @@ app.whenReady().then(async () => {
     setExperimentsDeps({
       db: experimentsDb,
       runLauncher,
+      // settleQuickArm write barrier: refuse to rest a quick arm whose session
+      // has an agent turn mid-write (grading would snapshot a partial diff).
+      // Routed through the facade so every substrate manager is consulted.
+      hasActiveAgentTurn: (sessionId) => substrateFacade.hasTurnInFlightForSession(sessionId),
       worktreeManager: {
         getProjectMainBranch: (p) => worktreeManager.getProjectMainBranch(p),
         getHeadCommit: (p) => worktreeManager.getHeadCommit(p),

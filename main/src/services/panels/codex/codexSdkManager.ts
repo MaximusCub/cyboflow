@@ -1107,6 +1107,19 @@ export class CodexSdkManager extends AbstractCliManager {
     }, CODEX_WARM_SESSION_TTL_MS);
   }
 
+  /**
+   * Codex-SDK override: an `activeRuns` entry exists exactly for the duration of
+   * a logical turn (set before startTurn, deleted in the drive loop's finally),
+   * so its presence for the session IS the in-flight-turn signal. A warm entry
+   * parked between turns has no activeRuns entry and correctly reports `false`.
+   */
+  override hasTurnInFlightForSession(sessionId: string): boolean {
+    for (const run of this.activeRuns.values()) {
+      if (run.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
   override async killProcess(identity: string): Promise<void> {
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),

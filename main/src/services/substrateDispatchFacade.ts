@@ -415,6 +415,23 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
+   * True when ANY substrate manager reports an agent turn in flight for the
+   * session. Best-effort by construction: PTY managers structurally answer
+   * `false` (see AbstractCliManager.hasTurnInFlightForSession). Consumed as the
+   * settleQuickArm write barrier (experiments router), where a false negative
+   * degrades to the pre-barrier behavior rather than blocking the settle.
+   */
+  hasTurnInFlightForSession(sessionId: string): boolean {
+    const managers: AbstractCliManager[] = [
+      this.sdkManager,
+      this.interactiveManager,
+      ...(this.codexSdkManager ? [this.codexSdkManager] : []),
+      ...this.additionalPtyHandlers.map((h) => h.manager),
+    ];
+    return managers.some((m) => m.hasTurnInFlightForSession(sessionId));
+  }
+
+  /**
    * Relay a live-input turn into the SAME running process (IDEA-030 / TASK-817).
    *
    * Takes the RUN id (workflow runs: panelId === runId per the orchestrator

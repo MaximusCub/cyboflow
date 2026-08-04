@@ -414,6 +414,19 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
+   * Whether an AGENT TURN is currently in flight for any panel of `sessionId`.
+   * Base answer is `false`: a PTY-substrate manager cannot bound a turn from its
+   * own state (the user types straight into the live terminal; turn ends arrive
+   * via Stop-hook markers only after the fact), so it reports no in-flight turn.
+   * SDK-substrate managers override this with their per-turn run records. Used
+   * as the settleQuickArm write barrier (experiments router) — best-effort by
+   * design: a false negative degrades to the pre-barrier behavior, never blocks.
+   */
+  hasTurnInFlightForSession(_sessionId: string): boolean {
+    return false;
+  }
+
+  /**
    * Kill all CLI processes on shutdown
    */
   async killAllProcesses(): Promise<void> {
