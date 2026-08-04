@@ -21,6 +21,12 @@
  *                             'idea-spec' via `tasks.get`); the renderer extracts
  *                             the '## Architecture design' section from its body
  *                             with the SHARED extractArchDesignSection.
+ *   - 'idea-summary'       -> the per-idea HUB: BOTH the originating idea
+ *                             (`tasks.get`) AND the idea component ledger's
+ *                             merged hybrid view (`cyboflow.ideaComponents.get`,
+ *                             migration 098) — sourceRef-keyed like idea-spec/
+ *                             arch-design, but needs a SECOND fetch, so it gets
+ *                             its own resolution block below.
  *   - 'screenshots'        -> no entity source yet; the parsed `payload_json`
  *                             (`{ fileNames?: string[] }`) is surfaced as-is.
  *   - 'ui-prototype' / 'generic' (canvas) -> the parsed `payload_json`
@@ -56,6 +62,7 @@ import type {
   ScreenshotsArtifactPayload,
 } from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
+import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
 
 /**
  * Parsed `payload_json` shape for the canvas (ui-prototype / generic) embed.
@@ -119,6 +126,7 @@ export type ArtifactContent =
   | { kind: 'idea'; idea: BacklogTaskItem }
   | { kind: 'stories'; ideas: BacklogTaskItem[] }
   | { kind: 'arch'; idea: BacklogTaskItem }
+  | { kind: 'idea-summary'; idea: BacklogTaskItem; components: IdeaComponentState[] }
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
   | { kind: 'recommendations'; payload: RecommendationsPayload }
   | { kind: 'eval-report'; payload: EvalReportArtifactPayload }
@@ -283,6 +291,92 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
       };
     }
 
+    // idea-summary — the per-idea HUB. It IS sourceRef-keyed (the idea), like
+    // idea-spec/arch-design, but needs TWO fetches — the idea itself AND the
+    // ledger's merged hybrid view (`cyboflow.ideaComponents.get`, migration
+    // 098) — so it gets its own block rather than reusing the toContent
+    // ternary below. Stays live on BOTH channels: an entity write to this
+    // idea/its descendants (onTaskChanged) refreshes the idea half; a ledger
+    // write to this idea specifically (onComponentsChanged) refreshes the
+    // component half. Either trigger re-fetches BOTH halves together (silent).
+    if (atype === 'idea-summary') {
+      if (!sourceRef) {
+        setState({ loading: false, error: 'No source entity linked to this artifact.', data: null });
+        return;
+      }
+
+      let cancelled = false;
+      // Monotonic fetch id — a slow earlier (re-)fetch must never clobber a newer.
+      let latestFetchId = 0;
+
+      const resolveSummary = (silent: boolean): void => {
+        if (!silent) setState({ loading: true, error: null, data: null });
+        const fetchId = ++latestFetchId;
+        Promise.all([
+          trpc.cyboflow.tasks.get.query({ taskId: sourceRef }),
+          trpc.cyboflow.ideaComponents.get.query({ ideaId: sourceRef }),
+        ]).then(
+          ([idea, components]) => {
+            if (cancelled || fetchId !== latestFetchId) return;
+            if (!idea) {
+              setState({ loading: false, error: 'Source entity not found.', data: null });
+              return;
+            }
+            setState({ loading: false, error: null, data: { kind: 'idea-summary', idea, components } });
+          },
+          (err: unknown) => {
+            if (cancelled || fetchId !== latestFetchId) return;
+            const message = err instanceof Error ? err.message : 'Failed to load artifact content.';
+            if (silent) {
+              console.warn('[useArtifactData] live refresh failed:', err);
+              setState((prev) => (prev.loading ? { loading: false, error: message, data: null } : prev));
+              return;
+            }
+            setState({ loading: false, error: message, data: null });
+          },
+        );
+      };
+
+      resolveSummary(false);
+
+      // Without a projectId we cannot scope the live channels, so the tab is
+      // one-shot.
+      if (projectId === null) {
+        return () => {
+          cancelled = true;
+        };
+      }
+
+      const taskSub = trpc.cyboflow.tasks.onTaskChanged.subscribe(
+        { projectId },
+        {
+          onData: (event) => {
+            if (event.task.id === sourceRef || event.task.originating_idea_id === sourceRef) {
+              resolveSummary(true);
+            }
+          },
+          onError: (err: unknown) => console.warn('[useArtifactData] onTaskChanged error:', err),
+        },
+      );
+      const componentsSub = trpc.cyboflow.ideaComponents.onComponentsChanged.subscribe(
+        { projectId },
+        {
+          onData: (event) => {
+            if (event.ideaId === sourceRef) {
+              resolveSummary(true);
+            }
+          },
+          onError: (err: unknown) => console.warn('[useArtifactData] onComponentsChanged error:', err),
+        },
+      );
+
+      return () => {
+        cancelled = true;
+        taskSub.unsubscribe();
+        componentsSub.unsubscribe();
+      };
+    }
+
     // Templated entity-backed types (idea-spec / arch-design) re-derive from the
     // live entity model via sourceRef (the originating idea id).
     if (!sourceRef) {
@@ -303,8 +397,8 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
     // failure, keep the last-good data instead of blanking the tab. The initial
     // load (silent=false) shows the loading state and surfaces errors.
     //
-    // idea-spec / arch-design fetch the bare idea body (decomposed-stories is
-    // handled in its own run-scoped block above).
+    // idea-spec / arch-design fetch the bare idea body (decomposed-stories and
+    // idea-summary are each handled in their own block above).
     const resolve = (silent: boolean): void => {
       if (!silent) setState({ loading: true, error: null, data: null });
       const fetchId = ++latestFetchId;

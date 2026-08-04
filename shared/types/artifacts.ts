@@ -20,7 +20,7 @@ import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVer
  * Artifact kinds. The bespoke (templated) types plus the two live-canvas types
  * (`ui-prototype`/`generic` — static srcdoc — and `interactive-prototype` — the
  * JS-enabled OOPIF canvas). Keep in sync with the `artifacts.atype` CHECK
- * constraint (currently widened by migration 099).
+ * constraint (currently widened by migration 102).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -48,7 +48,17 @@ export type ArtifactType =
    * mislabeled it as a Compound deliverable at the exact gate a human is asked
    * to approve repo changes from.
    */
-  | 'verify-runbook';
+  | 'verify-runbook'
+  /**
+   * The per-idea idea-component-ledger HUB (migration 102,
+   * shared/types/ideaComponents.ts): surfaces one idea's five tracked
+   * components (idea-spec / prototype / architecture / epics / stories) and
+   * links out to each real deliverable tab — a HUB, not an aggregator, so it
+   * points at those tabs rather than inlining their content. System-minted by
+   * autoMintArtifacts (reportable:false) — an agent-reported hub would arrive
+   * with no source_ref/ledger context and render broken.
+   */
+  | 'idea-summary';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -336,6 +346,26 @@ export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
     color: '#1f8f7a',
     glyph: '▨',
     perEntity: false,
+  },
+  'idea-summary': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    // Auto-mint-only (orchestrator-derived hub summarizing the idea component
+    // ledger + links to sibling deliverables) — an agent report would arrive
+    // with no source_ref/ledger context and render broken, mirroring
+    // arch-design/approve-designs.
+    reportable: false,
+    // Neutral gray — deliberately NOT one of the deliverable accents (blue/
+    // indigo/teal/rust/violet/amber/gold above): this tab is a HUB pointing at
+    // those deliverables, not a deliverable itself, so it reads as its own
+    // kind of (meta) surface.
+    color: '#6b6b6b',
+    glyph: '◈',
+    perEntity: true,
   },
 };
 
