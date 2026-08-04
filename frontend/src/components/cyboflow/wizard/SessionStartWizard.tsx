@@ -1322,8 +1322,13 @@ export default function SessionStartWizard(): React.JSX.Element {
                 {workflowsError}
               </p>
             )}
+            {/* Setup flows (verify-setup) are filtered HERE, at the render
+                site, and not out of `workflowMetas` itself — the array is
+                indexed by id on five other paths in this file (launch, banner,
+                CTA label, planner check), and a setup flow launched from its
+                own surface still has to resolve its meta through them. */}
             <div className="flex flex-col gap-2">
-              {workflowMetas.map((meta) => (
+              {workflowMetas.filter((meta) => !meta.hiddenFromLauncher).map((meta) => (
                 <WorkflowListRow
                   key={meta.id}
                   meta={meta}

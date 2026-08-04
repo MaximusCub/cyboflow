@@ -209,3 +209,65 @@ describe('buildWorkflowMeta', () => {
     expect(meta[0].stepCount).toBe(1);
   });
 });
+
+/**
+ * (f) Setup-flow visibility — the launcher-hiding half of the verify-setup
+ * finding. These pin the SEAM, not just the flag: the model must keep the row
+ * (so the Workflows gallery, the runs rail's name map, and the Verify Queue's
+ * own launch can all still resolve it) while marking it not-for-the-launcher.
+ */
+describe('buildWorkflowMeta — setup flows', () => {
+  it('marks verify-setup hiddenFromLauncher and leaves the work flows visible', () => {
+    const metas = buildWorkflowMeta(
+      [
+        makeWorkflow({ id: 'wf-sprint', name: 'sprint' }),
+        makeWorkflow({ id: 'wf-planner', name: 'planner' }),
+        makeWorkflow({ id: 'wf-verify', name: 'verify-setup' }),
+      ],
+      [],
+    );
+
+    const byName = new Map(metas.map((m) => [m.name, m]));
+    expect(byName.get('verify-setup')?.hiddenFromLauncher).toBe(true);
+    expect(byName.get('sprint')?.hiddenFromLauncher).toBe(false);
+    expect(byName.get('planner')?.hiddenFromLauncher).toBe(false);
+  });
+
+  it('still RETURNS the hidden row — hiding is presentation, not exclusion', () => {
+    // The registry deliberately does not filter setup flows out of
+    // `workflows.list` (that would break the Workflows editor and the
+    // active-runs rail's workflow_id → name map), so the projection must not
+    // drop them either. The launcher filters at its render site.
+    const metas = buildWorkflowMeta([makeWorkflow({ id: 'wf-verify', name: 'verify-setup' })], []);
+
+    expect(metas).toHaveLength(1);
+    expect(metas[0].name).toBe('verify-setup');
+    expect(metas[0].title).toBe('Verify Setup');
+    // And it resolves a real definition, so it is launchable once a surface
+    // offers it — not a dead card.
+    expect(metas[0].stepCount).toBeGreaterThan(0);
+  });
+
+  it('the launcher filter drops exactly the setup flows', () => {
+    // The expression the wizard renders with, asserted directly so a change to
+    // it has to break a test rather than silently strand or re-expose a flow.
+    const metas = buildWorkflowMeta(
+      [
+        makeWorkflow({ id: 'wf-sprint', name: 'sprint' }),
+        makeWorkflow({ id: 'wf-verify', name: 'verify-setup' }),
+        makeWorkflow({ id: 'wf-ship', name: 'ship' }),
+      ],
+      [],
+    );
+
+    expect(metas.filter((m) => !m.hiddenFromLauncher).map((m) => m.name)).toEqual(['sprint', 'ship']);
+  });
+
+  it('a custom flow that merely CONTAINS the name is not treated as setup', () => {
+    // Exact-name membership, not a substring test — a user flow called
+    // "verify-setup-notes" is ordinary work and must stay launchable.
+    const metas = buildWorkflowMeta([makeWorkflow({ id: 'wf-c', name: 'verify-setup-notes' })], []);
+
+    expect(metas[0].hiddenFromLauncher).toBe(false);
+  });
+});

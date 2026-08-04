@@ -47,6 +47,24 @@ export interface WorkflowCardMeta {
   slashCommand: string;
   /** True for the single default workflow ({@link DEFAULT_WORKFLOW_NAME}). */
   isDefault: boolean;
+  /**
+   * True for a SETUP flow ({@link SETUP_WORKFLOW_NAMES}) — one that configures
+   * the project rather than doing project work, and therefore does not belong
+   * in the wizard's "or run a workflow" list beside planner/sprint/ship.
+   *
+   * This is a PRESENTATION flag, deliberately not a registry filter. The
+   * `__quick__` / legacy-name exclusions in `WorkflowRegistry.listByProject`
+   * drop rows from `workflows.list` outright, which here would ALSO remove the
+   * flow from the Workflows gallery/editor and break the active-runs rail's
+   * `workflow_id → name` resolution (`activeRunsStore` builds its label map
+   * from that same list). The row must stay listed; only the launcher hides it.
+   *
+   * Consumers must filter at the RENDER site, not on the meta array: the
+   * wizard indexes `workflowMetas` by id on five other paths (launch, banner,
+   * CTA label, planner check), and a setup flow launched from its own surface
+   * still has to resolve its meta there.
+   */
+  hiddenFromLauncher: boolean;
   /** Total step count across all phases of the effective definition (0 if none). */
   stepCount: number;
   /** Phase count of the effective definition (0 if none). */
@@ -57,6 +75,19 @@ export interface WorkflowCardMeta {
 
 /** The workflow pre-selected by the wizard on open. */
 export const DEFAULT_WORKFLOW_NAME = 'sprint';
+
+/**
+ * Flows that configure the PROJECT rather than doing project work. They are
+ * hidden from the wizard's flow list and launched from the surface they
+ * configure — `verify-setup` from the Verify Queue, which is where a user who
+ * needs it is already standing (docs/proposals/verification-setup-flow.md §6).
+ *
+ * Hiding a flow here REMOVES ITS ONLY LAUNCH PATH: `slashCommand` on this
+ * model is a display eyebrow, not a command registry — nothing dispatches on
+ * it. A name added to this set therefore MUST have a launch affordance on its
+ * own surface first, or the flow becomes unreachable from the UI.
+ */
+export const SETUP_WORKFLOW_NAMES: ReadonlySet<string> = new Set(['verify-setup']);
 
 /**
  * Static one-line subtitles keyed by built-in workflow name. Custom flows fall
@@ -99,6 +130,10 @@ function titleCase(name: string): string {
  *     title-cased name; subtitle falls back to `''`).
  *   - `lastUsedAt` = the newest `created_at` among runs whose `workflow_id`
  *     matches this row's id, or null when the workflow has no runs.
+ *   - `hiddenFromLauncher` = the row names a {@link SETUP_WORKFLOW_NAMES} flow.
+ *
+ * Every row is returned, hidden ones included — this builds the full model and
+ * the launcher filters it. See {@link WorkflowCardMeta.hiddenFromLauncher}.
  */
 export function buildWorkflowMeta(
   rows: WorkflowListRow[],
@@ -126,6 +161,7 @@ export function buildWorkflowMeta(
       subtitle: SUBTITLE_BY_NAME[row.name] ?? '',
       slashCommand: `/${row.name}`,
       isDefault: row.name === DEFAULT_WORKFLOW_NAME,
+      hiddenFromLauncher: SETUP_WORKFLOW_NAMES.has(row.name),
       stepCount,
       phaseCount,
       lastUsedAt,
