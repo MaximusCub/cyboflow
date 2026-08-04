@@ -745,5 +745,57 @@ describe('transitions', () => {
       const result = reviveQuickRunToRunning(db, 'no-such-run');
       expect(result).toEqual({ revived: false, fromStatus: null });
     });
+
+    // -----------------------------------------------------------------------
+    // Experiment-arm settlement guard: a quick sentinel serving as an A/B arm
+    // must NOT be revived out of its settled status once its experiment has
+    // left 'running' — the captured verdict/decision consumed that status, and
+    // un-settling would strand the comparison view (Done only renders
+    // pre-verdict; decide requires both arms settled).
+    // -----------------------------------------------------------------------
+
+    function seedExperimentTag(experimentStatus: string): void {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
+      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)`);
+      db.prepare(`INSERT INTO experiments (id, status) VALUES ('exp-1', ?)`).run(experimentStatus);
+      db.prepare(`UPDATE workflow_runs SET experiment_id = 'exp-1' WHERE id = ?`).run(QUICK_RUN_ID);
+    }
+
+    it.each(['grading', 'decided', 'abandoned'])(
+      "does NOT revive an experiment-arm sentinel out of 'awaiting_review' when its experiment is '%s'",
+      (experimentStatus) => {
+        seedQuickWorkflow();
+        seedQuickRun('awaiting_review');
+        seedExperimentTag(experimentStatus);
+
+        const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+        expect(result).toEqual({ revived: false, fromStatus: 'awaiting_review' });
+        expect(readRun().status).toBe('awaiting_review');
+      },
+    );
+
+    it("still revives an experiment-arm sentinel while its experiment is 'running' (Done re-arms, no strand)", () => {
+      seedQuickWorkflow();
+      seedQuickRun('awaiting_review');
+      seedExperimentTag('running');
+
+      const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+      expect(result).toEqual({ revived: true, fromStatus: 'awaiting_review' });
+      expect(readRun().status).toBe('running');
+    });
+
+    it('still revives an UNTAGGED sentinel when the experiments table exists (experiment_id NULL)', () => {
+      seedQuickWorkflow();
+      seedQuickRun('failed', { error: 'app_restart' });
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
+      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)`);
+
+      const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+      expect(result).toEqual({ revived: true, fromStatus: 'failed' });
+      expect(readRun().status).toBe('running');
+    });
   });
 });

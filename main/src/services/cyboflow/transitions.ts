@@ -252,19 +252,49 @@ export function reviveQuickRunToRunning(
   // '__quick__' is QUICK_WORKFLOW_NAME (orchestrator/workflowRegistry). Inlined
   // here to keep transitions.ts from importing the heavyweight registry module —
   // the sentinel name is a DB-persisted constant that never changes.
-  const row = db
-    .prepare(
-      `SELECT wr.status AS status
-         FROM workflow_runs wr
-         JOIN workflows w ON w.id = wr.workflow_id
-        WHERE wr.id = @runId AND w.name = '__quick__'`,
-    )
-    .get({ runId }) as { status: string } | undefined;
+  let row: { status: string; experimentStatus: string | null } | undefined;
+  try {
+    row = db
+      .prepare(
+        `SELECT wr.status AS status, e.status AS experimentStatus
+           FROM workflow_runs wr
+           JOIN workflows w ON w.id = wr.workflow_id
+           LEFT JOIN experiments e ON e.id = wr.experiment_id
+          WHERE wr.id = @runId AND w.name = '__quick__'`,
+      )
+      .get({ runId }) as { status: string; experimentStatus: string | null } | undefined;
+  } catch {
+    // Pre-049 DB (no experiments table / workflow_runs.experiment_id column): no
+    // experiment can exist, so read the untagged shape and revive as before.
+    const legacy = db
+      .prepare(
+        `SELECT wr.status AS status
+           FROM workflow_runs wr
+           JOIN workflows w ON w.id = wr.workflow_id
+          WHERE wr.id = @runId AND w.name = '__quick__'`,
+      )
+      .get({ runId }) as { status: string } | undefined;
+    row = legacy ? { status: legacy.status, experimentStatus: null } : undefined;
+  }
 
   // Not a quick sentinel run (or row missing) → never touch it.
   if (!row) return { revived: false, fromStatus: null };
   // Already live → nothing to do (the common steady-state case).
   if (row.status === 'running') return { revived: false, fromStatus: 'running' };
+
+  // EXPERIMENT-ARM settlement guard: once this sentinel's experiment has left
+  // 'running' (grading/decided/abandoned), the arm's settled status is an input
+  // the captured pairwise verdict / decision already consumed. Reviving here
+  // would un-settle the arm AFTER the verdict landed, which strands the
+  // comparison view undecidable: the "Done" affordance only renders pre-verdict
+  // (showRunningState requires verdict === null) while decide/promote require
+  // both arms settled — no path back. Skip the revive; the chat turn still runs,
+  // at the cost of approval-gated tools being denied in this post-experiment
+  // session (the pre-revive behavior). While the experiment is still 'running',
+  // revival stays allowed — an un-settled arm simply re-arms the "Done" button.
+  if (row.experimentStatus !== null && row.experimentStatus !== 'running') {
+    return { revived: false, fromStatus: row.status };
+  }
 
   // A quick sentinel force-failed by app-restart boot recovery carries a
   // MACHINE-stamped terminal outcome ('interrupted', or 'failed' from
