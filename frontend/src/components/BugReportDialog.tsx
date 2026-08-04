@@ -93,12 +93,15 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
   );
 
   /**
-   * The dialog stays mounted while closed, so anything resolving after a close —
-   * an in-flight submit, a slow preview — must not write state that would be
-   * visible on the next open.
+   * One generation per open (and per close). The dialog stays mounted while
+   * closed, so anything resolving late — an in-flight submit, a slow preview —
+   * must not write state belonging to a different opening.
+   *
+   * A boolean "is it open" ref is not enough: closing and reopening before an
+   * in-flight submit resolves makes it true again, and the old result lands in
+   * the new dialog.
    */
-  const isOpenRef = useRef(isOpen);
-  isOpenRef.current = isOpen;
+  const generationRef = useRef(0);
 
   /**
    * Read at open time only. Seeding the session picker from a live subscription
@@ -123,30 +126,33 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     setEmail('');
     setIncludeLogs(false);
     setShowDiagnostics(false);
+    // Cleared with the rest: a preview held across a close is the PREVIOUS
+    // opening's diagnostics, and the next one would submit — and could show —
+    // recorded errors and a log tail the user never reviewed in this dialog.
+    setPreview(null);
     setSend({ phase: 'idle' });
   }, []);
 
   useEffect(() => {
+    generationRef.current += 1;
     if (!isOpen) {
       resetForm();
       return;
     }
+    const generation = generationRef.current;
     setSessionId(activeSessionIdRef.current ?? '');
     idempotencyKeyRef.current = crypto.randomUUID();
-    let cancelled = false;
     void (async () => {
       try {
         const result = await window.electronAPI.bugReport.getPreview();
-        if (!cancelled && result.success && result.data) {
+        if (generationRef.current !== generation) return;
+        if (result.success && result.data) {
           setPreview(result.data);
         }
       } catch {
         // Preview is best-effort; the report can still be sent without it.
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, [isOpen, resetForm]);
 
   const canSubmit =
@@ -156,6 +162,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
+    const generation = generationRef.current;
     setSend({ phase: 'sending' });
     try {
       const result = await window.electronAPI.bugReport.submit({
@@ -177,14 +184,14 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         recentErrors: preview?.diagnostics.recentErrors ?? [],
         idempotencyKey: idempotencyKeyRef.current,
       });
-      if (!isOpenRef.current) return;
+      if (generationRef.current !== generation) return;
       if (result.success && result.data) {
         setSend({ phase: 'done', response: result.data });
       } else {
         setSend({ phase: 'error', message: result.error ?? 'Failed to send report.' });
       }
     } catch (error) {
-      if (!isOpenRef.current) return;
+      if (generationRef.current !== generation) return;
       setSend({
         phase: 'error',
         message: error instanceof Error ? error.message : String(error),

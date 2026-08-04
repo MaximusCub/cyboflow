@@ -198,6 +198,89 @@ describe('dialog lifecycle', () => {
     expect(screen.queryByText(/report sent/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send report/i })).toBeInTheDocument();
   });
+
+  /**
+   * The harder version of the case above, and the one a boolean open-ness ref
+   * cannot catch: by the time the submission resolves the dialog is open AGAIN,
+   * so the guard passes and the previous opening's result lands in a dialog the
+   * user has just started filling in.
+   */
+  it('discards a submission that resolves after the dialog was closed and reopened', async () => {
+    let finish: (() => void) | undefined;
+    submit.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ success: true, data: { delivery: 'accepted' } });
+        }),
+    );
+    const { rerender } = await openDialog();
+
+    fireEvent.change(screen.getByLabelText(/what happened/i), {
+      target: { value: 'It froze.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
+
+    rerender(<BugReportDialog isOpen={false} onClose={vi.fn()} />);
+    rerender(<BugReportDialog isOpen onClose={vi.fn()} />);
+    finish?.();
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+
+    expect(screen.queryByText(/report sent/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /send report/i })).toBeInTheDocument();
+  });
+
+  /**
+   * The preview is the consent surface, so it belongs to one opening. Carrying it
+   * across a close would let a reopened dialog submit — and display — a log tail
+   * and recorded-error list the user never reviewed in this dialog.
+   */
+  it('drops the previous opening’s preview instead of reusing it', async () => {
+    const { rerender } = await openDialog();
+    fireEvent.click(screen.getByRole('checkbox', { name: /include recent log output/i }));
+    expect(screen.getByText(/SECRET_LOG_MARKER/)).toBeInTheDocument();
+
+    // The next open's preview is still in flight.
+    window.electronAPI.bugReport.getPreview = vi.fn(
+      (): Promise<PreviewResult> => new Promise(() => {}),
+    );
+    rerender(<BugReportDialog isOpen={false} onClose={vi.fn()} />);
+    rerender(<BugReportDialog isOpen onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/SECRET_LOG_MARKER/)).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /include recent log output/i })).toBeDisabled();
+  });
+
+  /**
+   * Same seam on the way in: a preview from the previous opening must not be
+   * attached to a report filed from the next one.
+   */
+  it('sends no previewed diagnostics from a stale opening', async () => {
+    const staleErrors = [
+      { at: '2026-08-03T00:00:00.000Z', seam: 'run-start', errorClass: 'Error', message: 'boom' },
+    ];
+    window.electronAPI.bugReport.getPreview = vi.fn(
+      async (): Promise<PreviewResult> => ({
+        success: true,
+        data: { ...PREVIEW, diagnostics: { ...PREVIEW.diagnostics, recentErrors: staleErrors } },
+      }),
+    );
+    const { rerender } = await openDialog();
+
+    window.electronAPI.bugReport.getPreview = vi.fn(
+      (): Promise<PreviewResult> => new Promise(() => {}),
+    );
+    rerender(<BugReportDialog isOpen={false} onClose={vi.fn()} />);
+    rerender(<BugReportDialog isOpen onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/what happened/i), {
+      target: { value: 'Something else.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submittedPayload().recentErrors).toEqual([]);
+    expect(submittedPayload().logText).toBeUndefined();
+  });
 });
 
 describe('submission', () => {
@@ -220,7 +303,30 @@ describe('submission', () => {
     fireEvent.click(screen.getByRole('button', { name: /send report/i }));
 
     await waitFor(() => expect(submit).toHaveBeenCalled());
-    expect(submittedPayload()).toMatchObject({ runId: 'run-9', flowName: 'sprint' });
+    expect(submittedPayload()).toMatchObject({
+      runId: 'run-9',
+      sessionId: 'session-1',
+      flowName: 'sprint',
+    });
+  });
+
+  /**
+   * A session with no flow run must not have its session id sent as `run_id` —
+   * different id spaces, and the tag would point at a run that does not exist.
+   */
+  it('sends only a session id when the chosen session has no run', async () => {
+    await openDialog();
+
+    fireEvent.change(screen.getByLabelText(/where did this happen/i), {
+      target: { value: 'session-2' },
+    });
+    fireEvent.change(screen.getByLabelText(/what happened/i), {
+      target: { value: 'It froze.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submittedPayload()).toMatchObject({ runId: undefined, sessionId: 'session-2' });
   });
 
   it('reports a queued delivery honestly rather than claiming it was sent', async () => {
