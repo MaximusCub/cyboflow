@@ -1272,10 +1272,19 @@ function RunningArmCard({
           Open session <ArrowRight size={13} />
         </button>
         {isQuick && !isExperimentArmSettled(status) && (
+          // settleQuickArm only has a legal edge from 'running' (any other
+          // transient status — awaiting_input's question gate, starting, stuck,
+          // paused — throws PRECONDITION_FAILED server-side). Disable the button
+          // there instead of surfacing that raw error, with the reason on hover.
           <button
             type="button"
             data-testid={`experiment-settle-quick-${arm.toLowerCase()}`}
-            disabled={settleBusy || actionBusy}
+            disabled={settleBusy || actionBusy || status !== 'running'}
+            title={
+              status !== 'running'
+                ? `The session can only be marked done while it is running (currently '${status}' — resolve any pending question or approval first).`
+                : undefined
+            }
             onClick={onSettle}
             className="inline-flex w-fit items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
           >

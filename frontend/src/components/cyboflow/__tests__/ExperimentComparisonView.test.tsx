@@ -824,6 +824,30 @@ describe('ExperimentComparisonView', () => {
     );
   });
 
+  it("disables 'Done' (with a hover hint) while the quick arm is parked at a non-settleable transient status — settleQuickArm is never called", async () => {
+    // 'awaiting_input' = a pending question gate: not settled (the button
+    // renders) but settleQuickArm has no legal edge from it — clicking would
+    // surface a raw PRECONDITION_FAILED. The button must be disabled instead.
+    getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: '__quick__' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'Quick session', status: 'awaiting_input' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const doneBtn = await screen.findByTestId('experiment-settle-quick-a');
+    expect(doneBtn).toBeDisabled();
+    expect(doneBtn).toHaveAttribute('title', expect.stringContaining("'awaiting_input'"));
+
+    fireEvent.click(doneBtn);
+    expect(settleQuickArmMutate).not.toHaveBeenCalled();
+  });
+
   it('renders "Done" for a live quick arm B (symmetric with arm A) and calls settleQuickArm with arm: "B" — arm A has no such control', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'running', variant_a_id: 'wfv_a', variant_b_id: '__quick__' }));
     getComparisonQuery.mockResolvedValue(
