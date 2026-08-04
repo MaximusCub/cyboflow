@@ -4683,14 +4683,31 @@ app.whenReady().then(async () => {
         // mirrors the quick handler's derivation; codex-pty is excluded from the
         // arm wire schema so useCodexPty is always false here.
         if (quickConfig) {
-          stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
-            resolvedSubstrate,
-            useCodexSdk:
-              quickConfig.agentRuntime === 'codex-sdk' ||
-              (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined),
-            useCodexPty: false,
-            requestedAgentMode: quickConfig.permissionMode,
-          });
+          try {
+            stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
+              resolvedSubstrate,
+              useCodexSdk:
+                quickConfig.agentRuntime === 'codex-sdk' ||
+                (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined),
+              useCodexPty: false,
+              requestedAgentMode: quickConfig.permissionMode,
+            });
+          } catch (err) {
+            // This stamp runs AFTER createQuickSessionCore's compensation window
+            // closed, so a throw here would orphan the provisioned session +
+            // worktree (the caller never learns the session id and can't sweep
+            // it). Compensate exactly like the core: best-effort full dismiss,
+            // then rethrow so startExperiment still sees the failure.
+            try {
+              await dismissSessionFully(session.id);
+            } catch (sweepErr) {
+              loggerLike.warn('[Main] experiment arm: orphan sweep after stamp failure failed', {
+                sessionId: session.id,
+                error: sweepErr instanceof Error ? sweepErr.message : String(sweepErr),
+              });
+            }
+            throw err;
+          }
         }
         // Seed the quick arm's chat config onto its Claude panel. A quick arm is
         // an interactive session the user drives, but its per-turn model /
