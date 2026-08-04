@@ -4689,19 +4689,18 @@ app.whenReady().then(async () => {
           });
         }
         // Seed the quick arm's chat config onto its Claude panel. A quick arm is
-        // an interactive session the user drives, but its per-turn model / fast-mode
-        // / reasoning-effort are read from PANEL settings at sessions:input spawn
+        // an interactive session the user drives, but its per-turn model /
+        // reasoning-effort are read from PANEL settings at sessions:input spawn
         // time (never from the session row) — and the arm's Claude panel is created
         // bare (lazily, by bootstrapArmSessionPanels). Without seeding it here, the
-        // whole quickConfig (including fastMode + reasoningEffort, which are threaded
-        // all the way from the tRPC input but had no production consumer) would fall
-        // back to the SDK/CLI defaults. Mirrors the quick handler's updatePanelSettings
-        // seeding; bootstrapArmSessionPanels is idempotent so it reuses this panel.
+        // quickConfig model/effort would fall back to the SDK/CLI defaults.
+        // Mirrors the quick handler's updatePanelSettings seeding;
+        // bootstrapArmSessionPanels is idempotent so it reuses this panel.
+        // (fastMode is deliberately NOT part of the arm wire schema — the user
+        // can still toggle it per-turn in the session UI after launch.)
         if (
           quickConfig &&
-          (quickConfig.model !== undefined ||
-            quickConfig.fastMode !== undefined ||
-            quickConfig.reasoningEffort !== undefined)
+          (quickConfig.model !== undefined || quickConfig.reasoningEffort !== undefined)
         ) {
           try {
             const chatPanel = await panelManager.createPanel({
@@ -4711,7 +4710,6 @@ app.whenReady().then(async () => {
             });
             databaseService.updatePanelSettings(chatPanel.id, {
               ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
-              ...(quickConfig.fastMode !== undefined ? { fastMode: quickConfig.fastMode } : {}),
               ...(quickConfig.reasoningEffort !== undefined
                 ? { reasoningEffort: quickConfig.reasoningEffort }
                 : {}),

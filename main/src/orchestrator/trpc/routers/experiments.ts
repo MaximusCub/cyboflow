@@ -21,7 +21,7 @@ import type { TaskChange } from '../../taskChangeRouter';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
-import type { AgentProvider, SessionAgentRuntime } from '../../../../../shared/types/agentRuntime';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type {
@@ -144,9 +144,13 @@ export interface ExperimentsTaskChangeLike {
 export interface ExperimentArmQuickConfig {
   substrate?: CliSubstrate;
   agentProvider?: AgentProvider;
-  agentRuntime?: SessionAgentRuntime;
+  /**
+   * WorkflowAgentRuntime, not SessionAgentRuntime: the wire schema (and the
+   * modal's clamp) exclude `codex-pty` for an A/B arm, so the interface must
+   * not overstate what the boundary accepts.
+   */
+  agentRuntime?: WorkflowAgentRuntime;
   model?: string;
-  fastMode?: boolean;
   reasoningEffort?: ReasoningEffort;
   permissionMode?: PermissionMode;
 }
@@ -2194,7 +2198,6 @@ const experimentArmQuickConfigSchema = z.object({
   agentProvider: z.enum(['claude', 'codex']).optional(),
   agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
   model: z.string().min(1).optional(),
-  fastMode: z.boolean().optional(),
   reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
   permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
 });

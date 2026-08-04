@@ -432,7 +432,7 @@ describe('quick-arm launch (TASK-120)', () => {
       substrate: 'interactive',
       agentProvider: 'codex',
       model: 'gpt-5-codex',
-      fastMode: true,
+      reasoningEffort: 'high',
     };
     await startExperiment(h.deps, {
       projectId: 1,
