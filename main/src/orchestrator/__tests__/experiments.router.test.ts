@@ -2035,6 +2035,56 @@ describe('experiments router orchestration (slice B)', () => {
       expect(() => settleQuickArm(h.deps, res.experimentId, 'A')).toThrow(/not settleable from status 'stuck'/);
     });
 
+    it('reports the FRESH status without forcing when the guarded UPDATE loses a race (changed:false, no event)', async () => {
+      const h = makeHarness();
+      const res = await startQuickVsVariantExperiment(h);
+      const runId = res.armA.runId;
+      // Interpose on the guarded UPDATE: flip the run out of 'running' just
+      // before it executes, simulating a concurrent transition (e.g. the run
+      // moved to stuck) landing between settleQuickArm's status read
+      // and its `WHERE status = 'running'` UPDATE.
+      const racingDeps: ExperimentsDeps = {
+        ...h.deps,
+        db: {
+          prepare: (sql: string) => {
+            const stmt = h.deps.db.prepare(sql);
+            if (sql.includes("SET status = 'awaiting_review'")) {
+              return {
+                run: (...params: unknown[]) => {
+                  setRunStatus(h.db, runId, 'stuck');
+                  return stmt.run(...params);
+                },
+                get: (...params: unknown[]) => stmt.get(...params),
+                all: (...params: unknown[]) => stmt.all(...params),
+              };
+            }
+            return stmt;
+          },
+          transaction: h.deps.db.transaction,
+          name: h.deps.db.name,
+        },
+      };
+      const emitted: RunStatusChangedEvent[] = [];
+      const onChanged = (evt: RunStatusChangedEvent): void => {
+        emitted.push(evt);
+      };
+      runStatusEvents.on('changed', onChanged);
+      try {
+        const out = settleQuickArm(racingDeps, res.experimentId, 'A');
+        expect(out).toEqual({
+          experimentId: res.experimentId,
+          arm: 'A',
+          runId,
+          status: 'stuck',
+          changed: false,
+        });
+        expect(emitted).toEqual([]);
+        expect(field(h.db, 'workflow_runs', runId, 'status')).toBe('stuck');
+      } finally {
+        runStatusEvents.off('changed', onChanged);
+      }
+    });
+
     it('promoteVariant short-circuits a quick arm to the __quick__ sentinel with NO NOT_FOUND / adoptWorkflowSpec', async () => {
       const h = makeHarness();
       const res = await settledQuickExperiment(h);

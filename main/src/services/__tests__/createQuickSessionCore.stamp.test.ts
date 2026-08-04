@@ -12,7 +12,13 @@
  */
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { stampQuickSessionRuntimeConfig } from '../createQuickSessionCore';
+import {
+  createQuickSessionCore,
+  stampQuickSessionRuntimeConfig,
+  _resetClaimedQuickSessionIdsForTesting,
+  type CreateQuickSessionCoreDeps,
+  type QuickSessionRow,
+} from '../createQuickSessionCore';
 
 const SESSION_ID = 'sess-stamp-001';
 
@@ -117,5 +123,70 @@ describe('stampQuickSessionRuntimeConfig', () => {
       substrate: 'sdk',
       agent_runtime: 'claude-sdk',
     });
+  });
+});
+
+/**
+ * The half-created-session compensation: the worktree + session row are
+ * provisioned (taskQueue.createSession) BEFORE the sentinel createRun validates
+ * the substrate/runtime combo, so a rejected combo throws AFTER provisioning.
+ * The core is the only layer holding the session id at that point (the throw
+ * pre-empts the return), so it must sweep the orphan via
+ * dismissHalfCreatedSession and rethrow.
+ */
+describe('createQuickSessionCore — half-created session sweep', () => {
+  beforeEach(() => {
+    _resetClaimedQuickSessionIdsForTesting();
+  });
+
+  function makeDeps(opts: {
+    sessionId: string;
+    dismissed: string[];
+    dismissThrows?: boolean;
+  }): CreateQuickSessionCoreDeps {
+    return {
+      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      sessionManager: {
+        // Deliver the matching session synchronously on subscribe — the core
+        // registers its listener after the createSession await, so an immediate
+        // emit models the session-created event without timers.
+        on: (_event, listener: (s: QuickSessionRow) => void) => {
+          listener({ id: opts.sessionId, worktreePath: '/wt/arm-a' });
+        },
+        removeListener: () => {},
+      },
+      workflowRegistry: {
+        ensureQuickWorkflow: () => 'wf-quick',
+        createRun: () => {
+          throw new Error('invalid substrate/runtime combo');
+        },
+      },
+      getDb: () => {
+        throw new Error('unreachable — createRun rejects before any db use');
+      },
+      dismissHalfCreatedSession: async (sessionId) => {
+        if (opts.dismissThrows) throw new Error('dismiss boom');
+        opts.dismissed.push(sessionId);
+      },
+    };
+  }
+
+  it('dismisses the provisioned session when the sentinel createRun rejects, then rethrows', async () => {
+    const dismissed: string[] = [];
+    const deps = makeDeps({ sessionId: 'sess-half-1', dismissed });
+
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a' }),
+    ).rejects.toThrow('invalid substrate/runtime combo');
+
+    expect(dismissed).toEqual(['sess-half-1']);
+  });
+
+  it('a dismiss failure is swallowed — the ORIGINAL error still propagates', async () => {
+    const deps = makeDeps({ sessionId: 'sess-half-2', dismissed: [], dismissThrows: true });
+
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a' }),
+    ).rejects.toThrow('invalid substrate/runtime combo');
   });
 });
