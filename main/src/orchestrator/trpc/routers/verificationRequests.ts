@@ -245,6 +245,13 @@ function newAccumulator(): StatsAccumulator {
  * is tallied for every NON-PASSING terminal row — an unstamped one lands in
  * `unclassified` rather than vanishing, so the histogram always reconciles
  * against `attempts - passed`.
+ *
+ * A status outside `REQUEST_STATUS` therefore falls to `inFlight` — which is
+ * unreachable today and deliberately left that way: migration 055 puts a CHECK
+ * on the column whose domain is exactly `REQUEST_STATUS`. If a status is ever
+ * added to the SQL CHECK without the TypeScript union (the drift 055's header
+ * warns about), a visibly stuck "in flight" is the better failure than a
+ * phantom terminal attempt silently depressing the pass rate.
  */
 function accumulate(acc: StatsAccumulator, row: HealthDbRow): void {
   const status = row.status;
