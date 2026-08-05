@@ -1,10 +1,51 @@
 import { IpcMain } from 'electron';
+import { z } from 'zod';
 import type { AppServices } from './types';
+import { validateInput } from './validateInput';
 import {
   isAgentProviderAccess,
   resolveAgentProviderAccess,
 } from '../../../shared/types/agentRuntime';
-import type { RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
+import { ALL_EFFORT_LEVELS } from '../../../shared/types/reasoningEffort';
+import { PERMISSION_MODES } from '../../../shared/types/workflows';
+
+const runTypeDefaultsFields = {
+  model: z.string().optional().nullable(),
+  permissionMode: z.enum(PERMISSION_MODES).optional().nullable(),
+  substrate: z.enum(['sdk', 'interactive']).optional().nullable(),
+  agentRuntime: z.enum([
+    'claude-sdk',
+    'claude-interactive',
+    'codex-sdk',
+    'codex-pty',
+    'codex-exec',
+  ]).optional().nullable(),
+  reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional().nullable(),
+};
+
+const runTypeDefaultsOpSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('merge'),
+    value: z.object(runTypeDefaultsFields).strict(),
+  }),
+  z.object({
+    kind: z.literal('replace'),
+    value: z.object({
+      ...runTypeDefaultsFields,
+      model: z.string().optional(),
+      permissionMode: z.enum(PERMISSION_MODES).optional(),
+      substrate: z.enum(['sdk', 'interactive']).optional(),
+      agentRuntime: z.enum([
+        'claude-sdk',
+        'claude-interactive',
+        'codex-sdk',
+        'codex-pty',
+        'codex-exec',
+      ]).optional(),
+      reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
+    }).strict().nullable(),
+  }),
+]);
 
 export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claudeCodeManager }: AppServices): void {
   ipcMain.handle('config:get', async () => {
@@ -56,10 +97,17 @@ export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claude
     async (
       _event,
       key: string,
-      op: RunTypeDefaultsOp,
+      op: unknown,
     ) => {
       try {
-        const result = await configManager.applyRunTypeDefault(key, op);
+        const input = validateInput(
+          z.object({ key: z.string().min(1), op: runTypeDefaultsOpSchema }),
+          { key, op },
+          'config:apply-run-type-default',
+        );
+        if (!input.ok) return { success: false, error: input.error };
+
+        const result = await configManager.applyRunTypeDefault(input.value.key, input.value.op);
         return { success: true, data: result };
       } catch (error) {
         console.error('Failed to apply run type default:', error);

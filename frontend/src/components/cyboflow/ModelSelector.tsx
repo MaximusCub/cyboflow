@@ -19,11 +19,6 @@ import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../stores/claudeModelCatalogStore';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
-import {
-  DEFAULT_QUICK_MODEL,
-  DEFAULT_WORKFLOW_MODEL,
-} from '../../../../shared/types/sessionDefaults';
-
 /** The quick-session default model — Opus, per product direction. */
 export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
 

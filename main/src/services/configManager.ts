@@ -304,20 +304,17 @@ export class ConfigManager extends EventEmitter {
       }
     } else {
       const merged: RunTypeDefaults = { ...previous };
-      for (const field of Object.keys(op.value) as Array<keyof RunTypeDefaults>) {
-        const value = op.value[field];
-        if (value === null) {
-          delete merged[field];
-        } else if (value !== undefined) {
-          switch (field) {
-            case 'model': merged.model = value; break;
-            case 'permissionMode': merged.permissionMode = value; break;
-            case 'substrate': merged.substrate = value; break;
-            case 'agentRuntime': merged.agentRuntime = value; break;
-            case 'reasoningEffort': merged.reasoningEffort = value; break;
-          }
-        }
-      }
+      const { model, permissionMode, substrate, agentRuntime, reasoningEffort } = op.value;
+      if (model === null) delete merged.model;
+      else if (model !== undefined) merged.model = model;
+      if (permissionMode === null) delete merged.permissionMode;
+      else if (permissionMode !== undefined) merged.permissionMode = permissionMode;
+      if (substrate === null) delete merged.substrate;
+      else if (substrate !== undefined) merged.substrate = substrate;
+      if (agentRuntime === null) delete merged.agentRuntime;
+      else if (agentRuntime !== undefined) merged.agentRuntime = agentRuntime;
+      if (reasoningEffort === null) delete merged.reasoningEffort;
+      else if (reasoningEffort !== undefined) merged.reasoningEffort = reasoningEffort;
       if (Object.keys(merged).length === 0) delete runTypeDefaults[key];
       else runTypeDefaults[key] = merged;
     }

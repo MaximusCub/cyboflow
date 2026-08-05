@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 describe('ConfigManager run-type defaults', () => {
-  it('reads sparse entries raw and keeps workflow floor separate from defaultModel', () => {
+  it('reads sparse entries raw and keeps launch floors separate from defaultModel', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
 
     expect(manager.getConfig().runTypeDefaults).toBeUndefined();
@@ -25,6 +25,10 @@ describe('ConfigManager run-type defaults', () => {
     expect(manager.getDefaultLaunchModel('workflow:nonexistent')).toBe('opus');
     expect(manager.getDefaultLaunchModel('workflow:nonexistent')).not.toBe(manager.getDefaultModel());
     expect(manager.getDefaultLaunchModel('quick')).toBe('opus');
+
+    await manager.updateConfig({ runTypeDefaults: { 'workflow:flow-a': { model: 'sonnet' } } });
+    expect(manager.getRunTypeDefaults('workflow:flow-a')).toEqual({ model: 'sonnet' });
+    expect(manager.getDefaultLaunchModel('workflow:flow-a')).toBe('sonnet');
   });
 
   it('returns the previous value and applies sparse merge deletion', async () => {
@@ -112,5 +116,20 @@ describe('ConfigManager run-type defaults', () => {
       reasoningEffort: 'high',
     });
     expect(deleted.config.runTypeDefaults).toBeUndefined();
+  });
+
+  it('deletes a key when replace receives an empty object and returns the whole updated config', async () => {
+    const manager = new ConfigManager('/tmp/test-git-path');
+    await manager.initialize();
+    await manager.updateConfig({ runTypeDefaults: { quick: { model: 'opus' } } });
+
+    const result = await manager.applyRunTypeDefault('quick', {
+      kind: 'replace',
+      value: {},
+    });
+
+    expect(result.previous).toEqual({ model: 'opus' });
+    expect(result.config).toBe(manager.getConfig());
+    expect(result.config.runTypeDefaults).toBeUndefined();
   });
 });
