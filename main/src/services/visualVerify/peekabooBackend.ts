@@ -22,13 +22,15 @@
  *    mutex (composes with PanelManager / WorktreeManager holders of named leases).
  *
  * TCC + availability (the recurring SPRINT-031..039 gotcha):
- *  - healthCheck() probes (a) the `peekaboo` binary on PATH and (b) the two
- *    required macOS TCC grants (Screen Recording + Accessibility) on the host
- *    binary. A missing binary OR a declined grant ⇒ healthCheck returns false ⇒
- *    the resolver / scheduler drops peekaboo and emits SKIPPED — never FAIL, never
- *    hang. A missing TCC grant must NEVER wedge a sprint. EVERY error path
- *    soft-fails (capture errors ⇒ CaptureResult ok:false fall-forward; probes ⇒
- *    false), never throws.
+ *  - probeGrants() asks (a) whether the `peekaboo` binary runs and (b) which of
+ *    the two required macOS TCC grants (Screen Recording + Accessibility) the
+ *    host binary holds — SEPARATELY, and distinguishing "declined" from "could
+ *    not ask". healthCheck() is that same probe folded to one boolean for the
+ *    scheduler gate: anything short of both grants observed ⇒ false ⇒ the
+ *    resolver drops peekaboo and emits SKIPPED — never FAIL, never hang. A
+ *    missing TCC grant must NEVER wedge a sprint. EVERY error path soft-fails
+ *    (capture errors ⇒ CaptureResult ok:false fall-forward; probes ⇒ a
+ *    NativeGrantProbe), never throws past the backend.
  *
  * @cyboflow-hidden: this backend is retired-in-place by the verification-agent
  * redesign (docs/proposals/verification-agent-redesign.md §3/§5.8) — NOT dead
@@ -46,18 +48,21 @@
  * (verificationScheduler.ts) or by leaving the kill switch set.
  *
  * SCOPE OF THE MARKER: the CAPTURE surface, not the whole class.
- * {@link PeekabooBackend.healthCheck} is live on the DEFAULT engine — index.ts
- * wires it as both the agent preflight's `nativeCaptureProbe` and the §6 health
- * panel's `native-capture` probe row (docs/proposals/verification-setup-flow.md
- * §4/§6), which is the point: the gate and the panel must read the TCC grant
- * from the same source, and this is the one implementation that asks the OS.
- * Keep it working when changing anything above.
+ * {@link PeekabooBackend.healthCheck} and {@link PeekabooBackend.probeGrants}
+ * are live on the DEFAULT engine — index.ts wires them as the agent preflight's
+ * `nativeCaptureProbe` and the §6 health panel's two TCC grant rows
+ * (docs/proposals/verification-setup-flow.md §4/§6), which is the point: the
+ * gate and the panel must read the grants from the same source, and this is the
+ * one implementation that asks the OS. Keep them working when changing anything
+ * above.
  */
 import { mkdir } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import type {
   CaptureContext,
   CaptureResult,
+  NativeGrantProbe,
+  NativeGrants,
   VerificationRequestInput,
   VisualBackend,
   VisualBackendId,
@@ -91,12 +96,17 @@ export interface PeekabooClient {
    */
   binaryAvailable(): Promise<boolean>;
   /**
-   * Probe the two required macOS TCC grants (Screen Recording + Accessibility) on
-   * the host binary. Returns true ONLY when BOTH are granted; false (never throws)
-   * when either is declined / unknown — the second gate of healthCheck (a missing
-   * grant must degrade to SKIPPED, never wedge a sprint).
+   * Read the two required macOS TCC grants (Screen Recording + Accessibility)
+   * off the host binary, SEPARATELY.
+   *
+   * REJECTS when the CLI could not answer — a bad exit, unparseable output, a
+   * timeout. That is deliberately not the same as "denied": the caller decides
+   * what an unanswerable probe means. {@link PeekabooBackend.healthCheck} folds
+   * it to `false` (degrade to SKIPPED, never wedge a sprint);
+   * {@link PeekabooBackend.probeGrants} reports it as `'inconclusive'` so the
+   * §6 panel never tells a user to re-grant a permission they already hold.
    */
-  permissionsGranted(): Promise<boolean>;
+  permissions(): Promise<NativeGrants>;
   /**
    * Capture a screenshot of `appTarget` into `outPath` (an absolute PNG path). The
    * production impl runs `peekaboo image --app <appTarget> --path <outPath>`. The
@@ -157,21 +167,18 @@ export class DefaultPeekabooClient implements PeekabooClient {
     }
   }
 
-  async permissionsGranted(): Promise<boolean> {
-    try {
-      // `peekaboo permissions --json` reports the two required TCC grants. We
-      // require BOTH Screen Recording AND Accessibility; a declined/unknown grant
-      // ⇒ false (degrade to SKIPPED, never wedge). The JSON shape is tolerated
-      // loosely (the CLI's exact schema varies by version) — any field that is not
-      // an explicit `true` for both grants fails the probe.
-      const stdout = await this.run('peekaboo', ['permissions', '--json'], 5_000);
-      return parsePermissionsJson(stdout);
-    } catch (err) {
-      this.logger?.info('[PeekabooBackend] permissions probe failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return false;
-    }
+  async permissions(): Promise<NativeGrants> {
+    // `peekaboo permissions --json-output` reports the two required TCC grants.
+    //
+    // The FLAG IS LOAD-BEARING: `--json` is not a synonym, it is an unknown
+    // option, and peekaboo exits 64 on it. This read `--json` until 2026-08-05,
+    // which meant every probe rejected and native-screen could never be
+    // available on ANY host — including one holding both grants.
+    //
+    // Deliberately no catch: an unanswerable probe propagates so the caller can
+    // tell "declined" from "could not ask".
+    const stdout = await this.run('peekaboo', ['permissions', '--json-output'], 5_000);
+    return parsePermissionsJson(stdout);
   }
 
   async capture(
@@ -263,35 +270,76 @@ export class DefaultPeekabooClient implements PeekabooClient {
   }
 }
 
+/** Accepted spellings of each grant, across peekaboo CLI versions. */
+const SCREEN_RECORDING_KEYS = ['screen_recording', 'screenRecording', 'screenCapture'] as const;
+const ACCESSIBILITY_KEYS = ['accessibility'] as const;
+
 /**
- * Parse the `peekaboo permissions --json` output, requiring BOTH the Screen
- * Recording AND Accessibility grants to be explicitly `true`. The CLI's exact
- * JSON schema varies by version, so this reads it defensively: any shape that does
- * not present both grants as `true` ⇒ false (degrade to SKIPPED). Never throws —
- * a parse error returns false.
+ * Parse `peekaboo permissions --json-output` into the two grants, SEPARATELY.
+ *
+ * THROWS on any output it cannot read. That is the point: a shape this does not
+ * recognise means the probe did not answer, and answering "both denied" on its
+ * behalf is how a healthy host gets told to go fix permissions it already has.
+ * Only the caller knows whether an unanswerable probe should degrade (the
+ * scheduler gate) or be shown as unknown (the §6 panel).
+ *
+ * Within a recognised object, an absent or non-`true` grant IS a denial — that
+ * much peekaboo does report faithfully.
  */
-function parsePermissionsJson(stdout: string): boolean {
+export function parsePermissionsJson(stdout: string): NativeGrants {
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(stdout);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return false;
-    }
-    const record = parsed as Record<string, unknown>;
-    // Tolerate either a flat shape ({ screenRecording, accessibility }) or a
-    // nested { permissions: {...} } wrapper.
-    const grants =
-      typeof record.permissions === 'object' && record.permissions !== null
-        ? (record.permissions as Record<string, unknown>)
-        : record;
-    return isGranted(grants, ['screenRecording', 'screen_recording', 'screenCapture']) &&
-      isGranted(grants, ['accessibility']);
-  } catch {
-    return false;
+    parsed = JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(
+      `peekaboo permissions output was not JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+  const grants = locateGrants(parsed);
+  if (grants === null) {
+    throw new Error('peekaboo permissions output carried no recognisable permissions object');
+  }
+  return {
+    screenRecording: isGranted(grants, SCREEN_RECORDING_KEYS),
+    accessibility: isGranted(grants, ACCESSIBILITY_KEYS),
+  };
+}
+
+/**
+ * Find the object carrying the grant keys, tolerating the CLI's nesting.
+ *
+ * v2.x wraps its whole payload in an envelope — `{ success, data: { permissions:
+ * {...} }, debug_logs }` — so a reader that only knew `{ permissions }` and a
+ * flat shape found nothing and silently reported both grants denied. Rather
+ * than pin one version's schema, try each known nesting OUTSIDE-IN and accept
+ * the first that actually carries a grant key; anything else is `null`, i.e. an
+ * output we do not understand, which the caller turns into a throw.
+ */
+function locateGrants(parsed: unknown): Record<string, unknown> | null {
+  const root = asRecord(parsed);
+  if (root === null) return null;
+  const candidates = [
+    asRecord(asRecord(root.data)?.permissions),
+    asRecord(root.permissions),
+    asRecord(root.data),
+    root,
+  ];
+  return candidates.find((c) => c !== null && carriesGrantKey(c)) ?? null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Whether an object mentions either grant AT ALL — the marker that it is the grants object. */
+function carriesGrantKey(candidate: Record<string, unknown>): boolean {
+  return [...SCREEN_RECORDING_KEYS, ...ACCESSIBILITY_KEYS].some((k) => k in candidate);
 }
 
 /** True iff ANY of the candidate keys on `grants` is the boolean `true`. */
-function isGranted(grants: Record<string, unknown>, keys: string[]): boolean {
+function isGranted(grants: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.some((k) => grants[k] === true);
 }
 
@@ -325,23 +373,49 @@ export class PeekabooBackend implements VisualBackend {
   }
 
   /**
-   * Health = the `peekaboo` binary is on PATH AND BOTH required TCC grants (Screen
-   * Recording + Accessibility) are held by the host binary. A missing binary OR a
-   * declined grant ⇒ false (the resolver / scheduler drops peekaboo ⇒ SKIPPED,
-   * never FAIL, never hang — the recurring SPRINT-031..039 gotcha). Never throws.
+   * The FULL native-grant picture: which of the two grants is held, or why the
+   * host could not be asked. This is the reporting surface (§6 health panel) —
+   * {@link healthCheck} is the gate that folds the same probe to one boolean.
+   *
+   * Never throws. The three outcomes are distinct on purpose: `'binary-missing'`
+   * and `'inconclusive'` both mean "no grant was observed", but only a denial
+   * justifies pointing a user at System Settings.
+   */
+  async probeGrants(): Promise<NativeGrantProbe> {
+    let present: boolean;
+    try {
+      present = await this.client.binaryAvailable();
+    } catch (err) {
+      return { kind: 'inconclusive', detail: errorText(err) };
+    }
+    if (!present) {
+      return { kind: 'binary-missing', detail: 'the peekaboo binary could not be run' };
+    }
+    try {
+      const grants = await this.client.permissions();
+      return { kind: 'ok', ...grants };
+    } catch (err) {
+      this.logger?.info('[PeekabooBackend] permissions probe could not answer', {
+        error: errorText(err),
+      });
+      return { kind: 'inconclusive', detail: errorText(err) };
+    }
+  }
+
+  /**
+   * Health = the `peekaboo` binary is runnable AND BOTH required TCC grants
+   * (Screen Recording + Accessibility) are held by the host binary. A missing
+   * binary, a declined grant, OR a probe that could not answer ⇒ false (the
+   * resolver / scheduler drops peekaboo ⇒ SKIPPED, never FAIL, never hang — the
+   * recurring SPRINT-031..039 gotcha). Never throws.
+   *
+   * The gate collapses `'inconclusive'` into `false` where the panel does not:
+   * proceeding on an unverified grant would hang a sprint on a permission
+   * dialog, and a skip is recoverable where a wedge is not.
    */
   async healthCheck(): Promise<boolean> {
-    try {
-      if (!(await this.client.binaryAvailable())) {
-        return false;
-      }
-      return await this.client.permissionsGranted();
-    } catch (err) {
-      this.logger?.warn('[PeekabooBackend] healthCheck threw', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return false;
-    }
+    const probe = await this.probeGrants();
+    return probe.kind === 'ok' && probe.screenRecording && probe.accessibility;
   }
 
   /**
@@ -361,13 +435,13 @@ export class PeekabooBackend implements VisualBackend {
       await this.client.capture({ appTarget: this.appTarget, outPath }, signal);
       return { ok: true, fileNames: [basename(fileName)] };
     } catch (err) {
-      return {
-        ok: false,
-        fileNames: [],
-        error: err instanceof Error ? err.message : String(err),
-      };
+      return { ok: false, fileNames: [], error: errorText(err) };
     }
   }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

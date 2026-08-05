@@ -1739,6 +1739,36 @@ export interface VerificationHealthSummary {
 }
 
 /**
+ * The two macOS TCC grants the native-screen modality needs, reported
+ * SEPARATELY rather than as one conjunction.
+ *
+ * Screen Recording is what lets a capture see pixels; Accessibility is what
+ * would let it send clicks and keystrokes. They are granted independently, in
+ * different System Settings panes, and a user who has one and not the other is
+ * the common case — so a single ANDed boolean can only ever say "something is
+ * wrong" and send them hunting through both.
+ */
+export interface NativeGrants {
+  screenRecording: boolean;
+  accessibility: boolean;
+}
+
+/**
+ * The result of asking the host about {@link NativeGrants}.
+ *
+ * Three outcomes, deliberately not two. A probe that could not run at all is
+ * NOT evidence that a grant is missing — the same fail-open rule `preflight.ts`
+ * enforces. Collapsing `'inconclusive'` into "denied" is what would tell a user
+ * to go re-grant a permission they already hold.
+ */
+export type NativeGrantProbe =
+  | ({ kind: 'ok' } & NativeGrants)
+  /** The capture binary itself is absent, so there is nothing to hold a grant. */
+  | { kind: 'binary-missing'; detail: string }
+  /** The binary is there but would not answer (bad exit, unparseable output, timeout). */
+  | { kind: 'inconclusive'; detail: string };
+
+/**
  * A host-capability probe the health panel runs (§6 "probes, not checkboxes").
  *
  * `'native-drive'` is the consent-gated drive round-trip. It is declared here
