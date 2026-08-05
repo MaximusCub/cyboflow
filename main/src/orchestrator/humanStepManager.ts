@@ -278,6 +278,13 @@ export class HumanStepManager {
    */
   async parkForBlockingReview(runId: string): Promise<boolean> {
     if (!hasReviewItemsTable(this.db)) return false;
+    // Same surface re-derive as openHumanGate, for the OTHER way a human ends up
+    // parked on a review item: the step-boundary blocking-items checkpoint. This
+    // is the path a BOOT re-drive takes for a run restarted mid-gate (the pending
+    // gate row parks the walk BEFORE the gate step re-executes, so openHumanGate
+    // never re-fires) — without this, such a run stays parked on a gate whose
+    // artifact surfaces never minted.
+    await handleEntityWrite(this.db, runId, 'idea');
     return (await this.getQueue(runId).add(() => {
       // Only park when there is genuinely something blocking (avoid parking a run
       // whose blocking items cleared between the caller's check and this task).
