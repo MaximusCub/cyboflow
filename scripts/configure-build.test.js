@@ -112,6 +112,14 @@ try {
     assert(config.mac.notarize === false, 'notarize should be false when signing disabled');
     assert(config.mac.entitlements === undefined, 'entitlements should be removed when signing disabled');
     assert(config.mac.entitlementsInherit === undefined, 'entitlementsInherit should be removed when signing disabled');
+    // The peekaboo binary CANNOT be executed from inside the asar archive. If
+    // this entry is ever dropped, native-screen verification breaks only in
+    // PACKAGED builds — dev keeps resolving it through node_modules — which is
+    // the kind of divergence that ships.
+    assert(
+      (config.asarUnpack || []).includes('node_modules/@steipete/peekaboo-mcp/**'),
+      'the peekaboo capture binary must be unpacked out of the asar'
+    );
   });
 } catch (err) {
   console.error('FAIL: Case A — ' + err.message);

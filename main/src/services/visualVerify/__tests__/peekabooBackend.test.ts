@@ -264,6 +264,26 @@ describe('parsePermissionsJson', () => {
     });
   });
 
+  it('reads v3\'s LIST of named grants, so the version bump is not a parser rewrite', () => {
+    // Verbatim shape from `@steipete/peekaboo` v3: an array of named grants
+    // rather than a keyed object, with extra grants we do not require.
+    const stdout = JSON.stringify({
+      success: true,
+      data: {
+        source: 'bridge',
+        permissions: [
+          { name: 'Screen Recording', isGranted: true, isRequired: true },
+          { name: 'Accessibility', isGranted: false, isRequired: true },
+          { name: 'Event Synthesizing', isGranted: true, isRequired: false },
+        ],
+      },
+    });
+    expect(parsePermissionsJson(stdout)).toEqual({
+      screenRecording: true,
+      accessibility: false,
+    });
+  });
+
   it('still reads the un-nested shapes older versions emitted', () => {
     expect(
       parsePermissionsJson(JSON.stringify({ permissions: { screenRecording: true, accessibility: false } })),

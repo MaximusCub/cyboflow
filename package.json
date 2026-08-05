@@ -88,6 +88,9 @@
     "uuid": "^13.0.0",
     "zod": "^3.23.8"
   },
+  "optionalDependencies": {
+    "@steipete/peekaboo-mcp": "2.0.3"
+  },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.726.0",
     "@aws-sdk/lib-storage": "^3.726.0",
@@ -125,6 +128,7 @@
       "node_modules/**/*.node",
       "node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**",
       "node_modules/@openai/codex*/**",
+      "node_modules/@steipete/peekaboo-mcp/**",
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
       "main/dist/main/src/orchestrator/shellHooks/**/*.js",
       "main/dist/main/src/orchestrator/verify/driver/**/*.js"

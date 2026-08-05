@@ -73,6 +73,34 @@ function getLeanPackagingPlan(targetArch) {
   };
 }
 
+/**
+ * Warn — loudly, but do not fail — when the bundled screen-capture binary is
+ * absent from node_modules.
+ *
+ * It is an OPTIONAL dependency (`os: ["darwin"]`, so a required one would break
+ * `pnpm install` on the Linux CI runners), which means "absent" is a legitimate
+ * state on any non-macOS box and this check has to be a no-op there.
+ *
+ * A warning rather than the hard fail the per-arch agent binaries get: shipping
+ * without it degrades to resolving `peekaboo` off the user's PATH, which is
+ * exactly the pre-bundling behaviour — a lost convenience, not a broken
+ * runtime. Silent, though, it would be the regression where most users simply
+ * never satisfy the prerequisite.
+ */
+function warnIfPeekabooMissing() {
+  if (process.platform !== 'darwin') return;
+  const binary = path.join(
+    __dirname, '..', 'node_modules', '@steipete', 'peekaboo-mcp', 'peekaboo'
+  );
+  if (fs.existsSync(binary)) return;
+  console.warn(
+    'Warning: the bundled peekaboo capture binary is missing ' +
+      '(@steipete/peekaboo-mcp). This build will ship without it and ' +
+      'native-screen verification will fall back to whatever is on the ' +
+      "user's PATH. Run \"pnpm install\" to restore it."
+  );
+}
+
 function configureBuild() {
   console.log('Configuring build for current environment...');
 
@@ -169,6 +197,8 @@ function configureBuild() {
         `excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
     );
   }
+
+  warnIfPeekabooMissing();
 
   // Write the environment-adjusted config; package.json stays pristine
   fs.mkdirSync(path.dirname(GENERATED_CONFIG_PATH), { recursive: true });

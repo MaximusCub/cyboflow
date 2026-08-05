@@ -138,6 +138,7 @@ import {
   makeScreenRecordingSettingsOpener,
 } from './services/visualVerify/hostProbeAdapters';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
+import { resolvePeekabooExecutable } from './services/visualVerify/peekabooExecutablePath';
 import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
 import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
@@ -1723,7 +1724,17 @@ async function initializeServices(): Promise<boolean> {
   // the scheduler (Peekaboo's sole client) serializes all native-desktop captures
   // app-wide through the shared mutex. dev builds run under the 'Electron' app
   // owner; the packaged app owner is 'Cyboflow' (the backend's default appTarget).
-  const peekabooBackend = new PeekabooBackend({ logger: cyboflowLogger });
+  // The BUNDLED peekaboo, not whatever is on PATH. macOS TCC grants attach to
+  // a binary, and an npx-resolved one sits under a content-hashed cache path
+  // that moves on every version bump — silently revoking both grants and
+  // reporting them as declined. See peekabooExecutablePath.ts.
+  const peekabooBackend = new PeekabooBackend({
+    logger: cyboflowLogger,
+    executablePath: resolvePeekabooExecutable({
+      isPackaged: app.isPackaged,
+      ...(process.resourcesPath ? { resourcesPath: process.resourcesPath } : {}),
+    }),
+  });
   // S5 — the golden-baseline SSIM pre-diff resolver. When a request carries a
   // baselineKey, this closure resolves the accepted baseline PNG per captured
   // viewport (FsBaselineStore) and compares it (comparePngFiles → nativeImage decode,

@@ -68,6 +68,7 @@ import type {
   VisualBackendId,
 } from '../../../../shared/types/visualVerification';
 import { VERIFY_SCREEN_LEASE } from '../../orchestrator/verify/verificationScheduler';
+import { PEEKABOO_PATH_FALLBACK } from './peekabooExecutablePath';
 import type { LoggerLike } from '../../orchestrator/types';
 
 /**
@@ -133,6 +134,13 @@ export interface PeekabooBackendOptions {
   appTarget?: string;
   /** Per-capture timeout (ms). Defaults to CAPTURE_TIMEOUT_MS. */
   captureTimeoutMs?: number;
+  /**
+   * The `peekaboo` binary to run. Defaults to the bare name (PATH lookup);
+   * `index.ts` passes the copy bundled in the app, whose stable path is what
+   * keeps the macOS TCC grants from being revoked on every version bump — see
+   * `peekabooExecutablePath.ts`.
+   */
+  executablePath?: string;
 }
 
 /**
@@ -146,10 +154,16 @@ export interface PeekabooBackendOptions {
 export class DefaultPeekabooClient implements PeekabooClient {
   private readonly logger?: LoggerLike;
   private readonly captureTimeoutMs: number;
+  private readonly executablePath: string;
 
-  constructor(opts: { logger?: LoggerLike; captureTimeoutMs?: number } = {}) {
+  constructor(
+    opts: { logger?: LoggerLike; captureTimeoutMs?: number; executablePath?: string } = {},
+  ) {
     this.logger = opts.logger;
     this.captureTimeoutMs = opts.captureTimeoutMs ?? CAPTURE_TIMEOUT_MS;
+    // Defaults to the bare name (resolved off PATH) so a caller that does not
+    // care keeps the pre-bundling behaviour. index.ts passes the bundled path.
+    this.executablePath = opts.executablePath ?? PEEKABOO_PATH_FALLBACK;
   }
 
   async binaryAvailable(): Promise<boolean> {
@@ -157,7 +171,7 @@ export class DefaultPeekabooClient implements PeekabooClient {
       // `peekaboo --version` resolves only when the binary is on PATH; a missing
       // binary throws ENOENT (caught → false). Short timeout so a wedged binary
       // never blocks the probe.
-      await this.run('peekaboo', ['--version'], 5_000);
+      await this.run(this.executablePath, ['--version'], 5_000);
       return true;
     } catch (err) {
       this.logger?.info('[PeekabooBackend] binary not available', {
@@ -177,7 +191,7 @@ export class DefaultPeekabooClient implements PeekabooClient {
     //
     // Deliberately no catch: an unanswerable probe propagates so the caller can
     // tell "declined" from "could not ask".
-    const stdout = await this.run('peekaboo', ['permissions', '--json-output'], 5_000);
+    const stdout = await this.run(this.executablePath, ['permissions', '--json-output'], 5_000);
     return parsePermissionsJson(stdout);
   }
 
@@ -189,7 +203,7 @@ export class DefaultPeekabooClient implements PeekabooClient {
     // app. A non-zero exit / missing PNG rejects (caught by the backend ⇒
     // ok:false). The signal aborts a hung capture.
     await this.run(
-      'peekaboo',
+      this.executablePath,
       ['image', '--app', args.appTarget, '--path', args.outPath],
       this.captureTimeoutMs,
       signal,
@@ -314,17 +328,43 @@ export function parsePermissionsJson(stdout: string): NativeGrants {
  * than pin one version's schema, try each known nesting OUTSIDE-IN and accept
  * the first that actually carries a grant key; anything else is `null`, i.e. an
  * output we do not understand, which the caller turns into a throw.
+ *
+ * v3 replaced the keyed object with a LIST of named grants, so a list is
+ * normalised into the keyed shape first. Reading it here rather than at the
+ * version bump keeps that bump a one-line change in
+ * `peekabooExecutablePath.ts`.
  */
 function locateGrants(parsed: unknown): Record<string, unknown> | null {
   const root = asRecord(parsed);
   if (root === null) return null;
+  const data = asRecord(root.data);
   const candidates = [
-    asRecord(asRecord(root.data)?.permissions),
-    asRecord(root.permissions),
-    asRecord(root.data),
+    asRecord(data?.permissions) ?? fromGrantList(data?.permissions),
+    asRecord(root.permissions) ?? fromGrantList(root.permissions),
+    data,
     root,
   ];
   return candidates.find((c) => c !== null && carriesGrantKey(c)) ?? null;
+}
+
+/**
+ * Normalise v3's `[{ name: 'Screen Recording', isGranted: true }, …]` into the
+ * keyed shape the rest of this reader expects.
+ *
+ * Names are lowercased and de-spaced so 'Screen Recording' meets
+ * `screen_recording`. Grants beyond the two we require (v3 also reports Event
+ * Synthesizing, among others) fall through harmlessly — an unrecognised key
+ * simply never gets read.
+ */
+function fromGrantList(value: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(value)) return null;
+  const grants: Record<string, unknown> = {};
+  for (const entry of value) {
+    const record = asRecord(entry);
+    if (record === null || typeof record.name !== 'string') continue;
+    grants[record.name.toLowerCase().replace(/\s+/g, '_')] = record.isGranted;
+  }
+  return Object.keys(grants).length > 0 ? grants : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -358,6 +398,7 @@ export class PeekabooBackend implements VisualBackend {
       new DefaultPeekabooClient({
         logger: opts.logger,
         captureTimeoutMs: opts.captureTimeoutMs,
+        ...(opts.executablePath !== undefined ? { executablePath: opts.executablePath } : {}),
       });
     this.appTarget = opts.appTarget ?? DEFAULT_APP_TARGET;
   }

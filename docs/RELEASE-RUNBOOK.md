@@ -129,6 +129,26 @@ cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch   #
   rebuild that DMG by hand from the (complete, signed, stapled) `.zip` — full
   recipe in `[[project_cross_arch_build_foreign_binaries]]`.
 
+- **Bundled `peekaboo` capture binary.** It ships unpacked beside the asar and
+  is RE-SIGNED under our Team ID (it arrives already signed as
+  `com.steipete.peekaboo`, which notarization would otherwise reject as a
+  foreign identity). Verify it survived signing, and that it still answers —
+  a binary that runs but cannot report its own grants makes every
+  native-screen verification skip, silently:
+
+  ```bash
+  APP="mac-arm64/Cyboflow Dev.app"   # or the mounted stable .app
+  PB="$APP/Contents/Resources/app.asar.unpacked/node_modules/@steipete/peekaboo-mcp/peekaboo"
+  test -x "$PB" || echo "MISSING — the build shipped without it"
+  codesign -dv --verbose=2 "$PB" 2>&1 | grep -E 'TeamIdentifier|flags'  # our Team ID, runtime flag
+  "$PB" permissions --json-output   # must print JSON, not "Unknown option"
+  ```
+
+  Absence is a DEGRADATION, not a break — the app falls back to resolving
+  `peekaboo` off the user's PATH, i.e. the pre-bundling behaviour — so
+  `configure-build.js` warns rather than failing. Which is exactly why this
+  check is here: nothing else would tell you.
+
 ## 5. Publish to R2 — the in-app update channel (THE release)
 
 > **This is the step that actually ships the update.** The app polls
