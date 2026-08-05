@@ -284,6 +284,41 @@ describe('parsePermissionsJson', () => {
     });
   });
 
+  it('THROWS on a grant list whose booleans are spelled some other way', () => {
+    // The failure this guards: an entry naming a grant we recognise but
+    // carrying nothing readable used to be stored verbatim, which satisfied the
+    // "is this the grants object?" check and parsed into BOTH grants denied. On
+    // a host holding both, that sends the user to re-grant permissions they
+    // already have and hard-disables a working capability — a confident denial
+    // invented from output we did not understand. An unreadable list must reach
+    // the caller as `inconclusive`, which only a throw produces.
+    const stdout = JSON.stringify({
+      success: true,
+      data: {
+        permissions: [
+          { name: 'Screen Recording', is_granted: true },
+          { name: 'Accessibility', is_granted: true },
+        ],
+      },
+    });
+    expect(() => parsePermissionsJson(stdout)).toThrow(/no recognisable permissions object/);
+  });
+
+  it('drops only the unreadable ENTRIES when the rest of the list is fine', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      data: {
+        permissions: [
+          { name: 'Screen Recording', isGranted: true },
+          { name: 'Accessibility', isGranted: 'yes' },
+        ],
+      },
+    });
+    // Accessibility never lands, so it reads as not-granted — the same as an
+    // absent key, which the docblock already declares a denial.
+    expect(parsePermissionsJson(stdout)).toEqual({ screenRecording: true, accessibility: false });
+  });
+
   it('still reads the un-nested shapes older versions emitted', () => {
     expect(
       parsePermissionsJson(JSON.stringify({ permissions: { screenRecording: true, accessibility: false } })),

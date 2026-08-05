@@ -355,6 +355,14 @@ function locateGrants(parsed: unknown): Record<string, unknown> | null {
  * `screen_recording`. Grants beyond the two we require (v3 also reports Event
  * Synthesizing, among others) fall through harmlessly — an unrecognised key
  * simply never gets read.
+ *
+ * An entry whose grant is not a BOOLEAN is dropped rather than stored. Storing
+ * it would satisfy {@link carriesGrantKey} while carrying nothing readable, so
+ * a payload spelling the field some other way would parse "successfully" into
+ * both grants denied — a confident denial invented from output we did not
+ * understand, which is the exact outcome {@link parsePermissionsJson} throws to
+ * prevent. Dropping it instead lets the whole list read as unrecognised, and an
+ * unrecognised shape becomes `inconclusive`, not `missing`.
  */
 function fromGrantList(value: unknown): Record<string, unknown> | null {
   if (!Array.isArray(value)) return null;
@@ -362,6 +370,7 @@ function fromGrantList(value: unknown): Record<string, unknown> | null {
   for (const entry of value) {
     const record = asRecord(entry);
     if (record === null || typeof record.name !== 'string') continue;
+    if (typeof record.isGranted !== 'boolean') continue;
     grants[record.name.toLowerCase().replace(/\s+/g, '_')] = record.isGranted;
   }
   return Object.keys(grants).length > 0 ? grants : null;

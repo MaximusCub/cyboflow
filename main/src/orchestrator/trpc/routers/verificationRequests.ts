@@ -608,13 +608,19 @@ async function grantRows(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]
           // grant is held, but nothing yet uses it to drive. Said here because
           // this is the grant driving would need — and because a bare "granted"
           // would imply a capability that does not exist.
-          detail: 'granted — used to target the app window; no drive API yet, so capture is observe-only',
+          detail:
+            'granted — brings a window forward before capture; no drive API yet, so capture is observe-only',
           fix: null,
         }
       : {
           id: 'accessibility',
           state: 'missing',
-          detail: 'not granted — capture cannot target a specific app window',
+          // Deliberately NOT "capture cannot target a window": peekaboo names
+          // this grant OPTIONAL and needs it for window FOCUS control, so a
+          // backgrounded window still captures without it. Overstating the
+          // consequence would send someone chasing a permission to fix
+          // something that is not broken.
+          detail: 'not granted — a background window cannot be raised before capture',
           fix: 'request-accessibility',
         },
   ];

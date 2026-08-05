@@ -1941,16 +1941,21 @@ async function initializeServices(): Promise<boolean> {
     resolveNode: findNodeExecutable,
     resolveChromium: probeChromiumExecutable,
     probeDriverCli: makeDriverCliProbe(verifyDriverCliPath, (p) => fs.promises.access(p)),
-    nativeGrants: () => peekabooBackend.probeGrants(),
     ensureChromium: makeChromiumProvisioner(
       () => new PlaywrightInstaller({ logger: cyboflowLogger }),
       cyboflowLogger,
     ),
-    // The two grant actions exist only on macOS: nothing else has these TCC
-    // grants, and the router omits a row's fix rather than offering a button
-    // that would open a settings pane that does not exist.
+    // The grant PROBE and the two grant ACTIONS are all macOS-only: no other
+    // platform has these TCC grants at all. Leaving the probe wired off darwin
+    // spawned a binary that is not there on every panel open, and reported the
+    // resulting failure as two permanent `unknown` rows — describing grants the
+    // platform does not have as something we merely could not read. Omitted, the
+    // router's own unwired branch says the honest thing instead ("no native
+    // capture backend wired on this host"). The router likewise omits a row's
+    // fix rather than offering a button for a settings pane that does not exist.
     ...(process.platform === 'darwin'
       ? {
+          nativeGrants: () => peekabooBackend.probeGrants(),
           requestAccessibility: makeAccessibilityRequester({
             isTrustedAccessibilityClient: (prompt) =>
               systemPreferences.isTrustedAccessibilityClient(prompt),
