@@ -18,6 +18,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { ReactElement } from 'react';
 
 import { TerminalDock, DOCK_OPEN_HEIGHT } from '../TerminalDock';
 
@@ -330,6 +331,52 @@ describe('TerminalDock — container-aware sizing', () => {
     // can't overshoot the pane and scroll the header/grip off-screen.
     setContainerHeight(400);
     expect(dockHeight()).toBe(400);
+  });
+
+  it('anchors a drag to the RENDERED height, not a taller persisted preference', () => {
+    // Persisted from a taller window/pane, so the container clamps what renders.
+    localStorage.setItem(HEIGHT_KEY, '1200');
+    render(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    setContainerHeight(500);
+    expect(dockHeight()).toBe(500);
+
+    // Anchoring to the raw 1200 preference instead of the rendered 500 made the
+    // divider look stuck: every upward drag clamped straight back to the ceiling
+    // and downward drags did nothing until they burned off the 700px gap.
+    dragGrip(100); // DOWN 100 → moves immediately
+    expect(dockHeight()).toBe(400);
+    dragGrip(-60); // UP 60 → actually grows
+    expect(dockHeight()).toBe(460);
+  });
+
+  it('remeasures the ceiling when a fixed sibling unmounts', async () => {
+    localStorage.setItem(HEIGHT_KEY, '1200');
+    const Harness = ({ strip }: { strip: boolean }): ReactElement => (
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {strip && <div data-testid="strip" style={{ flexGrow: 0 }} />}
+        <TerminalDock open onToggle={() => {}}>
+          <div data-testid="child" />
+        </TerminalDock>
+      </div>
+    );
+    const { rerender } = render(<Harness strip />);
+    Object.defineProperty(screen.getByTestId('strip'), 'offsetHeight', {
+      configurable: true,
+      get: () => 120,
+    });
+    setContainerHeight(500);
+    expect(dockHeight()).toBe(380); // 500 pane − 120 strip
+
+    // RunPendingInputStrip renders null once its items clear. That does NOT
+    // resize the pane, so a parent-only ResizeObserver never fires and the
+    // ceiling stays stuck at 380 — capping upward drags with 120px to spare.
+    rerender(<Harness strip={false} />);
+    await act(async () => {}); // MutationObserver callbacks are microtasks
+    expect(dockHeight()).toBe(500);
   });
 });
 

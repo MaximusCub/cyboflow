@@ -148,6 +148,15 @@ export function TerminalDock({
   useLayoutEffect(() => {
     const el = wrapperRef.current;
     const parent = el?.parentElement ?? null;
+    const fixedSiblings = (): HTMLElement[] => {
+      const out: HTMLElement[] = [];
+      if (el === null) return out;
+      for (let n = el.previousElementSibling; n !== null; n = n.previousElementSibling) {
+        const node = n as HTMLElement;
+        if (getComputedStyle(node).flexGrow === '0') out.push(node);
+      }
+      return out;
+    };
     const measure = (): void => {
       if (el === null || parent === null) {
         setAvailableHeight(null);
@@ -158,19 +167,53 @@ export function TerminalDock({
         setAvailableHeight(null);
         return;
       }
-      let fixedSiblings = 0;
-      for (let n = el.previousElementSibling; n !== null; n = n.previousElementSibling) {
-        const node = n as HTMLElement;
-        if (getComputedStyle(node).flexGrow === '0') fixedSiblings += node.offsetHeight;
-      }
-      setAvailableHeight(Math.max(DOCK_MIN_HEIGHT, paneHeight - fixedSiblings));
+      const taken = fixedSiblings().reduce((sum, node) => sum + node.offsetHeight, 0);
+      setAvailableHeight(Math.max(DOCK_MIN_HEIGHT, paneHeight - taken));
     };
     measure();
-    if (parent === null || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(parent);
-    return () => ro.disconnect();
+    if (parent === null) return;
+    // The ceiling is `parent height − fixed siblings`, so BOTH terms have to be
+    // watched. Observing only the parent leaves the ceiling stale whenever a
+    // fixed sibling mounts, unmounts, or reflows (RunPendingInputStrip renders
+    // null until a review item or live question arrives) — none of which resize
+    // the parent box. A stale-small ceiling caps upward drags with room to
+    // spare; a stale-large one lets the dock overshoot the pane.
+    const ro =
+      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => measure()) : null;
+    const observeAll = (): void => {
+      if (ro === null) return;
+      ro.disconnect();
+      ro.observe(parent);
+      // Only the FIXED siblings: the flex:1 content sibling collapses on every
+      // dock resize, and observing it would feed each resize straight back in.
+      for (const node of fixedSiblings()) ro.observe(node);
+    };
+    observeAll();
+    // childList only — a sibling appearing/disappearing needs both a remeasure
+    // and a fresh observe set.
+    const mo =
+      typeof MutationObserver !== 'undefined'
+        ? new MutationObserver(() => {
+            observeAll();
+            measure();
+          })
+        : null;
+    mo?.observe(parent, { childList: true });
+    return () => {
+      ro?.disconnect();
+      mo?.disconnect();
+    };
   }, [level, open]);
+
+  /**
+   * The standard height the dock ACTUALLY renders at: the persisted preference
+   * clamped to the live container ceiling. Everything that reads "the current
+   * height" must read THIS, not the raw preference — when the preference exceeds
+   * the ceiling (persisted from a taller window, or a sibling strip appeared),
+   * a drag anchored to the raw value moves the clamped output not at all upward
+   * and only after a dead zone downward, which reads as a stuck divider.
+   */
+  const effectiveHeight = Math.min(height, availableHeight ?? Infinity);
 
   // In the standard level the grip background is a resize handle. A press there is
   // a drag once it crosses DRAG_THRESHOLD; the chevron buttons stop the press from
@@ -225,13 +268,14 @@ export function TerminalDock({
       if (!canResize) return; // only the standard level resizes
       interactionRef.current = {
         startY: e.clientY,
-        startHeight: height,
+        // Anchor to the RENDERED height, not the raw preference — see effectiveHeight.
+        startHeight: effectiveHeight,
         dragged: false,
       };
       document.addEventListener('mousemove', handleGripMouseMove);
       document.addEventListener('mouseup', handleGripMouseUp);
     },
-    [canResize, height, handleGripMouseMove, handleGripMouseUp],
+    [canResize, effectiveHeight, handleGripMouseMove, handleGripMouseUp],
   );
 
   // Safety: detach global listeners if we unmount mid-drag.
@@ -251,7 +295,7 @@ export function TerminalDock({
           (availableHeight ?? fullDockHeight())
         : // Standard: never exceed the container, so a tall persisted height (or a
           // large drag) can't push the header/grip off-screen.
-          Math.min(height, availableHeight ?? Infinity);
+          effectiveHeight;
 
   return (
     <div
