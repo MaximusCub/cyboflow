@@ -1320,10 +1320,16 @@ describe('VerificationAgentRunner.run — §4 modality plumbing', () => {
     expect(query.mock.calls[0][0].env.VERIFY_MODALITY).toBe('cdp-app');
   });
 
-  it('exports VERIFY_PEEKABOO_BIN ONLY on native-screen (default `peekaboo`, overridable)', async () => {
-    const web = makeRunner();
+  it('exports VERIFY_PEEKABOO_BIN on EVERY modality (default `peekaboo`, overridable)', async () => {
+    // Unconditional on purpose. The harness's own window-identity probe always
+    // uses deps.peekabooBin, and nothing ties an attestation kind to a
+    // modality — so gating this on native-screen left the driver's self-check
+    // resolving a bare `peekaboo` off PATH while the harness measured the
+    // bundled one. On the host bundling exists for, the self-check would
+    // ENOENT while the authoritative probe passed.
+    const web = makeRunner({ peekabooBin: '/opt/peekaboo' });
     await web.runner.run(makeReq());
-    expect(web.query.mock.calls[0][0].env.VERIFY_PEEKABOO_BIN).toBeUndefined();
+    expect(web.query.mock.calls[0][0].env.VERIFY_PEEKABOO_BIN).toBe('/opt/peekaboo');
 
     const native = makeRunner();
     await native.runner.run(makeReq({ modality: 'native-screen' }));

@@ -2106,9 +2106,14 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // serve step injected can carry it.
         VERIFY_ATTEST_NONCE: attestNonce,
         VERIFY_MODALITY: modality,
-        ...(modality === 'native-screen'
-          ? { VERIFY_PEEKABOO_BIN: this.deps.peekabooBin ?? DEFAULT_PEEKABOO_BIN }
-          : {}),
+        // UNCONDITIONAL, deliberately. The harness's own window-identity probe
+        // always uses `deps.peekabooBin`, and nothing ties an attestation kind
+        // to a modality — so gating this on `native-screen` left the driver's
+        // self-check resolving a bare `peekaboo` off PATH while the harness
+        // measured the bundled one. On the host bundling exists for (nothing on
+        // PATH) the self-check would ENOENT while the authoritative probe
+        // passed, which is the least debuggable outcome available.
+        VERIFY_PEEKABOO_BIN: this.deps.peekabooBin ?? DEFAULT_PEEKABOO_BIN,
         ...(req.verifyPort !== null ? { VERIFY_PORT: String(req.verifyPort) } : {}),
         // CDP-attach mode (task.serve.attach === 'cdp'): the serve command
         // launches the app under test exposing CDP on VERIFY_DRIVER_PORT, so the
