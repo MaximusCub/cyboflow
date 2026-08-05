@@ -54,6 +54,35 @@ function entityIdsCreatedByRun(
 }
 
 /**
+ * Distinct idea ids the run's DECOMPOSITION step updated in place
+ * (kind='updated', actor='agent:ideas'). A decomposition agent that finds an
+ * equivalent idea already on the board (a prior canceled run's leftovers) is
+ * guided by the create-task tool description to update it rather than mint a
+ * duplicate — those ADOPTED cards are batch members exactly as if the run had
+ * created them, and every downstream surface (idea-spec tabs, the approve-ideas
+ * gate payload, plan-phase idea scoping, decomposed_at retirement) must see
+ * them. The actor filter keeps incidental touches by OTHER step agents (the
+ * interview writing a note into a pre-existing card) out of the batch.
+ * Fail-soft — see file header contract.
+ */
+function ideaIdsAdoptedByRunDecomposition(db: DatabaseLike, runId: string): string[] {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT entity_id AS entityId
+         FROM entity_events
+         WHERE entity_type = 'idea' AND kind = 'updated' AND actor = 'agent:ideas' AND run_id = ?`,
+      )
+      .all(runId) as Array<{ entityId: unknown }>;
+    return rows
+      .map((r) => r.entityId)
+      .filter((id): id is string => typeof id === 'string');
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The distinct idea ids that at least one of the run's CREATED child entities (an
  * epic or task) points back at through its `originating_idea_id` lineage column.
  * These are the ideas the run actually DECOMPOSED. A run-created child whose
@@ -145,6 +174,14 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
   }
 
   for (const ideaId of entityIdsCreatedByRun(db, runId, 'idea')) {
+    ownedIds.add(ideaId);
+  }
+
+  // Ideas the decomposition step ADOPTED by updating pre-existing cards in
+  // place instead of creating duplicates. NOT unioned into
+  // listRunCreatedIdeaIds — the experiment-arm sweep deletes that projection,
+  // and deleting an adopted pre-existing card would be destructive.
+  for (const ideaId of ideaIdsAdoptedByRunDecomposition(db, runId)) {
     ownedIds.add(ideaId);
   }
 

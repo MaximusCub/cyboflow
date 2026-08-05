@@ -164,12 +164,18 @@ function insertBatchTask(
 let seqCounter = 0;
 function insertEvent(
   db: Database.Database,
-  opts: { entityType: 'idea' | 'epic' | 'task'; entityId: string; kind: string; runId: string | null },
+  opts: {
+    entityType: 'idea' | 'epic' | 'task';
+    entityId: string;
+    kind: string;
+    runId: string | null;
+    actor?: string;
+  },
 ): void {
   db.prepare(
     `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id)
-     VALUES (?, ?, ?, ?, 'orchestrator', ?)`,
-  ).run(opts.entityType, opts.entityId, (seqCounter += 1), opts.kind, opts.runId);
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(opts.entityType, opts.entityId, (seqCounter += 1), opts.kind, opts.actor ?? 'orchestrator', opts.runId);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +222,33 @@ describe('runEntityOwnership.listRunOwnedIdeaIds', () => {
     insertEvent(db, { entityType: 'idea', entityId: 'ide_x', kind: 'created', runId: 'run-noseed' });
 
     expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-noseed')).toEqual(['ide_x']);
+  });
+
+  it('adopts pre-existing ideas the decomposition step updated in place (actor agent:ideas)', () => {
+    const db = buildDb();
+    insertRun(db, 'run-adopt', null);
+    // A prior run created these cards; this run's ideas step updated them.
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior_a', kind: 'created', runId: 'run-old' });
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior_b', kind: 'created', runId: 'run-old' });
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior_a', kind: 'updated', runId: 'run-adopt', actor: 'agent:ideas' });
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior_b', kind: 'updated', runId: 'run-adopt', actor: 'agent:ideas' });
+
+    expect([...listRunOwnedIdeaIds(dbAdapter(db), 'run-adopt')].sort()).toEqual([
+      'ide_prior_a',
+      'ide_prior_b',
+    ]);
+  });
+
+  it('does NOT adopt ideas updated by other step agents or by other runs', () => {
+    const db = buildDb();
+    insertRun(db, 'run-adopt', null);
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior', kind: 'created', runId: 'run-old' });
+    // Incidental touch by the interview agent — not a batch adoption.
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_prior', kind: 'updated', runId: 'run-adopt', actor: 'agent:interview' });
+    // Decomposition update belonging to a DIFFERENT run.
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_other', kind: 'updated', runId: 'run-else', actor: 'agent:ideas' });
+
+    expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-adopt')).toEqual([]);
   });
 });
 
