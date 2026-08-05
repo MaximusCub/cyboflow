@@ -2,8 +2,43 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import type { AppServices } from '../../ipc/types';
+import { registerConfigHandlers } from '../../ipc/config';
 import { ConfigManager } from '../configManager';
 import { setCyboflowDirectory } from '../../utils/cyboflowDirectory';
+import type { AppConfig as MainAppConfig } from '../../types/config';
+import type { AppConfig as FrontendAppConfig } from '../../../../frontend/src/types/config';
+import {
+  DEFAULT_QUICK_MODEL,
+  DEFAULT_RUN_TYPE_MODEL_FLOORS,
+  DEFAULT_WORKFLOW_MODEL,
+  type RunTypeDefaults,
+} from '../../../../shared/types/sessionDefaults';
+
+type MainRunTypeDefaults = MainAppConfig['runTypeDefaults'];
+type FrontendRunTypeDefaults = FrontendAppConfig['runTypeDefaults'];
+const mainRunTypeDefaultsParity: MainRunTypeDefaults extends FrontendRunTypeDefaults ? true : never = true;
+const frontendRunTypeDefaultsParity: FrontendRunTypeDefaults extends MainRunTypeDefaults ? true : never = true;
+
+function makeHandlerCapture() {
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const ipcMain = {
+    handle: (channel: string, handler: (...args: unknown[]) => Promise<unknown>) => {
+      handlers.set(channel, handler);
+    },
+  };
+  return { ipcMain, handlers };
+}
+
+async function invokeHandler(
+  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
+  channel: string,
+  ...args: unknown[]
+): Promise<unknown> {
+  const handler = handlers.get(channel);
+  if (!handler) throw new Error(`No handler registered for ${channel}`);
+  return handler({} as unknown, ...args);
+}
 
 let tempDir: string;
 
@@ -17,6 +52,17 @@ afterEach(async () => {
 });
 
 describe('ConfigManager run-type defaults', () => {
+  it('keeps the shared model floors and AppConfig runTypeDefaults mirrors aligned', () => {
+    expect(DEFAULT_WORKFLOW_MODEL).toBe('opus');
+    expect(DEFAULT_QUICK_MODEL).toBe('opus');
+    expect(DEFAULT_RUN_TYPE_MODEL_FLOORS).toEqual({ workflow: 'opus', quick: 'opus' });
+    expect(mainRunTypeDefaultsParity).toBe(true);
+    expect(frontendRunTypeDefaultsParity).toBe(true);
+
+    const defaults: RunTypeDefaults = { model: DEFAULT_WORKFLOW_MODEL };
+    expect(defaults).toEqual({ model: 'opus' });
+  });
+
   it('reads sparse entries raw and keeps launch floors separate from defaultModel', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
@@ -44,6 +90,7 @@ describe('ConfigManager run-type defaults', () => {
       value: { model: null },
     });
 
+    expect(updated.previous).toBe(prior);
     expect(updated.previous).toEqual(prior);
     expect(updated.config.runTypeDefaults).toBeUndefined();
     expect(manager.getRunTypeDefaults('quick')).toBeUndefined();
@@ -147,5 +194,44 @@ describe('ConfigManager run-type defaults', () => {
     expect(result.previous).toEqual({ model: 'opus' });
     expect(result.config).toBe(manager.getConfig());
     expect(result.config.runTypeDefaults).toBeUndefined();
+  });
+
+  it('registers the IPC operation, delegates valid input, and rejects invalid input', async () => {
+    const manager = new ConfigManager('/tmp/test-git-path');
+    await manager.initialize();
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerConfigHandlers(
+      ipcMain as unknown as Parameters<typeof registerConfigHandlers>[0],
+      {
+        configManager: manager,
+        claudeCodeManager: {},
+      } as unknown as AppServices,
+    );
+
+    expect(handlers.has('config:apply-run-type-default')).toBe(true);
+
+    const valid = await invokeHandler(
+      handlers,
+      'config:apply-run-type-default',
+      'quick',
+      { kind: 'replace', value: { model: 'opus' } },
+    ) as { success: boolean; data?: { previous: RunTypeDefaults | undefined; config: MainAppConfig } };
+    expect(valid).toEqual({
+      success: true,
+      data: {
+        previous: undefined,
+        config: manager.getConfig(),
+      },
+    });
+
+    const invalid = await invokeHandler(
+      handlers,
+      'config:apply-run-type-default',
+      'quick',
+      { kind: 'merge', value: { unknownField: 'nope' } },
+    ) as { success: boolean; error?: string };
+    expect(invalid.success).toBe(false);
+    expect(invalid.error).toContain('config:apply-run-type-default');
   });
 });
