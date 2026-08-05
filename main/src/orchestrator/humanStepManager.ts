@@ -38,6 +38,7 @@ import {
   hasReviewItemsTable,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
+import { handleEntityWrite } from './autoMintArtifacts';
 import { composePartialSprintGateBody } from './partialSprintGateSummary';
 import { listApproveIdeasBatchRows } from './runEntityOwnership';
 import { runStatusEvents } from './trpc/routers/events';
@@ -115,6 +116,16 @@ export class HumanStepManager {
     stepName: string,
   ): Promise<string | null> {
     if (!hasReviewItemsTable(this.db)) return null;
+
+    // Re-derive the gate's human-facing artifact surfaces BEFORE parking the run
+    // on them (and before the idempotency guard, so a crash-safe re-open at boot
+    // heals a run parked without them). The batch verdict UI renders from the
+    // approve-ideas / idea-spec / arch-design ARTIFACT tabs, which normally mint
+    // off idea entity writes — but a run whose decomposition step ADOPTED
+    // pre-existing cards can reach this gate with no further idea write coming.
+    // Idempotent (UPSERT per run+atype+source_ref), content-gated, and fail-soft
+    // inside handleEntityWrite (a non-content-driven workflow no-ops).
+    await handleEntityWrite(this.db, runId, 'idea');
 
     return (await this.getQueue(runId).add(() => {
       // Idempotency guard: if a pending human-gate decision item for THIS step

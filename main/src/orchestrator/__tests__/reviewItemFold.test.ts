@@ -33,7 +33,16 @@ import { HumanStepManager } from '../humanStepManager';
 import { buildPreToolUseHook } from '../permissionModeMapper';
 import { resolvePermissionReviewItem } from '../reviewItemListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { handleEntityWrite } from '../autoMintArtifacts';
 import type { QuestionPayload } from '../../../../shared/types/questions';
+
+// openHumanGate re-derives the gate's artifact surfaces (idea-spec /
+// approve-ideas tabs) through autoMintArtifacts.handleEntityWrite before
+// opening. Mock the module: the mint internals have their own 67-test suite;
+// here we assert only the SEAM (called, right args) without hauling the full
+// artifacts fixture into this file. The real function was a no-op for this
+// file's 'sprint'-named runs anyway (not a content-driven workflow).
+vi.mock('../autoMintArtifacts', () => ({ handleEntityWrite: vi.fn() }));
 
 // ---------------------------------------------------------------------------
 // Migration-backed test DB (projects + 006 + 011 + 014 + 015 + 016).
@@ -273,6 +282,24 @@ describe('HumanStepManager human gate (run-pause + aggregate-unblock)', () => {
     expect(rows[0].kind).toBe('decision');
     expect(rows[0].blocking).toBe(1);
     expect(rows[0].source).toBe('gate:human-step:plan-review');
+  });
+
+  it('openHumanGate re-derives the gate artifact surfaces before opening (and again on an idempotent re-open)', async () => {
+    const db = buildDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedRun(db, 'run-mint');
+
+    vi.mocked(handleEntityWrite).mockClear();
+    await mgr.openHumanGate('run-mint', 'approve-ideas', 'Approve ideas');
+    expect(handleEntityWrite).toHaveBeenCalledWith(expect.anything(), 'run-mint', 'idea');
+
+    // A crash-safe RE-open (gate already pending → returns null) must still
+    // re-derive first — that boot-time pass heals a run parked before its
+    // surfaces existed.
+    vi.mocked(handleEntityWrite).mockClear();
+    const reopened = await mgr.openHumanGate('run-mint', 'approve-ideas', 'Approve ideas');
+    expect(reopened).toBeNull();
+    expect(handleEntityWrite).toHaveBeenCalledWith(expect.anything(), 'run-mint', 'idea');
   });
 
   it('openHumanGate stamps the approve-ideas batch payload (ideaRefs) — and only for that step', async () => {

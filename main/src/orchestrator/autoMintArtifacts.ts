@@ -209,11 +209,6 @@ interface RunRow {
   projectId: number | null;
 }
 
-interface IdeaRow {
-  ref: string | null;
-  title: string | null;
-}
-
 interface IdeaContentRow {
   ref: string | null;
   title: string | null;
