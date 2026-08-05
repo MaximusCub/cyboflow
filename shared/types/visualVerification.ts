@@ -1739,6 +1739,34 @@ export interface VerificationHealthSummary {
 }
 
 /**
+ * Whether ONE project has verification set up, in the only terms that decide
+ * whether checks actually run.
+ *
+ *   - `proven`   — at least one modality's runbook is proven; verification
+ *                  will really execute for it.
+ *   - `unproven` — runbooks exist but none is proven, so the §3.2 degrade gate
+ *                  skips every build/serve check. This is the state that LOOKS
+ *                  configured and verifies nothing, which is why it is its own
+ *                  word rather than folded into either neighbour.
+ *   - `none`     — no runbook has ever been registered here.
+ */
+export type VerifyProjectSetupStatus = 'proven' | 'unproven' | 'none';
+
+/**
+ * One project's setup state for the §6 panel's project list.
+ *
+ * Carries NO project name: names live in the projects table, which this router
+ * has no business reading. The frontend already loads the project list for its
+ * own filter and joins on `projectId` — one owner per fact.
+ */
+export interface VerifyProjectSetupRow {
+  projectId: number;
+  status: VerifyProjectSetupStatus;
+  /** Modalities whose runbook is proven here, in {@link VERIFICATION_MODALITIES} order. */
+  provenModalities: VerificationModality[];
+}
+
+/**
  * The two macOS TCC grants the native-screen modality needs, reported
  * SEPARATELY rather than as one conjunction.
  *

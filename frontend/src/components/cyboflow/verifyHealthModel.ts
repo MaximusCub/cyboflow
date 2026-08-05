@@ -19,6 +19,8 @@ import type {
   VerificationRunbookState,
   VerifyProbeId,
   VerifyProbeRow,
+  VerifyProjectSetupRow,
+  VerifyProjectSetupStatus,
 } from '../../../../shared/types/visualVerification';
 
 /**
@@ -121,6 +123,44 @@ export function probeIsRequired(row: VerifyProbeRow, nativeScreenDeclared: boole
 /** The pill class for a row, via its status. */
 export function probeStatusClass(row: VerifyProbeRow, required: boolean): string {
   return PROBE_STATUS_CLASS[probeStatus(row, required)];
+}
+
+/**
+ * The word shown against a project in the setup list, and its pill class.
+ *
+ * `unproven` is NOT rolled into `none`. A project with runbooks that are all
+ * unproven looks configured — the setup flow has been run — while the §3.2
+ * degrade gate silently skips every check, so it is the state most worth
+ * naming. It reads as an action remaining rather than a fault, because it is.
+ */
+export function projectSetupLine(status: VerifyProjectSetupStatus): {
+  text: string;
+  className: string;
+} {
+  switch (status) {
+    case 'proven':
+      return { text: 'set up', className: PROBE_STATUS_CLASS.healthy };
+    case 'unproven':
+      return { text: 'not proven', className: PROBE_STATUS_CLASS['pending action'] };
+    case 'none':
+      return { text: 'not set up', className: PROBE_STATUS_CLASS.unknown };
+  }
+}
+
+/**
+ * Fold the setup rows into a lookup keyed by project id.
+ *
+ * A project the query never mentioned is `none`: the router omits projects
+ * with no runbook row at all, so absence IS the answer rather than missing
+ * data (see its doc). That also makes a pre-096 DB degrade honestly — every
+ * project reads `not set up`, which is the truth on a host that has never run
+ * setup.
+ */
+export function setupStatusFor(
+  rows: readonly VerifyProjectSetupRow[] | null,
+  projectId: number,
+): VerifyProjectSetupStatus {
+  return rows?.find((r) => r.projectId === projectId)?.status ?? 'none';
 }
 
 /**

@@ -46,7 +46,7 @@ import {
   type VerificationRequest,
 } from '../../hooks/useVerificationRequests';
 import { VerifyRequestDetailModal } from './VerifyRequestDetailModal';
-import { VerifyHealthPanel, VerifySetupCta } from './VerifyHealthPanel';
+import { VerifyHealthPanel } from './VerifyHealthPanel';
 import {
   STATUS_PILL_CLASS,
   budgetLineText,
@@ -307,21 +307,18 @@ export function VerifyQueueView(): ReactElement {
             <p className="text-sm text-text-tertiary">
               No verification requests for this project yet.
             </p>
-            <VerifySetupCta
-              projectId={projectId}
-              label="Set up verification"
-              testId="verify-queue-empty-setup-cta"
-            />
           </div>
-          {/* The prominent CTA above IS this state's setup affordance — the
-              panel must not render a second one right beneath it. */}
-          <VerifyHealthPanel projectId={projectId} showSetupCta={false} />
+          {/* The panel's project list carries this state's setup affordance —
+              including a row for THIS project — so the empty state no longer
+              needs a button of its own. Two of them a few pixels apart read as
+              two different actions. */}
+          <VerifyHealthPanel projectId={projectId} projects={projects} />
         </div>
       );
     }
     return (
       <div data-testid="verify-queue-list" className="flex flex-col gap-6">
-        <VerifyHealthPanel projectId={projectId} />
+        <VerifyHealthPanel projectId={projectId} projects={projects} />
         <QueueSection
           testId="verify-queue-pending-list"
           title="In flight"
@@ -340,7 +337,7 @@ export function VerifyQueueView(): ReactElement {
         />
       </div>
     );
-  }, [projectId, isLoading, requests, pending, history]);
+  }, [projectId, isLoading, requests, pending, history, projects]);
 
   return (
     <div

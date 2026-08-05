@@ -33,6 +33,7 @@ import type {
   VerificationModalityHealth,
   VerifyHostProbeReport,
   VerifyProbeRow,
+  VerifyProjectSetupRow,
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
@@ -40,14 +41,15 @@ import {
   capabilityLine,
   durationText,
   failureHistogramText,
-  hasProvenRunbook,
   passRateText,
   probeFixLabel,
   probeFixPendingLabel,
   probeIsRequired,
   probeStatus,
   probeStatusClass,
+  projectSetupLine,
   runbookLine,
+  setupStatusFor,
 } from './verifyHealthModel';
 
 /**
@@ -101,6 +103,65 @@ export function VerifySetupCta({
     >
       {label}
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Project setup list
+// ---------------------------------------------------------------------------
+
+/**
+ * Every project and whether verification is actually set up for it.
+ *
+ * This replaced a single "Set up verification" button in the panel header. A
+ * runbook is registered against ONE project, so that button could only ever
+ * configure whichever project the queue filter happened to be showing — and it
+ * said nothing at all about the others, which is exactly the question someone
+ * opening this panel is asking. Listing them turns an action with hidden scope
+ * into a state you can read.
+ *
+ * The project names come from the caller (which already loads them for the
+ * queue's filter); this component only joins them against the setup rows.
+ */
+export function VerifyProjectSetupList({
+  projects,
+  rows,
+}: {
+  projects: readonly { id: number; name: string }[];
+  /** `null` while loading or after a failed query — every project then reads `not set up`. */
+  rows: readonly VerifyProjectSetupRow[] | null;
+}): ReactElement | null {
+  if (projects.length === 0) return null;
+  return (
+    <div
+      data-testid="verify-setup-projects"
+      className="rounded-card border border-border-primary bg-bg-primary px-3 py-1"
+    >
+      {projects.map((project) => {
+        const status = setupStatusFor(rows, project.id);
+        const line = projectSetupLine(status);
+        return (
+          <div
+            key={project.id}
+            data-testid={`verify-setup-project-${project.id}`}
+            className="flex items-center gap-2 border-b border-border-primary/50 py-1.5 last:border-b-0"
+          >
+            <span
+              data-testid={`verify-setup-status-${project.id}`}
+              className={`w-24 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${line.className}`}
+            >
+              {line.text}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-xs text-text-primary">{project.name}</span>
+            <VerifySetupCta
+              projectId={project.id}
+              label={status === 'proven' ? 'Re-run setup' : 'Set up'}
+              testId={`verify-setup-cta-${project.id}`}
+            />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -231,18 +292,19 @@ function ModalityRow({ row }: { row: VerificationModalityHealth }): ReactElement
 
 export function VerifyHealthPanel({
   projectId,
-  showSetupCta = true,
+  projects = [],
 }: {
   projectId: number | null;
   /**
-   * Whether to render the header's setup CTA. The Verify Queue's EMPTY state
-   * carries its own prominent one directly above this panel, and two buttons
-   * doing the same thing a few pixels apart reads as two different actions.
+   * Every project, for the setup list. Supplied by the caller rather than
+   * fetched here: the Verify Queue already loads this list for its own filter,
+   * and a second loader would drift from it.
    */
-  showSetupCta?: boolean;
+  projects?: readonly { id: number; name: string }[];
 }): ReactElement | null {
   const [health, setHealth] = useState<VerificationHealthSummary | null>(null);
   const [probes, setProbes] = useState<VerifyHostProbeReport | null>(null);
+  const [setupRows, setSetupRows] = useState<VerifyProjectSetupRow[] | null>(null);
   const [fixInFlight, setFixInFlight] = useState(false);
 
   // HEALTH is project-scoped and cheap (one indexed read), so it polls. Cleared
@@ -300,6 +362,26 @@ export function VerifyHealthPanel({
     };
   }, []);
 
+  // SETUP rows are host-wide rather than project-scoped, so they load once per
+  // panel open like the probes do — not on the health interval. A failure
+  // degrades to `null`, which reads every project as `not set up`: the panel's
+  // whole job here is to offer the setup flow, and the worst it can do while
+  // the query is down is offer it to a project that already has it.
+  useEffect(() => {
+    let cancelled = false;
+    void trpc.cyboflow.verificationRequests.setupByProject
+      .query()
+      .then((res) => {
+        if (!cancelled) setSetupRows(res);
+      })
+      .catch(() => {
+        if (!cancelled) setSetupRows(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Every fix is the same shape — do the thing, take the RE-PROBED report back —
   // which is what lets a grant action and an install share one handler. The
   // mutation returning fresh rows (rather than a boolean) is why a success is
@@ -324,31 +406,18 @@ export function VerifyHealthPanel({
 
   if (projectId === null) return null;
 
-  // The panel renders even when BOTH queries failed. It degrades to a header
-  // and its CTA rather than disappearing: this is the launch path for the flow
-  // that repairs verification, and a failing health query is not a reason to
-  // take it away — it is a reason to want it.
-  //
-  // The CTA's LABEL, not its presence, tracks how much is set up. `proven` here
-  // means at least one modality is proven, which is not the same as "done" on a
-  // project with several.
-  const proven = health !== null && hasProvenRunbook(health.modalities);
-
+  // The panel renders even when EVERY query failed. It degrades to a header and
+  // the setup list rather than disappearing: this is the launch path for the
+  // flow that repairs verification, and a failing health query is not a reason
+  // to take it away — it is a reason to want it.
   return (
     <section data-testid="verify-health-panel" className="flex flex-col gap-3">
       <div className="flex items-baseline gap-2">
         <h2 className="eyebrow text-text-tertiary">Health</h2>
         <span className="text-[10px] text-text-tertiary">live probes · per-modality outcomes</span>
-        {showSetupCta && (
-          <span className="ml-auto">
-            <VerifySetupCta
-              projectId={projectId}
-              label={proven ? 'Re-run setup' : 'Set up verification'}
-              testId="verify-health-setup-cta"
-            />
-          </span>
-        )}
       </div>
+
+      <VerifyProjectSetupList projects={projects} rows={setupRows} />
 
       {probes !== null && (
         <div className="rounded-card border border-border-primary bg-bg-primary px-3 py-1">

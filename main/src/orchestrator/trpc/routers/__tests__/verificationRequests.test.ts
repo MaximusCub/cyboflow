@@ -1353,3 +1353,94 @@ describe('verificationRequests.hostProbes', () => {
     expect(probeRow(after, 'browser-driving').state).toBe('ok');
   });
 });
+
+describe('verificationRequests.setupByProject', () => {
+  const cleanups: Database.Database[] = [];
+  afterEach(() => {
+    while (cleanups.length) cleanups.pop()?.close();
+  });
+
+  function setup(migrations: readonly string[] = [...MIGRATIONS, '096_verify_runbook_local.sql']): {
+    caller: ReturnType<typeof appRouter.createCaller>;
+    db: Database.Database;
+  } {
+    const db = buildDb(migrations);
+    cleanups.push(db);
+    return { caller: appRouter.createCaller(createContext({ db: dbAdapter(db) })), db };
+  }
+
+  function seedRunbook(
+    db: Database.Database,
+    projectId: number,
+    modality: string,
+    status: 'proven' | 'unproven-draft',
+    hash = `h-${projectId}-${modality}`,
+  ): void {
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, status)
+       VALUES (?, ?, ?, '{}', ?)`,
+    ).run(projectId, modality, hash, status);
+  }
+
+  it('separates a project with a PROVEN runbook from one whose drafts are all unproven', async () => {
+    // The distinction the panel exists to draw: an all-unproven project looks
+    // configured while the degrade gate skips every single check.
+    const { caller, db } = setup();
+    seedRunbook(db, 1, 'web', 'proven');
+    seedRunbook(db, 2, 'web', 'unproven-draft');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows).toEqual([
+      { projectId: 1, status: 'proven', provenModalities: ['web'] },
+      { projectId: 2, status: 'unproven', provenModalities: [] },
+    ]);
+  });
+
+  it('lists only the PROVEN modalities of a project that has both', async () => {
+    const { caller, db } = setup();
+    seedRunbook(db, 1, 'web', 'proven');
+    seedRunbook(db, 1, 'native-screen', 'unproven-draft');
+    seedRunbook(db, 1, 'cdp-app', 'proven');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    // VERIFICATION_MODALITIES order, not insertion order.
+    expect(rows).toEqual([
+      { projectId: 1, status: 'proven', provenModalities: ['web', 'cdp-app'] },
+    ]);
+  });
+
+  it('omits a project with no runbook row at all — absence IS the answer', async () => {
+    // The caller holds the project list and reads an absent id as `none`, so
+    // emitting a row per project would duplicate a fact it already has.
+    const { caller, db } = setup();
+    seedRunbook(db, 2, 'web', 'proven');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows.map((r) => r.projectId)).toEqual([2]);
+  });
+
+  it('degrades to an empty list on a pre-096 DB rather than throwing', async () => {
+    // The table is absent before 096. Every project then reads `not set up` in
+    // the panel, which is the truth on a host that has never run setup.
+    const { caller } = setup(MIGRATIONS);
+
+    await expect(caller.cyboflow.verificationRequests.setupByProject()).resolves.toEqual([]);
+  });
+
+  it('ignores a runbook row whose modality is not one we know', async () => {
+    // Forward-compat: a newer build's modality must not be counted as proven by
+    // an older one that cannot run it.
+    const { caller, db } = setup();
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, status)
+       VALUES (1, 'holodeck', 'h', '{}', 'proven')`,
+    ).run();
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows).toEqual([{ projectId: 1, status: 'unproven', provenModalities: [] }]);
+  });
+});

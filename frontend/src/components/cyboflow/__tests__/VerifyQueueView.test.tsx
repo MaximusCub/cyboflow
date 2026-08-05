@@ -27,6 +27,7 @@ const {
   budgetQuerySpy,
   healthQuerySpy,
   hostProbesQuerySpy,
+  setupByProjectQuerySpy,
   provisionChromiumSpy,
   requestAccessibilitySpy,
   openScreenRecordingSettingsSpy,
@@ -37,6 +38,7 @@ const {
   budgetQuerySpy: vi.fn(),
   healthQuerySpy: vi.fn(),
   hostProbesQuerySpy: vi.fn(),
+  setupByProjectQuerySpy: vi.fn(),
   provisionChromiumSpy: vi.fn(),
   requestAccessibilitySpy: vi.fn(),
   openScreenRecordingSettingsSpy: vi.fn(),
@@ -62,6 +64,7 @@ vi.mock('../../../trpc/client', () => ({
         // The §6 health panel's procedures (VerifyHealthPanel).
         health: { query: healthQuerySpy },
         hostProbes: { query: hostProbesQuerySpy },
+        setupByProject: { query: setupByProjectQuerySpy },
         provisionChromium: { mutate: provisionChromiumSpy },
         requestAccessibility: { mutate: requestAccessibilitySpy },
         openScreenRecordingSettings: { mutate: openScreenRecordingSettingsSpy },
@@ -131,6 +134,8 @@ beforeEach(() => {
   healthQuerySpy.mockResolvedValue(emptyHealth());
   hostProbesQuerySpy.mockReset();
   hostProbesQuerySpy.mockResolvedValue({ probes: [], nativeScreenDeclared: false });
+  setupByProjectQuerySpy.mockReset();
+  setupByProjectQuerySpy.mockResolvedValue([]);
   provisionChromiumSpy.mockReset();
   requestAccessibilitySpy.mockReset();
   openScreenRecordingSettingsSpy.mockReset();
@@ -626,18 +631,53 @@ function stats(over: Partial<ReturnType<typeof emptyStats>> = {}): ReturnType<ty
 }
 
 describe('VerifyQueueView — health panel', () => {
-  it('offers the setup CTA in the empty state and launches the wizard preselected', async () => {
-    // Finding 2: the empty state is where a user who needs setup is standing,
-    // and (since verify-setup is hidden from the flow list) its only entry.
+  it('offers a setup CTA per project and launches the wizard locked to that one', async () => {
+    // verify-setup is hidden from the wizard's flow list, so these rows are its
+    // entry point — and each launches for ITS project, not for whichever one
+    // the queue filter happens to be showing.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    getAllSpy.mockResolvedValue({
+      success: true,
+      data: [
+        { id: 1, name: 'ProjA', path: '/tmp/a' },
+        { id: 2, name: 'ProjB', path: '/tmp/b' },
+      ],
+    });
     render(<VerifyQueueView />);
 
-    const cta = await screen.findByTestId('verify-queue-empty-setup-cta');
-    await userEvent.click(cta);
+    await userEvent.click(await screen.findByTestId('verify-setup-cta-2'));
 
     expect(goToWizardSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ preselectWorkflowName: 'verify-setup', lockProjectId: 1 }),
+      expect.objectContaining({ preselectWorkflowName: 'verify-setup', lockProjectId: 2 }),
     );
+  });
+
+  it('shows every project\'s setup state, not just the selected one', async () => {
+    // The question this panel is asked is "is verification set up?", and that
+    // is per project. A single button could only ever answer for one of them.
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    getAllSpy.mockResolvedValue({
+      success: true,
+      data: [
+        { id: 1, name: 'ProjA', path: '/tmp/a' },
+        { id: 2, name: 'ProjB', path: '/tmp/b' },
+        { id: 3, name: 'ProjC', path: '/tmp/c' },
+      ],
+    });
+    setupByProjectQuerySpy.mockResolvedValue([
+      { projectId: 1, status: 'proven', provenModalities: ['web'] },
+      { projectId: 2, status: 'unproven', provenModalities: [] },
+    ]);
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('set up');
+    expect(screen.getByTestId('verify-setup-cta-1')).toHaveTextContent('Re-run setup');
+    // Runbooks exist but none is proven: the degrade gate skips every check, so
+    // this must not read the same as a project that is genuinely configured.
+    expect(screen.getByTestId('verify-setup-status-2')).toHaveTextContent('not proven');
+    expect(screen.getByTestId('verify-setup-cta-2')).toHaveTextContent('Set up');
+    // Absent from the query entirely — absence IS the answer.
+    expect(screen.getByTestId('verify-setup-status-3')).toHaveTextContent('not set up');
   });
 
   it('renders the probe table with its live states', async () => {
@@ -802,68 +842,37 @@ describe('VerifyQueueView — health panel', () => {
     expect(screen.getByTestId('verify-health-failures-web')).toHaveTextContent('env 2');
   });
 
-  it('offers EXACTLY ONE setup CTA in the empty state', async () => {
-    // The empty state carries its own prominent CTA, so the panel suppresses
-    // its header one there — two buttons doing the same thing a few pixels
-    // apart read as two different actions.
+  it('offers EXACTLY ONE setup affordance per project in the empty state', async () => {
+    // The project list IS this state's affordance — it carries a row for the
+    // selected project too, so the empty state no longer adds one of its own.
+    // Two buttons doing the same thing a few pixels apart read as two actions.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-queue-empty-setup-cta')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByTestId('verify-health-panel')).toBeInTheDocument();
-    });
+    expect(await screen.findByTestId('verify-setup-cta-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('verify-queue-empty-setup-cta')).not.toBeInTheDocument();
     expect(screen.queryByTestId('verify-health-setup-cta')).not.toBeInTheDocument();
   });
 
-  it('keeps the setup CTA on a POPULATED queue, and relabels it once something is proven', async () => {
+  it('keeps the setup list on a POPULATED queue', async () => {
     // The reachability rule: verify-setup is hidden from the wizard's flow
-    // list, so this CTA is its entry point. A populated queue is precisely
-    // where the empty state's CTA is absent — if this one were conditional the
-    // flow would be unlaunchable.
+    // list, so these rows are its entry point. A populated queue is precisely
+    // where the empty state is absent — if the list were conditional on having
+    // no requests, the flow would be unlaunchable from here.
     useVerificationRequestsSpy.mockReturnValue({
       requests: [baseRow({ id: 'vr-1', status: 'passed' })],
       isLoading: false,
       error: null,
     });
-    healthQuerySpy.mockResolvedValue({
-      ...emptyHealth(),
-      modalities: [
-        {
-          modality: 'web',
-          ...stats({ attempts: 1, passed: 1, passRate: 1 }),
-          capability: null,
-          runbook: { status: 'proven', version: 2, portableHash: 'abc' },
-        },
-      ],
-    });
+    setupByProjectQuerySpy.mockResolvedValue([
+      { projectId: 1, status: 'proven', provenModalities: ['web'] },
+    ]);
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-health-runbook-web')).toHaveTextContent('proven');
     // Present, but relabelled — presence tracks reachability, the label tracks
-    // state. "Proven" here means ONE modality is, which is not "done".
-    expect(screen.getByTestId('verify-health-setup-cta')).toHaveTextContent('Re-run setup');
-  });
-
-  it('still offers the setup CTA when only SOME modality is proven', async () => {
-    useVerificationRequestsSpy.mockReturnValue({
-      requests: [baseRow({ id: 'vr-1', status: 'passed' })],
-      isLoading: false,
-      error: null,
-    });
-    healthQuerySpy.mockResolvedValue({
-      ...emptyHealth(),
-      modalities: [
-        { modality: 'web', ...stats(), capability: null, runbook: { status: 'proven', version: 1, portableHash: 'h' } },
-        { modality: 'cdp-app', ...stats(), capability: null, runbook: null },
-      ],
-    });
-    render(<VerifyQueueView />);
-
-    // cdp-app has no runbook at all — its checks all skip, and repairing that
-    // is exactly what the CTA is for.
-    expect(await screen.findByTestId('verify-health-runbook-cdp-app')).toHaveTextContent(/will skip/i);
-    expect(screen.getByTestId('verify-health-setup-cta')).toBeInTheDocument();
+    // state. "Proven" here means ONE modality is, which is not "done", which is
+    // why the row still offers a re-run.
+    expect(await screen.findByTestId('verify-setup-cta-1')).toHaveTextContent('Re-run setup');
   });
 
   it('shows an in-force suppression with its retry window', async () => {
@@ -921,8 +930,8 @@ describe('VerifyQueueView — health panel', () => {
     hostProbesQuerySpy.mockRejectedValue(new Error('nope'));
     render(<VerifyQueueView />);
 
-    const cta = await screen.findByTestId('verify-health-setup-cta');
-    expect(cta).toHaveTextContent('Set up verification');
+    const cta = await screen.findByTestId('verify-setup-cta-1');
+    expect(cta).toHaveTextContent('Set up');
     expect(screen.queryByTestId('verify-health-modality-web')).not.toBeInTheDocument();
     expect(screen.queryByTestId('verify-probe-browser-driving')).not.toBeInTheDocument();
   });
@@ -957,18 +966,19 @@ describe('VerifyQueueView — health panel', () => {
     }
   });
 
-  it('launches the wizard preselected from the health CTA', async () => {
+  it('reads every project as not-set-up when the setup query fails', async () => {
+    // Degrading to "already set up" would hide the only affordance for
+    // repairing verification exactly when the panel is least healthy. The worst
+    // this direction can do is offer setup to a project that has it.
     useVerificationRequestsSpy.mockReturnValue({
       requests: [baseRow({ id: 'vr-1', status: 'passed' })],
       isLoading: false,
       error: null,
     });
+    setupByProjectQuerySpy.mockRejectedValue(new Error('nope'));
     render(<VerifyQueueView />);
 
-    await userEvent.click(await screen.findByTestId('verify-health-setup-cta'));
-
-    expect(goToWizardSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ preselectWorkflowName: 'verify-setup', lockProjectId: 1 }),
-    );
+    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('not set up');
+    expect(screen.getByTestId('verify-setup-cta-1')).toBeInTheDocument();
   });
 });

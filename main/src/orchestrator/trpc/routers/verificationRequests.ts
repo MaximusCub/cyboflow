@@ -35,6 +35,12 @@
  *              `budget` is one: each has its own shape and its own refresh
  *              cadence in the panel.
  *
+ *   - setupByProject : query -> VerifyProjectSetupRow[] (§6's project list) —
+ *              whether EACH project has a proven runbook, in one pass over
+ *              `verify_runbook_local`. Verification is configured per project,
+ *              so a single global setup button can only ever speak for the
+ *              selected one.
+ *
  *   - hostProbes / provisionChromium : the §6 live host-capability probes and
  *              the chromium fix-it action. `provisionChromium` is the only
  *              mutation here and is NOT an entity write — it touches the host's
@@ -76,6 +82,7 @@ import {
   type VerifyHostProbeReport,
   type VerifyProbeFix,
   type VerifyProbeRow,
+  type VerifyProjectSetupRow,
   type VisualBackendId,
 } from '../../../../../shared/types/visualVerification';
 
@@ -826,6 +833,62 @@ export const verificationRequestsRouter = router({
         hostGeneration,
       };
     }),
+
+  /**
+   * Setup state for EVERY project at once (§6's project list).
+   *
+   * Verification is configured per project — a runbook is registered against
+   * one — so a single global "set up verification" button could only ever
+   * speak for whichever project happened to be selected, while saying nothing
+   * about the others. This is the query behind showing them all.
+   *
+   * One pass over `verify_runbook_local`, not one query per project: the table
+   * is small, and N round-trips driven by the length of the user's project list
+   * is the wrong shape for a panel that opens on every visit.
+   *
+   * A project with NO runbook row never appears in the result. The caller holds
+   * the project list and treats an absent id as `none` — which is also what
+   * makes a pre-096 DB (table absent) degrade correctly: every project reads
+   * `none`, which is the truth on a host that has never run setup.
+   */
+  setupByProject: protectedProcedure.query(async ({ ctx }): Promise<VerifyProjectSetupRow[]> => {
+    const db = requireDb(ctx.db, 'setupByProject');
+    let rows: { project_id: number; modality: string; status: string }[] = [];
+    try {
+      rows = db
+        .prepare('SELECT project_id, modality, status FROM verify_runbook_local')
+        .all() as typeof rows;
+    } catch {
+      return [];
+    }
+
+    const proven = new Map<number, Set<VerificationModality>>();
+    const seen = new Set<number>();
+    for (const row of rows) {
+      if (typeof row.project_id !== 'number') continue;
+      seen.add(row.project_id);
+      if (row.status !== 'proven' || !isVerificationModality(row.modality)) continue;
+      let set = proven.get(row.project_id);
+      if (!set) {
+        set = new Set<VerificationModality>();
+        proven.set(row.project_id, set);
+      }
+      set.add(row.modality);
+    }
+
+    return [...seen]
+      .sort((a, b) => a - b)
+      .map((projectId) => {
+        const provenModalities = VERIFICATION_MODALITIES.filter(
+          (m) => proven.get(projectId)?.has(m) === true,
+        );
+        return {
+          projectId,
+          status: provenModalities.length > 0 ? ('proven' as const) : ('unproven' as const),
+          provenModalities,
+        };
+      });
+  }),
 
   /**
    * Live host-capability probes for the health panel (§6 "probes, not
