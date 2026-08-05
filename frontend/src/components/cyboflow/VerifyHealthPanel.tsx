@@ -36,7 +36,6 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
-  PROBE_STATE_LABEL,
   attemptsText,
   capabilityLine,
   durationText,
@@ -46,8 +45,8 @@ import {
   probeFixLabel,
   probeFixPendingLabel,
   probeIsRequired,
-  probeOptionalNote,
-  probeStateClass,
+  probeStatus,
+  probeStatusClass,
   runbookLine,
 } from './verifyHealthModel';
 
@@ -142,30 +141,23 @@ function ProbeTableRow({
 }): ReactElement {
   const fixLabel = probeFixLabel(row);
   const pendingLabel = probeFixPendingLabel(row.fix);
-  const optionalNote = probeOptionalNote(row, required);
   return (
+    // The probe's own sentence — a chromium path, the reason a grant could not
+    // be read — survives as the row's tooltip rather than on screen. It is what
+    // you want the moment something is wrong and noise every other moment, and
+    // a row that says only `healthy` is the one a user can actually scan.
     <div
       data-testid={`verify-probe-${row.id}`}
+      title={row.detail}
       className="flex items-center gap-2 border-b border-border-primary/50 py-1.5 last:border-b-0"
     >
       <span
         data-testid={`verify-probe-state-${row.id}`}
-        className={`w-16 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStateClass(row, required)}`}
+        className={`w-24 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStatusClass(row, required)}`}
       >
-        {PROBE_STATE_LABEL[row.state]}
+        {probeStatus(row, required)}
       </span>
-      <span className="w-28 shrink-0 text-xs text-text-primary">{PROBE_LABEL[row.id]}</span>
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-tertiary" title={row.detail}>
-        {row.detail}
-      </span>
-      {optionalNote !== null && (
-        <span
-          data-testid={`verify-probe-optional-${row.id}`}
-          className="shrink-0 text-[10px] text-text-tertiary"
-        >
-          {optionalNote}
-        </span>
-      )}
+      <span className="min-w-0 flex-1 text-xs text-text-primary">{PROBE_LABEL[row.id]}</span>
       {fixLabel !== null && (
         <button
           type="button"

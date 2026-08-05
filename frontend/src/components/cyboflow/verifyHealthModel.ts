@@ -19,7 +19,6 @@ import type {
   VerificationRunbookState,
   VerifyProbeId,
   VerifyProbeRow,
-  VerifyProbeState,
 } from '../../../../shared/types/visualVerification';
 
 /**
@@ -36,28 +35,54 @@ export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
 };
 
 /**
- * Pill classes per probe state.
+ * What a probe row says about the host, in one word.
  *
- * `inconclusive` is deliberately NEUTRAL, not a warning colour: the probe did
- * not fail, it declined to answer, and colouring it red would manufacture
- * alarm about a host that may be perfectly fine (the fail-open rule in
- * `preflight.ts`). `blocked` is likewise neutral — it describes missing
- * machinery on our side, not a defect on the user's.
+ * `unknown` is NOT a fourth wheel: a probe that could not answer is not a
+ * probe that answered "no" (the fail-open rule in `preflight.ts`), and
+ * folding it into `unhealthy` would send someone to fix a host that may be
+ * perfectly fine. `n/a` covers machinery missing on OUR side, which is not a
+ * verdict on the user's host at all.
  */
-export const PROBE_STATE_CLASS: Readonly<Record<VerifyProbeState, string>> = {
-  ok: 'bg-status-success/15 text-status-success',
-  missing: 'bg-status-error/15 text-status-error',
-  inconclusive: 'bg-bg-tertiary text-text-tertiary',
-  blocked: 'bg-bg-tertiary text-text-tertiary',
+export type ProbeStatus = 'healthy' | 'pending action' | 'unhealthy' | 'unknown' | 'n/a';
+
+/**
+ * Pill classes per status.
+ *
+ * `unknown` and `n/a` are deliberately NEUTRAL rather than a warning colour,
+ * for the reason above. `pending action` is amber, not red: there is a button
+ * right there, so it is a step remaining rather than a fault.
+ */
+export const PROBE_STATUS_CLASS: Readonly<Record<ProbeStatus, string>> = {
+  healthy: 'bg-status-success/15 text-status-success',
+  'pending action': 'bg-status-warning/15 text-status-warning',
+  unhealthy: 'bg-status-error/15 text-status-error',
+  unknown: 'bg-bg-tertiary text-text-tertiary',
+  'n/a': 'bg-bg-tertiary text-text-tertiary',
 };
 
-/** Short state word rendered in the pill. */
-export const PROBE_STATE_LABEL: Readonly<Record<VerifyProbeState, string>> = {
-  ok: 'ok',
-  missing: 'missing',
-  inconclusive: 'unknown',
-  blocked: 'n/a',
-};
+/**
+ * The row's status word.
+ *
+ * An unmet capability is `pending action` exactly when the row carries a
+ * remedy — the distinction the user acts on is "there is something I can do
+ * here" versus "this is broken and the panel cannot help", and the fix button
+ * IS that distinction. An unmet capability nobody's runbook needs is softened
+ * to `unknown`: it describes a permission the user has no reason to grant, and
+ * calling it unhealthy is a false alarm about a host that verifies fine.
+ */
+export function probeStatus(row: VerifyProbeRow, required: boolean): ProbeStatus {
+  switch (row.state) {
+    case 'ok':
+      return 'healthy';
+    case 'inconclusive':
+      return 'unknown';
+    case 'blocked':
+      return 'n/a';
+    case 'missing':
+      if (!required) return 'unknown';
+      return row.fix === null ? 'unhealthy' : 'pending action';
+  }
+}
 
 /** The CTA label for a probe row's offered fix, or null when it offers none. */
 export function probeFixLabel(row: VerifyProbeRow): string | null {
@@ -93,21 +118,9 @@ export function probeIsRequired(row: VerifyProbeRow, nativeScreenDeclared: boole
   return row.id === 'browser-driving' ? true : nativeScreenDeclared;
 }
 
-/**
- * The pill class for a row, softened when the capability is optional here.
- *
- * A red `missing` on a permission the user has no reason to grant is a false
- * alarm; the row still reads `missing`, it just does not shout.
- */
-export function probeStateClass(row: VerifyProbeRow, required: boolean): string {
-  return !required && row.state === 'missing'
-    ? PROBE_STATE_CLASS.inconclusive
-    : PROBE_STATE_CLASS[row.state];
-}
-
-/** The trailing note explaining why an unmet optional row is not a problem. */
-export function probeOptionalNote(row: VerifyProbeRow, required: boolean): string | null {
-  return required || row.state === 'ok' ? null : 'not needed by any runbook yet';
+/** The pill class for a row, via its status. */
+export function probeStatusClass(row: VerifyProbeRow, required: boolean): string {
+  return PROBE_STATUS_CLASS[probeStatus(row, required)];
 }
 
 /**

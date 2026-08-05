@@ -13,7 +13,7 @@ import type {
   VerifyProbeRow,
 } from '../../../../../shared/types/visualVerification';
 import {
-  PROBE_STATE_CLASS,
+  PROBE_STATUS_CLASS,
   attemptsText,
   capabilityLine,
   durationText,
@@ -23,8 +23,8 @@ import {
   probeFixLabel,
   probeFixPendingLabel,
   probeIsRequired,
-  probeOptionalNote,
-  probeStateClass,
+  probeStatus,
+  probeStatusClass,
   runbookLine,
 } from '../verifyHealthModel';
 
@@ -242,33 +242,53 @@ describe('probeIsRequired', () => {
   });
 });
 
-describe('probeStateClass', () => {
-  it('softens a missing OPTIONAL capability out of the error colour', () => {
-    // A red row for a permission the user has no reason to grant is a false
-    // alarm; the state word still reads `missing`, it just does not shout.
-    const row = probe({ id: 'screen-recording', state: 'missing' });
-    expect(probeStateClass(row, false)).toBe(PROBE_STATE_CLASS.inconclusive);
-    expect(probeStateClass(row, true)).toBe(PROBE_STATE_CLASS.missing);
+describe('probeStatus', () => {
+  it('reads a met capability as healthy', () => {
+    expect(probeStatus(probe({ state: 'ok' }), true)).toBe('healthy');
+    expect(probeStatus(probe({ state: 'ok' }), false)).toBe('healthy');
   });
 
-  it('leaves every other state alone in both modes', () => {
-    for (const state of ['ok', 'inconclusive', 'blocked'] as const) {
-      const row = probe({ id: 'accessibility', state });
-      expect(probeStateClass(row, false)).toBe(PROBE_STATE_CLASS[state]);
-      expect(probeStateClass(row, true)).toBe(PROBE_STATE_CLASS[state]);
-    }
+  it('calls an unmet capability WITH a remedy a pending action, not a fault', () => {
+    // The distinction a user acts on is "there is something I can do here",
+    // and the fix button IS that distinction.
+    const row = probe({ id: 'screen-recording', state: 'missing', fix: 'open-screen-recording-settings' });
+    expect(probeStatus(row, true)).toBe('pending action');
   });
-});
 
-describe('probeOptionalNote', () => {
-  it('explains an unmet optional row rather than leaving it looking broken', () => {
-    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'missing' }), false)).toMatch(
-      /not needed by any runbook/,
+  it('calls an unmet capability with NO remedy unhealthy', () => {
+    expect(probeStatus(probe({ id: 'browser-driving', state: 'missing', fix: null }), true)).toBe(
+      'unhealthy',
     );
   });
 
-  it('says nothing when the row is required, or already ok', () => {
-    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'missing' }), true)).toBeNull();
-    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'ok' }), false)).toBeNull();
+  it('never renders an unanswered probe as unhealthy', () => {
+    // The fail-open rule: a probe that declined to answer is not a probe that
+    // answered "no", and sending someone to fix a host that may be perfectly
+    // fine is the exact failure `preflight.ts` exists to prevent.
+    expect(probeStatus(probe({ state: 'inconclusive' }), true)).toBe('unknown');
+    expect(probeStatus(probe({ state: 'blocked' }), true)).toBe('n/a');
+  });
+
+  it('softens an unmet OPTIONAL capability to unknown', () => {
+    // A permission no runbook needs is not a problem with this host.
+    const row = probe({ id: 'screen-recording', state: 'missing', fix: 'open-screen-recording-settings' });
+    expect(probeStatus(row, false)).toBe('unknown');
+  });
+});
+
+describe('probeStatusClass', () => {
+  it('colours each status by its own severity', () => {
+    const ok = probe({ state: 'ok' });
+    expect(probeStatusClass(ok, true)).toBe(PROBE_STATUS_CLASS.healthy);
+    const missing = probe({ id: 'browser-driving', state: 'missing', fix: null });
+    expect(probeStatusClass(missing, true)).toBe(PROBE_STATUS_CLASS.unhealthy);
+    const pending = probe({ id: 'accessibility', state: 'missing', fix: 'request-accessibility' });
+    expect(probeStatusClass(pending, true)).toBe(PROBE_STATUS_CLASS['pending action']);
+    expect(probeStatusClass(pending, false)).toBe(PROBE_STATUS_CLASS.unknown);
+  });
+
+  it('keeps the two non-verdict statuses visually neutral', () => {
+    expect(PROBE_STATUS_CLASS.unknown).toBe(PROBE_STATUS_CLASS['n/a']);
+    expect(PROBE_STATUS_CLASS.unknown).not.toBe(PROBE_STATUS_CLASS.unhealthy);
   });
 });

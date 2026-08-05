@@ -658,10 +658,28 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     expect(await screen.findByTestId('verify-probe-browser-driving')).toBeInTheDocument();
-    expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('missing');
+    expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent(
+      'pending action',
+    );
     expect(screen.getByTestId('verify-probe-fix-browser-driving')).toBeInTheDocument();
-    expect(screen.getByTestId('verify-probe-state-screen-recording')).toHaveTextContent('ok');
-    expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('ok');
+    expect(screen.getByTestId('verify-probe-state-screen-recording')).toHaveTextContent('healthy');
+    expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('healthy');
+  });
+
+  it('keeps the probe sentence as the row tooltip rather than on screen', async () => {
+    // The status word is what a user scans; the reason is what they want the
+    // one moment something is wrong. Dropping it entirely would make an
+    // `unhealthy` row undiagnosable from the panel.
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    hostProbesQuerySpy.mockResolvedValue({
+      nativeScreenDeclared: false,
+      probes: [{ id: 'browser-driving', state: 'ok', detail: '/path/to/chromium', fix: null }],
+    });
+    render(<VerifyQueueView />);
+
+    const row = await screen.findByTestId('verify-probe-browser-driving');
+    expect(row).toHaveAttribute('title', '/path/to/chromium');
+    expect(row).not.toHaveTextContent('/path/to/chromium');
   });
 
   it('renders an inconclusive probe as unknown, with no fix offered', async () => {
@@ -693,7 +711,7 @@ describe('VerifyQueueView — health panel', () => {
     await userEvent.click(await screen.findByTestId('verify-probe-fix-browser-driving'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('ok');
+      expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('healthy');
     });
   });
 
@@ -731,7 +749,7 @@ describe('VerifyQueueView — health panel', () => {
 
     await userEvent.click(await screen.findByTestId('verify-probe-fix-accessibility'));
     await waitFor(() => {
-      expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('ok');
+      expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('healthy');
     });
   });
 
@@ -754,11 +772,8 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     const pill = await screen.findByTestId('verify-probe-state-screen-recording');
-    expect(pill).toHaveTextContent('missing');
+    expect(pill).toHaveTextContent('unknown');
     expect(pill.className).not.toMatch(/status-error/);
-    expect(screen.getByTestId('verify-probe-optional-screen-recording')).toHaveTextContent(
-      /not needed by any runbook/,
-    );
   });
 
   it('leads a modality row with its runbook state and warns when nothing is proven', async () => {
