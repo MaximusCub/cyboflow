@@ -149,18 +149,23 @@ describe('makeChromiumProvisioner', () => {
 });
 
 describe('makeAccessibilityRequester', () => {
-  it('PROMPTS via the OS and does not open Settings when the app is already trusted', async () => {
+  it('PROMPTS via the OS and STILL opens Settings when the app reports trusted', async () => {
+    // The trust call answers for THIS APP's TCC identity; the row that offered
+    // this button said `missing` about the CAPTURE BINARY's. On an upgrade host
+    // — app granted long ago, freshly bundled binary never granted — skipping
+    // the pane on the app's answer means no prompt (that one was spent years
+    // ago) and no pane either: a button that does nothing at all, forever, in
+    // exactly the state it exists for.
     const isTrusted = vi.fn().mockReturnValue(true);
     const openSettings = vi.fn().mockResolvedValue(undefined);
     await makeAccessibilityRequester({ isTrustedAccessibilityClient: isTrusted, openSettings })();
 
     // `true` is the argument that makes macOS show the consent dialog.
     expect(isTrusted).toHaveBeenCalledWith(true);
-    // Sending someone to enable a switch that is already on is its own wrong answer.
-    expect(openSettings).not.toHaveBeenCalled();
+    expect(openSettings).toHaveBeenCalledWith(ACCESSIBILITY_SETTINGS_URL);
   });
 
-  it('falls through to the Settings pane when the app is NOT trusted', async () => {
+  it('opens the Settings pane when the app is NOT trusted', async () => {
     // macOS shows the consent dialog at most ONCE per binary and silently
     // no-ops forever after. Without this fallback the button works exactly one
     // time in the app's lifetime and then reads as broken.

@@ -130,9 +130,16 @@ export function makeChromiumProvisioner(
  * app's lifetime and then silently does nothing — which reads as a broken
  * button, not as a permission the user has to go and grant.
  *
- * The pane is opened only when the app is NOT already trusted. Sending someone
- * to System Settings to enable a switch that is already on is its own kind of
- * wrong answer.
+ * WHY THE PANE OPENS UNCONDITIONALLY: it is tempting to skip it when
+ * `isTrustedAccessibilityClient` reports the app already trusted — why send
+ * someone to a switch that is on? Because that call answers for THIS APP's TCC
+ * identity, while the row that surfaced this button said `missing` about the
+ * CAPTURE BINARY's. On a host where the app was granted earlier and a freshly
+ * bundled binary never was, skipping on the app's trust means no prompt (that
+ * one was spent long ago) and no pane either: a button that does nothing at
+ * all, forever, in exactly the state it exists for. The action is only ever
+ * offered on an unmet row, so "already granted" is not a state the thing being
+ * measured can be in.
  *
  * A failed `openExternal` is swallowed: the caller re-probes regardless, and
  * this action is advisory — nothing downstream depends on the pane having
@@ -145,15 +152,17 @@ export function makeAccessibilityRequester(deps: {
   logger?: LoggerLike;
 }): () => Promise<void> {
   return async () => {
-    let trusted = false;
     try {
-      trusted = deps.isTrustedAccessibilityClient(true);
+      // Fire-and-continue: the return value describes the APP, which is not
+      // what the row measured, so it cannot decide anything here. The call is
+      // still worth making — on a first run it is the one path that raises a
+      // real consent dialog instead of a Settings pane.
+      deps.isTrustedAccessibilityClient(true);
     } catch (err) {
       deps.logger?.warn('[hostProbeAdapters] accessibility trust check threw', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    if (trusted) return;
     await openSettingsPane(deps, ACCESSIBILITY_SETTINGS_URL);
   };
 }
