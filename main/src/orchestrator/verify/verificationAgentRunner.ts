@@ -1534,8 +1534,10 @@ const buildHarnessAttestationDeps = (
       return res.body;
     },
     cdpEvaluate: (port, expression, timeoutMs) => evaluateOverCdp(port, expression, timeoutMs),
-    listNativeWindows: async () =>
-      extractWindowTitles(await driver.runPeekaboo(peekabooBin, peekabooListWindowsArgs(), PEEKABOO_TIMEOUT_MS)),
+    listNativeWindows: async (app: string) =>
+      extractWindowTitles(
+        await driver.runPeekaboo(peekabooBin, peekabooListWindowsArgs(app), PEEKABOO_TIMEOUT_MS),
+      ),
     ...(logger ? { logger } : {}),
   };
 };

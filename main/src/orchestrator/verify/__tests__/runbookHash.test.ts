@@ -164,7 +164,7 @@ describe('verifyRunbook contract', () => {
       modalities: {
         'native-screen': {
           viewports: [{ width: 0, height: 800 }],
-          attestation: { kind: 'window-identity', titlePattern: 'Cyboflow' },
+          attestation: { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
         },
       },
     });

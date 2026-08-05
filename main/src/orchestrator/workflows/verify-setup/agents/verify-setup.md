@@ -173,7 +173,7 @@ failed draft rather than a creative one:
 | `http-endpoint` | `urlPath: string` | `web` | The serve step exposes a route; the driver GETs `http://localhost:$VERIFY_PORT<urlPath>` and the body must contain the per-request nonce. Needs a live, classic (non-attach) serve. |
 | `dom-marker` | `selector: string` | `web` | An element's text or `data-*` attribute in the rendered DOM carries the nonce — for a deliverable that cannot add a server-side route. |
 | `cdp-token` | `expression: string`, `expected: string` | `cdp-app` | `Runtime.evaluate(expression)` over the CDP session equals `expected`, an immutable build-stamped global. The ONLY channel that works in attach mode, where the driver never navigates. |
-| `window-identity` | `titlePattern: string` | `native-screen` | The launched app's OS window title matches. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
+| `window-identity` | `titlePattern: string`, `app: string` | `native-screen` | The application named by `app` has an OS window whose title matches. `app` is required — there is no host-wide window listing, and "some window on this machine matches" would not be an identity check. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
 | `file-identity` | *(none)* | degenerate pre-live `htmlPath` | Identity BY CONSTRUCTION: the runner itself writes and owns the path it opens. No live process, nothing to race. |
 
 Literal shapes (`urlPath` / `selector` / `expression` are always whatever the
@@ -181,7 +181,7 @@ project ACTUALLY exposes — these are shapes, not fixed values):
 `{"kind":"http-endpoint","urlPath":"/__verify__"}`,
 `{"kind":"dom-marker","selector":"[data-verify-build]"}`,
 `{"kind":"cdp-token","expression":"window.__BUILD_SHA__","expected":"<the literal this build bakes in>"}`,
-`{"kind":"window-identity","titlePattern":"Cyboflow — .*"}`,
+`{"kind":"window-identity","titlePattern":"Cyboflow — .*","app":"Cyboflow"}`,
 `{"kind":"file-identity"}`.
 
 **`file-identity` is NOT the escape hatch for "this is just static files."** It

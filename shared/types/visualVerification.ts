@@ -482,11 +482,18 @@ function isStringArray(value: unknown): value is string[] {
  *     'cdp'` mode, where the driver never navigates (so there is no `goto` to
  *     check an HTTP status on) — it reads the ALREADY-RUNNING app's own
  *     identity instead.
- *   - `'window-identity'` — `native-screen`: the launched app's OS window
- *     title matches `titlePattern`. The WEAKEST channel (§7.1 says so
- *     explicitly — a window title is spoofable/coincidental in a way an
- *     in-page nonce or a CDP-evaluated token is not) and MUST be recorded as
- *     such on the verdict rather than treated as equal-strength evidence.
+ *   - `'window-identity'` — `native-screen`: the launched app named by `app`
+ *     has an OS window whose title matches `titlePattern`. The WEAKEST channel
+ *     (§7.1 says so explicitly — a window title is spoofable/coincidental in a
+ *     way an in-page nonce or a CDP-evaluated token is not) and MUST be
+ *     recorded as such on the verdict rather than treated as equal-strength
+ *     evidence.
+ *
+ *     `app` is REQUIRED, and is not merely plumbing for peekaboo's `list
+ *     windows --app <app>`: scoping the question to one application is what
+ *     separates "the app we launched is showing this window" from "something
+ *     on this machine has a window with a matching title", and the second is
+ *     not an identity check at all.
  *   - `'file-identity'`   — the degenerate pre-live path (`target.htmlPath`):
  *     identity BY CONSTRUCTION, because the runner itself writes/owns the
  *     path being opened. No live process, no nonce, nothing to race.
@@ -497,7 +504,7 @@ export type AttestationSpec =
   | { kind: 'http-endpoint'; urlPath: string }
   | { kind: 'dom-marker'; selector: string }
   | { kind: 'cdp-token'; expression: string; expected: string }
-  | { kind: 'window-identity'; titlePattern: string }
+  | { kind: 'window-identity'; titlePattern: string; app: string }
   | { kind: 'file-identity' };
 
 /** True for one of AttestationSpec's five `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
@@ -531,7 +538,7 @@ export function isAttestationSpec(v: unknown): v is AttestationSpec {
     case 'cdp-token':
       return isNonEmptyString(v.expression) && isNonEmptyString(v.expected);
     case 'window-identity':
-      return isNonEmptyString(v.titlePattern);
+      return isNonEmptyString(v.titlePattern) && isNonEmptyString(v.app);
     case 'file-identity':
       return true;
   }

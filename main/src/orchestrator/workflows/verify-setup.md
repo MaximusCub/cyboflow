@@ -313,9 +313,11 @@ running app. There are **exactly five** kinds, and a sixth is a parse error:
   "expected": "<the literal this build bakes in>" }` — the only channel that works
   in attach mode, where the driver never navigates and there is no HTTP status to
   check.
-- `native-screen` → `{ "kind": "window-identity", "titlePattern": "..." }`, and
-  record that it is the WEAKEST channel; a window title is spoofable and
-  coincidental in a way an in-page nonce is not.
+- `native-screen` → `{ "kind": "window-identity", "titlePattern": "...", "app":
+  "<the application name>" }`. `app` is REQUIRED: peekaboo has no host-wide
+  window listing, and a match against any window on the machine would not be an
+  identity check. Record that it is the WEAKEST channel; a window title is
+  spoofable and coincidental in a way an in-page nonce is not.
 - `{ "kind": "file-identity" }` — ONLY for the degenerate pre-live path, a
   `target.htmlPath` the runner itself wrote and opens. A project you SERVE over a
   leased port is a live process on a socket you do not own, even if it is a

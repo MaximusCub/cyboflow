@@ -27,7 +27,7 @@ const ATTESTATION_SPECS: AttestationSpec[] = [
   { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
   { kind: 'dom-marker', selector: '[data-verify-nonce]' },
   { kind: 'cdp-token', expression: 'window.__CYBOFLOW_BUILD_TOKEN__', expected: 'abc123' },
-  { kind: 'window-identity', titlePattern: 'MyApp — dev' },
+  { kind: 'window-identity', titlePattern: 'MyApp — dev', app: 'MyApp' },
   { kind: 'file-identity' },
 ];
 
@@ -268,6 +268,17 @@ describe('isAttestationSpec', () => {
 
   it('rejects an unrecognized kind', () => {
     expect(isAttestationSpec({ kind: 'magic-word' })).toBe(false);
+  });
+
+  it('rejects a window-identity with no app to scope it to', () => {
+    // peekaboo has no host-wide window listing, and a match against ANY window
+    // on the machine would not be an identity check — so an app-less spec is
+    // not weaker evidence, it is an unrunnable probe.
+    expect(isAttestationSpec({ kind: 'window-identity', titlePattern: 'MyApp' })).toBe(false);
+    expect(isAttestationSpec({ kind: 'window-identity', titlePattern: 'MyApp', app: '' })).toBe(false);
+    expect(isAttestationSpec({ kind: 'window-identity', titlePattern: 'MyApp', app: 'MyApp' })).toBe(
+      true,
+    );
   });
 
   it('rejects a kind-specific field with the wrong type', () => {

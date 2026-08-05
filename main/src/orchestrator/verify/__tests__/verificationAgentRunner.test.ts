@@ -1708,7 +1708,7 @@ describe('serveBindingTarget — when the binding applies, and against which por
   it('does NOT apply to window-identity — a window title is not reached through a port', () => {
     const task = makeTask({ serve: { cmd: 'electron .' } });
     expect(
-      serveBindingTarget(task, { kind: 'window-identity', titlePattern: 'Cyboflow' }, ports),
+      serveBindingTarget(task, { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' }, ports),
     ).toBeNull();
   });
 

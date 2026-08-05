@@ -46,7 +46,7 @@ interface Probes {
 interface ProbeAnswers {
   httpGetBody?: (url: string, timeoutMs: number) => Promise<string>;
   cdpEvaluate?: (port: number, expression: string, timeoutMs: number) => Promise<string>;
-  listNativeWindows?: () => Promise<string[]>;
+  listNativeWindows?: (app: string) => Promise<string[]>;
 }
 
 /** All three probes as spies, defaulting to answers that FAIL to verify (opt into success per test). */
@@ -172,22 +172,34 @@ describe('performHarnessAttestation — cdp-token', () => {
 describe('performHarnessAttestation — window-identity', () => {
   it('verifies on a title matching the pattern as a REGEX', async () => {
     const probes = makeProbes({ listNativeWindows: (async () => ['Finder', 'Cyboflow — dev']) });
-    const result = await run({ kind: 'window-identity', titlePattern: 'Cyboflow.*dev' }, probes);
+    const result = await run(
+      { kind: 'window-identity', titlePattern: 'Cyboflow.*dev', app: 'Cyboflow' },
+      probes,
+    );
     expect(result).toMatchObject({ verified: true, kind: 'window-identity' });
     expect(result.detail).toContain('weakest channel');
+    // The listing is SCOPED to the declared app — peekaboo has no host-wide
+    // form, and an unscoped match would not be an identity check.
+    expect(probes.listNativeWindows).toHaveBeenCalledWith('Cyboflow');
   });
 
   it('falls back to a substring test for an invalid regex (never a probe failure)', async () => {
     const probes = makeProbes({ listNativeWindows: (async () => ['My App (v1)']) });
-    const result = await run({ kind: 'window-identity', titlePattern: '(v1)' }, probes);
+    const result = await run(
+      { kind: 'window-identity', titlePattern: '(v1)', app: 'My App' },
+      probes,
+    );
     expect(result.verified).toBe(true);
   });
 
   it('does not verify when no listed window matches', async () => {
     const probes = makeProbes({ listNativeWindows: (async () => ['Finder', 'Safari']) });
-    const result = await run({ kind: 'window-identity', titlePattern: 'Cyboflow' }, probes);
+    const result = await run(
+      { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
+      probes,
+    );
     expect(result.verified).toBe(false);
-    expect(result.detail).toContain('2 listed window(s)');
+    expect(result.detail).toContain('2 window(s) of "Cyboflow"');
   });
 });
 
@@ -278,7 +290,7 @@ describe('performHarnessAttestation — probe failures', () => {
     ],
     [
       'a missing peekaboo binary',
-      { kind: 'window-identity', titlePattern: 'Cyboflow' },
+      { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
       {
         listNativeWindows: async () => {
           throw new Error('spawn peekaboo ENOENT');

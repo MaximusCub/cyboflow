@@ -223,7 +223,7 @@ function baseRunbook(): VerifyRunbookV1 {
       },
       'native-screen': {
         serve: { cmd: 'electron .' },
-        attestation: { kind: 'window-identity', titlePattern: 'Cyboflow' },
+        attestation: { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
       },
     },
   };

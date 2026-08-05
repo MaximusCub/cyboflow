@@ -679,9 +679,9 @@ describe('parseArgv — attest', () => {
       ok: true,
       command: { kind: 'attest', channel: 'cdp', expression: 'window.__BUILD__', expected: 'sha-1' },
     });
-    expect(parseArgv(['attest', 'window', 'Cyboflow.*'])).toEqual({
+    expect(parseArgv(['attest', 'window', 'Cyboflow.*', 'Cyboflow'])).toEqual({
       ok: true,
-      command: { kind: 'attest', channel: 'window', titlePattern: 'Cyboflow.*' },
+      command: { kind: 'attest', channel: 'window', titlePattern: 'Cyboflow.*', app: 'Cyboflow' },
     });
   });
 
@@ -905,7 +905,16 @@ describe('runDriverCommand — attest cdp', () => {
 // ---------------------------------------------------------------------------
 
 describe('runDriverCommand — attest window', () => {
-  const listing = JSON.stringify({ windows: [{ title: 'Finder' }, { title: 'Cyboflow — main' }] });
+  // The shape the bundled binary actually emits (smoked): the app's own name
+  // rides along in `target_application_info`, which is exactly what must NOT be
+  // read as a window title.
+  const listing = JSON.stringify({
+    success: true,
+    data: {
+      target_application_info: { app_name: 'SomeOtherApp', bundle_id: 'com.x', pid: 1 },
+      windows: [{ window_index: 0, window_title: 'Finder' }, { window_index: 1, window_title: 'Cyboflow — main' }],
+    },
+  });
 
   it('passes on a matching window title, shells the peekaboo bin from env, never touches CDP', async () => {
     const calls = freshCalls();
@@ -916,13 +925,16 @@ describe('runDriverCommand — attest window', () => {
       }),
     });
     const exitCode = await runDriverCommand(
-      ['attest', 'window', 'Cyboflow'],
+      ['attest', 'window', 'Cyboflow', 'Cyboflow'],
       { ...NATIVE_ENV, VERIFY_PEEKABOO_BIN: '/opt/peekaboo' },
       deps,
     );
 
     expect(exitCode).toBe(0);
-    expect(calls.peekaboo).toEqual([{ bin: '/opt/peekaboo', args: ['list', 'windows', '--json'] }]);
+    // SMOKED argv: `--json` is not a flag (exit 64) and `--app` is mandatory.
+    expect(calls.peekaboo).toEqual([
+      { bin: '/opt/peekaboo', args: ['list', 'windows', '--app', 'Cyboflow', '--json-output'] },
+    ]);
     const record = soleAttestRecord(calls);
     expect(record).toMatchObject({ ok: true, kind: 'window-identity' });
     // §7.1 requires the weakness to be recorded on the verdict, not implied.
@@ -938,14 +950,18 @@ describe('runDriverCommand — attest window', () => {
         return listing;
       }),
     });
-    await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps);
+    await runDriverCommand(['attest', 'window', 'Cyboflow', 'Cyboflow'], NATIVE_ENV, deps);
     expect(calls.peekaboo[0].bin).toBe('peekaboo');
   });
 
   it('FAILS when no listed window title matches, and still records the weakest-channel detail', async () => {
     const calls = freshCalls();
     const deps = makeDeps(calls, { runPeekaboo: vi.fn(async () => listing) });
-    const exitCode = await runDriverCommand(['attest', 'window', 'SomeOtherApp'], NATIVE_ENV, deps);
+    const exitCode = await runDriverCommand(
+      ['attest', 'window', 'NoSuchTitle', 'Cyboflow'],
+      NATIVE_ENV,
+      deps,
+    );
     expect(exitCode).toBe(1);
     const record = soleAttestRecord(calls);
     expect(record).toMatchObject({ ok: false, kind: 'window-identity' });
@@ -959,15 +975,43 @@ describe('runDriverCommand — attest window', () => {
         throw new Error('spawn peekaboo ENOENT');
       }),
     });
-    const exitCode = await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps);
+    const exitCode = await runDriverCommand(
+      ['attest', 'window', 'Cyboflow', 'Cyboflow'],
+      NATIVE_ENV,
+      deps,
+    );
     expect(exitCode).toBe(1);
     expect(soleAttestRecord(calls).detail).toMatch(/ENOENT/);
   });
 });
 
 describe('extractWindowTitles', () => {
-  it('collects titles from a nested JSON listing', () => {
-    const stdout = JSON.stringify({ data: { windows: [{ window_title: 'A' }, { title: 'B' }] } });
+  it('reads the shape the bundled binary emits, and ONLY its windows', () => {
+    // The app's own name must never be read as a window title: on the weakest
+    // channel we have, a `titlePattern` matching the APPLICATION would
+    // otherwise attest against an entry that is not a window at all.
+    const stdout = JSON.stringify({
+      success: true,
+      data: {
+        target_application_info: { app_name: 'Cyboflow', pid: 1 },
+        windows: [{ window_title: 'A' }, { window_title: 'B' }],
+      },
+    });
+    expect(extractWindowTitles(stdout)).toEqual(['A', 'B']);
+  });
+
+  it('reports an app with NO windows as no titles, rather than falling through', () => {
+    // "That app is running and has no windows" is a real answer; falling
+    // through to the tolerant walk would let app_name back in the side door.
+    const stdout = JSON.stringify({
+      success: true,
+      data: { target_application_info: { app_name: 'Cyboflow' }, windows: [] },
+    });
+    expect(extractWindowTitles(stdout)).toEqual([]);
+  });
+
+  it('still walks an UNKNOWN json shape (a future peekaboo)', () => {
+    const stdout = JSON.stringify({ result: { items: [{ title: 'A' }, { windowTitle: 'B' }] } });
     expect(extractWindowTitles(stdout)).toEqual(expect.arrayContaining(['A', 'B']));
   });
 
@@ -1222,7 +1266,7 @@ describe('runDriverCommand — native-screen drive guard', () => {
   it('still permits attest window and native-screenshot — the native-screen surface', async () => {
     const calls = freshCalls();
     const deps = makeDeps(calls, { runPeekaboo: vi.fn(async () => JSON.stringify([{ title: 'Cyboflow' }])) });
-    expect(await runDriverCommand(['attest', 'window', 'Cyboflow'], NATIVE_ENV, deps)).toBe(0);
+    expect(await runDriverCommand(['attest', 'window', 'Cyboflow', 'Cyboflow'], NATIVE_ENV, deps)).toBe(0);
     expect(await runDriverCommand(['native-screenshot', 'home'], NATIVE_ENV, deps)).toBe(0);
   });
 

@@ -69,8 +69,13 @@ export interface HarnessAttestationDeps {
   httpGetBody: (url: string, timeoutMs: number) => Promise<string>;
   /** Evaluate `expression` over the CDP endpoint on `port` and return `String(result)`. */
   cdpEvaluate: (port: number, expression: string, timeoutMs: number) => Promise<string>;
-  /** List the host's window titles (peekaboo) for the `window-identity` channel. */
-  listNativeWindows: () => Promise<string[]>;
+  /**
+   * List the window titles of ONE application (peekaboo) for the
+   * `window-identity` channel. Scoped rather than host-wide because peekaboo
+   * offers no host-wide listing, and because "some window somewhere matches"
+   * would not be an identity check.
+   */
+  listNativeWindows: (app: string) => Promise<string[]>;
   /**
    * The inter-attempt delay. Injected ONLY so the unit suite does not spend real
    * seconds proving the retry loop; production always uses the real timer.
@@ -180,13 +185,13 @@ async function probeOnce(
       return { verified: true, detail: `cdp-token: ${spec.expression} matched "${truncate(spec.expected)}"` };
     }
     case 'window-identity': {
-      const titles = await deps.listNativeWindows();
+      const titles = await deps.listNativeWindows(spec.app);
       const matcher = compileTitleMatcher(spec.titlePattern);
       const matched = titles.find((t) => matcher(t));
       if (matched === undefined) {
         return {
           verified: false,
-          detail: `window-identity (weakest channel): no window title matching /${spec.titlePattern}/ among ${titles.length} listed window(s)`,
+          detail: `window-identity (weakest channel): no window title matching /${spec.titlePattern}/ among ${titles.length} window(s) of "${spec.app}"`,
         };
       }
       return {

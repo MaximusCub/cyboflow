@@ -154,7 +154,7 @@ export const USAGE = `Usage:
   attest http <urlPath>
   attest dom <selector>
   attest cdp <expression> <expected>
-  attest window <titlePattern>
+  attest window <titlePattern> <app>
   stop`;
 
 // ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ export type AttestCommand =
   | { kind: 'attest'; channel: 'http'; urlPath: string }
   | { kind: 'attest'; channel: 'dom'; selector: string }
   | { kind: 'attest'; channel: 'cdp'; expression: string; expected: string }
-  | { kind: 'attest'; channel: 'window'; titlePattern: string };
+  | { kind: 'attest'; channel: 'window'; titlePattern: string; app: string };
 
 export type DriverCommand =
   | { kind: 'serve'; command: string }
@@ -347,13 +347,19 @@ function parseAttestArgv(rest: string[]): ParseArgvResult {
         command: { kind: 'attest', channel: 'cdp', expression: args[0], expected: args[1] },
       };
     case 'window':
-      if (args.length !== 1 || !nonEmpty(0)) {
+      // <app> is required for the same reason the shared spec requires it:
+      // peekaboo has no host-wide window listing, and "some window on this
+      // machine matches" would not be an identity check.
+      if (args.length !== 2 || !nonEmpty(0) || !nonEmpty(1)) {
         return {
           ok: false,
-          message: 'attest window requires exactly one argument: <titlePattern> (quote it)',
+          message: 'attest window requires exactly two arguments: <titlePattern> <app> (quote each)',
         };
       }
-      return { ok: true, command: { kind: 'attest', channel: 'window', titlePattern: args[0] } };
+      return {
+        ok: true,
+        command: { kind: 'attest', channel: 'window', titlePattern: args[0], app: args[1] },
+      };
     default:
       return {
         ok: false,
@@ -482,19 +488,18 @@ export function attestFilePath(artifactsDir: string): string {
 }
 
 /**
- * The peekaboo argv for listing the host's windows (`attest window`).
+ * The peekaboo argv for listing ONE application's windows (`attest window`).
  *
- * `peekabooBackend.ts` — the repo's only other peekaboo integration — pins
- * exactly two invocations: `permissions --json` and
- * `image --app <target> --path <out>`. The window LISTING form is extrapolated
- * from that `--json` convention and has NOT been smoked against a live binary
- * (native-screen is observe-only and its drive/identity surface is a designed
- * prerequisite, §4 fn.²). It is a named function precisely so a live smoke has
- * ONE place to correct, and {@link extractWindowTitles} parses its output
- * defensively rather than assuming a schema.
+ * SMOKED against the bundled binary, after an earlier extrapolated form
+ * (`list windows --json`) turned out to be wrong twice over: the flag is
+ * `--json-output`, and `list windows` refuses without `--app` (exit 64,
+ * "Missing expected argument '--app <app>'"). There is no host-wide window
+ * listing in v2 at all — `list apps` reports counts, not titles — which is why
+ * {@link AttestationSpec} carries the app rather than this function guessing
+ * one.
  */
-export function peekabooListWindowsArgs(): string[] {
-  return ['list', 'windows', '--json'];
+export function peekabooListWindowsArgs(app: string): string[] {
+  return ['list', 'windows', '--app', app, '--json-output'];
 }
 
 /**
@@ -1031,14 +1036,18 @@ async function evaluateAttestation(
     }
     case 'window': {
       const bin = resolvePeekabooBin(env);
-      const stdout = await deps.runPeekaboo(bin, peekabooListWindowsArgs(), PEEKABOO_TIMEOUT_MS);
+      const stdout = await deps.runPeekaboo(
+        bin,
+        peekabooListWindowsArgs(command.app),
+        PEEKABOO_TIMEOUT_MS,
+      );
       const titles = extractWindowTitles(stdout);
       const matcher = compileTitleMatcher(command.titlePattern);
       const matched = titles.find((t) => matcher(t));
       if (matched === undefined) {
         return {
           ok: false,
-          detail: `window-identity (weakest channel): no window title matching /${command.titlePattern}/ among ${titles.length} listed window(s)`,
+          detail: `window-identity (weakest channel): no window title matching /${command.titlePattern}/ among ${titles.length} window(s) of "${command.app}"`,
         };
       }
       return {
@@ -1072,18 +1081,25 @@ export function compileTitleMatcher(pattern: string): (title: string) => boolean
 }
 
 /**
- * Pull candidate window titles out of a peekaboo listing. DELIBERATELY
- * schema-tolerant: peekaboo's JSON shape varies by version (the same reason
- * `peekabooBackend.parsePermissionsJson` reads its grants loosely), and the
- * listing subcommand itself is un-smoked (see {@link peekabooListWindowsArgs}).
- * So this walks any JSON structure collecting string values under the keys a
- * window title plausibly lives on, and falls back to treating the raw stdout
- * as one title per line when the output is not JSON at all. Over-collecting is
- * safe: a title that does not match the pattern simply never matches.
+ * Pull window titles out of a peekaboo listing.
+ *
+ * The KNOWN shape wins outright: v2 answers
+ * `{ data: { target_application_info: { app_name }, windows: [{ window_title }] } }`,
+ * and a walk that collected every plausible key also swept up `app_name` —
+ * so a `titlePattern` matching the application's NAME would attest against an
+ * entry that is not a window at all. On the weakest channel we have, that is
+ * the last place to be generous.
+ *
+ * The tolerant walk remains as a FALLBACK for a shape we do not know (v3, a
+ * future rename), and the line-oriented reading below that for output which is
+ * not JSON. Both are strictly worse evidence than the known shape, which is
+ * why they are only reached when it is absent.
  */
 export function extractWindowTitles(stdout: string): string[] {
   try {
     const parsed: unknown = JSON.parse(stdout);
+    const known = knownWindowTitles(parsed);
+    if (known !== null) return known;
     const titles: string[] = [];
     collectTitles(parsed, titles);
     if (titles.length > 0) return titles;
@@ -1096,6 +1112,29 @@ export function extractWindowTitles(stdout: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * Titles from the shape the bundled binary actually emits, or `null` when this
+ * is not that shape.
+ *
+ * An EMPTY `windows` array returns `[]`, not `null`: "that app is running and
+ * has no windows" is a real answer, and falling through to the tolerant walk
+ * there would let `app_name` back in through the side door.
+ */
+function knownWindowTitles(parsed: unknown): string[] | null {
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const data = (parsed as Record<string, unknown>).data;
+  if (typeof data !== 'object' || data === null) return null;
+  const windows = (data as Record<string, unknown>).windows;
+  if (!Array.isArray(windows)) return null;
+  const titles: string[] = [];
+  for (const entry of windows) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const title = (entry as Record<string, unknown>).window_title;
+    if (typeof title === 'string' && title.length > 0) titles.push(title);
+  }
+  return titles;
+}
+
 /** Recursive half of {@link extractWindowTitles} (JSON has no cycles, so plain recursion is safe). */
 function collectTitles(value: unknown, out: string[]): void {
   if (Array.isArray(value)) {
@@ -1104,7 +1143,7 @@ function collectTitles(value: unknown, out: string[]): void {
   }
   if (typeof value !== 'object' || value === null) return;
   const record = value as Record<string, unknown>;
-  for (const key of ['title', 'window_title', 'windowTitle', 'name', 'app_name', 'appName']) {
+  for (const key of ['title', 'window_title', 'windowTitle', 'name']) {
     const candidate = record[key];
     if (typeof candidate === 'string' && candidate.length > 0) out.push(candidate);
   }
