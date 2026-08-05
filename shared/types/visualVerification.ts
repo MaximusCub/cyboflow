@@ -1771,10 +1771,23 @@ export type NativeGrantProbe =
 /**
  * A host-capability probe the health panel runs (§6 "probes, not checkboxes").
  *
- * `'native-drive'` is the consent-gated drive round-trip. It is declared here
- * but is NOT currently runnable — see {@link VerifyProbeState}'s `'blocked'`.
+ * Three rows, matching the three things a user can actually decide about:
+ *
+ *  - `'browser-driving'` ROLLS UP node + chromium + the driver CLI. Those are
+ *    not three decisions — Playwright either drives a browser on this host or
+ *    it does not — and only one of the three ever offered an action. Listed
+ *    apart they read as a dependency audit; the rolled-up row names whichever
+ *    parts actually fell over, in its detail.
+ *  - `'screen-recording'` and `'accessibility'` are the two macOS TCC grants,
+ *    listed apart from each other because they are granted apart, in different
+ *    System Settings panes.
+ *
+ * The former `'native-drive'` row is gone. It never probed the host at all: it
+ * reported that OUR drive machinery is unbuilt, which is not a fact about the
+ * user's machine and does not belong in a table of them. That disclosure now
+ * rides the `'accessibility'` row, whose grant is the one driving would need.
  */
-export type VerifyProbeId = 'node' | 'chromium' | 'driver-cli' | 'native-capture' | 'native-drive';
+export type VerifyProbeId = 'browser-driving' | 'screen-recording' | 'accessibility';
 
 /**
  * The outcome of one probe.
@@ -1790,8 +1803,20 @@ export type VerifyProbeId = 'node' | 'chromium' | 'driver-cli' | 'native-capture
  */
 export type VerifyProbeState = 'ok' | 'missing' | 'inconclusive' | 'blocked';
 
-/** A remediation the panel can offer for a probe row; `null` when the user must fix it outside the app. */
-export type VerifyProbeFix = 'provision-chromium' | 'grant-screen-recording' | null;
+/**
+ * A remediation the panel can offer for a probe row; `null` when nothing the
+ * app can do would help.
+ *
+ * Only `'provision-chromium'` actually fixes anything in place. The two grant
+ * actions can at most put the user in front of the right switch: macOS has an
+ * API to PROMPT for Accessibility but none at all to request Screen Recording,
+ * so that one is unavoidably "here is the pane, go flip it".
+ */
+export type VerifyProbeFix =
+  | 'provision-chromium'
+  | 'request-accessibility'
+  | 'open-screen-recording-settings'
+  | null;
 
 /** One row of the health panel's probe table. */
 export interface VerifyProbeRow {
@@ -1815,12 +1840,20 @@ export interface VerifyHostProbeReport {
   probes: VerifyProbeRow[];
   /**
    * Whether ANY project's runbook declares the `native-screen` modality
-   * (`verify_runbook_local`). Gates the Peekaboo grant rows — a CDP-only user
-   * never sees a permissions screen (§6 "conditional grants branch").
+   * (`verify_runbook_local`).
    *
-   * Deliberately global rather than per-project: a permissions row that
-   * appeared and vanished as the user switched projects would read as a bug,
-   * and the grant it describes is itself host-wide.
+   * This used to HIDE the two grant rows outright (§6's "conditional grants
+   * branch", so a CDP-only user is never nagged for a host-wide TCC grant).
+   * That was circular: you need to know whether screen capture works on this
+   * host in order to decide whether to declare native-screen, and the answer
+   * was withheld until after you had declared it.
+   *
+   * So the rows are always present now, and this flag only sets how loudly a
+   * missing grant is rendered: REQUIRED when some runbook depends on it,
+   * merely optional otherwise. Still deliberately global rather than
+   * per-project — a permissions row that appeared and vanished as the user
+   * switched projects would read as a bug, and the grant it describes is
+   * itself host-wide.
    */
   nativeScreenDeclared: boolean;
 }

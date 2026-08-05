@@ -10,6 +10,7 @@
  * this single file (or injecting a session resolver at server-init time).
  */
 import type { DatabaseLike } from '../types';
+import type { NativeGrantProbe } from '../../../../shared/types/visualVerification';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
@@ -197,10 +198,35 @@ export interface VerifyHostProbesLike {
   resolveNode(): Promise<string>;
   /** Absolute path of the driver CLI, plus whether it is present on disk. */
   probeDriverCli(): Promise<{ path: string; exists: boolean }>;
-  /** Whether native screen capture is currently permitted (Peekaboo health check). Absent when no native backend is wired. */
-  nativeCaptureAvailable?: () => Promise<boolean>;
+  /**
+   * Read the two macOS TCC grants off the host, keeping "declined" and "could
+   * not ask" apart (`PeekabooBackend.probeGrants`). Absent when no native
+   * backend is wired on this platform.
+   */
+  nativeGrants?: () => Promise<NativeGrantProbe>;
   /** Provision chromium (idempotent, memoized, soft-fails to `false` — never throws). Backs the panel's fix-it action. */
   ensureChromium(): Promise<boolean>;
+  /**
+   * Prompt for the Accessibility grant, falling back to opening the Settings
+   * pane when macOS will not show the prompt (it fires once per binary, then
+   * silently no-ops forever).
+   *
+   * IDENTITY CAVEAT, load-bearing: the prompt is raised for THIS app's TCC
+   * identity, while {@link nativeGrants} reads the capture binary's. They
+   * coincide only when that binary ships inside the app bundle and is spawned
+   * by it — which is why the binary is bundled rather than resolved off PATH.
+   * A user pointing at some other peekaboo can grant here and still read
+   * `missing`, and that report is correct, not a bug.
+   *
+   * Absent on platforms with no such grant.
+   */
+  requestAccessibility?: () => Promise<void>;
+  /**
+   * Open the Screen Recording pane of System Settings. There is no request API
+   * for this grant on macOS at any privilege level, so showing the user the
+   * switch is genuinely the most the app can do. Absent off macOS.
+   */
+  openScreenRecordingSettings?: () => Promise<void>;
 }
 
 /**

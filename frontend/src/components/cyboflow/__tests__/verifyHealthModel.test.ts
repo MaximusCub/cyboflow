@@ -10,8 +10,10 @@ import type {
   VerificationCapabilityState,
   VerificationModalityHealth,
   VerificationOutcomeStats,
+  VerifyProbeRow,
 } from '../../../../../shared/types/visualVerification';
 import {
+  PROBE_STATE_CLASS,
   attemptsText,
   capabilityLine,
   durationText,
@@ -19,6 +21,10 @@ import {
   hasProvenRunbook,
   passRateText,
   probeFixLabel,
+  probeFixPendingLabel,
+  probeIsRequired,
+  probeOptionalNote,
+  probeStateClass,
   runbookLine,
 } from '../verifyHealthModel';
 
@@ -189,14 +195,80 @@ describe('hasProvenRunbook', () => {
   });
 });
 
+function probe(over: Partial<VerifyProbeRow> = {}): VerifyProbeRow {
+  return { id: 'browser-driving', state: 'ok', detail: '', fix: null, ...over };
+}
+
 describe('probeFixLabel', () => {
   it('labels the offered remediation, or none', () => {
-    expect(probeFixLabel({ id: 'chromium', state: 'missing', detail: '', fix: 'provision-chromium' })).toBe(
-      'Install',
-    );
+    expect(probeFixLabel(probe({ state: 'missing', fix: 'provision-chromium' }))).toBe('Install');
     expect(
-      probeFixLabel({ id: 'native-capture', state: 'missing', detail: '', fix: 'grant-screen-recording' }),
+      probeFixLabel(probe({ id: 'accessibility', state: 'missing', fix: 'request-accessibility' })),
+    ).toBe('Grant access');
+    expect(
+      probeFixLabel(
+        probe({ id: 'screen-recording', state: 'missing', fix: 'open-screen-recording-settings' }),
+      ),
     ).toBe('Open settings');
-    expect(probeFixLabel({ id: 'node', state: 'ok', detail: '', fix: null })).toBeNull();
+    expect(probeFixLabel(probe())).toBeNull();
+  });
+});
+
+describe('probeFixPendingLabel', () => {
+  it('only the install has an in-flight state worth naming', () => {
+    // Opening a Settings pane returns immediately; a spinner on it would
+    // suggest the app is doing work it is not.
+    expect(probeFixPendingLabel('provision-chromium')).toBe('Installing…');
+    expect(probeFixPendingLabel('request-accessibility')).toBeNull();
+    expect(probeFixPendingLabel('open-screen-recording-settings')).toBeNull();
+    expect(probeFixPendingLabel(null)).toBeNull();
+  });
+});
+
+describe('probeIsRequired', () => {
+  it('always requires browser driving, whatever the runbooks say', () => {
+    expect(probeIsRequired(probe(), false)).toBe(true);
+    expect(probeIsRequired(probe(), true)).toBe(true);
+  });
+
+  it('makes the TCC grants required only once a runbook depends on them', () => {
+    // The rows are always LISTED — you cannot decide whether to use screen
+    // capture without being told whether it works here. What changes is how
+    // loudly an unmet one is rendered.
+    for (const id of ['screen-recording', 'accessibility'] as const) {
+      expect(probeIsRequired(probe({ id }), false)).toBe(false);
+      expect(probeIsRequired(probe({ id }), true)).toBe(true);
+    }
+  });
+});
+
+describe('probeStateClass', () => {
+  it('softens a missing OPTIONAL capability out of the error colour', () => {
+    // A red row for a permission the user has no reason to grant is a false
+    // alarm; the state word still reads `missing`, it just does not shout.
+    const row = probe({ id: 'screen-recording', state: 'missing' });
+    expect(probeStateClass(row, false)).toBe(PROBE_STATE_CLASS.inconclusive);
+    expect(probeStateClass(row, true)).toBe(PROBE_STATE_CLASS.missing);
+  });
+
+  it('leaves every other state alone in both modes', () => {
+    for (const state of ['ok', 'inconclusive', 'blocked'] as const) {
+      const row = probe({ id: 'accessibility', state });
+      expect(probeStateClass(row, false)).toBe(PROBE_STATE_CLASS[state]);
+      expect(probeStateClass(row, true)).toBe(PROBE_STATE_CLASS[state]);
+    }
+  });
+});
+
+describe('probeOptionalNote', () => {
+  it('explains an unmet optional row rather than leaving it looking broken', () => {
+    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'missing' }), false)).toMatch(
+      /not needed by any runbook/,
+    );
+  });
+
+  it('says nothing when the row is required, or already ok', () => {
+    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'missing' }), true)).toBeNull();
+    expect(probeOptionalNote(probe({ id: 'accessibility', state: 'ok' }), false)).toBeNull();
   });
 });

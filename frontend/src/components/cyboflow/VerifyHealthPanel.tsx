@@ -4,11 +4,13 @@
  *
  * Two tables, both LIVE rather than remembered:
  *
- *   - HOST — one row per capability probe, re-run on every panel open. Never a
- *     stored checkbox: a TCC grant rots silently on any app-path or version
- *     change while a remembered "configured" keeps claiming otherwise, which is
- *     the failure this replaces. Chromium's row carries an in-place fix
- *     (provisioning, not consent).
+ *   - HOST — one row per capability the user can act on (browser driving, and
+ *     the two macOS TCC grants), re-run on every panel open. Never a stored
+ *     checkbox: a TCC grant rots silently on any app-path or version change
+ *     while a remembered "configured" keeps claiming otherwise, which is the
+ *     failure this replaces. Each row carries whatever remedy exists — an
+ *     in-place install for chromium, the OS prompt or the right Settings pane
+ *     for a grant.
  *   - MODALITIES — per modality: runbook state, attempts, pass rate,
  *     failure-class histogram, median duration, and any capability suppression
  *     with the time until it re-probes.
@@ -34,7 +36,6 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
-  PROBE_STATE_CLASS,
   PROBE_STATE_LABEL,
   attemptsText,
   capabilityLine,
@@ -43,6 +44,10 @@ import {
   hasProvenRunbook,
   passRateText,
   probeFixLabel,
+  probeFixPendingLabel,
+  probeIsRequired,
+  probeOptionalNote,
+  probeStateClass,
   runbookLine,
 } from './verifyHealthModel';
 
@@ -104,16 +109,40 @@ export function VerifySetupCta({
 // Rows
 // ---------------------------------------------------------------------------
 
+/**
+ * The mutation behind a row's fix, or `null` for a row that offers none.
+ *
+ * A `switch` rather than a lookup table so adding a `VerifyProbeFix` variant is
+ * a compile error here instead of a button that silently does nothing.
+ */
+function fixMutation(fix: VerifyProbeRow['fix']): (() => Promise<VerifyHostProbeReport>) | null {
+  switch (fix) {
+    case 'provision-chromium':
+      return () => trpc.cyboflow.verificationRequests.provisionChromium.mutate();
+    case 'request-accessibility':
+      return () => trpc.cyboflow.verificationRequests.requestAccessibility.mutate();
+    case 'open-screen-recording-settings':
+      return () => trpc.cyboflow.verificationRequests.openScreenRecordingSettings.mutate();
+    case null:
+      return null;
+  }
+}
+
 function ProbeTableRow({
   row,
+  required,
   onFix,
   fixInFlight,
 }: {
   row: VerifyProbeRow;
+  /** Whether some runbook actually depends on this capability — sets the tone, not the presence. */
+  required: boolean;
   onFix: (row: VerifyProbeRow) => void;
   fixInFlight: boolean;
 }): ReactElement {
   const fixLabel = probeFixLabel(row);
+  const pendingLabel = probeFixPendingLabel(row.fix);
+  const optionalNote = probeOptionalNote(row, required);
   return (
     <div
       data-testid={`verify-probe-${row.id}`}
@@ -121,7 +150,7 @@ function ProbeTableRow({
     >
       <span
         data-testid={`verify-probe-state-${row.id}`}
-        className={`w-16 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${PROBE_STATE_CLASS[row.state]}`}
+        className={`w-16 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStateClass(row, required)}`}
       >
         {PROBE_STATE_LABEL[row.state]}
       </span>
@@ -129,7 +158,15 @@ function ProbeTableRow({
       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-tertiary" title={row.detail}>
         {row.detail}
       </span>
-      {fixLabel !== null && row.fix === 'provision-chromium' && (
+      {optionalNote !== null && (
+        <span
+          data-testid={`verify-probe-optional-${row.id}`}
+          className="shrink-0 text-[10px] text-text-tertiary"
+        >
+          {optionalNote}
+        </span>
+      )}
+      {fixLabel !== null && (
         <button
           type="button"
           data-testid={`verify-probe-fix-${row.id}`}
@@ -137,16 +174,8 @@ function ProbeTableRow({
           onClick={() => onFix(row)}
           className="shrink-0 rounded-button border border-border-primary bg-bg-primary px-2 py-0.5 text-[11px] text-text-primary transition-colors hover:border-border-emphasized hover:bg-bg-hover disabled:opacity-50 focus:border-border-emphasized focus:outline-none"
         >
-          {fixInFlight ? 'Installing…' : fixLabel}
+          {fixInFlight && pendingLabel !== null ? pendingLabel : fixLabel}
         </button>
-      )}
-      {row.fix === 'grant-screen-recording' && (
-        // No in-app action: the grant lives in System Settings and cannot be
-        // toggled from here. Say where it is rather than offering a button that
-        // would only open a pane the user still has to act in.
-        <span className="shrink-0 text-[10px] text-text-tertiary">
-          System Settings → Privacy → Screen Recording
-        </span>
       )}
     </div>
   );
@@ -279,20 +308,24 @@ export function VerifyHealthPanel({
     };
   }, []);
 
+  // Every fix is the same shape — do the thing, take the RE-PROBED report back —
+  // which is what lets a grant action and an install share one handler. The
+  // mutation returning fresh rows (rather than a boolean) is why a success is
+  // reflected immediately instead of waiting out the poll interval.
+  //
+  // A grant action will usually come back with the row STILL missing, because
+  // the user has not flipped the switch yet. That is the honest reading of the
+  // host at that instant, not a failure, and the next panel open picks it up.
   const handleFix = useCallback((row: VerifyProbeRow) => {
-    if (row.fix !== 'provision-chromium') return;
+    const run = fixMutation(row.fix);
+    if (run === null) return;
     setFixInFlight(true);
-    void trpc.cyboflow.verificationRequests.provisionChromium
-      .mutate()
-      .then((res) => {
-        // The mutation returns the RE-PROBED report, so a success is reflected
-        // immediately instead of waiting out the poll interval.
-        setProbes(res);
-      })
+    void run()
+      .then(setProbes)
       .catch(() => {
-        // Soft-fail: provisioning never throws for an ordinary "could not
-        // install" — the re-probed row carries that outcome. An actual
-        // transport error leaves the previous rows in place.
+        // Soft-fail: none of these throw for an ordinary "could not do it" —
+        // the re-probed row carries that outcome. An actual transport error
+        // leaves the previous rows in place.
       })
       .finally(() => setFixInFlight(false));
   }, []);
@@ -328,7 +361,13 @@ export function VerifyHealthPanel({
       {probes !== null && (
         <div className="rounded-card border border-border-primary bg-bg-primary px-3 py-1">
           {probes.probes.map((row) => (
-            <ProbeTableRow key={row.id} row={row} onFix={handleFix} fixInFlight={fixInFlight} />
+            <ProbeTableRow
+              key={row.id}
+              row={row}
+              required={probeIsRequired(row, probes.nativeScreenDeclared)}
+              onFix={handleFix}
+              fixInFlight={fixInFlight}
+            />
           ))}
         </div>
       )}

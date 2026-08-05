@@ -72,7 +72,9 @@ import {
   type VerificationRunbookState,
   type VerificationRequestListRow,
   type VerificationType,
+  type NativeGrantProbe,
   type VerifyHostProbeReport,
+  type VerifyProbeFix,
   type VerifyProbeRow,
   type VisualBackendId,
 } from '../../../../../shared/types/visualVerification';
@@ -483,104 +485,171 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Run the host probes and shape them into panel rows.
+ * One constituent of the rolled-up `browser-driving` row.
+ *
+ * Kept as an internal shape rather than a `VerifyProbeRow` because these are
+ * NOT separately actionable: a user cannot do anything about node or the driver
+ * CLI, and a host where any one of the three is absent drives no browser at
+ * all. They collapse into one row whose detail names whichever parts fell over.
+ */
+interface DrivingPart {
+  name: string;
+  state: 'ok' | 'missing' | 'inconclusive';
+  detail: string;
+  fix: VerifyProbeFix;
+}
+
+/** node — the one probe whose rejection IS affirmative evidence (preflight's sole exception). */
+async function probeNodePart(probes: VerifyHostProbesLike): Promise<DrivingPart> {
+  try {
+    return { name: 'node', state: 'ok', detail: await probes.resolveNode(), fix: null };
+  } catch (err) {
+    return { name: 'node', state: 'missing', detail: errorText(err), fix: null };
+  }
+}
+
+/** chromium — provisioning, not consent: a miss is fixable in place (§6). */
+async function probeChromiumPart(probes: VerifyHostProbesLike): Promise<DrivingPart> {
+  try {
+    const chromium = await probes.resolveChromium();
+    return chromium === null
+      ? { name: 'chromium', state: 'missing', detail: 'not installed', fix: 'provision-chromium' }
+      : { name: 'chromium', state: 'ok', detail: chromium, fix: null };
+  } catch (err) {
+    return { name: 'chromium', state: 'inconclusive', detail: errorText(err), fix: null };
+  }
+}
+
+async function probeDriverCliPart(probes: VerifyHostProbesLike): Promise<DrivingPart> {
+  try {
+    const cli = await probes.probeDriverCli();
+    return {
+      name: 'driver CLI',
+      state: cli.exists ? 'ok' : 'missing',
+      detail: cli.exists ? cli.path : `absent at ${cli.path}`,
+      fix: null,
+    };
+  } catch (err) {
+    return { name: 'driver CLI', state: 'inconclusive', detail: errorText(err), fix: null };
+  }
+}
+
+/**
+ * Collapse node + chromium + driver CLI into the single `browser-driving` row.
+ *
+ * Precedence is missing > inconclusive > ok, and the detail names EVERY failing
+ * part rather than just the first — a host missing two of the three would
+ * otherwise send the user round the loop twice. The offered fix is the first
+ * failing part that has one (only chromium ever does).
+ *
+ * On success the detail is the chromium path: node and the driver CLI are ours
+ * and always resolve to the same uninteresting places, while the browser is the
+ * one that varies per host and is worth being able to read back.
+ */
+export function foldDrivingParts(parts: DrivingPart[]): VerifyProbeRow {
+  const failed = parts.filter((p) => p.state !== 'ok');
+  if (failed.length === 0) {
+    const chromium = parts.find((p) => p.name === 'chromium');
+    return {
+      id: 'browser-driving',
+      state: 'ok',
+      detail: detail(chromium?.detail ?? 'ready'),
+      fix: null,
+    };
+  }
+  return {
+    id: 'browser-driving',
+    // A single unanswerable part poisons the row to 'inconclusive' only when
+    // nothing else is affirmatively absent — a real absence is the stronger
+    // fact and the one with an action attached.
+    state: failed.some((p) => p.state === 'missing') ? 'missing' : 'inconclusive',
+    detail: detail(failed.map((p) => `${p.name}: ${p.detail}`).join(' · ')),
+    fix: failed.find((p) => p.fix !== null)?.fix ?? null,
+  };
+}
+
+/**
+ * The two macOS TCC grant rows, ALWAYS both present.
+ *
+ * A probe that could not answer yields `'inconclusive'` for both, never
+ * `'missing'`: the fail-open rule from `preflight.ts`, and here it is the
+ * difference between "grant this" and "we could not tell", which is the
+ * difference between a useful instruction and a wild goose chase.
+ */
+async function grantRows(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]> {
+  const probe = await readGrants(probes);
+  if (probe.kind !== 'ok') {
+    return [
+      { id: 'screen-recording', state: 'inconclusive', detail: detail(probe.detail), fix: null },
+      { id: 'accessibility', state: 'inconclusive', detail: detail(probe.detail), fix: null },
+    ];
+  }
+  return [
+    probe.screenRecording
+      ? { id: 'screen-recording', state: 'ok', detail: 'granted', fix: null }
+      : {
+          id: 'screen-recording',
+          state: 'missing',
+          detail: 'not granted — screenshots of a running app return blank or fail',
+          fix: 'open-screen-recording-settings',
+        },
+    probe.accessibility
+      ? {
+          id: 'accessibility',
+          state: 'ok',
+          // The §8 disclosure that used to be its own 'native-drive' row: the
+          // grant is held, but nothing yet uses it to drive. Said here because
+          // this is the grant driving would need — and because a bare "granted"
+          // would imply a capability that does not exist.
+          detail: 'granted — used to target the app window; no drive API yet, so capture is observe-only',
+          fix: null,
+        }
+      : {
+          id: 'accessibility',
+          state: 'missing',
+          detail: 'not granted — capture cannot target a specific app window',
+          fix: 'request-accessibility',
+        },
+  ];
+}
+
+/** Read the grants, mapping an unwired backend and a thrown probe alike to a reason string. */
+async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProbe> {
+  if (probes.nativeGrants === undefined) {
+    return { kind: 'inconclusive', detail: 'no native capture backend wired on this host' };
+  }
+  try {
+    return await probes.nativeGrants();
+  } catch (err) {
+    // The contract says it never throws; honour the fail-open rule anyway
+    // rather than letting a contract violation read as a denied permission.
+    return { kind: 'inconclusive', detail: errorText(err) };
+  }
+}
+
+/**
+ * Run the host probes and shape them into the three panel rows.
  *
  * The fail-open rule from `preflight.ts` is reproduced EXACTLY here: a probe
  * that rejects is `'inconclusive'`, never `'missing'`. The single exception is
  * `resolveNode` — "node is unresolvable" is itself the fact being checked, and
  * there is no state in which the harness could proceed without it.
+ *
+ * The grant rows are UNCONDITIONAL. They used to appear only once some runbook
+ * declared `native-screen`, which meant the one moment you needed to know
+ * whether screen capture works here — while deciding whether to declare it —
+ * was the one moment the panel would not say. `nativeScreenDeclared` still
+ * rides the report, but now only to tell the panel how loudly to render a
+ * missing grant.
  */
-async function runHostProbes(
-  probes: VerifyHostProbesLike,
-  includeNative: boolean,
-): Promise<VerifyProbeRow[]> {
-  const rows: VerifyProbeRow[] = [];
-
-  // node — the one probe whose rejection IS affirmative evidence.
-  try {
-    const path = await probes.resolveNode();
-    rows.push({ id: 'node', state: 'ok', detail: detail(path), fix: null });
-  } catch (err) {
-    rows.push({ id: 'node', state: 'missing', detail: detail(errorText(err)), fix: null });
-  }
-
-  // chromium — provisioning, not consent: a miss is fixable in place (§6).
-  try {
-    const chromium = await probes.resolveChromium();
-    rows.push(
-      chromium === null
-        ? {
-            id: 'chromium',
-            state: 'missing',
-            detail: 'no chromium binary resolved',
-            fix: 'provision-chromium',
-          }
-        : { id: 'chromium', state: 'ok', detail: detail(chromium), fix: null },
-    );
-  } catch (err) {
-    rows.push({ id: 'chromium', state: 'inconclusive', detail: detail(errorText(err)), fix: null });
-  }
-
-  try {
-    const cli = await probes.probeDriverCli();
-    rows.push({
-      id: 'driver-cli',
-      state: cli.exists ? 'ok' : 'missing',
-      detail: detail(cli.path),
-      fix: null,
-    });
-  } catch (err) {
-    rows.push({ id: 'driver-cli', state: 'inconclusive', detail: detail(errorText(err)), fix: null });
-  }
-
-  // The §6 conditional grants branch — a CDP-only user never sees these rows.
-  if (includeNative) {
-    if (probes.nativeCaptureAvailable === undefined) {
-      rows.push({
-        id: 'native-capture',
-        state: 'inconclusive',
-        detail: 'no native capture backend wired on this host',
-        fix: null,
-      });
-    } else {
-      try {
-        const capable = await probes.nativeCaptureAvailable();
-        rows.push(
-          capable
-            ? { id: 'native-capture', state: 'ok', detail: 'screen capture permitted', fix: null }
-            : {
-                id: 'native-capture',
-                state: 'missing',
-                detail: 'screen capture unavailable — the grant is missing or has rotted',
-                fix: 'grant-screen-recording',
-              },
-        );
-      } catch (err) {
-        rows.push({
-          id: 'native-capture',
-          state: 'inconclusive',
-          detail: detail(errorText(err)),
-          fix: null,
-        });
-      }
-    }
-
-    // NOT BUILT, and reported as such rather than faked. §6 specifies a
-    // consent-gated drive round-trip ("Test driving now"), but §8 still lists
-    // the native-screen drive API shape as an OPEN QUESTION — extend
-    // DriverCommand vs a scoped Peekaboo tool grant — so there is no audited
-    // API to round-trip through. A green row here would assert a capability
-    // nothing has demonstrated; a red one would blame a host for missing
-    // machinery that was never written.
-    rows.push({
-      id: 'native-drive',
-      state: 'blocked',
-      detail: 'no drive API yet (proposal §8 open question) — capture is observe-only',
-      fix: null,
-    });
-  }
-
-  return rows;
+async function runHostProbes(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]> {
+  const [node, chromium, cli, grants] = await Promise.all([
+    probeNodePart(probes),
+    probeChromiumPart(probes),
+    probeDriverCliPart(probes),
+    grantRows(probes),
+  ]);
+  return [foldDrivingParts([node, chromium, cli]), ...grants];
 }
 
 export const verificationRequestsRouter = router({
@@ -773,18 +842,7 @@ export const verificationRequestsRouter = router({
    * are already there.
    */
   hostProbes: protectedProcedure.query(async ({ ctx }): Promise<VerifyHostProbeReport> => {
-    const probes = ctx.verifyHostProbes;
-    if (!probes) {
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: '[verificationRequests.hostProbes] host probes not wired into tRPC context',
-      });
-    }
-    const includeNative = nativeScreenDeclared(ctx.db);
-    return {
-      probes: await runHostProbes(probes, includeNative),
-      nativeScreenDeclared: includeNative,
-    };
+    return await reportFor(ctx.db, requireProbes(ctx.verifyHostProbes, 'hostProbes'));
   }),
 
   /**
@@ -808,22 +866,87 @@ export const verificationRequestsRouter = router({
    * panel showing the pre-attempt rows.
    */
   provisionChromium: protectedProcedure.mutation(async ({ ctx }): Promise<VerifyHostProbeReport> => {
-    const probes = ctx.verifyHostProbes;
-    if (!probes) {
-      throw new TRPCError({
-        code: 'PRECONDITION_FAILED',
-        message: '[verificationRequests.provisionChromium] host probes not wired into tRPC context',
-      });
-    }
+    const probes = requireProbes(ctx.verifyHostProbes, 'provisionChromium');
     try {
       await probes.ensureChromium();
     } catch {
       // Intentionally ignored — see the docblock; the re-probe reports reality.
     }
-    const includeNative = nativeScreenDeclared(ctx.db);
-    return {
-      probes: await runHostProbes(probes, includeNative),
-      nativeScreenDeclared: includeNative,
-    };
+    return await reportFor(ctx.db, probes);
   }),
+
+  /**
+   * Prompt for the Accessibility grant, then return the REPROBED rows.
+   *
+   * Best-effort by construction: macOS shows the prompt once per binary and
+   * silently no-ops forever after, so the wiring falls through to opening the
+   * Settings pane. Either way the user still has to flip a switch, which is why
+   * the re-probed row will usually still read `missing` on return — that is the
+   * truth at that instant, not a failed mutation, and the next panel open picks
+   * up the grant.
+   */
+  requestAccessibility: protectedProcedure.mutation(async ({ ctx }): Promise<VerifyHostProbeReport> => {
+    const probes = requireProbes(ctx.verifyHostProbes, 'requestAccessibility');
+    await runGrantAction(probes.requestAccessibility);
+    return await reportFor(ctx.db, probes);
+  }),
+
+  /**
+   * Open the Screen Recording pane of System Settings and return the REPROBED
+   * rows. macOS exposes no request API for this grant, so this is the whole of
+   * what the app can offer.
+   */
+  openScreenRecordingSettings: protectedProcedure.mutation(
+    async ({ ctx }): Promise<VerifyHostProbeReport> => {
+      const probes = requireProbes(ctx.verifyHostProbes, 'openScreenRecordingSettings');
+      await runGrantAction(probes.openScreenRecordingSettings);
+      return await reportFor(ctx.db, probes);
+    },
+  ),
 });
+
+/**
+ * PRECONDITION_FAILED (rather than an all-missing report) when the probes are
+ * not wired: a host that was never asked is not a host with nothing installed,
+ * and rendering the second would send users chasing binaries already there.
+ */
+function requireProbes(
+  probes: VerifyHostProbesLike | undefined,
+  procedure: string,
+): VerifyHostProbesLike {
+  if (!probes) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `[verificationRequests.${procedure}] host probes not wired into tRPC context`,
+    });
+  }
+  return probes;
+}
+
+/**
+ * Fire a grant action, swallowing both its absence (a platform with no such
+ * grant) and any failure.
+ *
+ * Neither is worth failing the mutation over: the caller's real answer is the
+ * re-probed report, and an action that could not run leaves the rows exactly as
+ * they were — which is the honest outcome.
+ */
+async function runGrantAction(action: (() => Promise<void>) | undefined): Promise<void> {
+  if (action === undefined) return;
+  try {
+    await action();
+  } catch {
+    // Intentionally ignored — see the docblock; the re-probe reports reality.
+  }
+}
+
+/** The full probe report: the live rows plus whether any runbook needs the grants. */
+async function reportFor(
+  db: DatabaseLike | undefined,
+  probes: VerifyHostProbesLike,
+): Promise<VerifyHostProbeReport> {
+  return {
+    probes: await runHostProbes(probes),
+    nativeScreenDeclared: nativeScreenDeclared(db),
+  };
+}

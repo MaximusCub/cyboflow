@@ -28,6 +28,8 @@ const {
   healthQuerySpy,
   hostProbesQuerySpy,
   provisionChromiumSpy,
+  requestAccessibilitySpy,
+  openScreenRecordingSettingsSpy,
   goToWizardSpy,
 } = vi.hoisted(() => ({
   useVerificationRequestsSpy: vi.fn(),
@@ -36,6 +38,8 @@ const {
   healthQuerySpy: vi.fn(),
   hostProbesQuerySpy: vi.fn(),
   provisionChromiumSpy: vi.fn(),
+  requestAccessibilitySpy: vi.fn(),
+  openScreenRecordingSettingsSpy: vi.fn(),
   goToWizardSpy: vi.fn(),
 }));
 
@@ -55,10 +59,12 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       verificationRequests: {
         budget: { query: budgetQuerySpy },
-        // The §6 health panel's three procedures (VerifyHealthPanel).
+        // The §6 health panel's procedures (VerifyHealthPanel).
         health: { query: healthQuerySpy },
         hostProbes: { query: hostProbesQuerySpy },
         provisionChromium: { mutate: provisionChromiumSpy },
+        requestAccessibility: { mutate: requestAccessibilitySpy },
+        openScreenRecordingSettings: { mutate: openScreenRecordingSettingsSpy },
       },
     },
   },
@@ -126,6 +132,8 @@ beforeEach(() => {
   hostProbesQuerySpy.mockReset();
   hostProbesQuerySpy.mockResolvedValue({ probes: [], nativeScreenDeclared: false });
   provisionChromiumSpy.mockReset();
+  requestAccessibilitySpy.mockReset();
+  openScreenRecordingSettingsSpy.mockReset();
   goToWizardSpy.mockReset();
 });
 
@@ -635,18 +643,25 @@ describe('VerifyQueueView — health panel', () => {
   it('renders the probe table with its live states', async () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: false,
+      nativeScreenDeclared: true,
       probes: [
-        { id: 'node', state: 'ok', detail: '/usr/bin/node', fix: null },
-        { id: 'chromium', state: 'missing', detail: 'no chromium binary resolved', fix: 'provision-chromium' },
+        {
+          id: 'browser-driving',
+          state: 'missing',
+          detail: 'chromium: not installed',
+          fix: 'provision-chromium',
+        },
+        { id: 'screen-recording', state: 'ok', detail: 'granted', fix: null },
+        { id: 'accessibility', state: 'ok', detail: 'granted', fix: null },
       ],
     });
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-probe-node')).toBeInTheDocument();
-    expect(screen.getByTestId('verify-probe-state-node')).toHaveTextContent('ok');
-    expect(screen.getByTestId('verify-probe-state-chromium')).toHaveTextContent('missing');
-    expect(screen.getByTestId('verify-probe-fix-chromium')).toBeInTheDocument();
+    expect(await screen.findByTestId('verify-probe-browser-driving')).toBeInTheDocument();
+    expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('missing');
+    expect(screen.getByTestId('verify-probe-fix-browser-driving')).toBeInTheDocument();
+    expect(screen.getByTestId('verify-probe-state-screen-recording')).toHaveTextContent('ok');
+    expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('ok');
   });
 
   it('renders an inconclusive probe as unknown, with no fix offered', async () => {
@@ -655,31 +670,95 @@ describe('VerifyQueueView — health panel', () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
       nativeScreenDeclared: false,
-      probes: [{ id: 'chromium', state: 'inconclusive', detail: 'EPERM', fix: null }],
+      probes: [{ id: 'browser-driving', state: 'inconclusive', detail: 'chromium: EPERM', fix: null }],
     });
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-probe-state-chromium')).toHaveTextContent('unknown');
-    expect(screen.queryByTestId('verify-probe-fix-chromium')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('verify-probe-state-browser-driving')).toHaveTextContent('unknown');
+    expect(screen.queryByTestId('verify-probe-fix-browser-driving')).not.toBeInTheDocument();
   });
 
   it('provisioning chromium swaps the row to ok from the re-probed report', async () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
       nativeScreenDeclared: false,
-      probes: [{ id: 'chromium', state: 'missing', detail: 'absent', fix: 'provision-chromium' }],
+      probes: [{ id: 'browser-driving', state: 'missing', detail: 'chromium: not installed', fix: 'provision-chromium' }],
     });
     provisionChromiumSpy.mockResolvedValue({
       nativeScreenDeclared: false,
-      probes: [{ id: 'chromium', state: 'ok', detail: '/chromium', fix: null }],
+      probes: [{ id: 'browser-driving', state: 'ok', detail: '/chromium', fix: null }],
     });
     render(<VerifyQueueView />);
 
-    await userEvent.click(await screen.findByTestId('verify-probe-fix-chromium'));
+    await userEvent.click(await screen.findByTestId('verify-probe-fix-browser-driving'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('verify-probe-state-chromium')).toHaveTextContent('ok');
+      expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('ok');
     });
+  });
+
+  it('routes each grant row to its OWN action, not to the chromium installer', async () => {
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    const denied = {
+      nativeScreenDeclared: true,
+      probes: [
+        {
+          id: 'screen-recording',
+          state: 'missing',
+          detail: 'not granted',
+          fix: 'open-screen-recording-settings',
+        },
+        { id: 'accessibility', state: 'missing', detail: 'not granted', fix: 'request-accessibility' },
+      ],
+    };
+    hostProbesQuerySpy.mockResolvedValue(denied);
+    openScreenRecordingSettingsSpy.mockResolvedValue(denied);
+    requestAccessibilitySpy.mockResolvedValue({
+      nativeScreenDeclared: true,
+      probes: [
+        { id: 'screen-recording', state: 'missing', detail: 'not granted', fix: 'open-screen-recording-settings' },
+        { id: 'accessibility', state: 'ok', detail: 'granted', fix: null },
+      ],
+    });
+    render(<VerifyQueueView />);
+
+    // The two grants live in DIFFERENT Settings panes; one button opening the
+    // other's pane is worse than no button.
+    await userEvent.click(await screen.findByTestId('verify-probe-fix-screen-recording'));
+    await waitFor(() => expect(openScreenRecordingSettingsSpy).toHaveBeenCalledTimes(1));
+    expect(requestAccessibilitySpy).not.toHaveBeenCalled();
+    expect(provisionChromiumSpy).not.toHaveBeenCalled();
+
+    await userEvent.click(await screen.findByTestId('verify-probe-fix-accessibility'));
+    await waitFor(() => {
+      expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('ok');
+    });
+  });
+
+  it('shows a grant the host does not need WITHOUT dressing it as a fault', async () => {
+    // The rows are always listed — you cannot decide whether to use screen
+    // capture without being told whether it works here — but an unmet grant
+    // nobody's runbook needs is information, not an alarm.
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    hostProbesQuerySpy.mockResolvedValue({
+      nativeScreenDeclared: false,
+      probes: [
+        {
+          id: 'screen-recording',
+          state: 'missing',
+          detail: 'not granted',
+          fix: 'open-screen-recording-settings',
+        },
+      ],
+    });
+    render(<VerifyQueueView />);
+
+    const pill = await screen.findByTestId('verify-probe-state-screen-recording');
+    expect(pill).toHaveTextContent('missing');
+    expect(pill.className).not.toMatch(/status-error/);
+    expect(screen.getByTestId('verify-probe-optional-screen-recording')).toHaveTextContent(
+      /not needed by any runbook/,
+    );
   });
 
   it('leads a modality row with its runbook state and warns when nothing is proven', async () => {
@@ -830,7 +909,7 @@ describe('VerifyQueueView — health panel', () => {
     const cta = await screen.findByTestId('verify-health-setup-cta');
     expect(cta).toHaveTextContent('Set up verification');
     expect(screen.queryByTestId('verify-health-modality-web')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('verify-probe-node')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('verify-probe-browser-driving')).not.toBeInTheDocument();
   });
 
   it('probes the host ONCE per open — the probes do not ride the health poll', async () => {

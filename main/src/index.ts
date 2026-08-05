@@ -1,4 +1,12 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, IpcMainInvokeEvent } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  shell,
+  dialog,
+  systemPreferences,
+  IpcMainInvokeEvent,
+} from 'electron';
 import * as path from 'path';
 import * as os from 'os';
 import { TaskQueue } from './services/taskQueue';
@@ -124,8 +132,10 @@ import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PlaywrightInstaller } from './services/visualVerify/playwrightInstaller';
 import {
+  makeAccessibilityRequester,
   makeChromiumProvisioner,
   makeDriverCliProbe,
+  makeScreenRecordingSettingsOpener,
 } from './services/visualVerify/hostProbeAdapters';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
@@ -1907,11 +1917,28 @@ async function initializeServices(): Promise<boolean> {
     resolveNode: findNodeExecutable,
     resolveChromium: probeChromiumExecutable,
     probeDriverCli: makeDriverCliProbe(verifyDriverCliPath, (p) => fs.promises.access(p)),
-    nativeCaptureAvailable: () => peekabooBackend.healthCheck(),
+    nativeGrants: () => peekabooBackend.probeGrants(),
     ensureChromium: makeChromiumProvisioner(
       () => new PlaywrightInstaller({ logger: cyboflowLogger }),
       cyboflowLogger,
     ),
+    // The two grant actions exist only on macOS: nothing else has these TCC
+    // grants, and the router omits a row's fix rather than offering a button
+    // that would open a settings pane that does not exist.
+    ...(process.platform === 'darwin'
+      ? {
+          requestAccessibility: makeAccessibilityRequester({
+            isTrustedAccessibilityClient: (prompt) =>
+              systemPreferences.isTrustedAccessibilityClient(prompt),
+            openSettings: (url) => shell.openExternal(url),
+            logger: cyboflowLogger,
+          }),
+          openScreenRecordingSettings: makeScreenRecordingSettingsOpener({
+            openSettings: (url) => shell.openExternal(url),
+            logger: cyboflowLogger,
+          }),
+        }
+      : {}),
   };
   // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
   // 127.0.0.1:<port> means nothing is listening ⇒ the port is free; a successful

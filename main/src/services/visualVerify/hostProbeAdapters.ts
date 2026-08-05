@@ -13,11 +13,23 @@
  *     only AFFIRMATIVE absence is a miss.
  *   - {@link makeChromiumProvisioner} — retry semantics over a memoizing
  *     installer.
+ *   - {@link makeAccessibilityRequester} — a one-shot OS prompt with a Settings
+ *     fallback, because the prompt fires once per binary and then goes quiet.
  *
  * No Electron import: `index.ts` supplies the concrete `access` / installer
- * factory, so both are exercisable with plain fakes.
+ * factory / `systemPreferences` calls, so all of them are exercisable with
+ * plain fakes.
  */
 import type { LoggerLike } from '../../orchestrator/types';
+
+/**
+ * Deep links to the two System Settings panes. `x-apple.systempreferences:` is
+ * the documented URL scheme and survives the Ventura-era rename of the app.
+ */
+export const SCREEN_RECORDING_SETTINGS_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+export const ACCESSIBILITY_SETTINGS_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
 
 /** The subset of a provisioning installer these adapters drive. */
 export interface ChromiumInstallerLike {
@@ -105,4 +117,73 @@ export function makeChromiumProvisioner(
     inFlight = attempt;
     return attempt;
   };
+}
+
+/**
+ * The panel's "grant accessibility" action: ask the OS to prompt, and open the
+ * Settings pane when it will not.
+ *
+ * WHY THE FALLBACK IS NOT OPTIONAL: macOS shows the Accessibility consent
+ * dialog at most ONCE per binary. Every later call to
+ * `isTrustedAccessibilityClient(true)` returns false without displaying
+ * anything, so a button wired to the prompt alone works exactly one time in the
+ * app's lifetime and then silently does nothing — which reads as a broken
+ * button, not as a permission the user has to go and grant.
+ *
+ * The pane is opened only when the app is NOT already trusted. Sending someone
+ * to System Settings to enable a switch that is already on is its own kind of
+ * wrong answer.
+ *
+ * A failed `openExternal` is swallowed: the caller re-probes regardless, and
+ * this action is advisory — nothing downstream depends on the pane having
+ * opened.
+ */
+export function makeAccessibilityRequester(deps: {
+  /** `systemPreferences.isTrustedAccessibilityClient` — `true` PROMPTS (once, ever). */
+  isTrustedAccessibilityClient: (prompt: boolean) => boolean;
+  openSettings: (url: string) => Promise<void>;
+  logger?: LoggerLike;
+}): () => Promise<void> {
+  return async () => {
+    let trusted = false;
+    try {
+      trusted = deps.isTrustedAccessibilityClient(true);
+    } catch (err) {
+      deps.logger?.warn('[hostProbeAdapters] accessibility trust check threw', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (trusted) return;
+    await openSettingsPane(deps, ACCESSIBILITY_SETTINGS_URL);
+  };
+}
+
+/**
+ * The panel's "open screen-recording settings" action.
+ *
+ * There is no macOS API to REQUEST this grant — not `systemPreferences`, not at
+ * any privilege level — so unlike accessibility there is no prompt to try
+ * first. Showing the user the switch is the entire available remedy.
+ */
+export function makeScreenRecordingSettingsOpener(deps: {
+  openSettings: (url: string) => Promise<void>;
+  logger?: LoggerLike;
+}): () => Promise<void> {
+  return async () => {
+    await openSettingsPane(deps, SCREEN_RECORDING_SETTINGS_URL);
+  };
+}
+
+async function openSettingsPane(
+  deps: { openSettings: (url: string) => Promise<void>; logger?: LoggerLike },
+  url: string,
+): Promise<void> {
+  try {
+    await deps.openSettings(url);
+  } catch (err) {
+    deps.logger?.warn('[hostProbeAdapters] could not open the System Settings pane', {
+      url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

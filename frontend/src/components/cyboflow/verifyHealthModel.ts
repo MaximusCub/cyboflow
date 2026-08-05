@@ -22,13 +22,17 @@ import type {
   VerifyProbeState,
 } from '../../../../shared/types/visualVerification';
 
-/** Human label for each probe row. */
+/**
+ * Human label for each probe row.
+ *
+ * Named for the CAPABILITY, not the mechanism: a user deciding whether their
+ * project can be verified cares that a browser can be driven, not that
+ * `driver-cli` resolved.
+ */
 export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
-  node: 'node',
-  chromium: 'chromium',
-  'driver-cli': 'driver CLI',
-  'native-capture': 'screen capture',
-  'native-drive': 'screen driving',
+  'browser-driving': 'browser driving',
+  'screen-recording': 'screen recording',
+  accessibility: 'accessibility',
 };
 
 /**
@@ -60,11 +64,50 @@ export function probeFixLabel(row: VerifyProbeRow): string | null {
   switch (row.fix) {
     case 'provision-chromium':
       return 'Install';
-    case 'grant-screen-recording':
+    case 'request-accessibility':
+      return 'Grant access';
+    case 'open-screen-recording-settings':
       return 'Open settings';
     case null:
       return null;
   }
+}
+
+/** The in-flight label while a fix runs, or null for one that completes instantly. */
+export function probeFixPendingLabel(fix: VerifyProbeRow['fix']): string | null {
+  return fix === 'provision-chromium' ? 'Installing…' : null;
+}
+
+/**
+ * Whether a probe row describes a capability THIS host is actually relied upon
+ * for.
+ *
+ * The two TCC grants are always listed — you cannot decide whether to use
+ * screen capture without first being told whether it works here, which is
+ * exactly what hiding the rows until a runbook declared `native-screen` made
+ * impossible. But a grant nobody's runbook needs is not a problem to be
+ * alarmed about, so an unmet one is rendered as information rather than as a
+ * fault.
+ */
+export function probeIsRequired(row: VerifyProbeRow, nativeScreenDeclared: boolean): boolean {
+  return row.id === 'browser-driving' ? true : nativeScreenDeclared;
+}
+
+/**
+ * The pill class for a row, softened when the capability is optional here.
+ *
+ * A red `missing` on a permission the user has no reason to grant is a false
+ * alarm; the row still reads `missing`, it just does not shout.
+ */
+export function probeStateClass(row: VerifyProbeRow, required: boolean): string {
+  return !required && row.state === 'missing'
+    ? PROBE_STATE_CLASS.inconclusive
+    : PROBE_STATE_CLASS[row.state];
+}
+
+/** The trailing note explaining why an unmet optional row is not a problem. */
+export function probeOptionalNote(row: VerifyProbeRow, required: boolean): string | null {
+  return required || row.state === 'ok' ? null : 'not needed by any runbook yet';
 }
 
 /**
