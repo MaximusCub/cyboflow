@@ -1728,12 +1728,23 @@ async function initializeServices(): Promise<boolean> {
   // a binary, and an npx-resolved one sits under a content-hashed cache path
   // that moves on every version bump — silently revoking both grants and
   // reporting them as declined. See peekabooExecutablePath.ts.
+  //
+  // ONE path, resolved ONCE, handed to BOTH sides. The capability gate (this
+  // backend, via nativeCaptureProbe / unsupportedModalityDetail below) and the
+  // deployed driver (VerificationAgentRunner's `peekabooBin`, exported as
+  // VERIFY_PEEKABOO_BIN) must measure the SAME binary. They agreed by accident
+  // while both defaulted to the bare PATH name; pointing only the gate at the
+  // bundled copy would have it affirm a capability the driver then cannot use —
+  // and on the very host bundling exists for (grants held, nothing on PATH) the
+  // gate would pass, a count-1 screen lease and a full agent deploy would be
+  // spent, and the driver's spawn would ENOENT deep inside the run.
+  const verifyPeekabooPath = resolvePeekabooExecutable({
+    isPackaged: app.isPackaged,
+    ...(process.resourcesPath ? { resourcesPath: process.resourcesPath } : {}),
+  });
   const peekabooBackend = new PeekabooBackend({
     logger: cyboflowLogger,
-    executablePath: resolvePeekabooExecutable({
-      isPackaged: app.isPackaged,
-      ...(process.resourcesPath ? { resourcesPath: process.resourcesPath } : {}),
-    }),
+    executablePath: verifyPeekabooPath,
   });
   // S5 — the golden-baseline SSIM pre-diff resolver. When a request carries a
   // baselineKey, this closure resolves the accepted baseline PNG per captured
@@ -1867,6 +1878,8 @@ async function initializeServices(): Promise<boolean> {
     logger: cyboflowLogger,
   });
   const verificationAgentRunner = new VerificationAgentRunner({
+    // The SAME binary the capability gate measured — see verifyPeekabooPath.
+    peekabooBin: verifyPeekabooPath,
     query: makeVerificationAgentQuery(cyboflowLogger),
     // Codex runtime for a codex-pinned/inherited visual-verify agent; absent Codex CLI fails open to skipped.
     codexQuery: makeCodexVerificationAgentQuery(cyboflowLogger),

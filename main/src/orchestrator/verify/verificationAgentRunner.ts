@@ -406,9 +406,19 @@ export interface VerificationAgentRunnerDeps {
   /**
    * The peekaboo binary exported as `VERIFY_PEEKABOO_BIN` for a
    * `native-screen` request (the driver's `attest window` /
-   * `native-screenshot` commands shell it). Defaults to the bare `peekaboo`
-   * PATH name — the same assumption `peekabooBackend`'s production client
-   * makes.
+   * `native-screenshot` commands shell it).
+   *
+   * MUST be the same binary the capability gate probed. `index.ts` resolves it
+   * once (`verifyPeekabooPath`) and hands it to both this runner and the
+   * `PeekabooBackend` behind `nativeCaptureProbe` — because a gate measuring
+   * one binary while the driver runs another affirms a capability that then
+   * fails deep inside a deployed run, after the count-1 screen lease and the
+   * budget have already been spent.
+   *
+   * Defaults to the bare `peekaboo` PATH name, which is only right when the
+   * probe side has no bundled copy either. `driverCore` cannot resolve the
+   * bundled path itself — it is node-builtins-only by design and never imports
+   * Electron — so this dep is the sole channel.
    */
   peekabooBin?: string;
   /**

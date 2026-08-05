@@ -516,6 +516,17 @@ host. Rebuilt around what a user can actually decide about:
   was false on every host and `native-screen` could never be available — even
   on one holding both grants. Neither showed up in three review rounds; the
   live CLI did, in one invocation.
+- **The gate and the driver must measure the SAME binary.** Pointing only the
+  capability probe at the bundled copy created a divergence that did not exist
+  while both sides defaulted to the bare PATH name: `VerificationAgentRunner`'s
+  `peekabooBin` was never wired in `index.ts`, so the deployed driver still
+  shelled `peekaboo` off PATH. On the exact host bundling exists for — grants
+  held, nothing on PATH — the gate would affirm `native-screen`, the request
+  would take the count-1 screen lease, spend budget, provision a snapshot and
+  deploy a full SDK agent, and only then ENOENT inside the run. `index.ts` now
+  resolves the path ONCE and hands it to both. Caught by the adversarial review,
+  not by the suite: the `peekabooBin` channel is well tested, and the untested
+  part was the one line of wiring in a file no unit test can import.
 - **The capture binary now ships inside the app** (`optionalDependencies` +
   `asarUnpack`, resolved by `peekabooExecutablePath.ts`, PATH kept as a last
   resort). Beyond sparing users a manual install: macOS TCC grants attach to a
