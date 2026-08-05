@@ -114,6 +114,23 @@ describe('useArtifactData', () => {
     expect(result.current.data).toEqual({ kind: 'idea', idea: IDEA });
   });
 
+  it("routes a COMBINED 'idea-spec' (payload_json.combined) through runDecomposition and yields kind 'stories'", async () => {
+    const IDEAS = [IDEA, { ...IDEA, id: 'idea-2' } as unknown as BacklogTaskItem];
+    runDecompositionQuerySpy.mockReset().mockResolvedValue(IDEAS);
+    const { result } = renderHook(() =>
+      useArtifactData(
+        makeArtifact({ atype: 'idea-spec', payloadJson: JSON.stringify({ combined: true }) }),
+        null,
+      ),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // Run-scoped like decomposed-stories: sourceRef is only the identity anchor.
+    expect(runDecompositionQuerySpy).toHaveBeenCalledWith({ runId: 'run-1' });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(result.current.data).toEqual({ kind: 'stories', ideas: IDEAS });
+  });
+
   it("routes 'decomposed-stories' through runDecomposition({ runId }) and yields kind 'stories' with an idea array", async () => {
     const IDEAS = [IDEA, { ...IDEA, id: 'idea-2' } as unknown as BacklogTaskItem];
     runDecompositionQuerySpy.mockReset().mockResolvedValue(IDEAS);

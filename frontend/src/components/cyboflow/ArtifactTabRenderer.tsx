@@ -112,21 +112,97 @@ function StateRow({ testid, color, text }: { testid: string; color: string; text
 // ---------------------------------------------------------------------------
 // idea-spec — rendered markdown doc on white, centered, max-width 680px.
 // ---------------------------------------------------------------------------
+/**
+ * One idea's rendered spec doc (shared by the single tab and the combined
+ * multi-idea tab). Renders whichever field actually carries the structured
+ * markdown spec. The planner agent's rich spec historically landed in
+ * `summary` (a write-path gap: the cyboflow_create_task/update_task MCP tools
+ * had no `body` field), while `body` held only the idea-picker one-liner — so
+ * rendering `body` verbatim produced a flat paragraph with literal '#'/'##'.
+ * Prefer `body` when it has line structure; otherwise fall back to `summary`;
+ * otherwise whatever is non-empty. Keep `summary` as the small caption only
+ * when it is NOT the doc.
+ */
+function IdeaSpecDoc({
+  idea,
+  runId,
+  projectId,
+  accent,
+}: {
+  idea: BacklogTaskItem;
+  runId: string;
+  projectId: number;
+  accent: string;
+}): ReactElement {
+  const bodyHasStructure = idea.body?.includes('\n') ?? false;
+  const specMarkdown = bodyHasStructure ? (idea.body ?? '') : (idea.summary || idea.body || '');
+  const summaryIsCaption = !!idea.summary && idea.summary !== specMarkdown;
+
+  const doc = (
+    <div
+      data-testid="artifact-idea-doc"
+      style={{
+        maxWidth: 680,
+        margin: '0 auto',
+        background: 'var(--color-surface-primary)',
+        border: `1px solid ${HAIRLINE}`,
+        padding: '34px 40px 56px',
+        marginTop: 18,
+        marginBottom: 18,
+      }}
+    >
+      <div
+        style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+      >
+        {idea.ref}
+      </div>
+      <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
+        {idea.title}
+      </h1>
+      {summaryIsCaption && (
+        <div style={{ fontSize: '11px', color: FAINT, marginBottom: 18 }}>{idea.summary}</div>
+      )}
+      {specMarkdown ? (
+        <MarkdownPreview content={specMarkdown} />
+      ) : (
+        <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+          This idea has no spec body yet.
+        </div>
+      )}
+    </div>
+  );
+  // Feedback is only coherent against the structured `body` doc — the
+  // revision agent rewrites `body`, so commenting on the `summary`
+  // fallback (bodyHasStructure=false) would have nothing to anchor to.
+  return bodyHasStructure ? (
+    <FeedbackDocPanel
+      projectId={projectId}
+      runId={runId}
+      atype="idea-spec"
+      sourceRef={idea.id}
+      documentSource={specMarkdown}
+      ideaDecomposed={idea.decomposed_at !== null}
+      accent={accent}
+    >
+      {doc}
+    </FeedbackDocPanel>
+  ) : (
+    doc
+  );
+}
+
 function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['idea-spec'];
   const { loading, error, data } = useArtifactData(artifact, projectId);
   const idea = data?.kind === 'idea' ? data.idea : null;
-
-  // Render whichever field actually carries the structured markdown spec. The
-  // planner agent's rich spec historically landed in `summary` (a write-path gap:
-  // the cyboflow_create_task/update_task MCP tools had no `body` field), while
-  // `body` held only the idea-picker one-liner — so rendering `body` verbatim
-  // produced a flat paragraph with literal '#'/'##'. Prefer `body` when it has
-  // line structure; otherwise fall back to `summary`; otherwise whatever is
-  // non-empty. Keep `summary` as the small caption only when it is NOT the doc.
-  const bodyHasStructure = idea?.body?.includes('\n') ?? false;
-  const specMarkdown = bodyHasStructure ? (idea?.body ?? '') : (idea?.summary || idea?.body || '');
-  const summaryIsCaption = !!idea?.summary && idea?.summary !== specMarkdown;
+  // The COMBINED multi-idea tab (payload_json.combined): useArtifactData took
+  // the run-scoped path and resolved the batch's ideas (kind 'stories'). Render
+  // one stacked doc per content-bearing, non-archived idea — each with its own
+  // FeedbackDocPanel anchored to that idea's id.
+  const batch =
+    data?.kind === 'stories'
+      ? data.ideas.filter((i) => i.archived_at === null && (i.body || i.summary))
+      : null;
 
   return (
     <Shell testid="artifact-idea-spec">
@@ -135,69 +211,39 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
         projectId={projectId}
         accent={accent}
         eyebrow="Artifact · idea spec"
-        meta={artifact.sourceRef ? `${artifact.sourceRef} · ${artifact.stepOrigin ?? 'idea-extractor'}` : undefined}
+        meta={
+          batch !== null
+            ? `${batch.length} ideas · ${artifact.stepOrigin ?? 'idea-extractor'}`
+            : artifact.sourceRef
+              ? `${artifact.sourceRef} · ${artifact.stepOrigin ?? 'idea-extractor'}`
+              : undefined
+        }
       />
       {loading ? (
         <StateRow testid="artifact-idea-loading" color={MUTED} text="Loading idea spec…" />
       ) : error ? (
         <StateRow testid="artifact-idea-error" color={RUST} text={error} />
+      ) : batch !== null ? (
+        batch.length === 0 ? (
+          <StateRow testid="artifact-idea-empty" color={MUTED} text="No idea content to display." />
+        ) : (
+          <div style={{ flex: 1 }} data-testid="artifact-idea-specs-combined">
+            {batch.map((batchIdea) => (
+              <IdeaSpecDoc
+                key={batchIdea.id}
+                idea={batchIdea}
+                runId={artifact.runId}
+                projectId={projectId}
+                accent={accent}
+              />
+            ))}
+          </div>
+        )
       ) : !idea ? (
         <StateRow testid="artifact-idea-empty" color={MUTED} text="No idea content to display." />
       ) : (
         <div style={{ flex: 1 }}>
-          {(() => {
-            const doc = (
-              <div
-                data-testid="artifact-idea-doc"
-                style={{
-                  maxWidth: 680,
-                  margin: '0 auto',
-                  background: 'var(--color-surface-primary)',
-                  border: `1px solid ${HAIRLINE}`,
-                  padding: '34px 40px 56px',
-                  marginTop: 18,
-                  marginBottom: 18,
-                }}
-              >
-                <div
-                  style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
-                >
-                  {idea.ref}
-                </div>
-                <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
-                  {idea.title}
-                </h1>
-                {summaryIsCaption && (
-                  <div style={{ fontSize: '11px', color: FAINT, marginBottom: 18 }}>{idea.summary}</div>
-                )}
-                {specMarkdown ? (
-                  <MarkdownPreview content={specMarkdown} />
-                ) : (
-                  <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-                    This idea has no spec body yet.
-                  </div>
-                )}
-              </div>
-            );
-            // Feedback is only coherent against the structured `body` doc — the
-            // revision agent rewrites `body`, so commenting on the `summary`
-            // fallback (bodyHasStructure=false) would have nothing to anchor to.
-            return bodyHasStructure ? (
-              <FeedbackDocPanel
-                projectId={projectId}
-                runId={artifact.runId}
-                atype="idea-spec"
-                sourceRef={idea.id}
-                documentSource={specMarkdown}
-                ideaDecomposed={idea.decomposed_at !== null}
-                accent={accent}
-              >
-                {doc}
-              </FeedbackDocPanel>
-            ) : (
-              doc
-            );
-          })()}
+          <IdeaSpecDoc idea={idea} runId={artifact.runId} projectId={projectId} accent={accent} />
         </div>
       )}
     </Shell>

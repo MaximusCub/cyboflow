@@ -1061,7 +1061,7 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
     expect(spec!.step_origin).toBe('Plan · idea spec');
   });
 
-  it('mints ONE idea-spec PER seeded idea for a multi-idea planner batch (IDEA-009)', async () => {
+  it('mints ONE COMBINED idea-spec for a multi-idea batch (decomposed-stories pattern), anchored on the first idea', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     TaskChangeRouter.initialize(adapter);
@@ -1091,13 +1091,59 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
 
     const specs = db
       .prepare(
-        `SELECT source_ref, label FROM artifacts
-          WHERE run_id = 'run-batch' AND atype = 'idea-spec' ORDER BY label`,
+        `SELECT source_ref, label, payload_json FROM artifacts
+          WHERE run_id = 'run-batch' AND atype = 'idea-spec'`,
       )
+      .all() as Array<{ source_ref: string; label: string; payload_json: string | null }>;
+    expect(specs).toHaveLength(1);
+    // Anchored on the FIRST owned idea; label counts content-bearing ideas;
+    // payload marks the renderer's combined branch.
+    expect(specs[0].source_ref).toBe(ideaA);
+    expect(specs[0].label).toBe('Idea specs · 2 ideas');
+    expect(JSON.parse(specs[0].payload_json ?? '{}')).toEqual({ combined: true });
+  });
+
+  it('CONVERTS the single per-idea spec row into the combined tab when the batch grows past one idea', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    const router = TaskChangeRouter.getInstance();
+
+    seedPlannerRun(db, 'run-grow');
+    const { taskId: ideaA } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Alpha',
+      summary: 'spec A',
+      runId: 'run-grow',
+    });
+    setSeedIdeaIds(db, 'run-grow', [ideaA]);
+    await handleEntityWrite(adapter, 'run-grow', 'idea');
+
+    // Single-idea moment: the familiar per-idea tab.
+    const single = readArtifact(db, 'run-grow', 'idea-spec');
+    expect(single!.source_ref).toBe(ideaA);
+    expect(single!.label).toBe('Idea Alpha');
+
+    const { taskId: ideaB } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Beta',
+      summary: 'spec B',
+      runId: 'run-grow',
+    });
+    setSeedIdeaIds(db, 'run-grow', [ideaA, ideaB]);
+    await handleEntityWrite(adapter, 'run-grow', 'idea');
+
+    // The (run_id, atype, source_ref) UPSERT adopted ideaA's row in place —
+    // still exactly one artifact, now the combined tab.
+    const specs = db
+      .prepare(`SELECT source_ref, label FROM artifacts WHERE run_id = 'run-grow' AND atype = 'idea-spec'`)
       .all() as Array<{ source_ref: string; label: string }>;
-    expect(specs).toHaveLength(2);
-    expect(specs.map((s) => s.source_ref).sort()).toEqual([ideaA, ideaB].sort());
-    expect(specs.map((s) => s.label)).toEqual(['Idea Alpha', 'Idea Beta']);
+    expect(specs).toHaveLength(1);
+    expect(specs[0].source_ref).toBe(ideaA);
+    expect(specs[0].label).toBe('Idea specs · 2 ideas');
   });
 
   // -------------------------------------------------------------------------

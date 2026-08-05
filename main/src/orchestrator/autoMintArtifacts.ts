@@ -354,19 +354,26 @@ async function mintIdeaSpecForIdea(
 }
 
 /**
- * idea-spec mint for EVERY idea the run OWNS (the multi-idea planner batch,
- * IDEA-009): one artifact per owned idea, each with sourceRef = that idea id and
- * its own per-idea label (title ?? ref ?? labelFallback). Migration 062 makes
- * idea-spec identity (run_id, atype, source_ref), so the per-idea rows coexist;
- * every OTHER atype stays strictly one-per-(run, atype).
+ * idea-spec mint for the ideas the run OWNS.
+ *
+ * SINGLE-idea run: one per-idea tab, sourceRef = the idea, label = its title —
+ * unchanged since migration 062/063.
+ *
+ * MULTI-idea batch: ONE run-scoped COMBINED tab (the decomposed-stories
+ * pattern) instead of N disjoint per-idea tabs. sourceRef anchors on the FIRST
+ * owned idea so the row minted while the batch was still size 1 is ADOPTED in
+ * place by the (run_id, atype, source_ref) UPSERT — the single→multi transition
+ * converts that row rather than orphaning it. `payload_json.combined = true` is
+ * the renderer's branch marker (it re-derives the batch's specs from the live
+ * entity model via tasks.runDecomposition, exactly like decomposed-stories).
+ * Content gate: only ideas with a body OR summary count toward the label; a
+ * batch with NO content-bearing idea mints nothing.
  *
  * Resolution is the FULL result of `listRunOwnedOrBatchIdeaIds` — the run's
- * owned ideas (planner/ship/launch seed/create them), else the single sprint-batch
- * idea (a standalone sprint owns none) — vs. resolveOriginatingIdeaId, which
- * takes only the FIRST of that same list. No resolvable idea → fail-soft (logs
- * + returns). Each per-idea mint is itself content-gated inside
- * mintIdeaSpecForIdea (a bare idea with no body/summary is skipped), so a batch
- * surfaces a tab only for the ideas that actually have spec content yet.
+ * owned ideas (planner/ship/launch seed/create/adopt them), else the single
+ * sprint-batch idea (a standalone sprint owns none) — vs. resolveOriginatingIdeaId,
+ * which takes only the FIRST of that same list. No resolvable idea → fail-soft
+ * (logs + returns).
  */
 async function mintIdeaSpecForOwnedIdeas(
   db: DatabaseLike,
@@ -384,9 +391,42 @@ async function mintIdeaSpecForOwnedIdeas(
     logger?.debug('[autoMintArtifacts] idea-spec skipped — run owns no resolvable idea', { runId });
     return;
   }
-  for (const ideaId of ideaIds) {
-    await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, labelFallback, logger);
+
+  if (ideaIds.length === 1) {
+    await mintIdeaSpecForIdea(db, runId, projectId, ideaIds[0], stepOrigin, labelFallback, logger);
+    return;
   }
+
+  // CONTENT GATE — mirror mintIdeaSpecForIdea's per-idea gate across the batch:
+  // count the ideas that actually have spec content; none yet → no tab.
+  let withContent = 0;
+  for (const ideaId of ideaIds) {
+    const row = db
+      .prepare('SELECT body AS body, summary AS summary FROM ideas WHERE id = ?')
+      .get(ideaId) as { body: unknown; summary: unknown } | undefined;
+    if (!row) continue;
+    const hasBody = typeof row.body === 'string' && row.body.length > 0;
+    const hasSummary = typeof row.summary === 'string' && row.summary.length > 0;
+    if (hasBody || hasSummary) withContent += 1;
+  }
+  if (withContent === 0) {
+    logger?.debug('[autoMintArtifacts] combined idea-spec skipped — no idea has content yet', {
+      runId,
+    });
+    return;
+  }
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'idea-spec',
+    label: 'Idea specs · ' + pluralize(withContent, 'idea'),
+    sourceRef: ideaIds[0],
+    stepOrigin,
+    payloadJson: JSON.stringify({ combined: true }),
+    isNew: true,
+    actor: 'orchestrator',
+  });
 }
 
 /**

@@ -217,7 +217,14 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
     // does NOT require sourceRef; it re-derives from the live entity model via
     // artifact.runId (ALWAYS set). Handled here in its own block so the
     // single-idea (sourceRef) path below stays untouched.
-    if (atype === 'decomposed-stories') {
+    //
+    // A COMBINED idea-spec (payload_json.combined — the multi-idea batch's one
+    // rolled-up "Idea specs" tab) takes the SAME run-scoped path: same query,
+    // same live subscription, resolving to kind 'stories' with the batch's
+    // ideas. Its sourceRef is only an identity anchor, not the data source.
+    const isCombinedIdeaSpec =
+      atype === 'idea-spec' && parsePayload(payloadJson)['combined'] === true;
+    if (atype === 'decomposed-stories' || isCombinedIdeaSpec) {
       let cancelled = false;
       // Monotonic fetch id — a slow earlier (re-)fetch must never clobber a newer.
       let latestFetchId = 0;

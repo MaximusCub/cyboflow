@@ -284,6 +284,30 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('md-preview')).toHaveTextContent('The center column stacks.');
   });
 
+  it('renders the COMBINED multi-idea spec tab as stacked per-idea docs (kind stories)', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'stories',
+        ideas: [
+          makeIdea(),
+          makeIdea({ id: 'IDEA-019', ref: 'IDEA-019', title: 'Second idea', body: '# Second\n\nBody two.' }),
+          // Archived + content-less ideas are filtered out of the combined doc.
+          makeIdea({ id: 'IDEA-020', ref: 'IDEA-020', archived_at: '2026-01-01T00:00:00.000Z' }),
+          makeIdea({ id: 'IDEA-021', ref: 'IDEA-021', body: null, summary: null }),
+        ],
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-spec' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-idea-specs-combined')).toBeInTheDocument();
+    expect(screen.getAllByTestId('artifact-idea-doc')).toHaveLength(2);
+    expect(screen.getByText('Tabbed center pane')).toBeInTheDocument();
+    expect(screen.getByText('Second idea')).toBeInTheDocument();
+    expect(screen.queryByText('IDEA-020')).not.toBeInTheDocument();
+  });
+
   it('shows the idea-spec loading and error states', () => {
     setHook({ loading: true, error: null, data: null });
     const { rerender } = render(<ArtifactTabRenderer artifact={makeArtifact()} {...PROPS} />);
