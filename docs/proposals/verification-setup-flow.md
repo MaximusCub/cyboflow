@@ -414,7 +414,10 @@ Generated from the phase-1 roster; nearly invisible for most users.
   a visible health row — never a deep post-deploy failure.
 - **Conditional grants branch.** The Peekaboo grant pair appears only when
   some project's runbook declares `native-screen`. CDP-only users never see a
-  permissions screen.
+  permissions screen. **[SUPERSEDED 2026-08-05 — see "The probe table is three
+  rows" below.]** Hiding the rows made the panel silent at exactly the moment
+  the answer was needed: you cannot decide whether to declare `native-screen`
+  without first being told whether screen capture works on this host.
 - **Health panel** on `VerifyQueueView` (the natural "verification screen"):
   per-project-per-modality attempts, pass rate, failure-class histogram
   (env / deliverable / ambiguous, from §3.1), median duration, budget
@@ -460,7 +463,8 @@ from the section above:
   "Test driving now" under a screen lease against an owned probe window. §8
   still lists the drive API shape as open, so there is no audited API to drive
   through and the safety machinery the bullet describes has nothing to wrap.
-  Reported as a `blocked` probe row; the acceptance-matrix `it.todo` stays.
+  The acceptance-matrix `it.todo` stays; the disclosure now rides the
+  `accessibility` row rather than a probe row of its own (below).
 - **The capability row shown is the one the ENGINE reads**, keyed by the
   request pin's `runbook_hash` (a proven revision's hash, else migration 095's
   `''`) — not the most recently updated row. `verify_capability_state` is keyed
@@ -481,6 +485,46 @@ from the section above:
   counted against it". The panel surfaces the overlap
   (`setupProofCallsUsed`) rather than silently changing enforcement, since §8
   lists proof-run cost accounting as an open question.
+
+**The probe table is three rows [2026-08-05].** The first cut listed five —
+`node`, `chromium`, `driver-cli`, `native-capture`, `native-drive` — of which
+one offered an action and two described our own machinery rather than the
+host. Rebuilt around what a user can actually decide about:
+
+- **`browser-driving` rolls up node + chromium + the driver CLI.** They are not
+  three decisions; Playwright either drives a browser here or it does not. The
+  row names every part that fell over, and still offers chromium's install.
+- **The two macOS TCC grants get a row each, always shown.** They are granted
+  separately, in separate System Settings panes, and holding one but not the
+  other is the common case — a single ANDed boolean could only say "something
+  is wrong". `nativeScreenDeclared` survives, but now only sets how loudly an
+  unmet grant renders: required when a runbook depends on it, information
+  otherwise. This retires the "conditional grants branch" bullet above.
+- **`native-drive` is gone rather than relabelled.** It probed nothing about
+  the host — it reported that §8's drive API is unbuilt. That disclosure moved
+  onto the `accessibility` row, whose grant is the one driving would need.
+- **Remedies are per-row and honest about their limits.** Chromium installs in
+  place. Accessibility gets the OS consent prompt with a Settings fallback,
+  because macOS fires that prompt at most once per binary and then silently
+  no-ops — a button wired to the prompt alone works exactly one time in the
+  app's lifetime. Screen Recording gets the pane only: macOS exposes no request
+  API for it at any privilege level.
+- **The grant probe was reading a flag that does not exist.** `peekaboo
+  permissions --json` exits 64 on the unknown option (it is `--json-output`),
+  and the parser looked for `{permissions}` where v2 nests under
+  `{data:{permissions}}`. Both bugs pointed the same way, so `healthCheck()`
+  was false on every host and `native-screen` could never be available — even
+  on one holding both grants. Neither showed up in three review rounds; the
+  live CLI did, in one invocation.
+- **The capture binary now ships inside the app** (`optionalDependencies` +
+  `asarUnpack`, resolved by `peekabooExecutablePath.ts`, PATH kept as a last
+  resort). Beyond sparing users a manual install: macOS TCC grants attach to a
+  BINARY, and an npx-resolved peekaboo lives under a content-hashed cache path
+  that moves on every version bump — silently revoking both grants and
+  reporting them declined. Still on the deprecated v2 package; v3 is 52 MB plus
+  a sidecar dylib against v2's 2.2 MB, for a capture-only path. The parser
+  reads both output shapes, so that bump is a one-line change when the size is
+  worth paying.
 
 **STILL OPEN after phase 3** — surfaced by the adversarial review of this work,
 each wider than the panel and deliberately not folded into it:
