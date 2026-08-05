@@ -19,8 +19,10 @@ afterEach(async () => {
 describe('ConfigManager run-type defaults', () => {
   it('reads sparse entries raw and keeps launch floors separate from defaultModel', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
+    await manager.initialize();
 
     expect(manager.getConfig().runTypeDefaults).toBeUndefined();
+    expect(manager.getDefaultModel()).toBe('sonnet');
     expect(manager.getRunTypeDefaults('workflow:nonexistent')).toBeUndefined();
     expect(manager.getDefaultLaunchModel('workflow:nonexistent')).toBe('opus');
     expect(manager.getDefaultLaunchModel('workflow:nonexistent')).not.toBe(manager.getDefaultModel());
@@ -34,16 +36,30 @@ describe('ConfigManager run-type defaults', () => {
   it('returns the previous value and applies sparse merge deletion', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    await manager.updateConfig({ runTypeDefaults: { quick: { model: 'opus' } } });
+    const prior = { model: 'opus' as const };
+    await manager.updateConfig({ runTypeDefaults: { quick: prior } });
 
     const updated = await manager.applyRunTypeDefault('quick', {
       kind: 'merge',
       value: { model: null },
     });
 
-    expect(updated.previous).toEqual({ model: 'opus' });
+    expect(updated.previous).toEqual(prior);
     expect(updated.config.runTypeDefaults).toBeUndefined();
     expect(manager.getRunTypeDefaults('quick')).toBeUndefined();
+  });
+
+  it('creates a sparse key when merging an override that did not previously exist', async () => {
+    const manager = new ConfigManager('/tmp/test-git-path');
+    await manager.initialize();
+
+    const created = await manager.applyRunTypeDefault('quick', {
+      kind: 'merge',
+      value: { substrate: 'sdk' },
+    });
+
+    expect(created.previous).toBeUndefined();
+    expect(created.config.runTypeDefaults?.quick).toEqual({ substrate: 'sdk' });
   });
 
   it('returns undefined when the key did not exist and supports replace', async () => {

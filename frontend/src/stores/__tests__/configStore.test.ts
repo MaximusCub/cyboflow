@@ -44,6 +44,7 @@ describe('configStore.updateConfig', () => {
     const ok = await useConfigStore.getState().updateConfig({ verbose: true });
 
     expect(ok).toBe(true);
+    expect(configUpdate).toHaveBeenCalledWith({ verbose: true });
     expect(configGet).toHaveBeenCalledTimes(1);
     expect(useConfigStore.getState().config).toEqual(baseConfig({ verbose: true }));
     expect(useConfigStore.getState().error).toBeNull();
