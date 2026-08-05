@@ -137,7 +137,7 @@ function connectToOrchestrator(): net.Socket {
 function sendQuery(
   type: string,
   params: Record<string, unknown>,
-  timeoutMs = 30_000,
+  timeoutMs: number | null = 30_000,
 ): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
     if (!ipcClient || ipcClient.destroyed) {
@@ -146,15 +146,19 @@ function sendQuery(
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
 
-    const timer = setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, timeoutMs);
+    // timeoutMs null = wait forever. Safe because a pending entry cannot
+    // outlive the run: the IPC socket closing exits this whole process.
+    const timer = timeoutMs === null
+      ? undefined
+      : setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, timeoutMs);
 
     pendingRequests.set(requestId, {
       resolve: (response: unknown) => {
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         resolve(response);
       },
       reject: (reason: Error) => {
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         reject(reason);
       },
     });
@@ -1109,7 +1113,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 async function executeMcpQuery(
   type: string,
   params: Record<string, unknown>,
-  timeoutMs?: number,
+  timeoutMs?: number | null,
 ): Promise<CallToolResult> {
   try {
     const queryPromise = sendQuery(type, params, timeoutMs);
@@ -1611,12 +1615,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
       }
 
-      // Human question gates legitimately block for hours (e.g. an interview
-      // while the user steps away) — 24h is a leak backstop, not an interaction
-      // budget. Substrate MCP clients must allow MORE than this (Codex:
-      // tool_timeout_sec in runConfig.buildMcpConfig) so the agent sees this
-      // structured orchestrator_timeout rather than a client channel error.
-      return executeMcpQuery('mcp-request-user-input', { questions }, 24 * 60 * 60_000);
+      // Human question gates legitimately block for days (sessions get left
+      // open over a weekend) — no bridge timeout: the gate waits as long as the
+      // run is alive (socket close exits this process). The only remaining
+      // bound is the substrate MCP client's own cap (Codex: tool_timeout_sec
+      // in runConfig.buildMcpConfig; Claude has none).
+      return executeMcpQuery('mcp-request-user-input', { questions }, null);
     }
 
     case 'cyboflow_create_task': {

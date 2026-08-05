@@ -45,7 +45,7 @@ describe('Codex app-server run configuration', () => {
             },
             required: true,
             default_tools_approval_mode: 'approve',
-            tool_timeout_sec: 25 * 60 * 60,
+            tool_timeout_sec: 7 * 24 * 60 * 60,
           },
         },
       },
