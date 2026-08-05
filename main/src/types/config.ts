@@ -5,6 +5,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
+import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 /**
  * Auto-surface idle PTY quick sessions into the human review queue. Stored
@@ -211,10 +212,18 @@ export interface AppConfig {
     showAdvanced?: boolean;
     baseBranch?: string;
   };
+  // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
+  // synthetic global `quick` key. Intentionally NOT seeded into ConfigManager's
+  // constructor defaults, so config.json stays byte-identical for users who
+  // never touch it. Writes use the dedicated IPC operation below, not the
+  // generic UpdateConfigRequest, so the two channels cannot race on this field.
+  runTypeDefaults?: Record<string, RunTypeDefaults>;
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
 }
 
+// `runTypeDefaults` is deliberately absent from this generic payload: its
+// dedicated IPC operation is the exclusive write channel, preventing races.
 export interface UpdateConfigRequest {
   verbose?: boolean;
   claudeExecutablePath?: string;

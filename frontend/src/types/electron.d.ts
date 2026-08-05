@@ -31,6 +31,7 @@ import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/
 import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 
 interface LogEntry {
   timestamp: string;
@@ -319,6 +320,10 @@ interface ElectronAPI {
   config: {
     get: () => Promise<IPCDataResponse<AppConfig>>;
     update: (updates: Record<string, unknown>) => Promise<IPCResponse<void>>;
+    applyRunTypeDefault: (
+      key: string,
+      op: RunTypeDefaultsOp,
+    ) => Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>>;
     getSessionPreferences: () => Promise<IPCResponse<SessionCreationPreferences>>;
     updateSessionPreferences: (preferences: SessionCreationPreferences) => Promise<IPCResponse<void>>;
   };

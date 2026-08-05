@@ -4,6 +4,7 @@ import {
   isAgentProviderAccess,
   resolveAgentProviderAccess,
 } from '../../../shared/types/agentRuntime';
+import type { RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 
 export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claudeCodeManager }: AppServices): void {
   ipcMain.handle('config:get', async () => {
@@ -50,6 +51,23 @@ export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claude
     }
   });
 
+  ipcMain.handle(
+    'config:apply-run-type-default',
+    async (
+      _event,
+      key: string,
+      op: RunTypeDefaultsOp,
+    ) => {
+      try {
+        const result = await configManager.applyRunTypeDefault(key, op);
+        return { success: true, data: result };
+      } catch (error) {
+        console.error('Failed to apply run type default:', error);
+        return { success: false, error: 'Failed to apply run type default' };
+      }
+    },
+  );
+
   ipcMain.handle('config:get-session-preferences', async () => {
     try {
       const preferences = configManager.getSessionCreationPreferences();
@@ -69,4 +87,4 @@ export function registerConfigHandlers(ipcMain: IpcMain, { configManager, claude
       return { success: false, error: 'Failed to update session creation preferences' };
     }
   });
-} 
+}

@@ -5,6 +5,7 @@ import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
+import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 export interface AppConfig {
   gitRepoPath: string;
@@ -13,6 +14,12 @@ export interface AppConfig {
   runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
+  // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
+  // synthetic global `quick` key. This field is intentionally NOT seeded into
+  // ConfigManager's constructor defaults, so config.json stays byte-identical
+  // for users who never touch it. It is omitted from UpdateConfigRequest:
+  // writes use the dedicated IPC operation so the two channels cannot race.
+  runTypeDefaults?: Record<string, RunTypeDefaults>;
   // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
   // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to the app's default model.
   assistantModel?: string;

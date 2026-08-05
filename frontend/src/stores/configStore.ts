@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 import { API } from '../utils/api';
 import type { AppConfig } from '../types/config';
+import type {
+  RunTypeDefaults,
+  RunTypeDefaultsOp,
+} from '../../../shared/types/sessionDefaults';
 
 interface ConfigStore {
   config: AppConfig | null;
@@ -15,6 +19,10 @@ interface ConfigStore {
    * check the return value instead of racing the shared `error` field.
    */
   updateConfig: (updates: Partial<AppConfig>) => Promise<boolean>;
+  applyRunTypeDefault: (
+    key: string,
+    op: RunTypeDefaultsOp,
+  ) => Promise<RunTypeDefaults | undefined>;
 }
 
 export const useConfigStore = create<ConfigStore>((set, get) => ({
@@ -49,6 +57,24 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Failed to update config' });
       return false;
+    }
+  },
+
+  applyRunTypeDefault: async (
+    key: string,
+    op: RunTypeDefaultsOp,
+  ) => {
+    try {
+      const response = await API.config.applyRunTypeDefault(key, op);
+      if (response.success) {
+        await get().fetchConfig();
+        return response.data?.previous;
+      }
+      set({ error: response.error || 'Failed to apply run type default' });
+      return undefined;
+    } catch (error) {
+      set({ error: 'Failed to apply run type default' });
+      return undefined;
     }
   },
 }));

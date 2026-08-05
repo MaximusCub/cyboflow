@@ -19,9 +19,16 @@ import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../stores/claudeModelCatalogStore';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
+import {
+  DEFAULT_QUICK_MODEL,
+  DEFAULT_WORKFLOW_MODEL,
+} from '../../../../shared/types/sessionDefaults';
 
 /** The quick-session default model — Opus, per product direction. */
-export const DEFAULT_QUICK_MODEL = 'opus';
+export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
+
+/** The workflow-launch default model — Opus, matching quick sessions. */
+export { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults';
 
 /**
  * The Ultracode-launch default model — Fable 5, per product direction (ultracode
@@ -33,14 +40,6 @@ export const DEFAULT_QUICK_MODEL = 'opus';
  */
 export const ULTRACODE_DEFAULT_MODEL = 'fable';
 
-/**
- * The workflow-launch default model — Opus, matching quick sessions (per product
- * direction). Threaded into runs.start.mutate({ model }) from the Configure surface
- * and stamped onto workflow_runs.model (migration 037). A run launched without a
- * picker (legacy / programmatic callers) still pins nothing and falls to the SDK
- * default; this constant only seeds the user-facing pickers.
- */
-export const DEFAULT_WORKFLOW_MODEL = 'opus';
 export const DEFAULT_CODEX_MODEL = 'auto';
 
 interface ModelSelectorProps {

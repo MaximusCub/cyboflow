@@ -3,6 +3,11 @@ import { app } from 'electron';
 import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config';
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
 import {
+  DEFAULT_RUN_TYPE_MODEL_FLOORS,
+  type RunTypeDefaults,
+  type RunTypeDefaultsOp,
+} from '../../../shared/types/sessionDefaults';
+import {
   type AssistantContextRetention,
   DEFAULT_ASSISTANT_CONTEXT_RETENTION,
   isAssistantContextRetention,
@@ -254,6 +259,73 @@ export class ConfigManager extends EventEmitter {
 
   getDefaultModel(): string {
     return this.config.defaultModel || 'sonnet';
+  }
+
+  /** Return the raw sparse per-launch-type override, without applying floors. */
+  getRunTypeDefaults(key: string): RunTypeDefaults | undefined {
+    return this.config.runTypeDefaults?.[key];
+  }
+
+  /**
+   * Resolve the model for a launch kind. A per-kind override wins; otherwise
+   * the kind's picker floor wins. In particular, workflow launches floor to
+   * Opus and never inherit the legacy global defaultModel setting.
+   */
+  getDefaultLaunchModel(runType: string): string {
+    return this.config.runTypeDefaults?.[runType]?.model
+      ?? (runType === 'quick'
+        ? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick
+        : DEFAULT_RUN_TYPE_MODEL_FLOORS.workflow);
+  }
+
+  /**
+   * Apply one sparse per-launch-type override and return the previous value.
+   * Merge patches delete members set to null; replace null (or an empty
+   * resulting object) deletes the run-type key. Empty run-type keys are also
+   * removed so they can never become a persisted config entry.
+   */
+  async applyRunTypeDefault(
+    key: string,
+    op: RunTypeDefaultsOp,
+  ): Promise<{ previous: RunTypeDefaults | undefined; config: AppConfig }> {
+    const previous = this.config.runTypeDefaults?.[key];
+    const runTypeDefaults = { ...this.config.runTypeDefaults };
+
+    if (op.kind === 'replace') {
+      if (op.value === null || Object.keys(op.value).length === 0) {
+        delete runTypeDefaults[key];
+      } else {
+        const replacement = { ...op.value };
+        for (const field of Object.keys(replacement) as Array<keyof RunTypeDefaults>) {
+          if (replacement[field] === undefined) delete replacement[field];
+        }
+        if (Object.keys(replacement).length === 0) delete runTypeDefaults[key];
+        else runTypeDefaults[key] = replacement;
+      }
+    } else {
+      const merged: RunTypeDefaults = { ...previous };
+      for (const field of Object.keys(op.value) as Array<keyof RunTypeDefaults>) {
+        const value = op.value[field];
+        if (value === null) {
+          delete merged[field];
+        } else if (value !== undefined) {
+          switch (field) {
+            case 'model': merged.model = value; break;
+            case 'permissionMode': merged.permissionMode = value; break;
+            case 'substrate': merged.substrate = value; break;
+            case 'agentRuntime': merged.agentRuntime = value; break;
+            case 'reasoningEffort': merged.reasoningEffort = value; break;
+          }
+        }
+      }
+      if (Object.keys(merged).length === 0) delete runTypeDefaults[key];
+      else runTypeDefaults[key] = merged;
+    }
+
+    const config = await this.updateConfig({
+      runTypeDefaults: Object.keys(runTypeDefaults).length > 0 ? runTypeDefaults : undefined,
+    });
+    return { previous, config };
   }
 
   /**

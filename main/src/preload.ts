@@ -16,6 +16,7 @@ import type {
 } from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
+import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../shared/types/sessionDefaults';
 import {
   DESIGN_PROTO_SERVER_ENSURE_CHANNEL,
   DESIGN_PROTO_SERVER_STOP_CHANNEL,
@@ -437,6 +438,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   config: {
     get: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get'),
     update: (updates: UpdateConfigRequest): Promise<IPCResponse> => ipcRenderer.invoke('config:update', updates),
+    applyRunTypeDefault: (
+      key: string,
+      op: RunTypeDefaultsOp,
+    ): Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>> =>
+      ipcRenderer.invoke('config:apply-run-type-default', key, op),
     getSessionPreferences: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get-session-preferences'),
     updateSessionPreferences: (preferences: AppConfig['sessionCreationPreferences']): Promise<IPCResponse> => ipcRenderer.invoke('config:update-session-preferences', preferences),
   },

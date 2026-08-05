@@ -11,6 +11,8 @@ import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
+import type { AppConfig } from '../types/config';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -445,6 +447,14 @@ export class API {
     async update(updates: Record<string, unknown>) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.config.update(updates);
+    },
+
+    async applyRunTypeDefault(
+      key: string,
+      op: RunTypeDefaultsOp,
+    ): Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.config.applyRunTypeDefault(key, op);
     },
 
     async getSessionPreferences() {
