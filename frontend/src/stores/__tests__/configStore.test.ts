@@ -72,10 +72,24 @@ describe('configStore.updateConfig', () => {
 describe('configStore.applyRunTypeDefault', () => {
   it('returns the previous value and refetches after a successful write', async () => {
     const previous = { model: 'sonnet' };
-    configApplyRunTypeDefault.mockResolvedValue({ success: true, data: { previous, config: baseConfig() } });
-    configGet.mockResolvedValue({
-      success: true,
-      data: baseConfig({ runTypeDefaults: { workflow: { model: 'opus' } } }),
+    const initial = baseConfig({ runTypeDefaults: { workflow: { model: 'sonnet' } } });
+    const writeResponseConfig = baseConfig({
+      runTypeDefaults: { workflow: { model: 'opus' } },
+      verbose: false,
+    });
+    const fetchedConfig = baseConfig({
+      runTypeDefaults: { workflow: { model: 'opus' } },
+      verbose: true,
+    });
+    const calls: string[] = [];
+    useConfigStore.setState({ config: initial });
+    configApplyRunTypeDefault.mockImplementation(async () => {
+      calls.push('write');
+      return { success: true, data: { previous, config: writeResponseConfig } };
+    });
+    configGet.mockImplementation(async () => {
+      calls.push('get');
+      return { success: true, data: fetchedConfig };
     });
 
     const result = await useConfigStore.getState().applyRunTypeDefault(
@@ -83,15 +97,15 @@ describe('configStore.applyRunTypeDefault', () => {
       { kind: 'merge', value: { model: 'opus' } },
     );
 
-    expect(result).toEqual(previous);
+    expect(result).toBe(previous);
     expect(configApplyRunTypeDefault).toHaveBeenCalledWith(
       'workflow',
       { kind: 'merge', value: { model: 'opus' } },
     );
+    expect(calls).toEqual(['write', 'get']);
     expect(configGet).toHaveBeenCalledTimes(1);
-    expect(useConfigStore.getState().config).toEqual(
-      baseConfig({ runTypeDefaults: { workflow: { model: 'opus' } } }),
-    );
+    expect(useConfigStore.getState().config).toBe(fetchedConfig);
+    expect(useConfigStore.getState().config).not.toBe(writeResponseConfig);
   });
 
   it('leaves config untouched and does not refetch when the write fails', async () => {
@@ -106,7 +120,7 @@ describe('configStore.applyRunTypeDefault', () => {
 
     expect(result).toBeUndefined();
     expect(configGet).not.toHaveBeenCalled();
-    expect(useConfigStore.getState().config).toEqual(existing);
+    expect(useConfigStore.getState().config).toBe(existing);
     expect(useConfigStore.getState().error).toBe('nope');
   });
 

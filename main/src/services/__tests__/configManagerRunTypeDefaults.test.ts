@@ -53,11 +53,64 @@ describe('ConfigManager run-type defaults', () => {
     expect(created.previous).toBeUndefined();
     expect(created.config.runTypeDefaults?.['workflow:flow-a']).toEqual({ model: 'sonnet', substrate: 'sdk' });
 
+    const persistedAfterCreate = JSON.parse(
+      await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'),
+    ) as { runTypeDefaults?: Record<string, Record<string, string>> };
+    expect(persistedAfterCreate.runTypeDefaults?.['workflow:flow-a']).toEqual({
+      model: 'sonnet',
+      substrate: 'sdk',
+    });
+
     const replaced = await manager.applyRunTypeDefault('workflow:flow-a', {
       kind: 'replace',
       value: null,
     });
     expect(replaced.previous).toEqual({ model: 'sonnet', substrate: 'sdk' });
     expect(replaced.config.runTypeDefaults).toBeUndefined();
+
+    const persistedAfterDelete = JSON.parse(
+      await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'),
+    ) as { runTypeDefaults?: Record<string, Record<string, string>> };
+    expect(persistedAfterDelete.runTypeDefaults).toBeUndefined();
+  });
+
+  it('preserves unrelated sparse fields across merge patches before deleting the empty key', async () => {
+    const manager = new ConfigManager('/tmp/test-git-path');
+    await manager.initialize();
+    await manager.updateConfig({
+      runTypeDefaults: {
+        quick: {
+          model: 'opus',
+          substrate: 'sdk',
+          reasoningEffort: 'high',
+        },
+      },
+    });
+
+    const merged = await manager.applyRunTypeDefault('quick', {
+      kind: 'merge',
+      value: { model: null, substrate: 'interactive' },
+    });
+
+    expect(merged.previous).toEqual({
+      model: 'opus',
+      substrate: 'sdk',
+      reasoningEffort: 'high',
+    });
+    expect(merged.config.runTypeDefaults?.quick).toEqual({
+      substrate: 'interactive',
+      reasoningEffort: 'high',
+    });
+
+    const deleted = await manager.applyRunTypeDefault('quick', {
+      kind: 'merge',
+      value: { substrate: null, reasoningEffort: null },
+    });
+
+    expect(deleted.previous).toEqual({
+      substrate: 'interactive',
+      reasoningEffort: 'high',
+    });
+    expect(deleted.config.runTypeDefaults).toBeUndefined();
   });
 });
