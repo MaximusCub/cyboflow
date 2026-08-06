@@ -31,9 +31,9 @@ import type {
  * `driver-cli` resolved.
  */
 export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
-  'browser-driving': 'browser driving',
-  'screen-recording': 'screen recording',
-  accessibility: 'accessibility',
+  'browser-driving': 'Playwright browser control',
+  'screen-recording': 'Screen recording',
+  accessibility: 'Accessibility controls',
 };
 
 /**
@@ -60,6 +60,20 @@ export const PROBE_STATUS_CLASS: Readonly<Record<ProbeStatus, string>> = {
   unhealthy: 'bg-status-error/15 text-status-error',
   unknown: 'bg-bg-tertiary text-text-tertiary',
   'n/a': 'bg-bg-tertiary text-text-tertiary',
+};
+
+/**
+ * The rendered spelling of each status.
+ *
+ * Separate from the {@link ProbeStatus} union so the values stay lowercase
+ * identifiers to compare and switch on, while the panel shows sentence case.
+ */
+export const PROBE_STATUS_LABEL: Readonly<Record<ProbeStatus, string>> = {
+  healthy: 'Healthy',
+  'pending action': 'Pending action',
+  unhealthy: 'Unhealthy',
+  unknown: 'Unknown',
+  'n/a': 'N/A',
 };
 
 /**
@@ -139,11 +153,11 @@ export function projectSetupLine(status: VerifyProjectSetupStatus): {
 } {
   switch (status) {
     case 'proven':
-      return { text: 'set up', className: PROBE_STATUS_CLASS.healthy };
+      return { text: 'Set up', className: PROBE_STATUS_CLASS.healthy };
     case 'unproven':
-      return { text: 'not proven', className: PROBE_STATUS_CLASS['pending action'] };
+      return { text: 'Not proven', className: PROBE_STATUS_CLASS['pending action'] };
     case 'none':
-      return { text: 'not set up', className: PROBE_STATUS_CLASS.unknown };
+      return { text: 'Not set up', className: PROBE_STATUS_CLASS.unknown };
   }
 }
 

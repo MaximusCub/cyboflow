@@ -40,6 +40,7 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
+  PROBE_STATUS_LABEL,
   probeFixLabel,
   probeFixPendingLabel,
   probeIsRequired,
@@ -206,7 +207,7 @@ function ProbeTableRow({
         data-testid={`verify-probe-state-${row.id}`}
         className={`w-24 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStatusClass(row, required)}`}
       >
-        {probeStatus(row, required)}
+        {PROBE_STATUS_LABEL[probeStatus(row, required)]}
       </span>
       <span className="min-w-0 flex-1 text-xs text-text-primary">{PROBE_LABEL[row.id]}</span>
       {fixLabel !== null && (

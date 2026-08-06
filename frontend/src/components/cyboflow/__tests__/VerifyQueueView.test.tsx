@@ -666,14 +666,14 @@ describe('VerifyQueueView — health panel', () => {
     ]);
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('set up');
+    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('Set up');
     expect(screen.getByTestId('verify-setup-cta-1')).toHaveTextContent('Re-run setup');
     // Runbooks exist but none is proven: the degrade gate skips every check, so
     // this must not read the same as a project that is genuinely configured.
-    expect(screen.getByTestId('verify-setup-status-2')).toHaveTextContent('not proven');
+    expect(screen.getByTestId('verify-setup-status-2')).toHaveTextContent('Not proven');
     expect(screen.getByTestId('verify-setup-cta-2')).toHaveTextContent('Set up');
     // Absent from the query entirely — absence IS the answer.
-    expect(screen.getByTestId('verify-setup-status-3')).toHaveTextContent('not set up');
+    expect(screen.getByTestId('verify-setup-status-3')).toHaveTextContent('Not set up');
   });
 
   it('renders the probe table with its live states', async () => {
@@ -694,12 +694,10 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     expect(await screen.findByTestId('verify-probe-browser-driving')).toBeInTheDocument();
-    expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent(
-      'pending action',
-    );
+    expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('Pending action');
     expect(screen.getByTestId('verify-probe-fix-browser-driving')).toBeInTheDocument();
-    expect(screen.getByTestId('verify-probe-state-screen-recording')).toHaveTextContent('healthy');
-    expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('healthy');
+    expect(screen.getByTestId('verify-probe-state-screen-recording')).toHaveTextContent('Healthy');
+    expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('Healthy');
   });
 
   it('keeps the probe sentence as the row tooltip rather than on screen', async () => {
@@ -728,7 +726,7 @@ describe('VerifyQueueView — health panel', () => {
     });
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-probe-state-browser-driving')).toHaveTextContent('unknown');
+    expect(await screen.findByTestId('verify-probe-state-browser-driving')).toHaveTextContent('Unknown');
     expect(screen.queryByTestId('verify-probe-fix-browser-driving')).not.toBeInTheDocument();
   });
 
@@ -747,7 +745,7 @@ describe('VerifyQueueView — health panel', () => {
     await userEvent.click(await screen.findByTestId('verify-probe-fix-browser-driving'));
 
     await waitFor(() => {
-      expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('healthy');
+      expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('Healthy');
     });
   });
 
@@ -785,7 +783,7 @@ describe('VerifyQueueView — health panel', () => {
 
     await userEvent.click(await screen.findByTestId('verify-probe-fix-accessibility'));
     await waitFor(() => {
-      expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('healthy');
+      expect(screen.getByTestId('verify-probe-state-accessibility')).toHaveTextContent('Healthy');
     });
   });
 
@@ -808,7 +806,7 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     const pill = await screen.findByTestId('verify-probe-state-screen-recording');
-    expect(pill).toHaveTextContent('unknown');
+    expect(pill).toHaveTextContent('Unknown');
     expect(pill.className).not.toMatch(/status-error/);
   });
 
@@ -905,7 +903,7 @@ describe('VerifyQueueView — health panel', () => {
     setupByProjectQuerySpy.mockRejectedValue(new Error('nope'));
     render(<VerifyQueueView />);
 
-    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('not set up');
+    expect(await screen.findByTestId('verify-setup-status-1')).toHaveTextContent('Not set up');
     expect(screen.getByTestId('verify-setup-cta-1')).toBeInTheDocument();
   });
 });
