@@ -6,6 +6,22 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-06
+
+### Added
+
+- **Verification setup flow (5th built-in flow)**: a `verify-setup` flow that establishes per-project verification. It ships a portable verification runbook contract — a content-hashed, machine-local schema (migration 089) — injected into the flow as a pinned runbook, with runbook MCP tools and a synchronous proof primitive so a step's attestation is authorized and stamped at the MCP boundary (`setup_proof`). A forbidden-command enqueue guard and engine-enforced proof block unproven advancing skips.
+- **Verification capability model**: a failure taxonomy, a modality axis, and a hash-keyed capability ledger (migrations 088 → 095/096/097) drive an honest-failure verification scheduler and runner — modality-aware concurrency and drain priority, a conservative failure classifier, an agent-path preflight, and observe-only native-screen attestation channels.
+- **Live host-capability probes**: the Verify Queue gains a health panel and a setup CTA that probe each host's capabilities once per panel open (not on a 15s poll), keyed to the runbook hash the engine actually evaluates. It surfaces which projects have verification, what each probe row means, and provisions Chromium on demand. The Peekaboo capture binary is now bundled inside the app, and all three capabilities are probed the same way — through the same binary the deployed driver uses — on every host.
+- **Prepared-dependency mirror**: agent sessions get a dependency guard and a prepared-deps mirror that clones dependency dirs into snapshots (no write-through), with a 15-minute GC grace window.
+
+### Fixed
+
+- The Codex chat gate resolves through the chat-sentinel provider.
+- Handled MCP query errors are no longer logged as "Unhandled", and archived-session event drops no longer log at ERROR.
+- The git-exclude step is skipped quietly when the target is not a repo.
+- The terminal-dock divider no longer sticks when the ceiling clamps its height.
+
 ## [0.1.36] — 2026-08-03
 
 ### Added
