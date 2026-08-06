@@ -2,16 +2,23 @@
  * peekabooExecutablePath — where the `peekaboo` capture binary lives.
  *
  * The binary SHIPS INSIDE the app (an `optionalDependencies` entry, unpacked
- * out of the asar) rather than being resolved off the user's PATH. Two reasons,
- * the second the load-bearing one:
+ * out of the asar) rather than being resolved off the user's PATH:
  *
  *  1. It is a hard prerequisite for the native-screen modality, and a
  *     prerequisite the user has to go and install by hand is one most users
  *     never satisfy.
- *  2. macOS TCC grants attach to a BINARY, and an `npx`-resolved peekaboo lives
- *     under a content-hashed cache path that changes on every version bump.
- *     Every bump silently revoked the grants and reported them as declined. A
- *     path inside the app bundle is stable, and the grant survives.
+ *  2. The capability gate and the deployed driver must measure the SAME binary.
+ *     Resolving off PATH let the two disagree — see the `peekabooBin` wiring in
+ *     `index.ts` and `verificationAgentRunner.ts`.
+ *
+ * CORRECTED [2026-08-06]: an earlier version of this note claimed a third and
+ * "load-bearing" reason — that TCC grants attach to a BINARY, so an
+ * `npx`-resolved peekaboo under a content-hashed cache path would have its
+ * grants silently revoked on every version bump. That is WRONG, and was never
+ * tested. macOS attributes a TCC request to the RESPONSIBLE PROCESS, which for
+ * a helper spawned by this app is the app bundle itself: revoking Cyboflow's
+ * Accessibility grant flips what the spawned peekaboo reports, and a moving
+ * child path revokes nothing. Reasons 1 and 2 are what this file is for.
  *
  * Deliberately NO electron import, so this is unit-testable: `index.ts` passes
  * `app.isPackaged` and `process.resourcesPath` in. It mirrors

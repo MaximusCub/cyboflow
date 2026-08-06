@@ -132,14 +132,19 @@ export function makeChromiumProvisioner(
  *
  * WHY THE PANE OPENS UNCONDITIONALLY: it is tempting to skip it when
  * `isTrustedAccessibilityClient` reports the app already trusted — why send
- * someone to a switch that is on? Because that call answers for THIS APP's TCC
- * identity, while the row that surfaced this button said `missing` about the
- * CAPTURE BINARY's. On a host where the app was granted earlier and a freshly
- * bundled binary never was, skipping on the app's trust means no prompt (that
- * one was spent long ago) and no pane either: a button that does nothing at
- * all, forever, in exactly the state it exists for. The action is only ever
- * offered on an unmet row, so "already granted" is not a state the thing being
- * measured can be in.
+ * someone to a switch that is on? Because the button is only ever rendered on
+ * a row the PROBE reported unmet, so a `true` here contradicts the reason the
+ * user is clicking. Whatever explains that disagreement — a stale trust value,
+ * a peekaboo we did not spawn, a grant revoked since the probe ran — the one
+ * useless response is to do nothing, which after the once-ever consent dialog
+ * has been spent is exactly what skipping produced.
+ *
+ * NOTE [2026-08-06], correcting the original reasoning here: this used to say
+ * the two answers describe DIFFERENT TCC identities (the app's vs the bundled
+ * binary's). They do not, in the normal case — macOS attributes a spawned
+ * helper's TCC to the responsible parent process, so revoking the app's grant
+ * flips what peekaboo reports. The short-circuit is still wrong, for the
+ * narrower reason above.
  *
  * A failed `openExternal` is swallowed: the caller re-probes regardless, and
  * this action is advisory — nothing downstream depends on the pane having

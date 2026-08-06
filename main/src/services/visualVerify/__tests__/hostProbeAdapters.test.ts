@@ -150,12 +150,12 @@ describe('makeChromiumProvisioner', () => {
 
 describe('makeAccessibilityRequester', () => {
   it('PROMPTS via the OS and STILL opens Settings when the app reports trusted', async () => {
-    // The trust call answers for THIS APP's TCC identity; the row that offered
-    // this button said `missing` about the CAPTURE BINARY's. On an upgrade host
-    // — app granted long ago, freshly bundled binary never granted — skipping
-    // the pane on the app's answer means no prompt (that one was spent years
-    // ago) and no pane either: a button that does nothing at all, forever, in
-    // exactly the state it exists for.
+    // The button is only rendered on a row the PROBE reported unmet, so a
+    // `true` here contradicts the reason the user is clicking. Whatever
+    // explains the disagreement — a stale trust value, a peekaboo we did not
+    // spawn, a grant revoked since the probe ran — the one useless response is
+    // to do nothing, which is what skipping produced once the once-ever
+    // consent dialog had been spent.
     const isTrusted = vi.fn().mockReturnValue(true);
     const openSettings = vi.fn().mockResolvedValue(undefined);
     await makeAccessibilityRequester({ isTrustedAccessibilityClient: isTrusted, openSettings })();

@@ -497,9 +497,9 @@ host. Rebuilt around what a user can actually decide about:
 - **The two macOS TCC grants get a row each, always shown.** They are granted
   separately, in separate System Settings panes, and holding one but not the
   other is the common case — a single ANDed boolean could only say "something
-  is wrong". `nativeScreenDeclared` survives, but now only sets how loudly an
-  unmet grant renders: required when a runbook depends on it, information
-  otherwise. This retires the "conditional grants branch" bullet above.
+  is wrong". This retires the "conditional grants branch" bullet above.
+  (`nativeScreenDeclared` briefly survived to set how loudly an unmet grant
+  rendered; see the 2026-08-06 entry, which deleted it.)
 - **`native-drive` is gone rather than relabelled.** It probed nothing about
   the host — it reported that §8's drive API is unbuilt. That disclosure moved
   onto the `accessibility` row, whose grant is the one driving would need.
@@ -529,13 +529,55 @@ host. Rebuilt around what a user can actually decide about:
   part was the one line of wiring in a file no unit test can import.
 - **The capture binary now ships inside the app** (`optionalDependencies` +
   `asarUnpack`, resolved by `peekabooExecutablePath.ts`, PATH kept as a last
-  resort). Beyond sparing users a manual install: macOS TCC grants attach to a
-  BINARY, and an npx-resolved peekaboo lives under a content-hashed cache path
-  that moves on every version bump — silently revoking both grants and
-  reporting them declined. Still on the deprecated v2 package; v3 is 52 MB plus
+  resort). Beyond sparing users a manual install, it keeps the gate and the
+  driver measuring one binary (see the bullet above). A third reason claimed
+  here originally — that TCC grants attach to a BINARY, so an npx copy under a
+  content-hashed path loses its grants on every version bump — was WRONG and
+  untested; see the 2026-08-06 entry. Still on the deprecated v2 package; v3 is 52 MB plus
   a sidecar dylib against v2's 2.2 MB, for a capture-only path. The parser
   reads both output shapes, so that bump is a one-line change when the size is
   worth paying.
+
+**Panel simplification, and a TCC claim retracted [2026-08-06].** A second
+adversarial review (plus one live test by the user) against the phase-3 panel:
+
+- **TCC follows the RESPONSIBLE PROCESS, not the binary.** Revoking Cyboflow's
+  own Accessibility grant flips what the app-spawned peekaboo reports. Three
+  docblocks and a commit message had asserted the opposite — that the app's
+  identity and the capture binary's are separate and merely coincide — and
+  built arguments on it: part of the bundling rationale, and the severity of
+  the "grant button tests the wrong binary" finding. The claim was never
+  tested; one revocation settled it. The docblocks are corrected in place; the
+  commit message (754c8716, pre-rebase) stands uncorrected and is wrong.
+  The CODE changes both claims produced are still right, for narrower reasons.
+- **The probe table reports a status, not a sentence.** `Healthy` / `Pending
+  action` / `Unhealthy`, with `Unknown` reserved strictly for a probe that
+  could not answer and `N/A` for machinery missing on our side. The probe's own
+  detail survives as the row tooltip.
+- **Every capability is checked the same way on every host**, and
+  `nativeScreenDeclared` is deleted outright. Softening an unmet grant that no
+  runbook declared to `unknown` was the conditional-grants defect in a quieter
+  form: hiding the row withheld the answer, softening it withheld the answer's
+  meaning, and it rendered a grey we-don't-know beside a live remedy button.
+- **The setup CTA is a per-project list.** A runbook is registered against ONE
+  project, so a single global button could only ever configure whichever
+  project the queue filter was showing. KNOWN GAP: a project row reads `Set up`
+  when ANY modality is proven, so a project with `web` proven and
+  `native-screen` not shows no sign that native-screen checks are skipping —
+  the per-modality runbook line used to say that, and the outcomes block it
+  lived in is no longer rendered (health still serves it; this is a rendering
+  decision, not a teardown).
+- **`window-identity` was broken the same way the permissions probe was.**
+  `list windows --json` exits 64: the flag is `--json-output`, and `--app` is
+  mandatory. Since window-identity is the only attestation channel
+  `native-screen` has, fixing the permissions probe is what made this
+  reachable — a runbook could spend its screen lease, budget and full agent
+  deploy, then fail an attestation floor that could never pass. peekaboo has no
+  host-wide window listing at all, so `AttestationSpec` now carries the app;
+  scoping to one application is also what makes it an identity check rather
+  than "something on this machine has a matching title". Smoked against the
+  bundled binary this time. Any persisted window-identity runbook must be
+  re-registered — nothing proven can exist, since it could never have passed.
 
 **STILL OPEN after phase 3** — surfaced by the adversarial review of this work,
 each wider than the panel and deliberately not folded into it:

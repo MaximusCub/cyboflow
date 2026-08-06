@@ -211,12 +211,16 @@ export interface VerifyHostProbesLike {
    * pane when macOS will not show the prompt (it fires once per binary, then
    * silently no-ops forever).
    *
-   * IDENTITY CAVEAT, load-bearing: the prompt is raised for THIS app's TCC
-   * identity, while {@link nativeGrants} reads the capture binary's. They
-   * coincide only when that binary ships inside the app bundle and is spawned
-   * by it — which is why the binary is bundled rather than resolved off PATH.
-   * A user pointing at some other peekaboo can grant here and still read
-   * `missing`, and that report is correct, not a bug.
+   * IDENTITY: the prompt is raised for THIS app's TCC identity, and so — in
+   * practice — is the grant {@link nativeGrants} reads. macOS attributes a TCC
+   * request to the RESPONSIBLE PROCESS, which for a helper this app spawns is
+   * the app bundle: revoking Cyboflow's Accessibility grant flips what the
+   * spawned peekaboo reports. Verified [2026-08-06], correcting an earlier note
+   * here that called the two identities merely coincidental.
+   *
+   * A peekaboo NOT spawned by us — a user running one by hand — answers for
+   * whatever is responsible for that process instead, which is why the panel
+   * reports what the probe says rather than what this prompt returned.
    *
    * Absent on platforms with no such grant.
    */
