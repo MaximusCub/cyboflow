@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "modalities": {
+    "cdp-app": {
+      "build": [
+        "pnpm run build:main"
+      ],
+      "serve": {
+        "cmd": "CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
+        "attach": "cdp",
+        "readyWhen": {
+          "urlPath": "/",
+          "timeoutMs": 180000
+        }
+      },
+      "attestation": {
+        "kind": "cdp-token",
+        "expression": "window.electronAPI.getAppVersion()",
+        "expected": "0.2.0"
+      },
+      "notes": "Serve is package.json:30-31 'electron-dev' verbatim, with the three levers the project ALREADY reads: CYBOFLOW_VITE_PORT (frontend/vite.config.ts:12, strictPort:true at :15), CYBOFLOW_CDP_PORT (package.json:31 -> --remote-debugging-port), CYBOFLOW_DIR (main/src/utils/cyboflowDirectory.ts:89). CYBOFLOW_DIR is mandatory, not hygiene: the single-instance lock is keyed on the userData path under it (main/src/index.ts:592-611), so without it this instance silently loses to the developer's own pnpm dev. No 'web' entry: the renderer cannot bootstrap standalone without preload-injected electronTRPC (docs/VISUAL-VERIFICATION-SETUP.md:27-32). Attestation is the strongest channel that exists in the UNMODIFIED tree: preload exposes electronAPI.getAppVersion (main/src/preload.ts:210) -> ipc/app.ts:9-11 -> app.getVersion(), so a match proves preload + IPC + a live main process, not merely an answering socket. It is NOT build-stamped and does NOT distinguish this instance from the developer's own running app; see rung 2 for the launch-token upgrade that does. 'expected' tracks package.json version and must be re-derived on a version bump."
+    },
+    "native-screen": {
+      "build": [
+        "pnpm run build:main"
+      ],
+      "serve": {
+        "cmd": "CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
+        "attach": "cdp",
+        "readyWhen": {
+          "urlPath": "/",
+          "timeoutMs": 180000
+        }
+      },
+      "attestation": {
+        "kind": "window-identity",
+        "titlePattern": "^Cyboflow",
+        "app": "Electron"
+      },
+      "notes": "Same serve as cdp-app: the OS chrome only exists while the app runs. attach:'cdp' is kept deliberately even though this modality captures via peekaboo, because it sets VERIFY_DRIVER_ATTACH_ONLY (verificationAgentRunner.ts:2123) and stops the driver launching a blank chromium that would screenshot the wrong surface. app='Electron', not 'Cyboflow': a pnpm dev launch is UNPACKAGED, so the OS app name is Electron (docs/VISUAL-VERIFICATION-SETUP.md:87). titlePattern derives from frontend/index.html <title>Cyboflow</title> - BrowserWindow (main/src/index.ts:796) sets no title: option and nothing in frontend/src writes document.title. This is the WEAKEST channel and cannot distinguish this instance from the developer's own Electron window; rung 2 proposes a distinguishing title."
+    }
+  },
+  "levers": {
+    "portEnv": "CYBOFLOW_VITE_PORT",
+    "dataDirEnv": "CYBOFLOW_DIR",
+    "cdpPortFlag": "--remote-debugging-port",
+    "notes": "cdpPortFlag is what 'electron .' receives (package.json:31); the runbook sets it indirectly via CYBOFLOW_CDP_PORT, which that script interpolates. dataDirEnv is CYBOFLOW_DIR and NOT --user-data-dir: the single-instance lock keys on the userData path derived from CYBOFLOW_DIR (main/src/index.ts:592-611), so --user-data-dir alone does not break the singleton."
+  }
+}
