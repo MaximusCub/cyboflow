@@ -6,7 +6,7 @@
         "pnpm run build:main"
       ],
       "serve": {
-        "cmd": "CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
+        "cmd": "env -u ELECTRON_RUN_AS_NODE CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
         "attach": "cdp",
         "readyWhen": {
           "urlPath": "/",
@@ -18,14 +18,14 @@
         "expression": "window.electronAPI.getAppVersion()",
         "expected": "0.2.0"
       },
-      "notes": "Serve is package.json:30-31 'electron-dev' verbatim, with the three levers the project ALREADY reads: CYBOFLOW_VITE_PORT (frontend/vite.config.ts:12, strictPort:true at :15), CYBOFLOW_CDP_PORT (package.json:31 -> --remote-debugging-port), CYBOFLOW_DIR (main/src/utils/cyboflowDirectory.ts:89). CYBOFLOW_DIR is mandatory, not hygiene: the single-instance lock is keyed on the userData path under it (main/src/index.ts:592-611), so without it this instance silently loses to the developer's own pnpm dev. No 'web' entry: the renderer cannot bootstrap standalone without preload-injected electronTRPC (docs/VISUAL-VERIFICATION-SETUP.md:27-32). Attestation is the strongest channel that exists in the UNMODIFIED tree: preload exposes electronAPI.getAppVersion (main/src/preload.ts:210) -> ipc/app.ts:9-11 -> app.getVersion(), so a match proves preload + IPC + a live main process, not merely an answering socket. It is NOT build-stamped and does NOT distinguish this instance from the developer's own running app; see rung 2 for the launch-token upgrade that does. 'expected' tracks package.json version and must be re-derived on a version bump."
+      "notes": "Serve is package.json:30-31 'electron-dev' verbatim, with the three levers the project ALREADY reads: CYBOFLOW_VITE_PORT (frontend/vite.config.ts:12, strictPort:true at :15), CYBOFLOW_CDP_PORT (package.json:31 -> --remote-debugging-port), CYBOFLOW_DIR (main/src/utils/cyboflowDirectory.ts:89). CYBOFLOW_DIR is mandatory, not hygiene: the single-instance lock is keyed on the userData path under it (main/src/index.ts:592-611), so without it this instance silently loses to the developer's own pnpm dev. No 'web' entry: the renderer cannot bootstrap standalone without preload-injected electronTRPC (docs/VISUAL-VERIFICATION-SETUP.md:27-32). Attestation is the strongest channel that exists in the UNMODIFIED tree: preload exposes electronAPI.getAppVersion (main/src/preload.ts:210) -> ipc/app.ts:9-11 -> app.getVersion(), so a match proves preload + IPC + a live main process, not merely an answering socket. It is NOT build-stamped and does NOT distinguish this instance from the developer's own running app; see rung 2 for the launch-token upgrade that does. 'expected' tracks package.json version and must be re-derived on a version bump. PROVEN-ROUND LANDMINES (round 1, 2026-08-06): (1) 'env -u ELECTRON_RUN_AS_NODE' is LOAD-BEARING, not hygiene -- the verification agent is itself hosted inside Electron, so ELECTRON_RUN_AS_NODE=1 is INHERITED into serve; 'electron .' then runs as plain node and dies with 'Cannot read properties of undefined (reading getAppPath)', and concurrently reports only 'exited with code 1'. (2) The bundled driver require('playwright') is MODULE_NOT_FOUND from app.asar.unpacked, and its catch MASKS this as 'CDP endpoint not reachable on port N' even when the app is healthy and curl answers on that port. Workaround: export NODE_PATH=<snapshot>/node_modules before invoking $VERIFY_DRIVER. Do NOT read that message as a serve failure without first curling the CDP port."
     },
     "native-screen": {
       "build": [
         "pnpm run build:main"
       ],
       "serve": {
-        "cmd": "CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
+        "cmd": "env -u ELECTRON_RUN_AS_NODE CYBOFLOW_DIR=\"$VERIFY_ARTIFACTS_DIR/cyboflow-home\" CYBOFLOW_VITE_PORT=${PORT} CYBOFLOW_CDP_PORT=$VERIFY_DRIVER_PORT pnpm run electron-dev",
         "attach": "cdp",
         "readyWhen": {
           "urlPath": "/",
