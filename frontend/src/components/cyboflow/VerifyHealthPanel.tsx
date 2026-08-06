@@ -4,6 +4,8 @@
  *
  * Two tables, both LIVE rather than remembered:
  *
+ *   - PROJECTS — whether each project has verification set up, and a launch for
+ *     the flow that sets it up.
  *   - HOST — one row per capability the user can act on (browser driving, and
  *     the two macOS TCC grants), re-run on every panel open. Never a stored
  *     checkbox: a TCC grant rots silently on any app-path or version change
@@ -11,17 +13,20 @@
  *     failure this replaces. Each row carries whatever remedy exists — an
  *     in-place install for chromium, the OS prompt or the right Settings pane
  *     for a grant.
- *   - MODALITIES — per modality: runbook state, attempts, pass rate,
- *     failure-class histogram, median duration, and any capability suppression
- *     with the time until it re-probes.
  *
- * The runbook line leads each modality row on purpose. Until a runbook is
- * PROVEN, the §3.2 degrade gate skips every build/serve verification for that
- * modality — so the queue looks calm while nothing is actually being verified,
- * and no other number on this panel means what it appears to mean.
+ * The per-modality OUTCOMES block — runbook state, attempts, pass rate, failure
+ * histogram, median duration, capability suppressions, and the unattributed /
+ * setup-proof counters — is deliberately not rendered here for now. It answered
+ * a question ("how has verification been going?") that nobody was asking of a
+ * panel they open to find out whether verification WORKS, and on a project with
+ * a proven runbook and no lane traffic yet it was four em-dashes and a number
+ * about the budget.
  *
- * Setup-proof traffic is shown apart from lane traffic (§8's "separate
- * counter"), including the spend that still lands against the project budget.
+ * KNOWN GAP while it is gone: the project row reads `set up` when ANY modality
+ * is proven, so a project with `web` proven and `native-screen` not shows no
+ * sign that native-screen checks are silently skipping. `verificationRequests
+ * .health` still serves all of it — this is a rendering decision, not a
+ * teardown — so restoring the block is a UI change alone.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -29,35 +34,20 @@ import { trpc } from '../../trpc/client';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { VERIFY_SETUP_WORKFLOW_NAME } from './wizard/workflowMeta';
 import type {
-  VerificationHealthSummary,
-  VerificationModalityHealth,
   VerifyHostProbeReport,
   VerifyProbeRow,
   VerifyProjectSetupRow,
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
-  attemptsText,
-  capabilityLine,
-  durationText,
-  failureHistogramText,
-  passRateText,
   probeFixLabel,
   probeFixPendingLabel,
   probeIsRequired,
   probeStatus,
   probeStatusClass,
   projectSetupLine,
-  runbookLine,
   setupStatusFor,
 } from './verifyHealthModel';
-
-/**
- * Health polls far slower than the request list: these numbers move per
- * verification, not per tick. The host probes do NOT ride this interval — see
- * the probe effect.
- */
-const HEALTH_REFETCH_INTERVAL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Setup CTA
@@ -234,58 +224,6 @@ function ProbeTableRow({
   );
 }
 
-function ModalityRow({ row }: { row: VerificationModalityHealth }): ReactElement {
-  const runbook = runbookLine(row.runbook);
-  const capability = capabilityLine(row.capability);
-  const histogram = failureHistogramText(row);
-
-  return (
-    <div
-      data-testid={`verify-health-modality-${row.modality}`}
-      className="flex flex-col gap-0.5 border-b border-border-primary/50 py-2 last:border-b-0"
-    >
-      <div className="flex items-center gap-2">
-        <span className="w-28 shrink-0 font-mono text-xs text-text-primary">{row.modality}</span>
-        <span
-          data-testid={`verify-health-runbook-${row.modality}`}
-          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-            runbook.tone === 'ok'
-              ? 'bg-status-success/15 text-status-success'
-              : 'bg-status-warning/15 text-status-warning'
-          }`}
-        >
-          {runbook.text}
-        </span>
-        <span className="ml-auto shrink-0 text-[11px] text-text-secondary">
-          {attemptsText(row)} · {passRateText(row)} pass · median {durationText(row.medianDurationMs)}
-        </span>
-      </div>
-
-      {histogram.length > 0 && (
-        <div
-          data-testid={`verify-health-failures-${row.modality}`}
-          className="pl-[7.5rem] text-[10px] text-text-tertiary"
-        >
-          {histogram}
-        </div>
-      )}
-
-      {capability !== null && (
-        <div
-          data-testid={`verify-health-capability-${row.modality}`}
-          className="pl-[7.5rem] text-[10px] text-status-warning"
-        >
-          {capability}
-        </div>
-      )}
-
-      {row.inFlight > 0 && (
-        <div className="pl-[7.5rem] text-[10px] text-text-tertiary">{row.inFlight} in flight</div>
-      )}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Panel
 // ---------------------------------------------------------------------------
@@ -302,42 +240,11 @@ export function VerifyHealthPanel({
    */
   projects?: readonly { id: number; name: string }[];
 }): ReactElement | null {
-  const [health, setHealth] = useState<VerificationHealthSummary | null>(null);
   const [probes, setProbes] = useState<VerifyHostProbeReport | null>(null);
   const [setupRows, setSetupRows] = useState<VerifyProjectSetupRow[] | null>(null);
   const [fixInFlight, setFixInFlight] = useState(false);
 
-  // HEALTH is project-scoped and cheap (one indexed read), so it polls. Cleared
-  // synchronously when the project changes, so the new project never renders a
-  // moment of the previous one's numbers.
-  //
-  // Failure degrades to `null` (tables omitted) rather than raising a second
-  // error surface — the queue's own banner already covers the primary failure
-  // mode, and a missing health table is never worth an alarm of its own.
-  useEffect(() => {
-    setHealth(null);
-    if (projectId === null) return;
-    let cancelled = false;
-    const fetchHealth = (): void => {
-      void trpc.cyboflow.verificationRequests.health
-        .query({ projectId })
-        .then((res) => {
-          if (!cancelled) setHealth(res);
-        })
-        .catch(() => {
-          if (!cancelled) setHealth(null);
-        });
-    };
-    fetchHealth();
-    const timer = setInterval(fetchHealth, HEALTH_REFETCH_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [projectId]);
-
-  // PROBES run ONCE per panel open, deliberately NOT on the health interval.
-  // Each pass shells out — resolving a Playwright browser path and asking the
+  // PROBES run ONCE per panel open, never on a poll. Each pass shells out — resolving a Playwright browser path and asking the
   // OS about the screen-recording grant — and none of it is project-scoped or
   // fast-moving: a TCC grant or an installed binary changes when a human does
   // something about it, not every fifteen seconds. §6 asks for "probed at call
@@ -363,7 +270,7 @@ export function VerifyHealthPanel({
   }, []);
 
   // SETUP rows are host-wide rather than project-scoped, so they load once per
-  // panel open like the probes do — not on the health interval. A failure
+  // panel open like the probes do. A failure
   // degrades to `null`, which reads every project as `not set up`: the panel's
   // whole job here is to offer the setup flow, and the worst it can do while
   // the query is down is offer it to a project that already has it.
@@ -408,13 +315,13 @@ export function VerifyHealthPanel({
 
   // The panel renders even when EVERY query failed. It degrades to a header and
   // the setup list rather than disappearing: this is the launch path for the
-  // flow that repairs verification, and a failing health query is not a reason
-  // to take it away — it is a reason to want it.
+  // flow that repairs verification, and a failing query is not a reason to take
+  // it away — it is a reason to want it.
   return (
     <section data-testid="verify-health-panel" className="flex flex-col gap-3">
       <div className="flex items-baseline gap-2">
         <h2 className="eyebrow text-text-tertiary">Health</h2>
-        <span className="text-[10px] text-text-tertiary">live probes · per-modality outcomes</span>
+        <span className="text-[10px] text-text-tertiary">live probes · setup state</span>
       </div>
 
       <VerifyProjectSetupList projects={projects} rows={setupRows} />
@@ -433,28 +340,6 @@ export function VerifyHealthPanel({
         </div>
       )}
 
-      {health !== null && health.modalities.length > 0 && (
-        <div className="rounded-card border border-border-primary bg-bg-primary px-3 py-1">
-          {health.modalities.map((row) => (
-            <ModalityRow key={row.modality} row={row} />
-          ))}
-        </div>
-      )}
-
-      {health !== null && health.unattributed.attempts > 0 && (
-        <p data-testid="verify-health-unattributed" className="text-[10px] text-text-tertiary">
-          {attemptsText(health.unattributed)} not attributed to a modality ·{' '}
-          {passRateText(health.unattributed)} pass
-        </p>
-      )}
-
-      {health !== null && health.setupProof.attempts > 0 && (
-        <p data-testid="verify-health-setup-proof" className="text-[10px] text-text-tertiary">
-          setup proof: {attemptsText(health.setupProof)} · {passRateText(health.setupProof)} pass ·{' '}
-          {health.setupProofCallsUsed} call
-          {health.setupProofCallsUsed === 1 ? '' : 's'} counted against the project budget
-        </p>
-      )}
     </section>
   );
 }

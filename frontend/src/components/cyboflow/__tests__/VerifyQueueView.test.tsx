@@ -626,10 +626,6 @@ describe('VerifyQueueView', () => {
 // Phase-3 health panel (verification-setup-flow.md §6)
 // ---------------------------------------------------------------------------
 
-function stats(over: Partial<ReturnType<typeof emptyStats>> = {}): ReturnType<typeof emptyStats> {
-  return { ...emptyStats(), ...over };
-}
-
 describe('VerifyQueueView — health panel', () => {
   it('offers a setup CTA per project and launches the wizard locked to that one', async () => {
     // verify-setup is hidden from the wizard's flow list, so these rows are its
@@ -816,32 +812,6 @@ describe('VerifyQueueView — health panel', () => {
     expect(pill.className).not.toMatch(/status-error/);
   });
 
-  it('leads a modality row with its runbook state and warns when nothing is proven', async () => {
-    // The silent failure this panel exists to expose: no proven runbook means
-    // every build/serve check skips, so an empty queue is the SYMPTOM.
-    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
-    healthQuerySpy.mockResolvedValue({
-      ...emptyHealth(),
-      modalities: [
-        {
-          modality: 'web',
-          ...stats({ attempts: 4, passed: 2, passRate: 0.5, medianDurationMs: 42_000, failures: { env: 2, deliverable: 0, ambiguous: 0, unclassified: 0 } }),
-          capability: null,
-          runbook: { status: 'unproven-draft', version: 3, portableHash: 'abc' },
-        },
-      ],
-    });
-    render(<VerifyQueueView />);
-
-    expect(await screen.findByTestId('verify-health-runbook-web')).toHaveTextContent(
-      /not proven .* will skip/i,
-    );
-    expect(screen.getByTestId('verify-health-modality-web')).toHaveTextContent('4 attempts');
-    expect(screen.getByTestId('verify-health-modality-web')).toHaveTextContent('50% pass');
-    expect(screen.getByTestId('verify-health-modality-web')).toHaveTextContent('median 42s');
-    expect(screen.getByTestId('verify-health-failures-web')).toHaveTextContent('env 2');
-  });
-
   it('offers EXACTLY ONE setup affordance per project in the empty state', async () => {
     // The project list IS this state's affordance — it carries a row for the
     // selected project too, so the empty state no longer adds one of its own.
@@ -875,72 +845,30 @@ describe('VerifyQueueView — health panel', () => {
     expect(await screen.findByTestId('verify-setup-cta-1')).toHaveTextContent('Re-run setup');
   });
 
-  it('shows an in-force suppression with its retry window', async () => {
-    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
-    healthQuerySpy.mockResolvedValue({
-      ...emptyHealth(),
-      modalities: [
-        {
-          modality: 'cdp-app',
-          ...stats(),
-          capability: {
-            status: 'suppressed',
-            reason: 'port 4521 occupied',
-            consecutiveEnvFailures: 5,
-            suppressedUntil: new Date(Date.now() + 3_600_000).toISOString(),
-            hostGeneration: 1,
-            suppressionActive: true,
-          },
-          runbook: { status: 'proven', version: 1, portableHash: 'h' },
-        },
-      ],
-    });
-    render(<VerifyQueueView />);
-
-    const line = await screen.findByTestId('verify-health-capability-cdp-app');
-    expect(line).toHaveTextContent('suppressed: port 4521 occupied');
-    expect(line).toHaveTextContent(/retries in/i);
-  });
-
-  it('reports the setup-proof spend that lands against the project budget', async () => {
-    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
-    healthQuerySpy.mockResolvedValue({
-      ...emptyHealth(),
-      setupProof: stats({ attempts: 3, passed: 1, passRate: 1 / 3 }),
-      setupProofCallsUsed: 6,
-    });
-    render(<VerifyQueueView />);
-
-    expect(await screen.findByTestId('verify-health-setup-proof')).toHaveTextContent(
-      /6 calls counted against the project budget/i,
-    );
-  });
-
-  it('drops the health TABLES but keeps the CTA when both queries fail', async () => {
-    // A failed health query is not a reason to remove the launch path for the
-    // flow that repairs verification — it is a reason to want it. The tables
-    // go (there is nothing to show), the affordance stays. No second error
-    // surface either: the queue's own banner covers the primary failure mode.
+  it('drops the probe table but keeps the CTA when the queries fail', async () => {
+    // A failed query is not a reason to remove the launch path for the flow
+    // that repairs verification — it is a reason to want it. The table goes
+    // (there is nothing to show), the affordance stays. No second error surface
+    // either: the queue's own banner covers the primary failure mode.
     useVerificationRequestsSpy.mockReturnValue({
       requests: [baseRow({ id: 'vr-1', status: 'passed' })],
       isLoading: false,
       error: null,
     });
-    healthQuerySpy.mockRejectedValue(new Error('nope'));
     hostProbesQuerySpy.mockRejectedValue(new Error('nope'));
+    setupByProjectQuerySpy.mockRejectedValue(new Error('nope'));
     render(<VerifyQueueView />);
 
     const cta = await screen.findByTestId('verify-setup-cta-1');
     expect(cta).toHaveTextContent('Set up');
-    expect(screen.queryByTestId('verify-health-modality-web')).not.toBeInTheDocument();
     expect(screen.queryByTestId('verify-probe-browser-driving')).not.toBeInTheDocument();
   });
 
-  it('probes the host ONCE per open — the probes do not ride the health poll', async () => {
+  it('probes the host ONCE per open, never on a timer', async () => {
     // Every probe pass shells out (resolving a Playwright browser path, asking
     // the OS about the screen-recording grant). None of it is fast-moving: a
     // grant or an installed binary changes when a human does something, not on
-    // a fifteen-second tick.
+    // a fifteen-second tick. The setup rows are host-wide and load the same way.
     vi.useFakeTimers();
     try {
       useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
@@ -952,15 +880,14 @@ describe('VerifyQueueView — health panel', () => {
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(hostProbesQuerySpy).toHaveBeenCalledTimes(1);
-      const healthCallsBefore = healthQuerySpy.mock.calls.length;
+      expect(setupByProjectQuerySpy).toHaveBeenCalledTimes(1);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(60_000);
       });
 
-      // Health kept polling; the probes did not.
-      expect(healthQuerySpy.mock.calls.length).toBeGreaterThan(healthCallsBefore);
       expect(hostProbesQuerySpy).toHaveBeenCalledTimes(1);
+      expect(setupByProjectQuerySpy).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
