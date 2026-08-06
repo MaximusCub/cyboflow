@@ -679,7 +679,6 @@ describe('VerifyQueueView — health panel', () => {
   it('renders the probe table with its live states', async () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: true,
       probes: [
         {
           id: 'browser-driving',
@@ -706,7 +705,6 @@ describe('VerifyQueueView — health panel', () => {
     // `unhealthy` row undiagnosable from the panel.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: false,
       probes: [{ id: 'browser-driving', state: 'ok', detail: '/path/to/chromium', fix: null }],
     });
     render(<VerifyQueueView />);
@@ -721,7 +719,6 @@ describe('VerifyQueueView — health panel', () => {
     // must not be dressed as one or given a remediation to chase.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: false,
       probes: [{ id: 'browser-driving', state: 'inconclusive', detail: 'chromium: EPERM', fix: null }],
     });
     render(<VerifyQueueView />);
@@ -733,11 +730,9 @@ describe('VerifyQueueView — health panel', () => {
   it('provisioning chromium swaps the row to ok from the re-probed report', async () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: false,
       probes: [{ id: 'browser-driving', state: 'missing', detail: 'chromium: not installed', fix: 'provision-chromium' }],
     });
     provisionChromiumSpy.mockResolvedValue({
-      nativeScreenDeclared: false,
       probes: [{ id: 'browser-driving', state: 'ok', detail: '/chromium', fix: null }],
     });
     render(<VerifyQueueView />);
@@ -752,7 +747,6 @@ describe('VerifyQueueView — health panel', () => {
   it('routes each grant row to its OWN action, not to the chromium installer', async () => {
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     const denied = {
-      nativeScreenDeclared: true,
       probes: [
         {
           id: 'screen-recording',
@@ -766,7 +760,6 @@ describe('VerifyQueueView — health panel', () => {
     hostProbesQuerySpy.mockResolvedValue(denied);
     openScreenRecordingSettingsSpy.mockResolvedValue(denied);
     requestAccessibilitySpy.mockResolvedValue({
-      nativeScreenDeclared: true,
       probes: [
         { id: 'screen-recording', state: 'missing', detail: 'not granted', fix: 'open-screen-recording-settings' },
         { id: 'accessibility', state: 'ok', detail: 'granted', fix: null },
@@ -787,13 +780,13 @@ describe('VerifyQueueView — health panel', () => {
     });
   });
 
-  it('shows a grant the host does not need WITHOUT dressing it as a fault', async () => {
-    // The rows are always listed — you cannot decide whether to use screen
-    // capture without being told whether it works here — but an unmet grant
-    // nobody's runbook needs is information, not an alarm.
+  it('offers the grant remedy whatever the projects need', async () => {
+    // The rows used to soften to a grey "unknown" when no runbook declared
+    // native-screen — a capability you are told nothing about is one whose
+    // absence you discover the first time you need it, and it put a
+    // we-don't-know pill beside a live remedy button.
     useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
     hostProbesQuerySpy.mockResolvedValue({
-      nativeScreenDeclared: false,
       probes: [
         {
           id: 'screen-recording',
@@ -806,8 +799,8 @@ describe('VerifyQueueView — health panel', () => {
     render(<VerifyQueueView />);
 
     const pill = await screen.findByTestId('verify-probe-state-screen-recording');
-    expect(pill).toHaveTextContent('Unknown');
-    expect(pill.className).not.toMatch(/status-error/);
+    expect(pill).toHaveTextContent('Pending action');
+    expect(screen.getByTestId('verify-probe-fix-screen-recording')).toBeInTheDocument();
   });
 
   it('offers EXACTLY ONE setup affordance per project in the empty state', async () => {

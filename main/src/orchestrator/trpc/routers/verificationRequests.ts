@@ -463,24 +463,6 @@ function readHostGeneration(db: DatabaseLike): number {
   }
 }
 
-/**
- * Whether ANY project's runbook declares `native-screen` — the §6 conditional
- * grants branch. Fail-soft to `false` on a pre-096 DB (table absent): showing a
- * permissions row nobody needs is a worse default than omitting one, since the
- * grant it asks for is irreversible-ish and host-wide.
- */
-function nativeScreenDeclared(db: DatabaseLike | undefined): boolean {
-  if (!db) return false;
-  try {
-    const row = db
-      .prepare(`SELECT 1 AS present FROM verify_runbook_local WHERE modality = 'native-screen' LIMIT 1`)
-      .get() as { present: number } | undefined;
-    return row !== undefined;
-  } catch {
-    return false;
-  }
-}
-
 /** Bound a probe's detail string so a pathological error message cannot bloat the response. */
 function detail(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -648,12 +630,14 @@ async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProb
  * `resolveNode` — "node is unresolvable" is itself the fact being checked, and
  * there is no state in which the harness could proceed without it.
  *
- * The grant rows are UNCONDITIONAL. They used to appear only once some runbook
+ * All three rows are UNCONDITIONAL, and none of them is softened by what the
+ * project happens to need. The grants used to appear only once some runbook
  * declared `native-screen`, which meant the one moment you needed to know
  * whether screen capture works here — while deciding whether to declare it —
- * was the one moment the panel would not say. `nativeScreenDeclared` still
- * rides the report, but now only to tell the panel how loudly to render a
- * missing grant.
+ * was the one moment the panel would not say. Making the ANSWER conditional
+ * instead of the row had the same defect in a quieter form: a capability
+ * reported as "not needed" is a capability whose absence you find out about
+ * when you first try to use it.
  */
 async function runHostProbes(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]> {
   const [node, chromium, cli, grants] = await Promise.all([
@@ -911,7 +895,7 @@ export const verificationRequestsRouter = router({
    * are already there.
    */
   hostProbes: protectedProcedure.query(async ({ ctx }): Promise<VerifyHostProbeReport> => {
-    return await reportFor(ctx.db, requireProbes(ctx.verifyHostProbes, 'hostProbes'));
+    return await reportFor(requireProbes(ctx.verifyHostProbes, 'hostProbes'));
   }),
 
   /**
@@ -941,7 +925,7 @@ export const verificationRequestsRouter = router({
     } catch {
       // Intentionally ignored — see the docblock; the re-probe reports reality.
     }
-    return await reportFor(ctx.db, probes);
+    return await reportFor(probes);
   }),
 
   /**
@@ -957,7 +941,7 @@ export const verificationRequestsRouter = router({
   requestAccessibility: protectedProcedure.mutation(async ({ ctx }): Promise<VerifyHostProbeReport> => {
     const probes = requireProbes(ctx.verifyHostProbes, 'requestAccessibility');
     await runGrantAction(probes.requestAccessibility);
-    return await reportFor(ctx.db, probes);
+    return await reportFor(probes);
   }),
 
   /**
@@ -969,7 +953,7 @@ export const verificationRequestsRouter = router({
     async ({ ctx }): Promise<VerifyHostProbeReport> => {
       const probes = requireProbes(ctx.verifyHostProbes, 'openScreenRecordingSettings');
       await runGrantAction(probes.openScreenRecordingSettings);
-      return await reportFor(ctx.db, probes);
+      return await reportFor(probes);
     },
   ),
 });
@@ -1009,13 +993,7 @@ async function runGrantAction(action: (() => Promise<void>) | undefined): Promis
   }
 }
 
-/** The full probe report: the live rows plus whether any runbook needs the grants. */
-async function reportFor(
-  db: DatabaseLike | undefined,
-  probes: VerifyHostProbesLike,
-): Promise<VerifyHostProbeReport> {
-  return {
-    probes: await runHostProbes(probes),
-    nativeScreenDeclared: nativeScreenDeclared(db),
-  };
+/** The full probe report. */
+async function reportFor(probes: VerifyHostProbesLike): Promise<VerifyHostProbeReport> {
+  return { probes: await runHostProbes(probes) };
 }

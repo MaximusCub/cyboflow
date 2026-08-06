@@ -1068,7 +1068,6 @@ describe('verificationRequests.hostProbes', () => {
     const { caller } = setup();
     const report = await caller.cyboflow.verificationRequests.hostProbes();
 
-    expect(report.nativeScreenDeclared).toBe(false);
     expect(report.probes.map((p) => p.id)).toEqual([
       'browser-driving',
       'screen-recording',
@@ -1077,21 +1076,28 @@ describe('verificationRequests.hostProbes', () => {
     expect(report.probes.every((p) => p.state === 'ok')).toBe(true);
   });
 
-  it('shows the grant rows even when NO runbook declares native-screen', async () => {
-    // The old behaviour hid them until some runbook declared the modality,
+  it('reports the grants identically whether or not a runbook declares native-screen', async () => {
+    // The old behaviour hid the rows until some runbook declared the modality,
     // which withheld the answer at exactly the moment it was needed: you
     // cannot decide whether to use screen capture without being told whether
-    // it works on this host.
-    const { caller } = setup({
-      probes: {
-        nativeGrants: async () => ({ kind: 'ok', screenRecording: false, accessibility: false }),
-      },
-    });
-    const report = await caller.cyboflow.verificationRequests.hostProbes();
+    // it works on this host. Reporting them but calling them optional had the
+    // same defect more quietly, so nothing about these rows depends on what
+    // the current projects happen to need.
+    const grants = {
+      nativeGrants: async (): Promise<NativeGrantProbe> => ({
+        kind: 'ok' as const,
+        screenRecording: false,
+        accessibility: false,
+      }),
+    };
+    for (const declareNativeScreen of [false, true]) {
+      const { caller } = setup({ probes: grants, declareNativeScreen });
+      const report = await caller.cyboflow.verificationRequests.hostProbes();
 
-    expect(report.nativeScreenDeclared).toBe(false);
-    expect(probeRow(report, 'screen-recording').state).toBe('missing');
-    expect(probeRow(report, 'accessibility').state).toBe('missing');
+      expect(probeRow(report, 'screen-recording').state).toBe('missing');
+      expect(probeRow(report, 'accessibility').state).toBe('missing');
+      expect(probeRow(report, 'accessibility').fix).toBe('request-accessibility');
+    }
   });
 
   it('rolls node, chromium and the driver CLI into ONE browser-driving row', async () => {

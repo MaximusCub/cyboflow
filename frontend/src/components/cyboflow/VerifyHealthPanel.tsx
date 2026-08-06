@@ -43,7 +43,6 @@ import {
   PROBE_STATUS_LABEL,
   probeFixLabel,
   probeFixPendingLabel,
-  probeIsRequired,
   probeStatus,
   probeStatusClass,
   projectSetupLine,
@@ -181,13 +180,10 @@ function fixMutation(fix: VerifyProbeRow['fix']): (() => Promise<VerifyHostProbe
 
 function ProbeTableRow({
   row,
-  required,
   onFix,
   fixInFlight,
 }: {
   row: VerifyProbeRow;
-  /** Whether some runbook actually depends on this capability — sets the tone, not the presence. */
-  required: boolean;
   onFix: (row: VerifyProbeRow) => void;
   fixInFlight: boolean;
 }): ReactElement {
@@ -205,9 +201,9 @@ function ProbeTableRow({
     >
       <span
         data-testid={`verify-probe-state-${row.id}`}
-        className={`w-24 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStatusClass(row, required)}`}
+        className={`w-24 shrink-0 rounded-full px-2 py-0.5 text-center text-[10px] font-medium ${probeStatusClass(row)}`}
       >
-        {PROBE_STATUS_LABEL[probeStatus(row, required)]}
+        {PROBE_STATUS_LABEL[probeStatus(row)]}
       </span>
       <span className="min-w-0 flex-1 text-xs text-text-primary">{PROBE_LABEL[row.id]}</span>
       {fixLabel !== null && (
@@ -333,7 +329,6 @@ export function VerifyHealthPanel({
             <ProbeTableRow
               key={row.id}
               row={row}
-              required={probeIsRequired(row, probes.nativeScreenDeclared)}
               onFix={handleFix}
               fixInFlight={fixInFlight}
             />

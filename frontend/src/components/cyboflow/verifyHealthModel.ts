@@ -33,7 +33,7 @@ import type {
 export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
   'browser-driving': 'Playwright browser control',
   'screen-recording': 'Screen recording',
-  accessibility: 'Accessibility controls',
+  accessibility: 'Computer control (accessibility)',
 };
 
 /**
@@ -82,11 +82,17 @@ export const PROBE_STATUS_LABEL: Readonly<Record<ProbeStatus, string>> = {
  * An unmet capability is `pending action` exactly when the row carries a
  * remedy — the distinction the user acts on is "there is something I can do
  * here" versus "this is broken and the panel cannot help", and the fix button
- * IS that distinction. An unmet capability nobody's runbook needs is softened
- * to `unknown`: it describes a permission the user has no reason to grant, and
- * calling it unhealthy is a false alarm about a host that verifies fine.
+ * IS that distinction.
+ *
+ * Deliberately NOT softened by what the current projects happen to need. An
+ * earlier version reported an unmet grant no runbook depended on as `unknown`,
+ * which was wrong twice: `unknown` means the probe could not answer, and this
+ * probe answered clearly — and it rendered a grey "we don't know" beside a live
+ * remedy button. All three capabilities are checked and reported the same way
+ * on every host, because a capability you are told nothing about is one whose
+ * absence you discover the first time you need it.
  */
-export function probeStatus(row: VerifyProbeRow, required: boolean): ProbeStatus {
+export function probeStatus(row: VerifyProbeRow): ProbeStatus {
   switch (row.state) {
     case 'ok':
       return 'healthy';
@@ -95,7 +101,6 @@ export function probeStatus(row: VerifyProbeRow, required: boolean): ProbeStatus
     case 'blocked':
       return 'n/a';
     case 'missing':
-      if (!required) return 'unknown';
       return row.fix === null ? 'unhealthy' : 'pending action';
   }
 }
@@ -119,24 +124,9 @@ export function probeFixPendingLabel(fix: VerifyProbeRow['fix']): string | null 
   return fix === 'provision-chromium' ? 'Installing…' : null;
 }
 
-/**
- * Whether a probe row describes a capability THIS host is actually relied upon
- * for.
- *
- * The two TCC grants are always listed — you cannot decide whether to use
- * screen capture without first being told whether it works here, which is
- * exactly what hiding the rows until a runbook declared `native-screen` made
- * impossible. But a grant nobody's runbook needs is not a problem to be
- * alarmed about, so an unmet one is rendered as information rather than as a
- * fault.
- */
-export function probeIsRequired(row: VerifyProbeRow, nativeScreenDeclared: boolean): boolean {
-  return row.id === 'browser-driving' ? true : nativeScreenDeclared;
-}
-
 /** The pill class for a row, via its status. */
-export function probeStatusClass(row: VerifyProbeRow, required: boolean): string {
-  return PROBE_STATUS_CLASS[probeStatus(row, required)];
+export function probeStatusClass(row: VerifyProbeRow): string {
+  return PROBE_STATUS_CLASS[probeStatus(row)];
 }
 
 /**

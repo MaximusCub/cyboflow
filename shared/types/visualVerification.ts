@@ -1873,22 +1873,4 @@ export interface VerifyProbeRow {
  */
 export interface VerifyHostProbeReport {
   probes: VerifyProbeRow[];
-  /**
-   * Whether ANY project's runbook declares the `native-screen` modality
-   * (`verify_runbook_local`).
-   *
-   * This used to HIDE the two grant rows outright (§6's "conditional grants
-   * branch", so a CDP-only user is never nagged for a host-wide TCC grant).
-   * That was circular: you need to know whether screen capture works on this
-   * host in order to decide whether to declare native-screen, and the answer
-   * was withheld until after you had declared it.
-   *
-   * So the rows are always present now, and this flag only sets how loudly a
-   * missing grant is rendered: REQUIRED when some runbook depends on it,
-   * merely optional otherwise. Still deliberately global rather than
-   * per-project — a permissions row that appeared and vanished as the user
-   * switched projects would read as a bug, and the grant it describes is
-   * itself host-wide.
-   */
-  nativeScreenDeclared: boolean;
 }
