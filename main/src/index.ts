@@ -542,6 +542,32 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
+// Route node's process warnings (DeprecationWarning, ExperimentalWarning, a
+// MaxListenersExceededWarning) to WARN instead of ERROR. Node's own default
+// 'warning' listener prints them with console.error, and createWindow maps
+// console.error -> logger.error, so a deprecation notice from a dependency
+// landed in the on-disk log at ERROR. That channel is what post-hoc triage reads
+// first — the 2026-08-06 smoke run found DEP0180 sitting as one of the log's two
+// ERROR lines and filed it, which is the correct read of a level that was wrong.
+// A warning is not an app fault; it belongs at WARN, where it still persists
+// (Logger.shouldPersist keeps WARN unconditionally) without costing signal.
+//
+// removeAllListeners is required, not merely tidy: node ATTACHES its default
+// listener at bootstrap and adding ours would print every warning twice, once at
+// each level. Done here at module scope, before app code registers anything on
+// this channel. console.warn is resolved at emit time, so warnings raised after
+// createWindow's overrides install still reach the logger.
+process.removeAllListeners('warning');
+process.on('warning', (warning: Error & { code?: string; detail?: string }) => {
+  try {
+    const code = warning.code ? ` [${warning.code}]` : '';
+    const detail = warning.detail ? `\n${warning.detail}` : '';
+    console.warn(`(node:${process.pid})${code} ${warning.name}: ${warning.message}${detail}`);
+  } catch {
+    // swallow — a broken console must not turn a warning into a crash
+  }
+});
+
 // Parse command-line arguments for custom Cyboflow directory
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
