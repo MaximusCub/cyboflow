@@ -8,7 +8,7 @@
  * doesn't have. Each test gets its own temp-dir db file so tests never share
  * state or a lock.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -264,6 +264,65 @@ describe('mcp-db-query — readonly connection refuses writes independent of val
 
     const count = rawDb.prepare('SELECT COUNT(*) AS n FROM widgets').get() as { n: number };
     expect(count.n).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Log LEVEL of a caller error — a smoke-triage regression guard
+// ---------------------------------------------------------------------------
+
+describe('mcp-db-query — bad SQL is logged as a caller error, not an app fault', () => {
+  it('reports an unknown column at WARN and never on the ERROR channel', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-db-query', requestId: 'r11', runId: AGENT_RUN_ID, sql: 'SELECT no_such_col FROM widgets' },
+        socket,
+      );
+
+      // The caller is told, in-band.
+      const resp = parseLastWrite(writes);
+      expect(resp.ok).toBe(false);
+      expect(resp.error).toContain('no such column');
+
+      // ...and the app log does NOT claim a fault. Two smoke runs (2026-08-01
+      // and 2026-08-06) filed a false medium-severity app finding off this
+      // exact path, the second time from a log line whose own text already said
+      // "returned to client as ok:false" — triage keys off the LEVEL, so the
+      // level is what this test pins. The SQL here is agent-authored; a bad
+      // column in it is the caller's typo and nothing for the app to answer for.
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0][0]);
+      expect(line).toContain('mcp-db-query');
+      expect(line).toContain('no such column');
+      expect(line).toContain('agent-authored SQL');
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it('still logs a non-db-query handler throw at ERROR', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { socket } = makeSocketDouble();
+      // An unknown message type is the one throw-free path that still lands in
+      // the same catch-adjacent logging seam; assert the ERROR channel survives
+      // for everything that is NOT agent-authored SQL.
+      await handler.handleMessage(
+        { type: 'mcp-not-a-real-type', requestId: 'r12', runId: AGENT_RUN_ID } as never,
+        socket,
+      );
+      expect(error).toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
   });
 });
 

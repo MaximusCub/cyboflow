@@ -1698,7 +1698,21 @@ export class McpQueryHandler {
       // reclassified it. This message states what is true of BOTH classes (the
       // handler threw; the client got ok:false) and names the message type so
       // triage knows which handler without decoding the stack.
-      console.error(`[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`, err);
+      //
+      // mcp-db-query goes to WARN rather than ERROR: wording alone did not stop
+      // the recurrence (the 2026-08-06 smoke re-filed the same false finding off
+      // a line that already said "returned to client as ok:false", because log
+      // triage keys off the LEVEL, not the prose). Its SQL is agent-authored, so
+      // a throw here is by construction a caller error and does not belong on
+      // the channel reserved for app faults. Every other message type builds its
+      // own SQL and keeps ERROR, where a throw IS ours.
+      const logAtWarn = msg.type === 'mcp-db-query';
+      const summary = `[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`;
+      if (logAtWarn) {
+        console.warn(`${summary} ${error} (agent-authored SQL — caller error, not an app fault)`);
+      } else {
+        console.error(summary, err);
+      }
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
