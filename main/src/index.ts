@@ -835,6 +835,20 @@ async function createWindow() {
     runDeferredStartupWork();
   });
 
+  // Verification instances get a distinguishable OS window title so the
+  // native-screen window-identity channel is not satisfied by the developer's
+  // own window. An unpackaged `electron .` launch takes its OS app name from
+  // the Electron binary's bundle, so EVERY cyboflow worktree running `pnpm dev`
+  // presents as the same application ("Electron") — peekaboo then refuses the
+  // ambiguous name outright and the channel resolves to nothing. The title is
+  // the only discriminator available to it. Electron otherwise mirrors the page
+  // <title>, so that mirroring is pinned off for the lifetime of the window.
+  const verifyToken = process.env.CYBOFLOW_VERIFY_TOKEN;
+  if (verifyToken) {
+    mainWindow.on('page-title-updated', (e) => e.preventDefault());
+    mainWindow.setTitle(`Cyboflow — verify ${verifyToken}`);
+  }
+
   // Bind the tRPC IPC handler to this window BEFORE the renderer loads, so an
   // early renderer request never races handler registration. On the first window
   // the adapter creates the single global handler; on the macOS 'activate'

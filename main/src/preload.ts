@@ -203,6 +203,17 @@ contextBridge.exposeInMainWorld('__cyboflowPerf', {
   traceEnabled: process.env.CYBOFLOW_PERF_TRACE === '1',
 });
 
+// Verification identity (the cdp-token attestation channel of
+// .cyboflow/verify-runbook.json). Present ONLY when the launcher injected the
+// token, so a developer's own `pnpm dev` instance evaluates to null and can
+// never satisfy a verification's attestation — which the previous channel,
+// `electronAPI.getAppVersion()`, could not distinguish. Same pattern and same
+// justification as the __cyboflowPerf bridge above: preload runs in the Node
+// context, so process.env is available, and the value is a plain string.
+contextBridge.exposeInMainWorld('__CYBOFLOW_VERIFY__', {
+  token: process.env.CYBOFLOW_VERIFY_TOKEN ?? null,
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Generic invoke method for direct IPC calls
   invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
