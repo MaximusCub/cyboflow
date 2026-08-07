@@ -21,6 +21,7 @@
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
+import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
 import { DEFAULT_WORKFLOW_MODEL } from '../cyboflow/ModelSelector';
@@ -46,6 +47,11 @@ export interface TaskRunLaunchState {
 export function useTaskRunLauncher(): TaskRunLaunchState {
   const [launchingTaskId, setLaunchingTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Same global-default source useLaunchWorkflow uses — this launcher has no
+  // Configure screen either, so the run's permission snapshot floors to the
+  // global Agent-Permission-Mode default (or the per-workflow override below).
+  const globalPermissionMode =
+    useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
 
   const launch = useCallback(
     async (taskId: string, projectId: number, type: TaskType): Promise<string | null> => {
@@ -77,14 +83,22 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
             : type === 'task'
               ? { taskIds: [taskId] }
               : { taskId };
+        // The per-workflow model override lives under the resolved workflowId
+        // (only known now, post-`workflows.list`) — read the store's live state
+        // rather than a hook-level value, which would be stale/keyed wrong.
+        const model =
+          useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${workflowId}`]?.model ??
+          DEFAULT_WORKFLOW_MODEL;
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
           sessionId,
-          // Backlog launches have no model UI — pin the same default the wizard /
-          // picker surfaces use (Opus → workflow_runs.model), so the run's
-          // read-only model pill renders instead of a NULL no-pin.
-          model: DEFAULT_WORKFLOW_MODEL,
+          // Backlog launches have no model UI — pin the resolved default (a
+          // per-workflow override, else the wizard/picker default Opus) →
+          // workflow_runs.model, so the run's read-only model pill renders
+          // instead of a NULL no-pin.
+          model,
+          permissionMode: globalPermissionMode,
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
@@ -97,7 +111,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         setLaunchingTaskId(null);
       }
     },
-    [],
+    [globalPermissionMode],
   );
 
   const launchSprintBatch = useCallback(
@@ -117,13 +131,18 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         // Session-hosted like every other launch surface; forceNew so the batch
         // run never silently absorbs the selected quick session (mirrors `launch`).
         const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
+        // Same per-workflow resolution as `launch` above — read post-resolution.
+        const model =
+          useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${workflowId}`]?.model ??
+          DEFAULT_WORKFLOW_MODEL;
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
           sessionId,
           taskIds,
           // Same default pin as the single-entity launch above (no model UI here).
-          model: DEFAULT_WORKFLOW_MODEL,
+          model,
+          permissionMode: globalPermissionMode,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
@@ -135,7 +154,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         setLaunchingTaskId(null);
       }
     },
-    [],
+    [globalPermissionMode],
   );
 
   return { launchingTaskId, error, launch, launchSprintBatch };
