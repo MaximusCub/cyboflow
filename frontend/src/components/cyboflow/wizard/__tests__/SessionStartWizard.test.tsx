@@ -199,6 +199,7 @@ import { trpc } from '../../../../trpc/client';
 import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
 import type { AppConfig } from '../../../../types/config';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
+import type { RunTypeDefaults } from '../../../../../../shared/types/sessionDefaults';
 
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
@@ -285,14 +286,22 @@ const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
   archived_at: null,
 };
 
-/** Render the wizard pinned to project 1 with quick offered, and wait for load. */
-async function renderLockedWizard(): Promise<void> {
+/**
+ * Render the wizard pinned to project 1 with quick offered, and wait for load.
+ * Returns the unmount handle so a test that needs a SECOND, differently-seeded
+ * render (e.g. both branches of the Ultracode availability floor) can tear the
+ * first one down instead of matching two wizards' controls at once.
+ */
+async function renderLockedWizard(): Promise<() => void> {
   act(() => {
     useNavigationStore.setState({ view: 'wizard', wizardOpts: { lockProjectId: 1, allowQuick: true } });
   });
-  render(<SessionStartWizard />);
-  // Wait for the workflow list to resolve (the row becomes clickable).
-  await screen.findByTestId('workflow-list-row');
+  const { unmount } = render(<SessionStartWizard />);
+  // Wait for the workflow list to resolve (the rows become clickable). getAll,
+  // not find/getByTestId: a list of TWO rows (per-workflow-key seeding) is a
+  // legitimate fixture and the singular query throws on multiple matches.
+  await waitFor(() => expect(screen.getAllByTestId('workflow-list-row').length).toBeGreaterThan(0));
+  return unmount;
 }
 
 /** Click the workflow row → auto-advances to ③ Configure. */
@@ -325,6 +334,59 @@ async function selectDesignAndConfigure(): Promise<void> {
     fireEvent.click(screen.getByTestId('design-card'));
   });
   await screen.findByTestId('wizard-step3');
+}
+
+/**
+ * Click the workflow row carrying `slashCommand` (e.g. '/compound') →
+ * auto-advances to ③ Configure. The single-row helper above can't disambiguate
+ * a list of two, which the per-workflow-key seeding tests need.
+ */
+async function selectWorkflowRowAndConfigure(slashCommand: string): Promise<void> {
+  const row = screen
+    .getAllByTestId('workflow-list-row')
+    .find((el) => (el.textContent ?? '').includes(slashCommand));
+  if (row === undefined) throw new Error(`no workflow row for ${slashCommand}`);
+  await act(async () => {
+    fireEvent.click(row);
+  });
+  await screen.findByTestId('wizard-step3');
+}
+
+/** Go back to ② Workflow from ③ Configure. */
+async function backToWorkflow(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+  });
+}
+
+/** The Claude model picker's current value on ③. */
+function claudeModelValue(): string {
+  return (screen.getByLabelText('Select Claude model') as HTMLSelectElement).value;
+}
+
+/** The reasoning-effort select's current value on ③ ('' = provider default). */
+function effortValue(): string {
+  return (screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value;
+}
+
+/** Change the agent runtime on ③. */
+async function chooseRuntime(runtime: string): Promise<void> {
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: runtime } });
+  });
+}
+
+/**
+ * Install a `runTypeDefaults` map on the config store. The wizard reads it
+ * reactively (a Settings edit must re-seed an open, untouched wizard), so this
+ * doubles as the "the stored default changed under us" driver.
+ */
+function setRunTypeDefaults(defaults: Record<string, RunTypeDefaults>): void {
+  act(() => {
+    useConfigStore.setState({
+      config: { runTypeDefaults: defaults } as unknown as AppConfig,
+    });
+  });
 }
 
 beforeEach(() => {
@@ -1250,6 +1312,17 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
 //   - a stored per-key model default outranks the floor.
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — run-type defaults + seeded model selection', () => {
+  // The workflows.list mock is module-level and its resolved value PERSISTS
+  // across describes, so the two-row fixtures below (per-workflow-key seeding)
+  // would otherwise leak into whatever describe runs next. Pin it back to the
+  // single default row around every test in here.
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+  });
+  afterEach(() => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+  });
+
   it('still clears a pending reasoning effort when the runtime flips to Codex', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
@@ -1339,6 +1412,253 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
     );
+  });
+
+  // ── The cross-provider effort reset (the highest-risk contract here) ───────
+  // The reset is direction-agnostic: it fires on ANY effective-runtime change,
+  // so the Codex→Claude leg must clear just as hard as Claude→Codex. Only the
+  // Claude→Codex direction was pinned before; a seeding effect that re-applied
+  // on a runtime change would regress the reverse leg silently, letting a
+  // Codex-only level ('minimal' does not exist on the Claude scale) ride a
+  // Claude launch and be dropped at the spawn seam while the pill showed it.
+
+  it('clears a Codex-scale effort when the runtime flips BACK to Claude (the reset is symmetric)', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await chooseRuntime('codex-sdk');
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('wizard-effort-select'), { target: { value: 'minimal' } });
+    });
+    expect(effortValue()).toBe('minimal');
+
+    // 'minimal' is Codex-only — flipping back to a Claude runtime must clear it.
+    await chooseRuntime('claude-sdk');
+    expect(effortValue()).toBe('');
+    // ...and it is not merely invisible-but-set: the Claude scale never offers it.
+    expect(screen.queryByRole('option', { name: 'minimal' })).toBeNull();
+  });
+
+  it('never resurrects the stored quick effort after a Claude→Codex→Claude round trip', async () => {
+    // The seeding effect's deps are [card kind, stored value] ONLY. If the
+    // effective runtime were a dep, coming back to Claude would re-apply the
+    // stored 'high' and quietly undo the reset the user just triggered.
+    setRunTypeDefaults({ quick: { reasoningEffort: 'high' } });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(effortValue()).toBe('high');
+
+    await chooseRuntime('codex-sdk');
+    expect(effortValue()).toBe('');
+    await chooseRuntime('claude-sdk');
+    expect(effortValue()).toBe('');
+  });
+
+  it('ignores a stored quick effort that is off the CURRENT provider scale', async () => {
+    // 'minimal' is a Codex-only level; under the seeded Claude runtime the spawn
+    // seam would drop it, so the control must never show it as active.
+    setRunTypeDefaults({ quick: { reasoningEffort: 'minimal' } });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    expect(effortValue()).toBe('');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    // No reasoningEffort rides the launch — claudeConfig carries model+fastMode only.
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'opus', fastMode: false } }),
+    );
+  });
+
+  // ── The touched latch survives programmatic coercion ──────────────────────
+
+  it('still re-seeds the model from a CHANGED stored default after Codex→Claude→Codex flips', async () => {
+    // AC4, asserted through observable behavior rather than hook internals: if
+    // any of the family coercions had gone through setByUser instead of reseed,
+    // the 'quick' key would be latched and this stored-default change would be
+    // ignored.
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+
+    await chooseRuntime('codex-sdk');
+    await chooseRuntime('claude-sdk');
+    await chooseRuntime('codex-sdk');
+    await chooseRuntime('claude-sdk');
+
+    // Zero interaction with the model control so far → the key is untouched and
+    // a Settings edit must re-seed the open wizard.
+    setRunTypeDefaults({ quick: { model: 'sonnet' } });
+    expect(claudeModelValue()).toBe('sonnet');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+  });
+
+  it('STOPS re-seeding the model once the user picks one, even when the stored default changes', async () => {
+    // The non-vacuity twin of the test above: the same stored-default edit that
+    // lands on an untouched key must be ignored on a touched one.
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'haiku' } });
+    });
+    setRunTypeDefaults({ quick: { model: 'sonnet' } });
+
+    expect(claudeModelValue()).toBe('haiku');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'haiku', fastMode: false } }),
+    );
+  });
+
+  // ── Byte-identical no-config floors, per card path ────────────────────────
+
+  it('seeds the Ultracode floor from availability ALONE when nothing is configured', async () => {
+    // AC2, both branches, config left null: Fable usable → 'fable', greyed out
+    // → the plain Opus floor. Two renders because the availability snapshot is
+    // read at seed time.
+    const unmount = await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('fable');
+    expect(useConfigStore.getState().config).toBeNull();
+    unmount();
+
+    modelAvailability.fableUnavailable = true;
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+  });
+
+  it("seeds today's exact floor for every card path when nothing is configured", async () => {
+    // The four card paths that used to call the old imperative model-seeding
+    // callback, walked in one render: quick / ultracode / workflow / design.
+    // Only Ultracode leaves Opus.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+    await renderLockedWizard();
+
+    await selectQuickAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+
+    await backToWorkflow();
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('fable');
+
+    await backToWorkflow();
+    await selectWorkflowAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+
+    await backToWorkflow();
+    await selectDesignAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+
+    expect(useConfigStore.getState().config).toBeNull();
+  });
+
+  it('lets a stored quick default outrank the Ultracode Fable floor (quick + ultracode share one key)', async () => {
+    // Quick and Ultracode both key off the synthetic global 'quick' key, so an
+    // explicitly configured default is the user's word on both cards — it must
+    // beat the availability-derived Fable floor rather than the other way round.
+    setRunTypeDefaults({ quick: { model: 'sonnet' } });
+    await renderLockedWizard();
+
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('sonnet');
+    await backToWorkflow();
+    await selectQuickAndConfigure();
+    expect(claudeModelValue()).toBe('sonnet');
+  });
+
+  it('keeps the Design card on its OWN key — it never inherits the stored quick default', async () => {
+    setRunTypeDefaults({ quick: { model: 'sonnet' } });
+    await renderLockedWizard();
+
+    // Quick honours the stored default...
+    await selectQuickAndConfigure();
+    expect(claudeModelValue()).toBe('sonnet');
+
+    // ...design does not: it is excluded from the stored-defaults surface and
+    // stays on the plain Opus floor.
+    await backToWorkflow();
+    await selectDesignAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+  });
+
+  it('degrades a stored CODEX-family default to the Opus floor under a Claude runtime', async () => {
+    // A cross-provider stored default is reachable (the key is provider-blind).
+    // The seed lands the Codex id, the family-coercion effect immediately
+    // reseeds the Claude floor, and — because the hook's seed effect is keyed on
+    // [key, seed] and never on `value` — the two settle instead of ping-ponging.
+    setRunTypeDefaults({ quick: { model: 'gpt-5.4' } });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    expect(claudeModelValue()).toBe('opus');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'opus', fastMode: false } }),
+    );
+  });
+
+  // ── Per-workflow key isolation ────────────────────────────────────────────
+
+  it('seeds each workflow from its OWN stored default and threads it into runs.start', async () => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    setRunTypeDefaults({
+      'workflow:wf-1': { model: 'haiku' },
+      'workflow:wf-compound': { model: 'sonnet' },
+    });
+    await renderLockedWizard();
+
+    // Switching the selected flow BEFORE touching the model re-seeds to the new
+    // flow's default — the previous flow's value must not ride along.
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(claudeModelValue()).toBe('haiku');
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/compound');
+    expect(claudeModelValue()).toBe('sonnet');
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(claudeModelValue()).toBe('haiku');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowId: 'wf-1', model: 'haiku' }),
+    );
+  });
+
+  it("does not leak one workflow key's user pin onto another workflow", async () => {
+    // Nothing configured, so both flows floor to Opus. A pin on /custom is
+    // per-key: /compound must still seed Opus, and returning to /custom must
+    // restore the pin (each key tracks its own touched value).
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    await renderLockedWizard();
+
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(claudeModelValue()).toBe('opus');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'haiku' } });
+    });
+
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/compound');
+    expect(claudeModelValue()).toBe('opus');
+
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(claudeModelValue()).toBe('haiku');
   });
 });
 
