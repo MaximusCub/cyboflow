@@ -1276,7 +1276,19 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     setRunTypeDefaults({ quick: { model: 'haiku' } });
     render(<WorkflowPicker projectId={1} />);
 
-    const modelSelect = await screen.findByLabelText('Select Claude model');
+    // ModelSelector renders unconditionally from first mount — before
+    // workflows.list resolves and `selectedId` settles from null to 'wf-1'.
+    // Touching the dropdown during that pre-load window would land under the
+    // transient `workflow:` key (empty id); once the real id resolves,
+    // modelKey changes to `workflow:wf-1` and useSeededSelection's per-key
+    // touched map treats that as an untouched NEW key, silently dropping the
+    // touch. Wait for the real key to settle (Start Run enabling implies
+    // `selectedId` is set) before touching the dropdown, so this test
+    // exercises the intended "user touches a real workflow's control" case
+    // rather than racing the load.
+    await findEnabledStartRun();
+
+    const modelSelect = screen.getByLabelText('Select Claude model');
     await act(async () => {
       fireEvent.change(modelSelect, { target: { value: 'sonnet' } });
     });
@@ -1311,6 +1323,88 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     expect(mockCreateQuick).not.toHaveBeenCalledWith(
       expect.objectContaining({ agentModel: 'haiku' }),
     );
+  });
+
+  it('falls back to the Opus floor (not the stale stored value) when the stored per-workflow default is Codex-family and the runtime is Claude', async () => {
+    // A Codex model id saved under a workflow:<id> key (e.g. left over from a
+    // prior Codex launch of this same workflow) is incompatible with a Claude
+    // runtime. The runtime-family coercion effect must fall back to
+    // DEFAULT_WORKFLOW_MODEL rather than re-applying the stale cross-family
+    // value — re-applying it would hand the Claude runtime a Codex model id
+    // and then no-op forever (reseed/setValue bail out on an unchanged value).
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'gpt-5.4' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1', model: 'opus' }));
+  });
+
+  it("Quick Session forwards the live (untouched) model when no 'quick' key is stored at all", async () => {
+    // No 'quick' key in runTypeDefaults at all — the family guard's
+    // `storedQuickModel === undefined` branch must forward the live
+    // workflow-seeded model rather than falling through to some other value.
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+  });
+
+  it('per-key touched isolation: touching wf-1 then switching to wf-2 and back retains the touch on wf-1 without leaking into wf-2', async () => {
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' }, 'workflow:wf-2': { model: 'haiku' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    const workflowSelect = await screen.findByLabelText('Select workflow');
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    // User explicitly overrides wf-1's model.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'opus' } });
+    });
+
+    // Switch to wf-2: its OWN seed applies — wf-1's touched override does not
+    // leak into a different key's untouched state.
+    await act(async () => {
+      fireEvent.change(workflowSelect, { target: { value: 'wf-2' } });
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('haiku');
+    });
+
+    // Switch back to wf-1: the earlier touch is retained (NOT re-seeded back
+    // to 'sonnet') — each key keeps its own touched flag and last user value.
+    await act(async () => {
+      fireEvent.change(workflowSelect, { target: { value: 'wf-1' } });
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1', model: 'opus' }));
   });
 });
 
