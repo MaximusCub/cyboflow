@@ -3,6 +3,7 @@ import { Checkbox, Textarea } from '../ui/Input';
 import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector';
+import { RunTypeOverridesSection } from './RunTypeOverridesSection';
 import { trackEvent } from '../../utils/telemetry';
 import type { ExecutionModel } from '../../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
@@ -282,7 +283,12 @@ export function SessionSettings({
           </SettingsSection>
         </section>
 
-        {/* Per-run-type overrides land here, directly below Global defaults. */}
+        {/* Per-run-type overrides land here, directly below Global defaults.
+            This one IS self-fetching (workflow rows + config) and writes through
+            the dedicated `applyRunTypeDefault` IPC op rather than this group's
+            props-in/callback-out contract — routing it through Settings.tsx's
+            shared handleSubmit would echo a stale `runTypeDefaults` snapshot. */}
+        <RunTypeOverridesSection />
       </CollapsibleCard>
     </section>
   );
