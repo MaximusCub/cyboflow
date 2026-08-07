@@ -109,6 +109,7 @@ import { cn } from '../../../utils/cn';
 import { sameStringSet } from '../../../utils/sameStringSet';
 import { Switch } from '../../ui/Switch';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
+import { SessionActionToast } from '../SessionActionToast';
 import { WizardStepHeader } from './WizardStepHeader';
 import type { WizardStep } from './WizardStepHeader';
 import { ProjectFilingCard } from './ProjectFilingCard';
@@ -134,6 +135,7 @@ import {
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import { isMixedProviderOrchestratedError } from '../../../../../shared/types/executionModelErrors';
 import type { QuickSessionWorktreeMode } from '../../../../../shared/types/worktreeMode';
+import type { RunTypeDefaults } from '../../../../../shared/types/sessionDefaults';
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
@@ -191,6 +193,14 @@ const GRID_BG_STYLE: React.CSSProperties = {
 const HAZARD_STRIPE_STYLE: React.CSSProperties = {
   backgroundImage: 'repeating-linear-gradient(135deg, #2d8a5b 0 8px, #26764e 8px 16px)',
 };
+
+/**
+ * How long the "Saved as default" toast stays up on THIS surface. Deliberately
+ * longer than {@link SessionActionToast}'s 3s default: the toast carries the
+ * only Undo affordance for a write that has already hit disk. Scoped to this
+ * call site — the component default and its other call sites are untouched.
+ */
+const SAVE_DEFAULT_TOAST_MS = 9000;
 
 /** The dashed "add project" tile fill cue. */
 function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element {
@@ -1293,6 +1303,103 @@ export default function SessionStartWizard(): React.JSX.Element {
   const permissionLabel =
     PERMISSION_MODE_OPTIONS.find((o) => o.id === permissionMode)?.label ?? permissionMode;
 
+  // ── "Save as default" (③ Configure) ──────────────────────────────────────
+  /**
+   * Persist the Configure knobs as the stored default for the CURRENT card's
+   * run-type key. Independent of launching in BOTH directions: this never
+   * starts a session/run, and the CTA never writes a default.
+   *
+   * Side-effect-only: the handler writes config and nothing else — it must
+   * never touch the live launch controls (no setModelByUser /
+   * setPermissionMode / setAgentRuntime / setReasoningEffort), so the launch
+   * payload is byte-identical before and after a save. (The store's post-write
+   * fetchConfig does refresh `runTypeDefaults`, which feeds useSeededSelection's
+   * seed — harmless, since the value just stored IS the live value.)
+   */
+  const applyRunTypeDefault = useConfigStore((s) => s.applyRunTypeDefault);
+  /**
+   * The undo record for the last save: the key written plus the map entry that
+   * existed BEFORE it. `previous === undefined` is the common case (no default
+   * was stored for this key) and must replay as `value: null` — a key DELETION
+   * — never as `value: undefined`, which would leave the just-written entry in
+   * place and make Undo a silent no-op.
+   */
+  const [savedDefault, setSavedDefault] = useState<{
+    key: string;
+    previous: RunTypeDefaults | undefined;
+  } | null>(null);
+  /**
+   * The live toast text (null = hidden). Captured at save time rather than
+   * derived from the CURRENT selection, so switching cards while the toast is
+   * still up cannot relabel a confirmation that describes what was written.
+   */
+  const [saveToastMessage, setSaveToastMessage] = useState<string | null>(null);
+
+  const handleSaveDefault = useCallback(() => {
+    // `design` is deliberately excluded from the stored-defaults surface (it
+    // keeps the plain Opus floor), and the CTA is not rendered for it — this
+    // guard just makes that contract local to the write.
+    if (selection === null || selection.kind === 'design') return;
+    const key = modelDefaultsKey;
+    // Quick AND Ultracode both write the synthetic global 'quick' key, so the
+    // label has to say "Quick sessions" for both rather than naming the card.
+    const label =
+      selection.kind === 'workflow'
+        ? workflowMetas.find((m) => m.id === selection.workflowId)?.title ?? 'this flow'
+        : 'Quick sessions';
+    void (async () => {
+      const previous = await applyRunTypeDefault(key, {
+        kind: 'merge',
+        value: {
+          model,
+          permissionMode,
+          // The runtime this card would actually launch on (Ultracode pins
+          // interactive; the picker is hidden for it), not the raw picker state.
+          agentRuntime: effectiveRuntime,
+          // `?? null` (delete), NOT undefined (leave untouched): a Codex runtime
+          // has no substrate projection, and leaving a previously-stored Claude
+          // substrate behind would pair a stale 'sdk'/'interactive' with a Codex
+          // agentRuntime in the same entry.
+          substrate: substrateForRuntime(effectiveRuntime) ?? null,
+          // Reasoning effort is captured ONLY from the quick card — the only one
+          // with an effort control. `?? null` because the control's "Default"
+          // option means "no explicit selection", which must CLEAR any stored
+          // effort default rather than leave it standing. Ultracode is excluded
+          // even though it shares this key (it pins xhigh at spawn and has no
+          // control, so writing it would persist a value the user never chose),
+          // and a workflow's per-agent effort lives in the step inspector.
+          ...(selection.kind === 'quick' ? { reasoningEffort: reasoningEffort ?? null } : {}),
+          // Variant is deliberately NOT captured: the selection resets on every
+          // workflow change and VariantSelector re-seeds it, and a variant row
+          // can be deleted with no referential integrity from config — a stored
+          // pin would ride runs.start as an explicit (possibly dangling) choice.
+          // Quick-session worktree mode is likewise out of scope for v1.
+        },
+      });
+      setSavedDefault({ key, previous });
+      setSaveToastMessage(`Saved as default for ${label}`);
+    })();
+  }, [
+    selection,
+    modelDefaultsKey,
+    workflowMetas,
+    model,
+    permissionMode,
+    effectiveRuntime,
+    reasoningEffort,
+    applyRunTypeDefault,
+  ]);
+
+  const handleUndoSaveDefault = useCallback(() => {
+    const saved = savedDefault;
+    if (saved === null) return;
+    setSaveToastMessage(null);
+    setSavedDefault(null);
+    // `replace` with the exact prior entry — or null to DELETE the key when
+    // there was no prior entry at all (see savedDefault's doc comment).
+    void applyRunTypeDefault(saved.key, { kind: 'replace', value: saved.previous ?? null });
+  }, [savedDefault, applyRunTypeDefault]);
+
   const combinedError = launchError ?? quickError;
 
   // Selected-project banner card — shared by the workflow step (②) and the
@@ -1891,6 +1998,43 @@ export default function SessionStartWizard(): React.JSX.Element {
                 >
                   New flow
                 </button>
+              </div>
+            )}
+
+            {/* "Save as default …" — a PERSISTENT affordance at the bottom of
+                the Configure card, not a post-launch prompt: saving and
+                launching are independent actions. Enabled from the moment the
+                card opens, even with no knob touched — storing the current
+                (possibly untouched) values is a legitimate "this run type
+                follows today's global default" confirmation, so there is
+                deliberately no dirty check. Omitted for `design`, which is
+                excluded from the stored-defaults surface by design. */}
+            {selection.kind !== 'design' && (
+              <button
+                type="button"
+                onClick={handleSaveDefault}
+                data-testid="wizard-save-default"
+                className="self-start text-xs font-medium text-interactive underline underline-offset-2 hover:text-interactive-hover"
+              >
+                {selection.kind === 'workflow'
+                  ? `Save as default for ${selectedMeta?.title ?? 'this flow'}`
+                  : 'Save as default for Quick sessions'}
+              </button>
+            )}
+
+            {/* Save-as-default confirmation + its Undo. Fixed-positioned wrapper
+                per the CyboflowRoot render pattern; the longer duration is this
+                call site's own (SessionActionToast's 3s default is unchanged). */}
+            {saveToastMessage !== null && (
+              <div className="fixed bottom-4 right-4 z-50">
+                <SessionActionToast
+                  message={saveToastMessage}
+                  isVisible
+                  onDismiss={() => setSaveToastMessage(null)}
+                  durationMs={SAVE_DEFAULT_TOAST_MS}
+                  actionLabel="Undo"
+                  onAction={handleUndoSaveDefault}
+                />
               </div>
             )}
 

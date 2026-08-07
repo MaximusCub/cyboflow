@@ -199,7 +199,7 @@ import { trpc } from '../../../../trpc/client';
 import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
 import type { AppConfig } from '../../../../types/config';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
-import type { RunTypeDefaults } from '../../../../../../shared/types/sessionDefaults';
+import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../../shared/types/sessionDefaults';
 
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
@@ -1659,6 +1659,241 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
     await backToWorkflow();
     await selectWorkflowRowAndConfigure('/custom');
     expect(claudeModelValue()).toBe('haiku');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Save as default" CTA + Undo (TASK-157) — a PERSISTENT affordance at the
+// bottom of the Configure card, independent of launching in both directions.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () => {
+  /**
+   * Stand-in for the config store's `applyRunTypeDefault` action. The wizard
+   * reads it off the store (never API.config directly), so swapping the action
+   * itself both records the exact op written and lets a test stage the
+   * `previous` entry the real IPC would return.
+   */
+  const mockApplyRunTypeDefault = vi.fn(
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<RunTypeDefaults | undefined> => undefined,
+  );
+
+  beforeEach(() => {
+    mockApplyRunTypeDefault.mockClear();
+    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    // Non-gated custom flow so the workflow card reaches ③ and (for the
+    // side-effect-only proof) launches directly via runs.start.
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+    act(() => {
+      useConfigStore.setState({ applyRunTypeDefault: mockApplyRunTypeDefault });
+    });
+  });
+
+  it('renders the CTA on the workflow card, enabled before any knob is touched', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    const saveBtn = screen.getByTestId('wizard-save-default');
+    expect(saveBtn).toHaveTextContent('Save as default for Custom');
+    expect(saveBtn).toBeEnabled();
+    // It is a peer of the launch summary, not a post-launch prompt.
+    expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
+  });
+
+  it('writes model + permission + runtime/substrate under the workflow key WITHOUT launching', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
+      kind: 'merge',
+      value: {
+        model: 'opus',
+        permissionMode: 'default',
+        agentRuntime: 'claude-sdk',
+        substrate: 'sdk',
+      },
+    });
+    // Independence: saving is NOT a launch.
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('session-action-toast')).toHaveTextContent(
+      'Saved as default for Custom',
+    );
+  });
+
+  it("writes the quick card under the synthetic 'quick' key, INCLUDING reasoningEffort", async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Pick a non-default effort so the captured value is unambiguous.
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('wizard-effort-select'), { target: { value: 'high' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(screen.getByTestId('wizard-save-default')).toHaveTextContent(
+      'Save as default for Quick sessions',
+    );
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('quick', {
+      kind: 'merge',
+      value: {
+        model: 'opus',
+        permissionMode: 'default',
+        // Quick seeds the interactive PTY runtime from the (absent) global
+        // quick-session substrate preference, which floors to 'interactive'.
+        agentRuntime: 'claude-interactive',
+        substrate: 'interactive',
+        reasoningEffort: 'high',
+      },
+    });
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
+  it("sends reasoningEffort: null from the quick card's 'Default' option (clears a stored effort)", async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Untouched select — '' means "provider default", i.e. no explicit pin.
+    expect(effortValue()).toBe('');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith(
+      'quick',
+      expect.objectContaining({
+        kind: 'merge',
+        value: expect.objectContaining({ reasoningEffort: null }),
+      }),
+    );
+  });
+
+  it("writes the ultracode card under 'quick' but WITHOUT reasoningEffort", async () => {
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+
+    expect(screen.getByTestId('wizard-save-default')).toHaveTextContent(
+      'Save as default for Quick sessions',
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    const [key, op] = mockApplyRunTypeDefault.mock.calls[0];
+    expect(key).toBe('quick');
+    expect(op.kind).toBe('merge');
+    // Ultracode pins xhigh at spawn and exposes no effort control — writing the
+    // field would persist a value the user never chose.
+    expect(op.value).not.toHaveProperty('reasoningEffort');
+    expect(op.value).toMatchObject({ agentRuntime: 'claude-interactive', substrate: 'interactive' });
+  });
+
+  it('renders NO CTA for the design card', async () => {
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+  });
+
+  it('writes substrate: null for a Codex runtime so a stale Claude substrate cannot survive', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseRuntime('codex-sdk');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith(
+      'workflow:wf-1',
+      expect.objectContaining({
+        kind: 'merge',
+        value: expect.objectContaining({ agentRuntime: 'codex-sdk', substrate: null }),
+      }),
+    );
+  });
+
+  it('leaves the launch payload byte-identical (side-effect-only)', async () => {
+    // Baseline: launch with no save at all. A successful wizard launch latches
+    // startInFlightRef and navigates, so the "after" case needs its own mount.
+    const unmount = await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    const before = mockRunStart.mock.calls[0][0];
+    act(() => {
+      unmount();
+    });
+
+    // Same wizard, but the CTA fires before the launch.
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    const after = mockRunStart.mock.calls[1][0];
+
+    expect(after).toEqual(before);
+  });
+
+  it('Undo DELETES the key ({ kind: replace, value: null }) when no prior default existed', async () => {
+    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+    const undoBtn = await screen.findByTestId('session-action-toast-action');
+    await act(async () => {
+      fireEvent.click(undoBtn);
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledTimes(2);
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: null,
+    });
+    // Explicitly NOT `value: undefined`, which would leave the write standing.
+    expect(mockApplyRunTypeDefault.mock.calls[1][1]).not.toEqual({ kind: 'replace', value: undefined });
+    await waitFor(() => expect(screen.queryByTestId('session-action-toast')).toBeNull());
+  });
+
+  it('Undo restores the exact prior entry when one existed', async () => {
+    const previous: RunTypeDefaults = {
+      model: 'sonnet',
+      permissionMode: 'auto',
+      substrate: 'interactive',
+      agentRuntime: 'claude-interactive',
+    };
+    mockApplyRunTypeDefault.mockResolvedValue(previous);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+    const undoBtn = await screen.findByTestId('session-action-toast-action');
+    await act(async () => {
+      fireEvent.click(undoBtn);
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: previous,
+    });
   });
 });
 

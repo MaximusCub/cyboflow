@@ -21,6 +21,8 @@ import { useAgentPermissionMode } from '../../hooks/useAgentPermissionMode';
 import { useSeededSelection } from '../../hooks/useSeededSelection';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
+import { SessionActionToast } from './SessionActionToast';
+import { workflowTitleForName } from './wizard/workflowMeta';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
@@ -29,6 +31,7 @@ import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
+import type { RunTypeDefaults } from '../../../../shared/types/sessionDefaults';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../shared/types/agentRuntime';
@@ -43,6 +46,15 @@ import {
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
 import { notifyWorkflowRunStarted } from '../../utils/onboarding';
+
+/**
+ * How long the "Saved as default" toast stays up on THIS surface. Deliberately
+ * longer than {@link SessionActionToast}'s 3s default: the toast carries the
+ * only Undo affordance for a write that has already hit disk, and 3s is below
+ * the usual bar for an undo window. Scoped to this call site — the component
+ * default and its other call sites are untouched.
+ */
+const SAVE_DEFAULT_TOAST_MS = 9000;
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -515,6 +527,80 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     );
   }, [agentRuntime, model, isModelTouched, permissionMode, startQuickSession, quickDefaultSubstrate]);
 
+  /**
+   * "Save as default" — persist the Configure knobs as the stored default for
+   * the SELECTED workflow's key. Independent of launching in BOTH directions:
+   * this never starts a run, and Start Run never writes a default.
+   *
+   * Side-effect-only: the handler writes config and nothing else. It must never
+   * touch the live launch controls (no setModelByUser / setPermissionMode /
+   * setAgentRuntime), so the in-flight launch payload is byte-identical before
+   * and after a save. (The store's post-write fetchConfig does refresh
+   * `runTypeDefaults`, which feeds useSeededSelection's seed — harmless, since
+   * the value just stored IS the live value.)
+   */
+  const applyRunTypeDefault = useConfigStore((s) => s.applyRunTypeDefault);
+  /**
+   * The undo record for the last save: the key written plus the map entry that
+   * existed BEFORE it. `previous === undefined` is the common case (no default
+   * was stored for this key) and must replay as `value: null` — a key DELETION
+   * — never as `value: undefined`, which would leave the just-written entry in
+   * place and make Undo a silent no-op.
+   */
+  const [savedDefault, setSavedDefault] = useState<{
+    key: string;
+    previous: RunTypeDefaults | undefined;
+  } | null>(null);
+  /**
+   * The live toast text (null = hidden). Captured at save time rather than
+   * derived from the CURRENT selection, so switching flows while the toast is
+   * still up cannot relabel a confirmation that describes the flow that was
+   * actually written.
+   */
+  const [saveToastMessage, setSaveToastMessage] = useState<string | null>(null);
+
+  const selectedWorkflowTitle = workflowTitleForName(
+    workflows.find((wf) => wf.id === selectedId)?.name ?? '',
+  );
+
+  const handleSaveDefault = useCallback(() => {
+    if (selectedId === null) return;
+    const key = `workflow:${selectedId}`;
+    const title = workflowTitleForName(workflows.find((wf) => wf.id === selectedId)?.name ?? '');
+    void (async () => {
+      const previous = await applyRunTypeDefault(key, {
+        kind: 'merge',
+        value: {
+          model,
+          permissionMode,
+          agentRuntime,
+          // `?? null` (delete), NOT undefined (leave untouched): a Codex runtime
+          // has no substrate projection, and leaving a previously-stored Claude
+          // substrate behind would pair a stale 'sdk'/'interactive' with a Codex
+          // agentRuntime in the same entry.
+          substrate: substrateForRuntime(agentRuntime) ?? null,
+          // Variant is deliberately NOT captured — see the task/design note: the
+          // selection resets on every workflow change and VariantSelector
+          // re-seeds it, and a variant row can be deleted with no referential
+          // integrity from config, so a stored pin would ride runs.start as an
+          // explicit (and possibly dangling) choice.
+        },
+      });
+      setSavedDefault({ key, previous });
+      setSaveToastMessage(`Saved as default for ${title}`);
+    })();
+  }, [selectedId, workflows, model, permissionMode, agentRuntime, applyRunTypeDefault]);
+
+  const handleUndoSaveDefault = useCallback(() => {
+    const saved = savedDefault;
+    if (saved === null) return;
+    setSaveToastMessage(null);
+    setSavedDefault(null);
+    // `replace` with the exact prior entry — or null to DELETE the key when
+    // there was no prior entry at all (see savedDefault's doc comment).
+    void applyRunTypeDefault(saved.key, { kind: 'replace', value: saved.previous ?? null });
+  }, [savedDefault, applyRunTypeDefault]);
+
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
   const selectedSubstrate = substrateForRuntime(agentRuntime);
@@ -591,6 +677,23 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           onChange={setVariantSelection}
           id="workflow-picker-variant"
         />
+      )}
+
+      {/* "Save as default for <flow>" — a PERSISTENT affordance under the
+          Configure controls, not a post-launch prompt: saving and launching are
+          independent actions. Enabled from the moment a flow is selected, even
+          with no knob touched — storing the current (possibly untouched) values
+          is a legitimate "this flow follows today's global default" confirmation,
+          so there is deliberately no dirty check to gate it. */}
+      {selectedId !== null && (
+        <button
+          type="button"
+          onClick={handleSaveDefault}
+          data-testid="workflow-picker-save-default"
+          className="self-start text-xs font-medium text-interactive underline underline-offset-2 hover:text-interactive-hover"
+        >
+          Save as default for {selectedWorkflowTitle}
+        </button>
       )}
 
       {combinedError && (
@@ -677,6 +780,22 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           Quick Session
         </button>
       </div>
+
+      {/* Save-as-default confirmation + its Undo. Fixed-positioned wrapper per
+          the CyboflowRoot render pattern; the longer duration is this call
+          site's own (SessionActionToast's 3s default is unchanged). */}
+      {saveToastMessage !== null && (
+        <div className="fixed bottom-4 right-4 z-50">
+          <SessionActionToast
+            message={saveToastMessage}
+            isVisible
+            onDismiss={() => setSaveToastMessage(null)}
+            durationMs={SAVE_DEFAULT_TOAST_MS}
+            actionLabel="Undo"
+            onAction={handleUndoSaveDefault}
+          />
+        </div>
+      )}
     </div>
   );
 }

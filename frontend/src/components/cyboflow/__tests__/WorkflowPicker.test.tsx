@@ -164,6 +164,7 @@ import type { AppConfig } from '../../../types/config';
 import { API } from '../../../utils/api';
 import { trpc } from '../../../trpc/client';
 import type { ToolPanel } from '../../../../../shared/types/panels';
+import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../shared/types/sessionDefaults';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
@@ -1405,6 +1406,188 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1', model: 'opus' }));
+  });
+});
+
+describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
+  /**
+   * Stand-in for the config store's `applyRunTypeDefault` action. The component
+   * reads it off the store (never API.config directly), so swapping the action
+   * itself both records the exact op written and lets a test stage the
+   * `previous` entry the real IPC would return.
+   */
+  const mockApplyRunTypeDefault = vi.fn(
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<RunTypeDefaults | undefined> => undefined,
+  );
+
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    mockApplyRunTypeDefault.mockClear();
+    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    // A CUSTOM (non-planner, non-sprint) flow so Start Run hits the DIRECT
+    // launch path — the "save does not launch / does not perturb the payload"
+    // assertions need a synchronous runs.start, not a pre-launch modal.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+    ]);
+    act(() => {
+      useConfigStore.setState({ config: null, applyRunTypeDefault: mockApplyRunTypeDefault });
+    });
+  });
+
+  afterEach(() => {
+    useConfigStore.setState({ config: null });
+  });
+
+  /** Resolve the save CTA once the workflow list has settled a real selection. */
+  async function findSaveDefault(): Promise<HTMLElement> {
+    await findEnabledStartRun();
+    return screen.getByTestId('workflow-picker-save-default');
+  }
+
+  it('renders the CTA labelled with the selected flow title, enabled before any knob is touched', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    // 'custom' has no static title → title-cased by workflowTitleForName.
+    expect(saveBtn).toHaveTextContent('Save as default for Custom');
+    expect(saveBtn).toBeEnabled();
+  });
+
+  it('persists model + permission mode + runtime/substrate under the selected flow key WITHOUT launching', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
+      kind: 'merge',
+      value: {
+        model: 'opus',
+        permissionMode: 'default',
+        agentRuntime: 'claude-sdk',
+        substrate: 'sdk',
+      },
+    });
+    // Independence: saving is NOT a launch.
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    // The confirmation toast carries the Undo affordance.
+    expect(await screen.findByTestId('session-action-toast')).toHaveTextContent(
+      'Saved as default for Custom',
+    );
+    expect(screen.getByTestId('session-action-toast-action')).toBeInTheDocument();
+  });
+
+  it('writes substrate: null for a Codex runtime so a stale Claude substrate cannot survive', async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith(
+      'workflow:wf-1',
+      expect.objectContaining({
+        kind: 'merge',
+        value: expect.objectContaining({ agentRuntime: 'codex-sdk', substrate: null }),
+      }),
+    );
+  });
+
+  it('never captures the A/B variant selection', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    const [, op] = mockApplyRunTypeDefault.mock.calls[0];
+    expect(op.kind).toBe('merge');
+    expect(op.value).not.toHaveProperty('variantId');
+    expect(op.value).not.toHaveProperty('variant');
+  });
+
+  it('leaves the in-flight launch payload byte-identical (side-effect-only)', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    // Baseline launch payload, BEFORE any save.
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    const before = mockRunStart.mock.calls[0][0];
+
+    // Save, then launch again — the payload must be unchanged.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-save-default'));
+    });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    const after = mockRunStart.mock.calls[1][0];
+
+    expect(after).toEqual(before);
+  });
+
+  it('Undo DELETES the key ({ kind: replace, value: null }) when no prior default existed', async () => {
+    // The store returns `undefined` when the key held nothing — the common case.
+    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    const undoBtn = await screen.findByTestId('session-action-toast-action');
+    await act(async () => {
+      fireEvent.click(undoBtn);
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledTimes(2);
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: null,
+    });
+    // Explicitly NOT `value: undefined`, which would leave the write standing.
+    expect(mockApplyRunTypeDefault.mock.calls[1][1]).not.toEqual({ kind: 'replace', value: undefined });
+    // The toast is dismissed once Undo fires.
+    await waitFor(() => expect(screen.queryByTestId('session-action-toast')).toBeNull());
+  });
+
+  it('Undo restores the exact prior entry when one existed', async () => {
+    const previous: RunTypeDefaults = {
+      model: 'sonnet',
+      permissionMode: 'auto',
+      substrate: 'interactive',
+      agentRuntime: 'claude-interactive',
+    };
+    mockApplyRunTypeDefault.mockResolvedValue(previous);
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    const undoBtn = await screen.findByTestId('session-action-toast-action');
+    await act(async () => {
+      fireEvent.click(undoBtn);
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: previous,
+    });
   });
 });
 
