@@ -28,6 +28,7 @@ import { panelApi } from '../services/panelApi';
 import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { usePanelStore } from '../stores/panelStore';
+import { useConfigStore } from '../stores/configStore';
 import { dispatchQuickSessionInput } from './useClaudePanel';
 import type { Session } from '../types/session';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -35,6 +36,7 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -111,6 +113,25 @@ interface UseQuickSessionReturn {
     designIdeaId?: string,
     kickoffPrompt?: string,
   ) => Promise<void>;
+  /**
+   * Zero-arg-friendly entry point for launches that only know a run-type key
+   * (e.g. the synthetic global `'quick'` key used by the ⌘-shortcut / "New
+   * quick session" affordance) — NOT a `start` replacement. Resolves the
+   * saved run-type defaults + global config floors into `start`'s existing
+   * positional args and delegates, so a saved Quick Session default (Settings
+   * → "Run type defaults") is honored instead of silently ignored:
+   *   - `model`: `runTypeDefaults[key]?.model ?? DEFAULT_QUICK_MODEL`
+   *   - `permissionMode`: `config?.defaultAgentPermissionMode ?? 'default'`
+   *   - `reasoningEffort`: the synthetic global `'quick'` key's stored
+   *     `reasoningEffort` — v1 only ever writes it there (see
+   *     RunTypeDefaults doc), regardless of which `key` was requested.
+   *   - `substrate`: the same quick-session substrate floor every other
+   *     launch surface uses (`config?.quickSessionDefaultSubstrate ??
+   *     'interactive'`; see WorkflowPicker / SessionStartWizard).
+   * Added by TASK-153 as a NEW, additive method — `start`'s 13-positional-
+   * param signature is unchanged; do not expand it further.
+   */
+  startWithDefaults: (key: string) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -283,5 +304,33 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     [opts.projectId, opts.onSuccess],
   );
 
-  return { start, isStarting, error };
+  const startWithDefaults = useCallback(
+    (key: string): Promise<void> => {
+      const config = useConfigStore.getState().config;
+      const runTypeDefaults = config?.runTypeDefaults;
+      const model = runTypeDefaults?.[key]?.model ?? DEFAULT_QUICK_MODEL;
+      const permissionMode = config?.defaultAgentPermissionMode ?? 'default';
+      // v1 only ever writes reasoningEffort under the synthetic global 'quick'
+      // key — read from there regardless of the requested `key`.
+      const reasoningEffort = runTypeDefaults?.quick?.reasoningEffort;
+      const substrate = config?.quickSessionDefaultSubstrate ?? 'interactive';
+
+      return start(
+        permissionMode,
+        substrate,
+        undefined,
+        model,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        reasoningEffort,
+      );
+    },
+    [start],
+  );
+
+  return { start, startWithDefaults, isStarting, error };
 }

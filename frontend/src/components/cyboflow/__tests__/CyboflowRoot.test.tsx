@@ -226,11 +226,14 @@ vi.mock('../../../services/panelApi', () => ({
   },
 }));
 
-// Mock useQuickSession so we can spy on start() calls without hitting the real API
+// Mock useQuickSession so we can spy on start() / startWithDefaults() calls
+// without hitting the real API.
 const mockQuickSessionStart = vi.fn().mockResolvedValue(undefined);
+const mockQuickSessionStartWithDefaults = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../../hooks/useQuickSession', () => ({
   useQuickSession: vi.fn(() => ({
     start: mockQuickSessionStart,
+    startWithDefaults: mockQuickSessionStartWithDefaults,
     isStarting: null,
     error: null,
   })),
@@ -274,6 +277,7 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveQuickSession();
   });
   mockQuickSessionStart.mockClear();
+  mockQuickSessionStartWithDefaults.mockClear();
   vi.mocked(API.sessions.createQuick).mockClear();
   vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({ success: true, data: undefined });
   tRpcRuns.listRawEvents.query.mockClear();
@@ -399,6 +403,15 @@ describe('CyboflowRoot', () => {
     // useWorkflowPhaseState calls onStepTransition.subscribe only when runId is non-null;
     // getPhaseState.query must NOT have been called.
     expect(tRpcRuns.getPhaseState.query).not.toHaveBeenCalled();
+  });
+
+  it('the ⌘-shift-S quick-session shortcut resolves defaults via startWithDefaults(\'quick\') rather than the zero-arg start()', () => {
+    render(<CyboflowRoot projectId={1} />);
+
+    fireEvent.keyDown(window, { key: 'S', code: 'KeyS', shiftKey: true, metaKey: true });
+
+    expect(mockQuickSessionStartWithDefaults).toHaveBeenCalledWith('quick');
+    expect(mockQuickSessionStart).not.toHaveBeenCalled();
   });
 
   it('mounts WorkflowCanvas above RunBottomPane when a run is active', async () => {

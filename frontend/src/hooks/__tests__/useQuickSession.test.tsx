@@ -73,6 +73,9 @@ vi.mock('../../utils/cyboflowApi', () => ({
 }));
 
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useConfigStore } from '../../stores/configStore';
+import { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
+import type { AppConfig } from '../../types/config';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -107,6 +110,7 @@ beforeEach(() => {
   // Reset store state so tests are isolated
   act(() => {
     useCyboflowStore.getState().clearActiveQuickSession();
+    useConfigStore.setState({ config: null, isLoading: false, error: null });
   });
 });
 
@@ -472,5 +476,123 @@ describe('useQuickSession — guard conditions', () => {
     await act(async () => {
       resolveCall({ success: false, error: 'cancelled' });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startWithDefaults (TASK-153) — resolves runTypeDefaults / config floors
+// into `start`'s existing positional args instead of expanding its signature.
+// ---------------------------------------------------------------------------
+
+describe('useQuickSession — startWithDefaults()', () => {
+  it('with nothing configured, resolves the SAME effective defaults as the legacy zero-arg start() call (model floor, interactive substrate, default permission mode, no reasoning effort)', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'interactive',
+      claudeConfig: { model: DEFAULT_QUICK_MODEL, fastMode: false },
+    });
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', DEFAULT_QUICK_MODEL);
+  });
+
+  it("resolves model: 'sonnet' when the 'quick' run-type default stores { model: 'sonnet' }", async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: { quick: { model: 'sonnet' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claudeConfig: expect.objectContaining({ model: 'sonnet' }),
+      }),
+    );
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'sonnet');
+  });
+
+  it('reads permissionMode from config.defaultAgentPermissionMode when set', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { defaultAgentPermissionMode: 'acceptEdits' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentPermissionMode: 'acceptEdits' }),
+    );
+  });
+
+  it('reads substrate from config.quickSessionDefaultSubstrate when set', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { quickSessionDefaultSubstrate: 'sdk' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'sdk' }),
+    );
+  });
+
+  it("reads reasoningEffort from the synthetic global 'quick' key regardless of the requested key", async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: {
+            quick: { reasoningEffort: 'high' },
+            'workflow:flow-a': { model: 'opus' },
+          },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('workflow:flow-a');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claudeConfig: expect.objectContaining({ reasoningEffort: 'high' }),
+      }),
+    );
+  });
+
+  it('is a no-op when projectId is null, same as start()', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: null }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).not.toHaveBeenCalled();
   });
 });
