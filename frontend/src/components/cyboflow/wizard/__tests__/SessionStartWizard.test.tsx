@@ -1239,6 +1239,110 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Per-run-type stored defaults + the seeded-selection latch (TASK-160). The
+// model control is driven by useSeededSelection, keyed by the wizard card
+// (quick/ultracode share the synthetic 'quick' key, a workflow keys per flow),
+// seeded from config.runTypeDefaults with today's floor as the fallback. These
+// pin the seams that the refactor could silently regress:
+//   - the cross-provider effort RESET still wins over effort seeding;
+//   - programmatic family coercion goes through `reseed`, so it never latches
+//     the key as touched and reactive re-seeding keeps working;
+//   - a stored per-key model default outranks the floor.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — run-type defaults + seeded model selection', () => {
+  it('still clears a pending reasoning effort when the runtime flips to Codex', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    const effortSelect = screen.getByTestId('wizard-effort-select') as HTMLSelectElement;
+    await act(async () => {
+      fireEvent.change(effortSelect, { target: { value: 'high' } });
+    });
+    expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('high');
+
+    // The Claude scale ('high') has no meaning on the Codex turn options — the
+    // flip must clear it so a stale cross-provider value can never ride a launch.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('');
+  });
+
+  it('lets the runtime-flip effort reset win over the stored quick effort seed', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { runTypeDefaults: { quick: { reasoningEffort: 'high' } } } as unknown as AppConfig,
+      });
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Seeded from runTypeDefaults.quick.reasoningEffort...
+    expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('high');
+
+    // ...and STILL cleared by the provider flip: the seeding effect must not
+    // re-apply the stored value on a runtime change (it is not a dependency).
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('');
+  });
+
+  it('keeps the model key UNTOUCHED across Codex→Claude→Codex runtime flips, so re-seeding still works', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
+
+    // Codex → Claude → Codex, ZERO interaction with the model control. Each
+    // Codex leg coerces the Claude pin onto the Codex family default.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect((screen.getByLabelText('Select Codex model') as HTMLSelectElement).value).toBe('auto');
+    // The Claude leg is asserted only as "the Claude picker is back": the Codex
+    // family default is 'auto', which isCodexModelFamily does NOT match, so the
+    // reverse coercion is a deliberate no-op and 'auto' rides through unchanged
+    // — pre-existing behavior, untouched by the seeded-selection refactor.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-sdk' } });
+    });
+    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect((screen.getByLabelText('Select Codex model') as HTMLSelectElement).value).toBe('auto');
+
+    // The coercions used `reseed`, not `setByUser`, so the 'quick' key is still
+    // untouched — bouncing to Ultracode (same key, Fable seed) must re-seed. This
+    // also covers the flush where the hook re-seeds AND the effective runtime
+    // flips back to Claude in one go: the seed, not the Opus floor, must win.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+    });
+    await selectUltracodeAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('fable');
+  });
+
+  it('seeds the quick card from runTypeDefaults.quick.model instead of the Opus floor', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { runTypeDefaults: { quick: { model: 'sonnet' } } } as unknown as AppConfig,
+      });
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Design idea gate + launch (design-mode.md v0) — Design is idea-bound: the
 // CTA does NOT launch directly, it opens the idea picker (single-select, like
 // Ship — NOT Planner's multi mode). A confirm fires the SAME useQuickSession
