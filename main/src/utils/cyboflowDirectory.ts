@@ -21,6 +21,49 @@ export function setCyboflowDirectory(dir: string): void {
 }
 
 /**
+ * Cached `--cyboflow-dir` CLI override; `undefined` = not parsed yet, `null` =
+ * parsed and absent.
+ */
+let cachedCliDirOverride: string | null | undefined;
+
+/** Test-only: force the next getCyboflowDirectory call to re-parse process.argv. */
+export function _resetCliDirOverrideCacheForTesting(): void {
+  cachedCliDirOverride = undefined;
+}
+
+/**
+ * Parse `--cyboflow-dir` (and the deprecated `--crystal-dir` alias) directly
+ * from process.argv. index.ts parses the same flags in its module body, but
+ * import hoisting runs every static import BEFORE that body — including the
+ * services/database.ts databaseService singleton, which binds its sessions.db
+ * path at import time. When only index.ts honored the flag, those import-time
+ * consumers opened the DEFAULT data dir while everything wired later opened the
+ * override: two live databases in one process, surfacing as FOREIGN KEY
+ * failures (e.g. a session row written to one DB and its panel row to the
+ * other). Resolving the flag here, on first getCyboflowDirectory() call, makes
+ * import order irrelevant. Scans full argv (no slice) so it works both in dev
+ * (`electron . --cyboflow-dir X`) and packaged (`Cyboflow --cyboflow-dir X`)
+ * argv shapes; the last occurrence wins, matching index.ts's loop.
+ */
+function resolveCliDirOverride(): string | null {
+  if (cachedCliDirOverride !== undefined) return cachedCliDirOverride;
+  const argv = process.argv;
+  let dir: string | null = null;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
+      const value = arg.substring(arg.indexOf('=') + 1);
+      if (value) dir = value;
+    } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < argv.length) {
+      dir = argv[i + 1];
+      i++;
+    }
+  }
+  cachedCliDirOverride = dir;
+  return cachedCliDirOverride;
+}
+
+/**
  * Read the baked build variant ('dev' | 'stable') from the packaged
  * buildInfo.json. Mirrors telemetry/index.ts:readBuildInfo — with asar enabled
  * (the electron-builder default) buildInfo.json lives INSIDE app.asar, so the
@@ -66,6 +109,9 @@ function resolvePackagedVariant(): 'stable' | 'dev' {
  *
  * Resolution order:
  *  1. Programmatic override (`setCyboflowDirectory`).
+ *  1b. `--cyboflow-dir` / `--crystal-dir` CLI flag (parsed from process.argv
+ *      here, not just in index.ts, so import-time callers agree — see
+ *      resolveCliDirOverride).
  *  2. `CYBOFLOW_DIR` environment variable.
  *  3. Packaged builds — one data dir PER KIND so a user can run the stable
  *     release and the "Cyboflow Dev" distributable DMG side by side without them
@@ -83,6 +129,13 @@ export function getCyboflowDirectory(): string {
   // 1. Programmatic override.
   if (customCyboflowDir) {
     return customCyboflowDir;
+  }
+
+  // 1b. CLI flag, parsed here so import-time callers (before index.ts's own
+  //     arg loop runs) resolve the same directory as everything wired later.
+  const cliDir = resolveCliDirOverride();
+  if (cliDir) {
+    return cliDir;
   }
 
   // 2. Environment variable.

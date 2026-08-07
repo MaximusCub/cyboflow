@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { app } from 'electron';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -110,6 +110,52 @@ describe('cyboflowDirectory', () => {
     setCyboflowDirectory('/programmatic/override');
     const dir = getCyboflowDirectory();
     expect(dir).toBe('/programmatic/override');
+  });
+
+  describe('--cyboflow-dir CLI flag (import-order-independent)', () => {
+    let originalArgv: string[];
+
+    beforeEach(() => {
+      originalArgv = process.argv;
+    });
+
+    afterEach(() => {
+      process.argv = originalArgv;
+    });
+
+    it('resolves the flag on first call, before index.ts arg parsing runs (space form)', async () => {
+      process.argv = ['electron', '.', '--remote-debugging-port=9223', '--cyboflow-dir', '/flag/dir'];
+      const { getCyboflowDirectory } = await import('./cyboflowDirectory');
+      // No setCyboflowDirectory call — simulates an import-time consumer like
+      // the services/database.ts singleton, which runs before index.ts's body.
+      expect(getCyboflowDirectory()).toBe('/flag/dir');
+    });
+
+    it('supports the = form and the deprecated --crystal-dir alias, last occurrence winning', async () => {
+      process.argv = ['electron', '.', '--crystal-dir=/legacy/dir', '--cyboflow-dir=/newer/dir'];
+      const { getCyboflowDirectory } = await import('./cyboflowDirectory');
+      expect(getCyboflowDirectory()).toBe('/newer/dir');
+    });
+
+    it('CLI flag takes precedence over CYBOFLOW_DIR env', async () => {
+      process.argv = ['electron', '.', '--cyboflow-dir', '/flag/dir'];
+      process.env.CYBOFLOW_DIR = '/env/dir';
+      const { getCyboflowDirectory } = await import('./cyboflowDirectory');
+      expect(getCyboflowDirectory()).toBe('/flag/dir');
+    });
+
+    it('programmatic setCyboflowDirectory still takes precedence over the flag', async () => {
+      process.argv = ['electron', '.', '--cyboflow-dir', '/flag/dir'];
+      const { getCyboflowDirectory, setCyboflowDirectory } = await import('./cyboflowDirectory');
+      setCyboflowDirectory('/programmatic/dir');
+      expect(getCyboflowDirectory()).toBe('/programmatic/dir');
+    });
+
+    it('ignores a trailing valueless flag and an empty = value', async () => {
+      process.argv = ['electron', '.', '--cyboflow-dir=', '--cyboflow-dir'];
+      const { getCyboflowDirectory } = await import('./cyboflowDirectory');
+      expect(getCyboflowDirectory()).toBe(join(homedir(), '.cyboflow_dev'));
+    });
   });
 
   it('getCyboflowSubdirectory() appends subpaths to the cyboflow directory', async () => {
