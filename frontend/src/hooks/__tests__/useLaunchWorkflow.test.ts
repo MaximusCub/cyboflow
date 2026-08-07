@@ -24,10 +24,12 @@ vi.mock('../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: mockSubscribe,
 }));
 
-vi.mock('../../stores/configStore', () => ({
-  useConfigStore: (selector: (s: unknown) => unknown) =>
-    selector({ config: { defaultAgentPermissionMode: 'default' } }),
-}));
+vi.mock('../../stores/configStore', () => {
+  const state = { config: { defaultAgentPermissionMode: 'default' } };
+  const useConfigStore = (selector: (s: unknown) => unknown) => selector(state);
+  useConfigStore.getState = () => state;
+  return { useConfigStore };
+});
 
 import { useLaunchWorkflow } from '../useLaunchWorkflow';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -61,8 +63,9 @@ describe('useLaunchWorkflow', () => {
       substrate: 'sdk',
       sessionId: 'session-1',
       permissionMode: 'default',
-      // This one-click lane pins the same default the wizard/picker default to
-      // (Opus) → workflow_runs.model (migration 037).
+      // No runTypeDefaults entry configured for wf-sprint, so this falls back
+      // to the DEFAULT_WORKFLOW_MODEL floor (Opus) → workflow_runs.model
+      // (migration 037).
       model: 'opus',
     });
     expect(useCyboflowStore.getState().activeRunId).toBe('run-9');

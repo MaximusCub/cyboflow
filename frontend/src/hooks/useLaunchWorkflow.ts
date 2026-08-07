@@ -151,10 +151,13 @@ export function useLaunchWorkflow(
           substrate: forced ?? DEFAULT_SUBSTRATE,
           sessionId,
           permissionMode: launchOpts?.permissionMode ?? globalPermissionMode,
-          // This one-click lane has no Configure screen, so it pins the same
-          // default the wizard/picker default to (Opus) → workflow_runs.model
-          // (migration 037), keeping every UI-initiated launch consistent.
-          model: DEFAULT_WORKFLOW_MODEL,
+          // This one-click lane has no Configure screen, so a per-run-type
+          // default (config.runTypeDefaults['workflow:<id>'].model) is the only
+          // way a user can influence what these launches send to
+          // workflow_runs.model (migration 037); floors to Opus when unset.
+          model:
+            useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${workflowId}`]
+              ?.model ?? DEFAULT_WORKFLOW_MODEL,
         };
         const result = await trpc.cyboflow.runs.start.mutate(
           seed?.ideaIds !== undefined
