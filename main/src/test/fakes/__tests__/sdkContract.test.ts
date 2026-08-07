@@ -42,8 +42,16 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
 // Committed pins — UPDATE these deliberately when regenerating the fixture.
 // ---------------------------------------------------------------------------
 
-/** The `@anthropic-ai/claude-agent-sdk` version the fakeSdk builders were verified against. */
-const PINNED_SDK_VERSION = '0.3.201';
+/**
+ * The `@anthropic-ai/claude-agent-sdk` version the fakeSdk builders were verified against.
+ *
+ * 0.3.201 → 0.3.224 re-verification: the `SDKMessage` union gained exactly one variant,
+ * `SDKBackgroundTasksChangedMessage` (`system/background_tasks_changed`), and dropped none.
+ * cyboflow does not model that kind, so it fail-softs to `{kind:'__unknown__'}` like
+ * `system/permission_denied` already does — no new builder, so `EXPECTED_DISCRIMINANTS`
+ * is unchanged. Add one only if production starts consuming background-task events.
+ */
+const PINNED_SDK_VERSION = '0.3.224';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.
