@@ -215,4 +215,106 @@ describe('claude-panels model fallback sites resolve via getDefaultLaunchModel(\
       'sonnet',
     );
   });
+
+  it('claude-panels:start prefers an explicitly-passed model over the resolved default', async () => {
+    await configManager.updateConfig({ runTypeDefaults: { quick: { model: 'sonnet' } } });
+
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    // Stored panel settings also carry a model, to prove the explicit arg beats
+    // both the config-level default AND the stored per-panel setting.
+    const services = makeServices(configManager, sdkManager, interactiveManager, { model: 'opus' });
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+    claudePanelManager.registerPanel('panel-1', 'session-1');
+
+    const result = (await invoke(
+      handlers,
+      'claude-panels:start',
+      'panel-1',
+      'hello',
+      'explicit-model',
+    )) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(interactiveManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      'session-1',
+      '/tmp/session-1',
+      'hello',
+      undefined,
+      'explicit-model',
+    );
+  });
+
+  it('claude-panels:start prefers a stored panel-settings model over the config floor', async () => {
+    // Sanity: the stored value below ('sonnet') must actually differ from the
+    // config floor for this assertion to be meaningful (the quick floor is
+    // 'opus', not 'sonnet').
+    expect(configManager.getDefaultLaunchModel('quick')).not.toBe('sonnet');
+
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    const services = makeServices(configManager, sdkManager, interactiveManager, { model: 'sonnet' });
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+    claudePanelManager.registerPanel('panel-1', 'session-1');
+
+    // No model arg passed, so the handler must fall back to the stored
+    // panelSettings.model ('sonnet') rather than the config floor ('opus').
+    const result = (await invoke(handlers, 'claude-panels:start', 'panel-1', 'hello')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(interactiveManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      'session-1',
+      '/tmp/session-1',
+      'hello',
+      undefined,
+      'sonnet',
+    );
+  });
+
+  it('get-model prefers a stored panelSettings.model over the config floor', async () => {
+    expect(configManager.getDefaultLaunchModel('quick')).not.toBe('sonnet');
+
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    const services = makeServices(configManager, sdkManager, interactiveManager, { model: 'sonnet' });
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as {
+      success: boolean;
+      data: string;
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.data).toBe('sonnet');
+  });
+});
+
+describe('claudePanel.ts source guard: getDefaultModel() must not reappear at either fallback site', () => {
+  it('has zero references to getDefaultModel() and exactly two to getDefaultLaunchModel(\'quick\')', async () => {
+    const sourcePath = path.join(__dirname, '..', 'claudePanel.ts');
+    const source = await fs.readFile(sourcePath, 'utf-8');
+
+    const getDefaultModelHits = source.match(/getDefaultModel\(\)/g) ?? [];
+    const getDefaultLaunchModelQuickHits = source.match(/getDefaultLaunchModel\('quick'\)/g) ?? [];
+
+    expect(getDefaultModelHits).toHaveLength(0);
+    expect(getDefaultLaunchModelQuickHits).toHaveLength(2);
+  });
 });
