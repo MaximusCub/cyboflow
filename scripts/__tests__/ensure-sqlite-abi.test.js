@@ -186,15 +186,29 @@ test('a missing artifact is rebuilt rather than treated as correct', () => {
   }
 });
 
-test('an uninstalled better-sqlite3 fails loudly and names the worktree cause', () => {
+test('an unresolvable better-sqlite3 fails loudly instead of silently passing', () => {
   const ws = makeWorkspace({ stamp: 'abi:host\n' });
   try {
     const result = run(['host'], ws, {
       SQLITE_ABI_MODULE_DIR: path.join(ws.root, 'does-not-exist'),
     });
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /better-sqlite3 is not installed/);
-    assert.match(result.stderr, /worktree does NOT inherit/);
+    assert.match(result.stderr, /could not be resolved from this checkout or any parent/);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('operating on a shared out-of-checkout copy is announced, not silent', () => {
+  // Node resolution walks UP, so a worktree without its own node_modules hits the
+  // parent checkout's single artifact — shared with its dev server and every
+  // sibling worktree. A swap is a write; it must never happen invisibly.
+  const ws = makeWorkspace({ stamp: 'abi:host\n' });
+  try {
+    const result = run(['--check', 'host'], ws);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /using better-sqlite3 from outside this checkout/);
+    assert.match(result.stdout, /shared with the parent checkout and sibling worktrees/);
   } finally {
     ws.cleanup();
   }
@@ -209,6 +223,26 @@ test('an unknown target exits 2 with usage rather than touching anything', () =>
       assert.match(result.stderr, /usage: node scripts\/ensure-sqlite-abi\.mjs <host\|electron>/);
     }
     assert.equal(ws.readArtifact(), 'abi:host\noriginal-bytes');
+    assert.deepEqual(cacheKeys(ws), []);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('--check reports the installed ABI without mutating anything', () => {
+  const ws = makeWorkspace({ stamp: 'abi:electron\nelectron-bytes' });
+  try {
+    const miss = run(['--check', 'host'], ws);
+    assert.equal(miss.status, 1);
+    assert.match(miss.stdout, /does NOT load under the host ABI/);
+
+    const hit = run(['--check', 'electron'], ws);
+    assert.equal(hit.status, 0, hit.stderr);
+    assert.match(hit.stdout, /LOADS under the electron ABI/);
+
+    // The point of --check is that it is safe to run against a live checkout:
+    // no swap, no rebuild, no cache write.
+    assert.equal(ws.readArtifact(), 'abi:electron\nelectron-bytes');
     assert.deepEqual(cacheKeys(ws), []);
   } finally {
     ws.cleanup();

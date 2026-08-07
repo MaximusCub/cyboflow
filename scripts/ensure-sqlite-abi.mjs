@@ -34,6 +34,7 @@
  * USAGE
  *   node scripts/ensure-sqlite-abi.mjs host       # before vitest
  *   node scripts/ensure-sqlite-abi.mjs electron   # before `pnpm dev`
+ *   node scripts/ensure-sqlite-abi.mjs --check host       # read-only: which ABI is installed?
  *   node scripts/ensure-sqlite-abi.mjs --print-key host   # diagnostics
  *
  * ENV
@@ -107,6 +108,24 @@ function resolveModuleDir() {
 
 function artifactPath(moduleDir) {
   return path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node');
+}
+
+/**
+ * Warn when the artifact we are about to touch lives OUTSIDE this checkout.
+ *
+ * Node resolution walks up the directory tree, so a git worktree with no
+ * node_modules of its own silently resolves the parent checkout's copy — and
+ * there is only one compiled artifact there, shared with the parent's dev server
+ * and every sibling worktree. Whatever we do here is felt by all of them. That
+ * is pre-existing (vitest in such a worktree already loads the parent's addon),
+ * but a swap is a WRITE, so it must not happen invisibly.
+ */
+function noteModuleLocation(moduleDir) {
+  const relative = path.relative(repoRoot, moduleDir);
+  if (!relative.startsWith('..') && !path.isAbsolute(relative)) return;
+  log(`note: using better-sqlite3 from outside this checkout — ${moduleDir}`);
+  log('      that copy is shared with the parent checkout and sibling worktrees.');
+  log('      Run `pnpm install` here to give this worktree its own.');
 }
 
 function readJson(file) {
@@ -270,11 +289,11 @@ function rebuild(target, moduleDir) {
 function ensure(target) {
   const moduleDir = resolveModuleDir();
   if (!moduleDir) {
-    fail('better-sqlite3 is not installed under this checkout.');
-    fail('Run `pnpm install` here first. Note that a git worktree does NOT inherit');
-    fail("the main checkout's node_modules — it needs its own install.");
+    fail('better-sqlite3 could not be resolved from this checkout or any parent.');
+    fail('Run `pnpm install` first.');
     return 1;
   }
+  noteModuleLocation(moduleDir);
 
   const moduleVersion = readJson(path.join(moduleDir, 'package.json'))?.version ?? 'unknown';
   const key = cacheKey(target, moduleVersion);
@@ -335,6 +354,32 @@ function main(argv) {
       : 'unknown';
     console.log(cacheKey(target, moduleVersion) ?? '');
     return 0;
+  }
+
+  // Read-only: report whether the installed artifact loads under <target>
+  // without swapping, rebuilding or touching the cache. Safe to run against a
+  // checkout whose app is live — diagnosing must never mutate what it measures.
+  const checkIndex = argv.indexOf('--check');
+  if (checkIndex !== -1) {
+    const target = argv[checkIndex + 1];
+    if (!TARGETS.includes(target)) {
+      fail(`--check needs a target: ${TARGETS.join(' | ')}`);
+      return 2;
+    }
+    const moduleDir = resolveModuleDir();
+    if (!moduleDir) {
+      fail('better-sqlite3 could not be resolved from this checkout or any parent.');
+      return 1;
+    }
+    noteModuleLocation(moduleDir);
+    const result = probe(target, moduleDir);
+    if (result.ok) {
+      log(`installed artifact LOADS under the ${target} ABI (NODE_MODULE_VERSION=${result.info.nodeModuleVersion})`);
+      return 0;
+    }
+    log(`installed artifact does NOT load under the ${target} ABI`);
+    log(result.detail);
+    return 1;
   }
 
   const target = argv[0];
