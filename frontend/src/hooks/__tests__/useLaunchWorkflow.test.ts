@@ -6,10 +6,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
-const { mockEnsureSession, mockStartMutate, mockSubscribe } = vi.hoisted(() => ({
+const { mockEnsureSession, mockStartMutate, mockSubscribe, mockConfigState } = vi.hoisted(() => ({
   mockEnsureSession: vi.fn(),
   mockStartMutate: vi.fn(),
   mockSubscribe: vi.fn(() => vi.fn()),
+  // Mutable so tests can flip runTypeDefaults per-case (and mid-test, between
+  // two launch calls on the same mounted hook) without re-mocking the module.
+  mockConfigState: {
+    config: {
+      defaultAgentPermissionMode: 'default' as string,
+      runTypeDefaults: undefined as Record<string, { model?: string }> | undefined,
+    },
+  },
 }));
 
 vi.mock('../../utils/ensureSessionForLaunch', () => ({
@@ -25,9 +33,9 @@ vi.mock('../../utils/cyboflowApi', () => ({
 }));
 
 vi.mock('../../stores/configStore', () => {
-  const state = { config: { defaultAgentPermissionMode: 'default' } };
-  const useConfigStore = (selector: (s: unknown) => unknown) => selector(state);
-  useConfigStore.getState = () => state;
+  const useConfigStore = (selector: (s: typeof mockConfigState) => unknown) =>
+    selector(mockConfigState);
+  useConfigStore.getState = () => mockConfigState;
   return { useConfigStore };
 });
 
@@ -38,6 +46,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockEnsureSession.mockResolvedValue('session-1');
   mockStartMutate.mockResolvedValue({ runId: 'run-9', worktreePath: '/wt', branchName: 'b' });
+  mockConfigState.config.defaultAgentPermissionMode = 'default';
+  mockConfigState.config.runTypeDefaults = undefined;
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
@@ -208,5 +218,53 @@ describe('useLaunchWorkflow', () => {
       release('session-1');
       await first;
     });
+  });
+
+  it('resolves a configured per-workflow model default, keyed per call within the same hook instance', async () => {
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { model: 'sonnet' } };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenNthCalledWith(1, expect.objectContaining({ model: 'sonnet' }));
+
+    // wf-planner has no runTypeDefaults entry, so — from the SAME hook
+    // instance that just resolved wf-sprint to Sonnet — it still floors to
+    // Opus, proving the lookup is keyed per-call by workflowId, not cached
+    // or shared across workflows once one resolves.
+    await act(async () => {
+      await result.current.launch('wf-planner');
+    });
+    expect(mockStartMutate).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: 'opus' }));
+  });
+
+  it('picks up a runTypeDefaults change made between two launch calls on the same mounted hook', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenNthCalledWith(1, expect.objectContaining({ model: 'opus' }));
+
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { model: 'sonnet' } };
+    // The config read happens via useConfigStore.getState() INSIDE the launch
+    // callback, not a hook-level selector captured at mount, so a config
+    // change between two calls on the same hook instance is picked up by the
+    // second call.
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: 'sonnet' }));
+  });
+
+  it('falls back to the Opus floor when the runTypeDefaults entry exists but has no model field', async () => {
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': {} };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus' }));
   });
 });
