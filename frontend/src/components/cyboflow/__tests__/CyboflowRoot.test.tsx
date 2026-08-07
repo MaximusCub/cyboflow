@@ -13,6 +13,9 @@
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi — keeps only the entries that WorkflowPicker/RunView still
@@ -995,5 +998,32 @@ describe('CyboflowRoot — resting-session canvas', () => {
       expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
     });
     expect(screen.queryByTestId('quick-session-canvas')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source guard (TASK-153 AC5) — the existing SessionActionToast call site
+// (the success-toast rendered outside the lifecycleSession gate) must keep
+// its 3000ms default duration untouched by this task; a later task may add
+// an explicit `durationMs` override, but only at its OWN new call sites.
+// Read the source text directly (the useSeededSelection.test.ts idiom)
+// rather than driving the toast to visible via the full render harness,
+// since triggering it requires simulating a full lifecycle action success.
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — SessionActionToast call site keeps its 3s default (TASK-153 AC5)', () => {
+  it('the <SessionActionToast .../> usage does not pass an explicit durationMs override', () => {
+    const rootPath = resolve(dirname(fileURLToPath(import.meta.url)), '../CyboflowRoot.tsx');
+    const source = readFileSync(rootPath, 'utf-8');
+
+    const toastMatch = source.match(/<SessionActionToast[\s\S]*?\/>/);
+    expect(toastMatch).not.toBeNull();
+
+    const toastUsage = (toastMatch as RegExpMatchArray)[0];
+    expect(toastUsage).not.toMatch(/durationMs/);
+    // Sanity: confirm we matched the real usage (props unchanged from the diff).
+    expect(toastUsage).toContain('message={toastMessage}');
+    expect(toastUsage).toContain('isVisible');
+    expect(toastUsage).toContain('onDismiss={() => setToastMessage(null)}');
   });
 });

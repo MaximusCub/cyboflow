@@ -25,6 +25,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { useQuickSession } from '../useQuickSession';
 
@@ -594,5 +597,69 @@ describe('useQuickSession — startWithDefaults()', () => {
     });
 
     expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
+  it('falls through to DEFAULT_QUICK_MODEL when runTypeDefaults exists but has NO entry for the requested key — distinct from runTypeDefaults being absent entirely', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          // Populated, but only for an unrelated key — `quick` itself is missing.
+          runTypeDefaults: { 'workflow:flow-b': { model: 'opus' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claudeConfig: expect.objectContaining({ model: DEFAULT_QUICK_MODEL }),
+      }),
+    );
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', DEFAULT_QUICK_MODEL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source guard (TASK-153 AC4) — startWithDefaults must be a NEW, additive
+// method that delegates to `start` positionally, not an expansion of
+// `start`'s own signature. Read the source text directly (the same idiom
+// useSeededSelection.test.ts uses) rather than asserting on runtime behavior,
+// since `start.length` would undercount past the first optional param anyway.
+// ---------------------------------------------------------------------------
+
+describe('useQuickSession — source guard: start() signature is unexpanded (TASK-153 AC4)', () => {
+  const hookPath = resolve(dirname(fileURLToPath(import.meta.url)), '../useQuickSession.ts');
+  const source = readFileSync(hookPath, 'utf-8');
+
+  it("the `const start = useCallback(async (...) => ...)` implementation still declares exactly 13 positional parameters", () => {
+    const startMatch = source.match(/const start = useCallback\(\s*async \(([\s\S]*?)\): Promise<void> => \{/);
+    expect(startMatch).not.toBeNull();
+
+    const params = (startMatch as RegExpMatchArray)[1]
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
+    expect(params).toHaveLength(13);
+  });
+
+  it("startWithDefaults is declared as its OWN separate `useCallback` taking a single `key: string` param — it did not become start's 14th positional param", () => {
+    const startWithDefaultsMatch = source.match(
+      /const startWithDefaults = useCallback\(\s*\(([\s\S]*?)\): Promise<void> => \{/,
+    );
+    expect(startWithDefaultsMatch).not.toBeNull();
+
+    const params = (startWithDefaultsMatch as RegExpMatchArray)[1]
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
+    expect(params).toHaveLength(1);
+    expect(params[0]).toBe('key: string');
   });
 });
