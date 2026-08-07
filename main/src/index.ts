@@ -292,6 +292,22 @@ let pendingOpenUpdateSettings = false;
  * Set the application title based on development mode and worktree
  */
 function setAppTitle() {
+  // A verification instance's window title IS its identity — it is the
+  // native-screen window-identity attestation channel of
+  // .cyboflow/verify-runbook.json — so it outranks both the worktree and the
+  // default title. The override lives HERE, at the single seam that
+  // programmatically sets the title, rather than only at the createWindow call
+  // site: setAppTitle() runs again once the renderer has loaded, and would
+  // otherwise reset the verify title back to plain 'Cyboflow'.
+  const verifyToken = process.env.CYBOFLOW_VERIFY_TOKEN;
+  if (verifyToken) {
+    const title = `Cyboflow — verify ${verifyToken}`;
+    if (mainWindow) {
+      mainWindow.setTitle(title);
+    }
+    return title;
+  }
+
   if (!app.isPackaged) {
     const worktreeName = getCurrentWorktreeName(process.cwd());
     if (worktreeName) {
@@ -836,17 +852,15 @@ async function createWindow() {
   });
 
   // Verification instances get a distinguishable OS window title so the
-  // native-screen window-identity channel is not satisfied by the developer's
-  // own window. An unpackaged `electron .` launch takes its OS app name from
-  // the Electron binary's bundle, so EVERY cyboflow worktree running `pnpm dev`
-  // presents as the same application ("Electron") — peekaboo then refuses the
-  // ambiguous name outright and the channel resolves to nothing. The title is
-  // the only discriminator available to it. Electron otherwise mirrors the page
-  // <title>, so that mirroring is pinned off for the lifetime of the window.
-  const verifyToken = process.env.CYBOFLOW_VERIFY_TOKEN;
-  if (verifyToken) {
+  // native-screen window-identity channel is not satisfied by a developer's own
+  // window: every unpackaged `electron .` launch shares one bundle, so the
+  // title is the only per-instance discriminator peekaboo can see. Two distinct
+  // overwrites have to be held off — Electron mirrors the page <title> (pinned
+  // off here) and setAppTitle() sets it programmatically (which honors the
+  // token itself, and is the single source of the title string).
+  if (process.env.CYBOFLOW_VERIFY_TOKEN) {
     mainWindow.on('page-title-updated', (e) => e.preventDefault());
-    mainWindow.setTitle(`Cyboflow — verify ${verifyToken}`);
+    setAppTitle();
   }
 
   // Bind the tRPC IPC handler to this window BEFORE the renderer loads, so an
