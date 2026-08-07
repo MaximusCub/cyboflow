@@ -265,4 +265,46 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
     });
     expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ permissionMode: 'acceptEdits' });
   });
+
+  it('launch: keys strictly by the resolved workflowId — an entry for a DIFFERENT workflow does not leak, only a matching key applies', async () => {
+    // Entry only for the planner workflow (idea/epic), not for the sprint
+    // workflow a task launch resolves to. A hardcoded "return the configured
+    // model whenever runTypeDefaults is non-empty" would pass a single-arm
+    // test but fails this one on the first launch.
+    mockConfigState.config = { runTypeDefaults: { 'workflow:wf-planner': { model: 'sonnet' } } };
+    const { result } = renderHook(() => useTaskRunLauncher());
+
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    // task → wf-sprint, no matching entry → opus floor.
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: 'opus' });
+
+    await act(async () => {
+      await result.current.launch('idea_1', 7, 'idea');
+    });
+    // idea → wf-planner, matching entry → sonnet.
+    expect(mockStartMutate.mock.calls[1][0]).toMatchObject({ workflowId: 'wf-planner', model: 'sonnet' });
+  });
+
+  it('launchSprintBatch: keys strictly by the resolved workflowId — an entry for a different sprint-workflow id does not leak', async () => {
+    // Configured entry targets a sprint workflow id this project's list does
+    // NOT contain yet — same non-leak proof as the launch case above, applied
+    // to launchSprintBatch's own (always-"sprint"-named) resolution.
+    mockConfigState.config = { runTypeDefaults: { 'workflow:wf-sprint-b': { model: 'sonnet' } } };
+    const { result } = renderHook(() => useTaskRunLauncher());
+
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_1', ['t1'], 7);
+    });
+    // Resolves against the default SPRINT (id wf-sprint) — no matching entry.
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: 'opus' });
+
+    // A different project whose "sprint"-named workflow id matches the entry.
+    mockListQuery.mockResolvedValue([{ id: 'wf-sprint-b', name: 'sprint' }]);
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_2', ['t2'], 8);
+    });
+    expect(mockStartMutate.mock.calls[1][0]).toMatchObject({ workflowId: 'wf-sprint-b', model: 'sonnet' });
+  });
 });
