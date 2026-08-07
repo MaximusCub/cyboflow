@@ -1126,6 +1126,194 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
   });
 });
 
+describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    // TWO custom (direct-launch) flows so the "switching the selected workflow
+    // re-seeds" case has a second key to switch to. Re-pointed here because the
+    // gated describes (Planner / Ship / Sprint) leave the shared list mock
+    // pointed at their own single-flow fixtures under --sequence.shuffle.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+      { id: 'wf-2', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+    ]);
+    useConfigStore.setState({ config: null });
+  });
+
+  afterEach(() => {
+    // A seeded runTypeDefaults map must not bleed into the suites that assert
+    // the bare 'opus' floor.
+    useConfigStore.setState({ config: null });
+  });
+
+  /** Helper: install a runTypeDefaults map (everything else in config unset). */
+  function setRunTypeDefaults(map: Record<string, { model?: string }>): void {
+    useConfigStore.setState({ config: { runTypeDefaults: map } as unknown as AppConfig });
+  }
+
+  it('with nothing configured, a launch still sends the Opus floor', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1', model: 'opus' }));
+  });
+
+  it("seeds the model from runTypeDefaults['workflow:<id>'] without the user touching the dropdown", async () => {
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    // The control itself reflects the stored default (not just the payload).
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1', model: 'sonnet' }));
+  });
+
+  it('re-seeds to the NEW flow\'s default when the selected workflow changes (no leak from the prior flow)', async () => {
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' }, 'workflow:wf-2': { model: 'haiku' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    const workflowSelect = await screen.findByLabelText('Select workflow');
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    await act(async () => {
+      fireEvent.change(workflowSelect, { target: { value: 'wf-2' } });
+    });
+
+    // wf-1's 'sonnet' must NOT leak into wf-2's launch.
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('haiku');
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-2', model: 'haiku' }));
+  });
+
+  it('a Claude→Codex→Claude runtime round trip does NOT mark the model touched (re-seeding still works)', async () => {
+    // The runtime-family coercion goes through `reseed`, not `setByUser` — so
+    // merely flipping the runtime picker (a control the user touched, on a model
+    // control they did NOT) must never freeze future reactive re-seeding.
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    // Claude → Codex: the Claude alias is coerced off the Codex picker.
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    });
+
+    // Codex → Claude.
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
+    });
+
+    // The proof the coercion did NOT latch touched: a LATER default change is
+    // still picked up. (With `setByUser` the value would stay frozen here.)
+    await act(async () => {
+      setRunTypeDefaults({ 'workflow:wf-1': { model: 'haiku' } });
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('haiku');
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'haiku' }));
+  });
+
+  it("Quick Session resolves an UNTOUCHED model from the 'quick' key, not the selected workflow's", async () => {
+    // One control set, two run types: untouched ⇒ the quick button must resolve
+    // the quick default freshly rather than forward the workflow-keyed seed.
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' }, quick: { model: 'haiku' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    // The workflow-keyed control still shows the workflow default.
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'haiku', fastMode: false } }),
+    );
+  });
+
+  it('a TOUCHED model wins over the quick default for the Quick Session button', async () => {
+    setRunTypeDefaults({ quick: { model: 'haiku' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    const modelSelect = await screen.findByLabelText('Select Claude model');
+    await act(async () => {
+      fireEvent.change(modelSelect, { target: { value: 'sonnet' } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+  });
+
+  it('never hands a Codex-runtime quick session a Claude quick default (family guard)', async () => {
+    // The 'quick' default is stored without regard to runtime; forwarding it
+    // blindly would spawn a Codex session pinned to a Claude alias.
+    setRunTypeDefaults({ quick: { model: 'haiku' } });
+    render(<WorkflowPicker projectId={1} />);
+
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-pty' } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentProvider: 'codex', agentRuntime: 'codex-pty', agentModel: 'auto' }),
+    );
+    expect(mockCreateQuick).not.toHaveBeenCalledWith(
+      expect.objectContaining({ agentModel: 'haiku' }),
+    );
+  });
+});
+
 describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();

@@ -18,6 +18,7 @@ import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { useAgentPermissionMode } from '../../hooks/useAgentPermissionMode';
+import { useSeededSelection } from '../../hooks/useSeededSelection';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
@@ -86,19 +87,54 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const substrateTouchedRef = useRef(false);
 
   /**
-   * The per-run Claude model choice (Configure model dropdown). Defaults to Opus
-   * (DEFAULT_WORKFLOW_MODEL) like the Session Start Wizard; threaded into
-   * runs.start.mutate as `model` → workflow_runs.model (migration 037) for workflow
-   * launches, and into useQuickSession.start for the Quick Session button.
+   * The per-run Claude model choice (Configure model dropdown). Seeded from the
+   * user's stored per-run-type default for the SELECTED workflow
+   * (`config.runTypeDefaults['workflow:<id>'].model`), floored to Opus
+   * (DEFAULT_WORKFLOW_MODEL) when nothing is configured — the same resolution
+   * useLaunchWorkflow / useTaskRunLauncher apply on their one-click lanes, so a
+   * flow launched from here and from the backlog agree. Threaded into
+   * runs.start.mutate as `model` → workflow_runs.model (migration 037) for
+   * workflow launches, and into useQuickSession.start for the Quick Session button.
+   *
+   * Keyed on the selected workflow (`selectedId` is null until the list loads,
+   * hence the '' key), so switching flows re-seeds to the NEW flow's default and
+   * the prior flow's value never leaks — and each flow keeps its own touched flag.
    */
-  const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
+  const modelKey = `workflow:${selectedId ?? ''}`;
+  const modelSeed = useConfigStore((s) => s.config?.runTypeDefaults?.[modelKey]?.model);
+  const {
+    value: model,
+    setByUser: setModelByUser,
+    reseed: reseedModel,
+    isTouched: isModelTouched,
+  } = useSeededSelection<string>({
+    key: modelKey,
+    seed: modelSeed,
+    fallback: DEFAULT_WORKFLOW_MODEL,
+  });
+  // Runtime-family coercion: a Codex runtime cannot run a Claude model (and vice
+  // versa), so flipping the runtime picker rewrites an incompatible selection.
+  // This goes through `reseed`, NOT `setByUser`: it is a PROGRAMMATIC coercion,
+  // and marking the model touched here would permanently freeze reactive
+  // re-seeding for a control the user never actually touched (a mere
+  // Claude→Codex→Claude round trip on the runtime picker would kill the stored
+  // per-workflow default for the rest of the mount). The Claude branch re-seeds
+  // to the stored default rather than the bare floor so it survives that round
+  // trip intact — but ONLY when the stored default is itself Claude-compatible:
+  // a stale cross-family entry (a Codex id saved under a workflow key) must not
+  // be re-applied here, or the coercion would hand a Claude runtime a Codex
+  // model and then no-op forever (setValue with the same value bails out).
   useEffect(() => {
     if (isCodexRuntime(agentRuntime)) {
-      if (!isCodexModelSelection(model)) setModel(DEFAULT_CODEX_MODEL);
+      if (!isCodexModelSelection(model)) reseedModel(DEFAULT_CODEX_MODEL);
       return;
     }
-    if (isCodexModelFamily(model)) setModel(DEFAULT_WORKFLOW_MODEL);
-  }, [agentRuntime, model]);
+    if (isCodexModelFamily(model)) {
+      reseedModel(
+        modelSeed !== undefined && !isCodexModelFamily(modelSeed) ? modelSeed : DEFAULT_WORKFLOW_MODEL,
+      );
+    }
+  }, [agentRuntime, model, modelSeed, reseedModel]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -440,11 +476,36 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         ? 'claude-interactive'
         : 'claude-sdk';
     const sessionRuntime = quickSessionRuntimeForLaunch(effectiveRuntime);
+    // Shared-control ambiguity: this panel has ONE control set driving TWO run
+    // types. The controls key to `workflow:<selectedId>` (they primarily govern
+    // workflow launches), so an UNTOUCHED model here carries the selected
+    // WORKFLOW's default — which is the wrong default for a quick session.
+    // Settled resolution: a touched control is a real per-launch choice and is
+    // forwarded verbatim; otherwise we resolve the quick default freshly from
+    // the synthetic 'quick' key (read imperatively via getState(), consistent
+    // with useLaunchWorkflow / useQuickSession.startWithDefaults).
+    //
+    // The family guard is load-bearing: the 'quick' default is stored without
+    // regard to this launch's runtime, so an untouched Codex-runtime quick
+    // session could otherwise be handed a Claude model (and vice versa). When
+    // the stored value is incompatible we fall back to the live control value,
+    // which the coercion effect above already keeps family-correct.
+    const storedQuickModel = useConfigStore.getState().config?.runTypeDefaults?.quick?.model;
+    const quickModel =
+      isModelTouched || storedQuickModel === undefined
+        ? model
+        : (
+            isCodexRuntime(sessionRuntime)
+              ? isCodexModelSelection(storedQuickModel)
+              : !isCodexModelFamily(storedQuickModel)
+          )
+          ? storedQuickModel
+          : model;
     void startQuickSession(
       permissionMode,
       substrateForRuntime(sessionRuntime),
       undefined,
-      model,
+      quickModel,
       undefined,
       undefined,
       undefined,
@@ -452,7 +513,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       providerForRuntime(sessionRuntime),
       sessionRuntime,
     );
-  }, [agentRuntime, model, permissionMode, startQuickSession, quickDefaultSubstrate]);
+  }, [agentRuntime, model, isModelTouched, permissionMode, startQuickSession, quickDefaultSubstrate]);
 
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
@@ -515,7 +576,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           → workflow_runs.model (migration 037). Quick: into useQuickSession. */}
       <ModelSelector
         value={model}
-        onChange={setModel}
+        onChange={setModelByUser}
         id="workflow-picker-model"
         agentProvider={selectedProvider}
         agentRuntime={agentRuntime}
