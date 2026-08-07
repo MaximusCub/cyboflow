@@ -774,7 +774,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     rerunOfExperimentId: input.rerunOfExperimentId ?? null,
   });
 
-  // Persist each quick arm's config (migration 083) so experiments.rerun can
+  // Persist each quick arm's config (migration 098) so experiments.rerun can
   // replay the same matchup — rerun forwards only the variant ids, and the arm
   // sessions (the only other place the config's effects live) may already be
   // dismissed by the time a settled experiment is rerun. Fail-soft inside the
@@ -2267,8 +2267,8 @@ const experimentArmQuickConfigSchema = z
 /**
  * The persisted quick-arm config for one arm of a source experiment (migration
  * 083), re-validated through the SAME wire schema startSideBySide accepts —
- * a pre-083 experiment (no row) or an unparseable/mis-shaped payload yields
- * undefined, degrading the rerun arm to launch-defaults (the pre-083 behavior)
+ * a pre-098 experiment (no row) or an unparseable/mis-shaped payload yields
+ * undefined, degrading the rerun arm to launch-defaults (the pre-098 behavior)
  * rather than throwing a settled experiment's rerun away.
  */
 function persistedQuickConfig(
@@ -2277,11 +2277,11 @@ function persistedQuickConfig(
   arm: ExperimentArm,
 ): ExperimentArmQuickConfig | undefined {
   const json = getExperimentQuickConfigJson(db, experimentId, arm);
-  // Absent row (pre-083 experiment / pre-083 DB): silent degrade is correct —
+  // Absent row (pre-098 experiment / pre-098 DB): silent degrade is correct —
   // there is nothing to replay. A row that EXISTS but cannot be read is a
   // different case: the rerun still succeeds on launch defaults (a settled
   // experiment's rerun must not be thrown away over a nice-to-have replay),
-  // but it silently recreates the different-matchup behavior migration 083
+  // but it silently recreates the different-matchup behavior migration 098
   // exists to eliminate — so make that path loud.
   if (json === null) return undefined;
   const degrade = (reason: string): undefined => {
@@ -2379,9 +2379,9 @@ export const experimentsRouter = router({
         seedIdeaId: input.seedIdeaId,
         seedTaskIds: input.seedTaskIds,
         rerunOfExperimentId: src.id,
-        // Replay each quick arm's ORIGINAL config (migration 083) — without
+        // Replay each quick arm's ORIGINAL config (migration 098) — without
         // this a quick-arm rerun silently launched a default Claude-SDK quick
-        // session, a different matchup than the one being "repeated". A pre-083
+        // session, a different matchup than the one being "repeated". A pre-098
         // source (no persisted row) still degrades to launch-defaults.
         quickConfigA: isQuickArm(sb.variantAId)
           ? persistedQuickConfig(deps.db, src.id, 'A')

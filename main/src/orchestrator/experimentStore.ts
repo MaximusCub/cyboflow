@@ -165,7 +165,7 @@ export function deleteExperimentSeedTasks(db: DatabaseLike, experimentId: string
 }
 
 // ---------------------------------------------------------------------------
-// experiment_quick_configs (migration 083) — per-arm QUICK-SESSION config
+// experiment_quick_configs (migration 098) — per-arm QUICK-SESSION config
 // persistence for the '__quick__' arm sentinel. NOT an entity table (precedent:
 // experiment_seed_tasks): these direct helpers own its writes. Rows survive
 // decide/abandon deliberately — rerun REQUIRES a settled experiment, and this
@@ -174,9 +174,9 @@ export function deleteExperimentSeedTasks(db: DatabaseLike, experimentId: string
 
 /**
  * Record one quick arm's config (JSON-encoded ExperimentArmQuickConfig) at
- * experiment start. Fail-soft on a pre-083 DB (no table): startExperiment must
+ * experiment start. Fail-soft on a pre-098 DB (no table): startExperiment must
  * never fail over a nice-to-have persistence — a missed write only degrades a
- * LATER rerun to the pre-083 behavior (default quick arm).
+ * LATER rerun to the pre-098 behavior (default quick arm).
  */
 export function insertExperimentQuickConfig(
   db: DatabaseLike,
@@ -200,7 +200,7 @@ export function insertExperimentQuickConfig(
 
 /**
  * The persisted quick-arm config JSON for one arm; null when absent (non-quick
- * arm, pre-083 experiment, or pre-083 DB). Fail-soft like listExperimentSeedTasks.
+ * arm, pre-098 experiment, or pre-098 DB). Fail-soft like listExperimentSeedTasks.
  */
 export function getExperimentQuickConfigJson(
   db: DatabaseLike,

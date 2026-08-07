@@ -1,4 +1,4 @@
--- Migration 083: workflow A/B testing — per-arm QUICK-SESSION config persistence.
+-- Migration 098: workflow A/B testing — per-arm QUICK-SESSION config persistence.
 --
 -- A side-by-side experiment arm can be an ad hoc quick session (the '__quick__'
 -- arm sentinel) configured from the launch modal's quick-config sub-form
@@ -12,7 +12,7 @@
 --
 -- NOT an entity table (precedent: experiment_seed_tasks, migration 051): its
 -- writes are direct helpers in experimentStore (insert on start; reads are
--- fail-soft for pre-083 rows, which simply rerun with defaults as before). Rows
+-- fail-soft for pre-098 rows, which simply rerun with defaults as before). Rows
 -- deliberately survive decide/abandon — rerun REQUIRES a settled experiment, so
 -- deleting on close-out would defeat the table's purpose.
 --
@@ -22,7 +22,7 @@
 --
 -- ⚠️ MIGRATION-NUMBER COLLISION: sibling branches have historically claimed
 -- overlapping numbers. The ledger is filename-keyed; whichever lands second must
--- renumber. The integrator MUST verify no other 083_*.sql exists at merge time.
+-- renumber. The integrator MUST verify no other 098_*.sql exists at merge time.
 
 CREATE TABLE IF NOT EXISTS experiment_quick_configs (
   experiment_id TEXT NOT NULL,

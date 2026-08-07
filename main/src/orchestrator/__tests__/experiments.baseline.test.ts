@@ -451,24 +451,24 @@ describe('quick-arm launch (TASK-120)', () => {
 });
 
 /**
- * Quick-arm config persistence + rerun replay (migration 083) — startExperiment
+ * Quick-arm config persistence + rerun replay (migration 098) — startExperiment
  * records each quick arm's config in experiment_quick_configs so
  * experiments.rerun (which forwards only the variant ids) can replay the SAME
  * matchup instead of silently launching a default Claude-SDK quick arm. Reads
- * and writes are both fail-soft: a pre-083 DB / missing row / garbage payload
+ * and writes are both fail-soft: a pre-098 DB / missing row / garbage payload
  * degrades to launch-defaults, never a throw.
  */
-describe('quick-arm config persistence + rerun replay (migration 083)', () => {
+describe('quick-arm config persistence + rerun replay (migration 098)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();
   });
 
-  /** Migration 083's table shape, applied on top of buildDb()'s pre-083 schema. */
+  /** Migration 098's table shape, applied on top of buildDb()'s pre-098 schema. */
   function addQuickConfigsTable(h: Harness): void {
     // Execute the REAL migration file (not a duplicated CREATE TABLE) so a
-    // typo / missing index / non-idempotent change in 083 fails these tests.
-    const migPath = join(__dirname, '..', '..', 'database', 'migrations', '083_experiment_quick_configs.sql');
+    // typo / missing index / non-idempotent change in 098 fails these tests.
+    const migPath = join(__dirname, '..', '..', 'database', 'migrations', '098_experiment_quick_configs.sql');
     h.db.exec(readFileSync(migPath, 'utf-8'));
     // Idempotence guard: the migration must be safe to re-apply (CREATE ... IF
     // NOT EXISTS), matching the filename-keyed ledger's crash-replay behavior.
@@ -505,7 +505,7 @@ describe('quick-arm config persistence + rerun replay (migration 083)', () => {
     expect(JSON.parse(rows[0]!.config_json)).toEqual(quickConfigA);
   });
 
-  it('startExperiment on a pre-083 DB (no table) still succeeds — the persist is fail-soft', async () => {
+  it('startExperiment on a pre-098 DB (no table) still succeeds — the persist is fail-soft', async () => {
     const h = makeHarness(); // buildDb() has no experiment_quick_configs table
     const res = await startExperiment(h.deps, {
       projectId: 1,
@@ -553,7 +553,7 @@ describe('quick-arm config persistence + rerun replay (migration 083)', () => {
     expect(JSON.parse(rows[0]!.config_json)).toEqual(quickConfigA);
   });
 
-  it('rerun of a source with NO persisted config (legacy pre-083 experiment) launches the quick arm with defaults', async () => {
+  it('rerun of a source with NO persisted config (legacy pre-098 experiment) launches the quick arm with defaults', async () => {
     const h = makeHarness();
     addQuickConfigsTable(h);
     setExperimentsDeps(h.deps);
@@ -562,7 +562,7 @@ describe('quick-arm config persistence + rerun replay (migration 083)', () => {
       workflowId: 'wf',
       variantAId: QUICK_ARM_SENTINEL,
       variantBId: 'vB',
-      // no quickConfigA — mirrors a pre-083 experiment with nothing persisted
+      // no quickConfigA — mirrors a pre-098 experiment with nothing persisted
     });
     updateExperimentStatus(h.deps.db, res.experimentId, 'abandoned');
 
