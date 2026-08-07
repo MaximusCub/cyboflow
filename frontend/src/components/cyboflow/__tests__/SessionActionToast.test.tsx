@@ -54,6 +54,28 @@ describe('SessionActionToast', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it('honors an explicit durationMs override', () => {
+    vi.useFakeTimers();
+    const onDismiss = vi.fn();
+    render(<SessionActionToast message="Saved" isVisible onDismiss={onDismiss} durationMs={9000} />);
+
+    vi.advanceTimersByTime(8999);
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no action button when only actionLabel is provided without onAction', () => {
+    render(<SessionActionToast message="Saved" isVisible onDismiss={vi.fn()} actionLabel="Undo" />);
+    expect(screen.queryByTestId('session-action-toast-action')).not.toBeInTheDocument();
+  });
+
+  it('renders no action button when only onAction is provided without actionLabel', () => {
+    render(<SessionActionToast message="Saved" isVisible onDismiss={vi.fn()} onAction={vi.fn()} />);
+    expect(screen.queryByTestId('session-action-toast-action')).not.toBeInTheDocument();
+  });
+
   it('pauses the dismiss timer on hover and resumes on mouse leave', () => {
     vi.useFakeTimers();
     const onDismiss = vi.fn();
