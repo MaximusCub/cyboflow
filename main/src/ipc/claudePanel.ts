@@ -38,7 +38,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
   protected applySettingsDefaults(settings: Record<string, unknown>): Record<string, unknown> {
     const { configManager } = this.services;
     return {
-      model: settings.model || configManager.getDefaultModel() || 'auto',
+      model: settings.model || configManager.getDefaultLaunchModel('quick') || 'auto',
       systemPrompt: settings.systemPrompt || null,
       maxTokens: settings.maxTokens || 4096,
       temperature: settings.temperature || 0.7,
@@ -70,7 +70,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
         let modelToUse = model;
         if (!modelToUse) {
           const settings = databaseService.getPanelSettings(panelId);
-          modelToUse = (typeof settings?.model === 'string' ? settings.model : null) || configManager.getDefaultModel() || 'auto';
+          modelToUse = (typeof settings?.model === 'string' ? settings.model : null) || configManager.getDefaultLaunchModel('quick') || 'auto';
         }
 
         // Start Claude via the panel manager
