@@ -80,6 +80,26 @@ describe('SessionSettings', () => {
     }
   });
 
+  // The mount point itself: nothing else in the suite would notice if the
+  // overrides section were dropped from this group, since it is self-fetching
+  // and takes none of this component's props.
+  it('mounts the per-run-type overrides section BELOW the Global defaults sub-block', () => {
+    renderGroup();
+
+    const globalDefaults = screen.getByRole('region', { name: 'Global defaults' });
+    const overrides = screen.getByRole('region', { name: 'Session type overrides' });
+
+    // A sibling, not a child: it writes through its own IPC op, not this
+    // group's props-in/callback-out contract.
+    expect(globalDefaults).not.toContainElement(overrides);
+    expect(
+      globalDefaults.compareDocumentPosition(overrides) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Really mounted, not just a heading: the synthetic quick row always renders
+    // even with no config and no workflow rows fetched.
+    expect(within(overrides).getByTestId('run-type-row-quick')).toBeInTheDocument();
+  });
+
   it('renders every control the sections own', () => {
     renderGroup({ globalSystemPrompt: 'Always use TypeScript' });
 
