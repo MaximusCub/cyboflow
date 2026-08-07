@@ -50,6 +50,10 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Cached better-sqlite3 native artifacts, one per ABI (scripts/ensure-sqlite-abi.mjs).
+# Machine-specific compiled output — rebuilt on demand, never shared.
+.abi-cache/
+
 # Git worktrees (except the main directory)
 /worktree-*/
 /worktrees/
