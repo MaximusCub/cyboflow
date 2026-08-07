@@ -956,9 +956,14 @@ worktree's vitest already loads the parent's addon); an ABI swap, however, is a 
 of them, so the script announces it. Give a worktree its own `pnpm install` to opt out. Note that
 `pnpm electron:rebuild` no-ops in a worktree that has no local `node_modules`.
 
-**`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI; the
-root `postinstall` (`electron-builder install-app-deps`, run by `pnpm install`) and the
-`e2e:prereqs` / `build:mac:*` scripts leave the module on the Electron ABI.
+**`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI, as
+do the `e2e:prereqs` / `build:mac:*` scripts.
+
+Do NOT assume the root `postinstall` (`electron-builder install-app-deps`) leaves the module on
+the Electron ABI. It reports `finished moduleName=better-sqlite3`, but with `buildFromSource=false`
+it can resolve a **host-ABI prebuild** and leave NMV 127 in place — measured on a fresh worktree
+install, where `pnpm dev` would then have died on `NODE_MODULE_VERSION`. Which is the point of the
+guard: measure the artifact, never infer its ABI from which command last ran.
 
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.
