@@ -858,7 +858,7 @@ pnpm lint                 # ESLint across all workspaces
 pnpm test:unit            # THE headless code-change AC gate (see below)
 pnpm test:integration     # Tier-3 mocked-SDK itest suite; required for panels/claude changes
 pnpm test:e2e             # Playwright against the BUILT Electron bundle (needs a display)
-pnpm electron:rebuild     # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron ABI drift
+pnpm electron:rebuild     # Manual escape hatch for better-sqlite3 ABI drift (normally automatic — see below)
 pnpm test:gate            # Day-gate integration test; manual/unscheduled
 ```
 
@@ -897,8 +897,9 @@ excluded from `test:unit`'s vitest include pattern (`main/vitest.config.ts` only
 Electron window on screen — no Vite dev server, no `http://localhost:4521`, no Playwright
 `webServer`. The `pretest:e2e` hook (`e2e:prereqs`) builds the prerequisites (`build:main` +
 `build:frontend` + `electron:rebuild`) so the launched app has `better-sqlite3` on the
-**Electron** ABI; AFTER an e2e run you MUST run `pnpm rebuild better-sqlite3` to restore the
-host-Node ABI before running vitest again. Two config tiers: `playwright.config.ts` (full,
+**Electron** ABI; the host-Node ABI is restored automatically the next time you run `test:unit`
+or `test:integration` (see "The better-sqlite3 ABI ping-pong" below), or by hand with
+`node scripts/ensure-sqlite-abi.mjs host`. Two config tiers: `playwright.config.ts` (full,
 `workers: 1`, all specs — the app is launched per-test by the fixture) and
 `playwright.ci.minimal.config.ts` (smoke: health-check + smoke + permissions specs only). The
 seeded specs (`cyboflow-picker.spec.ts`, `standalone-terminal-panels.spec.ts`) boot the app once
@@ -908,13 +909,56 @@ CLI (present on every macOS runner; better-sqlite3 can't be imported host-side p
 on macOS, or via the report-only nightly `.github/workflows/e2e.yml` (macOS runner), which flips
 to blocking once green two consecutive runs.
 
-**`pnpm electron:rebuild`** fixes `better-sqlite3` `NODE_MODULE_VERSION` errors after a
-Node/Electron upgrade — the root `postinstall` (`electron-builder install-app-deps`, run by
-`pnpm install`) and the `e2e:prereqs` / `build:mac:*` scripts rebuild the module for the
-Electron ABI, so
-switching back to running vitest directly (`pnpm --filter main test`) needs
-`pnpm rebuild better-sqlite3` first to restore the host-Node ABI (the two ABIs ping-pong across
-`pnpm dev` / e2e runs vs. unit-test runs).
+### The better-sqlite3 ABI ping-pong
+
+`NODE_MODULE_VERSION` is a property of the **host binary**, not the module. There is exactly one
+compiled artifact — `node_modules/.../better-sqlite3/build/Release/better_sqlite3.node` — and two
+hosts that `dlopen` it: Electron (`pnpm dev`, e2e, packaging) and host Node (vitest). Whichever
+rebuilt last wins; the loser dies with a `NODE_MODULE_VERSION` mismatch far from its cause. There
+is no way to hold both without a second install tree.
+
+**This is now automatic.** `scripts/ensure-sqlite-abi.mjs <host|electron>` fronts the entry points
+that care:
+
+| Entry point | Ensures |
+| --- | --- |
+| `test:unit`, `test:integration`, `test:gate` | host ABI |
+| `electron-dev` (`pnpm dev`) | Electron ABI |
+
+It **probes first** — a real `new Database(':memory:')` in a fresh child process, under host Node
+or under Electron-as-Node (`ELECTRON_RUN_AS_NODE=1`) as appropriate. If the artifact already
+loads, it exits immediately, so steady state is a ~50ms no-op. Otherwise it swaps in a cached
+artifact (`.abi-cache/`, gitignored) — the addon is a single file, so a flip is a copy rather than
+a multi-minute recompile. The cache fills itself: before overwriting a working artifact it banks
+that artifact under the ABI it satisfies. Keys pin platform, arch, better-sqlite3 version, and the
+host's ABI-defining version, so a Node/Electron/better-sqlite3 upgrade **misses** rather than
+restoring a stale artifact that would `dlopen`-fail. Only a genuine miss rebuilds, delegating the
+host case to `scripts/rebuild-better-sqlite3-host.mjs` (which retries once with a forced source
+build — a bare `pnpm rebuild` can silently leave a stale wrong-arch prebuild behind).
+
+Two things it does NOT cover:
+
+- **Direct `npx vitest run`** — the lane-scoped command (see "Which tests to run when") bypasses
+  pnpm scripts entirely, so no guard runs. If it dies on `NODE_MODULE_VERSION`, run
+  `node scripts/ensure-sqlite-abi.mjs host` by hand.
+- **Release and packaging paths** — `build:mac:*`, `e2e:prereqs` and the root `postinstall` are
+  deliberately untouched. They already rebuild explicitly, and they are the riskiest scripts in
+  the repo to change.
+
+Diagnostics: `node scripts/ensure-sqlite-abi.mjs --check <target>` reports which ABI the installed
+artifact satisfies **without** swapping, rebuilding, or writing to the cache — safe against a
+checkout whose app is live. `--print-key <target>` prints the cache key.
+
+**Worktree caveat.** Node resolution walks UP the directory tree, so a git worktree with no
+`node_modules` of its own resolves the **parent checkout's** better-sqlite3 — one artifact shared
+with the parent's dev server and every sibling worktree. Reading it is pre-existing behaviour (a
+worktree's vitest already loads the parent's addon); an ABI swap, however, is a write felt by all
+of them, so the script announces it. Give a worktree its own `pnpm install` to opt out. Note that
+`pnpm electron:rebuild` no-ops in a worktree that has no local `node_modules`.
+
+**`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI; the
+root `postinstall` (`electron-builder install-app-deps`, run by `pnpm install`) and the
+`e2e:prereqs` / `build:mac:*` scripts leave the module on the Electron ABI.
 
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.

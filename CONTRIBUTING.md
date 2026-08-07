@@ -118,7 +118,7 @@ Fixes #42
 
 The code-change gate is `pnpm test:unit` — a one-shot chain that runs the main- and frontend-process Vitest suites plus schema-parity and build-script checks. Run it (or the per-workspace `pnpm --filter main test` / `pnpm --filter frontend test`) before opening a PR.
 
-`pnpm test:e2e` (Playwright) drives the built Electron bundle via `_electron.launch()` and needs a real display, so do **not** use it as the headless gate; after a run, `pnpm rebuild better-sqlite3` restores the host-Node ABI for vitest. See docs/ARCHITECTURE.md "Build & Run" for the full e2e contract and the native-module ABI notes (`pnpm electron:rebuild`) if you hit `NODE_MODULE_VERSION` errors.
+`pnpm test:e2e` (Playwright) drives the built Electron bundle via `_electron.launch()` and needs a real display, so do **not** use it as the headless gate; the host-Node ABI it leaves behind is restored automatically the next time you run `pnpm test:unit`. See docs/ARCHITECTURE.md → "The better-sqlite3 ABI ping-pong" for the full contract, and run `node scripts/ensure-sqlite-abi.mjs host` by hand if a direct `npx vitest run` hits `NODE_MODULE_VERSION` errors.
 
 ### Manual Testing
 

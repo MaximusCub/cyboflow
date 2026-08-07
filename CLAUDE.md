@@ -37,10 +37,17 @@ pnpm typecheck && pnpm lint
 pnpm test:unit         # THE headless AC gate — for a SETTLED tree, not per-change (see below)
 pnpm test:integration  # Mocked-SDK itest suite (required for panels/claude changes)
 pnpm test:e2e          # Built-bundle Playwright; needs a real display — NOT an AC gate
-pnpm electron:rebuild  # better-sqlite3 host-Node ABI (NMV 127) → Electron ABI (NMV 136)
-pnpm rebuild better-sqlite3  # reverse fix: back to host-Node ABI after e2e/packaging, before vitest
 pnpm test:gate         # Day-gate integration; needs `claude` on PATH — manual only
+node scripts/ensure-sqlite-abi.mjs <host|electron>   # better-sqlite3 ABI (normally automatic)
 ```
+
+**better-sqlite3 ABI.** One compiled `.node`, two hosts that load it: host Node/vitest (NMV 127)
+and Electron (NMV 136). This is now handled automatically — `test:unit` / `test:integration` /
+`test:gate` ensure the host ABI, `pnpm dev` ensures the Electron ABI, and a flip is a cached file
+copy rather than a recompile. You only need to act when running vitest **directly**
+(`npx vitest run`, which bypasses pnpm scripts): if it dies on `NODE_MODULE_VERSION`, run
+`node scripts/ensure-sqlite-abi.mjs host`. Add `--check <target>` to diagnose without mutating
+anything. Details: `docs/ARCHITECTURE.md` → "The better-sqlite3 ABI ping-pong".
 
 **Which tests to run when.** `pnpm test:unit` is the *final* gate, not the per-change gate. **Inside a sprint/ship lane** (an implement / write-tests / task-verify subagent) run only the tests covering your files — `cd main && npx vitest run <paths>` — never the full suite: lanes share ONE worktree, so a full-suite run there also executes siblings' half-finished uncommitted edits, making failures noise and a green result meaningless. The full suite is `sprint-verify`'s job, once, over the settled tree. Detail: `docs/ARCHITECTURE.md` → "Build & Run".
 

@@ -26,7 +26,7 @@
   - **Final verification** (`sprint-verify`, or an interactive session finishing a change): `pnpm test:unit` once, over the settled tree. See `CLAUDE.md` for why E2E is not the gate.
   - Prefer `npx vitest run` per workspace over `pnpm --filter` — filter recursion has broken bin PATH resolution in this repo.
 - For backend logic in `main/`, use Vitest colocated under `main/src/**/__tests__` or `*.spec.ts`; frontend likewise.
-- E2E tests live in `tests/*.spec.ts` (Playwright); they drive the built Electron bundle via `_electron.launch()` and need a real display (after a run, `pnpm rebuild better-sqlite3` restores the host-Node ABI).
+- E2E tests live in `tests/*.spec.ts` (Playwright); they drive the built Electron bundle via `_electron.launch()` and need a real display (the host-Node ABI is restored automatically by the next `pnpm test:unit`; for a direct `npx vitest run`, use `node scripts/ensure-sqlite-abi.mjs host`).
 
 ## Commit & Pull Request Guidelines
 - Commits: present tense, focused, reference issues (e.g., "Fix session diff flicker, closes #123").
