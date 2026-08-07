@@ -29,6 +29,7 @@ import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } f
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
+import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
 import {
@@ -398,6 +399,8 @@ let orchestratorHealth: OrchestratorHealth;
 // initializeServices(); the in-function usages (RunExecutor source/spawner +
 // pty-output fan-in) read the same instance.
 let substrateFacade: SubstrateDispatchFacade;
+/** Narrowed interactive PTY manager, shared with the experiments arm wiring. */
+let interactiveReplManager: InteractiveClaudeManager;
 // Session Dismiss → cancel hosted runs. Declared at module scope because the
 // services bag (initializeServices) defers to it while the REAL implementation
 // is assigned in app.whenReady()'s orchestrator wiring block (it needs
@@ -1294,6 +1297,10 @@ async function initializeServices(): Promise<boolean> {
   if (!(interactiveCliManager instanceof InteractiveClaudeManager)) {
     throw new Error('[Main] cliManagerFactory returned a non-InteractiveClaudeManager for claude-interactive');
   }
+  // Share the narrowed manager with the experiments wiring (createArmSession's
+  // eager interactive REPL spawn) — same module-level-let pattern as
+  // substrateFacade/sessionManager.
+  interactiveReplManager = interactiveCliManager;
 
   const createdCodexSdkManager = await cliManagerFactory.createManager('codex-sdk', {
     sessionManager,
@@ -4719,7 +4726,62 @@ app.whenReady().then(async () => {
         // bootstrapArmSessionPanels is idempotent so it reuses this panel.
         // (fastMode is deliberately NOT part of the arm wire schema — the user
         // can still toggle it per-turn in the session UI after launch.)
-        if (
+        if (quickConfig && resolvedSubstrate === 'interactive') {
+          // EAGER PTY SPAWN — parity with sessions:create-quick's interactive
+          // branch: without it an interactive arm boots to a DEAD terminal (no
+          // REPL until a first ^G-composed sessions:input re-spawns one on
+          // demand; direct terminal keystrokes go nowhere). Same contracts as
+          // the quick handler: the panel is NOT registered with
+          // ClaudePanelManager (the PTY surface never uses the structured
+          // claudePanels:* IPC), the runId→panelId translation is seeded
+          // BEFORE the spawn so a relay racing the first PTY byte resolves,
+          // and startPanel is NEVER awaited (its promise resolves only when
+          // the REPL exits — awaiting would deadlock arm creation).
+          try {
+            const chatPanel = await panelManager.createPanel({
+              sessionId: session.id,
+              type: 'claude',
+              title: 'Chat',
+            });
+            if (quickConfig.model !== undefined || quickConfig.reasoningEffort !== undefined) {
+              databaseService.updatePanelSettings(chatPanel.id, {
+                ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
+                ...(quickConfig.reasoningEffort !== undefined
+                  ? { reasoningEffort: quickConfig.reasoningEffort }
+                  : {}),
+              });
+            }
+            substrateFacade.registerInteractivePanel(runId, chatPanel.id);
+            void interactiveReplManager
+              .startPanel(
+                chatPanel.id,
+                session.id,
+                session.worktreePath,
+                QUICK_PTY_BRIEFING,
+                session.permissionMode,
+                quickConfig.model,
+                undefined, // effort ('ultracode') — not part of the arm wire schema
+                undefined, // fastMode — not part of the arm wire schema
+                undefined, // resumeSessionId — fresh eager spawn
+                quickConfig.reasoningEffort,
+              )
+              .catch((err: unknown) => {
+                // Fail-soft (mirrors create-quick): the arm stays usable — the
+                // first ^G-composed sessions:input bootstraps the REPL on demand.
+                loggerLike.warn('[Main] experiment arm: eager interactive REPL spawn failed', {
+                  sessionId: session.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              });
+            // Mirror sessions:input — the REPL is live; show the session as running.
+            await sessionManager.updateSession(session.id, { status: 'running' });
+          } catch (err) {
+            loggerLike.warn('[Main] experiment arm: interactive chat-panel seed failed', {
+              sessionId: session.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        } else if (
           quickConfig &&
           (quickConfig.model !== undefined || quickConfig.reasoningEffort !== undefined)
         ) {
@@ -4737,18 +4799,13 @@ app.whenReady().then(async () => {
             // the registering create. Register here (lazy require, mirroring
             // ipc/panels.ts — the handler assigns the export at boot, long
             // before any arm launch) so the arm's FIRST chat turn dispatches.
-            // Interactive arms stay unregistered on purpose: the PTY surface
-            // never uses the structured claudePanels IPC (same asymmetry as
-            // the quick handler's eager PTY panel).
-            if (resolvedSubstrate !== 'interactive') {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { claudePanelManager } = require('./ipc/claudePanel') as {
-                claudePanelManager?: {
-                  registerPanel(panelId: string, sessionId: string): void;
-                };
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { claudePanelManager } = require('./ipc/claudePanel') as {
+              claudePanelManager?: {
+                registerPanel(panelId: string, sessionId: string): void;
               };
-              claudePanelManager?.registerPanel(chatPanel.id, session.id);
-            }
+            };
+            claudePanelManager?.registerPanel(chatPanel.id, session.id);
             databaseService.updatePanelSettings(chatPanel.id, {
               ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
               ...(quickConfig.reasoningEffort !== undefined
