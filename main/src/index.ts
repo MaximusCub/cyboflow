@@ -254,7 +254,6 @@ import {
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
 import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from './services/createQuickSessionCore';
-import { panelManager } from './services/panelManager';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
