@@ -1,4 +1,4 @@
--- Migration 091: Launch flow pre-launch seed prompt — seed_prompt on workflow_runs.
+-- Migration 100: Launch flow pre-launch seed prompt — seed_prompt on workflow_runs.
 --
 -- workflow_runs:
 --   seed_prompt  Free-text "what are you trying to build?" grounding text

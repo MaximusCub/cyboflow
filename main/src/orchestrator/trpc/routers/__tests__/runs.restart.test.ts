@@ -39,7 +39,7 @@ describe('cyboflow.runs.restart', () => {
     db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     // Columns / tables restart touches that the shared fixture does not add.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
-    // Migration 091: Launch flow pre-launch seed prompt, re-threaded on restart.
+    // Migration 100: Launch flow pre-launch seed prompt, re-threaded on restart.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
     // seed_idea_ids (migration 061) is now provided by createTestDb's
     // includeSubstrate branch (listRunsHandler projects it), so it is NOT added
@@ -254,7 +254,7 @@ describe('cyboflow.runs.restart', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b6) Launch flow seed-prompt recovery (migration 091): a run seeded with
+  // (b6) Launch flow seed-prompt recovery (migration 100): a run seeded with
   // seed_prompt re-threads it in the trailing launchOptions bag (merged with
   // the baseline pin) so the relaunch re-injects the same `# What you are
   // building` grounding block.

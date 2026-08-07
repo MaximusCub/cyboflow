@@ -183,7 +183,7 @@ describe('WorkflowRegistry', () => {
     // projection resolves. Mirrors seed_finding_ids above.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
     // getRunById now SELECTs workflow_runs.seed_prompt (Launch flow pre-launch
-    // seed prompt, migration 091); layer the additive ALTER on top so the
+    // seed prompt, migration 100); layer the additive ALTER on top so the
     // projection resolves. Mirrors seed_idea_ids above.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
     // createRun stamps workflow_runs.model (per-run model pin, migration 037) and

@@ -332,7 +332,7 @@ export class RunLauncher {
       // compound-only findingIds guard). The singular positional `ideaId` param
       // stays valid for planner AND ship, unchanged, and leaves seed_idea_ids NULL.
       ideaIds?: string[];
-      // Launch flow pre-launch seed prompt (migration 091). When supplied, the
+      // Launch flow pre-launch seed prompt (migration 100). When supplied, the
       // launcher writes it DIRECTLY to workflow_runs.seed_prompt — NOT routed
       // through any chokepoint (workflow_runs has none), exactly like ideaIds
       // above. ONLY valid when the workflow's name === 'launch' — any other
@@ -398,7 +398,7 @@ export class RunLauncher {
       }
     }
 
-    // Launch pre-launch seed-prompt validation (migration 091) — BEFORE createRun
+    // Launch pre-launch seed-prompt validation (migration 100) — BEFORE createRun
     // so an invalid request never leaves a half-created run row behind. Mirrors
     // the compound findingIds / planner ideaIds guards: seedPrompt is ONLY valid
     // for the 'launch' workflow. The non-empty check mirrors runs.ts's zod
@@ -684,7 +684,7 @@ export class RunLauncher {
           .run(JSON.stringify(findingIds), runId);
       }
 
-      // Launch pre-launch seed prompt (migration 091). A direct workflow_runs
+      // Launch pre-launch seed prompt (migration 100). A direct workflow_runs
       // write — NOT routed through any chokepoint (workflow_runs has none),
       // exactly like seed_idea_id / seed_finding_ids / batch_id above.
       // RunExecutor.getPrompt reads this column to inject the `# What you are

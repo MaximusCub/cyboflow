@@ -936,7 +936,7 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a6f) seedPrompt supplied (Launch flow / migration 091) → forwarded in the
+  // (a6f) seedPrompt supplied (Launch flow / migration 100) → forwarded in the
   // trailing launchOptions bag (16th slot). The launcher dual-checks the
   // launch-only rule (covered in runLauncher.test.ts, where the real launcher
   // runs).

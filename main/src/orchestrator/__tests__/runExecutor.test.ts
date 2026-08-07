@@ -3570,7 +3570,7 @@ describe('RunExecutor.getPrompt — selected-findings injection (migration 034)'
   });
 });
 
-describe('RunExecutor.getPrompt — seed-prompt injection (migration 091)', () => {
+describe('RunExecutor.getPrompt — seed-prompt injection (migration 100)', () => {
   it('prepends a `# What you are building` block when run.seed_prompt is non-empty', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/w',

@@ -72,7 +72,7 @@ function sessionHostedDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
   // Migration 061: seed_idea_ids is dual-written by the planner multi-idea path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
-  // Migration 091: seed_prompt is written by the Launch flow's pre-launch seed path.
+  // Migration 100: seed_prompt is written by the Launch flow's pre-launch seed path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_prompt TEXT');
   db.exec(`
     CREATE TABLE sessions (
@@ -1900,7 +1900,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RunLauncher.launch — seedPrompt (Launch flow pre-launch seed, migration 091)
+// RunLauncher.launch — seedPrompt (Launch flow pre-launch seed, migration 100)
 //
 // Mirrors the findingIds (compound-only) / ideaIds (planner-only) guards: the
 // multi-idea seed rides the trailing launchOptions bag (16th positional) and

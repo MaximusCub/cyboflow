@@ -325,7 +325,7 @@ export interface RunLauncherLike {
    * `requestedAgentProvider` / `requestedAgentRuntime` carry the workflow's
    * run-scoped agent route. Omitted means the registry keeps the Claude default;
    * `codex-sdk` routes through the SDK substrate compatibility path.
-   * `launchOptions.seedPrompt` (migration 091) carries the Launch flow's
+   * `launchOptions.seedPrompt` (migration 100) carries the Launch flow's
    * pre-launch "what are you trying to build?" free text — written DIRECTLY to
    * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
    * When omitted the run is not prompt-seeded.
@@ -986,7 +986,7 @@ export const runsRouter = router({
       // workflow (the launcher enforces this). Mirrors taskIds/ideaId; NO selection
       // cap (OD-7) — a triage tray may seed any number of findings.
       findingIds: z.array(z.string().min(1)).optional(),
-      // Optional Launch flow pre-launch seed prompt (migration 091). Free-text
+      // Optional Launch flow pre-launch seed prompt (migration 100). Free-text
       // "what are you trying to build?" grounding text collected by a frontend
       // modal before the run starts. When supplied, it rides the trailing
       // launchOptions bag (mirroring ideaIds) and the launcher writes it DIRECTLY
@@ -1491,7 +1491,7 @@ export const runsRouter = router({
         // (restart inherits, no re-roll). ideaIds (IDEA-009 / migration 061) is
         // merged in whenever the failed run carried a multi-idea seed, so the
         // restart re-dual-writes seed_idea_id + seed_idea_ids. seed_prompt
-        // (migration 091) is merged in whenever the failed run carried a Launch
+        // (migration 100) is merged in whenever the failed run carried a Launch
         // flow seed prompt, so the restart re-injects the same `# What you are
         // building` grounding block.
         {

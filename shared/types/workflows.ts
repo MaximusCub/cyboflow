@@ -122,7 +122,7 @@ export interface WorkflowRunRow {
    *  runs launched with a single idea / non-planner runs. Mirrors seed_finding_ids (034). */
   seed_idea_ids?: string | null;
   /** Free-text "what are you trying to build?" grounding text seeded into a
-   *  'launch' run at launch time (migration 091). NULL for every non-launch run.
+   *  'launch' run at launch time (migration 100). NULL for every non-launch run.
    *  Parsed + injected by RunExecutor.getPrompt's `# What you are building` block.
    *  Mirrors seed_idea_id (017) / seed_finding_ids (034) — a direct workflow_runs
    *  write, no entity link. */

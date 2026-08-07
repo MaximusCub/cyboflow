@@ -1480,7 +1480,7 @@ export class RunExecutor {
    *      which is invisible to the chat transcript).
    *   5. (migration 034) compound run.seed_finding_ids resolve → PREPEND a
    *      `# Selected findings` block (priority/bucket-ordered) to the MAIN prompt.
-   *   6. (migration 091) run.seed_prompt is non-empty → PREPEND a
+   *   6. (migration 100) run.seed_prompt is non-empty → PREPEND a
    *      `# What you are building` block (Launch flow's pre-launch free text) to
    *      the MAIN prompt.
    *   7. none → return the base prompt verbatim (zero-behavior-change floor).
@@ -1548,7 +1548,7 @@ export class RunExecutor {
       return Promise.resolve(`# Selected findings\n\n${findingsBlock}\n\n${prompt}`);
     }
 
-    // Seed-prompt injection (migration 091). When a run carries a non-empty
+    // Seed-prompt injection (migration 100). When a run carries a non-empty
     // seed_prompt (the Launch flow's pre-launch "what are you trying to build?"
     // free text, collected by a frontend modal before launch), prepend a
     // `# What you are building` block to the run's MAIN prompt. Checked LAST —
@@ -1568,7 +1568,7 @@ export class RunExecutor {
 
   /**
    * Resolve the `# What you are building` block body for a Launch run's
-   * pre-launch seed prompt (migration 091).
+   * pre-launch seed prompt (migration 100).
    *
    * Unlike the seed-idea / selected-findings blocks, seed_prompt is free text
    * stored DIRECTLY on workflow_runs — no entity id to resolve, so no injected
