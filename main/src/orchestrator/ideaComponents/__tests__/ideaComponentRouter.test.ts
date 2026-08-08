@@ -10,6 +10,10 @@
  *  - markStale only flips currently-'complete' rows to 'incomplete' +
  *    stale_at/stale_reason; a 'skipped' row stays skipped and untouched; an
  *    already-'incomplete' row is left completely untouched.
+ *  - markStale covers the DERIVED half of the hybrid model too: a candidate
+ *    with NO row that derives 'complete' is MATERIALIZED into a stale row
+ *    (source 'flow'); one that derives 'incomplete' mints nothing; an existing
+ *    row is never materialized over; the components filter bounds both halves.
  *  - clearStale drops stale_at/stale_reason AND restores 'complete' (the exact
  *    inverse of markStale); rejects (not_found) a component with no ledger row;
  *    is idempotent on an already-non-stale row.
@@ -20,6 +24,8 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   IdeaComponentRouter,
   IdeaComponentError,
@@ -34,28 +40,17 @@ import type { IdeaComponentChangedEvent } from '../../../../../shared/types/idea
 // ---------------------------------------------------------------------------
 // Test DB builder — the neighbouring resolveIdeaComponents.test.ts's ad-hoc
 // schema idiom (hand-rolled CREATE TABLEs pared to exactly what this feature
-// reads/writes) rather than the full migration chain.
+// reads/writes) rather than the full migration chain, with `idea_components`
+// itself read straight from migration 098 so a future column or
+// CHECK-constraint change cannot silently miss this copy.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
+  const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
   db.exec(`
     CREATE TABLE ideas (id TEXT PRIMARY KEY, body TEXT);
-    CREATE TABLE idea_components (
-      idea_id TEXT NOT NULL,
-      project_id INTEGER NOT NULL,
-      component TEXT NOT NULL CHECK (component IN ('idea-spec','prototype','architecture','epics','stories')),
-      state TEXT NOT NULL CHECK (state IN ('complete','incomplete','skipped')),
-      source TEXT NOT NULL CHECK (source IN ('flow','manual')),
-      source_run_id TEXT,
-      source_session_id TEXT,
-      built_against_version INTEGER,
-      stale_at TEXT,
-      stale_reason TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (idea_id, component)
-    );
     CREATE TABLE approved_designs (id TEXT PRIMARY KEY, idea_id TEXT NOT NULL, superseded_at TEXT);
     CREATE TABLE epics (id TEXT PRIMARY KEY, originating_idea_id TEXT);
     CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_epic_id TEXT, originating_idea_id TEXT);
@@ -66,9 +61,11 @@ function buildDb(): Database.Database {
   return db;
 }
 
-function insertIdea(db: Database.Database, id: string): void {
-  db.prepare('INSERT INTO ideas (id, body) VALUES (?, NULL)').run(id);
+function insertIdea(db: Database.Database, id: string, body: string | null = null): void {
+  db.prepare('INSERT INTO ideas (id, body) VALUES (?, ?)').run(id, body);
 }
+
+const ARCH_DESIGN_BODY = '## Architecture design\n\nSome arch content.\n';
 
 function rowCount(db: Database.Database, ideaId: string): number {
   const row = db
@@ -269,6 +266,143 @@ describe('IdeaComponentRouter', () => {
     const epics = rawRow(db, 'idea-1', 'epics');
     expect(epics?.state).toBe('incomplete');
     expect(epics?.stale_at).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // markStale — the DERIVED half of the hybrid model. A candidate with NO
+  // ledger row that derives 'complete' must be materialized into a stale row;
+  // otherwise derivation (a live read of the very thing that just changed)
+  // keeps answering 'complete' forever. Every idea planned before migration
+  // 098 has zero rows, so an existing-rows-only pass was a no-op on the whole
+  // pre-existing backlog.
+  // -------------------------------------------------------------------------
+
+  it('markStale MATERIALIZES a stale row for a derived-complete component with no ledger row', async () => {
+    const db = buildDb();
+    // The body still carries '## Architecture design', so 'architecture'
+    // derives complete — and it is derived FROM the body that just changed,
+    // which is exactly the case worth flagging.
+    insertIdea(db, 'idea-1', ARCH_DESIGN_BODY);
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+    expect(rowCount(db, 'idea-1')).toBe(0);
+
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'idea body changed',
+      components: ['prototype', 'architecture', 'epics', 'stories'],
+    });
+
+    // Exactly one row minted — only 'architecture' derived complete.
+    expect(rowCount(db, 'idea-1')).toBe(1);
+    const architecture = rawRow(db, 'idea-1', 'architecture');
+    expect(architecture?.state).toBe('incomplete');
+    expect(architecture?.stale_at).not.toBeNull();
+    expect(architecture?.stale_reason).toBe('idea body changed');
+    // 'flow', not 'manual' — 'manual' is the card's human-override marker, and
+    // stamping it here would claim a person reviewed this component.
+    expect(architecture?.source).toBe('flow');
+
+    // The read model now says "needs review" rather than "complete".
+    const resolved = resolveIdeaComponents(dbAdapter(db), 'idea-1').find(
+      (s) => s.component === 'architecture',
+    )!;
+    expect(resolved.state).toBe('incomplete');
+    expect(resolved.staleAt).not.toBeNull();
+  });
+
+  it('markStale materializes nothing for a component that derives INCOMPLETE', async () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1', 'a plain body with no headings');
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'idea body changed',
+      components: ['prototype', 'architecture', 'epics', 'stories'],
+    });
+
+    // Nothing derived complete, so nothing was frozen — the ledger stays empty
+    // and every component keeps re-deriving on read.
+    expect(rowCount(db, 'idea-1')).toBe(0);
+  });
+
+  it('markStale never materializes over an EXISTING row (skipped and incomplete both survive)', async () => {
+    const db = buildDb();
+    // Body derives 'architecture' complete AND a child epic derives 'epics'
+    // complete — but both already carry rows, which always win over derivation.
+    insertIdea(db, 'idea-1', ARCH_DESIGN_BODY);
+    db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run('epc-1', 'idea-1');
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'set-component-state',
+      ideaId: 'idea-1',
+      component: 'architecture',
+      state: 'skipped',
+      source: 'manual',
+    });
+    await router.applyChange(1, {
+      op: 'set-component-state',
+      ideaId: 'idea-1',
+      component: 'epics',
+      state: 'incomplete',
+      source: 'flow',
+    });
+
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'idea body changed',
+      components: ['prototype', 'architecture', 'epics', 'stories'],
+    });
+
+    expect(rowCount(db, 'idea-1')).toBe(2);
+    const architecture = rawRow(db, 'idea-1', 'architecture');
+    expect(architecture?.state).toBe('skipped');
+    expect(architecture?.stale_at).toBeNull();
+    const epics = rawRow(db, 'idea-1', 'epics');
+    expect(epics?.state).toBe('incomplete');
+    expect(epics?.stale_at).toBeNull();
+  });
+
+  it('markStale materializes only within the components filter', async () => {
+    const db = buildDb();
+    // Both 'architecture' (body heading) and 'epics' (a child epic) derive
+    // complete; the filter admits only 'epics'.
+    insertIdea(db, 'idea-1', ARCH_DESIGN_BODY);
+    db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run('epc-1', 'idea-1');
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'arch section changed',
+      components: ['epics', 'stories'],
+    });
+
+    expect(rowCount(db, 'idea-1')).toBe(1);
+    expect(rawRow(db, 'idea-1', 'epics')?.stale_at).not.toBeNull();
+    expect(rawRow(db, 'idea-1', 'architecture')).toBeUndefined();
+  });
+
+  it('a materialized stale row is restorable by clearStale, like any other stale row', async () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1', ARCH_DESIGN_BODY);
+    const router = IdeaComponentRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'mark-stale',
+      ideaId: 'idea-1',
+      staleReason: 'idea body changed',
+      components: ['architecture'],
+    });
+    await router.applyChange(1, { op: 'clear-stale', ideaId: 'idea-1', component: 'architecture' });
+
+    const row = rawRow(db, 'idea-1', 'architecture');
+    expect(row?.state).toBe('complete');
+    expect(row?.stale_at).toBeNull();
   });
 
   it('markStale is a no-op when the idea has no complete rows', async () => {

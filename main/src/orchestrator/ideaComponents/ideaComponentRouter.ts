@@ -18,7 +18,8 @@
  *   - A ledger row, once written, is authoritative over derivation. This
  *     router only ever writes rows explicitly — it never needs to "delete
  *     down to derivation" as a normal op (that's what `deleteForIdea` is
- *     for, and it's cascade-only).
+ *     for, and it's cascade-only: TaskChangeRouter.applyDelete calls it
+ *     post-commit for each deleted idea).
  *   - `state='skipped'` is NEVER derived and only ever set explicitly via
  *     `setComponentState` — this router does not special-case it beyond
  *     that; the derivation module is what enforces "never derive skipped".
@@ -32,6 +33,7 @@
 import { EventEmitter } from 'node:events';
 import PQueue from 'p-queue';
 import type { DatabaseLike } from '../types';
+import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
 import type { IdeaComponentKey, IdeaComponentChangedEvent, IdeaComponentState } from '../../../../shared/types/ideaComponents';
 import { resolveIdeaComponents } from './resolveIdeaComponents';
 
@@ -100,11 +102,11 @@ export interface IdeaComponentSetState {
 }
 
 /**
- * Mark the idea's currently-'complete' ledger rows stale — called when the
+ * Mark the idea's currently-'complete' components stale — called when the
  * idea's body materially changes, so dependent prior work is flagged for
  * re-verification WITHOUT being discarded.
  *
- * Only rows with `state='complete'` are touched: each is set to
+ * Only components that read 'complete' are touched: each lands on
  * `state='incomplete'` with `stale_at`/`stale_reason` set, so the UI reads it
  * as "needs review" rather than "not started" (see the shared type header's
  * `state='incomplete' AND staleAt !== null` case). A row already
@@ -114,19 +116,23 @@ export interface IdeaComponentSetState {
  * `state='skipped'` row is NEVER touched: the user or flow declared that
  * component not-applicable, and a body edit does not un-skip it.
  *
- * Deliberately scoped to EXISTING ledger rows only — a component with no row
- * at all has no frozen state to go stale in the first place: its next
- * `resolveIdeaComponents` read re-derives straight from the (now-changed)
- * body/children, which is already correct with no explicit flag needed. See
- * this router's class-level JSDoc on `runMarkStale` for the fuller rationale
- * and the flagged design choice this implies.
+ * BOTH HALVES OF THE HYBRID MODEL ARE COVERED, not just existing rows. A
+ * candidate component with NO ledger row that DERIVES 'complete' is
+ * MATERIALIZED into a row in the stale state, because derivation is a live
+ * read of the very thing that just changed — it would keep answering
+ * 'complete' forever and the component most likely invalidated by a body edit
+ * ('architecture', derived FROM the body) would be the one that never flags.
+ * Every idea planned before migration 098 has zero rows, so an existing-rows-
+ * only pass would be a no-op on the entire pre-existing backlog. See
+ * `runMarkStale` for the materialization's ordering semantics.
  *
- * `components`, when given, restricts which components are candidates (still
- * subject to the same 'complete'-rows-only rule above) — e.g. the
- * taskChangeRouter.ts idea-body-change hook passes
- * `IDEA_COMPONENTS_STALE_ON_BODY_CHANGE` (the four downstream components,
- * never 'idea-spec') rather than every component. Omitted (the default)
- * preserves the original behavior of considering every component.
+ * `components`, when given, restricts which components are candidates — for
+ * BOTH halves above (an excluded component is neither flipped nor
+ * materialized). The taskChangeRouter.ts idea-body-change hook passes the set
+ * `componentsStaleForBodyChange` resolved for that specific edit (a subset of
+ * `IDEA_COMPONENTS_STALE_ON_BODY_CHANGE`, never 'idea-spec') rather than every
+ * component. Omitted (the default) preserves the original behavior of
+ * considering every component.
  */
 export interface IdeaComponentMarkStale {
   op: 'mark-stale';
@@ -142,8 +148,9 @@ export interface IdeaComponentMarkStale {
  * and found no adjustment needed" path.
  *
  * Restoring the state is load-bearing, not incidental. `markStale` only ever
- * flips rows that were `complete`, so a non-NULL `stale_at` unambiguously
- * encodes "this WAS complete". Clearing the flag alone would leave a bare
+ * stales a component that read `complete` — whether that came from a row it
+ * flipped or from a derivation it materialized — so a non-NULL `stale_at`
+ * unambiguously encodes "this WAS complete". Clearing the flag alone would leave a bare
  * `incomplete` — indistinguishable from "never started", collapsing exactly
  * the distinction `stale_at` exists to carry.
  *
@@ -161,7 +168,13 @@ export interface IdeaComponentClearStale {
   component: IdeaComponentKey;
 }
 
-/** Remove every ledger row for an idea (the idea-delete cascade). */
+/**
+ * Remove every ledger row for an idea. Called by TaskChangeRouter.applyDelete's
+ * post-commit cascade for each deleted entity of type 'idea' — migration 098
+ * deliberately declares no foreign key, so nothing else would ever remove these
+ * rows, and a surviving row WINS over derivation even with no `ideas` row
+ * behind it (an orphan would resurrect onto a future id collision).
+ */
 export interface IdeaComponentDeleteForIdea {
   op: 'delete-for-idea';
   ideaId: string;
@@ -187,8 +200,10 @@ interface StaleColumnsRow {
   stale_at: string | null;
 }
 
-interface CompleteComponentRow {
+/** One existing ledger row among a mark-stale candidate set. */
+interface ExistingComponentRow {
   component: IdeaComponentKey;
+  state: 'complete' | 'incomplete' | 'skipped';
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +351,8 @@ export class IdeaComponentRouter {
   }
 
   // --------------------------------------------------------------------------
-  // markStale — flip currently-'complete' rows to 'incomplete' + stale_at set
+  // markStale — land every currently-'complete' CANDIDATE on 'incomplete' +
+  // stale_at, whether it is backed by a ledger row or only by derivation
   // --------------------------------------------------------------------------
 
   private runMarkStale(
@@ -345,28 +361,31 @@ export class IdeaComponentRouter {
   ): IdeaComponentChangeResult {
     const now = new Date().toISOString();
 
-    const txn = this.db.transaction(() => {
-      // Only 'complete' rows are candidates — 'skipped' stays skipped,
-      // 'incomplete' is left untouched (see the type's JSDoc for the full
-      // rationale on both exclusions). An optional `components` filter
-      // narrows the candidate set further (e.g. the four downstream
-      // components on an idea-body change) — omitted, every component is a
-      // candidate, preserving the original unfiltered behavior.
-      const completeRows = (
-        change.components && change.components.length > 0
-          ? (this.db
-              .prepare(
-                `SELECT component FROM idea_components
-                  WHERE idea_id = ? AND state = 'complete'
-                    AND component IN (${change.components.map(() => '?').join(', ')})`,
-              )
-              .all(change.ideaId, ...change.components))
-          : this.db
-              .prepare(`SELECT component FROM idea_components WHERE idea_id = ? AND state = 'complete'`)
-              .all(change.ideaId)
-      ) as CompleteComponentRow[];
+    // The candidate set: an optional `components` filter (e.g. the four
+    // downstream components the idea-body-change hook passes) narrows it;
+    // omitted, every component is a candidate, preserving the original
+    // unfiltered behavior.
+    const candidates: IdeaComponentKey[] =
+      change.components && change.components.length > 0 ? change.components : [...IDEA_COMPONENT_KEYS];
+    const candidatePlaceholders = candidates.map(() => '?').join(', ');
 
-      for (const row of completeRows) {
+    const txn = this.db.transaction(() => {
+      // Read every EXISTING row among the candidates in one go — both which
+      // ones are 'complete' (the rows to flip) and which components have a row
+      // at all (the ones derivation must NOT be consulted for; a row always
+      // wins, see the module header).
+      const existingRows = this.db
+        .prepare(
+          `SELECT component, state FROM idea_components
+            WHERE idea_id = ? AND component IN (${candidatePlaceholders})`,
+        )
+        .all(change.ideaId, ...candidates) as ExistingComponentRow[];
+
+      // Only 'complete' rows are flipped — 'skipped' stays skipped,
+      // 'incomplete' is left untouched (see the type's JSDoc for the full
+      // rationale on both exclusions).
+      for (const row of existingRows) {
+        if (row.state !== 'complete') continue;
         this.db
           .prepare(
             `UPDATE idea_components
@@ -374,6 +393,45 @@ export class IdeaComponentRouter {
               WHERE idea_id = ? AND component = ?`,
           )
           .run(now, change.staleReason, now, change.ideaId, row.component);
+      }
+
+      // The DERIVED half of the hybrid model: a candidate with no row that
+      // resolves 'complete' purely by derivation is materialized into a row in
+      // the stale state, so it reads "needs review" instead of continuing to
+      // answer 'complete' off a live read of the very thing that just moved.
+      //
+      // ORDERING: the derivation is deliberately taken from the state as it
+      // stands AT MARK-STALE TIME, i.e. AFTER the body write this call is
+      // reacting to (the staleness hook is post-commit). For 'architecture'
+      // that means a body still carrying a '## Architecture design' section
+      // derives 'complete' here — which is exactly the case worth flagging: a
+      // section written against the OLD spec is what needs re-verification.
+      //
+      // The materialized row gets `source='flow'`, not 'manual': 'manual' is
+      // reserved for the card's explicit human-override path, and stamping it
+      // here would make the card claim a person reviewed this component. The
+      // row is machine-written by the ledger's own staleness machinery, which
+      // is what 'flow' means everywhere else in this table.
+      const withRow = new Set(existingRows.map((row) => row.component));
+      const missing = candidates.filter((component) => !withRow.has(component));
+      if (missing.length > 0) {
+        const resolved = resolveIdeaComponents(this.db, change.ideaId);
+        const derivedComplete = new Set(
+          resolved
+            .filter((state) => state.source === 'derived' && state.state === 'complete')
+            .map((state) => state.component),
+        );
+        for (const component of missing) {
+          if (!derivedComplete.has(component)) continue;
+          this.db
+            .prepare(
+              `INSERT INTO idea_components
+                 (idea_id, project_id, component, state, source, source_run_id, source_session_id,
+                  built_against_version, stale_at, stale_reason, created_at, updated_at)
+               VALUES (?, ?, ?, 'incomplete', 'flow', NULL, NULL, NULL, ?, ?, ?, ?)`,
+            )
+            .run(change.ideaId, projectId, component, now, change.staleReason, now, now);
+        }
       }
     });
     (txn as () => void)();
