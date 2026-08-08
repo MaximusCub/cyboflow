@@ -64,9 +64,13 @@ export type IdeaComponentStateValue = 'complete' | 'incomplete' | 'skipped';
  * prototype, the architecture design, the epics, the stories) now needs
  * re-verification against the new body, which is exactly what staleness
  * (see the file header's "RESET MEANS RE-VERIFY" section) exists to flag.
- * Consumed by the idea-body-change staleness hook (taskChangeRouter.ts,
- * fired post-commit on a real `body` delta) as the `components` filter it
- * passes to IdeaComponentRouter's `mark-stale` op — NOT that op's own
+ * This is the FULL downstream set. The idea-body-change staleness hook
+ * (taskChangeRouter.ts, fired post-commit on a real `body` delta) NARROWS it
+ * per edit — see `componentsStaleForBodyChange` there: an edit confined to the
+ * '## Architecture design' section stales only epics + stories, while an edit
+ * to '## Idea spec' (or one that cannot be attributed to either section)
+ * stales this whole set. Whatever it resolves to becomes the `components`
+ * filter passed to IdeaComponentRouter's `mark-stale` op — NOT that op's own
  * default (which, left unset, is every component; see ideaComponentRouter.ts).
  */
 export const IDEA_COMPONENTS_STALE_ON_BODY_CHANGE: readonly IdeaComponentKey[] = [

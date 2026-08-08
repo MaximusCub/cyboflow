@@ -30,8 +30,14 @@
  *  - applyDelete: cascade idea -> epics -> tasks (deduped), entity_events
  *    purge, pre-delete snapshots on the 'deleted' emits (both channels),
  *    active-run guard over the cascade, leaf deletes leave siblings/parents
- *    intact, best-effort review_items dismissal and artifact reap (failures
- *    swallowed).
+ *    intact, best-effort review_items dismissal, artifact reap and
+ *    idea-component-ledger purge (failures swallowed).
+ *  - the idea-component staleness hook is SECTION-SCOPED: an arch-section-only
+ *    edit stales epics + stories (never the just-stamped prototype, the case
+ *    that broke a fully successful planner run), an idea-spec edit stales all
+ *    four downstream components, an unattributable edit keeps the conservative
+ *    full set, and a pre-098 idea with zero ledger rows still flags its
+ *    DERIVED-complete architecture.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
@@ -50,6 +56,7 @@ import { selectTaskById } from '../taskListing';
 import type { DatabaseLike } from '../types';
 import type { EntityCategory, TaskChangedEvent } from '../../../../shared/types/tasks';
 import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
+import { replaceArchDesignSection } from '../../../../shared/types/artifacts';
 import { IdeaComponentRouter, ideaComponentChangeEvents } from '../ideaComponents/ideaComponentRouter';
 import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
 
@@ -855,6 +862,229 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const architecture = states.find((s) => s.component === 'architecture')!;
       expect(architecture.state).toBe('complete');
       expect(architecture.staleAt).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // SECTION-SCOPED staleness: which components a body delta invalidates is
+  // decided from WHICH named H2 section moved, not from the fact that some
+  // byte of the body moved. The flow-interleaved case below is the one the
+  // blanket rule broke: a planner run writes the body MID-run, after earlier
+  // steps have already stamped their components.
+  // -------------------------------------------------------------------------
+
+  describe('idea component staleness hook — section-scoped', () => {
+    it('the real planner sequence: folding in an arch section does NOT stale the just-stamped prototype', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const specBody = '## Idea spec\n\nSpec text.';
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: specBody,
+      });
+
+      // Planner step 4: builds the mockup, stamps 'prototype' complete.
+      await componentRouter.applyChange(1, {
+        op: 'set-component-state',
+        ideaId,
+        component: 'prototype',
+        state: 'complete',
+        source: 'flow',
+        sourceRunId: 'run-1',
+      });
+
+      // Planner step 5, part 1: folds its '## Architecture design' section into
+      // the SAME body via cyboflow_update_task — exactly how the flow writes it.
+      const withArch = replaceArchDesignSection(specBody, '## Architecture design\n\nArch content.');
+      await taskRouter.applyChange(1, {
+        actor: 'agent:planner',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: withArch },
+      });
+
+      // Planner step 5, part 2: stamps ONLY its own component. Nothing here
+      // re-stamps 'prototype' — which is why the blanket rule left a fully
+      // successful run showing "Prototype: Needs review".
+      await componentRouter.applyChange(1, {
+        op: 'set-component-state',
+        ideaId,
+        component: 'architecture',
+        state: 'complete',
+        source: 'flow',
+        sourceRunId: 'run-1',
+      });
+
+      const byComponent = new Map(
+        resolveIdeaComponents(dbAdapter(db), ideaId).map((s) => [s.component, s]),
+      );
+      const prototype = byComponent.get('prototype')!;
+      expect(prototype.state).toBe('complete');
+      expect(prototype.staleAt).toBeNull();
+      expect(byComponent.get('architecture')!.state).toBe('complete');
+    });
+
+    it('an arch-section-only edit stales epics + stories, never prototype or architecture', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const body = '## Idea spec\n\nSpec text.\n\n## Architecture design\n\nArch v1.';
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body,
+      });
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      await taskRouter.applyChange(1, {
+        actor: 'agent:planner',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: replaceArchDesignSection(body, '## Architecture design\n\nArch v2.') },
+      });
+
+      const byComponent = new Map(
+        resolveIdeaComponents(dbAdapter(db), ideaId).map((s) => [s.component, s]),
+      );
+      // 'architecture' IS that section — rewriting it is that component being
+      // (re)written, not invalidated. The mockup is built off the spec, which
+      // did not move.
+      for (const component of ['idea-spec', 'prototype', 'architecture'] as const) {
+        expect(byComponent.get(component)!.state).toBe('complete');
+        expect(byComponent.get(component)!.staleAt).toBeNull();
+      }
+      for (const component of ['epics', 'stories'] as const) {
+        expect(byComponent.get(component)!.state).toBe('incomplete');
+        expect(byComponent.get(component)!.staleAt).not.toBeNull();
+      }
+    });
+
+    it('an idea-spec edit still stales all four downstream components', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Idea spec\n\nSpec v1.\n\n## Architecture design\n\nArch v1.',
+      });
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: '## Idea spec\n\nSpec v2.\n\n## Architecture design\n\nArch v1.' },
+      });
+
+      const byComponent = new Map(
+        resolveIdeaComponents(dbAdapter(db), ideaId).map((s) => [s.component, s]),
+      );
+      expect(byComponent.get('idea-spec')!.state).toBe('complete');
+      expect(byComponent.get('idea-spec')!.staleAt).toBeNull();
+      for (const component of ['prototype', 'architecture', 'epics', 'stories'] as const) {
+        expect(byComponent.get(component)!.state).toBe('incomplete');
+        expect(byComponent.get(component)!.staleAt).not.toBeNull();
+      }
+    });
+
+    it('an edit outside BOTH named sections keeps the conservative full downstream set', async () => {
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Notes\n\nv1.',
+      });
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      // Neither '## Idea spec' nor '## Architecture design' exists, so the edit
+      // is unattributable — flag everything downstream rather than guess.
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: '## Notes\n\nv2.' },
+      });
+
+      const byComponent = new Map(
+        resolveIdeaComponents(dbAdapter(db), ideaId).map((s) => [s.component, s]),
+      );
+      expect(byComponent.get('idea-spec')!.staleAt).toBeNull();
+      for (const component of ['prototype', 'architecture', 'epics', 'stories'] as const) {
+        expect(byComponent.get(component)!.staleAt).not.toBeNull();
+      }
+    });
+
+    it('an idea with NO ledger rows (pre-098) still flags its DERIVED-complete architecture', async () => {
+      // The hybrid model's whole premise: every idea planned before migration
+      // 098 has zero rows. An existing-rows-only mark-stale was a no-op on all
+      // of them, so 'architecture' — the component derived FROM the body that
+      // just changed — kept reading 'complete' forever.
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'A legacy idea',
+        body: '## Idea spec\n\nSpec v1.\n\n## Architecture design\n\nArch v1.',
+      });
+      expect(
+        (db.prepare('SELECT COUNT(*) AS n FROM idea_components WHERE idea_id = ?').get(ideaId) as {
+          n: number;
+        }).n,
+      ).toBe(0);
+
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: '## Idea spec\n\nSpec v2.\n\n## Architecture design\n\nArch v1.' },
+      });
+
+      const architecture = resolveIdeaComponents(dbAdapter(db), ideaId).find(
+        (s) => s.component === 'architecture',
+      )!;
+      expect(architecture.state).toBe('incomplete');
+      expect(architecture.staleAt).not.toBeNull();
+      expect(architecture.source).toBe('flow');
     });
   });
 
@@ -2043,6 +2273,41 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     function rowCount(db: Database.Database, table: string, id: string): number {
       return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number }).n;
     }
+
+    it('idea delete purges the idea component ledger (migration 098 has no FK to do it)', async () => {
+      const db = buildDbWithIdeaComponents();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+      const { ideaId } = await seedFamily(router);
+
+      // A sibling idea's rows must survive — the purge is scoped to the cascade.
+      const sibling = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'Sibling idea',
+      });
+      for (const ideaUnderTest of [ideaId, sibling.taskId]) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId: ideaUnderTest,
+          component: 'architecture',
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      await router.applyDelete(1, { actor: 'user', taskId: ideaId });
+
+      // Nothing survives for the deleted idea. A surviving row would WIN over
+      // derivation with no `ideas` row behind it, resurrecting onto any future
+      // id collision.
+      const ledgerCount = (id: string): number =>
+        (db.prepare('SELECT COUNT(*) AS n FROM idea_components WHERE idea_id = ?').get(id) as {
+          n: number;
+        }).n;
+      expect(ledgerCount(ideaId)).toBe(0);
+      expect(ledgerCount(sibling.taskId)).toBe(1);
+    });
 
     it('idea delete cascades epics + tasks (direct AND via epics, deduped) and purges entity_events', async () => {
       const db = buildDb();

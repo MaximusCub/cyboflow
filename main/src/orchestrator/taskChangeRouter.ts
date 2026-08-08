@@ -57,8 +57,9 @@ import type {
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { ExperimentArm } from '../../../shared/types/experiments';
-import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
+import type { IdeaComponentKey, IdeaComponentState } from '../../../shared/types/ideaComponents';
 import { IDEA_COMPONENTS_STALE_ON_BODY_CHANGE } from '../../../shared/types/ideaComponents';
+import { extractArchDesignSection, extractIdeaSpecSection } from '../../../shared/types/artifacts';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
 import { resolveIdeaComponents } from './ideaComponents/resolveIdeaComponents';
 import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
@@ -443,6 +444,67 @@ const APPROVE_PLAN_STEP_ID = 'approve-plan';
  */
 const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship', 'launch']);
 
+/**
+ * SECTION-SCOPED STALENESS: which idea components a `body` delta invalidates,
+ * decided from WHICH named H2 section actually moved rather than from the fact
+ * that SOME byte of the body changed.
+ *
+ * WHY this is not simply IDEA_COMPONENTS_STALE_ON_BODY_CHANGE on every delta:
+ * a planner run writes the body MID-RUN, after it has already stamped earlier
+ * components. Step 4 builds a mockup and stamps 'prototype' complete; step 5
+ * folds its '## Architecture design' section into the same body. A blanket
+ * "any body byte moved" rule flips that just-stamped 'prototype' row to
+ * incomplete+stale, and step 5 only re-stamps 'architecture' — so a FULLY
+ * SUCCESSFUL run ends with the card reading "Prototype: Needs review". The
+ * hook's ordering note (write body, then stamp) only ever protects the
+ * component being stamped in that same step, never previously-stamped siblings.
+ *
+ * Deliberately NOT actor-scoped: an agent rewriting the spec in a LATER run
+ * genuinely should stale everything downstream, and an actor filter would lose
+ * exactly that. The section is the honest signal; the writer is not.
+ *
+ * The mapping follows what each component is actually derived FROM:
+ *   - '## Idea spec' content changed  -> the whole downstream set (the spec is
+ *     what the prototype, the architecture, the epics and the stories were all
+ *     built against).
+ *   - '## Architecture design' content changed -> epics + stories only. NOT
+ *     'architecture' — that component IS this section, so a change to it is
+ *     that component being (re)written, not invalidated (the same reason
+ *     'idea-spec' is never staled by a body edit). NOT 'prototype' either: the
+ *     mockup is built off the spec, not off the arch design.
+ *   - neither named section's content changed -> the conservative full
+ *     downstream set, unchanged from the original behavior. Some other part of
+ *     the body moved and we cannot attribute it, so we flag rather than guess.
+ * Both changed -> the union. 'idea-spec' is never returned (see
+ * IDEA_COMPONENTS_STALE_ON_BODY_CHANGE: the body IS that component).
+ *
+ * Section content is compared with the SAME fence-aware extractors the
+ * derivation side reads (`extractIdeaSpecSection`/`extractArchDesignSection`),
+ * so re-flowing bytes OUTSIDE both sections — or appending an arch section for
+ * the first time, which merely moves where the idea-spec section terminates —
+ * never registers as a change to a section that did not actually move.
+ */
+function componentsStaleForBodyChange(
+  previousBody: string | null,
+  nextBody: string | null,
+): IdeaComponentKey[] {
+  const specChanged = extractIdeaSpecSection(previousBody) !== extractIdeaSpecSection(nextBody);
+  const archChanged = extractArchDesignSection(previousBody) !== extractArchDesignSection(nextBody);
+
+  // Unattributable edit — keep the original conservative behavior.
+  if (!specChanged && !archChanged) return [...IDEA_COMPONENTS_STALE_ON_BODY_CHANGE];
+
+  const stale = new Set<IdeaComponentKey>();
+  if (specChanged) for (const component of IDEA_COMPONENTS_STALE_ON_BODY_CHANGE) stale.add(component);
+  if (archChanged) {
+    stale.add('epics');
+    stale.add('stories');
+  }
+  // Filtered through the canonical list so the result keeps its display order
+  // and can never carry 'idea-spec'.
+  return IDEA_COMPONENTS_STALE_ON_BODY_CHANGE.filter((component) => stale.has(component));
+}
+
 // ---------------------------------------------------------------------------
 // TaskChangeRouter
 // ---------------------------------------------------------------------------
@@ -533,7 +595,7 @@ export class TaskChangeRouter {
       wontDoRunIds?: string[];
       /** Only present on the update path (runUpdate) — see the staleness hook below. */
       entityType?: TaskType;
-      bodyChanged?: boolean;
+      staleComponentsOnBodyChange?: IdeaComponentKey[] | null;
     };
 
     // POST-COMMIT ARTIFACT FOLLOW-ON: parking an entity at Won't-do retires
@@ -595,14 +657,17 @@ export class TaskChangeRouter {
 
     // POST-COMMIT STALENESS HOOK (idea component ledger, migration 098 /
     // shared/types/ideaComponents.ts): an idea UPDATE that actually changed
-    // `body` marks the FOUR DOWNSTREAM components
-    // (IDEA_COMPONENTS_STALE_ON_BODY_CHANGE — prototype/architecture/epics/
-    // stories) stale, never 'idea-spec' (the body IS the idea-spec, so an edit
-    // to it changes that component rather than invalidating it). Gated on
-    // BOTH entityType==='idea' AND bodyChanged (runUpdate's hoisted flag,
-    // driven by its `deltas` array — never a string diff here) so an
-    // epic/task body edit, or an idea update that touched some other field,
-    // never fires this. markStale only flips currently-'complete' rows, so on
+    // `body` marks the components that edit INVALIDATED stale — never
+    // 'idea-spec' (the body IS the idea-spec, so an edit to it changes that
+    // component rather than invalidating it). Which components those are is
+    // SECTION-SCOPED, resolved by componentsStaleForBodyChange at the one site
+    // holding both the old and the new body; see that function's header for
+    // the mapping and for why a blanket "any body byte moved" rule broke a
+    // fully successful planner run. runUpdate hoists the resolved set (driven
+    // by its `deltas` array and gated on entityType==='idea' there — never a
+    // string diff here), so an epic/task body edit, an idea update that
+    // touched some other field, and an empty set all skip the call entirely.
+    // markStale only touches components that currently read 'complete', so on
     // a fresh idea (nothing complete yet) this is a harmless no-op.
     //
     // Placed HERE — same post-commit position as the wontDoRunIds reap and the
@@ -621,8 +686,12 @@ export class TaskChangeRouter {
     // cyboflow_set_idea_component SECOND — setComponentState clears staleness
     // as a side effect, so a step that stamps its own component right after
     // writing its section lands 'complete' with no stale flag, even though
-    // this hook just marked it stale moments earlier.
-    if (result.entityType === 'idea' && result.bodyChanged) {
+    // this hook may have marked it stale moments earlier. That ordering only
+    // ever covers the component being stamped in THAT step; siblings stamped
+    // by EARLIER steps of the same run are protected by the section scoping
+    // above, not by this ordering rule.
+    const staleComponents = result.staleComponentsOnBodyChange;
+    if (result.entityType === 'idea' && staleComponents && staleComponents.length > 0) {
       try {
         // getInstance() itself throws synchronously when the singleton was
         // never initialized (e.g. a unit test exercising TaskChangeRouter in
@@ -633,7 +702,7 @@ export class TaskChangeRouter {
           op: 'mark-stale',
           ideaId: result.taskId,
           staleReason: 'idea body changed',
-          components: [...IDEA_COMPONENTS_STALE_ON_BODY_CHANGE],
+          components: [...staleComponents],
         });
       } catch {
         // fail-soft: the entity write already committed above and must never
@@ -692,8 +761,9 @@ export class TaskChangeRouter {
    * One transaction deletes each entity's entity_events rows then the entity
    * row, children first (no event row survives — the entity is gone). Post
    * commit: pending review_items linked to deleted entities are dismissed
-   * best-effort via ReviewItemRouter and associated run artifacts are reaped
-   * through ArtifactRouter (ALL failures swallowed), then a
+   * best-effort via ReviewItemRouter, associated run artifacts are reaped
+   * through ArtifactRouter, and every deleted IDEA's component-ledger rows are
+   * purged through IdeaComponentRouter (ALL failures swallowed), then a
    * TaskChangedEvent { action: 'deleted', task: <pre-delete snapshot> } is
    * emitted per deleted entity on BOTH channels.
    *
@@ -708,6 +778,7 @@ export class TaskChangeRouter {
     )) as {
       taskId: string;
       deletedIds: string[];
+      deletedIdeaIds: string[];
       survivingParentEpicIds: string[];
       artifactRunIds: string[];
     };
@@ -715,6 +786,34 @@ export class TaskChangeRouter {
     // The reverse associations were captured per cascade entity before those
     // rows/events vanished. Reap only after the delete transaction committed.
     await this.reapArtifactsForRunIds(projectId, result.artifactRunIds);
+
+    // POST-COMMIT LEDGER CASCADE (idea component ledger, migration 098): purge
+    // every deleted idea's `idea_components` rows. That table deliberately
+    // carries NO foreign key (see the migration header — these rows must
+    // outlive the runs/sessions that produced them), so nothing else removes
+    // them: they would persist forever, and because a ledger row WINS over
+    // derivation even when no `ideas` row exists, an orphan would resurrect
+    // itself onto any future id collision.
+    //
+    // OUTSIDE the queue task above, for the same reason as the applyChange
+    // staleness hook: IdeaComponentRouter keys its OWN per-project PQueue, and
+    // calling it from inside THIS queue's concurrency-1 task would block on a
+    // lane that can never run. Best-effort + fail-soft, exactly like the
+    // review-item dismissal and artifact reap it sits beside — the delete has
+    // already committed and must never be reported as failed over cleanup. The
+    // whole call is wrapped in try/catch (not a chained `.catch()`) because
+    // getInstance() throws SYNCHRONOUSLY when the singleton was never
+    // initialized, e.g. a unit test exercising TaskChangeRouter in isolation.
+    for (const ideaId of result.deletedIdeaIds) {
+      try {
+        await IdeaComponentRouter.getInstance().applyChange(projectId, {
+          op: 'delete-for-idea',
+          ideaId,
+        });
+      } catch {
+        // Missing singleton or a failed ledger purge never fails the delete.
+      }
+    }
 
     // POST-COMMIT FOLLOW-ON (outside the queue task — see the applyChange seam):
     // deleting a child task changes its parent epic's rollup inputs; re-derive
@@ -1519,7 +1618,7 @@ export class TaskChangeRouter {
     previousParentEpicId?: string | null;
     wontDoRunIds?: string[];
     entityType: TaskType;
-    bodyChanged: boolean;
+    staleComponentsOnBodyChange: IdeaComponentKey[] | null;
   } {
     const taskId = change.taskId as string;
     const now = new Date().toISOString();
@@ -1534,12 +1633,14 @@ export class TaskChangeRouter {
     let previousParentEpicId: string | null = null;
     let wontDoRunIds: string[] | undefined;
     // Hoisted out of the txn closure (mirrors previousParentEpicId/wontDoRunIds
-    // above) so the STALENESS post-commit hook in applyChange can see whether
-    // this update actually changed `body` — deltas itself is txn-closure-local
-    // and never escapes. Idea-only in effect (the hook below also checks
-    // entityType==='idea'), but tracked for every entity type since a body
-    // delta is generic (epics/tasks carry a body field too).
-    let bodyChanged = false;
+    // above) so the STALENESS post-commit hook in applyChange can act on this
+    // update's `body` delta — deltas itself is txn-closure-local and never
+    // escapes. Carries the already-computed component set rather than the two
+    // body strings, so the section comparison happens exactly once, at the one
+    // site that holds both the old and the new body. Stays null unless this is
+    // an IDEA update that actually changed `body` (epics/tasks carry a body
+    // field too, but have no component ledger).
+    let staleComponentsOnBodyChange: IdeaComponentKey[] | null = null;
 
     const txn = this.db.transaction(() => {
       // Resolve the entity type: prefer the declared discriminator, else look up
@@ -1815,7 +1916,15 @@ export class TaskChangeRouter {
           sets.push('body = ?');
           params.push(f.body);
           deltas.push({ field: 'body', from: current.body, to: f.body });
-          bodyChanged = true;
+          // The one site holding BOTH bodies — resolve which components this
+          // edit actually invalidates here (see componentsStaleForBodyChange),
+          // rather than re-deriving it from a hoisted string pair later.
+          if (type === 'idea') {
+            staleComponentsOnBodyChange = componentsStaleForBodyChange(
+              current.body ?? null,
+              f.body ?? null,
+            );
+          }
         }
         if (f.priority !== undefined && f.priority !== current.priority) {
           sets.push('priority = ?');
@@ -1901,7 +2010,7 @@ export class TaskChangeRouter {
       previousParentEpicId,
       wontDoRunIds,
       entityType: resolvedType,
-      bodyChanged,
+      staleComponentsOnBodyChange,
     };
   }
 
@@ -1915,6 +2024,7 @@ export class TaskChangeRouter {
   ): Promise<{
     taskId: string;
     deletedIds: string[];
+    deletedIdeaIds: string[];
     survivingParentEpicIds: string[];
     artifactRunIds: string[];
   }> {
@@ -2002,6 +2112,9 @@ export class TaskChangeRouter {
     return {
       taskId: opts.taskId,
       deletedIds: cascade.map((e) => e.id),
+      // The IDEAS in the cascade — their component-ledger rows are purged
+      // post-commit in applyDelete (migration 098 deliberately carries no FK).
+      deletedIdeaIds: cascade.filter((e) => e.type === 'idea').map((e) => e.id),
       survivingParentEpicIds: [...survivingParentEpicIds],
       artifactRunIds: [...artifactRunIds],
     };
