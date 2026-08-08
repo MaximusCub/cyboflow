@@ -31,6 +31,7 @@ import type {
 import { trpc } from '../../trpc/client';
 import { compactAgo } from './backlogSelectors';
 import { ledgerChipVisualState, LEDGER_STATE_LABEL, type LedgerChipVisualState } from './markers';
+import { ConfirmDialog } from '../ConfirmDialog';
 
 interface LedgerExpandProps {
   ideaId: string;
@@ -72,8 +73,16 @@ function provenanceText(entry: IdeaComponentState, visual: LedgerChipVisualState
   }
 }
 
+// Labelled for exactly what the write path does, not what a fourth visual
+// state might suggest. `setComponentState` (ideaComponentRouter.ts) ALWAYS
+// clears `stale_at`/`stale_reason` on an explicit write — an intentional
+// invariant (every explicit set is a reaffirmation, see the router's own
+// JSDoc), but its consequence is that a manual override can only ever
+// PRODUCE 'not started', never 'needs review'. That state is flow/staleness
+// -only (see shared/types/ideaComponents.ts's header) — there is no manual
+// path to it, so the option must not claim to offer one.
 const OVERRIDE_OPTIONS: { value: IdeaComponentStateValue; label: string }[] = [
-  { value: 'incomplete', label: 'Not started / needs review' },
+  { value: 'incomplete', label: 'Not started' },
   { value: 'complete', label: 'Complete' },
   { value: 'skipped', label: 'Skipped' },
 ];
@@ -82,6 +91,17 @@ export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): Re
   const [rows, setRows] = useState<IdeaComponentState[]>(components);
   const [pending, setPending] = useState<IdeaComponentKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Staged confirmation for the one destructive override: demoting a row
+  // that is CURRENTLY "needs review" to "Not started". The write path has no
+  // way to keep the stale marker on an explicit set (see OVERRIDE_OPTIONS'
+  // comment), so that specific transition silently discards "prior work
+  // exists, re-verify it" — surface the loss instead of eating it quietly.
+  // Holding the pending component (rather than committing on `onChange`)
+  // also lets the native `<select>` snap back to `entry.state` on Cancel,
+  // since its `value` stays controlled by the untouched row state.
+  const [confirmDemote, setConfirmDemote] = useState<{ component: IdeaComponentKey; label: string; reason: string | null } | null>(
+    null,
+  );
 
   // The incoming prop wins on identity change (a fresh task fetch) — an
   // in-flight local override still shows immediately via the mutation's own
@@ -130,7 +150,19 @@ export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): Re
               value={entry.state}
               disabled={pending === key}
               onClick={(e) => e.stopPropagation()}
-              onChange={(e) => void handleOverride(key, e.target.value as IdeaComponentStateValue)}
+              onChange={(e) => {
+                const nextState = e.target.value as IdeaComponentStateValue;
+                // Gate the one destructive transition — see confirmDemote's
+                // comment above — behind a confirm instead of committing it
+                // straight away. Every other transition (including demoting
+                // a NON-stale row, or moving to complete/skipped) commits
+                // immediately, matching the prior behavior.
+                if (visual === 'needs-review' && nextState === 'incomplete') {
+                  setConfirmDemote({ component: key, label: IDEA_COMPONENT_LABELS[key], reason: entry.staleReason });
+                  return;
+                }
+                void handleOverride(key, nextState);
+              }}
               aria-label={`Override ${IDEA_COMPONENT_LABELS[key]} state`}
               data-testid={`ledger-override-${key}`}
               className="rounded-button border border-border-primary bg-surface-primary px-1 py-0.5 text-[10px] text-text-secondary disabled:opacity-50"
@@ -148,6 +180,21 @@ export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): Re
         <p role="alert" className="mt-1 text-[10px] text-status-error">
           {error}
         </p>
+      )}
+      {confirmDemote !== null && (
+        <ConfirmDialog
+          isOpen
+          onClose={() => setConfirmDemote(null)}
+          onConfirm={() => void handleOverride(confirmDemote.component, 'incomplete')}
+          title={`Mark ${confirmDemote.label} as not started?`}
+          message={
+            `${confirmDemote.label} currently needs review — prior work exists` +
+            (confirmDemote.reason ? ` (${confirmDemote.reason})` : '') +
+            ` and is flagged for re-verification. The prior work itself is untouched, but this` +
+            ` will discard that flag: the ledger will no longer show that anything was ever done here.`
+          }
+          confirmText="Mark not started"
+        />
       )}
     </div>
   );
