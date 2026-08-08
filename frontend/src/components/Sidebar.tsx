@@ -468,9 +468,9 @@ export const Sidebar = memo(function Sidebar({
               <button
                 onClick={() => setShowBugReport(true)}
                 title="Report a problem with Cyboflow"
-                className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
+                className="flex items-center justify-center gap-1.5 w-full px-3 py-1 text-xs font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
               >
-                <Bug className="w-4 h-4" />
+                <Bug className="w-3.5 h-3.5" />
                 <span>Report a bug</span>
               </button>
             </div>
