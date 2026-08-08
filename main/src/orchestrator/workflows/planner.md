@@ -158,8 +158,13 @@ each piece plainly. Offer:
 
 - **Resume** — skip the complete pieces, re-verify the stale ones, run the rest.
   *(recommended; put it first)*
-- **Redo a piece** — the user names what to rebuild from scratch; treat it as not
-  started.
+- **Redo a piece** — the user names what to rebuild from scratch. **Stamp it
+  `incomplete` via `cyboflow_set_idea_component` BEFORE you start the redo**
+  (the ledger must say not-done for exactly as long as the piece actually isn't —
+  otherwise a run that dies mid-redo leaves the ledger reading `complete`, and the
+  next resume silently skips the very piece the human just asked to rebuild).
+  Then run the step as though it were not started, and **stamp it `complete`
+  again** once the redo finishes.
 - **Start over** — ignore the ledger and run the full flow.
 
 Then honour the answer. On **Resume**, a `complete` component means **do not run its
