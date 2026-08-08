@@ -464,7 +464,7 @@ export const Sidebar = memo(function Sidebar({
               always present: a report must be filable before the version fetch
               resolves, and whatever the update pill is doing. */}
           <div className="px-4 py-2 border-t border-border-primary">
-            <div className="py-0.5">
+            <div className="pt-0.5 pb-[5px]">
               <button
                 onClick={() => setShowBugReport(true)}
                 title="Report a problem with Cyboflow"
