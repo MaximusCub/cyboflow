@@ -30,7 +30,6 @@ const submitSchema = z.object({
   stepsToReproduce: z.string().max(BUG_REPORT_LIMITS.stepsMax),
   expectedBehavior: z.string().max(BUG_REPORT_LIMITS.expectedMax),
   email: z.string().max(BUG_REPORT_LIMITS.emailMax).optional(),
-  contactConsent: z.boolean(),
   runId: z.string().max(200).optional(),
   sessionId: z.string().max(200).optional(),
   flowName: z.string().max(200).optional(),
@@ -200,9 +199,9 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
           whatHappened: request.whatHappened,
           stepsToReproduce: request.stepsToReproduce,
           expectedBehavior: request.expectedBehavior,
-          // Contact info rides only on explicit consent, regardless of whether
-          // the field happens to hold text.
-          email: request.contactConsent ? request.email : undefined,
+          // A blank or whitespace-only field is no contact info at all, not an
+          // empty string to attach.
+          email: request.email?.trim() || undefined,
           runId: request.runId,
           sessionId: request.sessionId,
           flowName: request.flowName,

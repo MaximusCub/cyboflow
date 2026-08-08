@@ -70,9 +70,12 @@ export interface BugReportSubmitRequest {
   whatHappened: string;
   stepsToReproduce: string;
   expectedBehavior: string;
-  /** Present only when `contactConsent` is true. */
+  /**
+   * Contact address, absent when the user left the field blank. Supplying it IS
+   * the consent — there is no separate flag, because a flag can only ever
+   * disagree with the field it guards.
+   */
   email?: string;
-  contactConsent: boolean;
   /**
    * The flow run the report is about. Kept distinct from `sessionId`: they are
    * different id spaces, and folding one into the other makes the `run_id` tag

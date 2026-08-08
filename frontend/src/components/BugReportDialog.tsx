@@ -67,7 +67,6 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
   const [whatHappened, setWhatHappened] = useState('');
   const [steps, setSteps] = useState('');
   const [expected, setExpected] = useState('');
-  const [contactConsent, setContactConsent] = useState(false);
   const [email, setEmail] = useState('');
   const [sessionId, setSessionId] = useState<string>('');
   const [includeLogs, setIncludeLogs] = useState(false);
@@ -122,7 +121,6 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     setWhatHappened('');
     setSteps('');
     setExpected('');
-    setContactConsent(false);
     setEmail('');
     setIncludeLogs(false);
     setShowDiagnostics(false);
@@ -169,8 +167,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         whatHappened,
         stepsToReproduce: steps,
         expectedBehavior: expected,
-        email: contactConsent && email.trim() ? email.trim() : undefined,
-        contactConsent,
+        email: email.trim() || undefined,
         // Two id spaces, two tags. A session id sent as `run_id` reads as a run
         // that does not exist.
         runId: linkedRun?.id,
@@ -285,34 +282,25 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                 )}
               </div>
 
-              {/* Contact */}
-              <div className="pt-4 border-t border-border-primary space-y-3">
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={contactConsent}
-                    onChange={(e) => setContactConsent(e.target.checked)}
-                    className="mt-0.5"
-                  />
-                  <span className="text-sm text-text-secondary">
-                    You can contact me about this report
-                    <span className="block text-xs text-text-tertiary">
-                      Optional, and only used to follow up on this report. See
-                      &ldquo;What&apos;s included&rdquo; below for everything else the report carries.
-                    </span>
+              {/* Contact. No consent checkbox: filling the field in IS the
+                  consent, and a separate flag can only ever disagree with it. */}
+              <div className="pt-4 border-t border-border-primary space-y-2">
+                <label className="block text-sm font-medium text-text-secondary" htmlFor="bug-report-email">
+                  Email
+                  <span className="block text-xs font-normal text-text-tertiary">
+                    Optional, and only used to follow up on this report. See
+                    &ldquo;What&apos;s included&rdquo; below for everything else the report carries.
                   </span>
                 </label>
-                {contactConsent && (
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    maxLength={BUG_REPORT_LIMITS.emailMax}
-                    placeholder="you@example.com"
-                    aria-label="Email address"
-                    className="w-full rounded-md border border-border-primary bg-surface-secondary px-3 py-2 text-sm text-text-primary"
-                  />
-                )}
+                <input
+                  id="bug-report-email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  maxLength={BUG_REPORT_LIMITS.emailMax}
+                  placeholder="you@example.com"
+                  className="w-full rounded-md border border-border-primary bg-surface-secondary px-3 py-2 text-sm text-text-primary"
+                />
               </div>
 
               {/* What's included */}

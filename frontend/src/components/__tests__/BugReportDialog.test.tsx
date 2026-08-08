@@ -144,13 +144,39 @@ describe('log consent', () => {
   });
 });
 
-describe('contact consent', () => {
-  it('hides the email field until the user opts into being contacted', async () => {
+/**
+ * The email field is always shown and always optional: filling it in IS the
+ * consent to be contacted, so there is no checkbox gating it.
+ */
+describe('contact address', () => {
+  it('offers the email field without any opt-in step', async () => {
     await openDialog();
 
-    expect(screen.queryByLabelText(/email address/i)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('checkbox', { name: /you can contact me/i }));
-    expect(screen.getByLabelText(/email address/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /contact/i })).not.toBeInTheDocument();
+  });
+
+  it('sends a typed address', async () => {
+    await openDialog();
+
+    fireEvent.change(screen.getByLabelText(/what happened/i), { target: { value: 'It froze.' } });
+    fireEvent.change(screen.getByLabelText(/email/i), {
+      target: { value: 'someone@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submittedPayload()).toMatchObject({ email: 'someone@example.com' });
+  });
+
+  it('sends no address when the field is left blank', async () => {
+    await openDialog();
+
+    fireEvent.change(screen.getByLabelText(/what happened/i), { target: { value: 'It froze.' } });
+    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submittedPayload().email).toBeUndefined();
   });
 });
 

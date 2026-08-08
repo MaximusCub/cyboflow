@@ -93,7 +93,6 @@ const VALID = {
   whatHappened: 'The sidebar froze.',
   stepsToReproduce: '1. Open a run',
   expectedBehavior: 'No freeze.',
-  contactConsent: false,
   idempotencyKey: 'key-1',
 };
 
@@ -144,20 +143,32 @@ describe('input validation', () => {
   });
 });
 
-describe('contact consent', () => {
-  it('drops the email when consent was not given, even if the field holds one', async () => {
-    await submit({ ...VALID, contactConsent: false, email: 'someone@example.com' });
+/**
+ * Supplying an address IS the consent — there is no separate flag to check. So
+ * the only thing this layer decides is what counts as "supplied": a field the
+ * user left blank must not travel as an empty string.
+ */
+describe('contact address', () => {
+  it('forwards a supplied email', async () => {
+    await submit({ ...VALID, email: 'someone@example.com' });
 
     expect(service.submitBugReport).toHaveBeenCalledTimes(1);
+    const payload = service.submitBugReport.mock.calls[0][0] as { email?: string };
+    expect(payload.email).toBe('someone@example.com');
+  });
+
+  it('drops a blank field rather than attaching an empty address', async () => {
+    await submit({ ...VALID, email: '   ' });
+
     const payload = service.submitBugReport.mock.calls[0][0] as { email?: string };
     expect(payload.email).toBeUndefined();
   });
 
-  it('forwards the email when consent was given', async () => {
-    await submit({ ...VALID, contactConsent: true, email: 'someone@example.com' });
+  it('omits the address entirely when the field was never filled', async () => {
+    await submit({ ...VALID });
 
     const payload = service.submitBugReport.mock.calls[0][0] as { email?: string };
-    expect(payload.email).toBe('someone@example.com');
+    expect(payload.email).toBeUndefined();
   });
 });
 
