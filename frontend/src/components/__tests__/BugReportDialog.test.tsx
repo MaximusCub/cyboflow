@@ -126,7 +126,7 @@ describe('log consent', () => {
   it('leaves log inclusion off by default and does not display the log text', async () => {
     await openDialog();
 
-    const checkbox = screen.getByRole('switch', { name: /include recent log output/i });
+    const checkbox = screen.getByRole('switch', { name: /include recent session logs/i });
     expect(checkbox).not.toBeChecked();
     expect(screen.queryByText(/SECRET_LOG_MARKER/)).not.toBeInTheDocument();
   });
@@ -134,10 +134,10 @@ describe('log consent', () => {
   it('shows the actual log text and a warning once the user opts in', async () => {
     await openDialog();
 
-    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent session logs/i }));
 
     expect(screen.getByText(/SECRET_LOG_MARKER/)).toBeInTheDocument();
-    expect(screen.getByText(/automated redaction cannot reliably remove/i)).toBeInTheDocument();
+    expect(screen.getByText(/automated redaction cannot always reliably remove/i)).toBeInTheDocument();
   });
 
   it('omits logText from the submission when not opted in', async () => {
@@ -158,7 +158,7 @@ describe('log consent', () => {
     fireEvent.change(screen.getByLabelText(/what happened/i), {
       target: { value: 'It froze.' },
     });
-    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent session logs/i }));
     fireEvent.click(screen.getByRole('button', { name: /send report/i }));
 
     await waitFor(() => expect(submit).toHaveBeenCalled());
@@ -286,7 +286,7 @@ describe('dialog lifecycle', () => {
    */
   it('drops the previous opening’s preview instead of reusing it', async () => {
     const { rerender } = await openDialog();
-    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent session logs/i }));
     expect(screen.getByText(/SECRET_LOG_MARKER/)).toBeInTheDocument();
 
     // The next open's preview is still in flight.
@@ -297,7 +297,7 @@ describe('dialog lifecycle', () => {
     rerender(<BugReportDialog isOpen onClose={vi.fn()} />);
 
     expect(screen.queryByText(/SECRET_LOG_MARKER/)).not.toBeInTheDocument();
-    expect(screen.getByRole('switch', { name: /include recent log output/i })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: /include recent session logs/i })).toBeDisabled();
   });
 
   /**
@@ -447,7 +447,7 @@ describe('submission', () => {
     );
     render(<BugReportDialog isOpen onClose={vi.fn()} />);
 
-    const checkbox = screen.getByRole('switch', { name: /include recent log output/i });
+    const checkbox = screen.getByRole('switch', { name: /include recent session logs/i });
     expect(checkbox).toBeDisabled();
 
     resolvePreview?.();

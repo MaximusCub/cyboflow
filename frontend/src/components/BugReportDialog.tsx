@@ -361,11 +361,11 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                     // Switching this on before the preview arrives would attach
                     // nothing while telling the user their logs were included.
                     disabled={!logTail || logTail.unavailable}
-                    aria-label="Include recent log output"
+                    aria-label="Include recent session logs"
                     className="mt-0.5 flex-shrink-0"
                   />
                   <span className="text-sm text-text-secondary">
-                    Include recent log output
+                    Include recent session logs (sensitive data redacted)
                     <span className="block text-xs text-text-tertiary">
                       {!logTail
                         ? 'Loading…'
@@ -382,8 +382,8 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                       <AlertTriangle className="w-4 h-4 text-status-warning flex-shrink-0 mt-0.5" />
                       <p className="text-xs text-text-secondary leading-relaxed">
                         Logs can contain file paths, repository names, prompts, command output, and
-                        occasionally credentials. Automated redaction cannot reliably remove these —
-                        please read the text below before sending.
+                        occasionally credentials. Automated redaction cannot always reliably remove
+                        these. Please review the logs below for sensitive details.
                       </p>
                     </div>
                     <p className="text-[11px] text-text-tertiary font-mono truncate" title={logTail.filePath}>
