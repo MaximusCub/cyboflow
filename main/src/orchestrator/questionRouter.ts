@@ -1361,7 +1361,7 @@ export class QuestionRouter extends EventEmitter {
    * 'Approve → keep planning' / 'Revise' / 'Reject' answer, independent of
    * step id — a second, self-contained guarantee against collision.
    */
-  private isDesignModeForkAnswer(answer: QuestionAnswer, questions?: ReadonlyArray<QuestionPayload>): boolean {
+  isDesignModeForkAnswer(answer: QuestionAnswer, questions?: ReadonlyArray<QuestionPayload>): boolean {
     const values = Object.values(answer.answers).map((v) => v.trim().toLowerCase());
     if (values.length === 0) return false;
 
