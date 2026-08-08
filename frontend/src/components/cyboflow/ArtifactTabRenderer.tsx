@@ -2153,74 +2153,29 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
     artifact.sourceRef !== null &&
     artifact.sessionId !== null;
 
-  // Widen: ANY prototype should be reopenable in design mode, whatever
-  // produced it (IDEA-013 "make any prototype reopenable"). A planner/sprint
-  // -produced ui-prototype carries no sourceRef (sourceRef is stamped ONLY on
-  // the design-report path, per the comment above) — resolve which idea it
-  // belongs to from the RUN that produced it instead. Gated on sourceRef
-  // being null specifically (not just "isn't a design-session canvas"): a
-  // sourceRef that IS set is the artifact's own trusted idea link and must
-  // never be second-guessed by a separate run-ownership lookup, even in the
-  // (production-impossible, but defensively tested) case where its sessionId
-  // is missing. Only prototype-family atypes fire the query — every other
-  // tab (generic) skips it entirely.
-  const isUnlinkedPrototype =
-    (artifact.atype === 'ui-prototype' || artifact.atype === 'interactive-prototype') &&
-    artifact.sourceRef === null;
-  const [reopenIdeaId, setReopenIdeaId] = useState<string | null>(null);
-  useEffect(() => {
-    if (!isUnlinkedPrototype) {
-      setReopenIdeaId(null);
-      return;
-    }
-    let cancelled = false;
-    trpc.cyboflow.design.resolveReopenIdea
-      .query({ runId: artifact.runId })
-      .then((result) => {
-        if (cancelled) return;
-        setReopenIdeaId(result?.ideaId ?? null);
-      })
-      .catch(() => {
-        // Fail-soft: an unresolved query means no reopen CTA, not a crash.
-        if (!cancelled) setReopenIdeaId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isUnlinkedPrototype, artifact.runId]);
-  // Exactly one owned/batch idea resolved for the run -> offer the CTA. Zero
-  // OR more-than-one (the resolver returns null for both — see
-  // reopenIdeaResolver.ts) both suppress it: a batch run's single combined
-  // prototype spanning several ideas is a genuinely ambiguous link, and
-  // guessing which idea it reopens against is worse than not offering the
-  // affordance at all.
-  const isReopenableCanvas = isUnlinkedPrototype && reopenIdeaId !== null;
-  const isDesignCanvas = isDesignSessionCanvas || isReopenableCanvas;
+  // Reopening a prototype that never ran inside a design session (no
+  // sourceRef — e.g. a planner/sprint-produced ui-prototype) into a NEW or
+  // promoted design session is a real, prepared seam: it resolves to the
+  // single idea its producing run belongs to via
+  // cyboflow.design.resolveReopenIdea (main/src/orchestrator/design/
+  // reopenIdeaResolver.ts) — both remain in place and tested. But actually
+  // ADOPTING that resolved artifact into a session is session-creation
+  // plumbing (main/src/services/*, ipc/session.ts) this component does not
+  // own, so rather than advertise a CTA it cannot honour (a permanently
+  // disabled button + a tooltip explaining internal plumbing), this canvas
+  // withholds the affordance entirely — and never fires the resolver query,
+  // since nothing here would consume its result. Re-enable by wiring an
+  // onClick that starts/promotes a design session seeded from this artifact
+  // once that adoption path exists, gating the CTA on the resolved idea again.
 
   // "Enter design mode" CTA (v0.5 fullscreen design surface, second entry
-  // door) — rendered leftmost of the two. For a live design-session canvas
-  // (isDesignSessionCanvas) it enters that EXISTING session, unchanged from
-  // before. For a reopen-only canvas (isReopenableCanvas) there is no
-  // existing design session to enter — starting a brand-new one today would
-  // run the generic design kickoff (DESIGN_KICKOFF_PROMPT), which tells the
-  // agent to produce a FIRST prototype from scratch, discarding this one.
-  // Actually adopting this artifact into a (new or promoted) design session
-  // is session-creation plumbing (main/src/services/*, ipc/session.ts) that
-  // is out of this change's scope, so the CTA renders but stays disabled in
-  // that case rather than wiring a click that would silently throw away the
-  // agent's existing work.
-  const enterDesignModeCta: ReactNode = isDesignCanvas ? (
+  // door) — rendered leftmost of the two, only for a live design-session
+  // canvas (sourceRef + sessionId present).
+  const enterDesignModeCta: ReactNode = isDesignSessionCanvas ? (
     <button
       type="button"
       data-testid="design-mode-enter-cta"
-      disabled={!isDesignSessionCanvas}
-      title={
-        isDesignSessionCanvas
-          ? undefined
-          : 'This prototype belongs to a resolvable idea, but reopening a prototype that never ran inside a design session is not wired up yet.'
-      }
       onClick={() => {
-        if (!isDesignSessionCanvas) return; // reopen-only path — see the note above
         const sessionId = artifact.sessionId as string; // narrowed by isDesignSessionCanvas
         // The fullscreen surface's chat rail derives from the global active
         // session, so entering design mode for this artifact's session must
@@ -2235,26 +2190,22 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
         fontSize: '10px',
         fontWeight: 700,
         letterSpacing: '.02em',
-        color: isDesignSessionCanvas ? INK : FAINT,
+        color: INK,
         background: PAGE,
         border: `1px solid ${HAIRLINE}`,
         borderRadius: 3,
         padding: '3px 10px',
         whiteSpace: 'nowrap',
-        cursor: isDesignSessionCanvas ? 'pointer' : 'not-allowed',
+        cursor: 'pointer',
       }}
     >
       Design mode
     </button>
   ) : null;
-  // The Approve control is a live-session affordance — it queries
-  // draftStatus by sessionId, so it must stay gated on the SAME session
-  // actually existing (isDesignSessionCanvas), never the widened
-  // isDesignCanvas (which admits a null sessionId via isReopenableCanvas).
   const designControl: ReactNode = isDesignSessionCanvas ? (
     <DesignApproveControl sessionId={artifact.sessionId as string} artifactRevision={artifact.revision} />
   ) : null;
-  const actions: ReactNode = isDesignCanvas ? (
+  const actions: ReactNode = isDesignSessionCanvas ? (
     <>
       {enterDesignModeCta}
       {designControl}

@@ -105,13 +105,6 @@ const tasksListQuery = vi.fn();
 // override with mockResolvedValueOnce + waitFor.
 const designDraftStatusQuery = vi.fn();
 const designApproveMutate = vi.fn();
-// CanvasBody's widened "reopen in design mode" resolution (IDEA-013) for a
-// sourceRef-less prototype — reads resolveReopenIdea. Defaults to never-
-// resolving (mirrors designDraftStatusQuery) so the many PRE-EXISTING
-// sourceRef-less-canvas assertions in this file, which never await, see no
-// CTA appear mid-synchronous-assertion; the dedicated reopen tests below
-// override with mockResolvedValueOnce + waitFor/findByTestId.
-const designResolveReopenIdeaQuery = vi.fn();
 // eval-report's live ScoreSummary read (origin:'adhoc') + its findings list.
 const insightsRunEvalQuery = vi.fn();
 const reviewItemsListQuery = vi.fn();
@@ -137,7 +130,6 @@ vi.mock('../../../trpc/client', () => ({
       design: {
         draftStatus: { query: (...args: unknown[]) => designDraftStatusQuery(...args) },
         approve: { mutate: (...args: unknown[]) => designApproveMutate(...args) },
-        resolveReopenIdea: { query: (...args: unknown[]) => designResolveReopenIdeaQuery(...args) },
       },
     },
   },
@@ -285,8 +277,6 @@ describe('ArtifactTabRenderer', () => {
     designDraftStatusQuery.mockReset();
     designDraftStatusQuery.mockImplementation(() => new Promise(() => {})); // never resolves by default
     designApproveMutate.mockReset();
-    designResolveReopenIdeaQuery.mockReset();
-    designResolveReopenIdeaQuery.mockImplementation(() => new Promise(() => {})); // never resolves by default
     // eval-report defaults: no live row (markdown fallback), no findings.
     insightsRunEvalQuery.mockReset();
     insightsRunEvalQuery.mockResolvedValue(null);
@@ -1456,20 +1446,18 @@ describe('ArtifactTabRenderer', () => {
     expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
   });
 
-  // --- "Enter design mode" CTA: widened to a sourceRef-less prototype
-  // (IDEA-013 "make any prototype reopenable"). A planner/sprint-produced
-  // ui-prototype carries no sourceRef and resolves its idea from the RUN
-  // that produced it via cyboflow.design.resolveReopenIdea — see
-  // reopenIdeaResolver.ts for the ownership + ambiguity policy this mirrors.
+  // --- "Enter design mode" CTA: a sourceRef-less prototype (produced
+  // outside any design session, e.g. by planner/sprint) never gets the CTA.
+  // cyboflow.design.resolveReopenIdea (main/src/orchestrator/design/
+  // reopenIdeaResolver.ts) can resolve such a run back to a single owning
+  // idea, but actually ADOPTING that artifact into a new/promoted design
+  // session is unwired session-creation plumbing this component doesn't own
+  // — see the WHY comment above isDesignSessionCanvas/enterDesignModeCta in
+  // ArtifactTabRenderer.tsx. Rather than render a permanently-disabled CTA
+  // explaining that gap, the canvas withholds the affordance entirely and
+  // never fires the resolver query in the first place.
 
-  it('does not fire the reopen-idea query for a design-session canvas (sourceRef already present)', () => {
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
-    expect(designResolveReopenIdeaQuery).not.toHaveBeenCalled();
-  });
-
-  it('shows the CTA for a sourceRef-less ui-prototype once exactly one owned idea resolves for its run', async () => {
-    designResolveReopenIdeaQuery.mockResolvedValueOnce({ ideaId: 'IDEA-042' });
+  it('renders no CTA, no Approve control, and never queries resolveReopenIdea for a sourceRef-less prototype', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
     render(
       <ArtifactTabRenderer
@@ -1477,78 +1465,9 @@ describe('ArtifactTabRenderer', () => {
         {...PROPS}
       />,
     );
-
-    expect(await screen.findByTestId('design-mode-enter-cta')).toHaveTextContent('Design mode');
-    expect(designResolveReopenIdeaQuery).toHaveBeenCalledWith({ runId: 'run-planner-1' });
-  });
-
-  it('the widened CTA is DISABLED (no session to enter yet) for a resolved sourceRef-less prototype', async () => {
-    designResolveReopenIdeaQuery.mockResolvedValueOnce({ ideaId: 'IDEA-042' });
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null, sessionId: null })}
-        {...PROPS}
-      />,
-    );
-
-    const cta = await screen.findByTestId('design-mode-enter-cta');
-    expect(cta).toBeDisabled();
-    fireEvent.click(cta);
-    expect(mockEnterDesignMode).not.toHaveBeenCalled();
-    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
-  });
-
-  it('renders no Approve control for a resolved sourceRef-less prototype (no session exists to bind it to)', async () => {
-    designResolveReopenIdeaQuery.mockResolvedValueOnce({ ideaId: 'IDEA-042' });
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null, sessionId: null })}
-        {...PROPS}
-      />,
-    );
-
-    await screen.findByTestId('design-mode-enter-cta');
+    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
     expect(screen.queryByTestId('design-approve-control')).not.toBeInTheDocument();
     expect(designDraftStatusQuery).not.toHaveBeenCalled();
-  });
-
-  it('stays hidden for a sourceRef-less prototype whose run resolves to ZERO ideas', async () => {
-    designResolveReopenIdeaQuery.mockResolvedValueOnce(null);
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null, sessionId: null })}
-        {...PROPS}
-      />,
-    );
-
-    await waitFor(() => expect(designResolveReopenIdeaQuery).toHaveBeenCalled());
-    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
-  });
-
-  it('stays hidden for a sourceRef-less prototype whose run resolves to MORE THAN ONE idea (ambiguous — never guesses)', async () => {
-    // The resolver itself returns null for the ambiguous multi-idea case
-    // (see reopenIdeaResolver.test.ts) — the renderer just sees null either way.
-    designResolveReopenIdeaQuery.mockResolvedValueOnce(null);
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null, sessionId: null })}
-        {...PROPS}
-      />,
-    );
-
-    await waitFor(() => expect(designResolveReopenIdeaQuery).toHaveBeenCalled());
-    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
-  });
-
-  it('does not fire the reopen-idea query for a non-prototype canvas atype (generic)', () => {
-    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
-    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'generic', mode: 'canvas', sourceRef: null, sessionId: null })} {...PROPS} />);
-    expect(designResolveReopenIdeaQuery).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
   });
 
   // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---
