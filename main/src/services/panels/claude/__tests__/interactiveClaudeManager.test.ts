@@ -1980,6 +1980,113 @@ describe('InteractiveClaudeManager', () => {
   });
 
   // -------------------------------------------------------------------------
+  // ROB-5 PTY turn-in-flight tracking — the settle-barrier / merge-gate answer
+  // for the interactive substrate. Armed by the spawn's argv prompt or a
+  // submitted composed line; cleared by the deterministic turn-end (Stop hook /
+  // transcript marker) and teardown. See turnInFlightPanelIds.
+  // -------------------------------------------------------------------------
+  describe('ROB-5 turn-in-flight tracking (hasTurnInFlightForSession)', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    /** Spawn a live REPL (prompt rides argv) WITHOUT the guard notifyTurnEnd call. */
+    async function spawnLive(panelId: string, prompt = 'go'): Promise<{ sessionId: string; spawn: Promise<void> }> {
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: `sess-${panelId}`, worktreePath: `/tmp/wt-${panelId}`, prompt });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[mgr.fakeSources.length - 1].started);
+      return { sessionId: `sess-${panelId}`, spawn };
+    }
+
+    async function drain(spawn: Promise<void>): Promise<void> {
+      mgr.ptys[mgr.ptys.length - 1].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    }
+
+    it('a non-empty argv prompt arms the flag at spawn; the Stop-hook turn-end clears it', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r1');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(true);
+
+      mgr.notifyTurnEnd('panel-r1'); // runId === panelId for a plain mock row
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+
+      await drain(spawn);
+    });
+
+    it('an empty prompt (eager resume) does NOT arm at spawn', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r2', '');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+      await drain(spawn);
+    });
+
+    it('a submitted composed line re-arms (body write, then the deferred CR)', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r3');
+      mgr.notifyTurnEnd('panel-r3');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+
+      mgr.sendInput('panel-r3', 'fix the flaky test'); // composed body
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false); // not yet submitted
+      mgr.sendInput('panel-r3', '\r'); // the composer's deferred Enter
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(true);
+
+      mgr.notifyTurnEnd('panel-r3');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+      await drain(spawn);
+    });
+
+    it('a bare Enter with no composed body since the last submit does NOT arm', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r4');
+      mgr.notifyTurnEnd('panel-r4');
+
+      mgr.sendInput('panel-r4', '\r');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+      await drain(spawn);
+    });
+
+    it('inline body + CR in one write (raw terminal paste) arms', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r5');
+      mgr.notifyTurnEnd('panel-r5');
+
+      mgr.sendInput('panel-r5', 'run the suite\r');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(true);
+      await drain(spawn);
+    });
+
+    it('process exit clears the answer even mid-turn (a dead PTY holds no turn)', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r6');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(true);
+
+      await drain(spawn);
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(false);
+    });
+
+    it('answers per-session: an armed panel never leaks into a sibling session', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-r7');
+      expect(mgr.hasTurnInFlightForSession(sessionId)).toBe(true);
+      expect(mgr.hasTurnInFlightForSession('sess-someone-else')).toBe(false);
+      await drain(spawn);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // (T2) __quick__ sentinel step-append suppression: a quick-session run row
   // points at the per-project __quick__ sentinel workflow, which has no real
   // steps — buildStepReportingAppendForRun must return '' BY NAME even when a

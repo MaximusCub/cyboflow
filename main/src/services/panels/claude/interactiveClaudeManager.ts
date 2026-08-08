@@ -322,6 +322,36 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private readonly awaitingInputRunIds = new Set<string>();
 
   /**
+   * ROB-5 turn-in-flight tracking: panelIds whose live PTY plausibly has an
+   * agent turn IN FLIGHT. A PTY cannot observe the CLI's composer, so this is a
+   * bounded heuristic over the only deterministic signals available:
+   *   - ARMED when a turn starts — the spawn's argv prompt (a non-empty prompt
+   *     means claude engages it as its first turn immediately), or a SUBMITTED
+   *     line in {@link sendInput} that had composed body behind it (tracked via
+   *     {@link pendingBodyPanelIds} — a bare Enter with nothing typed since the
+   *     last submit starts no turn and does NOT arm).
+   *   - CLEARED at the deterministic turn-end ({@link handleTurnEnd} — Stop-hook
+   *     seam or transcript marker; note an AskUserQuestion ask IS a turn-end in
+   *     interactive mode: the PTY parks for input and is not mutating the
+   *     worktree, which is exactly what {@link hasTurnInFlightForSession}'s
+   *     consumers — the experiment settle barrier and the merge gate — ask
+   *     about) and on run teardown / process exit.
+   * Known residual: escape-sequence navigation counts as composed body, so a
+   * stray Enter after arrow-keys-without-submit can arm a false in-flight that
+   * persists until the next real turn-end. Accepted — the alternative (no PTY
+   * signal at all) is a structural false NEGATIVE on every real turn.
+   */
+  private readonly turnInFlightPanelIds = new Set<string>();
+
+  /**
+   * PanelIds with composed-but-unsubmitted input written since the last
+   * submitted line: any non-CR/LF PTY write marks it, a submitted line consumes
+   * it. Deliberately NOT cleared at turn-end — a user may type the next message
+   * while the agent is still working; their later Enter must still arm.
+   */
+  private readonly pendingBodyPanelIds = new Set<string>();
+
+  /**
    * Optional orchestrator IPC socket path. When set, initializeCliEnvironment
    * injects CYBOFLOW_RUN_ID / CYBOFLOW_ORCH_SOCKET so the interactive REPL's
    * cyboflow MCP server entry can reach the orchestrator socket. Set at boot via
@@ -1178,6 +1208,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       worktreePath,
     });
 
+    // ROB-5: a non-empty initial prompt rides claude's POSITIONAL argument (see
+    // the note below waitForFirstLine), so the FIRST turn is already in flight
+    // the moment the PTY exists — no sendInput ever sees it. An empty prompt
+    // (eager resume) starts no turn.
+    if (typeof options.prompt === 'string' && options.prompt.trim().length > 0) {
+      this.turnInFlightPanelIds.add(panelId);
+    }
+
     // Wire the inherited onData/onExit handlers, then add the completion-settling
     // onExit listener.
     this.setupProcessHandlers(ptyProcess, panelId, sessionId);
@@ -1441,6 +1479,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * inherited onExit path after the settle window.
    */
   private handleTurnEnd(panelId: string): void {
+    // ROB-5: whatever ended here — a finished turn or a question ask parking the
+    // PTY for input — the agent is no longer driving the worktree; clear the
+    // in-flight mark. The next submitted line (or question answer) re-arms it.
+    // Cleared even when no run record exists (defensive symmetry with teardown).
+    this.turnInFlightPanelIds.delete(panelId);
+
     const run = this.interactiveRuns.get(panelId);
     if (!run) return;
 
@@ -1493,6 +1537,23 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * @returns true if a live interactive run for `runId` was found and notified;
    *   false if none is tracked (already torn down, or a stale/unrelated runId).
    */
+  /**
+   * ROB-5 settle-barrier answer for the PTY substrate. True when any live panel
+   * of `sessionId` has an armed turn-in-flight mark ({@link turnInFlightPanelIds}
+   * — see its doc for the arm/clear seams and accepted residuals). The
+   * `processes` check makes a dead PTY answer false even if a clear was missed.
+   * Consumed via SubstrateDispatchFacade.hasTurnInFlightForSession by the
+   * experiment settle barrier and the session merge gate.
+   */
+  override hasTurnInFlightForSession(sessionId: string): boolean {
+    for (const panelId of this.turnInFlightPanelIds) {
+      if (!this.processes.has(panelId)) continue;
+      const run = this.interactiveRuns.get(panelId);
+      if (run?.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
   notifyTurnEnd(runId: string): boolean {
     for (const [panelId, run] of this.interactiveRuns) {
       if (run.runId === runId) {
@@ -1535,9 +1596,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    */
   override sendInput(panelId: string, input: string): void {
     super.sendInput(panelId, input);
-    if (input.includes('\r') || input.includes('\n')) {
+    const submitted = input.includes('\r') || input.includes('\n');
+    if (submitted) {
       const runId = this.interactiveRuns.get(panelId)?.runId ?? panelId;
       this.awaitingInputRunIds.delete(runId);
+      // ROB-5 arm: a submitted line with composed body behind it (or carried
+      // inline, e.g. a raw terminal paste ending in '\r') starts/continues a
+      // turn. A bare Enter with no body since the last submit starts nothing.
+      const bodyInThisWrite = input.replace(/[\r\n]/g, '').trim().length > 0;
+      if (bodyInThisWrite || this.pendingBodyPanelIds.has(panelId)) {
+        this.pendingBodyPanelIds.delete(panelId);
+        this.turnInFlightPanelIds.add(panelId);
+      }
+    } else if (input.length > 0) {
+      this.pendingBodyPanelIds.add(panelId);
     }
   }
 
@@ -1809,6 +1881,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // dead run can never haunt the status board as permanently blocked. Use the
     // runId resolved above (the run record may already be gone).
     this.awaitingInputRunIds.delete(runId);
+    // ROB-5: a torn-down PTY can never hold a turn in flight (or pending body).
+    this.turnInFlightPanelIds.delete(panelId);
+    this.pendingBodyPanelIds.delete(panelId);
     this.interactiveRuns.delete(panelId);
   }
 
