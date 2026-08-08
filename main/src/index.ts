@@ -227,7 +227,11 @@ import {
   type ProposalExecutorDeps,
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
-import { DESIGN_MODE_KICKOFF_PROMPT, type DesignSessionLaunchDeps } from './orchestrator/designSessionLaunch';
+import {
+  DESIGN_MODE_KICKOFF_PROMPT,
+  finishDesignSessionCreate,
+  type DesignSessionLaunchDeps,
+} from './orchestrator/designSessionLaunch';
 import { validateDesignIdeaLink } from './services/designIdeaValidation';
 import { detectClaudeCredentials } from './utils/claudeCredentials';
 import { detectClaudeBinary } from './utils/claudeCodeTest';
@@ -5321,21 +5325,37 @@ app.whenReady().then(async () => {
             requireSdkSubstrate: true,
           },
         );
-        if (resolvedSubstrate !== 'sdk') {
-          // Belt-guard precedent (ipc/session.ts ~1050): expected unreachable —
-          // requireSdkSubstrate above already throws inside createRun on a
-          // mismatch. Fail closed defensively rather than link a wrong-substrate
-          // session to the idea.
-          throw new Error(
-            `design session ${session.id} resolved to substrate '${resolvedSubstrate}' instead of 'sdk'`,
-          );
-        }
-
-        const dbHandle = databaseService.getDb();
-        dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
+        // From here down, createQuickSessionCore has ALREADY minted a real
+        // session + sentinel run + git worktree — anything that throws past
+        // this point must compensate via a full dismiss before propagating,
+        // because launchDesignSessionForFork (designSessionLaunch.ts) only
+        // records `created.sessionId` once THIS callback resolves; a throw
+        // from inside it leaves the saga's own catch block with no id to
+        // dismiss, orphaning the session/run/worktree. finishDesignSessionCreate
+        // (designSessionLaunch.ts) owns that internal compensation — see its
+        // JSDoc for why this is NOT redundant with the saga's own dismiss (the
+        // two only ever apply in mutually exclusive windows): do NOT also add
+        // a dismiss to the saga's catch for this failure mode.
+        await finishDesignSessionCreate({
+          sessionId: session.id,
+          resolvedSubstrate,
+          stampDesignIdeaId: () => {
+            const dbHandle = databaseService.getDb();
+            dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
+          },
+          dismissSession: dismissSessionFully,
+          onCompensationFailure: (dismissErr) => {
+            loggerLike.warn('[Main] design-mode fork: compensating dismiss failed after mid-create error', {
+              sessionId: session.id,
+              error: dismissErr instanceof Error ? dismissErr.message : String(dismissErr),
+            });
+          },
+        });
 
         // v0.5 re-entry stub (mirrors ipc/session.ts ~1064-1090) — fail-soft: a
-        // stub failure must never fail session creation.
+        // stub failure must never fail session creation. Deliberately called
+        // AFTER finishDesignSessionCreate rather than folded into it — this
+        // failure mode is intentionally NOT compensating.
         try {
           await ArtifactRouter.getInstance().apply(projectId, {
             op: 'create',

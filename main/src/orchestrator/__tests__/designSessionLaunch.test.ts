@@ -19,9 +19,21 @@
  *    throws) reports the failure WITHOUT calling dismissSession (there is no
  *    session id to compensate) — mirrors the accepted risk documented in
  *    ipc/session.ts's own defensive branch.
+ *
+ * Plus a second describe block for finishDesignSessionCreate — the
+ * post-mint tail extracted from index.ts's `createDesignSession` dep (the
+ * belt-guard + `design_idea_id` stamp that run AFTER createQuickSessionCore
+ * has already minted a real session/run/worktree) — proving its internal
+ * mid-create compensation (the ROB-2 fix: a throw in this window used to
+ * orphan the session because the saga above never captured a sessionId to
+ * dismiss).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { launchDesignSessionForFork, type DesignSessionLaunchDeps } from '../designSessionLaunch';
+import {
+  launchDesignSessionForFork,
+  finishDesignSessionCreate,
+  type DesignSessionLaunchDeps,
+} from '../designSessionLaunch';
 
 function makeDeps(overrides: Partial<DesignSessionLaunchDeps> = {}): {
   deps: DesignSessionLaunchDeps;
@@ -155,6 +167,142 @@ describe('launchDesignSessionForFork', () => {
       ideaId: 'idea-42',
       runId: 'run-planner-1',
       error: 'panel creation failed',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// finishDesignSessionCreate — the post-mint tail (belt-guard + design_idea_id
+// stamp) that runs AFTER createQuickSessionCore has already minted a real
+// session/run/worktree. A throw here used to orphan that session, because
+// launchDesignSessionForFork's saga never captures `created.sessionId` until
+// the WHOLE createDesignSession promise resolves — see designSessionLaunch.ts.
+// ---------------------------------------------------------------------------
+
+describe('finishDesignSessionCreate', () => {
+  it('resolves cleanly on the sdk substrate once the stamp succeeds — no dismiss', async () => {
+    const stampDesignIdeaId = vi.fn();
+    const dismissSession = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      finishDesignSessionCreate({
+        sessionId: 'sess-1',
+        resolvedSubstrate: 'sdk',
+        stampDesignIdeaId,
+        dismissSession,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(stampDesignIdeaId).toHaveBeenCalledOnce();
+    expect(dismissSession).not.toHaveBeenCalled();
+  });
+
+  it('a throwing design_idea_id stamp compensates via a full dismiss AND still surfaces the failure', async () => {
+    const stampErr = new Error('SQLITE_BUSY: database is locked');
+    const stampDesignIdeaId = vi.fn(() => {
+      throw stampErr;
+    });
+    const dismissSession = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      finishDesignSessionCreate({
+        sessionId: 'sess-1',
+        resolvedSubstrate: 'sdk',
+        stampDesignIdeaId,
+        dismissSession,
+      }),
+    ).rejects.toThrow(stampErr);
+
+    // The already-minted session/run/worktree is fully dismissed rather than orphaned.
+    expect(dismissSession).toHaveBeenCalledWith('sess-1');
+    expect(dismissSession).toHaveBeenCalledOnce();
+  });
+
+  it('a resolvedSubstrate mismatch (belt-guard) also compensates via a full dismiss AND surfaces', async () => {
+    const stampDesignIdeaId = vi.fn();
+    const dismissSession = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      finishDesignSessionCreate({
+        sessionId: 'sess-1',
+        resolvedSubstrate: 'pty',
+        stampDesignIdeaId,
+        dismissSession,
+      }),
+    ).rejects.toThrow("resolved to substrate 'pty' instead of 'sdk'");
+
+    // The stamp must never run past a failed belt-guard.
+    expect(stampDesignIdeaId).not.toHaveBeenCalled();
+    expect(dismissSession).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('a dismiss-compensation failure is reported via onCompensationFailure but does not mask the original error', async () => {
+    const stampErr = new Error('SQLITE_BUSY: database is locked');
+    const dismissErr = new Error('dismiss also failed');
+    const stampDesignIdeaId = vi.fn(() => {
+      throw stampErr;
+    });
+    const dismissSession = vi.fn().mockRejectedValue(dismissErr);
+    const onCompensationFailure = vi.fn();
+
+    await expect(
+      finishDesignSessionCreate({
+        sessionId: 'sess-1',
+        resolvedSubstrate: 'sdk',
+        stampDesignIdeaId,
+        dismissSession,
+        onCompensationFailure,
+      }),
+    ).rejects.toThrow(stampErr);
+
+    expect(onCompensationFailure).toHaveBeenCalledWith(dismissErr);
+  });
+
+  it('composed with launchDesignSessionForFork (mirrors index.ts wiring): a mid-create stamp failure is fully dismissed exactly once, never double-dismissed', async () => {
+    // Mirrors how index.ts wires createDesignSession: createQuickSessionCore
+    // "mints" the session, then finishDesignSessionCreate runs the tail and,
+    // on failure, compensates internally before rethrowing — so the outer
+    // saga's own dismissSession dep must NEVER also fire for this path.
+    const sagaDismissSession = vi.fn().mockResolvedValue(undefined);
+    const innerDismissSession = vi.fn().mockResolvedValue(undefined);
+    const reportLaunchFailure = vi.fn();
+    const kickoffDesignPanel = vi.fn();
+
+    const deps: DesignSessionLaunchDeps = {
+      validateIdeaLink: () => ({ ok: true }),
+      createDesignSession: async () => {
+        // The session/run/worktree already exist by this point (createQuickSessionCore
+        // ran inside this closure, exactly like index.ts's real dep).
+        await finishDesignSessionCreate({
+          sessionId: 'sess-1',
+          resolvedSubstrate: 'sdk',
+          stampDesignIdeaId: () => {
+            throw new Error('SQLITE_BUSY: database is locked');
+          },
+          dismissSession: innerDismissSession,
+        });
+        // Unreachable — finishDesignSessionCreate rethrows above.
+        return { sessionId: 'sess-1', runId: 'run-design-1', worktreePath: '/tmp/wt-1' };
+      },
+      kickoffDesignPanel,
+      dismissSession: sagaDismissSession,
+      reportLaunchFailure,
+    };
+
+    const result = await launchDesignSessionForFork(deps, ARGS);
+
+    expect(result).toEqual({ ok: false, reason: 'launch-failed', error: 'SQLITE_BUSY: database is locked' });
+    // Dismissed exactly once, by the INNER compensation — never by the saga
+    // (which never captured a sessionId for this failure window).
+    expect(innerDismissSession).toHaveBeenCalledWith('sess-1');
+    expect(innerDismissSession).toHaveBeenCalledOnce();
+    expect(sagaDismissSession).not.toHaveBeenCalled();
+    expect(kickoffDesignPanel).not.toHaveBeenCalled();
+    expect(reportLaunchFailure).toHaveBeenCalledWith({
+      projectId: 1,
+      ideaId: 'idea-42',
+      runId: 'run-planner-1',
+      error: 'SQLITE_BUSY: database is locked',
     });
   });
 });

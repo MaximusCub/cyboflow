@@ -17,9 +17,17 @@
  * wired at the composition root (main/src/index.ts) exactly like
  * ProposalExecutorDeps.
  *
+ * {@link finishDesignSessionCreate} is a second, narrower export: the tail of
+ * index.ts's `createDesignSession` dep (belt-guard + `design_idea_id` stamp)
+ * AFTER `createQuickSessionCore` has already minted a real session, extracted
+ * here purely so its internal mid-create compensation is unit-testable
+ * without booting the composition root — see its own JSDoc for why a throw in
+ * that window needs INTERNAL compensation rather than relying on the saga's.
+ *
  * Standalone-typecheck invariant (mirrors questionRouter.ts / proposalExecutor.ts):
  * NO imports from 'electron', 'better-sqlite3', or main/src/services/*. Every
- * collaborator is a structural closure injected via {@link DesignSessionLaunchDeps}.
+ * collaborator is a structural closure injected via {@link DesignSessionLaunchDeps}
+ * / {@link FinishDesignSessionCreateArgs}.
  */
 
 /**
@@ -103,6 +111,75 @@ export interface DesignSessionLaunchDeps {
    * concrete write is async) so the saga never blocks on it.
    */
   reportLaunchFailure(args: { projectId: number; ideaId: string; runId: string; error: string }): void;
+}
+
+// ---------------------------------------------------------------------------
+// finishDesignSessionCreate — the post-mint tail, extracted for testability
+// ---------------------------------------------------------------------------
+
+export interface FinishDesignSessionCreateArgs {
+  /** The session `createQuickSessionCore` already minted (id only — this tail never needs the rest of the row). */
+  sessionId: string;
+  /** The substrate `createQuickSessionCore` actually resolved to. */
+  resolvedSubstrate: string;
+  /**
+   * Stamp `sessions.design_idea_id = ideaId` for this session. A thin closure
+   * over the concrete DB handle, injected so this module stays
+   * standalone-typecheck-clean (no `better-sqlite3` import here). Throws on
+   * failure exactly like the raw `.run(...)` call it wraps.
+   */
+  stampDesignIdeaId: () => void;
+  /**
+   * The FULL safe session-dismiss primitive (dismissSessionFully in
+   * main/src/index.ts — the SAME one the saga's own `dismissSession` dep is
+   * wired to) — compensates a mid-create failure below.
+   */
+  dismissSession: (sessionId: string) => Promise<void>;
+  /** Best-effort observability hook for a compensation failure; never rethrown. */
+  onCompensationFailure?: (err: unknown) => void;
+}
+
+/**
+ * Finish a design session's create AFTER `createQuickSessionCore` has ALREADY
+ * minted the session + its sentinel run + its git worktree. Two things can
+ * still throw at this point — the `resolvedSubstrate !== 'sdk'` belt-guard and
+ * the `design_idea_id` stamp — and unlike a failure INSIDE
+ * `createQuickSessionCore` itself (nothing was minted yet, nothing to
+ * compensate), a throw HERE happens after a REAL resource already exists.
+ *
+ * Without this, index.ts's `createDesignSession` callback would simply throw
+ * out of this tail, and `launchDesignSessionForFork` (the saga above) would
+ * have no `sessionId` to compensate with: it only records
+ * `created.sessionId` once the WHOLE `createDesignSession` promise resolves
+ * successfully, so a throw from inside it looks — from the saga's point of
+ * view — identical to "nothing was ever minted". This function closes that
+ * gap by compensating INTERNALLY (a full `dismissSession`) before rethrowing
+ * the original error, so the caller (index.ts) can propagate it and the saga
+ * still reports the failure, without ever holding a sessionId to
+ * double-dismiss. `dismissSession`'s own failure is swallowed (reported via
+ * `onCompensationFailure`, never rethrown) — the ORIGINAL error is what must
+ * surface, not a compensation-path failure.
+ */
+export async function finishDesignSessionCreate(args: FinishDesignSessionCreateArgs): Promise<void> {
+  try {
+    if (args.resolvedSubstrate !== 'sdk') {
+      // Belt-guard precedent (ipc/session.ts ~1050): expected unreachable —
+      // requireSdkSubstrate already throws inside createRun on a mismatch.
+      // Fail closed defensively rather than link a wrong-substrate session
+      // to the idea.
+      throw new Error(
+        `design session ${args.sessionId} resolved to substrate '${args.resolvedSubstrate}' instead of 'sdk'`,
+      );
+    }
+    args.stampDesignIdeaId();
+  } catch (err) {
+    try {
+      await args.dismissSession(args.sessionId);
+    } catch (dismissErr) {
+      args.onCompensationFailure?.(dismissErr);
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
