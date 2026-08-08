@@ -49,6 +49,8 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        // Live merge/PR gate — settled by default so accept actions proceed.
+        sessionSettleState: { query: vi.fn().mockResolvedValue({ flowBusy: false, chatTurnInFlight: false }) },
         listRawEvents: { query: vi.fn().mockResolvedValue([]) },
         listUnifiedMessages: { query: vi.fn().mockResolvedValue([]) },
         contextUsage: { query: vi.fn().mockResolvedValue({ usedTokens: null, contextWindow: null }) },
@@ -246,6 +248,7 @@ vi.mock('../QuickSessionCanvas', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useErrorStore } from '../../../stores/errorStore';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
@@ -262,6 +265,7 @@ const tRpcRuns = (trpc.cyboflow.runs as unknown) as {
   listRawEvents: { query: ReturnType<typeof vi.fn> };
   getPhaseState: { query: ReturnType<typeof vi.fn> };
   onStepTransition: { subscribe: ReturnType<typeof vi.fn> };
+  sessionSettleState: { query: ReturnType<typeof vi.fn> };
 };
 
 beforeEach(() => {
@@ -560,7 +564,10 @@ describe('CyboflowRoot — SessionLifecycleActionBar (TASK-792)', () => {
     expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
   });
 
-  it('disables Merge and Create PR when session is running; Dismiss stays enabled', () => {
+  it('a running session.status no longer disables Merge/Create PR — the gate is the click-time settle read', () => {
+    // sessions.status wedges at 'running' on flow sessions with chats (the chat
+    // sentinel's run-scoped turn-ends never reset it), so it is not a gate input
+    // anymore. The buttons stay enabled; runs.sessionSettleState decides on click.
     const session = makeQuickSession({ status: 'running' });
     act(() => {
       useSessionStore.setState({ sessions: [session] });
@@ -568,8 +575,8 @@ describe('CyboflowRoot — SessionLifecycleActionBar (TASK-792)', () => {
     });
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.getByTestId('session-action-merge')).toBeDisabled();
-    expect(screen.getByTestId('session-action-create-pr')).toBeDisabled();
+    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
     expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
   });
 
@@ -584,6 +591,39 @@ describe('CyboflowRoot — SessionLifecycleActionBar (TASK-792)', () => {
     expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
     expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
     expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+  });
+
+  it('a busy settle read blocks Merge with a notice instead of opening the dialog', async () => {
+    vi.mocked(tRpcRuns.sessionSettleState.query).mockResolvedValueOnce({
+      flowBusy: false,
+      chatTurnInFlight: true,
+    });
+    const session = makeQuickSession();
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('session-action-merge'));
+    await waitFor(() => {
+      expect(useErrorStore.getState().currentError?.title).toBe('Merge is waiting on live work');
+    });
+    expect(screen.queryByText('Merge session changes')).not.toBeInTheDocument();
+    act(() => useErrorStore.getState().clearError());
+  });
+
+  it('a failed settle read fails OPEN — Merge proceeds to the dialog', async () => {
+    vi.mocked(tRpcRuns.sessionSettleState.query).mockRejectedValueOnce(new Error('boom'));
+    const session = makeQuickSession();
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('session-action-merge'));
+    expect(await screen.findByText('Merge session changes')).toBeInTheDocument();
   });
 });
 
@@ -623,22 +663,24 @@ describe('CyboflowRoot — lifecycle dialog wiring (TASK-796)', () => {
     });
   };
 
-  it('clicking Merge opens the SessionMergeDialog', () => {
+  it('clicking Merge opens the SessionMergeDialog', async () => {
     activateQuickSession();
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByText('Merge session changes')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('session-action-merge'));
-    expect(screen.getByText('Merge session changes')).toBeInTheDocument();
+    // The click-time settle read resolves async before the dialog opens.
+    expect(await screen.findByText('Merge session changes')).toBeInTheDocument();
   });
 
-  it('clicking Create PR opens the SessionCreatePrDialog', () => {
+  it('clicking Create PR opens the SessionCreatePrDialog', async () => {
     activateQuickSession();
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByText('Create pull request')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('session-action-create-pr'));
-    expect(screen.getByText('Create pull request')).toBeInTheDocument();
+    // The click-time settle read resolves async before the dialog opens.
+    expect(await screen.findByText('Create pull request')).toBeInTheDocument();
   });
 
   it('clicking Dismiss opens the SessionDismissDialog', () => {

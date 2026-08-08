@@ -60,7 +60,7 @@ import * as path from 'path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setSetPermissionModeDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setSetPermissionModeDeps, setSessionSettleDeps } from '../runs';
 import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
 import type { SessionAgentPermissionModeDeps } from '../../../sessionPermissionMode';
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
@@ -3799,5 +3799,88 @@ describe('cyboflow.runs.merge / dismiss — batch-only run recomputes lanes (Fix
     await caller.cyboflow.runs.dismiss({ runId: 'run-batch-dismiss' });
 
     expect(recomputeSpy).toHaveBeenCalledWith('bat-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.sessionSettleState — the live merge/PR gate read. flowBusy must see an
+// actively-driving REAL workflow run, ignore rest/terminal states, and above
+// all ignore the perpetually-'running' __quick__ chat sentinel (the stale
+// sessions.status wedge this endpoint replaces); chatTurnInFlight is the
+// injected facade barrier verbatim.
+// ---------------------------------------------------------------------------
+describe('cyboflow.runs.sessionSettleState', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ includeSubstrate: true });
+  });
+
+  afterEach(() => {
+    // Reset the module-level dep so a wired spy never leaks across describes.
+    setSessionSettleDeps({ hasActiveAgentTurn: () => false });
+    db.close();
+  });
+
+  function seedSessionRun(
+    id: string,
+    sessionId: string,
+    status: string,
+    workflowName = 'sprint',
+  ): void {
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(`wf-${id}`, workflowName);
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json, session_id)
+       VALUES (?, ?, 1, '/tmp/wt', ?, '{}', ?)`,
+    ).run(id, `wf-${id}`, status, sessionId);
+  }
+
+  it('a session with no runs is settled (and an unwired dep answers chatTurnInFlight false)', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-none' })).resolves.toEqual({
+      flowBusy: false,
+      chatTurnInFlight: false,
+    });
+  });
+
+  it('an actively-driving real workflow run makes flowBusy true; rest/terminal states do not', async () => {
+    seedSessionRun('run-active', 'sess-a', 'running');
+    seedSessionRun('run-rest', 'sess-b', 'awaiting_review');
+    seedSessionRun('run-done', 'sess-c', 'completed');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-a' })).resolves.toMatchObject({ flowBusy: true });
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-b' })).resolves.toMatchObject({ flowBusy: false });
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-c' })).resolves.toMatchObject({ flowBusy: false });
+  });
+
+  it("a perpetually-'running' __quick__ chat sentinel does NOT count as flow activity", async () => {
+    seedSessionRun('run-sentinel', 'sess-q', 'running', '__quick__');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-q' })).resolves.toEqual({
+      flowBusy: false,
+      chatTurnInFlight: false,
+    });
+  });
+
+  it('chatTurnInFlight reflects the injected facade barrier, keyed by the queried session', async () => {
+    const spy = vi.fn((sessionId: string) => sessionId === 'sess-live');
+    setSessionSettleDeps({ hasActiveAgentTurn: spy });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-live' })).resolves.toMatchObject({ chatTurnInFlight: true });
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-idle' })).resolves.toMatchObject({ chatTurnInFlight: false });
+    expect(spy).toHaveBeenCalledWith('sess-live');
+    expect(spy).toHaveBeenCalledWith('sess-idle');
+  });
+
+  it('missing ctx.db -> TRPCError PRECONDITION_FAILED', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(caller.cyboflow.runs.sessionSettleState({ sessionId: 'sess-x' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
   });
 });

@@ -51,7 +51,8 @@ import {
   type CancelRunDeps,
   type CancelRunResult,
 } from '../../cancelRunHandler';
-import type { WorkflowRunRow } from '../../../../../shared/types/cyboflow';
+import type { SessionSettleState, WorkflowRunRow } from '../../../../../shared/types/cyboflow';
+import { QUICK_WORKFLOW_NAME } from '../../workflowRegistry';
 import {
   nudgeRunHandler,
   type NudgeRunDeps,
@@ -200,6 +201,34 @@ let nudgeRunDeps: NudgeRunDeps | null = null;
 export function setNudgeRunDeps(deps: NudgeRunDeps): void {
   nudgeRunDeps = deps;
 }
+
+// ---------------------------------------------------------------------------
+// sessionSettleState dependency bag (live merge/PR gate)
+//
+// Backs runs.sessionSettleState's `chatTurnInFlight` half with the
+// SubstrateDispatchFacade's live turn-in-flight read. Injected at boot by
+// main/src/index.ts. Until wired, chatTurnInFlight resolves false (flowBusy —
+// pure SQL — still answers), which matches the "never block an accept action on
+// a failed read" contract of the action bar.
+// ---------------------------------------------------------------------------
+
+export interface SessionSettleDeps {
+  hasActiveAgentTurn: (sessionId: string) => boolean;
+}
+
+let sessionSettleDeps: SessionSettleDeps | null = null;
+
+export function setSessionSettleDeps(deps: SessionSettleDeps): void {
+  sessionSettleDeps = deps;
+}
+
+/**
+ * Run statuses that count as "the flow is actively driving the worktree" for
+ * the accept-action gate. Rest states (awaiting_review/awaiting_input/stuck/
+ * paused) deliberately do NOT count — merging while a run is parked at a gate
+ * is the user's call — and terminal states obviously don't.
+ */
+const ACTIVE_RUN_STATUSES_SQL_IN = "('queued','starting','running')";
 
 // ---------------------------------------------------------------------------
 // queueInput dependency bag ("always allow messaging a running flow")
@@ -921,6 +950,41 @@ export const runsRouter = router({
         });
       }
       return listRunsHandler(ctx.db, input.projectId);
+    }),
+
+  /**
+   * Live settle state for a session's accept actions (Merge / Create-PR) —
+   * computed at read time, replacing `sessions.status` as the gate input (that
+   * persisted status wedges at 'running' on flow sessions whose chat sentinel
+   * turn-ends are run-scoped and thus never reset it). See SessionSettleState
+   * in shared/types/cyboflow.ts for the two halves' exact semantics.
+   */
+  sessionSettleState: protectedProcedure
+    .input(z.object({ sessionId: z.string().min(1) }))
+    .query(({ ctx, input }): SessionSettleState => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      // The join excludes `__quick__` sentinel runs by workflow NAME — the chat
+      // vehicle is perpetually 'running' by design and must never read as flow
+      // activity (the exact false-'running' this endpoint exists to correct).
+      const row = ctx.db
+        .prepare(
+          `SELECT COUNT(*) AS busy
+             FROM workflow_runs r
+             JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.session_id = ?
+              AND w.name != ?
+              AND r.status IN ${ACTIVE_RUN_STATUSES_SQL_IN}`,
+        )
+        .get(input.sessionId, QUICK_WORKFLOW_NAME) as { busy: number };
+      return {
+        flowBusy: row.busy > 0,
+        chatTurnInFlight: sessionSettleDeps?.hasActiveAgentTurn(input.sessionId) ?? false,
+      };
     }),
 
   /**

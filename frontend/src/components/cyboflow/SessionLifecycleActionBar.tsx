@@ -2,11 +2,13 @@ import { useRef, useState } from 'react';
 import { GitMerge, ExternalLink, Trash2 } from 'lucide-react';
 import { useLifecycleTarget } from '../../hooks/useLifecycleTarget';
 import { trpc } from '../../trpc/client';
+import { useErrorStore } from '../../stores/errorStore';
 import { findGuardedExperimentForSession } from '../../utils/armDismissGuard';
 import type { GuardedAction } from '../../utils/armDismissGuard';
 import { experimentDisplayName } from '../../utils/experimentDisplay';
 import { ArmDismissGuardDialog } from './ArmDismissGuardDialog';
 import type { ExperimentArm, ExperimentRow, ExperimentStatus } from '../../../../shared/types/experiments';
+import type { SessionSettleState } from '../../../../shared/types/cyboflow';
 
 interface SessionLifecycleActionBarProps {
   onMerge?: () => void;
@@ -31,6 +33,8 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   // the Dismiss trigger itself; null = no guard shown.
   const [armGuard, setArmGuard] = useState<ArmGuardState | null>(null);
   const [checkingArm, setCheckingArm] = useState(false);
+  // True while the click-time settle read (runs.sessionSettleState) is in flight.
+  const [checkingSettle, setCheckingSettle] = useState(false);
   // Latest selected-session id, read INSIDE the async guard's continuation so a
   // selection change during the (async) arm-check window aborts the action
   // rather than firing it against whatever session is selected when the read
@@ -40,12 +44,6 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   const targetSessionIdRef = useRef<string | undefined>(target?.session.id);
   targetSessionIdRef.current = target?.session.id;
   if (!target) return null;
-
-  // Merge / Create-PR accept the session's artifact. They are offered only once
-  // the work is finished and awaiting the user's decision — a session still
-  // `running` is in flight, so accept is disabled while running. (The run-scoped
-  // close-out was removed in Phase 4a; the target is always a session now.)
-  const acceptDisabled = target.session.status === 'running';
 
   // In-place sessions work directly in the project checkout — there is no
   // worktree to merge or open a PR from, so those accept actions are hidden.
@@ -132,8 +130,50 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       .finally(() => setCheckingArm(false));
   };
 
-  const handleMergeClick = () => runGuardedAction('merge', () => onMerge?.());
-  const handleCreatePRClick = () => runGuardedAction('create-pr', () => onCreatePR?.());
+  // Accept actions (Merge / Create-PR) gate on LIVE settle state at click time
+  // (runs.sessionSettleState) instead of the persisted session.status. That
+  // status wedges at 'running' on flow sessions with chats — the chat sentinel's
+  // run-scoped turn-ends never reset it — and, symmetrically, a secondary chat
+  // finishing a turn must never read as "the flow is ready to merge". The live
+  // read answers the only question that matters: is anything (flow run or chat
+  // turn) actively driving this worktree right now? Same fail-open contract as
+  // the arm guard: a failed read must never block the action.
+  const runSettleGatedAction = (action: 'merge' | 'create-pr', proceed: () => void) => {
+    const clickedSessionId = session.id;
+    let settlePromise: Promise<SessionSettleState>;
+    try {
+      settlePromise = trpc.cyboflow.runs.sessionSettleState.query({ sessionId: clickedSessionId });
+    } catch {
+      runGuardedAction(action, proceed);
+      return;
+    }
+    setCheckingSettle(true);
+    void settlePromise
+      .then((settle) => {
+        // Selection drift during the async read: abort silently (the user
+        // re-clicks on the intended session) — runGuardedAction's own drift
+        // guard only covers ITS deferred paths, not its synchronous one.
+        if (targetSessionIdRef.current !== clickedSessionId) return;
+        if (settle.flowBusy || settle.chatTurnInFlight) {
+          const actionLabel = action === 'merge' ? 'Merge' : 'Create PR';
+          useErrorStore.getState().showError({
+            title: `${actionLabel} is waiting on live work`,
+            error: settle.flowBusy
+              ? 'A workflow run on this session is still executing. Let it finish (or cancel it) before accepting the work.'
+              : 'A chat on this session has an agent turn in flight. Wait for the turn to finish before accepting the work.',
+          });
+          return;
+        }
+        runGuardedAction(action, proceed);
+      })
+      .catch(() => {
+        if (targetSessionIdRef.current === clickedSessionId) runGuardedAction(action, proceed);
+      })
+      .finally(() => setCheckingSettle(false));
+  };
+
+  const handleMergeClick = () => runSettleGatedAction('merge', () => onMerge?.());
+  const handleCreatePRClick = () => runSettleGatedAction('create-pr', () => onCreatePR?.());
   const handleDismissClick = () => runGuardedAction('dismiss', () => onDismiss?.());
 
   return (
@@ -144,10 +184,10 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       {!inPlace && (
         <button
           data-testid="session-action-merge"
-          disabled={acceptDisabled || checkingArm}
+          disabled={checkingSettle || checkingArm}
           onClick={handleMergeClick}
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          title={acceptDisabled ? 'Wait for the work to finish before merging' : 'Merge changes into base branch'}
+          title="Merge changes into base branch (checks for live work first)"
         >
           <GitMerge size={14} />
           Merge
@@ -157,10 +197,10 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       {!inPlace && (
         <button
           data-testid="session-action-create-pr"
-          disabled={acceptDisabled || checkingArm}
+          disabled={checkingSettle || checkingArm}
           onClick={handleCreatePRClick}
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          title={acceptDisabled ? 'Wait for the work to finish before creating a PR' : 'Create a pull request'}
+          title="Create a pull request (checks for live work first)"
         >
           <ExternalLink size={14} />
           Create PR

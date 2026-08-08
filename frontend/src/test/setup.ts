@@ -23,6 +23,8 @@ vi.mock('../trpc/client', () => ({
     cyboflow: {
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        // Live merge/PR gate — settled by default so accept actions proceed.
+        sessionSettleState: { query: vi.fn().mockResolvedValue({ flowBusy: false, chatTurnInFlight: false }) },
         listFiles: { query: vi.fn().mockResolvedValue([]) },
         readFile: {
           query: vi.fn().mockResolvedValue({ path: '', content: '', size: 0, unviewableReason: null }),

@@ -111,7 +111,7 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import type { VerifyHostProbesLike } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -5099,6 +5099,11 @@ app.whenReady().then(async () => {
       },
     };
     setNudgeRunDeps(nudgeDeps);
+    // Live merge/PR gate (runs.sessionSettleState): the chatTurnInFlight half
+    // answers from the SAME facade barrier the experiment settle guard uses.
+    setSessionSettleDeps({
+      hasActiveAgentTurn: (sessionId) => substrateFacade.hasTurnInFlightForSession(sessionId),
+    });
     console.log('[Main] runs.nudge deps wired');
 
     // Approve-ideas verdict delivery (IDEA-009 / TASK-035B): the default

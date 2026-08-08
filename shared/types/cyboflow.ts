@@ -35,6 +35,27 @@ export const TERMINAL_RUN_STATUSES_SQL_IN = `('${TERMINAL_RUN_STATUSES.join(
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'timed_out';
 
 /**
+ * Live settle state for a session's accept actions (Merge / Create-PR),
+ * computed in the main process AT READ TIME — never persisted, so it cannot go
+ * stale the way `sessions.status` does (a flow session's perpetually-running
+ * `__quick__` chat sentinel wedges that status at 'running' forever).
+ *
+ *  - `flowBusy`: the session has a workflow run actively driving
+ *    (queued/starting/running), EXCLUDING `__quick__` sentinel runs — the chat
+ *    vehicle is running by design and says nothing about the flow. Rest states
+ *    (awaiting_review/awaiting_input/stuck/paused) do NOT count: merging while
+ *    a run is parked at a gate is the user's call, exactly as before.
+ *  - `chatTurnInFlight`: some chat on the session has an agent turn in flight
+ *    RIGHT NOW (SubstrateDispatchFacade.hasTurnInFlightForSession — SDK managers
+ *    answer from live turn state; interactive PTY from the ROB-5 submit→Stop-hook
+ *    window).
+ */
+export interface SessionSettleState {
+  flowBusy: boolean;
+  chatTurnInFlight: boolean;
+}
+
+/**
  * Emitted on the global `runStatusEvents` emitter whenever the RunExecutor
  * drives a workflow_run through a lifecycle transition (running, awaiting_review
  * on clean drain, failed, canceled). This is the project-wide "run status
