@@ -98,11 +98,35 @@ function submittedPayload(index = 0): Record<string, unknown> {
   return submit.mock.calls[index][0] as Record<string, unknown>;
 }
 
+/**
+ * The diagnostics panel is the "what am I about to send" surface, so it is
+ * expanded from the start — a user who has to click to find out what a report
+ * carries mostly does not click. Note this is the opposite default from the log
+ * tail, which stays OFF: showing what is already attached costs nothing, while
+ * the log tail is the one thing being attached by the user's own choice.
+ */
+describe('diagnostics panel', () => {
+  it('shows the included details without the user expanding anything', async () => {
+    await openDialog();
+
+    expect(screen.getByText('Install ID')).toBeInTheDocument();
+    expect(screen.getByText(/^Recent errors$/)).toBeInTheDocument();
+  });
+
+  it('still collapses on demand', async () => {
+    await openDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: /what's included/i }));
+
+    expect(screen.queryByText('Install ID')).not.toBeInTheDocument();
+  });
+});
+
 describe('log consent', () => {
   it('leaves log inclusion off by default and does not display the log text', async () => {
     await openDialog();
 
-    const checkbox = screen.getByRole('checkbox', { name: /include recent log output/i });
+    const checkbox = screen.getByRole('switch', { name: /include recent log output/i });
     expect(checkbox).not.toBeChecked();
     expect(screen.queryByText(/SECRET_LOG_MARKER/)).not.toBeInTheDocument();
   });
@@ -110,7 +134,7 @@ describe('log consent', () => {
   it('shows the actual log text and a warning once the user opts in', async () => {
     await openDialog();
 
-    fireEvent.click(screen.getByRole('checkbox', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
 
     expect(screen.getByText(/SECRET_LOG_MARKER/)).toBeInTheDocument();
     expect(screen.getByText(/automated redaction cannot reliably remove/i)).toBeInTheDocument();
@@ -134,7 +158,7 @@ describe('log consent', () => {
     fireEvent.change(screen.getByLabelText(/what happened/i), {
       target: { value: 'It froze.' },
     });
-    fireEvent.click(screen.getByRole('checkbox', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
     fireEvent.click(screen.getByRole('button', { name: /send report/i }));
 
     await waitFor(() => expect(submit).toHaveBeenCalled());
@@ -262,7 +286,7 @@ describe('dialog lifecycle', () => {
    */
   it('drops the previous opening’s preview instead of reusing it', async () => {
     const { rerender } = await openDialog();
-    fireEvent.click(screen.getByRole('checkbox', { name: /include recent log output/i }));
+    fireEvent.click(screen.getByRole('switch', { name: /include recent log output/i }));
     expect(screen.getByText(/SECRET_LOG_MARKER/)).toBeInTheDocument();
 
     // The next open's preview is still in flight.
@@ -273,7 +297,7 @@ describe('dialog lifecycle', () => {
     rerender(<BugReportDialog isOpen onClose={vi.fn()} />);
 
     expect(screen.queryByText(/SECRET_LOG_MARKER/)).not.toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: /include recent log output/i })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: /include recent log output/i })).toBeDisabled();
   });
 
   /**
@@ -411,7 +435,7 @@ describe('submission', () => {
 
   /**
    * Until the preview resolves there is no log text to attach, so an enabled
-   * checkbox would tell the user their logs were included while sending nothing.
+   * toggle would tell the user their logs were included while sending nothing.
    */
   it('cannot opt into logs before the preview has resolved', async () => {
     let resolvePreview: (() => void) | undefined;
@@ -423,7 +447,7 @@ describe('submission', () => {
     );
     render(<BugReportDialog isOpen onClose={vi.fn()} />);
 
-    const checkbox = screen.getByRole('checkbox', { name: /include recent log output/i });
+    const checkbox = screen.getByRole('switch', { name: /include recent log output/i });
     expect(checkbox).toBeDisabled();
 
     resolvePreview?.();

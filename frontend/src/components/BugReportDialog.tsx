@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, Bug, ChevronRight, ChevronDown, AlertTriangle, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { useSessionStore } from '../stores/sessionStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
+import { Toggle } from './ui/Toggle';
 import {
   BUG_REPORT_LIMITS,
   type BugReportPreview,
@@ -70,7 +71,9 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
   const [email, setEmail] = useState('');
   const [sessionId, setSessionId] = useState<string>('');
   const [includeLogs, setIncludeLogs] = useState(false);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  // Expanded from the start: the point of the panel is that the user sees what
+  // they are about to send without having to go looking for it.
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
   const [preview, setPreview] = useState<BugReportPreview | null>(null);
   const [send, setSend] = useState<SendState>({ phase: 'idle' });
 
@@ -123,7 +126,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     setExpected('');
     setEmail('');
     setIncludeLogs(false);
-    setShowDiagnostics(false);
+    setShowDiagnostics(true);
     // Cleared with the rest: a preview held across a close is the PREVIOUS
     // opening's diagnostics, and the next one would submit — and could show —
     // recorded errors and a log tail the user never reviewed in this dialog.
@@ -350,15 +353,16 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                 )}
 
                 {/* Logs — deliberately separate, off by default, shown before sending */}
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
+                <div className="flex items-start gap-2.5">
+                  <Toggle
+                    size="sm"
                     checked={includeLogs}
-                    onChange={(e) => setIncludeLogs(e.target.checked)}
-                    // Ticking this before the preview arrives would attach
+                    onChange={setIncludeLogs}
+                    // Switching this on before the preview arrives would attach
                     // nothing while telling the user their logs were included.
                     disabled={!logTail || logTail.unavailable}
-                    className="mt-0.5"
+                    aria-label="Include recent log output"
+                    className="mt-0.5 flex-shrink-0"
                   />
                   <span className="text-sm text-text-secondary">
                     Include recent log output
@@ -370,7 +374,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                           : 'Off by default. Read it below before including it.'}
                     </span>
                   </span>
-                </label>
+                </div>
 
                 {includeLogs && logTail && !logTail.unavailable && (
                   <div className="space-y-2">
