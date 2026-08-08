@@ -10,6 +10,9 @@
  *   - other states  → muted "v{version}…" line; click → onAboutClick, no pill
  *   - check() runs exactly once on mount.
  *
+ * The "Report a bug" button shares that footer block, so its independence from
+ * `version` is guarded here too — see the second describe.
+ *
  * Mocking mirrors Sidebar.mcpHealth.test.tsx: heavy sub-components are stubbed,
  * window.electronAPI is faked for the mount-time version fetch, and useUpdater
  * is mocked so each case can pin `state` and spy on the action fns.
@@ -210,5 +213,43 @@ describe('Sidebar — update pill (TASK-001)', () => {
     renderSidebar();
 
     await waitFor(() => expect(checkSpy).toHaveBeenCalledTimes(1));
+  });
+});
+
+/**
+ * The bug-report button lives INSIDE the same bordered footer block as the
+ * version line, which is the whole risk this guards: the block must not inherit
+ * the version line's `{version && …}` gate. A user whose version fetch failed —
+ * or who is looking at the sidebar before it resolves — is exactly the user with
+ * something to report.
+ */
+describe('Sidebar — bug report button', () => {
+  it('renders even when the version fetch fails and the rest of the block does not', async () => {
+    setUpdaterState({ status: 'available', version: '1.3.0' });
+    Object.defineProperty(window, 'electronAPI', {
+      writable: true,
+      value: {
+        invoke: mockInvoke,
+        getVersionInfo: () => Promise.resolve({ success: false }),
+        uiState: { getExpanded: () => Promise.resolve({ success: false }) },
+      },
+    });
+
+    renderSidebar();
+
+    expect(await screen.findByText('Report a bug')).toBeInTheDocument();
+    // Everything version-gated stays absent — including the update pill, which
+    // has always waited on `version` and still does.
+    expect(screen.queryByTitle('Click to view version details')).not.toBeInTheDocument();
+    expect(screen.queryByText('Update available →')).not.toBeInTheDocument();
+  });
+
+  it('opens the bug report dialog when clicked', async () => {
+    setUpdaterState({ status: 'idle' });
+    renderSidebar();
+
+    fireEvent.click(await screen.findByText('Report a bug'));
+
+    expect(await screen.findByText('Report a bug', { selector: 'h2' })).toBeInTheDocument();
   });
 });

@@ -455,26 +455,30 @@ export const Sidebar = memo(function Sidebar({
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
 
-          {/* Bug reporting. Deliberately prominent and always present — it sits
-              above the version line because that is where users already look
-              when something is wrong, and it must not be gated on `version`
-              loading or on the update pill's state. */}
-          <div className="px-4 pt-2">
-            <button
-              onClick={() => setShowBugReport(true)}
-              title="Report a problem with Cyboflow"
-              className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
-            >
-              <Bug className="w-4 h-4" />
-              <span>Report a bug</span>
-            </button>
-          </div>
+          {/* Bug report + version share one bordered footer block, so the
+              divider reads as the top of the whole footer rather than as a
+              separator between them.
 
-          {/* Version display at bottom — flips to an update pill when the
-              auto-updater has news, otherwise shows the muted version line. */}
-          {version && (
-            <div className="px-4 py-2 border-t border-border-primary">
-              {updateState.status === 'available' ? (
+              NOTE the block itself is NOT gated on `version` — only the version
+              line inside it is. Bug reporting is deliberately prominent and
+              always present: a report must be filable before the version fetch
+              resolves, and whatever the update pill is doing. */}
+          <div className="px-4 py-2 border-t border-border-primary">
+            <div className="py-0.5">
+              <button
+                onClick={() => setShowBugReport(true)}
+                title="Report a problem with Cyboflow"
+                className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
+              >
+                <Bug className="w-4 h-4" />
+                <span>Report a bug</span>
+              </button>
+            </div>
+
+            {/* Version display — flips to an update pill when the auto-updater
+                has news, otherwise shows the muted version line. */}
+            {version &&
+              (updateState.status === 'available' ? (
                 <div
                   className="text-xs text-center rounded px-2 py-1 cursor-pointer w-full truncate bg-interactive text-text-on-interactive hover:bg-interactive-hover transition-colors"
                   onClick={() => void downloadUpdate()}
@@ -513,9 +517,8 @@ export const Sidebar = memo(function Sidebar({
                 >
                   v{version}{worktreeName && ` • ${worktreeName}`}{gitCommit && ` • ${gitCommit}`}
                 </div>
-              )}
-            </div>
-          )}
+              ))}
+          </div>
         </div>
     </div>
 
