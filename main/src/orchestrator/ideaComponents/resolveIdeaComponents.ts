@@ -328,12 +328,24 @@ export function resolveIdeaComponentsBatch(
   }
 
   // (5) tasks — 'stories' component completeness.
+  //
+  // A task reaches its idea EITHER directly (`tasks.originating_idea_id`, for a
+  // task minted straight off an idea) OR through its parent epic
+  // (`tasks.parent_epic_id` -> `epics.originating_idea_id`) — a task minted
+  // UNDER an epic carries a NULL originating_idea_id. COALESCEing both is the
+  // codebase's own lineage model; see `../runEntityOwnership.ts`
+  // (listRunBatchIdeaIds/resolveRunBatchIdeaId) for the identical join. Reading
+  // only the direct column would derive 'stories: incomplete' for an idea
+  // decomposed idea -> epics -> tasks while every story already exists, and the
+  // planner would redo the whole decomposition.
   const ideasWithStories = new Set<string>();
   for (const idsChunk of chunk(uniqueIds, ID_CHUNK_SIZE)) {
     const rows = db
       .prepare(
-        `SELECT DISTINCT originating_idea_id AS ideaId FROM tasks
-          WHERE originating_idea_id IN (${placeholders(idsChunk.length)})`,
+        `SELECT DISTINCT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId
+           FROM tasks t
+           LEFT JOIN epics e ON e.id = t.parent_epic_id
+          WHERE COALESCE(t.originating_idea_id, e.originating_idea_id) IN (${placeholders(idsChunk.length)})`,
       )
       .all(...idsChunk) as Array<{ ideaId: string }>;
     for (const row of rows) ideasWithStories.add(row.ideaId);

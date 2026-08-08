@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { DatabaseLike } from '../../types';
 import { resolveIdeaComponents, resolveIdeaComponentsBatch } from '../resolveIdeaComponents';
@@ -9,26 +11,19 @@ import { IDEA_COMPONENT_KEYS } from '../../../../../shared/types/ideaComponents'
  * Minimal ad-hoc schema — the neighbouring `entityRunLinks.test.ts` idiom of
  * hand-rolled CREATE TABLEs rather than running the full migration chain.
  * Column sets are pared to exactly what resolveIdeaComponents.ts reads.
+ *
+ * `idea_components` itself is the ONE exception: it is read straight from
+ * migration 098 (the same way taskChangeRouter.test.ts's
+ * buildDbWithIdeaComponents does) rather than hand-rolled, so a future column
+ * or CHECK-constraint change cannot silently miss this copy while the suite
+ * stays green against a schema the app no longer has.
  */
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
+  const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
   db.exec(`
     CREATE TABLE ideas (id TEXT PRIMARY KEY, body TEXT);
-    CREATE TABLE idea_components (
-      idea_id TEXT NOT NULL,
-      project_id INTEGER NOT NULL,
-      component TEXT NOT NULL,
-      state TEXT NOT NULL,
-      source TEXT NOT NULL,
-      source_run_id TEXT,
-      source_session_id TEXT,
-      built_against_version INTEGER,
-      stale_at TEXT,
-      stale_reason TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (idea_id, component)
-    );
     CREATE TABLE approved_designs (
       id TEXT PRIMARY KEY,
       idea_id TEXT NOT NULL,
@@ -81,7 +76,7 @@ function insertLedgerRow(
     `INSERT INTO idea_components
        (idea_id, project_id, component, state, source, source_run_id, source_session_id,
         built_against_version, stale_at, stale_reason, created_at, updated_at)
-     VALUES (?, '1', ?, ?, ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
   ).run(
     ideaId,
     component,
@@ -206,6 +201,53 @@ describe('resolveIdeaComponents / resolveIdeaComponentsBatch', () => {
     expect(ideaSpec.state).toBe('complete');
     expect(ideaSpec.staleAt).toBe('2026-02-01T00:00:00Z');
     expect(ideaSpec.staleReason).toBe('idea body changed');
+  });
+
+  // A task minted UNDER AN EPIC carries a NULL originating_idea_id and reaches
+  // its idea through `tasks.parent_epic_id -> epics.originating_idea_id` — the
+  // codebase's own lineage model (see runEntityOwnership.ts). Reading only the
+  // direct column derived 'stories: incomplete' for an idea whose entire
+  // decomposition already exists, so the planner redid it.
+  it('stories completes for an EPIC-CHILD task whose direct originating_idea_id is NULL', () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1', null);
+    db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run('epc-1', 'idea-1');
+    db.prepare(
+      'INSERT INTO tasks (id, parent_epic_id, originating_idea_id) VALUES (?, ?, NULL)',
+    ).run('tsk-1', 'epc-1');
+
+    const states = resolveIdeaComponents(dbAdapter(db), 'idea-1');
+    expect(pick(states, 'stories')).toMatchObject({ state: 'complete', source: 'derived' });
+    expect(pick(states, 'epics')).toMatchObject({ state: 'complete', source: 'derived' });
+  });
+
+  it('an epic-child task under ANOTHER idea\'s epic does not complete stories here', () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1', null);
+    insertIdea(db, 'idea-2', null);
+    db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run('epc-2', 'idea-2');
+    db.prepare(
+      'INSERT INTO tasks (id, parent_epic_id, originating_idea_id) VALUES (?, ?, NULL)',
+    ).run('tsk-2', 'epc-2');
+
+    expect(pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'stories')).toMatchObject({
+      state: 'incomplete',
+    });
+    expect(pick(resolveIdeaComponents(dbAdapter(db), 'idea-2'), 'stories')).toMatchObject({
+      state: 'complete',
+    });
+  });
+
+  it('an ORPHAN task (no idea, no parent epic) completes stories for nobody', () => {
+    const db = buildDb();
+    insertIdea(db, 'idea-1', null);
+    db.prepare(
+      'INSERT INTO tasks (id, parent_epic_id, originating_idea_id) VALUES (?, NULL, NULL)',
+    ).run('tsk-orphan');
+
+    expect(pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'stories')).toMatchObject({
+      state: 'incomplete',
+    });
   });
 
   it('prototype completes via an approved_designs current row', () => {
