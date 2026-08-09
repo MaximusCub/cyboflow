@@ -138,6 +138,7 @@ const ALL_CANONICAL_KEYS = [
   'sprint-verify',
   'visual-verify',
   'sprint-review',
+  'address-review',
   'compounder',
 ].sort();
 
@@ -147,11 +148,11 @@ const FAN_OUT_INNER_KEYS = ['implement', 'write-tests', 'code-review', 'task-ver
 describe('cyboflow.agents.list', () => {
   beforeEach(() => AgentOverrideRouter._resetForTesting());
 
-  it('returns the 18 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
+  it('returns the 19 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
     const entries = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
 
-    expect(entries).toHaveLength(18);
+    expect(entries).toHaveLength(19);
     for (const e of entries) {
       expect(e.source).toBe('builtin');
       expect(e.isOverridden).toBe(false);
@@ -340,7 +341,7 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(custom.name).toBe('cyboflow-my-helper');
 
     const listed = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(listed).toHaveLength(19);
+    expect(listed).toHaveLength(20);
     expect(listed.find((e) => e.agentKey === 'my-helper')).toBeDefined();
 
     const deleted = await caller.cyboflow.agents.deleteCustom({
@@ -350,7 +351,7 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(deleted).toEqual({ ok: true });
 
     const afterDelete = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(afterDelete).toHaveLength(18);
+    expect(afterDelete).toHaveLength(19);
   });
 
   it('createCustom CONFLICTs on a reserved builtin key', async () => {

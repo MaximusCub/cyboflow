@@ -283,7 +283,7 @@ describe('buildBuiltInWorkflows', () => {
     }
   });
 
-  it('ship definition has 6 phases, 16 steps, unique ids, and canonical/human agents', () => {
+  it('ship definition has 6 phases, 17 steps, unique ids, and canonical/human agents', () => {
     const def = WORKFLOW_DEFINITIONS.ship;
     expect(def, 'WORKFLOW_DEFINITIONS.ship present').toBeDefined();
     expect(def.id).toBe('ship');
@@ -296,9 +296,9 @@ describe('buildBuiltInWorkflows', () => {
     // Phase ids are globally unique.
     expect(new Set(phaseIds).size, 'phase ids are unique').toBe(phaseIds.length);
 
-    // 16 steps total, with globally-unique step ids.
+    // 17 steps total, with globally-unique step ids.
     const steps = def.phases.flatMap((p) => p.steps);
-    expect(steps).toHaveLength(16);
+    expect(steps).toHaveLength(17);
     const stepIds = steps.map((s) => s.id);
     expect(new Set(stepIds).size, 'step ids are globally unique').toBe(stepIds.length);
 

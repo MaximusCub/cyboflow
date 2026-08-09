@@ -814,8 +814,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // sprint — execute N ready tasks (board stages 7-10) in ONE session-hosted
   // run. The orchestrator agent analyzes the dependency DAG, fans out per-task
   // subagents with bounded concurrency, and reports per-task lane progress via
-  // cyboflow_update_sprint_task. One holistic verify/review/human gate at the
-  // end; N=1 degenerates to a normal single-task sprint. The inner chain's
+  // cyboflow_update_sprint_task. One holistic verify/review/address/human gate
+  // at the end — 'address-review' is what keeps the review honest: it verifies
+  // and acts on the findings the run's own reviews produced (per-lane
+  // code-review AND sprint-review) instead of deferring every one of them to a
+  // backlog nobody reads. N=1 degenerates to a normal single-task sprint. The
+  // inner chain's
   // `loopback: 'implement'` fields encode today's "on failure, re-delegate to
   // implement" behavior as data, consumed by both the orchestrated prompt
   // generator and the programmatic controller.
@@ -896,6 +900,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 0,
             desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',
+          },
+          {
+            id: 'address-review',
+            name: 'Address review findings',
+            agent: 'address-review',
+            mcps: ['filesystem', 'git'],
+            retries: 1,
+            desc: "Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.",
           },
           {
             id: 'human-review',
@@ -1182,6 +1194,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 0,
             desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',
+          },
+          {
+            id: 'address-review',
+            name: 'Address review findings',
+            agent: 'address-review',
+            mcps: ['filesystem', 'git'],
+            retries: 1,
+            desc: "Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.",
           },
           {
             id: 'human-review',

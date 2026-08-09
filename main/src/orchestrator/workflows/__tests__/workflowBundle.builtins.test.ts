@@ -39,12 +39,13 @@ describe('built-in workflow bundles', () => {
     assertAgentShape(bundle.agents);
   });
 
-  it('sprint ships its 8 heavy-phase subagents in order (gate stays inline)', () => {
+  it('sprint ships its 9 heavy-phase subagents in order (gate stays inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'sprint.md'));
     // The human-review gate runs inline in the orchestrator — not delegated — so the
     // bundle ships no commands, only subagents.
     expect(bundle.commands).toEqual([]);
     expect(bundle.agents.map((a) => a.name)).toEqual([
+      'address-review',
       'code-review',
       'dependency-analyzer',
       'implement',
@@ -57,7 +58,7 @@ describe('built-in workflow bundles', () => {
     assertAgentShape(bundle.agents);
   });
 
-  it('ship ships its 15 heavy-phase subagents in order (gates stay inline)', () => {
+  it('ship ships its 16 heavy-phase subagents in order (gates stay inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'ship.md'));
     // Human gates (approve-idea / approve-design / approve-plan / human-review) run
     // inline in the orchestrator — they are NOT delegated, so the bundle ships no
@@ -65,6 +66,7 @@ describe('built-in workflow bundles', () => {
     // execute/verify set, self-contained as verbatim copies.
     expect(bundle.commands).toEqual([]);
     expect(bundle.agents.map((a) => a.name)).toEqual([
+      'address-review',
       'adversarial-review',
       'architecture',
       'code-review',
