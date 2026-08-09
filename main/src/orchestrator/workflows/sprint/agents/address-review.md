@@ -63,10 +63,14 @@ this stage is for. Prefer fixing a genuine defect over deferring it.
   responsibly add at this stage.
 - It is a taste-level preference where reasonable engineers differ.
 
-Deferring is a legitimate outcome, not a failure — a deferred finding stays in
-the backlog with your analysis attached, which is strictly more than it had
-before. What is NOT legitimate is deferring a real, contained defect because
-fixing it is work.
+Deferring is a legitimate outcome, not a failure. What is NOT legitimate is
+deferring a real, contained defect because fixing it is work.
+
+A deferred finding stays in the backlog exactly as it was — there is no way to
+annotate it in place, so the only record of WHY you deferred it is the reasoning
+you put in your `## Disposition` entry, which the orchestrator carries to the
+human gate. Write that reason for someone who will read it cold, months from now,
+with none of your context: what you confirmed, and what closing it would take.
 
 ## 3. Fix, then prove it
 

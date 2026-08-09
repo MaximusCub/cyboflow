@@ -183,9 +183,15 @@ is `integrated`.
       re-run **sprint-verify** to confirm the full suite still passes. On
       `VERDICT: FAIL`, re-delegate `cyboflow-address-review` with the failures to
       repair or revert its own fixes — at most **once** — and re-run
-      sprint-verify; if it still fails, surface it at the human gate rather than
-      merging a red tree. Then make **ONE** commit for the whole pass with a
-      message naming the findings addressed.
+      sprint-verify. If it STILL fails, file a **blocking** finding via
+      `cyboflow_report_finding` (`blocking: true`, category
+      `address-review-regression`) carrying the failing tests and what changed,
+      and surface it at the human gate rather than merging a red tree — the
+      blocking finding is what actually parks the run, prose in a summary is not.
+      This is the ONE exception to "do not file new findings from this step", and
+      it qualifies because no further retry in this chain will fix it. Then make
+      **ONE** commit for the whole pass with a message naming the findings
+      addressed.
    4. **Only now resolve**, one entry per finding id, using the disposition as it
       stands *after* step 3:
       - **FIXED and the fix survived** → `cyboflow_resolve_finding` with
@@ -220,7 +226,9 @@ is `integrated`.
    final sprint summary — a per-lane outcome table (task ref, title, lane status,
    commit), plus the address-review tally (how many findings were fixed, dismissed
    as invalid, and left open) so the human can see what the review actually
-   changed — and stop; the user merges the session from the UI. Do **not** merge to
+   changed. **List each finding left OPEN with the one-line reason it was
+   deferred** — a deferred finding cannot be annotated in place, so this summary is
+   the only place that reasoning survives. Then stop; the user merges the session from the UI. Do **not** merge to
    main yourself. On **Reject**, summarize what was rejected, leave the lanes as
    they stand, and end.
 

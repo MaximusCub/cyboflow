@@ -70,7 +70,8 @@ import type { FanOutInnerStep } from '../../../shared/types/workflows';
 /**
  * Map a sprint per-task subagent_type to its lane step. ONLY the five per-task
  * agents are mapped; the sprint-wide phase-1/phase-3 agents
- * (cyboflow-dependency-analyzer / cyboflow-sprint-verify / cyboflow-sprint-review)
+ * (cyboflow-dependency-analyzer / cyboflow-sprint-verify / cyboflow-sprint-review /
+ * cyboflow-address-review)
  * have no per-task lane and are deliberately absent -> an unmapped subagent_type
  * is a no-op. This is the FALLBACK map (see the module doc above) — used only
  * when the run's fan-out chain does not resolve.

@@ -3494,7 +3494,66 @@ export class McpQueryHandler {
    * terminal run, so the agent must call this immediately after each finding's
    * action lands (NOT batched at run end); the RunExecutor terminal-seam close-out
    * is the safety net for whatever was missed.
+   *
+   * SCOPE-GUARDED (see resolveTargetInScope): the router validates only
+   * (projectId, status='pending'), so without this check a single mistyped or
+   * hallucinated id would silently close ANY pending item in the project — an
+   * unrelated run's finding, a `decision` gate row, a `human_task`. That was
+   * tolerable while `resolve_finding` was a rare compound-only call; the
+   * sprint/ship address-review step now calls it N times per run with ids the
+   * model transcribed from a list, so the blast radius is no longer theoretical.
    */
+  /**
+   * Guard `resolve_finding`'s target: it must be a `kind='finding'` row that
+   * THIS run is entitled to close. Two disjoint entitlements, matching the tool's
+   * only two legitimate callers:
+   *
+   *  - the run FILED it (`run_id = runId`) — sprint/ship's address-review closing
+   *    out its own code-review findings; or
+   *  - the run was SEEDED with it (`workflow_runs.seed_finding_ids`) — a compound
+   *    run acting on findings a human selected, which by definition belong to
+   *    EARLIER runs. This arm is why an ownership check cannot simply be
+   *    `run_id = runId`: that would break compound entirely.
+   *
+   * Anything else — another run's finding, a `decision` gate, a `human_task`, a
+   * missing id — is refused rather than silently closed. Read-only; the actual
+   * status transition stays the router's job.
+   */
+  private resolveTargetInScope(
+    runId: string,
+    reviewItemId: string,
+  ): { ok: true } | { ok: false; error: string } {
+    const row = this.db
+      .prepare(`SELECT kind, run_id AS runId FROM review_items WHERE id = ?`)
+      .get(reviewItemId) as { kind?: string; runId?: string | null } | undefined;
+
+    // Keep the router's existing 'not_found' code for a missing id — agents and
+    // tests already key on it; only the NEW refusals get new codes.
+    if (row === undefined) return { ok: false, error: 'not_found' };
+    if (row.kind !== 'finding') return { ok: false, error: 'not_a_finding' };
+    if (row.runId === runId) return { ok: true };
+
+    // Seeded arm: the compound path. Unparseable / absent seed json ⇒ no
+    // entitlement (fail closed), mirroring handleGetSelectedFindings' fail-soft
+    // read but in the refusing direction, since this one is a WRITE.
+    const runRow = this.db
+      .prepare('SELECT seed_finding_ids AS seedFindingIds FROM workflow_runs WHERE id = ?')
+      .get(runId) as { seedFindingIds?: unknown } | undefined;
+    const seedJson =
+      typeof runRow?.seedFindingIds === 'string' && runRow.seedFindingIds.length > 0
+        ? runRow.seedFindingIds
+        : null;
+    if (seedJson !== null) {
+      try {
+        const parsed: unknown = JSON.parse(seedJson);
+        if (Array.isArray(parsed) && parsed.includes(reviewItemId)) return { ok: true };
+      } catch {
+        // fall through to refusal
+      }
+    }
+    return { ok: false, error: 'finding_not_in_run_scope' };
+  }
+
   private async handleResolveFinding(
     msg: Extract<McpQueryMessage, { type: 'mcp-resolve-finding' }>,
     client: net.Socket,
@@ -3506,6 +3565,17 @@ export class McpQueryHandler {
         requestId: msg.requestId,
         ok: false,
         error: ctx.error,
+      });
+      return;
+    }
+
+    const scope = this.resolveTargetInScope(msg.runId, msg.reviewItemId);
+    if (!scope.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: scope.error,
       });
       return;
     }

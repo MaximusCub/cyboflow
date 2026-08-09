@@ -4277,6 +4277,92 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
   // -------------------------------------------------------------------------
 
   describe('mcp-resolve-finding', () => {
+    it('refuses to resolve an item this run neither filed nor was seeded with', async () => {
+      // The router validates only (projectId, status='pending'), so without the
+      // scope guard a mistyped/hallucinated id would silently close an unrelated
+      // pending item. address-review calls resolve N times per run with ids the
+      // model transcribed, so this is the realistic failure.
+      seedCompoundRun(fdb, { runId: 'run-a' });
+      seedCompoundRun(fdb, { runId: 'run-b' });
+      seedFinding(fdb, { id: 'ri_theirs', title: "another run's", runId: 'run-b' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-scope',
+          runId: 'run-a',
+          reviewItemId: 'ri_theirs',
+          resolutionKind: 'fixed',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('finding_not_in_run_scope');
+      // …and the other run's finding is untouched.
+      await drain();
+      const row = fdb.prepare(`SELECT status FROM review_items WHERE id = 'ri_theirs'`).get() as {
+        status: string;
+      };
+      expect(row.status).toBe('pending');
+    });
+
+    it('refuses a non-finding review item (a gate or human task is not triage fodder)', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+      fdb
+        .prepare(
+          `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title, body)
+           VALUES ('ri_gate', 1, 'run-a', 'human_task', 'pending', 1, 'Decide the thing', 'b')`,
+        )
+        .run();
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-kind',
+          runId: 'run-a',
+          reviewItemId: 'ri_gate',
+          resolutionKind: 'triaged',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('not_a_finding');
+    });
+
+    it('still allows a compound run to resolve a SEEDED finding filed by an earlier run', async () => {
+      // The seeded arm is why the ownership check cannot be a bare
+      // `run_id = runId`: compound acts on findings that by definition belong to
+      // earlier runs. Guarding without this arm would break that flow entirely.
+      seedCompoundRun(fdb, { runId: 'run-old' });
+      seedFinding(fdb, { id: 'ri_seeded', title: 'from an older run', runId: 'run-old' });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_seeded'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-seeded',
+          runId: 'run-c',
+          reviewItemId: 'ri_seeded',
+          resolutionKind: 'triaged',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+      await drain();
+      const row = fdb.prepare(`SELECT status FROM review_items WHERE id = 'ri_seeded'`).get() as {
+        status: string;
+      };
+      expect(row.status).toBe('resolved');
+    });
+
     it('promoted + task_id builds promoted:<taskId> and resolves the finding via the chokepoint', async () => {
       seedFinding(fdb, { id: 'ri_p', title: 'Promote me', payload: { kind: 'finding', proposedTarget: 'backlog' } });
       seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_p'] });

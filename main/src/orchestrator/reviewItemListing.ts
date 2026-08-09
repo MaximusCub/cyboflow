@@ -639,7 +639,9 @@ export interface RunFindingRow extends FindingSeedRow {
 /**
  * Read every still-open (`status = 'pending'`) HUMAN-audience `kind = 'finding'`
  * review item filed by `runId`, oldest first. Returns `[]` when the table is
- * absent or the run filed nothing — never throws.
+ * absent or the run filed nothing. (Strictly: a DB carrying review_items but
+ * predating migration 085 would throw on the `audience` column — unreachable in
+ * practice, since migrations run to completion at boot.)
  *
  * Read-only: deliberately does NOT route through ReviewItemRouter (no write),
  * mirroring {@link selectFindingForSeed}. Resolved/dismissed items are excluded

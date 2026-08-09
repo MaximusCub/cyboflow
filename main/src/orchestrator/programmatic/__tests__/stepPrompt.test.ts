@@ -205,6 +205,21 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('IRREVERSIBLE');
   });
 
+  it('escalates a persistently red tree as a BLOCKING finding, not just prose', () => {
+    // The controller does not parse this step's output (there is no VERDICT:
+    // relay channel like task-verify's), so "say so in your summary" guarantees
+    // nothing. A blocking review item is the only thing that actually parks the
+    // run before the human's merge gate.
+    const out = composeStepPrompt({
+      step: step({ id: 'address-review', agent: 'address-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(out).toContain('file a BLOCKING finding');
+    expect(out).toContain('address-review-regression');
+    expect(out).toContain('your summary prose is not machine-read');
+  });
+
   it('omits the address-review contract for every other step', () => {
     const other = composeStepPrompt({
       step: step({ id: 'sprint-review', agent: 'sprint-review' }),
