@@ -170,6 +170,23 @@ describe('composeStepPrompt', () => {
     expect(byAgent).toContain('## Findings contract (address-review)');
   });
 
+  it('requires a full-suite re-run when address-review changed files (programmatic parity)', () => {
+    // The controller walks the definition in order: sprint-verify runs BEFORE
+    // address-review, so any fix this step applies is unverified by the time the
+    // human merge gate opens. The orchestrated prose re-runs sprint-verify; the
+    // programmatic plane has no such step, so the contract must demand it here
+    // or the two planes diverge on a shipping-correctness property.
+    const out = composeStepPrompt({
+      step: step({ id: 'address-review', agent: 'address-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(out).toContain("re-run the project's FULL test suite");
+    expect(out).toContain('must not open over a tree whose suite has not passed');
+    // …and must not burn a full suite run when nothing changed.
+    expect(out).toContain('changed NO files, skip this');
+  });
+
   it('omits the address-review contract for every other step', () => {
     const other = composeStepPrompt({
       step: step({ id: 'sprint-review', agent: 'sprint-review' }),
