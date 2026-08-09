@@ -819,10 +819,9 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // and acts on the findings the run's own reviews produced (per-lane
   // code-review AND sprint-review) instead of deferring every one of them to a
   // backlog nobody reads. N=1 degenerates to a normal single-task sprint. The
-  // inner chain's
-  // `loopback: 'implement'` fields encode today's "on failure, re-delegate to
-  // implement" behavior as data, consumed by both the orchestrated prompt
-  // generator and the programmatic controller.
+  // inner chain's `loopback: 'implement'` fields encode today's "on failure,
+  // re-delegate to implement" behavior as data, consumed by both the
+  // orchestrated prompt generator and the programmatic controller.
   sprint: {
     id: 'sprint',
     phases: [
@@ -907,7 +906,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'address-review',
             mcps: ['filesystem', 'git'],
             retries: 1,
-            desc: "Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.",
+            desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
           },
           {
             id: 'human-review',
@@ -1201,7 +1200,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'address-review',
             mcps: ['filesystem', 'git'],
             retries: 1,
-            desc: "Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.",
+            desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
           },
           {
             id: 'human-review',
