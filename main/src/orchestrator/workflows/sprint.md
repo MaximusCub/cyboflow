@@ -138,12 +138,14 @@ gate.
 Enter this phase only after **every** lane is terminal (`integrated` or `failed`).
 
 **Closing-stage gate — if ANY lane is `failed` or otherwise not `integrated`, the
-sprint is INCOMPLETE: SKIP sprint-verify and sprint-review and go straight to the
-human gate.** Running the full-suite verification and code review over a sprint with
-blocked/failed tasks is wasteful and misleading — the human decides what to do with
-the partial sprint first. To skip them, report each of the two steps done via
-`cyboflow_report_step` (so the timeline advances) **without** delegating its subagent
-or doing its work, then present the human gate below with the partial-sprint summary.
+sprint is INCOMPLETE: SKIP sprint-verify, sprint-review, and address-review and go
+straight to the human gate.** Running the full-suite verification, the code review,
+and a round of fixes over a sprint with blocked/failed tasks is wasteful and
+misleading — the human decides what to do with the partial sprint first, and fixing
+review findings on top of a half-built branch only makes that decision harder. To
+skip them, report each of the three steps done via `cyboflow_report_step` (so the
+timeline advances) **without** delegating its subagent or doing its work, then
+present the human gate below with the partial-sprint summary.
 
 **The partial-sprint summary must enumerate each failed lane**, not just say "some
 lanes failed": for every `failed` lane give its task ref + title, the lane step it
@@ -152,7 +154,8 @@ panel — failed at `code-review` after 3 attempts"). That is the picture the hu
 needs to decide approve (seal the partial sprint; failed tasks return to the backlog)
 vs reject — so surface it in the gate question, don't make them open the swimlane.
 
-Run sprint-verify and sprint-review normally ONLY when every lane is `integrated`.
+Run sprint-verify, sprint-review, and address-review normally ONLY when every lane
+is `integrated`.
 
 1. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
    ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
@@ -163,12 +166,48 @@ Run sprint-verify and sprint-review normally ONLY when every lane is `integrated
 2. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in its
    `## Findings` via `cyboflow_report_finding`, passing `category` + code `locations`
    and a `severity` (this is a verify-phase step).
-3. **human-review** → **human gate, inline.** Use **AskUserQuestion** for the final
+3. **address-review** → **close the loop on this run's own review findings** so a
+   review changes code instead of only filling the backlog.
+   1. Call `cyboflow_list_run_findings` (read-only, no arguments). It returns
+      every still-open finding THIS run filed — each task lane's `code-review`
+      `## Findings` **and** sprint-review's — with the `id` each one needs to be
+      resolved. Read them from this tool, not from your own memory of what you
+      recorded: `cyboflow_report_finding` never returns the minted id, and lanes
+      you delegated hours ago filed findings you never saw. If it returns an
+      empty list, report the step done and move on.
+   2. Delegate to `cyboflow-address-review`, passing the findings **verbatim**
+      (id, title, body, category, severity, locations, suggested fix) plus the
+      per-lane files-touched lists you retained, so it can tell this run's work
+      from pre-existing code.
+   3. Act on its `## Disposition`, one entry per finding id:
+      - **FIXED** → `cyboflow_resolve_finding` with `resolution_kind: 'fixed'`
+        and a `note` naming what changed.
+      - **INVALID** → `cyboflow_resolve_finding` with `resolution_kind: 'triaged'`
+        and a `note` carrying the refutation, so the queue records WHY it was
+        dismissed rather than silently dropping it.
+      - **DEFERRED** → **leave it open.** Do not resolve it. It is a real issue
+        that deliberately isn't this sprint's work, and the human gate below is
+        where it gets decided. A finding id the subagent omitted, or gave a
+        verdict outside those three, is likewise left open — never guess a
+        disposition on its behalf.
+   4. If it changed any files, make **ONE** commit for the whole pass with a
+      message naming the findings addressed, then re-run **sprint-verify** once
+      to confirm the full suite still passes. On `VERDICT: FAIL`, re-delegate
+      `cyboflow-address-review` with the failures to repair or revert its own
+      fixes — at most **once**; if it still fails, surface it at the human gate
+      rather than merging a red tree.
+
+   Never let this step widen the sprint: it fixes filed findings, nothing else.
+   Deferring is a legitimate outcome — a backlog with three real, analyzed
+   deferrals beats one with thirty unread entries.
+4. **human-review** → **human gate, inline.** Use **AskUserQuestion** for the final
    taste-level sign-off on the whole sprint. Use the header `Approve sprint` with
    the options **Approve** / **Reject** (these exact labels). Do **not**
    self-approve and never silently proceed past a gate. On **Approve**, post a
    final sprint summary — a per-lane outcome table (task ref, title, lane status,
-   commit) — and stop; the user merges the session from the UI. Do **not** merge to
+   commit), plus the address-review tally (how many findings were fixed, dismissed
+   as invalid, and left open) so the human can see what the review actually
+   changed — and stop; the user merges the session from the UI. Do **not** merge to
    main yourself. On **Reject**, summarize what was rejected, leave the lanes as
    they stand, and end.
 

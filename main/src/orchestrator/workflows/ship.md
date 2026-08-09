@@ -286,14 +286,52 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 15. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in
     its `## Findings` via `cyboflow_report_finding`, passing `category` + code
     `locations` and a `severity` (this is a verify-phase step).
-16. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
+16. **address-review** → **close the loop on this run's own review findings** so a
+    review changes code instead of only filling the backlog.
+    1. Call `cyboflow_list_run_findings` (read-only, no arguments). It returns
+       every still-open finding THIS run filed — each task lane's `code-review`
+       `## Findings` **and** sprint-review's — with the `id` each one needs to be
+       resolved. Read them from this tool, not from your own memory of what you
+       recorded: `cyboflow_report_finding` never returns the minted id, and lanes
+       you delegated hours ago filed findings you never saw. If it returns an
+       empty list, report the step done and move on.
+    2. Delegate to `cyboflow-address-review`, passing the findings **verbatim**
+       (id, title, body, category, severity, locations, suggested fix) plus the
+       per-lane files-touched lists you retained, so it can tell this run's work
+       from pre-existing code.
+    3. Act on its `## Disposition`, one entry per finding id:
+       - **FIXED** → `cyboflow_resolve_finding` with `resolution_kind: 'fixed'`
+         and a `note` naming what changed.
+       - **INVALID** → `cyboflow_resolve_finding` with
+         `resolution_kind: 'triaged'` and a `note` carrying the refutation, so the
+         queue records WHY it was dismissed rather than silently dropping it.
+       - **DEFERRED** → **leave it open.** Do not resolve it. It is a real issue
+         that deliberately isn't this sprint's work, and the human gate below is
+         where it gets decided. A finding id the subagent omitted, or gave a
+         verdict outside those three, is likewise left open — never guess a
+         disposition on its behalf.
+    4. If it changed any files, make **ONE** commit for the whole pass with a
+       message naming the findings addressed, then re-run **sprint-verify** once
+       to confirm the full suite still passes. On `VERDICT: FAIL`, re-delegate
+       `cyboflow-address-review` with the failures to repair or revert its own
+       fixes — at most **once**; if it still fails, surface it at the human gate
+       rather than merging a red tree.
+
+    Never let this step widen the sprint: it fixes filed findings, nothing else.
+    Deferring is a legitimate outcome — a backlog with three real, analyzed
+    deferrals beats one with thirty unread entries. This step does NOT re-open any
+    planning decision; the idea and its task plan were already approved.
+17. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
     the final taste-level sign-off on the whole sprint. Use the header
     `Approve sprint` with the options **Approve** / **Reject** (these exact
     labels). Do **not** self-approve and never silently proceed past a gate.
     - On **Approve**: the originating idea(s) were already removed from the board
       (`decomposed_at` stamped) when the plan was approved at `approve-plan` (the
       backend does this), so no idea move is needed here. Post a final summary — a
-      per-lane outcome table (task ref, title, lane status, commit) — and **end**.
+      per-lane outcome table (task ref, title, lane status, commit), plus the
+      address-review tally (how many findings were fixed, dismissed as invalid,
+      and left open) so the human can see what the review actually changed — and
+      **end**.
       The run drains and rests in `awaiting_review`; the user merges the session from
       the UI. Do NOT merge to main yourself.
     - On **Reject**: summarize what was rejected and end. The idea stays off the
@@ -353,10 +391,10 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 
 ## Step reporting
 
-Report each of these 16 step ids via `cyboflow_report_step` as that step begins,
+Report each of these 17 step ids via `cyboflow_report_step` as that step begins,
 in order (the runtime also appends an authoritative copy of this list below):
 
 `context`, `approve-idea`, `expand-spec`, `ui-prototype`,
 `architecture`, `adversarial-review`, `approve-design`, `epics`, `tasks`,
 `approve-plan`, `materialize-batch`, `analyze-dependencies`, `execute-tasks`,
-`sprint-verify`, `sprint-review`, `human-review`.
+`sprint-verify`, `sprint-review`, `address-review`, `human-review`.
