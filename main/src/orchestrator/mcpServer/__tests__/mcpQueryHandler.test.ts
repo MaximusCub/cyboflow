@@ -4201,6 +4201,62 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       expect(response.data).toEqual({ findings: [] });
     });
 
+    it('observes a finding still queued from a fire-and-forget report (drains first)', async () => {
+      // report-finding replies BEFORE its create drains the per-project queue.
+      // Reading review_items straight after would race that write and silently
+      // return an incomplete set — dropping exactly the findings sprint-review
+      // filed moments earlier.
+      //
+      // Reporting and listing back-to-back does NOT reproduce this (the queue
+      // usually drains within the intervening microtasks), so OCCUPY the queue
+      // first: the report's create then provably sits behind a pending job while
+      // the list call runs. Without the drain in handleListRunFindings this
+      // returns 0 findings.
+      seedCompoundRun(fdb, { runId: 'run-a' });
+
+      let releaseBlocker: () => void = () => {};
+      const blocker = new Promise<void>((resolve) => {
+        releaseBlocker = resolve;
+      });
+      void ReviewItemRouter.getInstance()
+        ._queueForProject(1)
+        .add(() => blocker);
+
+      const reportSocket = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-1',
+          runId: 'run-a',
+          title: 'Races the reader',
+          body: 'filed immediately before the list call',
+          category: 'correctness',
+        },
+        reportSocket.socket,
+      );
+      // The report replied ok WITHOUT waiting for the write — that is the hazard.
+      expect(parseLastWrite(reportSocket.writes).ok).toBe(true);
+      // Proof the create really is still pending: nothing is in the table yet.
+      expect(
+        (fdb.prepare(`SELECT COUNT(*) AS n FROM review_items`).get() as { n: number }).n,
+      ).toBe(0);
+
+      const { socket, writes } = makeSocketDouble();
+      const listed = fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-race', runId: 'run-a' },
+        socket,
+      );
+      // The list call is parked on the drain; let the queue through.
+      releaseBlocker();
+      await listed;
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as { findings: Array<{ id: string; title: string }> };
+      expect(data.findings).toHaveLength(1);
+      expect(data.findings[0].title).toBe('Races the reader');
+    });
+
     it('is mid-run-only — a terminal run is rejected by the shared run-context guard', async () => {
       seedCompoundRun(fdb, { runId: 'run-a', status: 'completed' });
 

@@ -1529,9 +1529,10 @@ export class McpQueryHandler {
           this.handleGetSelectedFindings(msg, client);
           break;
         case 'mcp-list-run-findings':
-          // Read-only: returns the still-open findings THIS run filed itself,
-          // each with the review_items.id resolve-finding needs. Never writes.
-          this.handleListRunFindings(msg, client);
+          // Read-only, but AWAITED: it drains the project's review-item queue
+          // first so the run observes its own just-reported findings (the
+          // fire-and-forget report path replies before its write commits).
+          await this.handleListRunFindings(msg, client);
           break;
         case 'mcp-resolve-finding':
           // AWAITED (unlike fire-and-forget report-finding) so a failed resolve
@@ -3447,11 +3448,20 @@ export class McpQueryHandler {
    *
    * Mid-run-only via the shared run-context guard (a terminal run replies
    * run_not_active), matching get-selected-findings / resolve-finding.
+   *
+   * AWAITED, unlike its read-only sibling get-selected-findings: this read must
+   * observe the run's OWN prior `report_finding` writes, and those are enqueued
+   * on the ReviewItemRouter's per-project queue and replied to BEFORE they
+   * commit. Selecting straight from the table races them — the findings most
+   * likely to still be in flight are the ones sprint-review filed moments ago,
+   * i.e. exactly the ones this read exists to return. Draining the queue first
+   * costs nothing on the common path (an idle queue resolves immediately) and
+   * turns a silent under-read into a correct one.
    */
-  private handleListRunFindings(
+  private async handleListRunFindings(
     msg: Extract<McpQueryMessage, { type: 'mcp-list-run-findings' }>,
     client: net.Socket,
-  ): void {
+  ): Promise<void> {
     const ctx = this.resolveReviewItemRunContext(msg.runId);
     if (!ctx.ok) {
       this.writeResponse(client, {
@@ -3462,6 +3472,8 @@ export class McpQueryHandler {
       });
       return;
     }
+
+    await ReviewItemRouter.getInstance().awaitProjectWritesSettled(ctx.projectId);
 
     this.writeResponse(client, {
       type: 'mcp-query-response',

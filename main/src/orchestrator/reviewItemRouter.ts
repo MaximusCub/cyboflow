@@ -301,6 +301,27 @@ export class ReviewItemRouter {
     return this.getProjectQueue(projectId);
   }
 
+  /**
+   * Resolve once every review-item write already enqueued for `projectId` has
+   * committed. The read-back barrier for any caller that must observe its OWN
+   * prior writes.
+   *
+   * `applyReviewItem` is enqueued on a concurrency-1 PQueue, and the MCP
+   * `report_finding` path replies to the agent BEFORE its create drains (the run
+   * is deliberately never gated on the inbox). A reader that queries
+   * `review_items` directly right after a report therefore races the write and
+   * can miss it — which for the address-review step means silently skipping the
+   * most recently filed findings, the exact ones it exists to act on. Awaiting
+   * this first turns "probably committed" into "committed".
+   *
+   * Note this is a barrier on work enqueued SO FAR, not a lock: writes enqueued
+   * after it resolves are not covered. That is the right scope here — the caller
+   * only needs to see what was reported before it asked.
+   */
+  async awaitProjectWritesSettled(projectId: number): Promise<void> {
+    await this.getProjectQueue(projectId).onIdle();
+  }
+
   // --------------------------------------------------------------------------
   // Core API
   // --------------------------------------------------------------------------
