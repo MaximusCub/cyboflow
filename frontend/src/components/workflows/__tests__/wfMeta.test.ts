@@ -20,10 +20,10 @@ describe('wfMeta', () => {
     });
   });
 
-  it('sprint: 3 phases, 5 steps, 1 human gate, 0 loops', () => {
+  it('sprint: 3 phases, 6 steps, 1 human gate, 0 loops', () => {
     expect(wfMeta(WORKFLOW_DEFINITIONS.sprint)).toEqual({
       phases: 3,
-      steps: 5,
+      steps: 6,
       human: 1,
       loops: 0,
     });

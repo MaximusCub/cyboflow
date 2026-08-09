@@ -82,7 +82,7 @@ describe('buildWorkflowMeta', () => {
     expect(PLANNER_PHASES).toBe(2);
     expect(PLANNER_STEPS).toBe(11);
     expect(SPRINT_PHASES).toBe(3);
-    expect(SPRINT_STEPS).toBe(5);
+    expect(SPRINT_STEPS).toBe(6);
 
     const planner = meta.find((m) => m.name === 'planner')!;
     const sprint = meta.find((m) => m.name === 'sprint')!;
