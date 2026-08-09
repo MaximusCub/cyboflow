@@ -524,6 +524,13 @@ function liftProposedTarget(payload: unknown): FindingProposedTarget | null {
   return t === 'backlog' || t === 'docs' || t === 'prompt' || t === 'fix' ? t : null;
 }
 
+/** Parse the optional free-text grouping `category` off a finding payload. */
+function liftCategory(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const c = (payload as { category?: unknown }).category;
+  return typeof c === 'string' && c.length > 0 ? c : null;
+}
+
 /** Parse the optional `suggestedFix` prose off a finding payload. */
 function liftSuggestedFix(payload: unknown): string | null {
   if (typeof payload !== 'object' || payload === null) return null;
@@ -595,4 +602,101 @@ export function selectFindingForSeed(db: DatabaseLike, reviewItemId: string): Fi
     suggestedFix: liftSuggestedFix(payload),
     locations: liftLocations(payload),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Read helper: THIS run's own still-open findings, shaped for the address-review
+// step (the sprint/ship stage that verifies + acts on the run's code-review
+// findings instead of leaving every one of them deferred in the backlog)
+// ---------------------------------------------------------------------------
+
+/**
+ * A finding THIS run filed that is still open, shaped for the MCP
+ * `cyboflow_list_run_findings` reply.
+ *
+ * Extends {@link FindingSeedRow} (the compound-seed shape) with the two fields
+ * an in-run triage pass needs and a seeded compound run does not: the free-text
+ * grouping `category` (lifted out of `payload_json`, like the other extras) and
+ * the `blocking` flag, so the reader can tell a run-parking hazard apart from an
+ * ordinary deferred nit.
+ *
+ * WHY THIS EXISTS AT ALL: `cyboflow_report_finding` is deliberately
+ * fire-and-forget — it replies `{ accepted: true }` WITHOUT the minted
+ * review-item id, because the run must never be gated on the inbox queue. That
+ * makes an agent's own record of what it filed unusable as a resolve handle:
+ * `cyboflow_resolve_finding` needs the id. This read closes that loop from the
+ * DB side instead, which is also the more honest source — it sees findings filed
+ * across the whole run (every lane's `code-review` pass plus `sprint-review`),
+ * not just the ones one context window still remembers.
+ */
+export interface RunFindingRow extends FindingSeedRow {
+  /** Free-text grouping category (e.g. 'security', 'test-gap'); null when unset. */
+  category: string | null;
+  /** Whether this finding gates run resume. */
+  blocking: boolean;
+}
+
+/**
+ * Read every still-open (`status = 'pending'`) HUMAN-audience `kind = 'finding'`
+ * review item filed by `runId`, oldest first. Returns `[]` when the table is
+ * absent or the run filed nothing — never throws.
+ *
+ * Read-only: deliberately does NOT route through ReviewItemRouter (no write),
+ * mirroring {@link selectFindingForSeed}. Resolved/dismissed items are excluded
+ * — a re-entered step must not re-triage what it already disposed of.
+ *
+ * `audience = 'machine'` items are excluded for the same reason the run-park
+ * gate excludes them (migration 085): they are the ORCHESTRATOR's durable
+ * mailbox — the visual merge-gate's under-cap `loopback-implement` record exists
+ * only so the lane can be re-delegated, and is already answered by that
+ * loopback. Handing one to a triage pass would have it "address" a defect the
+ * chain itself is mid-way through fixing. The `IS NULL OR != 'machine'` form
+ * matches the sibling query above: a NULL audience counts as human, the safe
+ * direction.
+ */
+export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRow[] {
+  if (!hasReviewItemsTable(db)) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, title, body, severity, priority, source, blocking, payload_json AS payloadJson
+         FROM review_items
+        WHERE run_id = ? AND kind = 'finding' AND status = 'pending'
+          AND (audience IS NULL OR audience != 'machine')
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(runId) as Array<{
+    id: string;
+    title: string;
+    body: string | null;
+    severity: 'info' | 'warning' | 'error' | null;
+    priority: FindingPriority | null;
+    source: string | null;
+    blocking: number | boolean | null;
+    payloadJson: string | null;
+  }>;
+
+  return rows.map((row) => {
+    let payload: unknown = null;
+    if (row.payloadJson) {
+      try {
+        payload = JSON.parse(row.payloadJson);
+      } catch {
+        payload = null;
+      }
+    }
+    return {
+      id: row.id,
+      title: row.title,
+      body: row.body,
+      severity: row.severity,
+      priority: row.priority,
+      source: row.source,
+      category: liftCategory(payload),
+      // SQLite BOOLEAN reads back as 0/1 — normalize like ReviewItemRouter.shapeRow.
+      blocking: row.blocking === 1 || row.blocking === true,
+      proposedTarget: liftProposedTarget(payload),
+      suggestedFix: liftSuggestedFix(payload),
+      locations: liftLocations(payload),
+    };
+  });
 }

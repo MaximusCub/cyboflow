@@ -19,6 +19,7 @@ import {
   countPendingBlockingReviewItems,
   selectPendingBlockingReviewItems,
   selectFindingForSeed,
+  selectRunFindings,
 } from '../reviewItemListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
@@ -166,6 +167,7 @@ describe('empty-safe defaults when the review_items table is absent', () => {
     expect(countPendingBlockingReviewItems(db, 'run-x')).toBe(0);
     expect(selectPendingBlockingReviewItems(db, 'run-x')).toEqual([]);
     expect(selectFindingForSeed(db, 'rvw_x')).toBeNull();
+    expect(selectRunFindings(db, 'run-x')).toEqual([]);
   });
 });
 
@@ -227,5 +229,89 @@ describe('selectFindingForSeed', () => {
     });
     // Malformed location entry (path: 42) is dropped; valid ones survive.
     expect(seed?.locations).toEqual([{ path: 'a.ts', line: 5 }, { path: 'b.ts' }]);
+  });
+});
+
+describe('selectRunFindings', () => {
+  /** Insert one review_items row with explicit kind/status/audience/payload. */
+  const seedFinding = (
+    db: ReturnType<typeof buildReviewInboxDb>,
+    opts: {
+      id: string;
+      runId: string;
+      kind?: string;
+      status?: string;
+      audience?: string;
+      blocking?: number;
+      createdAt?: string;
+      payload?: unknown;
+    },
+  ): void => {
+    const stamp = opts.createdAt ?? new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, severity,
+          priority, source, payload_json, created_at, updated_at)
+       VALUES (?, 1, ?, ?, ?, ?, ?, ?, 'body', 'warning', 'P1', 'agent:code-review', ?, ?, ?)`,
+    ).run(
+      opts.id,
+      opts.runId,
+      opts.kind ?? 'finding',
+      opts.status ?? 'pending',
+      opts.blocking ?? 0,
+      opts.audience ?? 'human',
+      `title ${opts.id}`,
+      opts.payload === undefined ? null : JSON.stringify(opts.payload),
+      stamp,
+      stamp,
+    );
+  };
+
+  it('returns only this run\'s pending human-audience findings, oldest first', () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-1', 'running');
+    seedInboxRun(db, 'run-2', 'running');
+
+    seedFinding(db, { id: 'rvw_b', runId: 'run-1', createdAt: '2026-08-09T10:00:02Z' });
+    seedFinding(db, { id: 'rvw_a', runId: 'run-1', createdAt: '2026-08-09T10:00:01Z' });
+    // Excluded: already resolved, a non-finding kind, the orchestrator's machine
+    // mailbox, and another run's finding.
+    seedFinding(db, { id: 'rvw_done', runId: 'run-1', status: 'resolved' });
+    seedFinding(db, { id: 'rvw_kind', runId: 'run-1', kind: 'decision' });
+    seedFinding(db, { id: 'rvw_mach', runId: 'run-1', audience: 'machine' });
+    seedFinding(db, { id: 'rvw_other', runId: 'run-2' });
+
+    const found = selectRunFindings(dbAdapter(db), 'run-1');
+    expect(found.map((f) => f.id)).toEqual(['rvw_a', 'rvw_b']);
+  });
+
+  it('lifts category off the payload and normalizes the blocking bit', () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-1', 'running');
+    seedFinding(db, {
+      id: 'rvw_cat',
+      runId: 'run-1',
+      blocking: 1,
+      payload: {
+        category: 'security',
+        suggestedFix: 'validate the input',
+        locations: [{ path: 'a.ts', line: 5 }],
+      },
+    });
+    // A finding with no payload at all still shapes cleanly (all extras null).
+    seedFinding(db, { id: 'rvw_bare', runId: 'run-1' });
+
+    const byId = new Map(selectRunFindings(dbAdapter(db), 'run-1').map((f) => [f.id, f]));
+    const withPayload = byId.get('rvw_cat')!;
+    const bare = byId.get('rvw_bare')!;
+    expect(withPayload).toMatchObject({
+      id: 'rvw_cat',
+      category: 'security',
+      suggestedFix: 'validate the input',
+      blocking: true,
+    });
+    expect(withPayload.locations).toEqual([{ path: 'a.ts', line: 5 }]);
+    expect(bare).toMatchObject({ id: 'rvw_bare', category: null, blocking: false });
+    expect(bare.locations).toBeNull();
   });
 });
