@@ -74,7 +74,7 @@ const FLOW_STEPS: Record<'planner' | 'sprint', string[]> = {
     'approve-plan',
     'decompose',
   ],
-  sprint: ['analyze-dependencies', 'execute-tasks', 'sprint-verify', 'sprint-review', 'human-review'],
+  sprint: ['analyze-dependencies', 'execute-tasks', 'sprint-verify', 'sprint-review', 'address-review', 'human-review'],
 };
 
 // ---------------------------------------------------------------------------

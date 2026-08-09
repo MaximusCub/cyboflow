@@ -179,9 +179,20 @@ is `integrated`.
       (id, title, body, category, severity, locations, suggested fix) plus the
       per-lane files-touched lists you retained, so it can tell this run's work
       from pre-existing code.
-   3. Act on its `## Disposition`, one entry per finding id:
-      - **FIXED** → `cyboflow_resolve_finding` with `resolution_kind: 'fixed'`
-        and a `note` naming what changed.
+   3. **Settle the code first — resolving comes last.** If it changed any files,
+      re-run **sprint-verify** to confirm the full suite still passes. On
+      `VERDICT: FAIL`, re-delegate `cyboflow-address-review` with the failures to
+      repair or revert its own fixes — at most **once** — and re-run
+      sprint-verify; if it still fails, surface it at the human gate rather than
+      merging a red tree. Then make **ONE** commit for the whole pass with a
+      message naming the findings addressed.
+   4. **Only now resolve**, one entry per finding id, using the disposition as it
+      stands *after* step 3:
+      - **FIXED and the fix survived** → `cyboflow_resolve_finding` with
+        `resolution_kind: 'fixed'` and a `note` naming what changed.
+      - **FIXED but the fix was reverted or dropped** during step 3 → **leave it
+        open**, exactly like a DEFERRED one, and say so at the gate. The code no
+        longer carries the fix, so the finding is not fixed.
       - **INVALID** → `cyboflow_resolve_finding` with `resolution_kind: 'triaged'`
         and a `note` carrying the refutation, so the queue records WHY it was
         dismissed rather than silently dropping it.
@@ -190,12 +201,14 @@ is `integrated`.
         where it gets decided. A finding id the subagent omitted, or gave a
         verdict outside those three, is likewise left open — never guess a
         disposition on its behalf.
-   4. If it changed any files, make **ONE** commit for the whole pass with a
-      message naming the findings addressed, then re-run **sprint-verify** once
-      to confirm the full suite still passes. On `VERDICT: FAIL`, re-delegate
-      `cyboflow-address-review` with the failures to repair or revert its own
-      fixes — at most **once**; if it still fails, surface it at the human gate
-      rather than merging a red tree.
+
+      **Never resolve a finding before its fix is verified and committed.**
+      Resolving is irreversible — there is no un-resolve tool — so a finding
+      closed as `fixed` whose fix is then reverted by the repair pass, or lost to
+      a crash before the commit, leaves a real defect in the branch with its only
+      record already closed. Resolution is the cheapest and most repeatable step
+      in this chain; it goes last precisely because everything before it can
+      fail.
 
    Never let this step widen the sprint: it fixes filed findings, nothing else.
    Deferring is a legitimate outcome — a backlog with three real, analyzed

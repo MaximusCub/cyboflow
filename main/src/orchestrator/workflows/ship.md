@@ -277,6 +277,27 @@ window into per-task progress; never batch or backfill them.
 Enter this phase only after **every** lane is terminal (`integrated` or
 `failed`).
 
+**Closing-stage gate — if ANY lane is `failed` or otherwise not `integrated`, the
+sprint is INCOMPLETE: SKIP sprint-verify, sprint-review, and address-review and go
+straight to the human gate.** Running the full-suite verification, the code review,
+and a round of fixes over a sprint with blocked/failed tasks is wasteful and
+misleading — the human decides what to do with the partial sprint first, and
+address-review in particular would be editing code on a half-built branch AND
+closing out review records (including the failed lane's own escalation finding)
+before anyone has agreed the partial sprint should survive. To skip them, report
+each of the three steps done via `cyboflow_report_step` (so the timeline advances)
+**without** delegating its subagent or doing its work, then present the human gate
+below with the partial-sprint summary.
+
+**The partial-sprint summary must enumerate each failed lane**, not just say "some
+lanes failed": for every `failed` lane give its task ref + title, the lane step it
+died on (`current_step`), and the attempt it reached (e.g. "`TASK-107` — Add chat
+panel — failed at `code-review` after 3 attempts"). That is the picture the human
+needs to decide approve vs reject, so surface it in the gate question rather than
+making them open the swimlane.
+
+Run steps 14-16 normally ONLY when every lane is `integrated`.
+
 14. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
     ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
     offending task(s) from the failures, set those lanes back to `running`, and
@@ -299,9 +320,20 @@ Enter this phase only after **every** lane is terminal (`integrated` or
        (id, title, body, category, severity, locations, suggested fix) plus the
        per-lane files-touched lists you retained, so it can tell this run's work
        from pre-existing code.
-    3. Act on its `## Disposition`, one entry per finding id:
-       - **FIXED** → `cyboflow_resolve_finding` with `resolution_kind: 'fixed'`
-         and a `note` naming what changed.
+    3. **Settle the code first — resolving comes last.** If it changed any files,
+       re-run **sprint-verify** to confirm the full suite still passes. On
+       `VERDICT: FAIL`, re-delegate `cyboflow-address-review` with the failures to
+       repair or revert its own fixes — at most **once** — and re-run
+       sprint-verify; if it still fails, surface it at the human gate rather than
+       merging a red tree. Then make **ONE** commit for the whole pass with a
+       message naming the findings addressed.
+    4. **Only now resolve**, one entry per finding id, using the disposition as it
+       stands *after* step 3:
+       - **FIXED and the fix survived** → `cyboflow_resolve_finding` with
+         `resolution_kind: 'fixed'` and a `note` naming what changed.
+       - **FIXED but the fix was reverted or dropped** during step 3 → **leave it
+         open**, exactly like a DEFERRED one, and say so at the gate. The code no
+         longer carries the fix, so the finding is not fixed.
        - **INVALID** → `cyboflow_resolve_finding` with
          `resolution_kind: 'triaged'` and a `note` carrying the refutation, so the
          queue records WHY it was dismissed rather than silently dropping it.
@@ -310,12 +342,14 @@ Enter this phase only after **every** lane is terminal (`integrated` or
          where it gets decided. A finding id the subagent omitted, or gave a
          verdict outside those three, is likewise left open — never guess a
          disposition on its behalf.
-    4. If it changed any files, make **ONE** commit for the whole pass with a
-       message naming the findings addressed, then re-run **sprint-verify** once
-       to confirm the full suite still passes. On `VERDICT: FAIL`, re-delegate
-       `cyboflow-address-review` with the failures to repair or revert its own
-       fixes — at most **once**; if it still fails, surface it at the human gate
-       rather than merging a red tree.
+
+       **Never resolve a finding before its fix is verified and committed.**
+       Resolving is irreversible — there is no un-resolve tool — so a finding
+       closed as `fixed` whose fix is then reverted by the repair pass, or lost to
+       a crash before the commit, leaves a real defect in the branch with its only
+       record already closed. Resolution is the cheapest and most repeatable step
+       in this chain; it goes last precisely because everything before it can
+       fail.
 
     Never let this step widen the sprint: it fixes filed findings, nothing else.
     Deferring is a legitimate outcome — a backlog with three real, analyzed

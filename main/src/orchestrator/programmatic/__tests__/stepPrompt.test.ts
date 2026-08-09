@@ -184,7 +184,25 @@ describe('composeStepPrompt', () => {
     expect(out).toContain("re-run the project's FULL test suite");
     expect(out).toContain('must not open over a tree whose suite has not passed');
     // …and must not burn a full suite run when nothing changed.
-    expect(out).toContain('changed NO files, skip this');
+    expect(out).toContain('changed NO files, skip straight to step 4');
+  });
+
+  it('orders resolution AFTER verify+commit, and keeps a reverted fix open', () => {
+    // Resolving is irreversible (no un-resolve tool). Resolving a FIXED finding
+    // before the suite re-run means the repair pass can revert that very fix and
+    // leave a live defect behind a closed record — so the contract must put
+    // resolution last AND handle the reverted case explicitly.
+    const out = composeStepPrompt({
+      step: step({ id: 'address-review', agent: 'address-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    const verifyAt = out.indexOf("Settle the code BEFORE you resolve anything");
+    const resolveAt = out.indexOf('cyboflow_resolve_finding');
+    expect(verifyAt).toBeGreaterThan(-1);
+    expect(resolveAt).toBeGreaterThan(verifyAt);
+    expect(out).toContain('reverted or dropped in step 3');
+    expect(out).toContain('IRREVERSIBLE');
   });
 
   it('omits the address-review contract for every other step', () => {

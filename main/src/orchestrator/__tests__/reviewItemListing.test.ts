@@ -285,6 +285,31 @@ describe('selectRunFindings', () => {
     expect(found.map((f) => f.id)).toEqual(['rvw_a', 'rvw_b']);
   });
 
+  it('keeps only agent-reported findings — system-minted ones are never triaged', () => {
+    // The audience filter alone is NOT enough: verdictDelivery stamps its
+    // merge-gate `loopback-implement` record audience:'machine' ONLY on a
+    // PROGRAMMATIC run — on the orchestrated plane the same record is
+    // audience:'human' AND blocking. Without the source allow-list it would land
+    // in the triage pass, which could close a run-park record the human needed.
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-1', 'running');
+
+    seedFinding(db, { id: 'rvw_agent', runId: 'run-1' }); // source 'agent:code-review'
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, source, created_at, updated_at)
+       VALUES (?, 1, 'run-1', 'finding', 'pending', ?, 'human', ?, 'b', 'visual-verify', ?, ?)`,
+    ).run('rvw_gate', 1, 'loopback-implement', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, source, created_at, updated_at)
+       VALUES (?, 1, 'run-1', 'finding', 'pending', 0, 'human', ?, 'b', NULL, ?, ?)`,
+    ).run('rvw_nosrc', 'no source at all', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
+
+    const found = selectRunFindings(dbAdapter(db), 'run-1');
+    expect(found.map((f) => f.id)).toEqual(['rvw_agent']);
+  });
+
   it('lifts category off the payload and normalizes the blocking bit', () => {
     const db = buildReviewInboxDb();
     seedInboxRun(db, 'run-1', 'running');

@@ -83,6 +83,11 @@ Then:
 - **If a fix turns out to be bigger than it looked** once you are in the code,
   stop and mark it DEFERRED with what you learned. A half-applied fix is worse
   than an untouched finding.
+- **If the orchestrator re-delegates to you** with full-suite failures caused by
+  your own fixes, repair or revert them — and for every fix you REVERT, say so
+  explicitly and change that finding's verdict from FIXED to DEFERRED. The
+  orchestrator resolves findings from your final disposition, so a reverted fix
+  still marked FIXED closes a finding whose defect is back in the code.
 - **Never widen the change.** No refactors, no drive-by cleanups, no fixing
   things nobody filed. Every edit you make must trace to a finding id.
 

@@ -645,14 +645,30 @@ export interface RunFindingRow extends FindingSeedRow {
  * mirroring {@link selectFindingForSeed}. Resolved/dismissed items are excluded
  * — a re-entered step must not re-triage what it already disposed of.
  *
- * `audience = 'machine'` items are excluded for the same reason the run-park
- * gate excludes them (migration 085): they are the ORCHESTRATOR's durable
- * mailbox — the visual merge-gate's under-cap `loopback-implement` record exists
- * only so the lane can be re-delegated, and is already answered by that
- * loopback. Handing one to a triage pass would have it "address" a defect the
- * chain itself is mid-way through fixing. The `IS NULL OR != 'machine'` form
- * matches the sibling query above: a NULL audience counts as human, the safe
- * direction.
+ * TWO exclusions, both narrowing to "findings a REVIEW AGENT reported":
+ *
+ * 1. `audience = 'machine'` — the ORCHESTRATOR's durable mailbox (migration
+ *    085), same reason the run-park gate skips it. The `IS NULL OR != 'machine'`
+ *    form matches the sibling query above: a NULL audience counts as human, the
+ *    safe direction.
+ * 2. `source LIKE 'agent:%'` — an ALLOW-list, not a blacklist. Every finding
+ *    filed through `cyboflow_report_finding` carries the reporting agent's
+ *    `agent:<label>` actor as its source, so this keeps exactly the code-review
+ *    and sprint-review output and drops everything SYSTEM-minted.
+ *
+ * The second is load-bearing and the audience filter alone does NOT imply it:
+ * `verdictDelivery` stamps its merge-gate `loopback-implement` record
+ * `audience: 'machine'` ONLY when the run is programmatic — on the ORCHESTRATED
+ * plane the very same record is `audience: 'human'` and blocking, so it would
+ * otherwise land in a triage pass that could close a run-park record the human
+ * was meant to see. The same applies to `low_confidence` / `timeout` visual
+ * findings: those are judgments about RENDERED OUTPUT, and an agent reading only
+ * source code is not equipped to refute one — inviting it to try is inviting a
+ * false INVALID.
+ *
+ * Excluding a NULL or unrecognized source is deliberate and the safe direction:
+ * a skipped finding merely stays in the backlog for a human, whereas a wrongly
+ * included one can be resolved away.
  */
 export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRow[] {
   if (!hasReviewItemsTable(db)) return [];
@@ -662,6 +678,7 @@ export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRo
          FROM review_items
         WHERE run_id = ? AND kind = 'finding' AND status = 'pending'
           AND (audience IS NULL OR audience != 'machine')
+          AND source LIKE 'agent:%'
         ORDER BY created_at ASC, id ASC`,
     )
     .all(runId) as Array<{
