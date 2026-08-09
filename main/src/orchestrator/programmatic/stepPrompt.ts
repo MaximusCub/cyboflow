@@ -269,6 +269,18 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     step.agent === 'task-verify' || step.id === 'task-verify'
       ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
       : '';
+  // Address-review findings contract (sprint/ship): this step is the ONLY one
+  // whose input is the run's own review queue, and the generic "record every item
+  // the subagent returns" prose does not describe it — nothing is being recorded
+  // here, findings are being READ BACK and closed out. Two things a step agent
+  // cannot infer: the ids exist only via `cyboflow_list_run_findings` (report_
+  // finding is fire-and-forget and never returned them), and the three verdicts
+  // map to DIFFERENT dispositions — resolving a DEFERRED finding would silently
+  // delete the exact backlog entry this stage exists to preserve.
+  const addressReviewNote =
+    step.agent === 'address-review' || step.id === 'address-review'
+      ? `\n\n## Findings contract (address-review) — how this step gets its input and closes it out\n\nThis step acts on the findings THIS run already filed; it does not produce new ones.\n\n1. Call \`cyboflow_list_run_findings\` (read-only, no arguments) FIRST. It returns every still-open finding this run filed — each task lane's \`code-review\` \`## Findings\` AND \`sprint-review\`'s — with the \`id\` each one needs to be resolved. Do NOT reconstruct this list from your own context: \`cyboflow_report_finding\` never returns the minted id, and most of these were filed by lanes you never saw. An empty list means there is nothing to do — say so and stop.\n2. Delegate to \`cyboflow-address-review\`, passing the findings verbatim (id, title, body, category, severity, locations, suggested fix).\n3. Act on its \`## Disposition\`, one entry per finding id — the verdicts are NOT interchangeable:\n   - **FIXED** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'fixed'\` and a \`note\` naming what changed.\n   - **INVALID** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'triaged'\` and a \`note\` carrying the refutation.\n   - **DEFERRED** → do NOTHING. Leave it open. It is a real issue deliberately left for the human gate, and resolving it would erase the one record of it. The same applies to any id the subagent omitted or gave a verdict outside those three — never guess a disposition.\n\nDo NOT file new findings from this step, and do NOT widen the change beyond the filed findings. If the subagent changed files, commit them per step 2 above with a message naming the findings addressed.`
+      : '';
   const conditionalExecutionNote = conditionalExecution(step, workflowName, runOwnedIdeaIds.length > 0);
   const ideaFlagContractNote = ideaFlagContract(step);
   // Compound review-queue discipline — applies to EVERY compound step, not just
@@ -315,5 +327,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${addressReviewNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
 }

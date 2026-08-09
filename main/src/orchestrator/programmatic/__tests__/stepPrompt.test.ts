@@ -146,6 +146,40 @@ describe('composeStepPrompt', () => {
     expect(other).not.toContain('Final message contract (task-verify)');
   });
 
+  it('renders the address-review findings contract, keyed on id or agent', () => {
+    // Nothing in the generic wrapper tells a step agent that this step's INPUT is
+    // the run's own review queue, nor that the three verdicts map to different
+    // dispositions — so the contract has to say it.
+    const byId = composeStepPrompt({
+      step: step({ id: 'address-review', agent: 'address-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(byId).toContain('## Findings contract (address-review)');
+    expect(byId).toContain('cyboflow_list_run_findings');
+    expect(byId).toContain("resolution_kind: 'fixed'");
+    expect(byId).toContain("resolution_kind: 'triaged'");
+    // The load-bearing asymmetry: a DEFERRED finding must survive this step.
+    expect(byId).toContain('**DEFERRED** → do NOTHING');
+
+    const byAgent = composeStepPrompt({
+      step: step({ id: 'act-on-review', agent: 'address-review' }),
+      workflowName: 'ship',
+      attempt: 1,
+    });
+    expect(byAgent).toContain('## Findings contract (address-review)');
+  });
+
+  it('omits the address-review contract for every other step', () => {
+    const other = composeStepPrompt({
+      step: step({ id: 'sprint-review', agent: 'sprint-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(other).not.toContain('Findings contract (address-review)');
+    expect(other).not.toContain('cyboflow_list_run_findings');
+  });
+
   it('contract re-run prose forbids firing the request in place of printing the contract', () => {
     const out = composeStepPrompt({
       step: step({ id: 'task-verify', agent: 'task-verify' }),
