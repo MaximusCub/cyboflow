@@ -20,18 +20,23 @@ type SendState =
   | { phase: 'done'; response: BugReportSubmitResponse }
   | { phase: 'error'; message: string };
 
-/** Human-readable outcome text per delivery state. */
+/**
+ * Human-readable outcome text per delivery state.
+ *
+ * `detail` is absent for the one outcome that needs no explaining: a report that
+ * simply sent. Every other state is telling the user something happened to their
+ * report, so it says what.
+ */
 function describeDelivery(response: BugReportSubmitResponse): {
   tone: 'success' | 'warning' | 'error';
   title: string;
-  detail: string;
+  detail?: string;
 } {
   switch (response.delivery) {
     case 'accepted':
       return {
         tone: 'success',
         title: 'Report sent',
-        detail: 'Thanks — this went straight through.',
       };
     case 'queued':
       return {
@@ -501,7 +506,7 @@ function ResultPanel({
       <Icon className={`w-10 h-10 mx-auto ${color}`} />
       <div className="space-y-1">
         <h3 className="text-base font-medium text-text-primary">{title}</h3>
-        <p className="text-sm text-text-secondary">{detail}</p>
+        {detail && <p className="text-sm text-text-secondary">{detail}</p>}
       </div>
       <div className="flex items-center justify-center gap-3 pt-2">
         {response.delivery !== 'accepted' && response.delivery !== 'queued' && (
