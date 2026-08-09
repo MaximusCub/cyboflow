@@ -3990,6 +3990,9 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
     fdb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     fdb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
     fdb.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+    // 085 adds review_items.audience — selectRunFindings (mcp-list-run-findings)
+    // filters machine-audience rows out, so the column must exist here.
+    fdb.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
     return fdb;
   }
 
@@ -4135,6 +4138,81 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(false);
       expect(response.error).toBe('finding_requires_real_run');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // list-run-findings — the run reading back its OWN open findings, with the
+  // resolve handles fire-and-forget report-finding never returned.
+  // -------------------------------------------------------------------------
+
+  describe('mcp-list-run-findings', () => {
+    it("returns only this run's pending human-audience findings, with their ids", async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+      seedCompoundRun(fdb, { runId: 'run-b' });
+
+      seedFinding(fdb, {
+        id: 'ri_mine',
+        title: 'Unvalidated input',
+        runId: 'run-a',
+        severity: 'error',
+        payload: { kind: 'finding', category: 'security', suggestedFix: 'validate it', locations: [{ path: 'a.ts', line: 9 }] },
+      });
+      // Another run's finding is out of scope.
+      seedFinding(fdb, { id: 'ri_theirs', title: 'Elsewhere', runId: 'run-b' });
+      // Already-resolved and machine-audience rows are both excluded.
+      seedFinding(fdb, { id: 'ri_done', title: 'Handled', runId: 'run-a' });
+      fdb.prepare(`UPDATE review_items SET status = 'resolved' WHERE id = 'ri_done'`).run();
+      seedFinding(fdb, { id: 'ri_mailbox', title: 'loopback-implement', runId: 'run-a' });
+      fdb.prepare(`UPDATE review_items SET audience = 'machine' WHERE id = 'ri_mailbox'`).run();
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-1', runId: 'run-a' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as {
+        findings: Array<{ id: string; title: string; category: string | null; blocking: boolean; suggestedFix: string | null }>;
+      };
+      expect(data.findings).toHaveLength(1);
+      expect(data.findings[0]).toMatchObject({
+        id: 'ri_mine',
+        title: 'Unvalidated input',
+        category: 'security',
+        blocking: false,
+        suggestedFix: 'validate it',
+      });
+    });
+
+    it('returns an empty array when the run filed nothing', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-2', runId: 'run-a' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ findings: [] });
+    });
+
+    it('is mid-run-only — a terminal run is rejected by the shared run-context guard', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a', status: 'completed' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-3', runId: 'run-a' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('run_not_active');
     });
   });
 

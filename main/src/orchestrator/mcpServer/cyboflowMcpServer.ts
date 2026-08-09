@@ -744,6 +744,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: { type: 'object', properties: {}, required: [] },
       },
       {
+        name: 'cyboflow_list_run_findings',
+        description:
+          "Return the still-open findings THIS run filed itself, each with the review_items.id cyboflow_resolve_finding needs; read-only; bound from CYBOFLOW_RUN_ID (no arguments). This is how a run acts on its OWN findings instead of deferring all of them: cyboflow_report_finding is fire-and-forget and never returns the minted id, so the ids only exist here. The set spans the WHOLE run (every task lane's code review plus the sprint-wide review), oldest first, and each row carries { id, title, body, severity, priority, source, category, blocking, proposedTarget, suggestedFix, locations }. Excludes anything already resolved or dismissed (so a re-entered step never re-triages its own disposals) and the orchestrator's internal machine-audience records (e.g. the visual merge-gate's loopback mailbox — those are answered by the loopback, not by triage). Mid-run only: a terminal run is rejected with run_not_active. Distinct from cyboflow_get_selected_findings, which returns the findings a HUMAN seeded into a Compound run.",
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+      {
         name: 'cyboflow_resolve_finding',
         description:
           'Resolve a finding the run consumed; records the correct resolution prefix; routes through the review-item chokepoint. Call this immediately after each finding\'s action lands — resolves are rejected once the run reaches a terminal status.',
@@ -2259,6 +2265,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'cyboflow_get_selected_findings': {
       // Read-only; bound from CYBOFLOW_RUN_ID — no arguments.
       return executeMcpQuery('mcp-get-selected-findings', {});
+    }
+
+    case 'cyboflow_list_run_findings': {
+      // Read-only; bound from CYBOFLOW_RUN_ID — no arguments.
+      return executeMcpQuery('mcp-list-run-findings', {});
     }
 
     case 'cyboflow_resolve_finding': {

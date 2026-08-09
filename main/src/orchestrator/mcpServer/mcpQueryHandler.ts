@@ -110,7 +110,7 @@ import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
-import { selectFindingForSeed } from '../reviewItemListing';
+import { selectFindingForSeed, selectRunFindings } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
@@ -413,6 +413,12 @@ export type McpQueryMessage =
     }
   | {
       type: 'mcp-get-selected-findings';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      /** Read THIS run's own still-open findings, with their resolve handles. */
+      type: 'mcp-list-run-findings';
       requestId: string;
       runId: string;
     }
@@ -1521,6 +1527,11 @@ export class McpQueryHandler {
           // Read-only: returns the findings the human seeded into THIS compound
           // run (workflow_runs.seed_finding_ids). Never writes.
           this.handleGetSelectedFindings(msg, client);
+          break;
+        case 'mcp-list-run-findings':
+          // Read-only: returns the still-open findings THIS run filed itself,
+          // each with the review_items.id resolve-finding needs. Never writes.
+          this.handleListRunFindings(msg, client);
           break;
         case 'mcp-resolve-finding':
           // AWAITED (unlike fire-and-forget report-finding) so a failed resolve
@@ -3419,6 +3430,44 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { findings },
+    });
+  }
+
+  /**
+   * Return the still-open findings THIS run filed itself, each carrying the
+   * `review_items.id` that `cyboflow_resolve_finding` needs. Read-only.
+   *
+   * This is the READ half of the report→act→resolve loop for a run acting on its
+   * OWN findings (the sprint/ship `address-review` step). `report_finding` is
+   * fire-and-forget by design — it never returns the minted id — so an agent
+   * cannot resolve what it filed from memory alone. Reading back from the DB is
+   * also the truer set: it spans every lane's `code-review` pass plus
+   * `sprint-review`, including findings filed by a subagent chain whose context
+   * is long gone.
+   *
+   * Mid-run-only via the shared run-context guard (a terminal run replies
+   * run_not_active), matching get-selected-findings / resolve-finding.
+   */
+  private handleListRunFindings(
+    msg: Extract<McpQueryMessage, { type: 'mcp-list-run-findings' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { findings: selectRunFindings(this.db, msg.runId) },
     });
   }
 

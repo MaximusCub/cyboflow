@@ -530,6 +530,20 @@ describe('cyboflowMcpServer ListTools compound-run findings tools', () => {
     expect(tool!.description.toLowerCase()).toContain('read-only');
   });
 
+  it('declares cyboflow_list_run_findings as a read-only, argument-free sibling', async () => {
+    const tools = await listTools();
+    expect(tools.map((t) => t.name)).toContain('cyboflow_list_run_findings');
+
+    const tool = tools.find((t) => t.name === 'cyboflow_list_run_findings');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.properties).toEqual({});
+    expect(tool!.inputSchema.required).toEqual([]);
+    expect(tool!.description.toLowerCase()).toContain('read-only');
+    // The whole point of the tool: it hands back the resolve handle that
+    // fire-and-forget report_finding never returns.
+    expect(tool!.description).toContain('review_items.id');
+  });
+
   it('declares cyboflow_resolve_finding with the documented inputSchema', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name);
