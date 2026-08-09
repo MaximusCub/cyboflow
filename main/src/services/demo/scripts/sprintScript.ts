@@ -199,6 +199,19 @@ export async function sprintScript(ctx: DemoScriptContext): Promise<void> {
   ctx.say('Also left you a blocking **human task** — the run will stay paused until BOTH it and the final review are resolved.');
   await ctx.sleep(700);
 
+  // ── Verify · address-review (verify + act on the run's own findings) ──────
+  // The real step reads the run's open findings, verifies each, fixes what is
+  // worth fixing, and resolves those. This demo's one finding is a genuine but
+  // product-decision-shaped issue, so it takes the DEFERRED path — which is the
+  // outcome worth showing: the stage leaves an analyzed finding for the human
+  // rather than clearing the queue for its own sake.
+  ctx.reportStep('address-review', 'running');
+  await ctx.sleep(1200);
+  ctx.say(
+    'Reviewed the finding against the code — it is real: `computeStreak` does bucket in UTC. But which calendar day a check-in belongs to is a product decision, not a bug fix, so I left it open for you rather than picking a semantics.',
+  );
+  await ctx.sleep(700);
+
   // ── Verify · human-review (final gate; aggregate-unblock with the task) ───
   ctx.reportStep('human-review', 'running');
   await ctx.humanGate('human-review', 'Human review');
