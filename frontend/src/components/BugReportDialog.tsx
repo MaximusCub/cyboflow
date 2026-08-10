@@ -370,7 +370,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                     className="mt-0.5 flex-shrink-0"
                   />
                   <span className="text-sm text-text-secondary">
-                    Include recent session logs (sensitive data redacted)
+                    Include recent session logs (prompts and file contents excluded)
                     <span className="block text-xs text-text-tertiary">
                       {!logTail
                         ? 'Loading…'
