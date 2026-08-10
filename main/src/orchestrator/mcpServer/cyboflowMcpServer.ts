@@ -829,7 +829,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_request_verification',
         description:
-          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler deploys the verification agent and delivers the verdict asynchronously (to the screenshots artifact + the review queue). The PREFERRED form is `task`: a composed verification task (the `## Visual verification task` fence object task-verify emits — version/summary/build/serve/target/behaviors, matching VerificationTaskV1) that the agent independently builds, drives, and judges. `intent` + `url`/`html_path` remain the LEGACY degenerate form (a bare acceptance sentence and a pre-live target, no build/behaviors) — still accepted for backward compatibility and simple checks. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks.',
+          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId, type, snapshotSha, dirtyWorktree } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler deploys the verification agent and delivers the verdict asynchronously (to the screenshots artifact + the review queue). The PREFERRED form is `task`: a composed verification task (the `## Visual verification task` fence object task-verify emits — version/summary/build/serve/target/behaviors, matching VerificationTaskV1) that the agent independently builds, drives, and judges. `intent` + `url`/`html_path` remain the LEGACY degenerate form (a bare acceptance sentence and a pre-live target, no build/behaviors) — still accepted for backward compatibility and simple checks. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks. QUICK CHAT SESSIONS may fire this too, not just sprint/ship flow lanes — it returns immediately and the chat continues; cyboflow_await_verification is the opt-in in-turn wait, cyboflow_get_verifications is the later-turn cold read once the request_id is gone. COST: firing this spends real per-project verification budget and deploys an SDK agent that runs the project\'s build/serve commands in an isolated snapshot worktree — treat it as a costly action, not a free read. DIRTY-TREE CONTRACT (load-bearing): the verification runs against a DETACHED checkout at `snapshotSha`, so UNCOMMITTED WORK IS INVISIBLE to it — prefer committing before verifying. When `dirtyWorktree` is true you MUST state both the verified sha and the dirty flag alongside ANY verdict you relay: a PASS on a dirty tree certifies the commit, not what the user is looking at, and must never be reported as unqualified. The skip reason "no proven verification runbook for this project (run verification setup)" is ACTIONABLE, not a dead end — offer to run the verify-setup flow.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -921,6 +921,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ['request_id'],
+        },
+      },
+      {
+        name: 'cyboflow_get_verifications',
+        description:
+          "Lists THIS run's verification requests and their outcomes, newest first — a NON-BLOCKING cold read, never a wait. Each row: id, status, verifyType, attempt, failureClass, feedback, errorMessage, enqueuedAt, endedAt, snapshotSha, screenshotFiles. WHY IT EXISTS: cyboflow_await_verification can only answer for a request_id you are still holding; after a context compaction those ids are gone, and this is how you find out what happened to verifications you already fired. `screenshotFiles` is PER-REQUEST and may be `null` — that means this engine persisted no exact per-request file list (the legacy capture path), NOT that no screenshots exist; distinguish it from `[]`, which means the agent ran and captured nothing. SCOPE CAVEAT: the scope is THIS run — in a quick chat session that means the session's own quick sentinel, so it will NOT list verifications fired by structured flow runs the session hosted, even though the artifacts pane does show those; reading an empty list as \"no verifications exist\" is a mistake without this caveat in mind. `snapshotSha` is what the verdict actually certifies — pair it with `dirtyWorktree` from the enqueue reply before relaying any verdict.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            request_id: {
+              type: 'string',
+              description: 'Optional verification request id to narrow the listing to a single row; omit to list every request for this run.',
+            },
+          },
+          required: [],
         },
       },
       {
@@ -2561,6 +2576,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // waiting"). Same pattern as the question gate's 30-minute transport
       // budget, sized here off the handler's own 20-minute clamp plus slack.
       return executeMcpQuery('mcp-await-verification', queryParams, AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS);
+    }
+
+    case 'cyboflow_get_verifications': {
+      const args = (request.params.arguments ?? {}) as { request_id?: unknown };
+      const { request_id } = args;
+      if (request_id !== undefined && (typeof request_id !== 'string' || request_id.length === 0)) {
+        return invalidArgs('request_id: string (optional; the id cyboflow_request_verification returned)');
+      }
+      // `request_id` is renamed to `verificationRequestId` on the wire: every
+      // message on this socket already carries its OWN `requestId` correlation
+      // id, and colliding the two would make the handler answer the wrong call.
+      const queryParams: Record<string, unknown> = {};
+      if (request_id !== undefined) queryParams['verificationRequestId'] = request_id;
+      // NON-BLOCKING cold read — no custom transport timeout. The extended
+      // AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS budget exists only for the
+      // BLOCKING await tool above; this handler answers from the DB immediately.
+      return executeMcpQuery('mcp-get-verifications', queryParams);
     }
 
     case 'cyboflow_register_verify_runbook': {

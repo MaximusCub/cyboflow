@@ -151,20 +151,61 @@ run's `screenshots` artifact (`ArtifactRouter`), advances or loops back the
 sprint lane (`mergeGateLaneAdvance.ts`), and raises/supersedes a
 `review_items` finding carrying the real failure evidence.
 
-Dispatch keys on an IMMUTABLE per-run stamp
-(`workflow_runs.verify_chain=['agent']`), never a live flag, so an in-flight
-run always finishes on the engine it started on. The prior LEGACY engine
-(capture backends `capturePageBackend`/`playwrightBackend`/`peekabooBackend` +
-`VlmJudge`, plus the `.cyboflow/verify.json`-driven `DevServerManager`/
-`StaticServerManager` and the retired golden-baseline `pixelDiff`/
-`baselineStore`) is retired **in place** (`@cyboflow-hidden` — see
-`docs/CODE-PATTERNS.md`) under `main/src/services/visualVerify/`: it stays
-reachable only for a pre-upgrade run's legacy `verify_chain` stamp or the
-`CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch, which also boot-terminalizes
-any agent-chain request stranded queued/leased/running when the switch flips
-(`VerificationScheduler.runRecovery`). Both engines share one per-project
-verification budget (`projects.visual_verify_budget_calls` /
-`verification_requests.judge_calls_used`, migration 056).
+Dispatch keys on `isAgentEngineRequest`: the REQUEST row's own
+`chain_json === '["agent"]'` first, falling back to the per-run stamp
+(`workflow_runs.verify_chain=['agent']`) — never a live flag, so an in-flight
+run always finishes on the engine it started on. For a flow run the two rungs
+are indistinguishable: its request's `chain_json` is always the empty
+intersection `'[]'` (`'agent'` is not a `VisualBackendId`, so it survives no
+intersection), so dispatch still reads the run stamp exactly as it always did.
+The ONE exception is the `__quick__` chat sentinel: it is minted once on the
+session's first chat turn and `verify_chain` has no UPDATE path (see the
+header on `visualVerificationResolver.ts`), so a quick run's posture is
+instead resolved LIVE at enqueue time (`handleRequestVerification`, gated on
+the optional `getVisualVerifyConfig` dep) and written VERBATIM onto the
+request row's `chain_json`. A request row is never re-enqueued, so this is
+every bit as immutable as the run stamp it substitutes for — the dispatch key
+is still frozen at first write, just at request granularity instead of run
+granularity for this one case. The prior LEGACY engine (capture backends
+`capturePageBackend`/`playwrightBackend`/`peekabooBackend` + `VlmJudge`, plus
+the `.cyboflow/verify.json`-driven `DevServerManager`/`StaticServerManager`
+and the retired golden-baseline `pixelDiff`/`baselineStore`) is retired **in
+place** (`@cyboflow-hidden` — see `docs/CODE-PATTERNS.md`) under
+`main/src/services/visualVerify/`: it stays reachable only for a pre-upgrade
+run's legacy `verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback
+kill switch, which also boot-terminalizes any agent-engine request stranded
+queued/leased/running when the switch flips (via the same
+`isAgentEngineRequest` key, `VerificationScheduler.runRecovery`). Both engines
+share one per-project verification budget
+(`projects.visual_verify_budget_calls` / `verification_requests.judge_calls_used`,
+migration 056).
+
+**Quick sessions are the first user-conversation-triggered path into this
+queue, and firing one is deliberately UN-GATED at the PreToolUse layer.** In
+native auto permission mode every `mcp__cyboflow__*` tool — including
+`cyboflow_request_verification` — is allowed deterministically BEFORE the
+auto-mode classifier even runs (`CYBOFLOW_MCP_TOOL_PREFIX` /
+`claudeCodeManager.ts`'s always-installed dynamic PreToolUse hook), so a
+verification fired from chat spends real per-project budget and deploys a
+real SDK verification agent with NO PreToolUse prompt in front of it. What
+bounds this: the runbook's build/serve commands were human-reviewed at
+verify-setup time (the setup-flow layer below); the verifier runs against an
+isolated, detached snapshot worktree, never the live checkout; it carries
+zero MCP servers; `Bash` sits in its tool ceiling but is deliberately excluded
+from its SDK `allowedTools` auto-approve list (`verificationAgentQuery.ts`), so
+every Bash call still routes through `canUseTool` and the §7.2 guard below;
+the per-project budget above still applies uniformly; and — the load-bearing
+one — a human is present in the conversation actually asking for the check.
+That last point is what makes the missing PreToolUse prompt acceptable here;
+revisit this posture if quick sessions ever become reachable by a
+non-interactive or untrusted caller.
+
+`cyboflow_get_verifications` is the complementary NON-BLOCKING cold read
+(`VerificationScheduler.listRequestsForRun`, run-scoped in SQL): it answers
+"what has this run already verified", the one question the blocking
+`cyboflow_await_verification` cannot serve once the caller no longer holds the
+specific request id — e.g. a quick chat session after a context compaction
+drops it.
 
 The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–2
 implemented) sits on top of the agent engine: failures are classified
