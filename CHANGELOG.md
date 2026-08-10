@@ -6,6 +6,29 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-10
+
+### Added
+
+- **Launch flow (built-in)**: an interview-driven super-planner. A Launch run is grounded with a seed prompt collected in a pre-launch modal (migration 100), produces a `project-brief` artifact (migration 090/099), and mints one combined "Idea specs" artifact for multi-idea batches, with approve-ideas verdicts threaded into the post-gate programmatic steps.
+- **Address-review stage**: the sprint and ship verify phases gain an address-review agent + step that acts on a run's own review findings. Adds a `cyboflow_list_run_findings` MCP tool (and `selectRunFindings`) for in-run triage, a findings contract for the programmatic execution plane, and a required full-suite re-run after address-review edits.
+- **Quick-arm experiments**: launch a quick-session arm directly from the A/B launch modal — skipping the launcher and stamping a sentinel run — with a "Done" affordance in the comparison view and persisted quick-arm configs (migration 098) so a rerun replays the same matchup.
+- **better-sqlite3 ABI guard + artifact cache**: `ensure-sqlite-abi.mjs <host|electron>` flips native ABI in ~0.3s (cached), and a read-only `--check` announces shared out-of-checkout artifacts.
+- Verification instances are attested by launch token rather than app version or shared window title.
+
+### Changed
+
+- Bumped `@anthropic-ai/claude-agent-sdk` to 0.3.224.
+- Merge / Create-PR is gated on a run's live settle state rather than `session.status`.
+
+### Fixed
+
+- Question gates survive human absence: the bridge timeout is removed and a Codex 300s tool-timeout + 30-minute bridge cap replace it.
+- A red test tree is escalated as a blocking finding, and findings resolve only after the fix is verified and committed.
+- Quick-arm hardening: a settle write-barrier refuses to settle an arm mid-turn, orphaned arm sessions are swept, and quick-arm configs are cross-field validated at the wire.
+- Node process warnings and agent-authored SQL errors log at WARN, not ERROR.
+- The verify window resolves by bundle id (not the ambiguous name "Electron") and `setAppTitle` no longer overwrites a verification instance's title.
+
 ## [0.2.0] — 2026-08-06
 
 ### Added
