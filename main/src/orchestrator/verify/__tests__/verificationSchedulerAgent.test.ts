@@ -512,6 +512,224 @@ describe('VerificationScheduler — legacy kill-switch boot terminalization (§5
   });
 });
 
+// ---------------------------------------------------------------------------
+// isAgentEngineRequest — the REQUEST-level dispatch key (b5f25edb, "let quick
+// sessions queue visual verifications over MCP").
+//
+// A `__quick__` chat sentinel's posture is resolved at MCP call time (there is
+// no UPDATE path for a run's frozen `verify_chain` stamp), so the MCP handler
+// writes the resolved chain verbatim onto the REQUEST row instead. The
+// scheduler must therefore consult the request's own chain_json FIRST and only
+// fall back to the run stamp when the request carries none — every dispatch
+// site (drain, the legacy-kill-switch boot sweep, queued-age expiry
+// provenance) goes through this one method, so these cases are written against
+// each of those three call sites rather than only the drain path.
+// ---------------------------------------------------------------------------
+describe('VerificationScheduler — isAgentEngineRequest request-level dispatch key (quick sessions)', () => {
+  it("a request whose OWN chain_json is '[\"agent\"]' dispatches to the agent engine even though its RUN is not agent-stamped (the __quick__ case)", async () => {
+    // verify_chain NULL — a quick-session run never gets the frozen stamp at all.
+    seedRun(db, 'run-quick', null);
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend(captureSpy) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+    });
+    scheduler.enqueue({
+      runId: 'run-quick',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'verify the widget' },
+      chain: ['agent'],
+    });
+    await flushDrain();
+
+    // Without this rung the row would fall to the legacy waterfall, select no
+    // candidate off an empty/foreign backend list, and terminate
+    // skipped:'no usable backend' behind a healthy-looking reply — the whole
+    // feature would be dead on arrival.
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(requestRow(db).status).toBe('passed');
+  });
+
+  it("REGRESSION: an agent-STAMPED run whose request persists chain_json '[]' (every flow run today) still dispatches to the agent engine via the run-stamp fallback", async () => {
+    seedRun(db, 'run-flow', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend(captureSpy) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+    });
+    // The FALLBACK_CHAINS ∩ VisualBackendId[] intersection a flow run's MCP
+    // handler computes for an 'agent'-stamped run is always empty — 'agent' is
+    // not a VisualBackendId, so it never survives the intersection.
+    scheduler.enqueue({
+      runId: 'run-flow',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'verify the widget' },
+      chain: [],
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(requestRow(db).status).toBe('passed');
+  });
+
+  it('a legacy-stamped run with a legacy request chain still runs the capture/VLM waterfall, unchanged', async () => {
+    seedRun(db, 'run-legacy-2', JSON.stringify(['capturePage']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend(captureSpy) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+    });
+    scheduler.enqueue({
+      runId: 'run-legacy-2',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'x' },
+      chain: ['capturePage'],
+    });
+    await flushDrain();
+
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(requestRow(db).status).toBe('passed');
+  });
+
+  /**
+   * Insert a request row directly at `status` with an explicit `chain_json`,
+   * for the boot-sweep / queued-age cases below — mirrors the file's own
+   * `insertRow` idiom (§5.8 boot-terminalization describe above) but exposes
+   * `chainJson` and `enqueuedAt` since those are exactly what these cases vary.
+   */
+  function insertQuickStyleRow(
+    dbX: Database.Database,
+    opts: {
+      id: string;
+      runId: string;
+      status: 'queued' | 'leased' | 'running';
+      chainJson: string;
+      enqueuedAt?: string;
+    },
+  ): void {
+    dbX
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+         VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, ?, 0, ?)`,
+      )
+      .run(
+        opts.id,
+        opts.runId,
+        opts.status,
+        JSON.stringify({ intent: 'x', taskRef: 'TASK-1' }),
+        opts.chainJson,
+        opts.enqueuedAt ?? new Date().toISOString(),
+      );
+  }
+
+  it("the CYBOFLOW_VERIFY_LEGACY boot sweep terminalizes a QUEUED quick-style request (chain_json '[\"agent\"]', run NOT agent-stamped) with the same 'agent engine disabled' provenance a flow run gets", async () => {
+    // The run stamp alone says "not agent" — only the request's own chain_json
+    // carries the quick session's resolved posture. Without isAgentEngineRequest
+    // reading the request row, this row would never match the sweep's
+    // isAgentStampedRun(row.run_id) check and would be stranded queued forever.
+    seedRun(db, 'run-quick-2', null);
+    insertQuickStyleRow(db, {
+      id: 'vr_quick_queued',
+      runId: 'run-quick-2',
+      status: 'queued',
+      chainJson: JSON.stringify(['agent']),
+    });
+
+    const verdicts: Array<{ requestId: string; status: string; captureOrigin?: string }> = [];
+    const onVerdict: OnVerdict = (a) =>
+      void verdicts.push({ requestId: a.requestId, status: a.status, captureOrigin: a.captureOrigin });
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict,
+      legacyKillSwitch: () => true,
+    });
+
+    const n = await scheduler.runRecovery();
+    expect(n).toBe(1);
+
+    const row = db
+      .prepare(`SELECT status, error_message AS error FROM verification_requests WHERE id = 'vr_quick_queued'`)
+      .get() as { status: string; error: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.error).toContain('agent engine disabled');
+    expect(row.error).toContain('CYBOFLOW_VERIFY_LEGACY');
+    expect(verdicts).toEqual([{ requestId: 'vr_quick_queued', status: 'skipped', captureOrigin: 'agent' }]);
+  });
+
+  it("expireOverAgeQueued stamps captureOrigin 'agent' for an over-age quick-style row (chain_json '[\"agent\"]', run NOT agent-stamped)", async () => {
+    seedRun(db, 'run-quick-3', null);
+    let clock = 50_000_000;
+    insertQuickStyleRow(db, {
+      id: 'vr_quick_stale',
+      runId: 'run-quick-3',
+      status: 'queued',
+      chainJson: JSON.stringify(['agent']),
+      // Enqueued well before the clock — past the ceiling below.
+      enqueuedAt: new Date(clock - 3_600_000).toISOString(),
+    });
+
+    const verdicts: Array<{ requestId: string; status: string; captureOrigin?: string }> = [];
+    const onVerdict: OnVerdict = (a) =>
+      void verdicts.push({ requestId: a.requestId, status: a.status, captureOrigin: a.captureOrigin });
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: { ...CONFIG, queuedAgeCeilingMs: 5_000 },
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict,
+      now: () => clock,
+    });
+    await scheduler.drain();
+
+    const row = db
+      .prepare(`SELECT status, error_message AS error FROM verification_requests WHERE id = 'vr_quick_stale'`)
+      .get() as { status: string; error: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.error).toMatch(/queued-age deadline exceeded/);
+    // captureOrigin: 'agent' is forwarded to onVerdict (not a persisted column —
+    // see verificationScheduler.ts's TerminalExtra/deliver) precisely because
+    // isAgentEngineRequest, not the run stamp alone, recognized this row.
+    expect(verdicts).toEqual([{ requestId: 'vr_quick_stale', status: 'skipped', captureOrigin: 'agent' }]);
+  });
+});
+
 describe('ResourceLeasePool.quarantine (§5.4 step 6)', () => {
   it('holds a leaked lease until its re-probe reports the resource free', async () => {
     const pool = new ResourceLeasePool(new Mutex());

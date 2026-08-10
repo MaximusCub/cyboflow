@@ -37,9 +37,12 @@ import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../spri
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { VerificationScheduler } from '../../verify/verificationScheduler';
+import type { VerificationRequestSummary } from '../../verify/verificationScheduler';
 import { VerifyRunbookStore } from '../../verify/runbookStore';
 import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
-import type { VerdictV1 } from '../../../../../shared/types/visualVerification';
+import { QUICK_WORKFLOW_NAME } from '../../workflowRegistry';
+import type { VerdictV1, ResolvedVisualVerifyConfig } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { handleEntityWrite } from '../../autoMintArtifacts';
@@ -4511,6 +4514,10 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   // test. 'wf-verify-setup' is the one workflow identity the new gate accepts.
   const NON_SETUP_WORKFLOW_ID = 'wf-1';
   const VERIFY_SETUP_WORKFLOW_ID = 'wf-verify-setup';
+  // The __quick__ chat sentinel identity (b5f25edb): resolveRunFrozenSpec's
+  // workflow_runs → workflows JOIN must see a real row named QUICK_WORKFLOW_NAME
+  // for `isQuickRun` to flip true, exactly like the two IDs above.
+  const QUICK_WORKFLOW_ID = 'wf-quick';
 
   /**
    * Seed a run with the migration-036 verify stamp applied inline.
@@ -4699,6 +4706,9 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     vdb
       .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'verify-setup', '{}')`)
       .run(VERIFY_SETUP_WORKFLOW_ID);
+    vdb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`)
+      .run(QUICK_WORKFLOW_ID, QUICK_WORKFLOW_NAME);
 
     initVerifyScheduler();
 
@@ -4717,6 +4727,22 @@ describe('McpQueryHandler — mcp-request-verification', () => {
   afterEach(() => {
     VerificationScheduler._resetForTesting();
   });
+
+  /**
+   * A handler wired with `getVisualVerifyConfig` — the dep b5f25edb added so a
+   * `__quick__` run can resolve its posture at CALL time (index.ts wires the real
+   * one to `configManager.getVisualVerifyConfig()`; here it's a fixed value so
+   * each test controls the global rung directly). Deliberately a SEPARATE
+   * handler instance from `vHandler`: most of this block's tests exercise the
+   * pre-existing frozen-stamp path and must keep doing so with the dep absent,
+   * which is itself one of the required regression cases below.
+   */
+  function makeQuickHandler(configOverrides: Partial<ResolvedVisualVerifyConfig> = {}): McpQueryHandler {
+    return new McpQueryHandler(dbAdapter(vdb), undefined, {
+      verifyRunbookStore: verifyStore,
+      getVisualVerifyConfig: () => ({ ...VISUAL_VERIFY_DEFAULTS, ...configOverrides }),
+    });
+  }
 
   it('enabled run → enqueues a verification_requests row and replies { requestId }', async () => {
     seedVerifyRun(vdb, 'run-v1', {
@@ -5846,6 +5872,317 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(false);
     expect(response.error).toBe('run_not_active');
+  });
+
+  // -------------------------------------------------------------------------
+  // QUICK-SESSION LATE BINDING (b5f25edb). A `__quick__` chat sentinel's
+  // verify_chain stamp is minted once on the session's first turn and has no
+  // UPDATE path, so it resolves posture at CALL time through the OPTIONAL
+  // `getVisualVerifyConfig` dep instead — gated on `isQuickRun` (the run's
+  // FROZEN workflow name, via resolveRunFrozenSpec, equals QUICK_WORKFLOW_NAME)
+  // AND the dep actually being present, so every pre-existing fixture that
+  // builds a deps bag without it keeps its old behavior untouched. `vHandler`
+  // (built in `beforeEach` with no `getVisualVerifyConfig`) stays the control
+  // for "old wiring, unaffected"; `makeQuickHandler` builds the post-change
+  // wiring on demand.
+  // -------------------------------------------------------------------------
+
+  it('QUICK run + getVisualVerifyConfig enabled=true → enqueues (posture resolved at CALL time, overriding a DISABLED frozen stamp) and persists chain_json exactly ["agent"]', async () => {
+    // Stamped DISABLED — this is the exact bug b5f25edb fixes: a `__quick__`
+    // sentinel minted before the master switch was flipped on is frozen
+    // disabled forever under the OLD stamp-reading path. The quick branch must
+    // enqueue anyway by resolving the CURRENT global config instead of this stamp.
+    seedVerifyRun(vdb, 'run-quick-enabled', { enabled: false, workflowId: QUICK_WORKFLOW_ID });
+
+    const quickHandler = makeQuickHandler({ enabled: true });
+    const { socket, writes } = makeSocketDouble();
+    await quickHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rvq-1',
+        runId: 'run-quick-enabled',
+        intent: 'the quick-session UI renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string; type: string; skipped?: boolean };
+    expect(data.skipped).toBeUndefined();
+    expect(typeof data.requestId).toBe('string');
+    expect(data.type).toBe('static-render-snapshot');
+
+    const row = vdb
+      .prepare('SELECT chain_json, verify_type FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { chain_json: string; verify_type: string };
+    // Written VERBATIM, not intersected against FALLBACK_CHAINS — the
+    // intersection would erase the 'agent' selector (it is not a
+    // VisualBackendId) and misroute the row to the legacy waterfall.
+    expect(row.chain_json).toBe('["agent"]');
+    expect(row.verify_type).toBe('static-render-snapshot');
+  });
+
+  it('QUICK run + getVisualVerifyConfig enabled=false → replies { skipped:true } and enqueues nothing', async () => {
+    seedVerifyRun(vdb, 'run-quick-disabled', { enabled: false, workflowId: QUICK_WORKFLOW_ID });
+
+    const quickHandler = makeQuickHandler({ enabled: false });
+    const { socket, writes } = makeSocketDouble();
+    await quickHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rvq-2',
+        runId: 'run-quick-disabled',
+        intent: 'should be skipped',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toEqual({ skipped: true });
+
+    const count = vdb
+      .prepare("SELECT COUNT(*) AS n FROM verification_requests WHERE run_id = 'run-quick-disabled'")
+      .get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('REGRESSION — a non-quick run still reads its FROZEN stamp (chain_json "[]" under the default agent engine), even when getVisualVerifyConfig is wired', async () => {
+    // Mirrors what createRun actually stamps for an ordinary flow run under the
+    // default agent engine: verify_chain = ['agent']. The pre-existing
+    // intersection (FALLBACK_CHAINS[type] ∩ the stamp narrowed to
+    // VisualBackendId[]) always empties this out — 'agent' narrows away — so
+    // the persisted chain_json is '[]', byte-identical to before b5f25edb.
+    // `quickHandler` (not `vHandler`) is used deliberately: it carries
+    // getVisualVerifyConfig, the realistic post-change production wiring — the
+    // point of this test is that a NON-quick run ignores that dep entirely
+    // because `isQuickRun` is false, proving the change has zero blast radius
+    // on sprint/ship runs.
+    seedVerifyRun(vdb, 'run-flow-regression', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['agent'],
+      workflowId: NON_SETUP_WORKFLOW_ID,
+    });
+
+    const quickHandler = makeQuickHandler({ enabled: true });
+    const { socket, writes } = makeSocketDouble();
+    await quickHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rvq-3',
+        runId: 'run-flow-regression',
+        intent: 'the toggle renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string; skipped?: boolean };
+    expect(data.skipped).toBeUndefined();
+
+    const row = vdb
+      .prepare('SELECT chain_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { chain_json: string };
+    expect(row.chain_json).toBe('[]');
+  });
+
+  it('QUICK run with getVisualVerifyConfig ABSENT from deps falls back to the frozen stamp (pre-existing fixtures keep their old behavior)', async () => {
+    seedVerifyRun(vdb, 'run-quick-nodep', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      workflowId: QUICK_WORKFLOW_ID,
+    });
+
+    // vHandler (beforeEach) was built WITHOUT getVisualVerifyConfig — the
+    // `this.deps.getVisualVerifyConfig !== undefined` guard must skip the quick
+    // branch entirely and fall through to the frozen-stamp read above it.
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rvq-4',
+        runId: 'run-quick-nodep',
+        intent: 'legacy quick behavior',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string; skipped?: boolean };
+    expect(data.skipped).toBeUndefined();
+
+    const row = vdb
+      .prepare('SELECT chain_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { chain_json: string };
+    // Intersected off the frozen stamp exactly as a pre-b5f25edb quick run
+    // would be — NOT the verbatim ['agent'] engine selector.
+    expect(JSON.parse(row.chain_json)).toEqual(['capturePage']);
+  });
+
+  it('the enqueue ack carries snapshotSha and dirtyWorktree, and dirtyWorktree is true for a quick-session worktree with uncommitted changes', async () => {
+    // A dedicated throwaway repo (not the shared `gitRepo` fixture, which other
+    // tests in this block read `gitRepoHead` against and must stay clean) so
+    // this test can dirty it without disturbing any other test's assumptions.
+    const dirtyRepo = mkdtempSync(join(os.tmpdir(), 'cyboflow-mcp-verify-dirty-'));
+    try {
+      const git = (...args: string[]): string => execFileSync('git', args, { cwd: dirtyRepo, encoding: 'utf8' });
+      git('init', '-q');
+      git('config', 'user.email', 't@t.dev');
+      git('config', 'user.name', 'T');
+      writeFileSync(join(dirtyRepo, 'f.txt'), 'hi');
+      git('add', '.');
+      git('commit', '-q', '-m', 'init');
+      const head = git('rev-parse', 'HEAD').trim();
+      // Uncommitted change AFTER the commit — the exact case `isWorktreeDirty`
+      // exists to catch: a snapshot at `head` will not contain this edit.
+      writeFileSync(join(dirtyRepo, 'f.txt'), 'changed, uncommitted');
+
+      seedVerifyRun(vdb, 'run-quick-dirty', {
+        enabled: false,
+        workflowId: QUICK_WORKFLOW_ID,
+        worktreePath: dirtyRepo,
+      });
+
+      const quickHandler = makeQuickHandler({ enabled: true });
+      const { socket, writes } = makeSocketDouble();
+      await quickHandler.handleMessage(
+        {
+          type: 'mcp-request-verification',
+          requestId: 'rvq-5',
+          runId: 'run-quick-dirty',
+          intent: 'checking before I commit',
+          url: 'http://localhost:5173',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as {
+        requestId: string;
+        type: string;
+        snapshotSha: string | null;
+        dirtyWorktree: boolean;
+      };
+      expect(data.snapshotSha).toBe(head);
+      expect(data.dirtyWorktree).toBe(true);
+    } finally {
+      rmSync(dirtyRepo, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // mcp-get-verifications (cyboflow_get_verifications — b5f25edb). The
+  // NON-BLOCKING cold read behind VerificationScheduler.listRequestsForRun:
+  // run-scoped in SQL (never a post-filter), newest-first, with PER-REQUEST
+  // (not run-unioned) screenshot filenames.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Seed a bare verification_requests row for the listing tests — these care
+   * about status/enqueued_at/report_json shape, not about driving a real
+   * enqueue through the scheduler. `enqueuedAt` is always explicit (never the
+   * column DEFAULT) so "newest-first" is asserted against a controlled
+   * ordering rather than same-second CURRENT_TIMESTAMP ties.
+   */
+  function seedListedRequest(
+    id: string,
+    runId: string,
+    opts: { status?: string; verifyType?: string; enqueuedAt: string; reportJson?: string | null },
+  ): void {
+    vdb
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, enqueued_at, report_json)
+         VALUES (?, ?, 1, ?, ?, '{"intent":"x"}', '[]', ?, ?)`,
+      )
+      .run(
+        id,
+        runId,
+        opts.status ?? 'passed',
+        opts.verifyType ?? 'static-render-snapshot',
+        opts.enqueuedAt,
+        opts.reportJson ?? null,
+      );
+  }
+
+  it("mcp-get-verifications is run-scoped: only THIS run's rows come back newest-first, and a request_id from ANOTHER run yields an EMPTY list (not that run's row, not an error)", async () => {
+    seedVerifyRun(vdb, 'run-list-a', { enabled: false });
+    seedVerifyRun(vdb, 'run-list-b', { enabled: false });
+
+    seedListedRequest('vr_a_older', 'run-list-a', { enqueuedAt: '2026-01-01T00:00:00.000Z' });
+    seedListedRequest('vr_a_newer', 'run-list-a', { enqueuedAt: '2026-01-02T00:00:00.000Z' });
+    seedListedRequest('vr_b_only', 'run-list-b', { enqueuedAt: '2026-01-03T00:00:00.000Z' });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage({ type: 'mcp-get-verifications', requestId: 'gv-1', runId: 'run-list-a' }, socket);
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const { verifications } = response.data as { verifications: VerificationRequestSummary[] };
+    expect(verifications.map((v) => v.id)).toEqual(['vr_a_newer', 'vr_a_older']);
+
+    // vr_b_only genuinely exists — just not on run-list-a. Run-scoping is
+    // enforced in the SQL WHERE, so this cannot leak run-b's row.
+    const { socket: socket2, writes: writes2 } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-get-verifications',
+        requestId: 'gv-2',
+        runId: 'run-list-a',
+        verificationRequestId: 'vr_b_only',
+      },
+      socket2,
+    );
+    const response2 = parseLastWrite(writes2);
+    expect(response2.ok).toBe(true);
+    expect((response2.data as { verifications: unknown[] }).verifications).toEqual([]);
+  });
+
+  it('mcp-get-verifications reports PER-REQUEST screenshots with no bleed across rows on the same run, and a NULL report_json → screenshotFiles null (distinct from [])', async () => {
+    seedVerifyRun(vdb, 'run-list-shots', { enabled: false });
+
+    seedListedRequest('vr_shots_1', 'run-list-shots', {
+      enqueuedAt: '2026-01-01T00:00:00.000Z',
+      reportJson: JSON.stringify({ screenshots: [{ fileName: 'turn1-a.png' }] }),
+    });
+    seedListedRequest('vr_shots_2', 'run-list-shots', {
+      enqueuedAt: '2026-01-02T00:00:00.000Z',
+      reportJson: JSON.stringify({ screenshots: [{ fileName: 'turn2-a.png' }, { fileName: 'turn2-b.png' }] }),
+    });
+    // No report_json at all — the legacy capture path / a request that never
+    // reached a terminal. Must read back as null, not [].
+    seedListedRequest('vr_shots_none', 'run-list-shots', {
+      enqueuedAt: '2026-01-03T00:00:00.000Z',
+      reportJson: null,
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      { type: 'mcp-get-verifications', requestId: 'gv-3', runId: 'run-list-shots' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const { verifications } = response.data as { verifications: VerificationRequestSummary[] };
+    const byId = new Map(verifications.map((v) => [v.id, v]));
+
+    // If this test were sourcing from the run's unioned `screenshots` artifact
+    // instead of this request's own report_json, EVERY row here would carry
+    // all four filenames — exactly the bleed the design (verificationScheduler
+    // §VerificationRequestSummary doc) calls out as the bug to avoid.
+    expect(byId.get('vr_shots_1')?.screenshotFiles).toEqual(['turn1-a.png']);
+    expect(byId.get('vr_shots_2')?.screenshotFiles).toEqual(['turn2-a.png', 'turn2-b.png']);
+    expect(byId.get('vr_shots_none')?.screenshotFiles).toBeNull();
   });
 });
 
