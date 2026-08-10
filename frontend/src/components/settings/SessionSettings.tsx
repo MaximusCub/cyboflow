@@ -286,8 +286,8 @@ export function SessionSettings({
         {/* Per-run-type overrides land here, directly below Global defaults.
             This one IS self-fetching (workflow rows + config) and writes through
             the dedicated `applyRunTypeDefault` IPC op rather than this group's
-            props-in/callback-out contract — routing it through Settings.tsx's
-            shared handleSubmit would echo a stale `runTypeDefaults` snapshot. */}
+            props-in/callback-out contract — see RunTypeOverrideDetail's module
+            doc for why Settings.tsx's shared handleSubmit is the wrong channel. */}
         <RunTypeOverridesSection />
       </CollapsibleCard>
     </section>

@@ -23,6 +23,8 @@
  */
 import { MODEL_OPTIONS, modelDisplayLabel } from '../cyboflow/unified/ModelPill';
 import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector';
+import { DEFAULT_CODEX_MODEL } from '../cyboflow/ModelSelector';
+import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
   DEFAULT_WORKFLOW_AGENT_RUNTIME,
@@ -32,12 +34,17 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import { CLAUDE_EFFORT_LEVELS, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import {
-  DEFAULT_QUICK_MODEL,
-  DEFAULT_WORKFLOW_MODEL,
+  DEFAULT_PERMISSION_MODE,
+  DEFAULT_RUN_TYPE_MODEL_FLOORS,
+  DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS,
+  isQuickRunTypeKey,
+  QUICK_RUN_TYPE_KEY,
+  runTypeKindForKey,
+  workflowRunTypeKey,
   type RunTypeDefaults,
   type RunTypeDefaultsPatch,
 } from '../../../../shared/types/sessionDefaults';
-import { DEFAULT_SUBSTRATE, type CliSubstrate } from '../../../../shared/types/substrate';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import {
   CYBOFLOW_WORKFLOW_NAMES,
   isCyboflowWorkflowName,
@@ -53,18 +60,14 @@ import type { AppConfig } from '../../types/config';
 // Keys
 // ---------------------------------------------------------------------------
 
-/** The synthetic global key every quick session resolves its defaults under. */
-export const QUICK_RUN_TYPE_KEY = 'quick';
-
-/** The `runTypeDefaults` key for one workflow row id. */
-export function workflowRunTypeKey(workflowId: string): string {
-  return `workflow:${workflowId}`;
-}
-
-/** True for the synthetic quick-session key (the only key that carries effort). */
-export function isQuickRunTypeKey(key: string): boolean {
-  return key === QUICK_RUN_TYPE_KEY;
-}
+/**
+ * Re-exported from `shared/types/sessionDefaults` — THE canonical key helpers
+ * (also used by `resolveRunTypeLaunchDefaults`, the launch-time resolver).
+ * This file used to define its own copies; keeping two definitions of "what a
+ * quick key looks like" is exactly the drift `resolveRunTypeBaseline` below
+ * guards against for the floors.
+ */
+export { QUICK_RUN_TYPE_KEY, workflowRunTypeKey, isQuickRunTypeKey };
 
 // ---------------------------------------------------------------------------
 // Fields
@@ -160,28 +163,35 @@ export interface RunTypeBaseline {
 }
 
 /**
- * Resolve the global baseline for one key. Mirrors, field for field:
- *   - `model`        — the per-kind floor (`DEFAULT_QUICK_MODEL` /
- *                      `DEFAULT_WORKFLOW_MODEL`, both Opus). There is no global
- *                      launch-model config field; `configManager.getDefaultLaunchModel`
- *                      floors to these same constants and deliberately never
- *                      inherits the legacy `defaultModel`.
- *   - `substrate`    — quick: `quickSessionDefaultSubstrate ?? 'interactive'`
- *                      (useQuickSession.startWithDefaults); flows: DEFAULT_SUBSTRATE
- *                      ('sdk', useLaunchWorkflow).
- *   - `permissionMode` — `defaultAgentPermissionMode ?? 'default'` for both.
+ * Resolve the global baseline for one key. Mirrors, field for field, the SAME
+ * floors `resolveRunTypeLaunchDefaults` (shared/types/sessionDefaults.ts) uses
+ * at launch time — sourced from there directly rather than re-declared here, so
+ * the Settings diff chips can never silently disagree with what a launch
+ * actually resolves:
+ *   - `model`        — `DEFAULT_RUN_TYPE_MODEL_FLOORS[kind]` (Opus for both).
+ *                      There is no global launch-model config field;
+ *                      `configManager.getDefaultLaunchModel` floors to this
+ *                      same constant and deliberately never inherits the
+ *                      legacy `defaultModel`.
+ *   - `substrate`    — quick: `quickSessionDefaultSubstrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.quick`
+ *                      (useQuickSession.startWithDefaults); flows:
+ *                      `DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.workflow` (useLaunchWorkflow).
+ *   - `permissionMode` — `defaultAgentPermissionMode ?? DEFAULT_PERMISSION_MODE` for both.
  *   - `agentRuntime` — the shared session / workflow runtime defaults.
  */
 export function resolveRunTypeBaseline(
   key: string,
   config: AppConfig | null | undefined,
 ): RunTypeBaseline {
-  const quick = isQuickRunTypeKey(key);
+  const kind = runTypeKindForKey(key);
+  const quick = kind === 'quick';
   return {
-    model: quick ? DEFAULT_QUICK_MODEL : DEFAULT_WORKFLOW_MODEL,
-    substrate: quick ? (config?.quickSessionDefaultSubstrate ?? 'interactive') : DEFAULT_SUBSTRATE,
+    model: DEFAULT_RUN_TYPE_MODEL_FLOORS[kind],
+    substrate: quick
+      ? (config?.quickSessionDefaultSubstrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.quick)
+      : DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.workflow,
     agentRuntime: quick ? DEFAULT_SESSION_AGENT_RUNTIME : DEFAULT_WORKFLOW_AGENT_RUNTIME,
-    permissionMode: config?.defaultAgentPermissionMode ?? 'default',
+    permissionMode: config?.defaultAgentPermissionMode ?? DEFAULT_PERMISSION_MODE,
   };
 }
 
@@ -409,4 +419,62 @@ export function patchFromDraft(draft: RunTypeDraft): RunTypeDefaultsPatch {
     agentRuntime: draft.agentRuntime,
     permissionMode: draft.permissionMode,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-family coercion
+// ---------------------------------------------------------------------------
+
+/**
+ * The substrate one concrete agent runtime implies; `null` for a Codex
+ * runtime, which has no `sdk`/`interactive` transport distinction of its own
+ * (mirrors `agentRuntimeUi.substrateForRuntime`, adapted to the full
+ * `AgentRuntime` union this draft stores).
+ */
+function substrateImpliedByRuntime(runtime: AgentRuntime): CliSubstrate | null {
+  if (runtime === 'claude-interactive') return 'interactive';
+  if (runtime === 'claude-sdk') return 'sdk';
+  return null;
+}
+
+/**
+ * Apply the SAME runtime-family coercion the launch surfaces already apply on
+ * a runtime flip (`WorkflowPicker.tsx` / `wizard/SessionStartWizard.tsx`'s
+ * reseed-on-runtime-change effects): picking a concrete `agentRuntime` must
+ * never leave the draft able to SAVE a cross-family combination — a Claude
+ * model paired with a Codex runtime (or vice versa) cannot launch, and
+ * neither can a `substrate` value that no longer matches the new runtime's
+ * transport.
+ *
+ *   - `model` is COERCED, not just cleared: the EFFECTIVE model (the draft's
+ *     own override, or — if the model card is off — the baseline it would
+ *     otherwise fall through to) is replaced with a same-family value once it
+ *     is not one already. This closes the hole even when the model card was
+ *     never switched on: an omitted model member still resolves to the
+ *     (always-Claude) baseline floor at launch, so leaving it alone would
+ *     reproduce the exact bug for a runtime-only override.
+ *   - `substrate` is CLEARED (not re-synced to match) once it no longer
+ *     agrees with the new runtime's implied transport — a Codex runtime has
+ *     no substrate of its own to clear TO.
+ */
+export function coerceDraftForRuntime(
+  draft: RunTypeDraft,
+  runtime: AgentRuntime,
+  baseline: RunTypeBaseline,
+): RunTypeDraft {
+  const next: RunTypeDraft = { ...draft, agentRuntime: runtime };
+
+  const effectiveModel = draft.model ?? baseline.model;
+  if (runtime.startsWith('codex-')) {
+    if (!isCodexModelSelection(effectiveModel)) next.model = DEFAULT_CODEX_MODEL;
+  } else if (isCodexModelFamily(effectiveModel)) {
+    next.model = baseline.model;
+  }
+
+  const impliedSubstrate = substrateImpliedByRuntime(runtime);
+  if (next.substrate !== null && next.substrate !== impliedSubstrate) {
+    next.substrate = null;
+  }
+
+  return next;
 }

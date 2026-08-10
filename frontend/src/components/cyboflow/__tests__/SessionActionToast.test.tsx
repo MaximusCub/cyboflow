@@ -98,6 +98,20 @@ describe('SessionActionToast', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it('defaults to the success tone when `tone` is omitted', () => {
+    render(<SessionActionToast message="Saved" isVisible onDismiss={vi.fn()} />);
+    const toast = screen.getByTestId('session-action-toast');
+    expect(toast).toHaveClass('bg-status-success');
+    expect(toast).not.toHaveClass('bg-status-error');
+  });
+
+  it('renders a visually distinct error tone when tone="error"', () => {
+    render(<SessionActionToast message="Couldn't save" isVisible onDismiss={vi.fn()} tone="error" />);
+    const toast = screen.getByTestId('session-action-toast');
+    expect(toast).toHaveClass('bg-status-error');
+    expect(toast).not.toHaveClass('bg-status-success');
+  });
+
   it('pauses the dismiss timer on focus and resumes on blur', () => {
     vi.useFakeTimers();
     const onDismiss = vi.fn();

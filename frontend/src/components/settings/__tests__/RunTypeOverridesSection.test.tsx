@@ -8,13 +8,20 @@
  * `main/src/services/__tests__/configManagerRunTypeDefaults.test.ts`). That is
  * what lets the merge-to-empty contract be exercised END TO END — component →
  * store → IPC → refetch → re-render — instead of stopping at a spy.
+ *
+ * The workflow inventory is faked at the `trpc.cyboflow.workflows.list` +
+ * `API.projects.getAll` layer (mirroring `TrackerIntegrationSection.test.tsx`),
+ * NOT via `workflowsStore` — the component under test deliberately never
+ * touches that shared, filterable store (COR-3). `data-workflows-loaded` on the
+ * section is the deterministic "the async fan-out settled" signal every helper
+ * below waits on, since the synthetic quick row renders regardless of fetch
+ * state and so cannot be used to detect settlement.
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { RunTypeOverridesSection } from '../RunTypeOverridesSection';
-import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
+import type { Project } from '../../../types/project';
 import type { WorkflowRow } from '../../../../../shared/types/workflows';
 import type {
   RunTypeDefaults,
@@ -37,31 +44,68 @@ function wfRow(over: Partial<WorkflowRow> & Pick<WorkflowRow, 'id' | 'name'>): W
   };
 }
 
-const WORKFLOW_ENTRIES = [
+interface WorkflowFixtureEntry {
+  row: WorkflowRow;
+  projectName: string;
+}
+
+const WORKFLOW_ENTRIES: WorkflowFixtureEntry[] = [
   { row: wfRow({ id: 'wf-global-sprint', name: 'sprint' }), projectName: '' },
   { row: wfRow({ id: 'wf-global-planner', name: 'planner' }), projectName: '' },
   { row: wfRow({ id: 'wf-global-custom-aa', name: 'triage' }), projectName: '' },
   { row: wfRow({ id: 'wf-3-custom-bb', name: 'nightly', project_id: 3 }), projectName: 'Cyboflow' },
 ];
 
-const workflowsState = vi.hoisted(() => ({
-  workflows: [] as unknown[],
-  init: vi.fn(),
-}));
+/** Every project the cross-project fan-out enumerates (COR-3: ALL of them,
+ * always — see the module doc of the component under test). */
+const PROJECTS: Project[] = [
+  {
+    id: 1,
+    name: 'Default',
+    path: '/repo',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 3,
+    name: 'Cyboflow',
+    path: '/repo3',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
 
-vi.mock('../../../stores/workflowsStore', () => ({
-  useWorkflowsStore: (selector?: (s: typeof workflowsState) => unknown) =>
-    selector ? selector(workflowsState) : workflowsState,
-}));
+/** What `workflows.list({ projectId })` would real-mindedly return: global rows
+ * (project_id null) PLUS whatever is scoped to that exact project. */
+function workflowsForProject(entries: WorkflowFixtureEntry[], projectId: number): WorkflowRow[] {
+  return entries
+    .filter((e) => e.row.project_id === null || e.row.project_id === projectId)
+    .map((e) => e.row);
+}
 
 // ---------------------------------------------------------------------------
-// In-memory `config:*` IPC fake
+// Module mocks — cross-project fetch (trpc + API.projects), and the in-memory
+// `config:*` IPC fake (real configStore, fake transport).
 // ---------------------------------------------------------------------------
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      workflows: {
+        list: { query: vi.fn() },
+      },
+    },
+  },
+}));
 
 const configUpdate = vi.fn();
 const applyRunTypeDefaultSpy = vi.fn();
 
 let liveConfig: AppConfig;
+/** Set by a test to make the NEXT `applyRunTypeDefault` call report failure. */
+let forcedApplyError: string | null = null;
 
 /** Mirrors ConfigManager.applyRunTypeDefault: null deletes a member; an empty key is dropped. */
 function applyOp(key: string, op: RunTypeDefaultsOp): RunTypeDefaults | undefined {
@@ -92,6 +136,7 @@ function applyOp(key: string, op: RunTypeDefaultsOp): RunTypeDefaults | undefine
 
 vi.mock('../../../utils/api', () => ({
   API: {
+    projects: { getAll: vi.fn() },
     config: {
       get: () => Promise.resolve({ success: true, data: liveConfig }),
       update: (...a: unknown[]) => {
@@ -100,6 +145,9 @@ vi.mock('../../../utils/api', () => ({
       },
       applyRunTypeDefault: (key: string, op: RunTypeDefaultsOp) => {
         applyRunTypeDefaultSpy(key, op);
+        if (forcedApplyError !== null) {
+          return Promise.resolve({ success: false, error: forcedApplyError });
+        }
         const previous = applyOp(key, op);
         return Promise.resolve({ success: true, data: { previous, config: liveConfig } });
       },
@@ -107,14 +155,39 @@ vi.mock('../../../utils/api', () => ({
   },
 }));
 
+// Imported after the mocks so vi.mock hoisting is in effect.
+import { RunTypeOverridesSection } from '../RunTypeOverridesSection';
+import { useConfigStore } from '../../../stores/configStore';
+import { useWorkflowsStore } from '../../../stores/workflowsStore';
+import { trpc } from '../../../trpc/client';
+import { API } from '../../../utils/api';
+
+const workflowsListQuery = vi.mocked(trpc.cyboflow.workflows.list.query);
+const projectsGetAll = vi.mocked(API.projects.getAll);
+
+function setWorkflowFixture(entries: WorkflowFixtureEntry[]): void {
+  projectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
+  workflowsListQuery.mockImplementation(({ projectId }: { projectId: number }) =>
+    Promise.resolve(workflowsForProject(entries, projectId)),
+  );
+}
+
+/** The deterministic "the async fan-out settled" signal — see the module doc. */
+async function waitForWorkflowsSettled(): Promise<void> {
+  await waitFor(() =>
+    expect(screen.getByTestId('run-type-overrides')).toHaveAttribute('data-workflows-loaded', 'true'),
+  );
+}
+
 async function renderList(
   over: Partial<AppConfig> = {},
-  entries: unknown[] = WORKFLOW_ENTRIES,
+  entries: WorkflowFixtureEntry[] = WORKFLOW_ENTRIES,
 ): Promise<void> {
+  setWorkflowFixture(entries);
   liveConfig = { gitRepoPath: '/repo', ...over };
-  workflowsState.workflows = entries;
   await useConfigStore.getState().fetchConfig();
   render(<RunTypeOverridesSection />);
+  await waitForWorkflowsSettled();
 }
 
 /**
@@ -124,22 +197,26 @@ async function renderList(
  */
 async function renderInParentForm(over: Partial<AppConfig> = {}): Promise<Mock> {
   const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
+  setWorkflowFixture(WORKFLOW_ENTRIES);
   liveConfig = { gitRepoPath: '/repo', ...over };
-  workflowsState.workflows = WORKFLOW_ENTRIES;
   await useConfigStore.getState().fetchConfig();
   render(
     <form onSubmit={onSubmit}>
       <RunTypeOverridesSection />
     </form>,
   );
+  await waitForWorkflowsSettled();
   return onSubmit;
 }
 
 beforeEach(() => {
   configUpdate.mockReset();
   applyRunTypeDefaultSpy.mockReset();
-  workflowsState.init.mockReset().mockResolvedValue(undefined);
+  workflowsListQuery.mockReset();
+  projectsGetAll.mockReset();
+  forcedApplyError = null;
   useConfigStore.setState({ config: null, error: null, isLoading: false });
+  useWorkflowsStore.setState({ projectFilter: null, workflows: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -272,11 +349,93 @@ describe('RunTypeOverridesSection — grouped list', () => {
     expect(screen.queryByText('Built-in flows')).not.toBeInTheDocument();
   });
 
-  it('does not surface a workflows-store bootstrap failure as an unhandled rejection', async () => {
-    workflowsState.init.mockRejectedValue(new Error('fan-out failed'));
-    await renderList({}, []);
+  // AC 1 (ROB-6) — a rejected enumeration is surfaced, never silently swallowed.
+  describe('workflow enumeration failure', () => {
+    it('renders a visible error instead of presenting a partial list as complete', async () => {
+      projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
+      liveConfig = { gitRepoPath: '/repo' };
+      await useConfigStore.getState().fetchConfig();
+      render(<RunTypeOverridesSection />);
+      await waitForWorkflowsSettled();
 
-    expect(screen.getByTestId('run-type-row-quick')).toBeInTheDocument();
+      const alert = screen.getByTestId('run-type-overrides-error');
+      expect(alert).toHaveTextContent('fan-out failed');
+      // The quick row still renders, but the built-in group (which needed the
+      // failed fan-out) does not — the list is visibly incomplete, not silently short.
+      expect(screen.getByTestId('run-type-row-quick')).toBeInTheDocument();
+      expect(screen.queryByText('Built-in flows')).not.toBeInTheDocument();
+    });
+
+    it('never surfaces the rejection as an unhandled promise rejection', async () => {
+      projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
+      liveConfig = { gitRepoPath: '/repo' };
+      await useConfigStore.getState().fetchConfig();
+      // Rendering (and awaiting settlement) must not throw.
+      render(<RunTypeOverridesSection />);
+      await expect(waitForWorkflowsSettled()).resolves.toBeUndefined();
+    });
+
+    it('lets the user retry, clearing the error once the retry succeeds', async () => {
+      projectsGetAll.mockRejectedValueOnce(new Error('fan-out failed'));
+      liveConfig = { gitRepoPath: '/repo' };
+      await useConfigStore.getState().fetchConfig();
+      render(<RunTypeOverridesSection />);
+      await waitForWorkflowsSettled();
+      expect(screen.getByTestId('run-type-overrides-error')).toBeInTheDocument();
+
+      setWorkflowFixture(WORKFLOW_ENTRIES);
+      fireEvent.click(screen.getByTestId('run-type-overrides-retry'));
+
+      await waitFor(() =>
+        expect(screen.queryByTestId('run-type-overrides-error')).not.toBeInTheDocument(),
+      );
+      expect(await screen.findByText('Built-in flows')).toBeInTheDocument();
+    });
+
+    it('keeps a per-project failure from blanking the other projects it DID resolve', async () => {
+      projectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
+      workflowsListQuery.mockImplementation(({ projectId }: { projectId: number }) => {
+        if (projectId === 3) return Promise.reject(new Error('project 3 unreachable'));
+        return Promise.resolve(workflowsForProject(WORKFLOW_ENTRIES, projectId));
+      });
+      liveConfig = { gitRepoPath: '/repo' };
+      await useConfigStore.getState().fetchConfig();
+      render(<RunTypeOverridesSection />);
+      await waitForWorkflowsSettled();
+
+      expect(screen.getByTestId('run-type-overrides-error')).toHaveTextContent(
+        'project 3 unreachable',
+      );
+      // Project 1's (global) rows still resolved and still render.
+      expect(screen.getByTestId('run-type-row-workflow:wf-global-sprint')).toBeInTheDocument();
+    });
+  });
+
+  // AC 2 (COR-3) — the inventory is cross-project regardless of whatever the
+  // shared, filterable gallery store is left scoped to.
+  it('lists flows from every project even when workflowsStore is left filtered to one project, and never touches that store', async () => {
+    useWorkflowsStore.setState({ projectFilter: 3 });
+    const initSpy = vi.spyOn(useWorkflowsStore.getState(), 'init');
+
+    await renderList({
+      runTypeDefaults: { 'workflow:wf-global-planner': { model: 'sonnet' } },
+    });
+
+    // Every project's rows are present, not just project 3's.
+    expect(screen.getByTestId('run-type-row-workflow:wf-global-sprint')).toBeInTheDocument();
+    expect(screen.getByTestId('run-type-row-workflow:wf-global-planner')).toBeInTheDocument();
+    expect(screen.getByTestId('run-type-row-workflow:wf-3-custom-bb')).toBeInTheDocument();
+    // The planner's saved default is a REAL row's chip, never an "unmatched" one.
+    expect(screen.queryByText('Unmatched saved defaults')).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('run-type-row-workflow:wf-global-planner')).getByTestId(
+        'run-type-chip-workflow:wf-global-planner-model',
+      ),
+    ).toBeInTheDocument();
+    // The filtered shared store was never consulted at all.
+    expect(initSpy).not.toHaveBeenCalled();
+
+    initSpy.mockRestore();
   });
 });
 
@@ -346,15 +505,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
 
   // AC 2 — Save goes through applyRunTypeDefault, never API.config.update or the parent form.
   it('saves through applyRunTypeDefault without touching config.update or the parent form', async () => {
-    const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
-    liveConfig = { gitRepoPath: '/repo' };
-    workflowsState.workflows = WORKFLOW_ENTRIES;
-    await useConfigStore.getState().fetchConfig();
-    render(
-      <form onSubmit={onSubmit}>
-        <RunTypeOverridesSection />
-      </form>,
-    );
+    const onSubmit = await renderInParentForm();
 
     fireEvent.click(screen.getByRole('button', { name: 'Configure Sprint' }));
     const card = await screen.findByTestId('knob-card-model');
@@ -440,6 +591,117 @@ describe('RunTypeOverridesSection — detail screen', () => {
     expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('quick', { kind: 'replace', value: null });
     expect(configUpdate).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  // AC 4 — a FAILED write must never close the screen or discard the draft.
+  describe('a failed write', () => {
+    it('keeps the screen open and shows the error on Save', async () => {
+      await openDetail('Quick session');
+
+      const card = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(card).getByRole('switch'));
+      fireEvent.change(within(card).getByLabelText('Model'), { target: { value: 'sonnet' } });
+
+      forcedApplyError = "Couldn't save default";
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      expect(await screen.findByTestId('run-type-save-error')).toHaveTextContent(
+        "Couldn't save default",
+      );
+      // Still on the detail screen, draft intact — never closed on failure.
+      expect(screen.getByTestId('run-type-detail')).toBeInTheDocument();
+      expect(within(card).getByLabelText('Model')).toHaveValue('sonnet');
+    });
+
+    it('keeps the screen open and shows the error on Reset', async () => {
+      await openDetail('Quick session', { runTypeDefaults: { quick: { model: 'sonnet' } } });
+
+      forcedApplyError = "Couldn't reset";
+      fireEvent.click(screen.getByRole('button', { name: /Reset Quick session to defaults/ }));
+
+      expect(await screen.findByTestId('run-type-save-error')).toHaveTextContent("Couldn't reset");
+      expect(screen.getByTestId('run-type-detail')).toBeInTheDocument();
+    });
+
+    it('does not carry a stale error into a later successful save', async () => {
+      await openDetail('Quick session');
+
+      const card = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(card).getByRole('switch'));
+      forcedApplyError = 'nope';
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await screen.findByTestId('run-type-save-error');
+
+      forcedApplyError = null;
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(screen.queryByTestId('run-type-detail')).not.toBeInTheDocument());
+    });
+  });
+
+  // AC 3 (COR-3) — an unlaunchable model/runtime/substrate combination cannot be saved.
+  describe('runtime-family coercion', () => {
+    it('coerces an already-overridden Claude model and clears an incompatible substrate when Codex is selected', async () => {
+      await openDetail('Sprint');
+
+      const modelCard = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(modelCard).getByRole('switch'));
+      expect(within(modelCard).getByLabelText('Model')).toHaveValue('opus');
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Substrate'), {
+        target: { value: 'interactive' },
+      });
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+
+      // The unlaunchable combo (opus + codex-sdk + interactive) is coerced: the
+      // model flips to the Codex-compatible 'auto' sentinel, and the now
+      // incompatible substrate is cleared back to "Follow defaults".
+      expect(within(modelCard).getByLabelText('Model')).toHaveValue('auto');
+      expect(within(runtimeCard).getByLabelText('Substrate')).toHaveValue('');
+    });
+
+    it('coerces the model even when the model card was never switched on', async () => {
+      await openDetail('Sprint');
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The saved patch carries an EXPLICIT Codex-compatible model — a stale
+      // Claude floor can never ride along with the runtime override.
+      await waitFor(() =>
+        expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('workflow:wf-global-sprint', {
+          kind: 'merge',
+          value: expect.objectContaining({ model: 'auto', agentRuntime: 'codex-sdk' }),
+        }),
+      );
+    });
+
+    it('coerces a stale Codex-family model back to Claude when flipping to a Claude runtime', async () => {
+      // A raw Codex model id (never offered by this Claude-only picker, but
+      // reachable via a stale/older-version stored default) has no matching
+      // <option>, so the control cannot even DISPLAY it — which is exactly why
+      // it must be coerced away rather than left standing the moment the
+      // runtime override is touched.
+      await openDetail('Sprint', {
+        runTypeDefaults: { 'workflow:wf-global-sprint': { model: 'gpt-5-codex', agentRuntime: 'codex-sdk' } },
+      });
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'claude-sdk' },
+      });
+
+      const modelCard = screen.getByTestId('knob-card-model');
+      expect(within(modelCard).getByLabelText('Model')).toHaveValue('opus');
+    });
   });
 
   // AC 3 — the quick key is the only one whose launch can reach the Codex TUI.

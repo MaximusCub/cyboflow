@@ -7,6 +7,9 @@ interface SessionActionToastProps {
   durationMs?: number;
   actionLabel?: string;
   onAction?: () => void;
+  /** Visual style; defaults to 'success' so every pre-existing call site (which
+   * never passed this prop) renders byte-identical to before. */
+  tone?: 'success' | 'error';
 }
 
 export function SessionActionToast({
@@ -16,6 +19,7 @@ export function SessionActionToast({
   durationMs = 3000,
   actionLabel,
   onAction,
+  tone = 'success',
 }: SessionActionToastProps) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pausedRef = useRef(false);
@@ -57,7 +61,9 @@ export function SessionActionToast({
     <div
       data-testid="session-action-toast"
       role="status"
-      className="bg-status-success text-white rounded px-4 py-2 text-sm font-medium shadow-lg flex items-center gap-3"
+      className={`${
+        tone === 'error' ? 'bg-status-error' : 'bg-status-success'
+      } text-white rounded px-4 py-2 text-sm font-medium shadow-lg flex items-center gap-3`}
       onMouseEnter={handlePause}
       onMouseLeave={handleResume}
       onFocus={handlePause}

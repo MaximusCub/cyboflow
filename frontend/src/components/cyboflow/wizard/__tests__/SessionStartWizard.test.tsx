@@ -1927,6 +1927,9 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     expect(toast).toHaveAttribute('data-tone', 'error');
     expect(toast).toHaveTextContent("Couldn't save default for Custom");
     expect(screen.queryByTestId('session-action-toast-action')).toBeNull();
+    // The failure tone reaches the actual toast, not just its wrapper — a
+    // discarded `tone` prop would render this in the success (green) style.
+    expect(screen.getByTestId('session-action-toast')).toHaveClass('bg-status-error');
     expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
   });
 

@@ -1985,6 +1985,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                   isVisible
                   onDismiss={dismissSaveToast}
                   durationMs={SAVE_DEFAULT_TOAST_MS}
+                  tone={saveToast.tone}
                   {...(canUndoSaveDefault
                     ? { actionLabel: 'Undo', onAction: undoSaveDefault }
                     : {})}

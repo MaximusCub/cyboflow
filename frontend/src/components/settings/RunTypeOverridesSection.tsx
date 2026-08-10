@@ -15,17 +15,31 @@
  * doc for why routing it through the shared form would clobber concurrent
  * launch-screen writes.
  *
- * The live workflow rows come from `useWorkflowsStore`, which already does the
- * per-project `workflows.list` fan-out, dedupes by `row.id` (a GLOBAL flow is
- * returned by every project), and resolves each row's owning `projectName`. Its
- * bootstrap is fire-and-forget: a failure leaves the list showing the quick row
- * plus whatever keys are already stored, which is strictly better than blocking
- * the whole Settings tab on a gallery fetch.
+ * ## Why this does its OWN cross-project fetch instead of `useWorkflowsStore`
+ *
+ * The Workflows gallery's `useWorkflowsStore` is a GLOBAL singleton with an
+ * in-memory `projectFilter` another view (`WorkflowsView`) can leave scoped to
+ * one project. This screen must always show the FULL inventory regardless of
+ * that filter — a filtered store would silently drop real flows AND mislabel
+ * their saved defaults as "unmatched" (`buildRunTypeGroups`'s stale bucket).
+ * Reusing that store (even just its already-idempotent `init()`) would inherit
+ * whatever filter it was last left in and — since `setProjectFilter` mutates
+ * shared state — clearing it here would leak back into `WorkflowsView`. So this
+ * component fetches every project's `workflows.list` directly (mirroring
+ * `TrackerIntegrationSection`'s per-project fan-out, not the gallery store) and
+ * never touches `workflowsStore` at all.
+ *
+ * A failed fan-out is surfaced, not swallowed: `error` renders an inline
+ * message (with Retry) so a partial or empty list is never mistaken for a
+ * complete one, and a per-project failure still commits whatever OTHER
+ * projects' rows resolved (stale-not-cleared, same as `workflowsStore`).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ChevronRight, Layers } from 'lucide-react';
 import { useConfigStore } from '../../stores/configStore';
-import { useWorkflowsStore } from '../../stores/workflowsStore';
+import { trpc } from '../../trpc/client';
+import { API } from '../../utils/api';
+import type { Project } from '../../types/project';
 import { RunTypeOverrideDetail } from './RunTypeOverrideDetail';
 import {
   buildRunTypeGroups,
@@ -33,31 +47,106 @@ import {
   runTypeOverrideChips,
   runTypeStatusLabel,
   type RunTypeRow,
+  type RunTypeWorkflowSource,
 } from './runTypeOverrides';
+
+interface WorkflowInventory {
+  workflows: RunTypeWorkflowSource[];
+  /** First fan-out failure's message; null once a fetch fully succeeds. */
+  error: string | null;
+  /**
+   * True once the fetch has settled at least once (success OR failure). The
+   * quick-session row renders unconditionally regardless of fetch state, so
+   * this is the only reliable "has the inventory actually resolved" signal —
+   * tests wait on it instead of racing a group that may or may not appear.
+   */
+  loaded: boolean;
+  retry: () => void;
+}
+
+/**
+ * Fetch every workflow row across ALL projects, independent of any filter
+ * `workflowsStore` might be scoped to — see the module doc's "Why this does
+ * its OWN cross-project fetch" section.
+ */
+function useCrossProjectWorkflowInventory(): WorkflowInventory {
+  const [workflows, setWorkflows] = useState<RunTypeWorkflowSource[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  const load = useCallback((): (() => void) => {
+    let cancelled = false;
+    setLoaded(false);
+    void (async () => {
+      try {
+        const projectsRes = await API.projects.getAll();
+        if (!projectsRes.success || !Array.isArray(projectsRes.data)) {
+          throw new Error(projectsRes.error ?? 'Could not list projects');
+        }
+        const projects = projectsRes.data as Project[];
+        const byId = new Map<string, RunTypeWorkflowSource>();
+        let firstError: string | null = null;
+        await Promise.all(
+          projects.map(async (project) => {
+            try {
+              const rows = await trpc.cyboflow.workflows.list.query({ projectId: project.id });
+              for (const row of rows) {
+                if (!byId.has(row.id)) {
+                  byId.set(row.id, {
+                    row,
+                    projectName: row.project_id === null ? '' : project.name,
+                  });
+                }
+              }
+            } catch (err: unknown) {
+              if (firstError === null) {
+                firstError =
+                  err instanceof Error
+                    ? err.message
+                    : `Could not load flows for ${project.name}`;
+              }
+            }
+          }),
+        );
+        if (cancelled) return;
+        setWorkflows(Array.from(byId.values()));
+        setError(firstError);
+        setLoaded(true);
+      } catch (err: unknown) {
+        if (cancelled) return;
+        // The projects list itself failed — leave any PRIOR rows standing
+        // (stale-not-cleared) rather than blanking a list that was working.
+        setError(err instanceof Error ? err.message : 'Could not load your flows');
+        setLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => load(), [load, attempt]);
+
+  return { workflows, error, loaded, retry: () => setAttempt((a) => a + 1) };
+}
 
 export function RunTypeOverridesSection(): React.JSX.Element {
   const config = useConfigStore((s) => s.config);
-  const workflows = useWorkflowsStore((s) => s.workflows);
-  const initWorkflows = useWorkflowsStore((s) => s.init);
+  const {
+    workflows,
+    error: workflowsError,
+    loaded: workflowsLoaded,
+    retry: retryWorkflows,
+  } = useCrossProjectWorkflowInventory();
   const [selected, setSelected] = useState<RunTypeRow | null>(null);
-
-  // Fire-and-forget bootstrap. Wrapped so BOTH a synchronous throw and a
-  // rejected fan-out are swallowed here: a Settings tab must never surface an
-  // unhandled rejection because the workflows gallery could not be enumerated.
-  useEffect(() => {
-    void Promise.resolve()
-      .then(() => initWorkflows())
-      .catch(() => {
-        /* list degrades to the quick row + stored keys */
-      });
-  }, [initWorkflows]);
 
   const runTypeDefaults = config?.runTypeDefaults;
 
   const groups = useMemo(
     () =>
       buildRunTypeGroups(
-        workflows ?? [],
+        workflows,
         runTypeDefaults === undefined ? [] : Object.keys(runTypeDefaults),
       ),
     [workflows, runTypeDefaults],
@@ -89,6 +178,7 @@ export function RunTypeOverridesSection(): React.JSX.Element {
       aria-labelledby="session-settings-run-type-overrides"
       className="mt-8"
       data-testid="run-type-overrides"
+      data-workflows-loaded={workflowsLoaded}
     >
       <h4
         id="session-settings-run-type-overrides"
@@ -106,6 +196,26 @@ export function RunTypeOverridesSection(): React.JSX.Element {
           listed.
         </p>
       </div>
+
+      {workflowsError !== null && (
+        <div
+          role="alert"
+          data-testid="run-type-overrides-error"
+          className="mb-4 flex items-start justify-between gap-3 rounded-button border border-status-error bg-surface-secondary px-3 py-2"
+        >
+          <p className="text-xs leading-relaxed text-status-error">
+            Couldn't load your flows — this list may be incomplete: {workflowsError}
+          </p>
+          <button
+            type="button"
+            data-testid="run-type-overrides-retry"
+            onClick={retryWorkflows}
+            className="shrink-0 text-xs font-medium text-interactive hover:text-text-primary transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-5">
         {groups.map((group) => (

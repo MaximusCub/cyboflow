@@ -8,23 +8,23 @@
  *
  * ## Two deliberate scope decisions
  *
- * 1. **Only knob cards backed by a real `RunTypeDefaults` field are rendered.**
- *    The original copy also named "Runtime & orchestration" and "Quality eval"
- *    cards — neither has a storage field (`RunTypeDefaults` has no
- *    executionModel and no eval member), and widening that shared type is a
- *    main-process + IPC change. Rendering them would be a control that silently
- *    does nothing, which is exactly the reason effort is quick-only below. Do
- *    NOT "restore" them without also adding the storage + launch plumbing.
+ * 1. **Only knob cards backed by a real `RunTypeDefaults` field are rendered**
+ *    (see {@link knobCardsFor} for which fields those are and why the list
+ *    stops there).
  * 2. **Reasoning effort is Quick-Session-only.** `runs.start` carries no
  *    `reasoningEffort` field, so a flow-type effort override has no sink.
  *
  * ## Why Save writes through `configStore.applyRunTypeDefault` directly
  *
  * It must NOT route through `Settings.tsx`'s shared `handleSubmit`. That form
- * echoes back a `runTypeDefaults` object built from `_config`, which is
- * snapshotted once when the modal opens and never refreshed — an unguarded
- * read-before-write that would clobber a default saved from a launch screen
- * while the modal sat open. The dedicated IPC op is the only write channel.
+ * is a merge-a-slice pattern — e.g. `visualVerify: { ..._config?.visualVerify,
+ * ... }` (Settings.tsx's `handleSubmit`) — built from `_config`, which is
+ * snapshotted once when the modal opens and never refreshed. `runTypeDefaults`
+ * is never part of that submit payload at all; routing this screen's writes
+ * through it would still be an unguarded read-before-write of the STALE
+ * snapshot, clobbering a default saved from a launch screen while this modal
+ * sat open. The dedicated per-key IPC op (`applyRunTypeDefault`) is the only
+ * write channel that reads and writes the LIVE config.
  */
 import { useEffect, useState } from 'react';
 import { ChevronLeft, RotateCcw } from 'lucide-react';
@@ -35,6 +35,7 @@ import {
   RUN_TYPE_FIELD_LABELS,
   agentRuntimeOptions,
   baselineValueFor,
+  coerceDraftForRuntime,
   draftFromStored,
   isQuickRunTypeKey,
   patchFromDraft,
@@ -58,16 +59,12 @@ interface KnobCard {
 }
 
 /**
- * The knob cards for one key.
- *
- * THIS LIST IS DELIBERATELY SHORT. The original copy also named a "Runtime &
- * orchestration" and a "Quality eval" card. Neither has a backing field:
- * `RunTypeDefaults` carries only `model`, `reasoningEffort`, `substrate`,
- * `agentRuntime`, `permissionMode` — there is no `executionModel` member and no
- * eval member, and adding one is a shared-type + main-process + IPC change well
- * outside this surface. Rendering either card would be a control that silently
- * does nothing, which is precisely why effort is quick-only here. Do NOT
- * "restore" them without the storage and launch plumbing to match.
+ * The knob cards for one key. THIS LIST IS DELIBERATELY SHORT — see the module
+ * doc's "Two deliberate scope decisions". The original copy also named a
+ * "Runtime & orchestration" and a "Quality eval" card; neither has a backing
+ * field (`RunTypeDefaults` has no `executionModel` and no eval member), so
+ * rendering either would be a control that silently does nothing. Do NOT
+ * "restore" them without adding the storage + launch plumbing to match.
  */
 function knobCardsFor(runTypeKey: string): KnobCard[] {
   const quick = isQuickRunTypeKey(runTypeKey);
@@ -122,6 +119,7 @@ export function RunTypeOverrideDetail({
   const applyRunTypeDefault = useConfigStore((s) => s.applyRunTypeDefault);
   const [draft, setDraft] = useState<RunTypeDraft>(() => draftFromStored(stored));
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Re-seed when the key changes (list → another type without unmounting).
   // `stored` is intentionally not a dependency: a config refetch mid-edit must
@@ -143,7 +141,14 @@ export function RunTypeOverrideDetail({
         case 'substrate':
           return { ...prev, substrate: value as CliSubstrate | null };
         case 'agentRuntime':
-          return { ...prev, agentRuntime: value as AgentRuntime | null };
+          // A concrete pick goes through the SAME runtime-family coercion the
+          // launch surfaces apply (WorkflowPicker / SessionStartWizard): it
+          // must never leave the draft able to save an unlaunchable
+          // model/runtime/substrate combination. Clearing back to "follow
+          // defaults" needs no coercion — the baseline is always self-consistent.
+          return value === null
+            ? { ...prev, agentRuntime: null }
+            : coerceDraftForRuntime(prev, value as AgentRuntime, baseline);
         case 'permissionMode':
           return { ...prev, permissionMode: value as PermissionMode | null };
       }
@@ -166,11 +171,23 @@ export function RunTypeOverrideDetail({
     }
   };
 
+  // Both writers close the screen ONLY on a confirmed `{ ok: true }` — a
+  // failed write must keep the draft on screen with the error visible rather
+  // than closing as if the save/reset had landed (COR-4-class bug: a
+  // discarded result reports a failed write as success).
   const handleSave = async (): Promise<void> => {
     setIsSaving(true);
+    setSaveError(null);
     try {
-      await applyRunTypeDefault(runTypeKey, { kind: 'merge', value: patchFromDraft(draft) });
-      onClose();
+      const result = await applyRunTypeDefault(runTypeKey, {
+        kind: 'merge',
+        value: patchFromDraft(draft),
+      });
+      if (result.ok) {
+        onClose();
+      } else {
+        setSaveError(result.error);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -178,9 +195,14 @@ export function RunTypeOverrideDetail({
 
   const handleReset = async (): Promise<void> => {
     setIsSaving(true);
+    setSaveError(null);
     try {
-      await applyRunTypeDefault(runTypeKey, { kind: 'replace', value: null });
-      onClose();
+      const result = await applyRunTypeDefault(runTypeKey, { kind: 'replace', value: null });
+      if (result.ok) {
+        onClose();
+      } else {
+        setSaveError(result.error);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -293,6 +315,16 @@ export function RunTypeOverrideDetail({
           );
         })}
       </div>
+
+      {saveError !== null && (
+        <p
+          role="alert"
+          data-testid="run-type-save-error"
+          className="mt-3 text-xs leading-relaxed text-status-error"
+        >
+          {saveError}
+        </p>
+      )}
 
       <div className="mt-4 flex items-center justify-between gap-3 border-t border-border-secondary pt-3">
         <button
