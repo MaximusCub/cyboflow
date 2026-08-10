@@ -31,7 +31,12 @@ import type {
   TrackerIssue,
 } from '../../../../shared/types/trackerSync';
 import type { TrackerAdapter, TrackerAdapterCapabilities, FetchLike, IssueDraft } from './adapterTypes';
-import { TrackerApiError, TrackerAuthError } from './errors';
+import {
+  TrackerApiError,
+  TrackerAuthError,
+  TRACKER_REQUEST_TIMEOUT_MS,
+  describeTransportFailure,
+} from './errors';
 
 const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
@@ -487,6 +492,12 @@ export interface LinearAdapterOptions {
   apiKey: string;
   /** Injected at construction so adapter tests never touch the network. */
   fetchImpl?: FetchLike;
+  /**
+   * Per-request abort budget; defaults to {@link TRACKER_REQUEST_TIMEOUT_MS}.
+   * Injectable so a test can prove the abort path in milliseconds instead of
+   * waiting out the real budget.
+   */
+  requestTimeoutMs?: number;
 }
 
 export class LinearAdapter implements TrackerAdapter {
@@ -499,10 +510,12 @@ export class LinearAdapter implements TrackerAdapter {
 
   private readonly apiKey: string;
   private readonly fetchImpl: FetchLike;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: LinearAdapterOptions) {
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? TRACKER_REQUEST_TIMEOUT_MS;
   }
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
@@ -679,7 +692,17 @@ export class LinearAdapter implements TrackerAdapter {
     }
   }
 
-  /** Low-level POST + JSON parse; never throws on GraphQL-level errors — callers decide. */
+  /**
+   * Low-level POST + JSON parse; never throws on GraphQL-level errors — callers
+   * decide.
+   *
+   * EVERY call carries an abort timeout (see TRACKER_REQUEST_TIMEOUT_MS): a
+   * request that never settles would pin the sync engine's per-connection lock
+   * for the life of the process. The abort surfaces as an ordinary
+   * TrackerApiError with a NULL status, which is what puts it on the outbox's
+   * RETRY path rather than its terminal one — a timeout says nothing about
+   * whether the write is valid.
+   */
   private async execute<T>(
     query: string,
     variables?: Record<string, unknown>
@@ -694,9 +717,14 @@ export class LinearAdapter implements TrackerAdapter {
           Authorization: this.apiKey,
         },
         body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
       });
     } catch (err) {
-      throw new TrackerApiError('linear', `network request failed: ${errorMessage(err)}`, null);
+      throw new TrackerApiError(
+        'linear',
+        describeTransportFailure(err, this.requestTimeoutMs),
+        null
+      );
     }
 
     let body: LinearGraphQLResponse<T>;

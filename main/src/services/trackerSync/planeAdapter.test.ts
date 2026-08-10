@@ -115,6 +115,47 @@ describe('PlaneAdapter.validateCredentials', () => {
     expect(identity.actorLabel).toBe('Grace Hopper');
   });
 
+  it('names the SLUG when the workspace probe 404s, instead of "request failed (404)"', async () => {
+    // The key is good — /users/me/ just succeeded with it — and the path is a
+    // literal workspace slug, so a 404 here has exactly one cause. The raw
+    // message reads like a bug in cyboflow rather than a typo in the one field
+    // the user just filled in.
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/users/me/',
+        respond: () => ({ status: 200, body: { id: 'u1', display_name: 'Ada Lovelace' } }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme-typo/projects/',
+        respond: () => ({ status: 404, body: { detail: 'Not found.' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme-typo', fetchImpl });
+
+    await expect(adapter.validateCredentials()).rejects.toMatchObject({
+      name: 'TrackerApiError',
+      status: 404,
+      message: '[plane] workspace not found — check the workspace slug "acme-typo"',
+    });
+  });
+
+  it('leaves a NON-validation 404 with the generic message', async () => {
+    // Every other 404 in this adapter names an id the user did not type, so
+    // there is no friendlier thing to say about it.
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) => method === 'GET' && path.startsWith('/api/v1/workspaces/acme/projects/proj1/states/'),
+        respond: () => ({ status: 404, body: { detail: 'Not found.' } }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await expect(adapter.listStates(ALL_SELECTION)).rejects.toMatchObject({
+      message: '[plane] request failed (404)',
+      status: 404,
+    });
+  });
+
   it('rejects with TrackerAuthError on a 401 from /users/me/', async () => {
     const { fetchImpl } = scriptedFetch([
       {
@@ -830,5 +871,85 @@ describe('PlaneAdapter /work-items/ ↔ /issues/ path-rename compatibility', () 
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
 
     await expect(adapter.updateIssueState('proj1/missing', 'state-x')).rejects.toBeInstanceOf(TrackerApiError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request timeouts
+// ---------------------------------------------------------------------------
+
+/**
+ * A fetch that never settles on its own and rejects only when the request's
+ * abort signal fires — i.e. what a hung socket looks like from here. `reason`
+ * is what Node's `AbortSignal.timeout` aborts with (a `TimeoutError`
+ * DOMException), so the rejection this produces is the real one.
+ */
+function hangingFetch(): { fetchImpl: FetchLike; signals: Array<AbortSignal | undefined> } {
+  const signals: Array<AbortSignal | undefined> = [];
+  const fetchImpl = ((_input: string | URL, init?: RequestInit): Promise<Response> => {
+    const signal = init?.signal ?? undefined;
+    signals.push(signal ?? undefined);
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal === undefined || signal === null) return;
+      signal.addEventListener('abort', () => {
+        reject((signal as AbortSignal).reason as Error);
+      });
+    });
+  }) as unknown as FetchLike;
+  return { fetchImpl, signals };
+}
+
+describe('PlaneAdapter request timeouts', () => {
+  it('aborts a hung request and reports it as a RETRYABLE transport failure', async () => {
+    // Without this the request never returns, and the sync engine's
+    // per-connection lock is held for the life of the process — the connection
+    // simply stops syncing, silently and permanently.
+    const { fetchImpl, signals } = hangingFetch();
+    const adapter = new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(adapter.validateCredentials()).rejects.toMatchObject({
+      // Status NULL is the load-bearing part: outboxWorker only terminalizes a
+      // 4xx, so a null-status failure takes the backoff-retry path. A timeout
+      // says nothing about whether the write was valid — and it must not read
+      // as an AUTH failure either, which would pause the connection.
+      name: 'TrackerApiError',
+      status: null,
+      message: '[plane] request timed out after 5ms',
+    });
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('carries an abort signal on every request path, work-item routes included', async () => {
+    const { fetchImpl, signals } = hangingFetch();
+    const adapter = new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(adapter.listStates(ALL_SELECTION)).rejects.toThrow('timed out');
+    await expect(adapter.updateIssueState('proj1/iss1', 'state-x')).rejects.toThrow('timed out');
+
+    expect(signals).toHaveLength(2);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('types an ordinary network failure instead of letting it escape raw', async () => {
+    // These used to propagate as whatever the platform threw — not a
+    // TrackerApiError at all — so nothing downstream could classify them.
+    const fetchImpl = (() => Promise.reject(new Error('ECONNREFUSED'))) as unknown as FetchLike;
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await expect(adapter.validateCredentials()).rejects.toMatchObject({
+      name: 'TrackerApiError',
+      status: null,
+      message: '[plane] network request failed: ECONNREFUSED',
+    });
   });
 });
