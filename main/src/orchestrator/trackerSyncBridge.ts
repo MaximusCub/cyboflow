@@ -76,6 +76,22 @@ export interface TrackerSyncFacade {
   /** Persist the connection (+ encrypted key + reconcile decisions) and kick the first pass. */
   connect(payload: TrackerConnectPayload): Promise<{ connectionId: string }>;
 
+  /**
+   * ROTATE an existing connection's API key in place, resuming it: the key is
+   * probed live, checked against the connection's own workspace, stored
+   * encrypted, and the connection goes back to 'active' — which replays every
+   * write an auth failure had held.
+   *
+   * The reconnect path for a revoked or rotated key, which `connect` cannot
+   * serve: against a connection that is still active or paused it would mint a
+   * SECOND one and re-import the whole synced backlog.
+   *
+   * Rejects with a NOT_FOUND-shaped error for an unknown id, and with a typed
+   * mismatch error when the key authorizes a DIFFERENT workspace than the
+   * connection is bound to. The returned identity carries no key material.
+   */
+  updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity>;
+
   /** The project's connected-view cards. */
   connections(projectId: number): Promise<TrackerConnectionSummary[]>;
 

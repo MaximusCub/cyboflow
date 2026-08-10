@@ -618,6 +618,71 @@ describe('TrackerSyncService.connect', () => {
     });
   });
 
+  it('SKIPS a reconcile decision naming an entity from another project, and applies the rest', async () => {
+    // A wizard submission is a payload of bare entity ids, and it can be minutes
+    // stale — composed against one project, submitted after the user switched.
+    // Neither the archive nor upsertLink checks project membership on its own,
+    // so an id from project B applied under a project-A connection silently
+    // archived B's idea, or hung a live link (and therefore inbound mutations,
+    // and write-back) off an entity outside this connection's project.
+    raw
+      .prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)')
+      .run(2, 'Proj 2', '/tmp/p2');
+    svc.seedDefaultBoard(2);
+    const { taskId: foreignDiscard } = await router.applyChange(2, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Another project’s idea',
+      body: null,
+    });
+    const { taskId: foreignLink } = await router.applyChange(2, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Another project’s second idea',
+      body: null,
+    });
+    const mine = await createEntity('idea', { title: 'Mine to discard' });
+
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const guardedService = new TrackerSyncService({
+      db: raw,
+      router,
+      nowIso: () => now,
+      adapterFactory: () => adapter,
+      logger,
+    });
+
+    const { connectionId } = await guardedService.connect(
+      connectPayload({
+        reconcile: [
+          { entityType: 'idea', entityId: foreignDiscard, action: 'discard' },
+          { entityType: 'idea', entityId: foreignLink, action: 'link', linkExternalId: 'ext-42' },
+          { entityType: 'idea', entityId: mine, action: 'discard' },
+          // A dangling id is the same answer: not something this connection may act on.
+          { entityType: 'idea', entityId: 'ide_does_not_exist', action: 'discard' },
+        ],
+      }),
+    );
+
+    // Untouched, and specifically NOT linked — the corruption this prevents.
+    expect(readIdea(foreignDiscard).archived_at).toBeNull();
+    expect(
+      raw.prepare('SELECT * FROM entity_external_links WHERE entity_id = ?').get(foreignLink),
+    ).toBeUndefined();
+    // The in-project decision still applied.
+    expect(readIdea(mine).archived_at).not.toBeNull();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      '[trackerSync] reconcile decisions skipped — entity is not in this project',
+      expect.objectContaining({ connectionId, projectId: PROJECT_ID }),
+    );
+    // …and it is visible where the user looks, not only in a log file.
+    await vi.waitFor(() => {
+      const log = getConnection(raw, connectionId)?.last_sync_log_json ?? '[]';
+      expect(log).toContain('reconcile rows skipped · not in this project');
+    });
+  });
+
   it('REVIVES the disconnected connection for the same workspace instead of duplicating the backlog', async () => {
     // The regression: disconnect deliberately KEEPS the links, but connect used
     // to always mint a fresh id — so a routine credential rotation (disconnect,
@@ -735,6 +800,81 @@ describe('TrackerSyncService.connect', () => {
 // ---------------------------------------------------------------------------
 // connections()
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// updateCredentials — rotating a key in place
+// ---------------------------------------------------------------------------
+
+describe('TrackerSyncService.updateCredentials', () => {
+  it('probes, stores encrypted, RESUMES a paused connection, and kicks a pass', async () => {
+    // The reconnect path `connect` cannot serve: against a connection that is
+    // still active or paused it mints a SECOND one, strands every link on the
+    // first, and re-imports the whole synced backlog as fresh ideas.
+    makeConnection({ status: 'paused' });
+
+    const identity = await service.updateCredentials(CONN_ID, 'lin_rotated_key');
+
+    expect(identity).toEqual({
+      workspaceId: 'ws-1',
+      workspaceName: 'Acme',
+      actorLabel: 'K. Esteva',
+    });
+    // The key was PROBED before anything was written…
+    expect(adapter.calls).toContain('validateCredentials');
+    expect(factoryCalls.some((call) => call.secret === 'lin_rotated_key')).toBe(true);
+    // …stored encrypted, never in the clear…
+    expect((readSecret(raw, CONN_ID) as Buffer).toString('utf-8')).toBe('lin_rotated_key');
+    // …and the connection is live again, which is what un-gates the poll loop
+    // and replays every write the auth failure held.
+    const row = getConnection(raw, CONN_ID);
+    expect(row?.status).toBe('active');
+    expect(row?.actor_label).toBe('K. Esteva');
+    expect(broadcasts.some((e) => e.kind === 'connection' && e.connectionId === CONN_ID)).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(getConnection(raw, CONN_ID)?.last_sync_at).not.toBeNull();
+    });
+  });
+
+  it('REFUSES a key for a different workspace, leaving the connection paused and the old key intact', async () => {
+    // Storing it would leave every retained link pointing at external ids that
+    // belong to somebody else's workspace: write-back would target strangers'
+    // issues, and the deletion sweep would read their absence as deletions and
+    // archive live local entities.
+    makeConnection({ status: 'paused' });
+    adapter.workspaceId = 'ws-somebody-else';
+
+    await expect(service.updateCredentials(CONN_ID, 'lin_other_workspace')).rejects.toMatchObject({
+      name: 'TrackerIdentityMismatchError',
+    });
+    await expect(service.updateCredentials(CONN_ID, 'lin_other_workspace')).rejects.toThrow(
+      /different workspace/i,
+    );
+
+    const row = getConnection(raw, CONN_ID);
+    expect(row?.status).toBe('paused');
+    expect(row?.workspace_id).toBe('ws-1');
+    // The stored key is untouched — a refused rotation changes nothing.
+    expect((readSecret(raw, CONN_ID) as Buffer).toString('utf-8')).toBe(API_KEY);
+  });
+
+  it('propagates the provider’s auth rejection without touching the connection', async () => {
+    makeConnection({ status: 'paused' });
+    adapter.failValidate = new TrackerAuthError('linear', 'invalid api key', 401);
+
+    await expect(service.updateCredentials(CONN_ID, 'still_bad')).rejects.toBeInstanceOf(
+      TrackerAuthError,
+    );
+    expect(getConnection(raw, CONN_ID)?.status).toBe('paused');
+    expect((readSecret(raw, CONN_ID) as Buffer).toString('utf-8')).toBe(API_KEY);
+  });
+
+  it('reports an unknown connection id as a typed not-found', async () => {
+    await expect(service.updateCredentials('conn-nope', 'k')).rejects.toMatchObject({
+      name: 'TrackerConnectionNotFoundError',
+    });
+  });
+});
 
 describe('TrackerSyncService.connections', () => {
   it('summarizes a connection with active-link and open-conflict counts', async () => {

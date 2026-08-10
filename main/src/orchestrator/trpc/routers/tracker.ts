@@ -6,6 +6,7 @@
  *   wizardIssues                  : mutations    -> stateless provider probes (persist nothing)
  *   reconcilePreview              : mutation     -> TrackerReconcileItem[] (wizard Step 4)
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
+ *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
  *   connections                   : query        -> TrackerConnectionSummary[]
  *   updateSettings / disconnect   : mutations    -> void
  *   syncNow                       : mutation     -> TrackerSyncPassSummary ("Sync now")
@@ -76,14 +77,32 @@ function isErrorNamed(err: unknown, name: string): boolean {
 /**
  * Map a tracker/chokepoint failure onto a TRPCError the renderer can branch on:
  *
- *   TrackerAuthError               -> UNAUTHORIZED       (the key is bad — re-connect)
- *   TrackerSecretsUnavailableError -> PRECONDITION_FAILED (no OS keychain on this host)
- *   TrackerSyncNotInitializedError -> PRECONDITION_FAILED (called before boot wired the facade)
- *   TaskChangeError                -> the chokepoint's own code map (mirrors tasks.ts)
+ *   TrackerAuthError                -> UNAUTHORIZED       (the key is bad — re-connect)
+ *   TrackerConnectionNotFoundError  -> NOT_FOUND          (unknown connection id)
+ *   TrackerIdentityMismatchError    -> CONFLICT           (right key, wrong workspace)
+ *   TrackerSecretsUnavailableError  -> PRECONDITION_FAILED (no OS keychain on this host)
+ *   TrackerSyncNotInitializedError  -> PRECONDITION_FAILED (called before boot wired the facade)
+ *   TaskChangeError                 -> the chokepoint's own code map (mirrors tasks.ts)
  *
  * Anything else re-throws unchanged.
  */
 function rethrowAsTRPCError(err: unknown): never {
+  if (isErrorNamed(err, 'TrackerConnectionNotFoundError')) {
+    throw new TRPCError({
+      code: 'NOT_FOUND',
+      message: err instanceof Error ? err.message : 'tracker connection not found',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerIdentityMismatchError')) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      // Passed through verbatim, unlike the generic auth message below: this one
+      // names the two workspaces, which is the whole actionable content.
+      message: err instanceof Error ? err.message : 'this key authorizes a different workspace',
+      cause: err,
+    });
+  }
   if (isErrorNamed(err, 'TrackerAuthError')) {
     throw new TRPCError({
       code: 'UNAUTHORIZED',
@@ -326,6 +345,26 @@ export const trackerRouter = router({
     .mutation(async ({ input }): Promise<{ connectionId: string }> => {
       try {
         return await getTrackerSyncFacade().connect(input);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Rotate an existing connection's API key in place and resume it — the
+   * reconnect path for a revoked/rotated key, which `connect` cannot serve
+   * (against a live or paused connection it would mint a second one and
+   * re-import the whole synced backlog).
+   *
+   * The key travels in, exactly like the wizard calls, and nothing comes back
+   * out: the result is the validated workspace identity. Rejects NOT_FOUND for
+   * an unknown id and CONFLICT when the key belongs to a different workspace.
+   */
+  updateCredentials: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1), apiKey: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
+      try {
+        return await getTrackerSyncFacade().updateCredentials(input.connectionId, input.apiKey);
       } catch (err) {
         rethrowAsTRPCError(err);
       }
