@@ -824,6 +824,32 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
   const link = getLinkByExternal(db, connection.id, issue.externalId);
 
   if (link === null) {
+    // REPAIR COMES FIRST, ahead of every permanent-skip gate below.
+    //
+    // A half-imported idea from a crashed pass is REPAIR of an import that
+    // already happened, not a new one (see the module header's IMPORT RECOVERY
+    // note) — and the ONLY thing that repairs it is the link write. Deciding
+    // eligibility first would make the repair hostage to conditions that have
+    // nothing to do with it: an issue archived, remapped to 'dont', or filtered
+    // out of the selection between the crash and this pass would take the
+    // permanent-skip branch, return 'applied', and let the cursor advance —
+    // stranding the local idea unlinked forever, because those branches never
+    // look at the marker and the issue may never enter the incremental window
+    // again.
+    //
+    // So the repair runs unconditionally, and the CURRENT eligibility only
+    // decides what happens to the now-linked entity afterwards.
+    const adoptable = findAdoptableIdea(
+      db,
+      connection.project_id,
+      connection.provider,
+      provenanceMarker(connection.provider, issue.externalId),
+    );
+    if (adoptable !== null) {
+      await repairHalfImport(ctx, issue, adoptable);
+      return 'applied';
+    }
+
     // An archived remote issue never seeds a NEW local idea — importing
     // something the tracker already retired is pure noise.
     if (issue.archivedAt !== null) {
@@ -839,30 +865,21 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
       report.skipped++;
       return 'applied';
     }
-    // A half-imported idea from a crashed pass is REPAIR of an import that
-    // already happened, not a new one — so it proceeds even while the import
-    // direction is held. Resolved HERE rather than inside importIssueAsIdea so
-    // the gate below can tell the two apart.
-    const adoptable = findAdoptableIdea(
-      db,
-      connection.project_id,
-      connection.provider,
-      provenanceMarker(connection.provider, issue.externalId),
-    );
-    if (!ctx.importNewIssues && adoptable === null) {
+    if (!ctx.importNewIssues) {
       // Deferred, NOT skipped: the cursor holds so this issue is re-offered
       // until a pass may import it.
       return 'import-deferred';
     }
-    await importIssueAsIdea(ctx, issue, target, adoptable);
+    await importIssueAsIdea(ctx, issue, target, null);
     return 'applied';
   }
 
   // Manual mode parks a conflicting item until the user decides; everything
-  // else keeps flowing past it.
+  // else keeps flowing past it. The item is NOT necessarily finished with,
+  // though — see {@link outcomeForParkedLink}.
   if (hasOpenConflictForLink(db, link.id)) {
     report.skipped++;
-    return 'applied';
+    return outcomeForParkedLink(ctx, issue, link);
   }
 
   // An orphaned link already had its remote deletion/archive applied. Leaving
@@ -900,6 +917,88 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
   return await mergeLinkedIssue(ctx, issue, link, local, baseline);
 }
 
+/**
+ * What a link PARKED behind an open conflict means for the cursor.
+ *
+ * The park applies nothing and leaves the baseline where it was, so the whole
+ * item is re-derived on every later pass — for as long as the pass still SEES
+ * it. That is the catch: the cursor is what decides whether it does, and an
+ * issue the cursor moved past is only ever fetched again if the tracker touches
+ * it again. So anything the park suppressed that no durable row records is lost
+ * the moment the cursor advances.
+ *
+ * The one such thing is a remote STAGE change:
+ *   - status direction HELD ('manual'): the merge computed the delta and
+ *     declined to apply it, recording nothing. Nothing else will.
+ *   - status AUTO, item parked by a CONTENT conflict: the stage move was
+ *     applicable and the park dropped it on the floor with the rest of the
+ *     item. Resolving the title conflict advances only the title baseline
+ *     ({@link acceptLocalFieldValue} et al), so the stage would never re-derive.
+ * Both hold the cursor, so the change is re-offered until a pass applies it.
+ *
+ * An open STAGE conflict is the exception: that row already carries the remote
+ * state id and its group, and resolving it applies (or deliberately declines)
+ * the change. The work is durable, so the cursor may move on — and must, or an
+ * unresolved stage conflict would pin the fetch window open indefinitely.
+ */
+function outcomeForParkedLink(
+  ctx: SyncContext,
+  issue: TrackerIssue,
+  link: EntityExternalLinkRow,
+): ApplyOutcome {
+  const { db } = ctx;
+  if (hasOpenConflictForLink(db, link.id, 'stage')) return 'applied';
+  // An archived issue never reaches the merge at all ({@link applyRemoteArchive}
+  // owns it), so there is no stage move being held back — and pinning the
+  // cursor on one would stall the window behind a remote-deletion conflict the
+  // user has not answered yet.
+  if (issue.archivedAt !== null) return 'applied';
+
+  const baseline = parseBaseline(link.baseline_json);
+  if (baseline === null) return 'applied';
+  const local = readLocalEntity(db, link.entity_type, link.entity_id);
+  if (local === null) return 'applied';
+
+  // The same delta mergeLinkedIssue computes, asked only for its existence.
+  const baselineStageId = mappingTargetToStageId(ctx.mapping[baseline.stateId] ?? 'dont', ctx.stageIds);
+  const remoteStageId = mappingTargetToStageId(targetFor(ctx, issue), ctx.stageIds);
+  const waiting =
+    remoteStageId !== null && remoteStageId !== baselineStageId && remoteStageId !== local.stageId;
+  return waiting ? 'stage-deferred' : 'applied';
+}
+
+/**
+ * Finish an import a crash interrupted between the idea's create and its link
+ * write, whatever the issue's CURRENT import eligibility says (see the call
+ * site in {@link applyIssue} for why eligibility cannot gate this).
+ *
+ * The link is written first and unconditionally, because it is the repair: it
+ * is what stops the marked idea from being an orphan and the issue from being
+ * imported a second time.
+ *
+ * WHAT FOLLOWS depends on the issue, and lands the entity exactly where a
+ * LINKED issue in the same state would have:
+ *   - ARCHIVED remotely -> {@link applyRemoteArchive}, i.e. Auto archives the
+ *     idea in place and orphans the link, Manual opens a `remote_deleted`
+ *     conflict. Its mapped stage is deliberately NOT applied on the way — a
+ *     placement onto a board column for an entity we are about to archive is
+ *     noise in the event log and changes nothing.
+ *   - otherwise -> the mapped placement the crashed pass never made. A state
+ *     mapped to 'dont' places nothing (there is no stage it names), which is
+ *     the same non-answer a linked issue on that state gets from the merge.
+ */
+async function repairHalfImport(
+  ctx: SyncContext,
+  issue: TrackerIssue,
+  adopted: { id: string; stageId: string },
+): Promise<void> {
+  const archived = issue.archivedAt !== null;
+  await importIssueAsIdea(ctx, issue, archived ? 'dont' : targetFor(ctx, issue), adopted);
+  if (!archived) return;
+  const link = getLinkByExternal(ctx.db, ctx.connection.id, issue.externalId);
+  if (link !== null) await applyRemoteArchive(ctx, issue, link);
+}
+
 /** selection_mode gate — applied only to issues that would import as NEW ideas. */
 function passesSelectionFilter(connection: TrackerConnectionRow, issue: TrackerIssue): boolean {
   if (connection.selection_mode === 'all') return true;
@@ -924,9 +1023,10 @@ function passesSelectionFilter(connection: TrackerConnectionRow, issue: TrackerI
  * the next pass by adopting the marked idea instead of creating a second one;
  * a crash after the link leaves an ordinary linked entity the merge path owns.
  *
- * `adopted` is that half-imported idea, resolved by the CALLER (applyIssue) —
- * which needs the same answer to tell a genuine new import from a repair when
- * the import direction is held.
+ * `adopted` is that half-imported idea. It is resolved by the CALLER, because
+ * the caller needs the same answer BEFORE it decides anything: a repair runs
+ * ahead of every skip gate and regardless of the import direction, a fresh
+ * import runs behind both (see {@link applyIssue} and {@link repairHalfImport}).
  */
 async function importIssueAsIdea(
   ctx: SyncContext,
@@ -1117,7 +1217,15 @@ async function mergeLinkedIssue(
       report.conflictsOpened++;
     }
     // Nothing applied, baseline untouched — the item is parked.
-    return stageDeferred ? 'stage-deferred' : 'applied';
+    //
+    // A `stageMove` computed here was APPLICABLE (remote-only change, status
+    // direction running) and the park has just dropped it along with the rest
+    // of the item. Nothing records it: the conflict rows above are about the
+    // CONTENT fields, and resolving one advances only its own field's baseline.
+    // So the cursor holds, exactly as a held stage does, and the move is
+    // re-offered once the item stops being parked. See
+    // {@link outcomeForParkedLink} for the later passes.
+    return stageDeferred || stageMove !== undefined ? 'stage-deferred' : 'applied';
   }
 
   // Auto mode: tracker wins content, cyboflow wins stage. Record each override

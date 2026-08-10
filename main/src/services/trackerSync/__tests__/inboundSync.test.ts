@@ -66,6 +66,8 @@ import {
   getConnection,
   getLinkByExternal,
   enqueueOutbox,
+  updateBaseline,
+  updateConnectionSettings,
   type NewConnectionRow,
 } from '../store';
 import { createWriteBackListener, type WriteBackListener } from '../writeBack';
@@ -495,6 +497,109 @@ describe('runInboundSync — import crash recovery', () => {
     // entity is linked and syncable, but the placement this window skipped is
     // not re-derived (the remote state has not changed since the baseline).
     expect(ideas()[0].stage_id).toBe(STAGE.idea);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Import crash recovery — the repair runs AHEAD of the permanent-skip gates
+//
+// A crash between the create and the link leaves a marked idea nothing points
+// at, and only the LINK repairs it. Every gate that answers "should this issue
+// import?" is therefore the wrong question to ask first: an issue that becomes
+// ineligible between the crash and the next pass took a skip branch that
+// returned 'applied', the cursor moved past it, and the idea stayed unlinked
+// forever — the issue may never enter the incremental window again.
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — a half-import is repaired regardless of current eligibility', () => {
+  /** Crash a pass between the idea's create and its link write. */
+  async function crashMidImport(
+    connection: TrackerConnectionRow,
+    issue: TrackerIssue,
+  ): Promise<{ orphanId: string; crashDeps: InboundSyncDeps }> {
+    const crashing = new CrashingRouter(router);
+    const crashDeps: InboundSyncDeps = { ...deps, router: crashing };
+    adapter.issues = [issue];
+    crashing.crashAfterCreate = true;
+    await expect(runInboundSync(crashDeps, connection)).rejects.toThrow('simulated crash');
+    crashing.crashAfterCreate = false;
+
+    const rows = ideas();
+    expect(rows).toHaveLength(1);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+    return { orphanId: rows[0].id, crashDeps };
+  }
+
+  it('links the idea when the issue was ARCHIVED remotely in the meantime, then archives it', async () => {
+    const connection = makeConnection();
+    const { orphanId, crashDeps } = await crashMidImport(connection, makeIssue());
+
+    // The tracker retires the issue before the repair pass runs. As an UNLINKED
+    // issue it is skipped outright (we never import something already retired)
+    // — which is exactly the branch that used to strand the idea.
+    adapter.issues = [
+      makeIssue({ archivedAt: '2026-07-30T10:30:00.000Z', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+    await runInboundSync(crashDeps, reload());
+
+    // Linked — the repair is not conditional on wanting the issue.
+    const link = getLinkByExternal(raw, 'conn-1', 'ext-1');
+    expect(link?.entity_id).toBe(orphanId);
+    // …and then given exactly the outcome a LINKED archived issue gets: Auto
+    // archives in place and orphans the link.
+    expect(ideas()[0].archived_at).not.toBeNull();
+    expect(link?.orphaned_at).not.toBeNull();
+    expect(ideas()).toHaveLength(1);
+  });
+
+  it('links the idea when the issue was remapped to DON’T IMPORT in the meantime', async () => {
+    const connection = makeConnection();
+    const { orphanId, crashDeps } = await crashMidImport(connection, makeIssue());
+
+    // Triage maps to 'dont' by default: the issue is no longer importable.
+    adapter.issues = [makeIssue({ stateId: 'st-triage', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(crashDeps, reload());
+
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.entity_id).toBe(orphanId);
+    expect(ideas()).toHaveLength(1);
+    // 'dont' names no stage, so the idea stays where the crashed pass left it —
+    // the same non-answer a LINKED issue on that state gets from the merge.
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it('links the idea when the SELECTION no longer covers the issue', async () => {
+    const connection = makeConnection();
+    const { orphanId, crashDeps } = await crashMidImport(connection, makeIssue());
+
+    // The user narrows the connection's selection between the crash and the
+    // repair pass, to a manual list this issue is not on.
+    updateConnectionSettings(raw, 'conn-1', {
+      selection_mode: 'manual',
+      selection_json: JSON.stringify({ issueIds: ['ext-other'] }),
+    });
+    adapter.issues = [makeIssue({ updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(crashDeps, reload());
+
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.entity_id).toBe(orphanId);
+    expect(ideas()).toHaveLength(1);
+  });
+
+  it('still refuses to import an ineligible issue that has NO half-import behind it', async () => {
+    // The mirror image, so the repair path cannot be mistaken for a hole in the
+    // gates: with no marked idea to adopt, every skip still skips.
+    const connection = makeConnection();
+    adapter.issues = [
+      makeIssue({ stateId: 'st-triage' }),
+      makeIssue({ externalId: 'ext-2', identifier: 'CORE-143', archivedAt: '2026-07-29T09:00:00.000Z' }),
+    ];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.imported).toBe(0);
+    expect(report.skipped).toBe(2);
+    expect(ideas()).toHaveLength(0);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
   });
 });
 
@@ -1674,6 +1779,181 @@ describe('runInboundSync — applyLinkedStage: false (status direction held)', (
     // import lands.
     expect(report.imported).toBe(1);
     expect(ideas()[0].stage_id).toBe(STAGE.done);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A parked item that still owes work
+//
+// An open conflict parks an item and applies nothing. The cursor is what
+// decides whether a later pass ever SEES it again, so anything the park
+// suppressed that no durable row records is lost the moment the cursor moves.
+// A remote STAGE change is exactly that: the conflict rows describe the fields
+// they were opened FOR, and resolving one advances only its own field.
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — an open conflict must not swallow a pending stage change', () => {
+  async function importOnce(connection: TrackerConnectionRow): Promise<string> {
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    return ideas()[0].id;
+  }
+
+  /**
+   * Settle the one open TITLE conflict the way the user accepting their own
+   * value does — which is the point being made: TrackerSyncService's
+   * `acceptLocalFieldValue` resolves the row and advances the baseline's TITLE,
+   * and nothing else. The stage baseline is untouched by any ruling about a
+   * title, so the stage change only survives if the CURSOR kept the issue in
+   * the fetch window.
+   */
+  function acceptLocalTitle(): void {
+    const [conflict] = conflicts();
+    expect(conflict.field).toBe('title');
+    raw
+      .prepare("UPDATE tracker_conflicts SET state = 'resolved', resolution = 'manual-local' WHERE id = ?")
+      .run(conflict.id);
+    const link = getLinkByExternal(raw, 'conn-1', 'ext-1');
+    if (link === null) throw new Error('no link for ext-1');
+    updateBaseline(
+      raw,
+      link.id,
+      JSON.stringify({ ...baselineOf('ext-1'), title: conflict.remote_value }),
+    );
+  }
+
+  it('HELD status + an open content conflict: the stage survives both passes and applies on a manual one', async () => {
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+    const held: InboundSyncDeps = { ...deps, applyLinkedStage: false };
+
+    // Both sides edit the title (a content conflict), and the remote ALSO moves
+    // state — a change the held status direction may not apply.
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Local title' },
+    });
+    adapter.issues = [
+      makeIssue({ title: 'Remote title', stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+
+    // PASS 1 — the conflict opens and the stage is deferred; the cursor holds.
+    const first = await runInboundSync(held, reload());
+    expect(first.conflictsOpened).toBe(1);
+    expect(first.stageDeferred).toBe(1);
+    expect(conflicts().map((row) => row.field)).toEqual(['title']);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+
+    // PASS 2 — the open conflict short-circuits the item BEFORE the merge. This
+    // is the regression: the short-circuit used to report the issue as fully
+    // applied, the cursor advanced past it, and the held stage change was gone
+    // for good — the issue leaves the incremental window and resolving the
+    // TITLE conflict never touches the stage baseline.
+    const second = await runInboundSync(held, reload());
+    expect(second.skipped).toBe(1);
+    expect(second.stageDeferred).toBe(1);
+    expect(second.conflictsOpened).toBe(0);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+    // Nothing was applied either way.
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
+    expect(ideas()[0].title).toBe('Local title');
+    expect(baselineOf('ext-1').stateId).toBe('st-backlog');
+
+    // The user resolves the title conflict, then hits "Sync now" — which runs
+    // every direction, so the stage finally applies from the same remote state.
+    acceptLocalTitle();
+
+    const manual = await runInboundSync(deps, reload());
+    expect(manual.updated).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(baselineOf('ext-1').stateId).toBe('st-done');
+    expect(reload().cursor_updated_at).toBe('2026-07-30T11:00:00.000Z');
+  });
+
+  it('AUTO status + a manual-mode content conflict: the parked stage move is re-delivered after resolution', async () => {
+    // The interplay the status-manual case above shares a root with. Here the
+    // stage move is APPLICABLE — status runs, and only the remote moved — but
+    // the manual-mode park drops the whole item, conflicting field and all. No
+    // row records the stage, so the cursor has to hold for it too.
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Local title' },
+    });
+    adapter.issues = [
+      makeIssue({ title: 'Remote title', stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' }),
+    ];
+
+    const first = await runInboundSync(deps, reload());
+    expect(first.conflictsOpened).toBe(1);
+    expect(first.stageDeferred).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.idea);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+
+    const second = await runInboundSync(deps, reload());
+    expect(second.stageDeferred).toBe(1);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+
+    acceptLocalTitle();
+
+    const after = await runInboundSync(deps, reload());
+    expect(after.updated).toBe(1);
+    expect(ideas()[0].stage_id).toBe(STAGE.done);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T11:00:00.000Z');
+  });
+
+  it('lets the cursor move past an item parked by a STAGE conflict — that row already records it', async () => {
+    // The exception, and why the hold is conditional rather than blanket: a
+    // stage conflict row carries the remote state id and applies it on
+    // resolution, so the work is durable. Holding the cursor for it as well
+    // would pin the fetch window open for as long as the user takes to answer.
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: STAGE.wontdo,
+    });
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    await runInboundSync(deps, reload());
+    expect(conflicts().map((row) => row.field)).toEqual(['stage']);
+
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T12:00:00.000Z' })];
+    const second = await runInboundSync(deps, reload());
+
+    expect(second.skipped).toBe(1);
+    expect(second.stageDeferred).toBe(0);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T12:00:00.000Z');
+  });
+
+  it('lets the cursor move past a parked item with NO stage change waiting', async () => {
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Local title' },
+    });
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(deps, reload());
+
+    adapter.issues = [makeIssue({ title: 'Remote title again', updatedAt: '2026-07-30T12:00:00.000Z' })];
+    const second = await runInboundSync(deps, reload());
+
+    expect(second.skipped).toBe(1);
+    expect(second.stageDeferred).toBe(0);
+    expect(reload().cursor_updated_at).toBe('2026-07-30T12:00:00.000Z');
   });
 });
 
