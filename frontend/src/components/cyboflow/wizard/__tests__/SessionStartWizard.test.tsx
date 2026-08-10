@@ -377,6 +377,33 @@ async function chooseRuntime(runtime: string): Promise<void> {
   });
 }
 
+/** The agent-runtime picker's current value on ③. */
+function runtimeValue(): string {
+  return (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+}
+
+/**
+ * The permission mode currently shown as selected on ③. The selector is a group
+ * of buttons, so "selected" is `aria-pressed`, not a select value.
+ */
+function pressedPermissionLabel(): string | null {
+  const pressed = screen
+    .getAllByRole('button')
+    .find(
+      (b) =>
+        (b.getAttribute('aria-label') ?? '').startsWith('Permission mode: ') &&
+        b.getAttribute('aria-pressed') === 'true',
+    );
+  return pressed?.getAttribute('aria-label')?.replace('Permission mode: ', '') ?? null;
+}
+
+/** Click a permission-mode option on ③ (a real user pick → setByUser). */
+async function choosePermission(label: string): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText(`Permission mode: ${label}`));
+  });
+}
+
 /**
  * Install a `runTypeDefaults` map on the config store. The wizard reads it
  * reactively (a Settings edit must re-seed an open, untouched wizard), so this
@@ -1660,6 +1687,331 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
     await backToWorkflow();
     await selectWorkflowRowAndConfigure('/custom');
     expect(claudeModelValue()).toBe('haiku');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seeded Configure controls (SCP-1). The feature's promise is that a run type
+// FOLLOWS its saved defaults. The launch payload honoured them, but the
+// Configure controls seeded only the model — so permission + runtime displayed
+// the GLOBAL defaults, and the next "Save as default" from that screen wrote
+// those global values back over the stored ones. That second-order effect is
+// the real damage: the feature lost data on ordinary use.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Configure controls seed from the stored per-type default', () => {
+  const mockApplyRunTypeDefault = vi.fn(
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<ApplyRunTypeDefaultResult> => ({
+      ok: true,
+      previous: null,
+    }),
+  );
+
+  beforeEach(() => {
+    mockApplyRunTypeDefault.mockClear();
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+    act(() => {
+      useConfigStore.setState({ applyRunTypeDefault: mockApplyRunTypeDefault });
+    });
+  });
+  afterEach(() => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+  });
+
+  /**
+   * Install a config with BOTH a global permission default and a runTypeDefaults
+   * map, so "seeded from the stored per-type value" and "seeded from the global"
+   * are distinguishable rather than coincidentally equal.
+   */
+  function setConfig(
+    runTypeDefaults: Record<string, RunTypeDefaults>,
+    globals?: { defaultAgentPermissionMode?: string; quickSessionDefaultSubstrate?: string },
+  ): void {
+    act(() => {
+      useConfigStore.setState({
+        config: { runTypeDefaults, ...globals } as unknown as AppConfig,
+      });
+    });
+  }
+
+  // ── AC1: every control seeds, with no user interaction ───────────────────
+
+  it('seeds model, permission mode AND runtime from the stored workflow default', async () => {
+    setConfig(
+      {
+        'workflow:wf-1': {
+          model: 'sonnet',
+          permissionMode: 'auto',
+          agentRuntime: 'claude-interactive',
+        },
+      },
+      // Deliberately DIFFERENT from the stored values: if a control fell back to
+      // the global rung the assertions below would read 'dontAsk' / 'claude-sdk'.
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    expect(claudeModelValue()).toBe('sonnet');
+    expect(pressedPermissionLabel()).toBe('Auto');
+    expect(runtimeValue()).toBe('claude-interactive');
+  });
+
+  it('threads the seeded (untouched) controls into the launch payload', async () => {
+    setConfig(
+      {
+        'workflow:wf-1': {
+          model: 'sonnet',
+          permissionMode: 'auto',
+          agentRuntime: 'claude-interactive',
+        },
+      },
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'sonnet',
+        permissionMode: 'auto',
+        agentRuntime: 'claude-interactive',
+        // Derived FROM the runtime, never resolved independently — that is what
+        // keeps a stored 'claude-interactive' from being paired with an 'sdk'
+        // substrate floor.
+        substrate: 'interactive',
+      }),
+    );
+  });
+
+  // ── AC2: round-trip integrity — THE data-loss case ───────────────────────
+
+  it('re-saving an untouched screen writes back what was STORED, not the global defaults', async () => {
+    // The defect in one test: seed from a stored default, touch nothing, hit
+    // "Save as default". Before the fix the permission/runtime controls showed
+    // the global values, so this write silently replaced the user's stored
+    // per-type default with them.
+    setConfig(
+      {
+        'workflow:wf-1': {
+          model: 'sonnet',
+          permissionMode: 'auto',
+          agentRuntime: 'claude-interactive',
+        },
+      },
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
+      kind: 'merge',
+      value: {
+        model: 'sonnet',
+        permissionMode: 'auto',
+        agentRuntime: 'claude-interactive',
+        // The stored entry carried no substrate (picking a runtime in Settings
+        // CLEARS a now-mismatched one); the runtime OWNS it, so writing the
+        // implied 'interactive' is equivalent, never contradictory.
+        substrate: 'interactive',
+      },
+    });
+    // The global values must appear nowhere in the written patch.
+    const [, op] = mockApplyRunTypeDefault.mock.calls[0];
+    expect(op).not.toEqual(
+      expect.objectContaining({
+        value: expect.objectContaining({ permissionMode: 'dontAsk' }),
+      }),
+    );
+  });
+
+  it('round-trips the quick card, including its stored reasoning effort', async () => {
+    setConfig(
+      {
+        quick: {
+          model: 'haiku',
+          permissionMode: 'acceptEdits',
+          agentRuntime: 'claude-sdk',
+          reasoningEffort: 'high',
+        },
+      },
+      { defaultAgentPermissionMode: 'dontAsk', quickSessionDefaultSubstrate: 'interactive' },
+    );
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Seeded — note the runtime is the STORED 'claude-sdk', not the
+    // quick-session substrate preference ('interactive') it would otherwise take.
+    expect(claudeModelValue()).toBe('haiku');
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+    expect(runtimeValue()).toBe('claude-sdk');
+    expect(effortValue()).toBe('high');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('quick', {
+      kind: 'merge',
+      value: {
+        model: 'haiku',
+        permissionMode: 'acceptEdits',
+        agentRuntime: 'claude-sdk',
+        substrate: 'sdk',
+        reasoningEffort: 'high',
+      },
+    });
+  });
+
+  // ── AC3: switching the selected workflow re-seeds, with no leak ──────────
+
+  it('re-seeds every control when the selected workflow changes (no leak from the prior flow)', async () => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    setConfig({
+      'workflow:wf-1': {
+        model: 'haiku',
+        permissionMode: 'auto',
+        agentRuntime: 'claude-interactive',
+      },
+      'workflow:wf-compound': {
+        model: 'sonnet',
+        permissionMode: 'acceptEdits',
+        agentRuntime: 'claude-sdk',
+      },
+    });
+    await renderLockedWizard();
+
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(claudeModelValue()).toBe('haiku');
+    expect(pressedPermissionLabel()).toBe('Auto');
+    expect(runtimeValue()).toBe('claude-interactive');
+
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/compound');
+    expect(claudeModelValue()).toBe('sonnet');
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    // …and back: each key still resolves its OWN stored entry.
+    await backToWorkflow();
+    await selectWorkflowRowAndConfigure('/custom');
+    expect(pressedPermissionLabel()).toBe('Auto');
+    expect(runtimeValue()).toBe('claude-interactive');
+  });
+
+  // ── AC4: a user edit wins and survives a re-render ───────────────────────
+
+  it('lets a user pick beat the stored default and survive a later Settings change', async () => {
+    setConfig({
+      'workflow:wf-1': { permissionMode: 'auto', agentRuntime: 'claude-interactive' },
+    });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    expect(pressedPermissionLabel()).toBe('Auto');
+
+    await choosePermission("Don't ask");
+    await chooseRuntime('claude-sdk');
+
+    // A Settings edit re-seeds only UNTOUCHED controls — the explicit picks stand.
+    setRunTypeDefaults({
+      'workflow:wf-1': { model: 'haiku', permissionMode: 'default', agentRuntime: 'codex-sdk' },
+    });
+    expect(pressedPermissionLabel()).toBe("Don't ask");
+    expect(runtimeValue()).toBe('claude-sdk');
+    // The untouched model control DID pick the change up.
+    expect(claudeModelValue()).toBe('haiku');
+  });
+
+  // ── AC5: a runtime-family round trip must not latch anything touched ─────
+
+  it('leaves the model + permission keys UNTOUCHED across a Codex→Claude runtime round trip', async () => {
+    // Every programmatic coercion the flip triggers goes through `reseed`. If any
+    // of them used `setByUser`, the key would latch and the stored-default change
+    // below would be ignored for the rest of the mount.
+    setConfig({ 'workflow:wf-1': { permissionMode: 'auto' } });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseRuntime('codex-sdk');
+    await chooseRuntime('claude-sdk');
+
+    setRunTypeDefaults({
+      'workflow:wf-1': { model: 'sonnet', permissionMode: 'acceptEdits' },
+    });
+    expect(claudeModelValue()).toBe('sonnet');
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+  });
+
+  // ── AC7: nothing configured ⇒ byte-identical to the previous behaviour ───
+
+  it('with NOTHING configured, every control seeds exactly as before', async () => {
+    expect(useConfigStore.getState().config).toBeNull();
+    await renderLockedWizard();
+
+    // Workflow: Opus floor, the 'default' permission floor, the SDK runtime.
+    await selectWorkflowAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+    expect(pressedPermissionLabel()).toBe('Ask before edits');
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    // Quick: same model/permission floors, but the quick-session substrate
+    // preference (absent ⇒ 'interactive') projected onto a Claude runtime.
+    await backToWorkflow();
+    await selectQuickAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+    expect(pressedPermissionLabel()).toBe('Ask before edits');
+    expect(runtimeValue()).toBe('claude-interactive');
+    expect(effortValue()).toBe('');
+  });
+
+  it("with NOTHING configured, the Ultracode card keeps its fable-when-usable / opus floor", async () => {
+    expect(useConfigStore.getState().config).toBeNull();
+    const unmount = await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('fable');
+    // Ultracode hides the runtime picker (it always runs the interactive PTY).
+    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(pressedPermissionLabel()).toBe('Ask before edits');
+
+    // Fable greyed out ⇒ the Opus floor, unchanged.
+    act(() => unmount());
+    modelAvailability.fableUnavailable = true;
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+    expect(claudeModelValue()).toBe('opus');
+  });
+
+  // ── AC8: the design card is outside the stored-defaults surface ──────────
+
+  it('leaves the Design card unaffected by a stored default', async () => {
+    setConfig(
+      {
+        // Both a quick entry (design must not inherit it) and a hand-written
+        // 'design' entry (design has no save CTA, so this can only come from an
+        // edited config — it must not steer the hard-pinned SDK runtime).
+        quick: { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' },
+        design: { agentRuntime: 'codex-sdk' },
+      },
+      { defaultAgentPermissionMode: 'acceptEdits' },
+    );
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    // Plain Opus floor + the GLOBAL permission default, and no runtime picker at
+    // all (design is hard-pinned to the Claude SDK substrate).
+    expect(claudeModelValue()).toBe('opus');
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    // No save CTA: design is excluded from the stored-defaults surface.
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
   });
 });
 

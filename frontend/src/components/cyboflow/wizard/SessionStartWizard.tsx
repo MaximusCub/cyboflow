@@ -71,7 +71,7 @@
  * The whole surface is monospace, mostly square-cornered, on a faint graph-paper
  * grid; UI labels are UPPERCASE wide-tracked.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { inferRouterOutputs } from '@trpc/server';
 import type { AppRouter } from '../../../../../shared/types/trpc';
 import { trpc } from '../../../trpc/client';
@@ -81,7 +81,6 @@ import { useNavigationStore } from '../../../stores/navigationStore';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useConfigStore } from '../../../stores/configStore';
 import { useQuickSession } from '../../../hooks/useQuickSession';
-import { useAgentPermissionMode } from '../../../hooks/useAgentPermissionMode';
 import { useSeededSelection } from '../../../hooks/useSeededSelection';
 import {
   useSaveRunTypeDefault,
@@ -127,7 +126,15 @@ import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
+  isSessionAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
+import {
+  DEFAULT_PERMISSION_MODE,
+  QUICK_RUN_TYPE_KEY,
+  resolveRunTypeLaunchDefaults,
+  workflowRunTypeKey,
+  type RunTypeLaunchGlobals,
+} from '../../../../../shared/types/sessionDefaults';
 import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
   isCodexRuntime,
@@ -140,7 +147,10 @@ import type { ExecutionModel } from '../../../../../shared/types/executionModel'
 import { isMixedProviderOrchestratedError } from '../../../../../shared/types/executionModelErrors';
 import type { QuickSessionWorktreeMode } from '../../../../../shared/types/worktreeMode';
 import { trackEvent } from '../../../utils/telemetry';
-import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
+import {
+  CYBOFLOW_WORKFLOW_NAMES,
+  type PermissionMode,
+} from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
 import {
   notifyQuickSessionCreated,
@@ -263,23 +273,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [selection, setSelection] = useState<WizardSelection | null>(null);
 
   // ── Step ③ Configure ─────────────────────────────────────────────────────
-  // Per-run/per-session agent permission (seeded from the global default, race-
-  // guarded by the shared hook) + per-launch agent runtime. Runtime is projected
-  // onto the legacy substrate field during the Claude provider/runtime migration
-  // and threaded into runs.start / useQuickSession.
-  const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
-  const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
-  // Whether the user explicitly picked a runtime this wizard visit (the runtime
-  // analogue of useSeededSelection's touched latch, which the model picker below
-  // uses). Card selection seeds a per-launcher default — quick /
-  // ultracode → the quick-session substrate preference projected onto a Claude
-  // runtime (PTY by default), workflow → the SDK default runtime — but seeding must
-  // never clobber an explicit pick when the user bounces between cards, so it is
-  // gated on this latch.
-  const runtimeTouchedRef = useRef(false);
   // The global quick-session substrate default (floors to 'interactive'), read
-  // reactively from the config store. Projected onto a Claude runtime to seed the
-  // runtime picker for quick + ultracode cards so quick sessions default to the PTY.
+  // reactively from the config store. Projected onto a Claude runtime to form the
+  // GLOBAL rung of the runtime ladder for quick + ultracode cards, so quick
+  // sessions still default to the PTY when nothing per-type is stored.
   const quickDefaultSubstrate = useConfigStore(
     (s) => s.config?.quickSessionDefaultSubstrate ?? 'interactive',
   );
@@ -289,6 +286,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   // useLaunchWorkflow use at their launch seams — so a Settings edit re-seeds an
   // open, untouched wizard instead of going stale.
   const runTypeDefaults = useConfigStore((s) => s.config?.runTypeDefaults);
+  const globalPermissionMode = useConfigStore((s) => s.config?.defaultAgentPermissionMode);
   const { isAliasUsable } = useModelAvailability();
   // The run-type-defaults key for the CURRENT card. Quick AND Ultracode share
   // the synthetic global 'quick' key (Ultracode is a quick-shaped launch and
@@ -297,54 +295,117 @@ export default function SessionStartWizard(): React.JSX.Element {
   // surface — giving it a key of its own keeps it on the plain Opus floor
   // instead of silently inheriting the quick default. A null selection floors to
   // 'quick' so the key is never `workflow:null`.
-  const modelDefaultsKey =
+  const runTypeKey =
     selection?.kind === 'workflow'
-      ? `workflow:${selection.workflowId}`
+      ? workflowRunTypeKey(selection.workflowId)
       : selection?.kind === 'design'
         ? 'design'
-        : 'quick';
-  // The seed for the current key: the stored per-run-type default when present,
-  // else today's exact floor (Ultracode + a usable Fable → Fable, else Opus).
+        : QUICK_RUN_TYPE_KEY;
+  // The per-launcher default RUNTIME — the GLOBAL rung of the runtime ladder,
+  // below any stored per-type entry. Quick + Ultracode take the quick-session
+  // substrate preference projected onto a Claude runtime (PTY by default);
+  // WORKFLOW launches keep the SDK default runtime so an SDK flow run can still
+  // resolve 'programmatic' (interactive hard-pins orchestrated). DESIGN always
+  // lands on 'claude-sdk' (its picker is hidden; see the seed below).
+  const launcherDefaultRuntime: LaunchAgentRuntime =
+    selection?.kind === 'workflow'
+      ? DEFAULT_SESSION_AGENT_RUNTIME
+      : selection?.kind === 'design'
+        ? 'claude-sdk'
+        : quickDefaultSubstrate === 'interactive'
+          ? 'claude-interactive'
+          : 'claude-sdk';
+  // The per-launcher default MODEL — today's exact floor (Ultracode + a usable
+  // Fable → Fable, else Opus), supplied as the resolver's GLOBAL rung.
   //
   // The Ultracode/Fable distinction MUST live in the SEED, not in `fallback`:
   // quick and ultracode share the 'quick' key, so if it lived in the fallback,
   // bouncing quick↔ultracode would change neither `key` nor `seed`,
   // useSeededSelection's [key, seed] effect would never re-fire, and Ultracode
-  // would keep the Opus floor. Folding it into `seed` makes the value flip
-  // opus↔fable exactly as the card kind changes — and lets an explicitly
-  // configured 'quick' default outrank the Fable floor, which is the intended
-  // meaning of a user-set default.
-  const storedModelForKey = runTypeDefaults?.[modelDefaultsKey]?.model;
-  const modelSeed = useMemo(
-    () =>
-      storedModelForKey ??
-      (selection?.kind === 'ultracode' && isAliasUsable(ULTRACODE_DEFAULT_MODEL)
-        ? ULTRACODE_DEFAULT_MODEL
-        : DEFAULT_QUICK_MODEL),
-    // isAliasUsable is a fresh closure per availability snapshot, so this recomputes
-    // often — harmless, since the seed is a primitive compared by value.
-    [storedModelForKey, selection?.kind, isAliasUsable],
-  );
+  // would keep the Opus floor. Folding it into the resolver's global rung makes
+  // the value flip opus↔fable exactly as the card kind changes — and lets an
+  // explicitly configured 'quick' default outrank the Fable floor, which is the
+  // intended meaning of a user-set default.
+  const launcherDefaultModel =
+    selection?.kind === 'ultracode' && isAliasUsable(ULTRACODE_DEFAULT_MODEL)
+      ? ULTRACODE_DEFAULT_MODEL
+      : DEFAULT_QUICK_MODEL;
+  /**
+   * Every Configure control seeds from the SAME canonical resolver the launch
+   * seams use (`resolveRunTypeLaunchDefaults`: stored → globals → floor). Seeding
+   * only the model — while still WRITING model + permission + runtime + substrate
+   * on "Save as default" — silently rewrote a stored permission/runtime back to
+   * the global values the screen happened to display, i.e. lost data on ordinary
+   * use. Every control the save CTA captures must therefore also seed from it.
+   *
+   * Substrate is never seeded as an independent value: it is DERIVED from the
+   * resolved runtime (`substrateForRuntime`) at every launch seam and at the save
+   * CTA, so the pair can never contradict.
+   */
+  const launchGlobals: RunTypeLaunchGlobals = {
+    model: launcherDefaultModel,
+    ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+    agentRuntime: launcherDefaultRuntime,
+  };
+  const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
   // Per-launch Claude model for QUICK, ULTRACODE, DESIGN and workflow launches
   // (Configure ③). Driven by useSeededSelection: the value re-seeds REACTIVELY
-  // from `modelSeed` while the current key is untouched, and each key tracks its
-  // own touched flag + last user-chosen value, so a pin on one workflow never
-  // bleeds onto another. Fable availability is read optimistically — if the
-  // snapshot hasn't arrived (or flips later), the spawn seam's availability
-  // fallback still degrades an unavailable Fable to Opus and the picker surfaces
-  // the grey-out note. Pinned to a concrete snapshot at the spawn seam.
-  // Quick/ultracode thread it into useQuickSession; workflow threads it into
-  // runs.start ({ model }) → workflow_runs.model (migration 037). Fast mode is
-  // the premium Opus-only research preview — a separate opt-in, default OFF,
-  // QUICK-only, surfaced only while Opus is selected.
+  // from the resolved default while the current key is untouched, and each key
+  // tracks its own touched flag + last user-chosen value, so a pin on one
+  // workflow never bleeds onto another. Fable availability is read
+  // optimistically — if the snapshot hasn't arrived (or flips later), the spawn
+  // seam's availability fallback still degrades an unavailable Fable to Opus and
+  // the picker surfaces the grey-out note. Pinned to a concrete snapshot at the
+  // spawn seam. Quick/ultracode thread it into useQuickSession; workflow threads
+  // it into runs.start ({ model }) → workflow_runs.model (migration 037). Fast
+  // mode is the premium Opus-only research preview — a separate opt-in, default
+  // OFF, QUICK-only, surfaced only while Opus is selected.
   const {
     value: model,
     setByUser: setModelByUser,
     reseed: reseedModel,
   } = useSeededSelection<string>({
-    key: modelDefaultsKey,
-    seed: modelSeed,
+    key: runTypeKey,
+    seed: launchDefaults.model,
     fallback: DEFAULT_QUICK_MODEL,
+  });
+  // Per-run/per-session agent permission. The seed already carries the global
+  // default (the resolver's middle rung), so an untouched picker still forwards
+  // exactly what the launch would otherwise inherit, and a config fetch that
+  // resolves AFTER mount re-seeds it.
+  const {
+    value: permissionMode,
+    setByUser: setPermissionModeByUser,
+  } = useSeededSelection<PermissionMode>({
+    key: runTypeKey,
+    seed: launchDefaults.permissionMode,
+    fallback: DEFAULT_PERMISSION_MODE,
+  });
+  // Per-launch agent runtime. Runtime is projected onto the legacy substrate
+  // field during the Claude provider/runtime migration and threaded into
+  // runs.start / useQuickSession. Card selection changes `runTypeKey`, which
+  // re-seeds this control for untouched keys — replacing the old imperative
+  // `seedDefaultRuntimeFor` + single wizard-wide touched ref, which could not
+  // express "stored default for THIS card" at all.
+  const runtimeSeed: LaunchAgentRuntime | undefined =
+    // Design is hard-pinned to the Claude SDK substrate (design-mode.md "Session
+    // plumbing" — a security boundary), so it never seeds off a stored entry.
+    // A stored 'codex-exec' is not launchable from any picker, so it seeds
+    // nothing and the control falls through to its own fallback.
+    selection?.kind === 'design'
+      ? 'claude-sdk'
+      : isSessionAgentRuntime(launchDefaults.agentRuntime)
+        ? launchDefaults.agentRuntime
+        : undefined;
+  const {
+    value: agentRuntime,
+    setByUser: setAgentRuntimeByUser,
+    reseed: reseedAgentRuntime,
+    isTouched: isAgentRuntimeTouched,
+  } = useSeededSelection<LaunchAgentRuntime>({
+    key: runTypeKey,
+    seed: runtimeSeed,
+    fallback: DEFAULT_SESSION_AGENT_RUNTIME,
   });
   const [fastMode, setFastMode] = useState<boolean>(false);
   // Per-session reasoning-effort selection (IDEA-029), QUICK on every
@@ -356,14 +417,19 @@ export default function SessionStartWizard(): React.JSX.Element {
   // Tracks the previous effective runtime so the effect below clears a pending
   // effort selection on a genuine runtime transition (never on mount).
   const prevEffectiveRuntimeRef = useRef<LaunchAgentRuntime | null>(null);
+  // A workflow cannot launch on Codex PTY, so a runtime that is only valid for a
+  // session is coerced back to the SDK default when a workflow card is selected.
+  // Goes through `reseed`, NOT `setByUser`: it is a PROGRAMMATIC coercion, and
+  // latching the key touched here would permanently freeze reactive re-seeding
+  // for a control the user never actually touched.
   useEffect(() => {
     if (
       selection?.kind === 'workflow' &&
       workflowRuntimeForLaunch(agentRuntime) === null
     ) {
-      setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
+      reseedAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
     }
-  }, [selection?.kind, agentRuntime]);
+  }, [selection?.kind, agentRuntime, reseedAgentRuntime]);
   useEffect(() => {
     const effectiveRuntime: LaunchAgentRuntime =
       selection?.kind === 'ultracode'
@@ -407,27 +473,43 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     if (isCodexModelFamily(model)) {
-      reseedModel(isCodexModelFamily(modelSeed) ? DEFAULT_QUICK_MODEL : modelSeed);
+      const seededModel = launchDefaults.model;
+      reseedModel(isCodexModelFamily(seededModel) ? DEFAULT_QUICK_MODEL : seededModel);
     }
-  }, [selection?.kind, agentRuntime, model, modelSeed, reseedModel]);
+  }, [selection?.kind, agentRuntime, model, launchDefaults.model, reseedModel]);
   // The stored quick-session reasoning-effort default (written only under the
   // synthetic global 'quick' key).
   const storedQuickEffort = runTypeDefaults?.quick?.reasoningEffort;
   // Seed the QUICK card's reasoning effort from that stored default.
   //
-  // Deliberately a plain useState + this dedicated effect rather than a second
-  // useSeededSelection: a touched latch would fight the cross-provider reset in
-  // the effect above. Its dep array is ONLY [card kind, stored value] — the
-  // effective runtime is read through prevEffectiveRuntimeRef (kept current by
-  // that same effect, which is registered first) and is deliberately NOT a
-  // dependency, so a provider FLIP can never re-trigger seeding. The reset above
-  // therefore always wins: once a flip clears the effort to null, nothing
-  // re-applies the stored seed until the card kind or the stored value itself
-  // changes. Ultracode (which pins xhigh at spawn and suppresses --effort) and
-  // design are excluded by the card-kind guard.
+  // Deliberately a plain useState + this dedicated effect rather than a third
+  // useSeededSelection: this control has to lose to the cross-provider reset in
+  // the effect above, which no touched latch of its own could express.
+  //
+  // THE INVARIANT: an actual provider flip ALWAYS beats the stored default, and
+  // nothing may resurrect the effort afterwards. It is enforced by the
+  // `isAgentRuntimeTouched` guard below, NOT by omitting `agentRuntime` from the
+  // deps — because the runtime picker is the ONLY way a user flips the provider
+  // on this surface, and touching it latches that key forever (useSeededSelection
+  // tracks touched per key). So: the moment the user picks a runtime, this effect
+  // is dead for that card and the reset above stands.
+  //
+  // `agentRuntime` IS a dependency, and has to be, because the runtime re-seeds
+  // through an effect — one commit AFTER the card-kind change that triggers this
+  // seeding. Without it the sequence for "select the quick card" is: commit N
+  // seeds the effort, commit N+1 settles the re-seeded runtime and the reset
+  // above wipes it. Re-running here on the settled runtime also means the
+  // provider-scale check below validates against the runtime that will ACTUALLY
+  // launch, instead of the pre-seed one. Both writers run in the same flush with
+  // the reset registered first, so the seed lands last and wins — for an
+  // UNTOUCHED runtime only.
+  //
+  // Ultracode (which pins xhigh at spawn and suppresses --effort) and design are
+  // excluded by the card-kind guard.
   useEffect(() => {
     if (selection?.kind !== 'quick') return;
     if (storedQuickEffort === undefined) return;
+    if (isAgentRuntimeTouched) return;
     const provider = providerForRuntime(
       prevEffectiveRuntimeRef.current ?? DEFAULT_SESSION_AGENT_RUNTIME,
     );
@@ -436,31 +518,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     // while the control still showed it as active, so skip it entirely.
     if (!isValidEffortForProvider(provider, storedQuickEffort)) return;
     setReasoningEffort(storedQuickEffort);
-  }, [selection?.kind, storedQuickEffort]);
-  // Seed the per-launcher default RUNTIME on card selection (no-op once the user
-  // has touched the picker). Quick + Ultracode default to the quick-session
-  // substrate preference projected onto a Claude runtime (PTY → 'claude-interactive',
-  // SDK → 'claude-sdk'); WORKFLOW launches keep the SDK default runtime so an SDK
-  // flow run can still resolve 'programmatic' (interactive hard-pins orchestrated).
-  // DESIGN always seeds 'claude-sdk' — the runtime picker is hidden for it (design
-  // sessions are hard-pinned to the Claude SDK substrate, a security boundary; see
-  // design-mode.md "Session plumbing"), but keeping the state itself consistent
-  // avoids relying solely on the render-time effectiveRuntime override.
-  const seedDefaultRuntimeFor = useCallback(
-    (kind: WizardSelection['kind']) => {
-      if (runtimeTouchedRef.current) return;
-      setAgentRuntime(
-        kind === 'workflow'
-          ? DEFAULT_SESSION_AGENT_RUNTIME
-          : kind === 'design'
-            ? 'claude-sdk'
-            : quickDefaultSubstrate === 'interactive'
-              ? 'claude-interactive'
-              : 'claude-sdk',
-      );
-    },
-    [quickDefaultSubstrate],
-  );
+  }, [selection?.kind, storedQuickEffort, agentRuntime, isAgentRuntimeTouched]);
   // Advanced (Configure ③, WORKFLOW only): per-run code-review-eval override.
   // 'inherit' → omit `evalEnabled` (the run inherits the global codeReviewEvalEnabled
   // setting); 'on'/'off' → send true/false → workflow_runs.eval_enabled (migration
@@ -1325,7 +1383,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     toast: saveToast,
     dismissToast: dismissSaveToast,
   } = useSaveRunTypeDefault({
-    key: selection === null || selection.kind === 'design' ? null : modelDefaultsKey,
+    key: selection === null || selection.kind === 'design' ? null : runTypeKey,
     label: saveDefaultLabel,
   });
 
@@ -1465,11 +1523,11 @@ export default function SessionStartWizard(): React.JSX.Element {
               <QuickSessionCard
                 selected={selection?.kind === 'quick'}
                 onSelect={() => {
-                  // The model no longer needs an imperative seed here: the
-                  // selection change flips useSeededSelection's key/seed and the
-                  // hook re-seeds reactively (untouched keys only).
+                  // No control needs an imperative seed here: the selection
+                  // change flips useSeededSelection's key/seed and every seeded
+                  // control (model, permission, runtime) re-seeds reactively —
+                  // untouched keys only.
                   setSelection({ kind: 'quick' });
-                  seedDefaultRuntimeFor('quick');
                   setStep(3);
                 }}
               />
@@ -1482,7 +1540,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               selected={selection?.kind === 'ultracode'}
               onSelect={() => {
                 setSelection({ kind: 'ultracode' });
-                seedDefaultRuntimeFor('ultracode');
                 setStep(3);
               }}
             />
@@ -1498,7 +1555,6 @@ export default function SessionStartWizard(): React.JSX.Element {
                 selected={selection?.kind === 'design'}
                 onSelect={() => {
                   setSelection({ kind: 'design' });
-                  seedDefaultRuntimeFor('design');
                   setStep(3);
                 }}
               />
@@ -1541,11 +1597,11 @@ export default function SessionStartWizard(): React.JSX.Element {
                     // initial default pre-selection (in loadWorkflows) only sets
                     // state — it never calls setStep — so the wizard does NOT
                     // auto-jump on load; only a user click advances. That
-                    // pre-selection now DOES seed the model (the hook keys off
-                    // `workflow:<id>` reactively), which with nothing configured
-                    // still resolves to the same Opus floor as before.
+                    // pre-selection now DOES seed every Configure control (the
+                    // hooks key off `workflow:<id>` reactively), which with
+                    // nothing configured still resolves to exactly the previous
+                    // values (Opus floor, global permission, SDK runtime).
                     setSelection({ kind: 'workflow', workflowId: meta.id });
-                    seedDefaultRuntimeFor('workflow');
                     setStep(3);
                   }}
                 />
@@ -1571,12 +1627,9 @@ export default function SessionStartWizard(): React.JSX.Element {
               <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
                 <SubstrateSelector
                   value={agentRuntime}
-                  onChange={(next) => {
-                    // A real per-launch pick — stop card-selection seeding from
-                    // overriding it when the user bounces between cards.
-                    runtimeTouchedRef.current = true;
-                    setAgentRuntime(next);
-                  }}
+                  // A real per-launch pick — latches THIS key touched, so the
+                  // card's stored/global default stops re-seeding it (and only it).
+                  onChange={setAgentRuntimeByUser}
                   id="wizard-substrate"
                   caveatsTestId="wizard-substrate-caveats"
                   runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
@@ -1591,7 +1644,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
               <AgentPermissionModeSelector
                 value={permissionMode}
-                onChange={setPermissionMode}
+                onChange={setPermissionModeByUser}
                 agentProvider={effectiveProvider}
                 agentRuntime={effectiveRuntime}
               />

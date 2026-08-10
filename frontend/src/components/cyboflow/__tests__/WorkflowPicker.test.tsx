@@ -1448,6 +1448,272 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Seeded Configure controls (SCP-1). The launch payload already honoured the
+// stored per-run-type defaults, but the controls seeded only the model — so
+// permission + runtime displayed the GLOBAL defaults, and the next "Save as
+// default" from this screen wrote those global values back over the stored
+// ones. That second-order effect is the real damage: data loss on ordinary use.
+// ---------------------------------------------------------------------------
+describe('WorkflowPicker — Configure controls seed from the stored per-type default', () => {
+  const mockApplyRunTypeDefault = vi.fn(
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<ApplyRunTypeDefaultResult> => ({
+      ok: true,
+      previous: null,
+    }),
+  );
+
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    mockApplyRunTypeDefault.mockClear();
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
+    // TWO custom (direct-launch) flows so the "switching re-seeds" case has a
+    // second key to switch to.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+      { id: 'wf-2', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+    ]);
+    act(() => {
+      useConfigStore.setState({ config: null, applyRunTypeDefault: mockApplyRunTypeDefault });
+    });
+  });
+
+  afterEach(() => {
+    useConfigStore.setState({ config: null });
+  });
+
+  /**
+   * Install a config carrying BOTH a global permission default and a
+   * runTypeDefaults map, so "seeded from the stored per-type value" and "seeded
+   * from the global" are distinguishable rather than coincidentally equal.
+   */
+  function setConfig(
+    runTypeDefaults: Record<string, RunTypeDefaults>,
+    globals?: { defaultAgentPermissionMode?: string; quickSessionDefaultSubstrate?: string },
+  ): void {
+    act(() => {
+      useConfigStore.setState({
+        config: { runTypeDefaults, ...globals } as unknown as AppConfig,
+      });
+    });
+  }
+
+  const runtimeValue = (): string =>
+    (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+  const modelValue = (): string =>
+    (screen.getByLabelText('Select Claude model') as HTMLSelectElement).value;
+  const pressedPermissionLabel = (): string | null => {
+    const pressed = screen
+      .getAllByRole('button')
+      .find(
+        (b) =>
+          (b.getAttribute('aria-label') ?? '').startsWith('Permission mode: ') &&
+          b.getAttribute('aria-pressed') === 'true',
+      );
+    return pressed?.getAttribute('aria-label')?.replace('Permission mode: ', '') ?? null;
+  };
+
+  // ── AC1: every control seeds, with no user interaction ───────────────────
+
+  it('seeds model, permission mode AND runtime from the stored workflow default', async () => {
+    setConfig(
+      { 'workflow:wf-1': { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' } },
+      // Deliberately different from the stored values: a control that fell back
+      // to the global rung would read 'dontAsk' / 'claude-sdk' here.
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await waitFor(() => expect(modelValue()).toBe('sonnet'));
+    expect(pressedPermissionLabel()).toBe('Auto');
+    expect(runtimeValue()).toBe('claude-interactive');
+  });
+
+  it('threads the seeded (untouched) controls into runs.start', async () => {
+    setConfig(
+      { 'workflow:wf-1': { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' } },
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        model: 'sonnet',
+        permissionMode: 'auto',
+        agentRuntime: 'claude-interactive',
+        // Derived FROM the runtime, never resolved independently.
+        substrate: 'interactive',
+      }),
+    );
+  });
+
+  // ── AC2: round-trip integrity — THE data-loss case ───────────────────────
+
+  it('re-saving an untouched screen writes back what was STORED, not the global defaults', async () => {
+    setConfig(
+      { 'workflow:wf-1': { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' } },
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-save-default'));
+    });
+
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
+      kind: 'merge',
+      value: {
+        model: 'sonnet',
+        permissionMode: 'auto',
+        agentRuntime: 'claude-interactive',
+        // The stored entry carried no substrate; the runtime OWNS it, so the
+        // implied 'interactive' is equivalent, never contradictory.
+        substrate: 'interactive',
+      },
+    });
+    const [, op] = mockApplyRunTypeDefault.mock.calls[0];
+    expect(op).not.toEqual(
+      expect.objectContaining({ value: expect.objectContaining({ permissionMode: 'dontAsk' }) }),
+    );
+  });
+
+  // ── AC3: switching the selected workflow re-seeds, with no leak ──────────
+
+  it('re-seeds every control when the selected workflow changes (no leak from the prior flow)', async () => {
+    setConfig({
+      'workflow:wf-1': { model: 'haiku', permissionMode: 'auto', agentRuntime: 'claude-interactive' },
+      'workflow:wf-2': { model: 'sonnet', permissionMode: 'acceptEdits', agentRuntime: 'claude-sdk' },
+    });
+    render(<WorkflowPicker projectId={1} />);
+    const workflowSelect = await screen.findByLabelText('Select workflow');
+    await waitFor(() => expect(modelValue()).toBe('haiku'));
+    expect(pressedPermissionLabel()).toBe('Auto');
+    expect(runtimeValue()).toBe('claude-interactive');
+
+    await act(async () => {
+      fireEvent.change(workflowSelect, { target: { value: 'wf-2' } });
+    });
+
+    await waitFor(() => expect(modelValue()).toBe('sonnet'));
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+    expect(runtimeValue()).toBe('claude-sdk');
+  });
+
+  // ── AC4: a user edit wins and survives a re-render ───────────────────────
+
+  it('lets a user pick beat the stored default and survive a later Settings change', async () => {
+    setConfig({ 'workflow:wf-1': { permissionMode: 'auto', agentRuntime: 'claude-interactive' } });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Permission mode: Don't ask"));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-sdk' } });
+    });
+
+    // A Settings edit re-seeds only UNTOUCHED controls.
+    setConfig({
+      'workflow:wf-1': { model: 'haiku', permissionMode: 'default', agentRuntime: 'codex-sdk' },
+    });
+    await waitFor(() => expect(modelValue()).toBe('haiku'));
+    expect(pressedPermissionLabel()).toBe("Don't ask");
+    expect(runtimeValue()).toBe('claude-sdk');
+  });
+
+  // ── AC5: a runtime-family round trip must not latch anything touched ─────
+
+  it('leaves the model + permission keys UNTOUCHED across a Codex→Claude runtime round trip', async () => {
+    setConfig({ 'workflow:wf-1': { permissionMode: 'auto' } });
+    render(<WorkflowPicker projectId={1} />);
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
+    });
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
+    });
+
+    // If any coercion had used `setByUser`, this stored-default change would be
+    // ignored for the rest of the mount.
+    setConfig({ 'workflow:wf-1': { model: 'sonnet', permissionMode: 'acceptEdits' } });
+    await waitFor(() => expect(modelValue()).toBe('sonnet'));
+    expect(pressedPermissionLabel()).toBe('Allow edits');
+  });
+
+  // ── AC7: nothing configured ⇒ byte-identical to the previous behaviour ───
+
+  it('with NOTHING configured, every control seeds exactly as before', async () => {
+    useConfigStore.setState({ config: null });
+    render(<WorkflowPicker projectId={1} />);
+    const startRunBtn = await findEnabledStartRun();
+
+    expect(modelValue()).toBe('opus');
+    expect(pressedPermissionLabel()).toBe('Ask before edits');
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      model: 'opus',
+    });
+  });
+
+  it("still resolves the Quick Session button's UNTOUCHED controls from the 'quick' key", async () => {
+    // One control set, two run types. The controls key to the selected WORKFLOW,
+    // so an untouched quick launch must re-resolve against the 'quick' key —
+    // otherwise the workflow's stored permission/runtime would ride a quick
+    // session that never asked for them.
+    setConfig(
+      {
+        'workflow:wf-1': { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' },
+        quick: { model: 'haiku', permissionMode: 'acceptEdits', agentRuntime: 'claude-sdk' },
+      },
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentPermissionMode: 'acceptEdits',
+        agentRuntime: 'claude-sdk',
+        substrate: 'sdk',
+        claudeConfig: { model: 'haiku', fastMode: false },
+      }),
+    );
+  });
+});
+
 describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
   /**
    * Stand-in for the config store's `applyRunTypeDefault` action. The component

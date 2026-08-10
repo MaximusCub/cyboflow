@@ -17,7 +17,6 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
-import { useAgentPermissionMode } from '../../hooks/useAgentPermissionMode';
 import { useSeededSelection } from '../../hooks/useSeededSelection';
 import { useSaveRunTypeDefault, SAVE_DEFAULT_TOAST_MS } from '../../hooks/useSaveRunTypeDefault';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
@@ -31,10 +30,24 @@ import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
-import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
+import {
+  type PermissionMode,
+  type WorkflowRow,
+  CYBOFLOW_WORKFLOW_NAMES,
+} from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
-import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../shared/types/agentRuntime';
+import {
+  DEFAULT_SESSION_AGENT_RUNTIME,
+  isSessionAgentRuntime,
+} from '../../../../shared/types/agentRuntime';
+import {
+  DEFAULT_PERMISSION_MODE,
+  QUICK_RUN_TYPE_KEY,
+  resolveRunTypeLaunchDefaults,
+  workflowRunTypeKey,
+  type RunTypeLaunchGlobals,
+} from '../../../../shared/types/sessionDefaults';
 import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
   isCodexRuntime,
@@ -67,81 +80,151 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const [error, setError] = useState<string | null>(null);
 
   /**
-   * The per-launch agent runtime choice. Claude runtimes project onto the legacy
-   * substrate field. On this mixed launch surface, Codex SDK can launch
-   * workflows or quick sessions; Codex PTY is quick-session-only and disables
-   * Start Run.
-   */
-  const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
-
-  /**
    * The user's global quick-session substrate preference (floors to 'interactive',
-   * the PTY). This surface's substrate selector defaults to DEFAULT_SUBSTRATE
-   * ('sdk') because it primarily governs WORKFLOW launches — but the "Quick
-   * Session" escape hatch below is a real quick session and must honor the quick
-   * preference, exactly like the Session Start Wizard and keyboard shortcut. When
-   * the user hasn't touched the selector we launch the quick session on
-   * `quickDefaultSubstrate`; an explicit selector change (tracked by
-   * `substrateTouchedRef`) is a real per-launch choice and still wins.
+   * the PTY). This surface's runtime selector is keyed to the SELECTED WORKFLOW
+   * (it primarily governs WORKFLOW launches) — but the "Quick Session" escape
+   * hatch below is a real quick session and must honor the quick preference,
+   * exactly like the Session Start Wizard and keyboard shortcut. When the user
+   * hasn't touched the selector the quick launch resolves the quick key's own
+   * defaults; an explicit selector change is a real per-launch choice and wins.
    */
   const quickDefaultSubstrate = useConfigStore(
     (s) => s.config?.quickSessionDefaultSubstrate ?? 'interactive',
   );
-  const substrateTouchedRef = useRef(false);
 
   /**
-   * The per-run Claude model choice (Configure model dropdown). Seeded from the
-   * user's stored per-run-type default for the SELECTED workflow
-   * (`config.runTypeDefaults['workflow:<id>'].model`), floored to Opus
-   * (DEFAULT_WORKFLOW_MODEL) when nothing is configured — the same resolution
-   * useLaunchWorkflow / useTaskRunLauncher apply on their one-click lanes, so a
-   * flow launched from here and from the backlog agree. Threaded into
-   * runs.start.mutate as `model` → workflow_runs.model (migration 037) for
-   * workflow launches, and into useQuickSession.start for the Quick Session button.
+   * The Configure controls are ALL seeded from the user's stored per-run-type
+   * default for the SELECTED workflow, through the one canonical resolver every
+   * launch seam uses (`resolveRunTypeLaunchDefaults`: stored → globals → floor).
+   * Seeding only the model — while still WRITING all four fields on "Save as
+   * default" — silently rewrote a stored `permissionMode`/`agentRuntime` back to
+   * the global values the screen happened to display, i.e. lost data on ordinary
+   * use. Every control the save CTA captures must therefore also seed from it.
+   *
+   * `model` is deliberately NOT given a global rung: there is no global model
+   * default in this ladder (a `config.defaultModel` fallback is exactly what
+   * DEFAULT_RUN_TYPE_MODEL_FLOORS exists to prevent), so it resolves stored →
+   * the per-kind floor (Opus for a workflow key).
    *
    * Keyed on the selected workflow (`selectedId` is null until the list loads,
-   * hence the '' key), so switching flows re-seeds to the NEW flow's default and
-   * the prior flow's value never leaks — and each flow keeps its own touched flag.
+   * hence the '' key), so switching flows re-seeds every control to the NEW
+   * flow's defaults and the prior flow's values never leak — and each flow keeps
+   * its own per-control touched flag.
    */
-  const modelKey = `workflow:${selectedId ?? ''}`;
-  const modelSeed = useConfigStore((s) => s.config?.runTypeDefaults?.[modelKey]?.model);
+  const runTypeKey = workflowRunTypeKey(selectedId ?? '');
+  const runTypeDefaults = useConfigStore((s) => s.config?.runTypeDefaults);
+  const globalPermissionMode = useConfigStore((s) => s.config?.defaultAgentPermissionMode);
+  const launchGlobals: RunTypeLaunchGlobals = {
+    ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+    agentRuntime: DEFAULT_SESSION_AGENT_RUNTIME,
+  };
+  const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
+  // A stored 'codex-exec' is not a launchable runtime on any picker (it is the
+  // headless exec runtime, never offered here), so it seeds nothing and the
+  // control falls through to its own fallback.
+  const runtimeSeed: LaunchAgentRuntime | undefined = isSessionAgentRuntime(
+    launchDefaults.agentRuntime,
+  )
+    ? launchDefaults.agentRuntime
+    : undefined;
+
+  /**
+   * The per-run Claude model choice (Configure model dropdown). Threaded into
+   * runs.start.mutate as `model` → workflow_runs.model (migration 037) for
+   * workflow launches, and into useQuickSession.start for the Quick Session button.
+   */
   const {
     value: model,
     setByUser: setModelByUser,
     reseed: reseedModel,
     isTouched: isModelTouched,
   } = useSeededSelection<string>({
-    key: modelKey,
-    seed: modelSeed,
+    key: runTypeKey,
+    seed: launchDefaults.model,
     fallback: DEFAULT_WORKFLOW_MODEL,
   });
 
   /**
-   * The model control is live from first mount, but `selectedId` is null until
-   * workflows.list resolves — so a pick made in that window lands under the
-   * transient `workflow:` key. useSeededSelection's touched map is per-key, so
-   * once the real id arrives the new key looks UNTOUCHED and the user's choice
-   * is silently re-seeded away. Park a pre-load pick here and re-apply it under
-   * the real key on the first settle; the ref is cleared immediately after, so
-   * every later flow switch keeps normal per-key semantics.
+   * The per-run agent permission choice. Threaded into runs.start.mutate as
+   * `permissionMode` (the AppRouter-inferred input). The seed already carries the
+   * global default (the middle rung of the resolver ladder), so an untouched
+   * picker still forwards exactly what the launch would otherwise inherit — and
+   * a config fetch that resolves AFTER mount re-seeds it.
    */
-  const preLoadModelRef = useRef<string | null>(null);
+  const {
+    value: permissionMode,
+    setByUser: setPermissionModeByUser,
+    isTouched: isPermissionModeTouched,
+  } = useSeededSelection<PermissionMode>({
+    key: runTypeKey,
+    seed: launchDefaults.permissionMode,
+    fallback: DEFAULT_PERMISSION_MODE,
+  });
+
+  /**
+   * The per-launch agent runtime choice. Claude runtimes project onto the legacy
+   * substrate field (the substrate is DERIVED from the runtime at every launch
+   * seam below — never resolved independently, which is how a stored
+   * `claude-interactive` used to end up paired with an 'sdk' substrate). On this
+   * mixed launch surface, Codex SDK can launch workflows or quick sessions;
+   * Codex PTY is quick-session-only and disables Start Run.
+   */
+  const {
+    value: agentRuntime,
+    setByUser: setAgentRuntimeByUser,
+    isTouched: isAgentRuntimeTouched,
+  } = useSeededSelection<LaunchAgentRuntime>({
+    key: runTypeKey,
+    seed: runtimeSeed,
+    fallback: DEFAULT_SESSION_AGENT_RUNTIME,
+  });
+
+  /**
+   * Every Configure control is live from first mount, but `selectedId` is null
+   * until workflows.list resolves — so a pick made in that window lands under the
+   * transient `workflow:` key. useSeededSelection's touched map is per-key, so
+   * once the real id arrives the new key looks UNTOUCHED and the user's choice is
+   * silently re-seeded away. Park pre-load picks here and re-apply them under the
+   * real key on the first settle; the ref is cleared immediately after, so every
+   * later flow switch keeps normal per-key semantics.
+   */
+  const preLoadPicksRef = useRef<{
+    model?: string;
+    permissionMode?: PermissionMode;
+    agentRuntime?: LaunchAgentRuntime;
+  }>({});
   const handleModelChange = useCallback(
     (next: string) => {
-      if (selectedId === null) preLoadModelRef.current = next;
+      if (selectedId === null) preLoadPicksRef.current.model = next;
       setModelByUser(next);
     },
     [selectedId, setModelByUser],
   );
+  const handlePermissionModeChange = useCallback(
+    (next: PermissionMode) => {
+      if (selectedId === null) preLoadPicksRef.current.permissionMode = next;
+      setPermissionModeByUser(next);
+    },
+    [selectedId, setPermissionModeByUser],
+  );
+  const handleAgentRuntimeChange = useCallback(
+    (next: LaunchAgentRuntime) => {
+      if (selectedId === null) preLoadPicksRef.current.agentRuntime = next;
+      setAgentRuntimeByUser(next);
+    },
+    [selectedId, setAgentRuntimeByUser],
+  );
   useEffect(() => {
     if (selectedId === null) return;
-    const pending = preLoadModelRef.current;
-    if (pending === null) return;
-    preLoadModelRef.current = null;
-    // Runs AFTER useSeededSelection's own key-change effect (declared earlier in
-    // this component), so this re-application wins over the new key's seed.
-    setModelByUser(pending);
-  }, [selectedId, setModelByUser]);
+    const pending = preLoadPicksRef.current;
+    preLoadPicksRef.current = {};
+    // Runs AFTER useSeededSelection's own key-change effects (the hooks are
+    // declared earlier in this component), so these re-applications win over the
+    // new key's seeds.
+    if (pending.model !== undefined) setModelByUser(pending.model);
+    if (pending.permissionMode !== undefined) setPermissionModeByUser(pending.permissionMode);
+    if (pending.agentRuntime !== undefined) setAgentRuntimeByUser(pending.agentRuntime);
+  }, [selectedId, setModelByUser, setPermissionModeByUser, setAgentRuntimeByUser]);
   // Runtime-family coercion: a Codex runtime cannot run a Claude model (and vice
   // versa), so flipping the runtime picker rewrites an incompatible selection.
   // This goes through `reseed`, NOT `setByUser`: it is a PROGRAMMATIC coercion,
@@ -160,11 +243,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       return;
     }
     if (isCodexModelFamily(model)) {
-      reseedModel(
-        modelSeed !== undefined && !isCodexModelFamily(modelSeed) ? modelSeed : DEFAULT_WORKFLOW_MODEL,
-      );
+      const seededModel = launchDefaults.model;
+      reseedModel(!isCodexModelFamily(seededModel) ? seededModel : DEFAULT_WORKFLOW_MODEL);
     }
-  }, [agentRuntime, model, modelSeed, reseedModel]);
+  }, [agentRuntime, model, launchDefaults.model, reseedModel]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -177,14 +259,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * (variant ids are workflow-scoped — the resolver rejects a foreign pin).
    */
   const [variantSelection, setVariantSelection] = useState<VariantSelection>({ mode: 'rotation' });
-
-  /**
-   * The per-run agent permission choice — seeded from the global default and
-   * guarded against the config-load race by {@link useAgentPermissionMode}.
-   * Threaded into runs.start.mutate as `permissionMode` (the AppRouter-inferred
-   * input).
-   */
-  const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -495,25 +569,37 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   );
 
   const handleQuickSession = useCallback(() => {
-    // The runtime selector primarily governs WORKFLOW launches and defaults to
-    // the SDK runtime. The "Quick Session" escape hatch is a real quick session,
-    // so when the user hasn't explicitly touched the selector it must honor the
-    // quick-session substrate preference (projected onto a Claude runtime), like
-    // the wizard + keyboard shortcut. An explicit runtime pick still wins.
-    const effectiveRuntime = substrateTouchedRef.current
+    // Shared-control ambiguity, resolved the same way for EVERY control: this
+    // panel has ONE control set driving TWO run types, and the controls key to
+    // `workflow:<selectedId>`. A TOUCHED control is a real per-launch choice and
+    // is forwarded verbatim; an UNTOUCHED one is re-resolved for THIS launch
+    // against the synthetic 'quick' key through the same canonical resolver the
+    // dedicated quick-session seams use (read imperatively via getState(),
+    // consistent with useQuickSession.startWithDefaults). With nothing stored
+    // under 'quick' that ladder lands exactly where this surface landed before:
+    // the global permission default, and the quick-session substrate preference
+    // projected onto a Claude runtime.
+    const quickDefaultRuntime: LaunchAgentRuntime =
+      quickDefaultSubstrate === 'interactive' ? 'claude-interactive' : 'claude-sdk';
+    const quickDefaults = resolveRunTypeLaunchDefaults(
+      QUICK_RUN_TYPE_KEY,
+      useConfigStore.getState().config?.runTypeDefaults,
+      {
+        ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+        substrate: quickDefaultSubstrate,
+        agentRuntime: quickDefaultRuntime,
+      },
+    );
+    const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched
       ? agentRuntime
-      : quickDefaultSubstrate === 'interactive'
-        ? 'claude-interactive'
-        : 'claude-sdk';
+      : isSessionAgentRuntime(quickDefaults.agentRuntime)
+        ? quickDefaults.agentRuntime
+        : quickDefaultRuntime;
+    const quickPermissionMode = isPermissionModeTouched
+      ? permissionMode
+      : quickDefaults.permissionMode;
     const sessionRuntime = quickSessionRuntimeForLaunch(effectiveRuntime);
-    // Shared-control ambiguity: this panel has ONE control set driving TWO run
-    // types. The controls key to `workflow:<selectedId>` (they primarily govern
-    // workflow launches), so an UNTOUCHED model here carries the selected
-    // WORKFLOW's default — which is the wrong default for a quick session.
-    // Settled resolution: a touched control is a real per-launch choice and is
-    // forwarded verbatim; otherwise we resolve the quick default freshly from
-    // the synthetic 'quick' key (read imperatively via getState(), consistent
-    // with useLaunchWorkflow / useQuickSession.startWithDefaults).
+    // The model follows the same touched/untouched rule, with one extra guard.
     //
     // The family guard is load-bearing: the 'quick' default is stored without
     // regard to this launch's runtime, so an untouched Codex-runtime quick
@@ -532,7 +618,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           ? storedQuickModel
           : model;
     void startQuickSession(
-      permissionMode,
+      quickPermissionMode,
       substrateForRuntime(sessionRuntime),
       undefined,
       quickModel,
@@ -543,7 +629,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       providerForRuntime(sessionRuntime),
       sessionRuntime,
     );
-  }, [agentRuntime, model, isModelTouched, permissionMode, startQuickSession, quickDefaultSubstrate]);
+  }, [
+    agentRuntime,
+    isAgentRuntimeTouched,
+    model,
+    isModelTouched,
+    permissionMode,
+    isPermissionModeTouched,
+    globalPermissionMode,
+    startQuickSession,
+    quickDefaultSubstrate,
+  ]);
 
   const selectedWorkflowTitle = workflowTitleForName(
     workflows.find((wf) => wf.id === selectedId)?.name ?? '',
@@ -566,7 +662,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     toast: saveToast,
     dismissToast: dismissSaveToast,
   } = useSaveRunTypeDefault({
-    key: selectedId === null ? null : `workflow:${selectedId}`,
+    key: selectedId === null ? null : workflowRunTypeKey(selectedId),
     label: selectedWorkflowTitle,
   });
 
@@ -621,12 +717,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       {/* Agent runtime selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
       <SubstrateSelector
         value={agentRuntime}
-        onChange={(next) => {
-          // A real per-launch choice — after this the Quick Session button uses
-          // the explicit runtime's substrate instead of the quick-session default.
-          substrateTouchedRef.current = true;
-          setAgentRuntime(next);
-        }}
+        // A real per-launch choice — after this the Quick Session button uses the
+        // explicit runtime's substrate instead of the quick-session default, and
+        // the control stops re-seeding from the stored per-workflow default.
+        onChange={handleAgentRuntimeChange}
         id="workflow-picker-substrate"
         caveatsTestId="workflow-picker-substrate-caveats"
         runtimeScope="mixed"
@@ -638,7 +732,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           permission_mode_snapshot. Omitted → the session mode is left untouched. */}
       <AgentPermissionModeSelector
         value={permissionMode}
-        onChange={setPermissionMode}
+        onChange={handlePermissionModeChange}
         agentProvider={selectedProvider}
         agentRuntime={agentRuntime}
       />
