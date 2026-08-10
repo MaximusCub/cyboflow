@@ -26,8 +26,6 @@ import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector
 import { DEFAULT_CODEX_MODEL } from '../cyboflow/ModelSelector';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import {
-  DEFAULT_SESSION_AGENT_RUNTIME,
-  DEFAULT_WORKFLOW_AGENT_RUNTIME,
   SESSION_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIMES,
   claudeRuntimeFromSubstrate,
@@ -37,11 +35,10 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import { CLAUDE_EFFORT_LEVELS, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import {
-  DEFAULT_PERMISSION_MODE,
-  DEFAULT_RUN_TYPE_MODEL_FLOORS,
   DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS,
   isQuickRunTypeKey,
   QUICK_RUN_TYPE_KEY,
+  resolveRunTypeLaunchDefaults,
   runTypeKindForKey,
   workflowRunTypeKey,
   type RunTypeDefaults,
@@ -166,35 +163,58 @@ export interface RunTypeBaseline {
 }
 
 /**
- * Resolve the global baseline for one key. Mirrors, field for field, the SAME
- * floors `resolveRunTypeLaunchDefaults` (shared/types/sessionDefaults.ts) uses
- * at launch time — sourced from there directly rather than re-declared here, so
- * the Settings diff chips can never silently disagree with what a launch
- * actually resolves:
- *   - `model`        — `DEFAULT_RUN_TYPE_MODEL_FLOORS[kind]` (Opus for both).
- *                      There is no global launch-model config field;
- *                      `configManager.getDefaultLaunchModel` floors to this
- *                      same constant and deliberately never inherits the
- *                      legacy `defaultModel`.
- *   - `substrate`    — quick: `quickSessionDefaultSubstrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.quick`
- *                      (useQuickSession.startWithDefaults); flows:
- *                      `DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.workflow` (useLaunchWorkflow).
- *   - `permissionMode` — `defaultAgentPermissionMode ?? DEFAULT_PERMISSION_MODE` for both.
- *   - `agentRuntime` — the shared session / workflow runtime defaults.
+ * Resolve the global baseline for one key by DELEGATING to
+ * `resolveRunTypeLaunchDefaults` (shared/types/sessionDefaults.ts) — the same
+ * function every launch seam calls. It used to restate that ladder field by
+ * field, which is exactly how it drifted: it resolved `substrate` and
+ * `agentRuntime` INDEPENDENTLY and returned `{ substrate: 'interactive',
+ * agentRuntime: 'claude-sdk' }` for the quick key on a default install — a pair
+ * no launch can honour, seeded straight into the detail screen's draft by
+ * `toggleCard`. There is now exactly ONE implementation of "what does this key
+ * resolve to".
+ *
+ * Two deliberate choices:
+ *
+ * 1. **`runTypeDefaults` is NOT passed.** A baseline is "what a launch resolves
+ *    for this key when NOTHING is stored for it" — only the GLOBAL rungs. Feeding
+ *    the stored entry back in would make every stored value equal its own
+ *    baseline and every diff chip would vanish (rule 1 in the module doc).
+ *    The globals passed here are the same ones the launch seams pass:
+ *    `quickSessionDefaultSubstrate` for the quick key
+ *    (useQuickSession.startWithDefaults) and `defaultAgentPermissionMode`.
+ *
+ * 2. **`agentRuntime` is projected from the resolved SUBSTRATE.** The resolver
+ *    returns `undefined` for an unconfigured runtime on purpose — that omission
+ *    is what keeps an unconfigured install's launch payload byte-identical — but
+ *    a diff chip needs a concrete value to display as "the default". So the
+ *    baseline fills the gap with `claudeRuntimeFromSubstrate(resolved.substrate)`:
+ *    the runtime that OWNS the transport the launch actually resolved. That is
+ *    the one direction that cannot contradict itself, and it keeps
+ *    `RunTypeBaseline.agentRuntime` non-optional for its consumers
+ *    (`effectiveRuntimeForDraft`, `coerceDraftForRuntime`, `toggleCard`).
+ *
+ *    This DOES change what an unconfigured quick key shows: `claude-interactive`
+ *    (matching its `interactive` substrate baseline) rather than the old
+ *    `DEFAULT_SESSION_AGENT_RUNTIME`. That is the fix, not a side effect — the
+ *    old value was the contradictory half. A workflow key is unchanged
+ *    (`sdk` ⇒ `claude-sdk` == `DEFAULT_WORKFLOW_AGENT_RUNTIME`).
  */
 export function resolveRunTypeBaseline(
   key: string,
   config: AppConfig | null | undefined,
 ): RunTypeBaseline {
-  const kind = runTypeKindForKey(key);
-  const quick = kind === 'quick';
-  return {
-    model: DEFAULT_RUN_TYPE_MODEL_FLOORS[kind],
+  const quick = runTypeKindForKey(key) === 'quick';
+  const resolved = resolveRunTypeLaunchDefaults(key, undefined, {
+    permissionMode: config?.defaultAgentPermissionMode,
     substrate: quick
       ? (config?.quickSessionDefaultSubstrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.quick)
       : DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.workflow,
-    agentRuntime: quick ? DEFAULT_SESSION_AGENT_RUNTIME : DEFAULT_WORKFLOW_AGENT_RUNTIME,
-    permissionMode: config?.defaultAgentPermissionMode ?? DEFAULT_PERMISSION_MODE,
+  });
+  return {
+    model: resolved.model,
+    substrate: resolved.substrate,
+    agentRuntime: resolved.agentRuntime ?? claudeRuntimeFromSubstrate(resolved.substrate),
+    permissionMode: resolved.permissionMode,
   };
 }
 

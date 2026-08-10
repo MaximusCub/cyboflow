@@ -1,9 +1,10 @@
 /**
  * useSeededSelection — generic per-key seed/touched selection state.
  *
- * Generalizes the seed/touched pattern from useAgentPermissionMode (a value
- * seeds reactively from an external default until the user explicitly picks
- * one) to (a) any value type and (b) a KEYED selection, so switching key
+ * Generalizes the seed/touched pattern the permission picker used to carry in a
+ * hook of its own — since retired, this IS that hook now — (a value seeds
+ * reactively from an external default until the user explicitly picks one) to
+ * (a) any value type and (b) a KEYED selection, so switching key
  * (e.g. wizard card kind, or selected workflow) does not bleed one key's
  * touched flag onto another — each key tracks its own touched state and its
  * own last user-chosen value.

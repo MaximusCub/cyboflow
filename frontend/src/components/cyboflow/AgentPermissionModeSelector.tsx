@@ -1,7 +1,9 @@
 /**
  * AgentPermissionModeSelector — the 4-button agent-permission picker, mirroring
  * the global control in Settings.tsx. Presentational (controlled value/onChange);
- * the seed-from-global + touched-guard state lives in {@link useAgentPermissionMode}.
+ * the seed-from-global + touched-guard state lives in each caller's own
+ * `useSeededSelection` (frontend/src/hooks/useSeededSelection.ts), keyed per run
+ * type.
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * options + button markup are single-sourced (no drift in labels/hints/styling).

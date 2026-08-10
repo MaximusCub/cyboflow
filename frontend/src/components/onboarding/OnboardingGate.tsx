@@ -359,7 +359,8 @@ export function OnboardingGate(): React.JSX.Element | null {
     try {
       // MUST go through the config store: updateConfig persists AND refetches
       // the renderer's cached config, so downstream seeds (the wizard's
-      // useAgentPermissionMode) inherit the choice without an app restart.
+      // permission-mode useSeededSelection) inherit the choice without an app
+      // restart.
       await useConfigStore.getState().updateConfig({ defaultAgentPermissionMode: permMode });
     } catch {
       /* non-fatal — advance regardless; the pill can be changed in Settings */

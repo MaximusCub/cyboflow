@@ -486,6 +486,51 @@ describe('RunTypeOverridesSection — detail screen', () => {
     expect(screen.queryByTestId('knob-card-eval')).not.toBeInTheDocument();
   });
 
+  // COR-8 — the Runtime card seeds each of its fields "from the baseline so the
+  // control starts at the value the launch would have used". The quick baseline
+  // used to hand it `substrate: 'interactive'` alongside `agentRuntime:
+  // 'claude-sdk'`, so the runtime pick's own coercion immediately threw the
+  // seeded substrate away and left the card describing a transport the launch
+  // does NOT use — on a default install, with no user input beyond the toggle.
+  it('seeds the Runtime card on a DEFAULT install with a self-consistent pair (quick)', async () => {
+    await openDetail('Quick session');
+
+    const card = screen.getByTestId('knob-card-runtime');
+    // What the screen claims the launch would use, before the toggle.
+    expect(within(card).getByTestId('run-type-field-substrate')).toHaveTextContent(
+      'from defaults · Interactive terminal',
+    );
+    expect(within(card).getByTestId('run-type-field-agentRuntime')).toHaveTextContent(
+      'from defaults · Claude interactive',
+    );
+
+    fireEvent.click(within(card).getByRole('switch'));
+
+    expect(within(card).getByLabelText('Substrate')).toHaveValue('interactive');
+    expect(within(card).getByLabelText('Agent runtime')).toHaveValue('claude-interactive');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('quick', {
+        kind: 'merge',
+        value: expect.objectContaining({
+          substrate: 'interactive',
+          agentRuntime: 'claude-interactive',
+        }),
+      }),
+    );
+  });
+
+  it('seeds the Runtime card on a DEFAULT install with a self-consistent pair (flow)', async () => {
+    await openDetail('Sprint');
+
+    const card = screen.getByTestId('knob-card-runtime');
+    fireEvent.click(within(card).getByRole('switch'));
+
+    expect(within(card).getByLabelText('Substrate')).toHaveValue('sdk');
+    expect(within(card).getByLabelText('Agent runtime')).toHaveValue('claude-sdk');
+  });
+
   // AC 3 — effort is Quick-Session-only.
   it("shows a reasoning-effort field on the 'quick' detail screen", async () => {
     await openDetail('Quick session', { runTypeDefaults: { quick: { model: 'sonnet' } } });

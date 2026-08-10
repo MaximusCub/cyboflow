@@ -12,6 +12,7 @@ import {
   QUICK_RUN_TYPE_KEY,
   RUN_TYPE_FIELD_ORDER,
   agentRuntimeOptions,
+  baselineValueFor,
   buildRunTypeGroups,
   coerceDraftForModel,
   coerceDraftForRuntime,
@@ -31,8 +32,15 @@ import {
 } from '../runTypeOverrides';
 import {
   SESSION_AGENT_RUNTIMES,
+  claudeRuntimeFromSubstrate,
   substrateForRuntime,
+  type AgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
+import {
+  resolveRunTypeLaunchDefaults,
+  type RunTypeDefaults,
+} from '../../../../../shared/types/sessionDefaults';
+import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { AppConfig } from '../../../types/config';
 import type { WorkflowRow } from '../../../../../shared/types/workflows';
 
@@ -62,11 +70,16 @@ describe('resolveRunTypeBaseline', () => {
     });
   });
 
+  // THE unanimous defect (COR-8). This used to assert `agentRuntime:
+  // 'claude-sdk'` NEXT TO `substrate: 'interactive'` — a pair no launch can
+  // honour, on a DEFAULT INSTALL, seeded straight into the detail screen's draft
+  // by `toggleCard`. The baseline now delegates to the shared resolver, and the
+  // runtime is projected from the resolved substrate, so the two agree.
   it('floors the quick key to the quick-session launch defaults (Opus / interactive)', () => {
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, NO_CONFIG)).toEqual({
       model: 'opus',
       substrate: 'interactive',
-      agentRuntime: 'claude-sdk',
+      agentRuntime: 'claude-interactive',
       permissionMode: 'default',
     });
   });
@@ -79,6 +92,9 @@ describe('resolveRunTypeBaseline', () => {
     };
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).substrate).toBe('sdk');
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).permissionMode).toBe('dontAsk');
+    // The runtime moves WITH the substrate — a configured SDK quick preference
+    // makes 'claude-sdk' the baseline runtime, not just the baseline transport.
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).agentRuntime).toBe('claude-sdk');
     // quickSessionDefaultSubstrate governs QUICK only — a flow key keeps 'sdk'
     // via DEFAULT_SUBSTRATE, and the permission knob is shared by both.
     expect(resolveRunTypeBaseline('workflow:wf-1', config).substrate).toBe('sdk');
@@ -87,6 +103,94 @@ describe('resolveRunTypeBaseline', () => {
 
   it('tolerates a null config (the modal renders before the first fetch resolves)', () => {
     expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, null).permissionMode).toBe('default');
+  });
+
+  // AC 1 — the whole point of delegating: there is no config, stored or global,
+  // that can make the baseline describe an unlaunchable pair.
+  it('never returns a runtime/substrate pair that disagree, for any key or config', () => {
+    const keys = [QUICK_RUN_TYPE_KEY, 'workflow:wf-1', 'workflow:wf-archived-77'];
+    const configs: (AppConfig | null)[] = [
+      null,
+      NO_CONFIG,
+      { gitRepoPath: '/repo', quickSessionDefaultSubstrate: 'sdk' },
+      { gitRepoPath: '/repo', quickSessionDefaultSubstrate: 'interactive' },
+      { gitRepoPath: '/repo', defaultAgentPermissionMode: 'dontAsk' },
+    ];
+    for (const key of keys) {
+      for (const config of configs) {
+        const baseline = resolveRunTypeBaseline(key, config);
+        expect(substrateForRuntime(baseline.agentRuntime)).toBe(baseline.substrate);
+      }
+    }
+  });
+
+  /**
+   * The SAME invariant one rung down, on the composition every launch seam now
+   * uses: `resolveRunTypeLaunchDefaults` with the per-surface default routed
+   * through the SUBSTRATE rung, then inverted back to a runtime with
+   * `claudeRuntimeFromSubstrate` when nothing is stored. Routing that default
+   * through the `agentRuntime` rung instead is what produced a contradictory
+   * pair from either side:
+   *   - a stored substrate with no runtime kept the SYNTHETIC global runtime
+   *     (`{ substrate: 'interactive' }` ⇒ `agentRuntime: 'claude-sdk'`), because
+   *     `substrate` has a stored rung above the implied one and `agentRuntime`
+   *     does not;
+   *   - and a stored runtime with no substrate is the mirror case the resolver's
+   *     `impliedSubstrate` rung already covered.
+   * Extends the baseline matrix above rather than duplicating it: same rule,
+   * exercised over STORED rows (which a baseline deliberately ignores).
+   */
+  it('holds for the launch-seam composition too, over stored rows on both key kinds', () => {
+    const storedRows: (RunTypeDefaults | undefined)[] = [
+      undefined,
+      {},
+      { substrate: 'interactive' },
+      { substrate: 'sdk' },
+      { agentRuntime: 'claude-interactive' },
+      { agentRuntime: 'claude-sdk' },
+      { agentRuntime: 'claude-interactive', substrate: 'interactive' },
+      { model: 'sonnet', permissionMode: 'dontAsk' },
+    ];
+    // The substrate each surface routes its own default through.
+    const globalSubstrates: CliSubstrate[] = ['sdk', 'interactive'];
+
+    for (const key of [QUICK_RUN_TYPE_KEY, 'workflow:wf-1']) {
+      for (const stored of storedRows) {
+        for (const substrate of globalSubstrates) {
+          const resolved = resolveRunTypeLaunchDefaults(key, { [key]: stored ?? {} }, { substrate });
+          const launchRuntime =
+            resolved.agentRuntime ?? claudeRuntimeFromSubstrate(resolved.substrate);
+          // Claude-family only: a Codex runtime implies no substrate at all, and
+          // every seam sends `undefined` for it rather than a Claude transport.
+          expect(substrateForRuntime(launchRuntime)).toBe(resolved.substrate);
+        }
+      }
+    }
+  });
+
+  // The baseline is the GLOBAL rung only. If it consumed `runTypeDefaults` too,
+  // every stored value would equal its own baseline and every diff chip would
+  // vanish — the "restated config" failure the module doc names.
+  it('ignores the stored entry for the key (a baseline is what a launch resolves with NOTHING stored)', () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      runTypeDefaults: {
+        [QUICK_RUN_TYPE_KEY]: { model: 'haiku', substrate: 'sdk', agentRuntime: 'codex-sdk' },
+      },
+    };
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config)).toEqual({
+      model: 'opus',
+      substrate: 'interactive',
+      agentRuntime: 'claude-interactive',
+      permissionMode: 'default',
+    });
+    // …and therefore the stored values still render as overrides.
+    expect(
+      runTypeOverrideChips(
+        { model: 'haiku', substrate: 'sdk', agentRuntime: 'codex-sdk' },
+        resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config),
+      ).map((c) => c.field),
+    ).toEqual(['model', 'substrate', 'agentRuntime']);
   });
 });
 
@@ -448,6 +552,46 @@ describe('runtime-family coercion — every edit order', () => {
     it('clears to "follow defaults" without touching the runtime', () => {
       const next = coerceDraftForSubstrate(draft({ agentRuntime: 'claude-interactive', substrate: 'interactive' }), null);
       expect(next).toMatchObject({ substrate: null, agentRuntime: 'claude-interactive' });
+    });
+  });
+
+  // AC 3 — `RunTypeOverrideDetail`'s `toggleCard` seeds each field of a card
+  // from `baselineValueFor` "so the control starts at the value the launch would
+  // have used". With the old contradictory quick baseline that seeded
+  // `{ substrate: 'interactive' }` and then `{ agentRuntime: 'claude-sdk' }`,
+  // whose coercion silently threw the substrate away. This replays that exact
+  // loop for the Runtime card on a DEFAULT install.
+  describe('Runtime-card seeding on a default install', () => {
+    function seedRuntimeCard(key: string): RunTypeDraft {
+      const baseline = resolveRunTypeBaseline(key, NO_CONFIG);
+      let next = draftFromStored(undefined);
+      // The card's field order, from knobCardsFor('runtime').
+      for (const field of ['substrate', 'agentRuntime'] as const) {
+        const value = baselineValueFor(field, baseline);
+        next =
+          field === 'substrate'
+            ? coerceDraftForSubstrate(next, value as CliSubstrate | null)
+            : coerceDraftForRuntime(next, value as AgentRuntime, baseline);
+      }
+      return next;
+    }
+
+    it('seeds the quick key to a self-consistent interactive pair', () => {
+      const draft = seedRuntimeCard(QUICK_RUN_TYPE_KEY);
+      expect(draft).toMatchObject({
+        substrate: 'interactive',
+        agentRuntime: 'claude-interactive',
+      });
+      // The seeded pair is exactly the baseline it claims to start from — the
+      // substrate is no longer discarded by the runtime's coercion.
+      expect(substrateForRuntime(draft.agentRuntime as AgentRuntime)).toBe(draft.substrate);
+    });
+
+    it('seeds a flow key to a self-consistent SDK pair', () => {
+      expect(seedRuntimeCard('workflow:wf-1')).toMatchObject({
+        substrate: 'sdk',
+        agentRuntime: 'claude-sdk',
+      });
     });
   });
 

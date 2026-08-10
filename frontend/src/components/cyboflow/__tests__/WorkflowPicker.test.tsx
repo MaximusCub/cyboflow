@@ -291,6 +291,37 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({ substrate: 'sdk' }));
   });
 
+  // DES-6 — a stored quick substrate with NO accompanying runtime (reachable
+  // from Settings: pick a substrate, then set Agent runtime back to "Follow
+  // defaults"). `useQuickSession.startWithDefaults` already honored it; this
+  // surface re-derived the substrate from a runtime it had synthesized out of
+  // the GLOBAL preference, so the same config launched a different transport
+  // depending on which button you pressed.
+  it('honors a stored quick substrate with no runtime over the global preference (untouched)', async () => {
+    useConfigStore.setState({
+      config: {
+        quickSessionDefaultSubstrate: 'sdk',
+        runTypeDefaults: { quick: { substrate: 'interactive' } },
+      } as unknown as AppConfig,
+    });
+    render(<WorkflowPicker projectId={1} />);
+
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        substrate: 'interactive',
+        // …and the runtime that OWNS that transport, never the SDK one implied
+        // by the global preference the stored substrate outranks.
+        agentRuntime: 'claude-interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
   it("threads the picked 'interactive' substrate into the Quick Session create", async () => {
     // A user selecting Interactive (PTY) then clicking Quick Session must get a
     // PTY-backed quick session — not a silent SDK fallback (review finding F1).
@@ -1554,6 +1585,55 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
         substrate: 'interactive',
       }),
     );
+  });
+
+  // COR-8, workflow-key side. The quick path hit this defect because a
+  // synthetic global runtime outranked a stored substrate; the WORKFLOW-key
+  // seeding path hit the SAME contradiction from the other direction, because
+  // `substrate` has a stored rung ABOVE the runtime's implied one and
+  // `agentRuntime` does not. A `workflow:<id>` entry carrying only
+  // `{ substrate: 'interactive' }` therefore resolved to `agentRuntime:
+  // 'claude-sdk'` + `substrate: 'interactive'` and seeded the picker to a
+  // runtime the launch would not use.
+  it('seeds the runtime from a stored workflow substrate that carries no runtime', async () => {
+    setConfig(
+      { 'workflow:wf-1': { substrate: 'interactive' } },
+      // The global permission knob is set to prove the runtime seed came from
+      // the STORED substrate and not from an untouched-config coincidence.
+      { defaultAgentPermissionMode: 'dontAsk' },
+    );
+    render(<WorkflowPicker projectId={1} />);
+    const startRunBtn = await findEnabledStartRun();
+
+    // The control shows the runtime that OWNS the stored transport…
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // …and the launch payload agrees with it, in both fields.
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        substrate: 'interactive',
+        agentRuntime: 'claude-interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  // The seed's no-stored-runtime fallback is the resolved substrate's owner, so
+  // a stored 'codex-exec' (never offered by any picker — it is the headless exec
+  // runtime — but reachable via a hand-edited config) degrades to the runtime
+  // this key would otherwise launch on rather than to a hardcoded constant. On a
+  // workflow key with no stored substrate that is 'claude-sdk', i.e. unchanged.
+  it("degrades a stored, unlaunchable 'codex-exec' to the resolved substrate's runtime", async () => {
+    setConfig({ 'workflow:wf-1': { agentRuntime: 'codex-exec' } });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await waitFor(() => expect(runtimeValue()).toBe('claude-sdk'));
   });
 
   // ── AC2: round-trip integrity — THE data-loss case ───────────────────────

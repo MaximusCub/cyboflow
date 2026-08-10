@@ -712,6 +712,41 @@ describe('useQuickSession — startWithDefaults()', () => {
     );
   });
 
+  // COR-3/DES-6 — THE cross-surface case. A stored substrate with NO
+  // accompanying runtime is reachable straight from the Settings detail screen
+  // (pick a substrate, then set Agent runtime back to "Follow defaults", which
+  // clears `agentRuntime` and leaves `substrate`). This seam honored it; both
+  // quick-launch surfaces re-derived the substrate from the runtime instead and
+  // silently sent the global preference. The payload pinned here is the one
+  // WorkflowPicker and SessionStartWizard must now match.
+  it('honors a stored substrate that has NO accompanying runtime, over the global quick preference', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          // Deliberately the OPPOSITE of the stored substrate, so "stored wins"
+          // and "global wins" are distinguishable rather than coincidentally equal.
+          quickSessionDefaultSubstrate: 'sdk',
+          runTypeDefaults: { quick: { substrate: 'interactive' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'interactive',
+      claudeConfig: { model: DEFAULT_QUICK_MODEL, fastMode: false },
+    });
+    // No runtime is stored, so none is synthesized onto the payload.
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+  });
+
   it('sends NO agentRuntime when none is stored (an unconfigured install stays byte-identical)', async () => {
     act(() => {
       useConfigStore.setState({

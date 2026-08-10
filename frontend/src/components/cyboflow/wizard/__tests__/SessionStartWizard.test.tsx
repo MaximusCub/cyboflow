@@ -1871,6 +1871,71 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     });
   });
 
+  // DES-6 — a stored quick substrate with NO accompanying runtime (reachable
+  // from Settings: pick a substrate, then set Agent runtime back to "Follow
+  // defaults", which clears `agentRuntime` and leaves `substrate` standing).
+  // `useQuickSession.startWithDefaults` honored it; this surface fed the GLOBAL
+  // preference into the resolver's `agentRuntime` rung — which OUTRANKS a stored
+  // substrate — and then re-derived the substrate back off that runtime, so the
+  // same config launched a different transport here than from the shortcut.
+  it('honors a stored quick substrate with no runtime over the global preference', async () => {
+    setConfig(
+      { quick: { substrate: 'interactive' } },
+      // Deliberately the OPPOSITE, so "stored wins" is distinguishable.
+      { quickSessionDefaultSubstrate: 'sdk' },
+    );
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // The picker seeds to the runtime that OWNS the resolved transport, so the
+    // screen shows what the launch will actually do.
+    expect(runtimeValue()).toBe('claude-interactive');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        substrate: 'interactive',
+        agentRuntime: 'claude-interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  /**
+   * Deliberate pin for the seed's no-stored-runtime fallback.
+   *
+   * 'codex-exec' is the headless exec runtime — never offered by any picker, but
+   * reachable via a hand-edited config. It used to seed NOTHING, so the control
+   * fell through to `useSeededSelection`'s type-level fallback
+   * (`DEFAULT_SESSION_AGENT_RUNTIME`) and the quick card launched on 'sdk' while
+   * the resolver — and `useQuickSession.startWithDefaults`, which drops the
+   * unlaunchable runtime and keeps the resolved substrate — said 'interactive'.
+   * It now degrades to the runtime that OWNS the resolved substrate, so the two
+   * seams agree on the transport for the same config. Pinned rather than left to
+   * chance: it is a genuine behavior change, and the next person to touch this
+   * fallback should have to decide against it explicitly.
+   */
+  it("degrades a stored, unlaunchable 'codex-exec' to the resolved substrate's runtime", async () => {
+    setConfig(
+      { quick: { agentRuntime: 'codex-exec' } },
+      { quickSessionDefaultSubstrate: 'interactive' },
+    );
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    expect(runtimeValue()).toBe('claude-interactive');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'interactive', agentRuntime: 'claude-interactive' }),
+    );
+  });
+
   // ── AC3: switching the selected workflow re-seeds, with no leak ──────────
 
   it('re-seeds every control when the selected workflow changes (no leak from the prior flow)', async () => {

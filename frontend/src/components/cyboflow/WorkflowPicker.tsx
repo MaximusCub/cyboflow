@@ -39,6 +39,7 @@ import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
+  claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
 } from '../../../../shared/types/agentRuntime';
 import {
@@ -110,23 +111,34 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * hence the '' key), so switching flows re-seeds every control to the NEW
    * flow's defaults and the prior flow's values never leak — and each flow keeps
    * its own per-control touched flag.
+   *
+   * The workflow runtime default rides the resolver's SUBSTRATE rung, NOT its
+   * `agentRuntime` rung — the same rung-ordering rule `handleQuickSession` and
+   * the wizard follow. `substrate` resolves `stored ?? implied ?? global ??
+   * floor`, so a stored substrate outranks the global one; `agentRuntime`
+   * resolves `stored ?? global` with NO stored-substrate rung above it. Feeding
+   * a synthesized runtime into that rung therefore produced a self-contradictory
+   * pair from the opposite side: a `workflow:<id>` entry carrying only
+   * `{ substrate: 'interactive' }` came back as `agentRuntime: 'claude-sdk'`
+   * (synthetic global) + `substrate: 'interactive'` (stored), and `runtimeSeed`
+   * below then seeded the picker to a runtime the launch would not use.
    */
   const runTypeKey = workflowRunTypeKey(selectedId ?? '');
   const runTypeDefaults = useConfigStore((s) => s.config?.runTypeDefaults);
   const globalPermissionMode = useConfigStore((s) => s.config?.defaultAgentPermissionMode);
   const launchGlobals: RunTypeLaunchGlobals = {
     ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
-    agentRuntime: DEFAULT_SESSION_AGENT_RUNTIME,
+    substrate: substrateForRuntime(DEFAULT_SESSION_AGENT_RUNTIME),
   };
   const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
-  // A stored 'codex-exec' is not a launchable runtime on any picker (it is the
-  // headless exec runtime, never offered here), so it seeds nothing and the
-  // control falls through to its own fallback.
-  const runtimeSeed: LaunchAgentRuntime | undefined = isSessionAgentRuntime(
-    launchDefaults.agentRuntime,
-  )
+  // No stored session runtime — including a stored 'codex-exec', which is not a
+  // launchable runtime on any picker (it is the headless exec runtime, never
+  // offered here) — seeds from the RESOLVED substrate's owning runtime, so the
+  // control always agrees with the transport the launch will use. With nothing
+  // stored this is `DEFAULT_SESSION_AGENT_RUNTIME`, exactly as before.
+  const runtimeSeed: LaunchAgentRuntime = isSessionAgentRuntime(launchDefaults.agentRuntime)
     ? launchDefaults.agentRuntime
-    : undefined;
+    : claudeRuntimeFromSubstrate(launchDefaults.substrate);
 
   /**
    * The per-run Claude model choice (Configure model dropdown). Threaded into
@@ -579,26 +591,45 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // under 'quick' that ladder lands exactly where this surface landed before:
     // the global permission default, and the quick-session substrate preference
     // projected onto a Claude runtime.
-    const quickDefaultRuntime: LaunchAgentRuntime =
-      quickDefaultSubstrate === 'interactive' ? 'claude-interactive' : 'claude-sdk';
+    //
+    // The quick-session substrate preference rides the resolver's SUBSTRATE rung
+    // ONLY — never also as a synthesized `agentRuntime` global. `agentRuntime` is
+    // the rung that makes a runtime OWN its substrate, so injecting a runtime
+    // derived from the global preference outranked a stored substrate that
+    // carried no runtime of its own (reachable from Settings: pick a substrate,
+    // then set Agent runtime back to "Follow defaults"). `resolved.substrate` is
+    // now taken verbatim rather than re-derived from the runtime, so this seam
+    // and `useQuickSession.startWithDefaults` resolve the SAME transport.
     const quickDefaults = resolveRunTypeLaunchDefaults(
       QUICK_RUN_TYPE_KEY,
       useConfigStore.getState().config?.runTypeDefaults,
       {
         ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
         substrate: quickDefaultSubstrate,
-        agentRuntime: quickDefaultRuntime,
       },
     );
+    // With no stored runtime the launch runtime follows the RESOLVED substrate,
+    // so the pair is consistent by construction (and, with nothing stored at all,
+    // identical to the old `quickDefaultSubstrate`-derived value).
+    const quickDefaultRuntime: LaunchAgentRuntime = isSessionAgentRuntime(
+      quickDefaults.agentRuntime,
+    )
+      ? quickDefaults.agentRuntime
+      : claudeRuntimeFromSubstrate(quickDefaults.substrate);
     const effectiveRuntime: LaunchAgentRuntime = isAgentRuntimeTouched
       ? agentRuntime
-      : isSessionAgentRuntime(quickDefaults.agentRuntime)
-        ? quickDefaults.agentRuntime
-        : quickDefaultRuntime;
+      : quickDefaultRuntime;
     const quickPermissionMode = isPermissionModeTouched
       ? permissionMode
       : quickDefaults.permissionMode;
     const sessionRuntime = quickSessionRuntimeForLaunch(effectiveRuntime);
+    // A TOUCHED runtime pick is a real per-launch choice and owns its transport;
+    // a Codex runtime has no Claude substrate to send at all. Otherwise the
+    // resolver's answer is authoritative.
+    const quickSubstrate =
+      isAgentRuntimeTouched || isCodexRuntime(sessionRuntime)
+        ? substrateForRuntime(sessionRuntime)
+        : quickDefaults.substrate;
     // The model follows the same touched/untouched rule, with one extra guard.
     //
     // The family guard is load-bearing: the 'quick' default is stored without
@@ -619,7 +650,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           : model;
     void startQuickSession(
       quickPermissionMode,
-      substrateForRuntime(sessionRuntime),
+      quickSubstrate,
       undefined,
       quickModel,
       undefined,

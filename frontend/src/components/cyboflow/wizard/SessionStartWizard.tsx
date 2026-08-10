@@ -126,6 +126,7 @@ import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
+  claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import {
@@ -338,14 +339,20 @@ export default function SessionStartWizard(): React.JSX.Element {
    * the global values the screen happened to display, i.e. lost data on ordinary
    * use. Every control the save CTA captures must therefore also seed from it.
    *
-   * Substrate is never seeded as an independent value: it is DERIVED from the
-   * resolved runtime (`substrateForRuntime`) at every launch seam and at the save
-   * CTA, so the pair can never contradict.
+   * The per-launcher runtime default rides the resolver's SUBSTRATE rung, NOT
+   * its `agentRuntime` rung. `agentRuntime` is the rung that makes a resolved
+   * runtime OWN its substrate, so a synthesized global runtime outranked a
+   * STORED substrate that carried no runtime of its own (reachable from
+   * Settings: pick a substrate, then set Agent runtime back to "Follow
+   * defaults") — the card then launched on a transport the resolver, and
+   * `useQuickSession.startWithDefaults`, had already rejected. Every
+   * `launcherDefaultRuntime` is a Claude runtime, so the projection is lossless
+   * and `runtimeSeed` below inverts it.
    */
   const launchGlobals: RunTypeLaunchGlobals = {
     model: launcherDefaultModel,
     ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
-    agentRuntime: launcherDefaultRuntime,
+    substrate: substrateForRuntime(launcherDefaultRuntime),
   };
   const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
   // Per-launch Claude model for QUICK, ULTRACODE, DESIGN and workflow launches
@@ -387,16 +394,20 @@ export default function SessionStartWizard(): React.JSX.Element {
   // re-seeds this control for untouched keys — replacing the old imperative
   // `seedDefaultRuntimeFor` + single wizard-wide touched ref, which could not
   // express "stored default for THIS card" at all.
-  const runtimeSeed: LaunchAgentRuntime | undefined =
+  const runtimeSeed: LaunchAgentRuntime =
     // Design is hard-pinned to the Claude SDK substrate (design-mode.md "Session
     // plumbing" — a security boundary), so it never seeds off a stored entry.
     // A stored 'codex-exec' is not launchable from any picker, so it seeds
-    // nothing and the control falls through to its own fallback.
+    // nothing and falls through to the resolved substrate's owning runtime.
     selection?.kind === 'design'
       ? 'claude-sdk'
       : isSessionAgentRuntime(launchDefaults.agentRuntime)
         ? launchDefaults.agentRuntime
-        : undefined;
+        : // No stored runtime: the RESOLVED substrate owns the seed, so the pair
+          // is consistent by construction and a stored substrate with no
+          // accompanying runtime is honoured (with nothing stored this is exactly
+          // `launcherDefaultRuntime`, i.e. byte-identical to before).
+          claudeRuntimeFromSubstrate(launchDefaults.substrate);
   const {
     value: agentRuntime,
     setByUser: setAgentRuntimeByUser,
