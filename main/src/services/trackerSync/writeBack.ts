@@ -67,6 +67,7 @@ import {
   listConnections,
   listLinksByParentExternal,
   listUnresolvedOutbox,
+  supersedeQueuedStateWrites,
 } from './store';
 import { resolveStageIds, stageIdToWriteBackGroup, type TrackerStageIds } from './stateMapping';
 import { carriesTrackerProvenance } from './provenance';
@@ -340,7 +341,7 @@ function enqueueStateWrite(
   if (duplicate) return false;
 
   const payload: UpdateStatePayload = { desiredGroup: group };
-  enqueueOutbox(db, {
+  const enqueued = enqueueOutbox(db, {
     connection_id: connection.id,
     kind: opts.kind ?? 'update_state',
     entity_type: opts.entityType ?? null,
@@ -348,6 +349,10 @@ function enqueueStateWrite(
     external_id: externalId,
     payload_json: JSON.stringify(payload),
   });
+  // This row is now the truth about the issue's state, so anything still queued
+  // for it is not just redundant — it is WRONG, and would regress the tracker if
+  // a backoff let it drain last. See store.supersedeQueuedStateWrites.
+  supersedeQueuedStateWrites(db, connection.id, externalId, enqueued.id);
   return true;
 }
 

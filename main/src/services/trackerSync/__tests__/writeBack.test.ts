@@ -211,6 +211,43 @@ describe('writeBack — stage moves', () => {
     expect(outbox()).toHaveLength(1);
   });
 
+  it('settles the earlier queued write when a later stage move supersedes it', () => {
+    // Two stage moves before either drains — the ordinary case for a card
+    // dragged twice, or a task that starts and finishes inside one poll
+    // interval. Only the LATEST instruction may ever reach the tracker: a stale
+    // one carrying a retry backoff would otherwise drain last and drag the
+    // remote issue back to where it no longer is.
+    const connectionId = seedConnection();
+    seedTask('tsk_1', 'TASK-1', { stageId: stageIds.done });
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    const listener = makeListener();
+    listener.handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.inDevelopment));
+    listener.handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.done));
+
+    // `outbox()` lists only UNSETTLED rows, which is the point: both intents
+    // were recorded, and exactly one of them is still drainable.
+    const drainable = outbox();
+    expect(drainable).toHaveLength(1);
+    expect(JSON.parse(drainable[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+
+    const all = raw
+      .prepare('SELECT * FROM tracker_outbox ORDER BY id ASC')
+      .all() as TrackerOutboxRow[];
+    expect(all).toHaveLength(2);
+    expect(JSON.parse(all[0].payload_json)).toEqual({ desiredGroup: 'started' });
+    // Settled `done`, not `failed`: nothing went wrong, the instruction was
+    // simply replaced.
+    expect(all[0].state).toBe('done');
+    expect(all[0].last_error).toContain('superseded');
+  });
+
   it("maps Won't do to the 'cancelled' group", () => {
     const connectionId = seedConnection();
     seedTask('tsk_1', 'TASK-1', { stageId: stageIds.wontdo });
