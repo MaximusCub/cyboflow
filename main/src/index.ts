@@ -2445,6 +2445,14 @@ async function initializeServices(): Promise<boolean> {
       // passing setup-proof run, so the two halves of "derive → prove" must be
       // looking at one store over one DB.
       verifyRunbookStore,
+      // The GLOBAL visual-verify config, read LIVE per call — the same accessor
+      // the WorkflowRegistry injects into createRun. Only the `__quick__` chat
+      // sentinel consults it: its run stamp is minted on the session's first turn
+      // and has no UPDATE path, so a quick session resolves its verify posture at
+      // CALL time through this closure instead. A closure (not the resolved value)
+      // so toggling the master switch in Settings takes effect on the next tool
+      // call rather than requiring a restart.
+      getVisualVerifyConfig: () => configManager.getVisualVerifyConfig(),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the

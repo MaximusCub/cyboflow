@@ -117,6 +117,39 @@ export async function captureSnapshotSha(runWorktreePath: string, gitExec: GitEx
 }
 
 /**
+ * Does the run worktree have uncommitted changes (`git status --porcelain`
+ * reports anything, including untracked files)?
+ *
+ * WHY THIS EXISTS. A recorded sha ALWAYS snapshots, and the snapshot is a
+ * DETACHED checkout at that sha — so uncommitted work is invisible to the
+ * verifier, and since the old whole-tree dirty check was removed (see
+ * {@link captureSnapshotSha}) nothing else catches it. A sprint lane tolerates
+ * this because it commits before verifying; a QUICK CHAT SESSION has no such
+ * discipline, so a PASS there can certify the previous commit while the user is
+ * looking at newer code. Callers surface this alongside the sha so a verdict can
+ * be reported with the qualification it deserves.
+ *
+ * This is a WARNING SIGNAL, not a gate — verifying a dirty tree stays allowed,
+ * because "check this before I commit" is a legitimate thing to ask of a chat
+ * session. It is the caller's job to relay it.
+ *
+ * Fail-soft to `false` on ANY error (not a repo, no HEAD, git missing): an
+ * unanswerable question must never block an enqueue, and the honest reading of
+ * "could not check" is the same as today's behavior — no warning attached.
+ */
+export async function isWorktreeDirty(
+  runWorktreePath: string,
+  gitExec: GitExec = defaultGitExec,
+): Promise<boolean> {
+  try {
+    const out = await gitExec(['status', '--porcelain'], runWorktreePath);
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Is the portable runbook half VISIBLE AT `HEAD` of the run worktree — i.e.
  * would the detached snapshot the verifier builds from actually contain it?
  *
