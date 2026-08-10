@@ -27,6 +27,7 @@ vi.mock('../../../trpc/client', () => ({
         syncNow: { mutate: vi.fn() },
         resolveConflict: { mutate: vi.fn() },
         disconnect: { mutate: vi.fn() },
+        updateCredentials: { mutate: vi.fn() },
       },
     },
   },
@@ -41,6 +42,7 @@ const mockUpdate = vi.mocked(trpc.cyboflow.tracker.updateSettings.mutate);
 const mockSyncNow = vi.mocked(trpc.cyboflow.tracker.syncNow.mutate);
 const mockResolve = vi.mocked(trpc.cyboflow.tracker.resolveConflict.mutate);
 const mockDisconnect = vi.mocked(trpc.cyboflow.tracker.disconnect.mutate);
+const mockUpdateCredentials = vi.mocked(trpc.cyboflow.tracker.updateCredentials.mutate);
 
 const onClose = vi.fn();
 const onChanged = vi.fn();
@@ -104,6 +106,11 @@ beforeEach(() => {
   mockUpdate.mockResolvedValue({ ok: true });
   mockResolve.mockResolvedValue({ ok: true });
   mockDisconnect.mockResolvedValue({ ok: true });
+  mockUpdateCredentials.mockResolvedValue({
+    workspaceId: 'ws-1',
+    workspaceName: 'Acme',
+    actorLabel: 'J. Kesteva',
+  });
   mockSyncNow.mockResolvedValue({
     connectionId: 'conn-1',
     ran: true,
@@ -226,6 +233,76 @@ describe('TrackerConnectedView — conflicts', () => {
     await waitFor(() =>
       expect(mockResolve).toHaveBeenCalledWith({ conflictId: 41, choice: 'local' }),
     );
+  });
+});
+
+describe('TrackerConnectedView — paused reconnect', () => {
+  it('hides the banner while the connection is active', () => {
+    renderView();
+    expect(screen.queryByTestId('tracker-reconnect-banner')).not.toBeInTheDocument();
+  });
+
+  it('shows the banner and submits the typed key when paused', async () => {
+    renderView(makeConnection({ status: 'paused' }));
+
+    expect(screen.getByTestId('tracker-reconnect-banner')).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Reconnect' });
+    expect(button).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('New Personal API key'), {
+      target: { value: 'lin_new_key' },
+    });
+    expect(button).toBeEnabled();
+
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(mockUpdateCredentials).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        apiKey: 'lin_new_key',
+      }),
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // The key is cleared after a successful reconnect.
+    await waitFor(() =>
+      expect(screen.getByLabelText('New Personal API key')).toHaveValue(''),
+    );
+  });
+
+  it('shows the failure inline and leaves the key in place', async () => {
+    mockUpdateCredentials.mockRejectedValue(new Error('That key belongs to another workspace.'));
+    renderView(makeConnection({ status: 'paused' }));
+
+    fireEvent.change(screen.getByLabelText('New Personal API key'), {
+      target: { value: 'lin_wrong_workspace' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That key belongs to another workspace.',
+    );
+    expect(screen.getByLabelText('New Personal API key')).toHaveValue('lin_wrong_workspace');
+  });
+
+  it('disables the button while the request is in flight', async () => {
+    let resolveUpdate: (identity: { workspaceId: string; workspaceName: string; actorLabel: string }) => void =
+      () => {};
+    mockUpdateCredentials.mockReturnValue(
+      new Promise((resolve) => {
+        resolveUpdate = resolve;
+      }),
+    );
+    renderView(makeConnection({ status: 'paused' }));
+
+    fireEvent.change(screen.getByLabelText('New Personal API key'), {
+      target: { value: 'lin_new_key' },
+    });
+    const button = screen.getByRole('button', { name: /Reconnect/ });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button).toBeDisabled());
+
+    resolveUpdate({ workspaceId: 'ws-1', workspaceName: 'Acme', actorLabel: 'J. Kesteva' });
+    await waitFor(() => expect(mockUpdateCredentials).toHaveBeenCalledTimes(1));
   });
 });
 
