@@ -35,8 +35,15 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import { isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
+import type { RunTypeLaunchGlobals } from '../../../shared/types/sessionDefaults';
+import {
+  DEFAULT_QUICK_SUBSTRATE,
+  DEFAULT_RUN_TYPE_MODEL_FLOORS,
+  QUICK_RUN_TYPE_KEY,
+  resolveRunTypeLaunchDefaults,
+} from '../../../shared/types/sessionDefaults';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -116,18 +123,17 @@ interface UseQuickSessionReturn {
   /**
    * Zero-arg-friendly entry point for launches that only know a run-type key
    * (e.g. the synthetic global `'quick'` key used by the ⌘-shortcut / "New
-   * quick session" affordance) — NOT a `start` replacement. Resolves the
-   * saved run-type defaults + global config floors into `start`'s existing
-   * positional args and delegates, so a saved Quick Session default (Settings
-   * → "Run type defaults") is honored instead of silently ignored:
-   *   - `model`: `runTypeDefaults[key]?.model ?? DEFAULT_QUICK_MODEL`
-   *   - `permissionMode`: `config?.defaultAgentPermissionMode ?? 'default'`
-   *   - `reasoningEffort`: the synthetic global `'quick'` key's stored
-   *     `reasoningEffort` — v1 only ever writes it there (see
-   *     RunTypeDefaults doc), regardless of which `key` was requested.
-   *   - `substrate`: the same quick-session substrate floor every other
-   *     launch surface uses (`config?.quickSessionDefaultSubstrate ??
-   *     'interactive'`; see WorkflowPicker / SessionStartWizard).
+   * quick session" affordance) — NOT a `start` replacement. Delegates the
+   * whole ladder (stored per-type default → global config default → floor) to
+   * the canonical `resolveRunTypeLaunchDefaults`, then threads every resolved
+   * field — model, permissionMode, substrate, agentRuntime, reasoningEffort —
+   * into `start`'s existing positional args, so a saved Quick Session default
+   * (Settings → "Run type defaults") is honored rather than write-only.
+   *
+   * `reasoningEffort` resolves off the `'quick'` key even when the caller
+   * passes a workflow key: this seam always creates a quick session, and v1
+   * never writes effort under any other key (see RunTypeDefaults).
+   *
    * Added by TASK-153 as a NEW, additive method — `start`'s 13-positional-
    * param signature is unchanged; do not expand it further.
    */
@@ -308,24 +314,39 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     (key: string): Promise<void> => {
       const config = useConfigStore.getState().config;
       const runTypeDefaults = config?.runTypeDefaults;
-      const model = runTypeDefaults?.[key]?.model ?? DEFAULT_QUICK_MODEL;
-      const permissionMode = config?.defaultAgentPermissionMode ?? 'default';
-      // v1 only ever writes reasoningEffort under the synthetic global 'quick'
-      // key — read from there regardless of the requested `key`.
-      const reasoningEffort = runTypeDefaults?.quick?.reasoningEffort;
-      const substrate = config?.quickSessionDefaultSubstrate ?? 'interactive';
+      // This seam always creates a QUICK session, so the quick-kind floors
+      // apply even when the caller hands over a workflow key — pin them here
+      // rather than let the key pick the (workflow) floor table.
+      const globals: RunTypeLaunchGlobals = {
+        model: DEFAULT_RUN_TYPE_MODEL_FLOORS.quick,
+        permissionMode: config?.defaultAgentPermissionMode,
+        substrate: config?.quickSessionDefaultSubstrate ?? DEFAULT_QUICK_SUBSTRATE,
+      };
+      const resolved = resolveRunTypeLaunchDefaults(key, runTypeDefaults, globals);
+      // Effort always resolves off the quick key — see the doc above.
+      const { reasoningEffort } = resolveRunTypeLaunchDefaults(
+        QUICK_RUN_TYPE_KEY,
+        runTypeDefaults,
+        globals,
+      );
+      // `start` takes the session-scoped runtime union; a stored 'codex-exec'
+      // (never written by the settings UI, but reachable via a hand-edited
+      // config) is dropped rather than sent as an unlaunchable runtime.
+      const agentRuntime = isSessionAgentRuntime(resolved.agentRuntime)
+        ? resolved.agentRuntime
+        : undefined;
 
       return start(
-        permissionMode,
-        substrate,
+        resolved.permissionMode,
+        resolved.substrate,
         undefined,
-        model,
-        undefined,
-        undefined,
+        resolved.model,
         undefined,
         undefined,
         undefined,
         undefined,
+        undefined,
+        agentRuntime,
         reasoningEffort,
       );
     },

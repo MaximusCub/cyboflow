@@ -35,12 +35,14 @@ import { useQuickSession } from '../useQuickSession';
 // Mocks — hoisted so vi.mock factory closures can reference them
 // ---------------------------------------------------------------------------
 
-const { mockCreateQuick, mockCreatePanel, mockSetModel, mockSetFastMode } = vi.hoisted(() => ({
-  mockCreateQuick: vi.fn(),
-  mockCreatePanel: vi.fn(),
-  mockSetModel: vi.fn(),
-  mockSetFastMode: vi.fn(),
-}));
+const { mockCreateQuick, mockCreatePanel, mockSetModel, mockSetFastMode, mockSetEffort } =
+  vi.hoisted(() => ({
+    mockCreateQuick: vi.fn(),
+    mockCreatePanel: vi.fn(),
+    mockSetModel: vi.fn(),
+    mockSetFastMode: vi.fn(),
+    mockSetEffort: vi.fn(),
+  }));
 
 vi.mock('../../utils/api', () => ({
   API: {
@@ -50,6 +52,7 @@ vi.mock('../../utils/api', () => ({
     claudePanels: {
       setModel: mockSetModel,
       setFastMode: mockSetFastMode,
+      setEffort: mockSetEffort,
     },
   },
 }));
@@ -89,8 +92,10 @@ beforeEach(() => {
   mockCreatePanel.mockReset();
   mockSetModel.mockReset();
   mockSetFastMode.mockReset();
+  mockSetEffort.mockReset();
   mockSetModel.mockResolvedValue({ success: true });
   mockSetFastMode.mockResolvedValue({ success: true });
+  mockSetEffort.mockResolvedValue({ success: true });
   mockSubscribe.mockClear();
   mockSubscribe.mockImplementation(() => vi.fn());
 
@@ -621,6 +626,106 @@ describe('useQuickSession — startWithDefaults()', () => {
       }),
     );
     expect(mockSetModel).toHaveBeenCalledWith('panel-001', DEFAULT_QUICK_MODEL);
+  });
+
+  // -------------------------------------------------------------------------
+  // Stored substrate / permissionMode / agentRuntime used to be write-only:
+  // saved, shown as the active launch default, then silently dropped here.
+  // -------------------------------------------------------------------------
+
+  it('threads EVERY stored quick default into the launch — model, permissionMode, substrate, agentRuntime, reasoningEffort', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: {
+            quick: {
+              model: 'sonnet',
+              permissionMode: 'dontAsk',
+              substrate: 'sdk',
+              agentRuntime: 'claude-sdk',
+              reasoningEffort: 'high',
+            },
+          },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    // One assertion per positional arg `startWithDefaults` hands to `start`:
+    // permissionMode (1), substrate (2), model (4), agentRuntime (10),
+    // reasoningEffort (11) — asserted through their observable effects.
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'dontAsk',
+      substrate: 'sdk',
+      agentRuntime: 'claude-sdk',
+      claudeConfig: { model: 'sonnet', fastMode: false, reasoningEffort: 'high' },
+    });
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'sonnet');
+    expect(mockSetEffort).toHaveBeenCalledWith('panel-001', 'high');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('threads a stored codex runtime (a quick session may legitimately run on codex-pty)', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: { quick: { agentRuntime: 'codex-pty', model: 'sonnet' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      // A codex runtime routes the model through `agentModel`, not claudeConfig.
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'sonnet' }),
+    );
+  });
+
+  it('a stored quick permissionMode / substrate beats the GLOBAL config default', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          defaultAgentPermissionMode: 'acceptEdits',
+          quickSessionDefaultSubstrate: 'interactive',
+          runTypeDefaults: { quick: { permissionMode: 'dontAsk', substrate: 'sdk' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentPermissionMode: 'dontAsk', substrate: 'sdk' }),
+    );
+  });
+
+  it('sends NO agentRuntime when none is stored (an unconfigured install stays byte-identical)', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { runTypeDefaults: { quick: { model: 'sonnet' } } } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+    expect(mockSetEffort).not.toHaveBeenCalled();
   });
 });
 

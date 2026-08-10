@@ -6,6 +6,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
+import type { RunTypeDefaults } from '../../../../shared/types/sessionDefaults';
+
 const { mockEnsureSession, mockStartMutate, mockSubscribe, mockConfigState } = vi.hoisted(() => ({
   mockEnsureSession: vi.fn(),
   mockStartMutate: vi.fn(),
@@ -15,7 +17,9 @@ const { mockEnsureSession, mockStartMutate, mockSubscribe, mockConfigState } = v
   mockConfigState: {
     config: {
       defaultAgentPermissionMode: 'default' as string,
-      runTypeDefaults: undefined as Record<string, { model?: string }> | undefined,
+      demoMode: false as boolean,
+      interactivePtyOnly: false as boolean,
+      runTypeDefaults: undefined as Record<string, RunTypeDefaults> | undefined,
     },
   },
 }));
@@ -47,6 +51,8 @@ beforeEach(() => {
   mockEnsureSession.mockResolvedValue('session-1');
   mockStartMutate.mockResolvedValue({ runId: 'run-9', worktreePath: '/wt', branchName: 'b' });
   mockConfigState.config.defaultAgentPermissionMode = 'default';
+  mockConfigState.config.demoMode = false;
+  mockConfigState.config.interactivePtyOnly = false;
   mockConfigState.config.runTypeDefaults = undefined;
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
@@ -266,5 +272,137 @@ describe('useLaunchWorkflow', () => {
       await result.current.launch('wf-sprint');
     });
     expect(mockStartMutate).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus' }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-run-type defaults are LAUNCH defaults, not just a model pin: substrate,
+// permissionMode and agentRuntime used to be write-only (saved + shown as
+// active, silently dropped at launch).
+// ---------------------------------------------------------------------------
+
+describe('useLaunchWorkflow — stored per-run-type launch defaults', () => {
+  it('REGRESSION: with nothing configured the payload is byte-identical to the pre-feature one (no agentRuntime key at all)', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    // Exact-equality, not objectContaining — an added/renamed field must fail.
+    expect(mockStartMutate).toHaveBeenCalledWith({
+      workflowId: 'wf-sprint',
+      projectId: 7,
+      substrate: 'sdk',
+      sessionId: 'session-1',
+      permissionMode: 'default',
+      model: 'opus',
+    });
+    expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+  });
+
+  it('reflects a full stored workflow default (model + permissionMode + substrate) in the runs.start payload', async () => {
+    mockConfigState.config.runTypeDefaults = {
+      'workflow:wf-sprint': { model: 'sonnet', permissionMode: 'dontAsk', substrate: 'interactive' },
+    };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'wf-sprint',
+        model: 'sonnet',
+        permissionMode: 'dontAsk',
+        substrate: 'interactive',
+      }),
+    );
+  });
+
+  it('sends a stored agentRuntime that a workflow CAN run on', async () => {
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { agentRuntime: 'codex-sdk' } };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-sdk' }),
+    );
+  });
+
+  it('DROPS a stored agentRuntime a workflow cannot run on (codex-pty) and still launches', async () => {
+    mockConfigState.config.runTypeDefaults = {
+      'workflow:wf-sprint': { agentRuntime: 'codex-pty', model: 'sonnet' },
+    };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    let runId: string | null = null;
+    await act(async () => {
+      runId = await result.current.launch('wf-sprint');
+    });
+    // The launch proceeds (no throw, no block) — only the runtime is dropped.
+    expect(runId).toBe('run-9');
+    expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'sonnet' });
+  });
+
+  it('launchOpts.permissionMode still beats a stored per-workflow permissionMode', async () => {
+    mockConfigState.config.runTypeDefaults = {
+      'workflow:wf-planner': { permissionMode: 'dontAsk' },
+    };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-planner', undefined, { permissionMode: 'acceptEdits' });
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ permissionMode: 'acceptEdits' }),
+    );
+  });
+
+  it('the forced-substrate pin still beats a stored per-workflow substrate', async () => {
+    // A global hard constraint (PTY-only lock) the caller imposes — the backend
+    // stamps it regardless, so the payload must not claim the stored value.
+    mockConfigState.config.interactivePtyOnly = true;
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { substrate: 'sdk' } };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'interactive' }),
+    );
+  });
+
+  it('a stored permissionMode beats the GLOBAL default (the ladder rung order)', async () => {
+    mockConfigState.config.defaultAgentPermissionMode = 'acceptEdits';
+    mockConfigState.config.runTypeDefaults = {
+      'workflow:wf-sprint': { permissionMode: 'dontAsk' },
+    };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ permissionMode: 'dontAsk' }),
+    );
+  });
+
+  it('keys the whole settings bundle per call — another workflow’s defaults do not leak', async () => {
+    mockConfigState.config.runTypeDefaults = {
+      'workflow:wf-sprint': { model: 'sonnet', permissionMode: 'dontAsk', substrate: 'interactive' },
+    };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    await act(async () => {
+      await result.current.launch('wf-planner');
+    });
+    expect(mockStartMutate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        workflowId: 'wf-planner',
+        model: 'opus',
+        permissionMode: 'default',
+        substrate: 'sdk',
+      }),
+    );
   });
 });

@@ -9,9 +9,10 @@
  *     → trpc.cyboflow.runs.start.mutate({ workflowId, sessionId, … })
  *     → cyboflowStore.setActiveRun(runId, sessionId)
  *
- * — but with the run's substrate / permission-mode left at their defaults
- * (DEFAULT_SUBSTRATE + the global Agent-Permission-Mode), since the canvas is a
- * fast lane; the full WorkflowPicker ("Browse all") still offers per-run control.
+ * — but with no Configure screen, since the canvas is a fast lane; the full
+ * WorkflowPicker ("Browse all") still offers per-run control. Launch settings
+ * come from `resolveRunTypeLaunchDefaults` (the saved `workflow:<id>` defaults,
+ * then the global config default, then the floor).
  *
  * `seed.ideaId` threads the Planner's single-select pre-launch seed idea
  * (migration 017); `seed.ideaIds` threads its multi-select batch (IDEA-009);
@@ -27,8 +28,11 @@ import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useConfigStore } from '../stores/configStore';
 import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
 import { useForcedSubstrate } from './useForcedSubstrate';
-import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
-import { DEFAULT_WORKFLOW_MODEL } from '../components/cyboflow/ModelSelector';
+import {
+  resolveRunTypeLaunchDefaults,
+  workflowRunTypeKey,
+} from '../../../shared/types/sessionDefaults';
+import { workflowRuntimeForLaunch } from '../components/cyboflow/agentRuntimeUi';
 import { trackEvent } from '../utils/telemetry';
 import { notifyWorkflowRunStarted } from '../utils/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -111,9 +115,9 @@ export function useLaunchWorkflow(
   const forceNew = opts?.forceNew ?? false;
   const globalPermissionMode =
     useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
-  // Global forced-substrate pin (demo 'sdk' wins, else PTY-only lock 'interactive',
-  // else null). Send it so the payload matches what the backend would stamp
-  // anyway (getForcedSubstrate overrides regardless); floors to the SDK default.
+  // Global forced-substrate pin (demo 'sdk' wins, else PTY-only lock
+  // 'interactive', else null). Sent so the payload matches what the backend
+  // would stamp anyway (getForcedSubstrate overrides regardless).
   const forced = useForcedSubstrate();
 
   const launch = useCallback(
@@ -145,19 +149,33 @@ export function useLaunchWorkflow(
             : await ensureSessionForLaunch(projectId, {
                 forceNew: forceNew || launchOpts?.forceNewSession === true,
               });
+        // Read the config INSIDE the callback, keyed off THIS call's
+        // workflowId — a hook-level selector would capture the wrong (or a
+        // stale) workflow's defaults, since `launch` is generic over any id.
+        const resolved = resolveRunTypeLaunchDefaults(
+          workflowRunTypeKey(workflowId),
+          useConfigStore.getState().config?.runTypeDefaults,
+          { permissionMode: globalPermissionMode },
+        );
+        // A stored runtime a workflow simply cannot run on (codex-pty, and the
+        // session-only 'codex-exec' that never reaches a launch surface) is
+        // dropped, never sent — the launch proceeds on the backend's default.
+        const storedRuntime = resolved.agentRuntime;
+        const agentRuntime =
+          storedRuntime !== undefined && storedRuntime !== 'codex-exec'
+            ? (workflowRuntimeForLaunch(storedRuntime) ?? undefined)
+            : undefined;
         const base = {
           workflowId,
           projectId,
-          substrate: forced ?? DEFAULT_SUBSTRATE,
+          // `forced` is a hard global pin (demo 'sdk' / PTY-only lock), so it
+          // outranks a saved per-workflow substrate; the backend stamps it
+          // regardless, and sending it keeps the payload honest.
+          substrate: forced ?? resolved.substrate,
           sessionId,
-          permissionMode: launchOpts?.permissionMode ?? globalPermissionMode,
-          // This one-click lane has no Configure screen, so a per-run-type
-          // default (config.runTypeDefaults['workflow:<id>'].model) is the only
-          // way a user can influence what these launches send to
-          // workflow_runs.model (migration 037); floors to Opus when unset.
-          model:
-            useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${workflowId}`]
-              ?.model ?? DEFAULT_WORKFLOW_MODEL,
+          permissionMode: launchOpts?.permissionMode ?? resolved.permissionMode,
+          model: resolved.model,
+          ...(agentRuntime !== undefined ? { agentRuntime } : {}),
         };
         const result = await trpc.cyboflow.runs.start.mutate(
           seed?.ideaIds !== undefined
