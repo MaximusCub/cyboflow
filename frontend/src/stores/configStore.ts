@@ -6,6 +6,21 @@ import type {
   RunTypeDefaultsOp,
 } from '../../../shared/types/sessionDefaults';
 
+/**
+ * The outcome of one `applyRunTypeDefault` write. Discriminated on purpose: the
+ * caller MUST be able to tell "the write landed and the key previously held
+ * nothing" (`{ ok: true, previous: null }`) from "the write never landed"
+ * (`{ ok: false }`). Collapsing both onto `undefined` is what let a failed write
+ * report success and hand its Undo a `{ kind: 'replace', value: null }` — a key
+ * DELETION of a default the failed write never overwrote.
+ *
+ * Declared here rather than in `shared/types/sessionDefaults.ts` because it is a
+ * renderer-store contract, not part of the IPC payload shape.
+ */
+export type ApplyRunTypeDefaultResult =
+  | { ok: true; previous: RunTypeDefaults | null }
+  | { ok: false; error: string };
+
 interface ConfigStore {
   config: AppConfig | null;
   isLoading: boolean;
@@ -22,7 +37,7 @@ interface ConfigStore {
   applyRunTypeDefault: (
     key: string,
     op: RunTypeDefaultsOp,
-  ) => Promise<RunTypeDefaults | undefined>;
+  ) => Promise<ApplyRunTypeDefaultResult>;
 }
 
 export const useConfigStore = create<ConfigStore>((set, get) => ({
@@ -63,18 +78,22 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   applyRunTypeDefault: async (
     key: string,
     op: RunTypeDefaultsOp,
-  ) => {
+  ): Promise<ApplyRunTypeDefaultResult> => {
     try {
       const response = await API.config.applyRunTypeDefault(key, op);
       if (response.success) {
         await get().fetchConfig();
-        return response.data?.previous;
+        // The IPC reports "no prior entry" as `undefined`; normalize to `null`
+        // so the success shape has exactly one absent-value spelling.
+        return { ok: true, previous: response.data?.previous ?? null };
       }
-      set({ error: response.error || 'Failed to apply run type default' });
-      return undefined;
-    } catch (error) {
-      set({ error: 'Failed to apply run type default' });
-      return undefined;
+      const error = response.error || 'Failed to apply run type default';
+      set({ error });
+      return { ok: false, error };
+    } catch {
+      const message = 'Failed to apply run type default';
+      set({ error: message });
+      return { ok: false, error: message };
     }
   },
 }));

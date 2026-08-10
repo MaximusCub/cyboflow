@@ -165,6 +165,7 @@ import { API } from '../../../utils/api';
 import { trpc } from '../../../trpc/client';
 import type { ToolPanel } from '../../../../../shared/types/panels';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../shared/types/sessionDefaults';
+import type { ApplyRunTypeDefaultResult } from '../../../stores/configStore';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
@@ -1153,6 +1154,20 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     useConfigStore.setState({ config: { runTypeDefaults: map } as unknown as AppConfig });
   }
 
+  type WorkflowListRows = Awaited<ReturnType<typeof mockWorkflowsList>>;
+
+  /** A workflows.list response the test settles by hand, to hold the pre-load window open. */
+  function deferredWorkflows(): {
+    promise: Promise<WorkflowListRows>;
+    resolve: (rows: WorkflowListRows) => void;
+  } {
+    let resolve!: (rows: WorkflowListRows) => void;
+    const promise = new Promise<WorkflowListRows>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
   it('with nothing configured, a launch still sends the Opus floor', async () => {
     render(<WorkflowPicker projectId={1} />);
 
@@ -1273,20 +1288,44 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     );
   });
 
+  it('a model chosen BEFORE workflows.list resolves is carried onto the real key, not discarded', async () => {
+    // ModelSelector is live from first mount, while `selectedId` is still null —
+    // so a pick made then lands under the transient `workflow:` key (empty id).
+    // useSeededSelection's touched map is per-key, so the real `workflow:wf-1`
+    // key would otherwise look untouched and re-seed the choice away. The
+    // pre-load pick must survive the transition, and must ride the launch.
+    setRunTypeDefaults({ 'workflow:wf-1': { model: 'haiku' } });
+    const listSettled = deferredWorkflows();
+    mockWorkflowsList.mockReturnValueOnce(listSettled.promise);
+    render(<WorkflowPicker projectId={1} />);
+
+    // Start Run is still disabled here — the list has not resolved.
+    const modelSelect = await screen.findByLabelText('Select Claude model');
+    expect(screen.getByRole('button', { name: /^Start Run$/ })).toBeDisabled();
+    await act(async () => {
+      fireEvent.change(modelSelect, { target: { value: 'sonnet' } });
+    });
+
+    await act(async () => {
+      listSettled.resolve([
+        { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+      ]);
+    });
+
+    const startRunBtn = await findEnabledStartRun();
+    // Neither the stored 'haiku' default nor the Opus floor won — the user's
+    // pre-load choice did.
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
+  });
+
   it('a TOUCHED model wins over the quick default for the Quick Session button', async () => {
     setRunTypeDefaults({ quick: { model: 'haiku' } });
     render(<WorkflowPicker projectId={1} />);
 
-    // ModelSelector renders unconditionally from first mount — before
-    // workflows.list resolves and `selectedId` settles from null to 'wf-1'.
-    // Touching the dropdown during that pre-load window would land under the
-    // transient `workflow:` key (empty id); once the real id resolves,
-    // modelKey changes to `workflow:wf-1` and useSeededSelection's per-key
-    // touched map treats that as an untouched NEW key, silently dropping the
-    // touch. Wait for the real key to settle (Start Run enabling implies
-    // `selectedId` is set) before touching the dropdown, so this test
-    // exercises the intended "user touches a real workflow's control" case
-    // rather than racing the load.
     await findEnabledStartRun();
 
     const modelSelect = screen.getByLabelText('Select Claude model');
@@ -1417,14 +1456,26 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
    * `previous` entry the real IPC would return.
    */
   const mockApplyRunTypeDefault = vi.fn(
-    async (_key: string, _op: RunTypeDefaultsOp): Promise<RunTypeDefaults | undefined> => undefined,
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<ApplyRunTypeDefaultResult> => ({
+      ok: true,
+      previous: null,
+    }),
   );
+
+  /** A promise the test resolves by hand, so overlapping writes are deterministic. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
 
   beforeEach(() => {
     mockRunStart.mockClear();
     mockCreateQuick.mockClear();
     mockApplyRunTypeDefault.mockClear();
-    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
     // A CUSTOM (non-planner, non-sprint) flow so Start Run hits the DIRECT
     // launch path — the "save does not launch / does not perturb the payload"
     // assertions need a synchronous runs.start, not a pre-launch modal.
@@ -1541,8 +1592,9 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
   });
 
   it('Undo DELETES the key ({ kind: replace, value: null }) when no prior default existed', async () => {
-    // The store returns `undefined` when the key held nothing — the common case.
-    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    // `{ ok: true, previous: null }` = the write LANDED and the key held nothing
+    // — the common case, and the only one that may replay as a deletion.
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
     render(<WorkflowPicker projectId={1} />);
 
     const saveBtn = await findSaveDefault();
@@ -1572,7 +1624,7 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
       substrate: 'interactive',
       agentRuntime: 'claude-interactive',
     };
-    mockApplyRunTypeDefault.mockResolvedValue(previous);
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous });
     render(<WorkflowPicker projectId={1} />);
 
     const saveBtn = await findSaveDefault();
@@ -1587,6 +1639,56 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
     expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
       kind: 'replace',
       value: previous,
+    });
+  });
+
+  it('a FAILED write shows a failure toast and offers NO Undo (never a deleting replace)', async () => {
+    // The data-loss fix: the failed write left the stored default standing, so
+    // an Undo replaying `{ kind: 'replace', value: null }` would delete a
+    // default this surface never overwrote.
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: false, error: 'nope' });
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    const toast = await screen.findByTestId('workflow-picker-save-toast');
+    expect(toast).toHaveAttribute('data-tone', 'error');
+    expect(toast).toHaveTextContent("Couldn't save default for Custom");
+    expect(screen.queryByTestId('session-action-toast-action')).toBeNull();
+    // Exactly the one failed merge — no replace was ever issued.
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+  });
+
+  it('disables the CTA while a write is in flight and rejects a same-tick double click', async () => {
+    const pending = deferred<ApplyRunTypeDefaultResult>();
+    mockApplyRunTypeDefault.mockReturnValueOnce(pending.promise);
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    // Two clicks in ONE tick: only the synchronous ref latch can stop the
+    // second — `disabled` has not re-rendered yet.
+    act(() => {
+      fireEvent.click(saveBtn);
+      fireEvent.click(saveBtn);
+    });
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    await waitFor(() => expect(saveBtn).toBeDisabled());
+
+    await act(async () => {
+      pending.resolve({ ok: true, previous: { model: 'sonnet' } });
+    });
+    expect(saveBtn).toBeEnabled();
+
+    // The Undo record belongs to the write that actually landed.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('session-action-toast-action'));
+    });
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: { model: 'sonnet' },
     });
   });
 });

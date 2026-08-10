@@ -200,6 +200,7 @@ import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch
 import type { AppConfig } from '../../../../types/config';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../../shared/types/sessionDefaults';
+import type { ApplyRunTypeDefaultResult } from '../../../../stores/configStore';
 
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
@@ -1674,12 +1675,24 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
    * `previous` entry the real IPC would return.
    */
   const mockApplyRunTypeDefault = vi.fn(
-    async (_key: string, _op: RunTypeDefaultsOp): Promise<RunTypeDefaults | undefined> => undefined,
+    async (_key: string, _op: RunTypeDefaultsOp): Promise<ApplyRunTypeDefaultResult> => ({
+      ok: true,
+      previous: null,
+    }),
   );
+
+  /** A promise the test resolves by hand, so overlapping writes are deterministic. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
 
   beforeEach(() => {
     mockApplyRunTypeDefault.mockClear();
-    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
     // Non-gated custom flow so the workflow card reaches ③ and (for the
     // side-effect-only proof) launches directly via runs.start.
     mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
@@ -1849,7 +1862,9 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
   });
 
   it('Undo DELETES the key ({ kind: replace, value: null }) when no prior default existed', async () => {
-    mockApplyRunTypeDefault.mockResolvedValue(undefined);
+    // `{ ok: true, previous: null }` = the write LANDED and the key held nothing
+    // — the only outcome that may replay as a deletion.
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous: null });
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
@@ -1878,7 +1893,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
       substrate: 'interactive',
       agentRuntime: 'claude-interactive',
     };
-    mockApplyRunTypeDefault.mockResolvedValue(previous);
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: true, previous });
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
@@ -1893,6 +1908,56 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
       kind: 'replace',
       value: previous,
+    });
+  });
+
+  it('a FAILED write shows a failure toast and offers NO Undo (never a deleting replace)', async () => {
+    // The data-loss fix: the failed write left the stored default standing, so
+    // an Undo replaying `{ kind: 'replace', value: null }` would delete a
+    // default this surface never overwrote.
+    mockApplyRunTypeDefault.mockResolvedValue({ ok: false, error: 'nope' });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    const toast = await screen.findByTestId('wizard-save-toast');
+    expect(toast).toHaveAttribute('data-tone', 'error');
+    expect(toast).toHaveTextContent("Couldn't save default for Custom");
+    expect(screen.queryByTestId('session-action-toast-action')).toBeNull();
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+  });
+
+  it('disables the CTA while a write is in flight and rejects a same-tick double click', async () => {
+    const pending = deferred<ApplyRunTypeDefaultResult>();
+    mockApplyRunTypeDefault.mockReturnValueOnce(pending.promise);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    const saveBtn = screen.getByTestId('wizard-save-default');
+    // Two clicks in ONE tick: only the synchronous ref latch can stop the
+    // second — `disabled` has not re-rendered yet.
+    act(() => {
+      fireEvent.click(saveBtn);
+      fireEvent.click(saveBtn);
+    });
+    expect(mockApplyRunTypeDefault).toHaveBeenCalledOnce();
+    await waitFor(() => expect(saveBtn).toBeDisabled());
+
+    await act(async () => {
+      pending.resolve({ ok: true, previous: { model: 'sonnet' } });
+    });
+    expect(saveBtn).toBeEnabled();
+
+    // The Undo record belongs to the write that actually landed.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('session-action-toast-action'));
+    });
+    expect(mockApplyRunTypeDefault).toHaveBeenLastCalledWith('workflow:wf-1', {
+      kind: 'replace',
+      value: { model: 'sonnet' },
     });
   });
 });
