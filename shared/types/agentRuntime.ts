@@ -76,6 +76,21 @@ export function providerForRuntime(runtime: AgentRuntime): AgentProvider {
 }
 
 /**
+ * The inverse of `claudeRuntimeFromSubstrate`: the substrate a runtime implies,
+ * or `null` for a Codex runtime (which carries no sdk/interactive transport
+ * distinction of its own).
+ *
+ * A caller that resolves runtime and substrate INDEPENDENTLY can otherwise emit
+ * a contradictory pair — e.g. `agentRuntime: 'claude-interactive'` alongside a
+ * substrate floored to `'sdk'` — which the launch path then has to arbitrate.
+ */
+export function substrateForRuntime(runtime: AgentRuntime): CliSubstrate | null {
+  if (runtime === 'claude-interactive') return 'interactive';
+  if (runtime === 'claude-sdk') return 'sdk';
+  return null;
+}
+
+/**
  * Per-provider access toggles — the user's answer to "may Cyboflow use this
  * agent account at all?", set in Settings → Integrations and in the onboarding
  * Connect step (both write the SAME `AppConfig.agentProviderAccess` field).

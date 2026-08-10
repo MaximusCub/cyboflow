@@ -1,4 +1,5 @@
 import type { AgentRuntime } from './agentRuntime';
+import { substrateForRuntime } from './agentRuntime';
 import type { ReasoningEffort } from './reasoningEffort';
 import type { CliSubstrate } from './substrate';
 import { DEFAULT_SUBSTRATE } from './substrate';
@@ -125,11 +126,22 @@ export function resolveRunTypeLaunchDefaults(
 ): ResolvedRunTypeLaunchDefaults {
   const kind = runTypeKindForKey(key);
   const stored = runTypeDefaults?.[key];
+  const agentRuntime = stored?.agentRuntime ?? globals?.agentRuntime;
+  // A resolved runtime OWNS the substrate it implies. Resolving the two
+  // independently lets a stored `{ agentRuntime: 'claude-interactive' }` with no
+  // substrate member — exactly what the Settings editor writes, since picking a
+  // runtime CLEARS a now-mismatched substrate rather than re-syncing it — fall
+  // through to the 'sdk' floor and emit a contradictory pair.
+  const impliedSubstrate = agentRuntime === undefined ? null : substrateForRuntime(agentRuntime);
   return {
     model: stored?.model ?? globals?.model ?? DEFAULT_RUN_TYPE_MODEL_FLOORS[kind],
     permissionMode: stored?.permissionMode ?? globals?.permissionMode ?? DEFAULT_PERMISSION_MODE,
-    substrate: stored?.substrate ?? globals?.substrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS[kind],
-    agentRuntime: stored?.agentRuntime ?? globals?.agentRuntime,
+    substrate:
+      stored?.substrate ??
+      impliedSubstrate ??
+      globals?.substrate ??
+      DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS[kind],
+    agentRuntime,
     reasoningEffort:
       kind === 'quick' ? (stored?.reasoningEffort ?? globals?.reasoningEffort) : undefined,
   };

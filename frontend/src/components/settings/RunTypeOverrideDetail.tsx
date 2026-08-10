@@ -14,6 +14,15 @@
  * 2. **Reasoning effort is Quick-Session-only.** `runs.start` carries no
  *    `reasoningEffort` field, so a flow-type effort override has no sink.
  *
+ * ## The runtime-family invariant is enforced on EVERY edit path
+ *
+ * A saved override must never describe a combination no launch can honour (a
+ * Claude model under a Codex runtime, a substrate the runtime contradicts).
+ * That holds only because the controls are scoped to the draft's EFFECTIVE
+ * runtime AND every setter coerces — see {@link fieldOptions} and `setField`.
+ * Coercing on the `agentRuntime` pick alone is not enough: the reverse edit
+ * order (runtime first, model second) walked straight back into the pair.
+ *
  * ## Why Save writes through `configStore.applyRunTypeDefault` directly
  *
  * It must NOT route through `Settings.tsx`'s shared `handleSubmit`. That form
@@ -29,14 +38,18 @@
 import { useEffect, useState } from 'react';
 import { ChevronLeft, RotateCcw } from 'lucide-react';
 import { useConfigStore } from '../../stores/configStore';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import {
   RUN_TYPE_EFFORT_OPTIONS,
   RUN_TYPE_MODEL_OPTIONS,
   RUN_TYPE_FIELD_LABELS,
   agentRuntimeOptions,
   baselineValueFor,
+  coerceDraftForModel,
   coerceDraftForRuntime,
+  coerceDraftForSubstrate,
   draftFromStored,
+  draftUsesCodexRuntime,
   isQuickRunTypeKey,
   patchFromDraft,
   runTypeValueLabel,
@@ -45,6 +58,7 @@ import {
   type RunTypeFieldId,
 } from './runTypeOverrides';
 import type { AgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { CodexModelOption } from '../../../../shared/types/agentModels';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import type { RunTypeDefaults } from '../../../../shared/types/sessionDefaults';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
@@ -121,6 +135,14 @@ export function RunTypeOverrideDetail({
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Every control is scoped to the runtime this key would ACTUALLY launch on
+  // (the draft's own override, else the baseline) — offering the other family's
+  // options is what let a cross-family pair be assembled in the first place.
+  // Codex models come from the same catalog store the launch pickers read
+  // (`ModelSelector` / `ModelPill`), never from a second hardcoded list.
+  const usesCodex = draftUsesCodexRuntime(draft, baseline);
+  const { options: codexModelOptions } = useCodexModelCatalog(usesCodex);
+
   // Re-seed when the key changes (list → another type without unmounting).
   // `stored` is intentionally not a dependency: a config refetch mid-edit must
   // not silently discard the user's in-progress draft.
@@ -131,23 +153,32 @@ export function RunTypeOverrideDetail({
 
   const cards = knobCardsFor(runTypeKey);
 
+  /**
+   * EVERY family-bearing field coerces, not just `agentRuntime` — the invariant
+   * ("a cross-family combination is never savable") has to hold in every edit
+   * order, and coercing only on the runtime pick left the reverse order
+   * (runtime first, model/substrate second) able to reassemble the exact pair
+   * the runtime pick had just removed.
+   */
   const setField = (field: RunTypeFieldId, value: string | null): void => {
     setDraft((prev) => {
       switch (field) {
         case 'model':
-          return { ...prev, model: value };
+          return coerceDraftForModel(prev, value, baseline);
         case 'reasoningEffort':
           return { ...prev, reasoningEffort: value as ReasoningEffort | null };
         case 'substrate':
-          return { ...prev, substrate: value as CliSubstrate | null };
+          return coerceDraftForSubstrate(prev, value as CliSubstrate | null);
         case 'agentRuntime':
           // A concrete pick goes through the SAME runtime-family coercion the
           // launch surfaces apply (WorkflowPicker / SessionStartWizard): it
           // must never leave the draft able to save an unlaunchable
           // model/runtime/substrate combination. Clearing back to "follow
-          // defaults" needs no coercion — the baseline is always self-consistent.
+          // defaults" is NOT a no-op either — the draft then falls through to
+          // the (always-Claude) baseline runtime, so a Codex model left over
+          // from the override has to be coerced with it.
           return value === null
-            ? { ...prev, agentRuntime: null }
+            ? coerceDraftForModel({ ...prev, agentRuntime: null }, prev.model, baseline)
             : coerceDraftForRuntime(prev, value as AgentRuntime, baseline);
         case 'permissionMode':
           return { ...prev, permissionMode: value as PermissionMode | null };
@@ -213,6 +244,16 @@ export function RunTypeOverrideDetail({
     const base = baselineValueFor(field, baseline);
     const changed = value !== null && value !== base;
     const selectId = `run-type-${field}`;
+    const options = fieldOptions(field, runTypeKey, usesCodex, codexModelOptions);
+    // "Follow defaults" is unavailable for a Codex model, exactly as on the
+    // launch pickers (`ModelSelector`'s `allowDefaultOption` is Claude-only):
+    // an omitted model member resolves to the always-Claude floor, so offering
+    // it here would BE the cross-family pair rather than an escape from it.
+    const allowFollowDefaults = !(field === 'model' && usesCodex);
+    // A Codex runtime carries no sdk/interactive transport of its own, so there
+    // is no substrate to pick — the control states that instead of offering a
+    // value the resolved runtime would contradict.
+    const notApplicable = field === 'substrate' && usesCodex;
     return (
       <div key={field} className="flex flex-col gap-1" data-testid={`run-type-field-${field}`}>
         <label htmlFor={selectId} className="text-xs font-medium text-text-secondary">
@@ -221,17 +262,23 @@ export function RunTypeOverrideDetail({
         <select
           id={selectId}
           value={value ?? ''}
+          disabled={notApplicable}
           onChange={(e) => setField(field, e.target.value === '' ? null : e.target.value)}
-          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
+          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary disabled:opacity-50"
         >
-          <option value="">Follow defaults</option>
-          {fieldOptions(field, runTypeKey).map((option) => (
-            <option key={option} value={option}>
-              {runTypeValueLabel(field, option)}
+          {allowFollowDefaults && <option value="">Follow defaults</option>}
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
             </option>
           ))}
         </select>
-        {changed && (
+        {notApplicable && (
+          <span className="text-xs text-text-tertiary" data-testid={`run-type-na-${field}`}>
+            Not applicable · the selected Codex runtime has no substrate
+          </span>
+        )}
+        {changed && !notApplicable && (
           <span className="text-xs text-text-tertiary" data-testid={`run-type-changed-${field}`}>
             {base === null
               ? 'overridden · no global default'
@@ -359,18 +406,47 @@ export function RunTypeOverrideDetail({
   );
 }
 
-/** The option ids offered for one field on one key. */
-function fieldOptions(field: RunTypeFieldId, runTypeKey: string): readonly string[] {
+interface FieldOption {
+  id: string;
+  label: string;
+}
+
+/** Option ids labelled from the same maps the chips and pickers already use. */
+function labelled(field: RunTypeFieldId, ids: readonly string[]): FieldOption[] {
+  return ids.map((id) => ({ id, label: runTypeValueLabel(field, id) }));
+}
+
+/**
+ * The options offered for one field on one key, scoped to the runtime the key
+ * would actually launch on.
+ *
+ * `model` is the load-bearing one: an unconditional Claude list let a Codex
+ * runtime be paired with a Claude alias no matter how carefully the runtime
+ * pick coerced. The Codex list is the SAME `model/list` catalog the launch
+ * pickers render (`ModelSelector` / `ModelPill` via `useCodexModelCatalog`),
+ * so Settings cannot offer a model a launch would not.
+ *
+ * `substrate` collapses to nothing on a Codex runtime — that family has no
+ * sdk/interactive transport, so every value would disagree with the runtime.
+ */
+function fieldOptions(
+  field: RunTypeFieldId,
+  runTypeKey: string,
+  usesCodex: boolean,
+  codexModels: readonly CodexModelOption[],
+): readonly FieldOption[] {
   switch (field) {
     case 'model':
-      return RUN_TYPE_MODEL_OPTIONS.map((o) => o.id);
+      return usesCodex
+        ? codexModels.map((o) => ({ id: o.id, label: o.label }))
+        : labelled(field, RUN_TYPE_MODEL_OPTIONS.map((o) => o.id));
     case 'reasoningEffort':
-      return RUN_TYPE_EFFORT_OPTIONS;
+      return labelled(field, RUN_TYPE_EFFORT_OPTIONS);
     case 'substrate':
-      return ['sdk', 'interactive'];
+      return usesCodex ? [] : labelled(field, ['sdk', 'interactive']);
     case 'agentRuntime':
-      return agentRuntimeOptions(runTypeKey);
+      return labelled(field, agentRuntimeOptions(runTypeKey));
     case 'permissionMode':
-      return PERMISSION_MODE_OPTIONS.map((o) => o.id);
+      return labelled(field, PERMISSION_MODE_OPTIONS.map((o) => o.id));
   }
 }

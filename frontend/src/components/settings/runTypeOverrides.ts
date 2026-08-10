@@ -30,6 +30,9 @@ import {
   DEFAULT_WORKFLOW_AGENT_RUNTIME,
   SESSION_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIMES,
+  claudeRuntimeFromSubstrate,
+  providerForRuntime,
+  substrateForRuntime,
   type AgentRuntime,
 } from '../../../../shared/types/agentRuntime';
 import { CLAUDE_EFFORT_LEVELS, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
@@ -426,15 +429,47 @@ export function patchFromDraft(draft: RunTypeDraft): RunTypeDefaultsPatch {
 // ---------------------------------------------------------------------------
 
 /**
- * The substrate one concrete agent runtime implies; `null` for a Codex
- * runtime, which has no `sdk`/`interactive` transport distinction of its own
- * (mirrors `agentRuntimeUi.substrateForRuntime`, adapted to the full
- * `AgentRuntime` union this draft stores).
+ * The runtime a draft would actually launch on: its own `agentRuntime`
+ * override, or — when the runtime card is off — the baseline it falls through
+ * to. EVERY family decision below (which models are offerable, which substrate
+ * a pick may imply) is taken against THIS, not against `draft.agentRuntime`,
+ * because an absent member still resolves to a concrete runtime at launch.
  */
-function substrateImpliedByRuntime(runtime: AgentRuntime): CliSubstrate | null {
-  if (runtime === 'claude-interactive') return 'interactive';
-  if (runtime === 'claude-sdk') return 'sdk';
-  return null;
+export function effectiveRuntimeForDraft(
+  draft: RunTypeDraft,
+  baseline: RunTypeBaseline,
+): AgentRuntime {
+  return draft.agentRuntime ?? baseline.agentRuntime;
+}
+
+/** True when the draft would launch on the Codex provider. */
+export function draftUsesCodexRuntime(
+  draft: RunTypeDraft,
+  baseline: RunTypeBaseline,
+): boolean {
+  return providerForRuntime(effectiveRuntimeForDraft(draft, baseline)) === 'codex';
+}
+
+/**
+ * The same-family projection of one model value for `runtime`.
+ *
+ * `null` means "follow defaults", which is only expressible on the CLAUDE side:
+ * an omitted `model` member resolves to the (always-Claude) floor at launch, so
+ * under a Codex runtime "follow defaults" IS the cross-family combination — it
+ * is replaced with the explicit Codex sentinel instead. This mirrors
+ * `ModelSelector`, whose `allowDefaultOption` is likewise Claude-path only.
+ */
+export function coerceModelForRuntime(
+  model: string | null,
+  runtime: AgentRuntime,
+  baseline: RunTypeBaseline,
+): string | null {
+  if (providerForRuntime(runtime) === 'codex') {
+    const effective = model ?? baseline.model;
+    return isCodexModelSelection(effective) ? effective : DEFAULT_CODEX_MODEL;
+  }
+  if (model === null) return null;
+  return isCodexModelFamily(model) ? baseline.model : model;
 }
 
 /**
@@ -446,6 +481,12 @@ function substrateImpliedByRuntime(runtime: AgentRuntime): CliSubstrate | null {
  * neither can a `substrate` value that no longer matches the new runtime's
  * transport.
  *
+ * This is ONE of three entry points, and the invariant only holds because all
+ * three coerce: {@link coerceDraftForModel} (model edited last) and
+ * {@link coerceDraftForSubstrate} (substrate edited last) close the reverse
+ * edit orders. Coercing here alone left `{ agentRuntime: 'codex-sdk', model:
+ * 'opus' }` reachable by picking the runtime first and the model second.
+ *
  *   - `model` is COERCED, not just cleared: the EFFECTIVE model (the draft's
  *     own override, or — if the model card is off — the baseline it would
  *     otherwise fall through to) is replaced with a same-family value once it
@@ -455,7 +496,10 @@ function substrateImpliedByRuntime(runtime: AgentRuntime): CliSubstrate | null {
  *     reproduce the exact bug for a runtime-only override.
  *   - `substrate` is CLEARED (not re-synced to match) once it no longer
  *     agrees with the new runtime's implied transport — a Codex runtime has
- *     no substrate of its own to clear TO.
+ *     no substrate of its own to clear TO, and for a Claude runtime the
+ *     cleared member re-derives from the runtime at launch
+ *     (`resolveRunTypeLaunchDefaults` treats a resolved runtime as OWNING its
+ *     implied substrate).
  */
 export function coerceDraftForRuntime(
   draft: RunTypeDraft,
@@ -464,17 +508,58 @@ export function coerceDraftForRuntime(
 ): RunTypeDraft {
   const next: RunTypeDraft = { ...draft, agentRuntime: runtime };
 
-  const effectiveModel = draft.model ?? baseline.model;
-  if (runtime.startsWith('codex-')) {
-    if (!isCodexModelSelection(effectiveModel)) next.model = DEFAULT_CODEX_MODEL;
-  } else if (isCodexModelFamily(effectiveModel)) {
-    next.model = baseline.model;
-  }
+  next.model = coerceModelForRuntime(draft.model, runtime, baseline);
 
-  const impliedSubstrate = substrateImpliedByRuntime(runtime);
+  const impliedSubstrate = substrateForRuntime(runtime);
   if (next.substrate !== null && next.substrate !== impliedSubstrate) {
     next.substrate = null;
   }
 
   return next;
+}
+
+/**
+ * The model edit path — the reverse of {@link coerceDraftForRuntime}. A value
+ * from another family (a stale draft, a restored row, a picker that has not
+ * caught up with the runtime yet) never survives into the draft, so it can
+ * never reach the saved patch either.
+ */
+export function coerceDraftForModel(
+  draft: RunTypeDraft,
+  model: string | null,
+  baseline: RunTypeBaseline,
+): RunTypeDraft {
+  return {
+    ...draft,
+    model: coerceModelForRuntime(model, effectiveRuntimeForDraft(draft, baseline), baseline),
+  };
+}
+
+/**
+ * The substrate edit path. A stored substrate BEATS the runtime's implied one
+ * at launch (`resolveRunTypeLaunchDefaults`: `stored?.substrate ??
+ * impliedSubstrate ?? …`), so a substrate that disagrees with an explicitly
+ * chosen runtime is a savable contradiction, not merely odd:
+ *
+ *   - No runtime override in the draft ⇒ the substrate is a free-standing
+ *     override (it contradicts nothing this key chose) and is taken as picked.
+ *   - A CLAUDE runtime override ⇒ the pair must agree, so the RUNTIME moves to
+ *     the one that owns the picked transport (`claudeRuntimeFromSubstrate`)
+ *     rather than the pick being silently dropped.
+ *   - A CODEX runtime override ⇒ there is no substrate to agree with
+ *     (`substrateForRuntime` → null), so the member is cleared.
+ */
+export function coerceDraftForSubstrate(
+  draft: RunTypeDraft,
+  substrate: CliSubstrate | null,
+): RunTypeDraft {
+  if (substrate === null) return { ...draft, substrate: null };
+
+  const runtime = draft.agentRuntime;
+  if (runtime === null) return { ...draft, substrate };
+
+  const implied = substrateForRuntime(runtime);
+  if (implied === null) return { ...draft, substrate: null };
+  if (implied === substrate) return { ...draft, substrate };
+  return { ...draft, substrate, agentRuntime: claudeRuntimeFromSubstrate(substrate) };
 }

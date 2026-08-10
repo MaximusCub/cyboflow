@@ -134,6 +134,27 @@ function applyOp(key: string, op: RunTypeDefaultsOp): RunTypeDefaults | undefine
   return previous;
 }
 
+/**
+ * The Codex model catalog the detail screen's model picker reads once the
+ * draft's effective runtime is Codex. Faked at the store (the pattern
+ * `VariantEditorModal.codex.test.tsx` uses) so the option set is deterministic
+ * — the real store fetches `model/list` off the bundled runtime.
+ */
+const CODEX_MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto/default', description: 'Use the Codex runtime default', isDefault: false },
+  { id: 'gpt-5-codex', label: 'GPT-5 Codex', description: 'Codex-tuned', isDefault: true },
+  { id: 'gpt-5', label: 'GPT-5', description: 'General purpose', isDefault: false },
+];
+
+vi.mock('../../../stores/codexModelCatalogStore', () => ({
+  useCodexModelCatalog: () => ({
+    options: CODEX_MODEL_OPTIONS,
+    defaultModel: 'gpt-5-codex',
+    loading: false,
+    error: null,
+  }),
+}));
+
 vi.mock('../../../utils/api', () => ({
   API: {
     projects: { getAll: vi.fn() },
@@ -682,6 +703,159 @@ describe('RunTypeOverridesSection — detail screen', () => {
           value: expect.objectContaining({ model: 'auto', agentRuntime: 'codex-sdk' }),
         }),
       );
+    });
+
+    // AC 1 — runtime LAST. Already worked; pinned on the PATCH (not just the
+    // control) so the fix for the other orders cannot regress it.
+    it('runtime last: a Claude model picked first never reaches the saved patch', async () => {
+      await openDetail('Sprint');
+
+      const modelCard = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(modelCard).getByRole('switch'));
+      fireEvent.change(within(modelCard).getByLabelText('Model'), { target: { value: 'sonnet' } });
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() =>
+        expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('workflow:wf-global-sprint', {
+          kind: 'merge',
+          value: {
+            model: 'auto',
+            reasoningEffort: null,
+            substrate: null,
+            agentRuntime: 'codex-sdk',
+            permissionMode: null,
+          },
+        }),
+      );
+    });
+
+    // AC 2 — model LAST. THE defect: the model dropdown stayed Claude-only and
+    // its edit path applied no coercion, so this order rebuilt the exact pair
+    // the runtime pick had just removed.
+    it('model last: a Claude model cannot be re-selected after a Codex runtime', async () => {
+      await openDetail('Sprint');
+
+      const modelCard = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(modelCard).getByRole('switch'));
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+
+      // The Claude alias is not even on offer any more…
+      const modelSelect = within(modelCard).getByLabelText('Model');
+      expect(
+        within(modelSelect).queryAllByRole('option').map((o) => (o as HTMLOptionElement).value),
+      ).not.toContain('opus');
+      // …and forcing it through the control anyway does not stick.
+      fireEvent.change(modelSelect, { target: { value: 'opus' } });
+      expect(modelSelect).not.toHaveValue('opus');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(applyRunTypeDefaultSpy).toHaveBeenCalled());
+      const [, op] = applyRunTypeDefaultSpy.mock.calls[0] as [string, RunTypeDefaultsOp];
+      expect(op).toMatchObject({ kind: 'merge', value: { agentRuntime: 'codex-sdk' } });
+      expect((op.value as RunTypeDefaults).model).toBe('auto');
+    });
+
+    // AC 3 — substrate LAST. A stored substrate BEATS the runtime's implied one
+    // at launch, so a disagreeing pick would be saved as dead, contradictory
+    // state; the runtime moves to the one that owns the picked transport.
+    it('substrate last: a disagreeing pick moves the runtime instead of contradicting it', async () => {
+      await openDetail('Sprint');
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'claude-sdk' },
+      });
+      fireEvent.change(within(runtimeCard).getByLabelText('Substrate'), {
+        target: { value: 'interactive' },
+      });
+
+      expect(within(runtimeCard).getByLabelText('Agent runtime')).toHaveValue('claude-interactive');
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() =>
+        expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('workflow:wf-global-sprint', {
+          kind: 'merge',
+          value: expect.objectContaining({
+            substrate: 'interactive',
+            agentRuntime: 'claude-interactive',
+          }),
+        }),
+      );
+    });
+
+    // AC 3 — and a Codex runtime has no substrate at all to disagree WITH.
+    it('substrate last: the control is inert under a Codex runtime and saves nothing', async () => {
+      await openDetail('Sprint');
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+
+      const substrateSelect = within(runtimeCard).getByLabelText('Substrate');
+      expect(substrateSelect).toBeDisabled();
+      expect(within(runtimeCard).getByTestId('run-type-na-substrate')).toBeInTheDocument();
+      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+      expect(substrateSelect).toHaveValue('');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(applyRunTypeDefaultSpy).toHaveBeenCalledWith('workflow:wf-global-sprint', {
+          kind: 'merge',
+          value: expect.objectContaining({ substrate: null, agentRuntime: 'codex-sdk' }),
+        }),
+      );
+    });
+
+    // AC 4 — the model dropdown is scoped to the draft's EFFECTIVE runtime, and
+    // sources its Codex half from the same catalog store the launch pickers use.
+    it('offers Claude aliases on a Claude runtime and Codex catalog models on a Codex one', async () => {
+      await openDetail('Sprint');
+
+      const modelCard = screen.getByTestId('knob-card-model');
+      fireEvent.click(within(modelCard).getByRole('switch'));
+      const optionText = (): (string | null)[] =>
+        within(within(modelCard).getByLabelText('Model'))
+          .getAllByRole('option')
+          .map((o) => o.textContent);
+
+      expect(optionText()).toEqual([
+        'Follow defaults',
+        'Fable 5 · 1M',
+        'Opus 5 · 1M',
+        'Sonnet 5 · 1M',
+        'Haiku 4.5 · 200K',
+        'Auto',
+      ]);
+
+      const runtimeCard = screen.getByTestId('knob-card-runtime');
+      fireEvent.click(within(runtimeCard).getByRole('switch'));
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+
+      // No Claude alias survives — and no "Follow defaults" either: an omitted
+      // model member resolves to the always-Claude floor, so it would BE the
+      // cross-family pair (this mirrors ModelSelector's Claude-only default option).
+      expect(optionText()).toEqual(['Auto/default', 'GPT-5 Codex', 'GPT-5']);
+
+      fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
+        target: { value: 'claude-interactive' },
+      });
+      expect(optionText()).toContain('Opus 5 · 1M');
     });
 
     it('coerces a stale Codex-family model back to Claude when flipping to a Claude runtime', async () => {

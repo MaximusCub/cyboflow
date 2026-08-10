@@ -13,7 +13,12 @@ import {
   RUN_TYPE_FIELD_ORDER,
   agentRuntimeOptions,
   buildRunTypeGroups,
+  coerceDraftForModel,
+  coerceDraftForRuntime,
+  coerceDraftForSubstrate,
   draftFromStored,
+  draftUsesCodexRuntime,
+  effectiveRuntimeForDraft,
   isQuickRunTypeKey,
   patchFromDraft,
   resolveRunTypeBaseline,
@@ -21,8 +26,13 @@ import {
   runTypeStatusLabel,
   runTypeValueLabel,
   workflowRunTypeKey,
+  type RunTypeDraft,
   type RunTypeWorkflowSource,
 } from '../runTypeOverrides';
+import {
+  SESSION_AGENT_RUNTIMES,
+  substrateForRuntime,
+} from '../../../../../shared/types/agentRuntime';
 import type { AppConfig } from '../../../types/config';
 import type { WorkflowRow } from '../../../../../shared/types/workflows';
 
@@ -325,5 +335,132 @@ describe('draft ⇄ patch', () => {
       agentRuntime: null,
       permissionMode: null,
     });
+  });
+});
+
+/**
+ * The invariant: a draft can never SAVE a combination no launch can honour — a
+ * Claude model under a Codex runtime (or the reverse), or a substrate the
+ * chosen runtime contradicts. It used to be enforced on the `agentRuntime` pick
+ * ONLY, which held for one edit order and collapsed in every other: picking the
+ * runtime first and the model second reassembled the exact pair the runtime
+ * pick had just removed. These pin all three entry points.
+ */
+describe('runtime-family coercion — every edit order', () => {
+  const flow = resolveRunTypeBaseline('workflow:wf-1', NO_CONFIG);
+
+  function draft(over: Partial<RunTypeDraft> = {}): RunTypeDraft {
+    return { ...draftFromStored(undefined), ...over };
+  }
+
+  describe('effective runtime', () => {
+    it('falls through to the baseline while the runtime card is off', () => {
+      expect(effectiveRuntimeForDraft(draft(), flow)).toBe('claude-sdk');
+      expect(draftUsesCodexRuntime(draft(), flow)).toBe(false);
+      expect(effectiveRuntimeForDraft(draft({ agentRuntime: 'codex-pty' }), flow)).toBe('codex-pty');
+      expect(draftUsesCodexRuntime(draft({ agentRuntime: 'codex-sdk' }), flow)).toBe(true);
+    });
+  });
+
+  // AC 1 — runtime last. This order already held; it is pinned so the fix for
+  // the others cannot regress it.
+  describe('runtime last', () => {
+    it('coerces a Claude model chosen first once a Codex runtime is picked', () => {
+      const next = coerceDraftForRuntime(draft({ model: 'sonnet' }), 'codex-sdk', flow);
+      expect(patchFromDraft(next)).toMatchObject({ model: 'auto', agentRuntime: 'codex-sdk' });
+    });
+
+    it('coerces the model even when the model card was never switched on', () => {
+      // An omitted member resolves to the always-Claude floor at launch, so
+      // "leave it null" would be the cross-family pair, just implicitly.
+      expect(coerceDraftForRuntime(draft(), 'codex-sdk', flow).model).toBe('auto');
+    });
+
+    it('coerces a stale Codex model back to the baseline on a Claude runtime', () => {
+      const next = coerceDraftForRuntime(draft({ model: 'gpt-5-codex' }), 'claude-sdk', flow);
+      expect(next.model).toBe('opus');
+    });
+
+    it('leaves "follow defaults" alone on a Claude runtime', () => {
+      expect(coerceDraftForRuntime(draft(), 'claude-interactive', flow).model).toBeNull();
+    });
+  });
+
+  // AC 2 — model last. THE defect: the model path applied no coercion at all.
+  describe('model last', () => {
+    it('refuses a Claude alias once the runtime is Codex', () => {
+      const codex = coerceDraftForRuntime(draft({ model: 'sonnet' }), 'codex-sdk', flow);
+      const next = coerceDraftForModel(codex, 'opus', flow);
+      expect(next.model).toBe('auto');
+      // The patch that would actually be saved carries no cross-family pair.
+      expect(patchFromDraft(next)).toMatchObject({ model: 'auto', agentRuntime: 'codex-sdk' });
+    });
+
+    it('keeps a genuine Codex model under a Codex runtime', () => {
+      const next = coerceDraftForModel(draft({ agentRuntime: 'codex-sdk' }), 'gpt-5-codex', flow);
+      expect(next.model).toBe('gpt-5-codex');
+    });
+
+    it('has no "follow defaults" under a Codex runtime — that IS the Claude floor', () => {
+      expect(coerceDraftForModel(draft({ agentRuntime: 'codex-pty' }), null, flow).model).toBe('auto');
+    });
+
+    it('judges the model against the EFFECTIVE runtime, not just an explicit one', () => {
+      // Runtime card off ⇒ the baseline (Claude) runtime owns the launch, so a
+      // Codex model restored from a stale row cannot survive the edit path.
+      expect(coerceDraftForModel(draft(), 'gpt-5-codex', flow).model).toBe('opus');
+      expect(coerceDraftForModel(draft(), 'sonnet', flow).model).toBe('sonnet');
+      expect(coerceDraftForModel(draft({ model: 'sonnet' }), null, flow).model).toBeNull();
+    });
+  });
+
+  // AC 3 — substrate last. A stored substrate BEATS the runtime's implied one in
+  // `resolveRunTypeLaunchDefaults`, so a disagreeing pair is savable dead state.
+  describe('substrate last', () => {
+    it('moves the Claude runtime to the one that owns the picked transport', () => {
+      const next = coerceDraftForSubstrate(draft({ agentRuntime: 'claude-sdk' }), 'interactive');
+      expect(patchFromDraft(next)).toMatchObject({
+        substrate: 'interactive',
+        agentRuntime: 'claude-interactive',
+      });
+    });
+
+    it('keeps an agreeing pick as-is', () => {
+      const next = coerceDraftForSubstrate(draft({ agentRuntime: 'claude-interactive' }), 'interactive');
+      expect(next.agentRuntime).toBe('claude-interactive');
+      expect(next.substrate).toBe('interactive');
+    });
+
+    it('drops the pick entirely under a Codex runtime — there is nothing to agree with', () => {
+      for (const substrate of ['sdk', 'interactive'] as const) {
+        const next = coerceDraftForSubstrate(draft({ agentRuntime: 'codex-sdk' }), substrate);
+        expect(next.substrate).toBeNull();
+        expect(next.agentRuntime).toBe('codex-sdk');
+      }
+    });
+
+    it('leaves a free-standing substrate override alone when no runtime is chosen', () => {
+      // Nothing to contradict: the key has picked no runtime of its own.
+      const next = coerceDraftForSubstrate(draft(), 'interactive');
+      expect(next).toMatchObject({ substrate: 'interactive', agentRuntime: null });
+    });
+
+    it('clears to "follow defaults" without touching the runtime', () => {
+      const next = coerceDraftForSubstrate(draft({ agentRuntime: 'claude-interactive', substrate: 'interactive' }), null);
+      expect(next).toMatchObject({ substrate: null, agentRuntime: 'claude-interactive' });
+    });
+  });
+
+  // AC 5 — the substrate a runtime implies has ONE definition (shared/types),
+  // and this module reads it rather than keeping a private copy that can drift.
+  it('agrees with shared substrateForRuntime for every runtime, not a local copy', () => {
+    for (const runtime of SESSION_AGENT_RUNTIMES) {
+      const implied = substrateForRuntime(runtime);
+      for (const substrate of ['sdk', 'interactive'] as const) {
+        const next = coerceDraftForRuntime(draft({ substrate }), runtime, flow);
+        // Kept only when it IS the implied transport; cleared otherwise.
+        expect(next.substrate).toBe(implied === substrate ? substrate : null);
+      }
+    }
   });
 });
