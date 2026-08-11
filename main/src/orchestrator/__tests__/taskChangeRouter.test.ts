@@ -1012,6 +1012,51 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       }
     });
 
+    it('one write touching BOTH named sections stales the full downstream set (union, not intersection)', async () => {
+      // The two section arms union: 'idea-spec' contributes all four downstream
+      // components and 'architecture' contributes a subset of those, so a write
+      // that moves both must land on the full set. Worth pinning explicitly —
+      // the arms are computed independently, and a future edit that turned the
+      // union into an intersection (or let the narrower arm win) would silently
+      // leave 'prototype' reading complete against a spec that had moved.
+      const db = buildDbWithIdeaComponents();
+      const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
+      const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));
+
+      const { taskId: ideaId } = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'An idea',
+        body: '## Idea spec\n\nspec v1.\n\n## Architecture design\n\narch v1.',
+      });
+      for (const component of IDEA_COMPONENT_KEYS) {
+        await componentRouter.applyChange(1, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'complete',
+          source: 'flow',
+        });
+      }
+
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        taskId: ideaId,
+        entityType: 'idea',
+        fields: { body: '## Idea spec\n\nspec v2.\n\n## Architecture design\n\narch v2.' },
+      });
+
+      const byComponent = new Map(
+        resolveIdeaComponents(dbAdapter(db), ideaId).map((s) => [s.component, s]),
+      );
+      // 'idea-spec' IS the body — it is never staled by its own edit.
+      expect(byComponent.get('idea-spec')!.staleAt).toBeNull();
+      for (const component of ['prototype', 'architecture', 'epics', 'stories'] as const) {
+        expect(byComponent.get(component)!.state).toBe('incomplete');
+        expect(byComponent.get(component)!.staleAt).not.toBeNull();
+      }
+    });
+
     it('an edit outside BOTH named sections keeps the conservative full downstream set', async () => {
       const db = buildDbWithIdeaComponents();
       const taskRouter = TaskChangeRouter.initialize(dbAdapter(db));
