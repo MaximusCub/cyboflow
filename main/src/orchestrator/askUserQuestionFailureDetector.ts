@@ -1,6 +1,6 @@
 /**
  * AskUserQuestionFailureDetector — watches a single flow-run's typed
- * ClaudeStreamEvent stream for an `AskUserQuestion` gate that FAILED at the SDK
+ * ClaudeStreamEvent stream for a HUMAN GATE that FAILED at the SDK
  * control-channel layer, so the orchestrator can synthesize a durable review
  * gate instead of letting the run silently false-complete.
  *
@@ -17,9 +17,22 @@
  * stdin-keepalive fix; this detector is the durable safety net for when it fails
  * mid-run anyway. Diagnosed 2026-07-07 from a real ship run.
  *
+ * WHICH GATES (2026-08-11)
+ * ------------------------
+ * Both gate tools count, because both are serviced over the same channel: the
+ * native `AskUserQuestion` and the first-party MCP `cyboflow_request_user_input`
+ * (the form workflowPromptRenderer tells every flow agent to use, and the ONLY
+ * form a Codex-runtime agent has). A launch run lost its human checkpoint when
+ * the MCP form came back CANCELLED — the CLI cancels a tool at entry when the
+ * turn's abort signal is already set, framing it with its standard
+ * user-declined text — and the agent, told the user had declined, walked past
+ * the gate. Neither the tool name nor that wording was matched here, so the
+ * durable net never fired. See shouldHoldFlowTurnOpen for the root-cause fix;
+ * this stays the safety net for every other way the round trip can die.
+ *
  * DETECTION
  * ---------
- *   (a) `assistant` events: a `tool_use` block named 'AskUserQuestion' records
+ *   (a) `assistant` events: a `tool_use` block for either gate tool records
  *       its block id as pending, keyed to its `questions` input payload.
  *   (b) `user` events: a `tool_result` whose tool_use_id is pending, whose
  *       `is_error` is true, and whose flattened text matches the gate-failure
@@ -40,12 +53,32 @@ import type { LoggerLike } from './types';
 
 /**
  * Matches the CLI's error tool_result text when the `can_use_tool` control
- * round-trip for a gate fails. The observed string is
- * `Tool permission request failed: Error: Stream closed`; we match either the
- * generic permission-request-failure prefix OR the "stream closed" cause so a
- * minor wording change on either side still trips the recovery path.
+ * round-trip for a gate fails. Three observed shapes:
+ *   - `Tool permission request failed: Error: Stream closed` — the control
+ *     channel dropped (matched by either half, so a minor wording change on
+ *     either side still trips the recovery path);
+ *   - `The user doesn't want to take this action right now. …` — the CLI's
+ *     standard user-declined framing, which it ALSO uses for a tool cancelled
+ *     at entry on an already-aborted turn (2026-08-11). Matched on the stable
+ *     middle of the sentence so the apostrophe form does not matter.
+ *
+ * A gate the human genuinely denies at the permission prompt would match the
+ * last one too. That is deliberate: a denied gate is still an unanswered human
+ * decision, and re-offering it as a review item is far cheaper than losing it.
  */
-const GATE_FAILURE_SIGNATURE = /stream closed|tool permission request failed/i;
+const GATE_FAILURE_SIGNATURE =
+  /stream closed|tool permission request failed|want to take this action/i;
+
+/**
+ * The MCP gate tool, minus its `mcp__<server>__` prefix. Matched by suffix so a
+ * rename of the MCP server registration cannot silently unhook the detector.
+ */
+const MCP_GATE_TOOL_SUFFIX = 'cyboflow_request_user_input';
+
+/** True for either human-gate tool (native AskUserQuestion or the MCP form). */
+function isGateToolName(name: string): boolean {
+  return name === 'AskUserQuestion' || name.endsWith(MCP_GATE_TOOL_SUFFIX);
+}
 
 export interface AskUserQuestionFailureDetectorOptions {
   /**
@@ -92,10 +125,10 @@ export class AskUserQuestionFailureDetector {
     }
   }
 
-  /** (a) Remember every AskUserQuestion tool_use block id + its questions. */
+  /** (a) Remember every gate tool_use block id + its questions. */
   private handleAssistant(event: AssistantEvent): void {
     for (const block of event.message.content) {
-      if (block.type !== 'tool_use' || block.name !== 'AskUserQuestion') continue;
+      if (block.type !== 'tool_use' || !isGateToolName(block.name)) continue;
       const questions = extractQuestions(block.input);
       // Even with no parseable questions we track the id so a failure can still
       // synthesize an (option-less) recovery gate rather than false-completing.
@@ -127,17 +160,46 @@ export class AskUserQuestionFailureDetector {
 }
 
 /**
- * Narrow the SDK AskUserQuestion tool_use input to QuestionPayload[]. The wire
- * shape is `{ questions: QuestionPayload[] }`; anything malformed yields `[]`
- * (the recovery gate then carries no options — still better than a lost gate).
+ * Narrow a gate tool_use input to QuestionPayload[]. Both wire shapes are
+ * `{ questions: [...] }` and differ only in the multi-select key: the native
+ * AskUserQuestion tool carries camelCase `multiSelect`, the MCP
+ * `cyboflow_request_user_input` tool carries snake_case `multi_select` (see
+ * cyboflowMcpServer's input schema). Anything malformed yields `[]` (the
+ * recovery gate then carries no options — still better than a lost gate).
  */
 function extractQuestions(input: Record<string, unknown>): QuestionPayload[] {
   const raw = (input as { questions?: unknown }).questions;
   if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (q): q is QuestionPayload =>
-      typeof q === 'object' && q !== null && typeof (q as QuestionPayload).question === 'string',
-  );
+  const out: QuestionPayload[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const q = entry as Record<string, unknown>;
+    if (typeof q['question'] !== 'string') continue;
+    out.push({
+      question: q['question'],
+      header: typeof q['header'] === 'string' ? q['header'] : '',
+      multiSelect: q['multiSelect'] === true || q['multi_select'] === true,
+      options: extractOptions(q['options']),
+    });
+  }
+  return out;
+}
+
+/** Narrow a question's `options` array; a malformed entry is dropped. */
+function extractOptions(raw: unknown): QuestionPayload['options'] {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ label: string; description?: string; preview?: string }> = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const o = entry as Record<string, unknown>;
+    if (typeof o['label'] !== 'string') continue;
+    out.push({
+      label: o['label'],
+      ...(typeof o['description'] === 'string' ? { description: o['description'] } : {}),
+      ...(typeof o['preview'] === 'string' ? { preview: o['preview'] } : {}),
+    });
+  }
+  return out;
 }
 
 /**

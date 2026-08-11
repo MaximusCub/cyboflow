@@ -23,7 +23,11 @@ const QUESTIONS: QuestionPayload[] = [
   },
 ];
 
-function askToolUse(id: string, questions: unknown = QUESTIONS): AssistantEvent {
+function askToolUse(
+  id: string,
+  questions: unknown = QUESTIONS,
+  name = 'AskUserQuestion',
+): AssistantEvent {
   return {
     type: 'assistant',
     message: {
@@ -32,7 +36,7 @@ function askToolUse(id: string, questions: unknown = QUESTIONS): AssistantEvent 
       role: 'assistant',
       content: [
         { type: 'text', text: 'Asking the human.' },
-        { type: 'tool_use', id, name: 'AskUserQuestion', input: { questions } },
+        { type: 'tool_use', id, name, input: { questions } },
       ],
     },
   };
@@ -119,6 +123,74 @@ describe('AskUserQuestionFailureDetector', () => {
     d.handleEvent(askToolUse('tu_1', 'not-an-array'));
     d.handleEvent(toolResult('tu_1', 'Error: Stream closed', true));
     expect(onFailure).toHaveBeenCalledWith([]);
+  });
+
+  // The MCP gate form (2026-08-11): every flow agent is told to open gates with
+  // `cyboflow_request_user_input`, and a Codex-runtime agent has no other form.
+  it('tracks the MCP gate tool and recovers a gate cancelled with the user-declined text', () => {
+    const onFailure = vi.fn();
+    const d = new AskUserQuestionFailureDetector({ onFailure });
+    d.handleEvent(askToolUse('tu_1', QUESTIONS, 'mcp__cyboflow__cyboflow_request_user_input'));
+    d.handleEvent(
+      toolResult(
+        'tu_1',
+        "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+        true,
+      ),
+    );
+    expect(onFailure).toHaveBeenCalledTimes(1);
+    expect(onFailure).toHaveBeenCalledWith(QUESTIONS);
+  });
+
+  it('matches the cancellation text on the native gate tool too', () => {
+    const onFailure = vi.fn();
+    const d = new AskUserQuestionFailureDetector({ onFailure });
+    d.handleEvent(askToolUse('tu_1'));
+    d.handleEvent(toolResult('tu_1', 'The user does not want to take this action right now.', true));
+    expect(onFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes the MCP question shape (snake_case multi_select, options)', () => {
+    const onFailure = vi.fn();
+    const d = new AskUserQuestionFailureDetector({ onFailure });
+    d.handleEvent(
+      askToolUse(
+        'tu_1',
+        [
+          {
+            header: 'Checkpoint',
+            question: 'Clarify further or draft the brief?',
+            multi_select: true,
+            options: [
+              { label: 'Keep clarifying', description: 'more rounds' },
+              { label: 'Draft the brief', preview: '# brief' },
+              { notALabel: 'dropped' },
+            ],
+          },
+        ],
+        'mcp__cyboflow__cyboflow_request_user_input',
+      ),
+    );
+    d.handleEvent(toolResult('tu_1', 'Error: Stream closed', true));
+    expect(onFailure).toHaveBeenCalledWith([
+      {
+        header: 'Checkpoint',
+        question: 'Clarify further or draft the brief?',
+        multiSelect: true,
+        options: [
+          { label: 'Keep clarifying', description: 'more rounds' },
+          { label: 'Draft the brief', preview: '# brief' },
+        ],
+      },
+    ]);
+  });
+
+  it('ignores a NON-gate MCP tool that fails the same way', () => {
+    const onFailure = vi.fn();
+    const d = new AskUserQuestionFailureDetector({ onFailure });
+    d.handleEvent(askToolUse('tu_1', QUESTIONS, 'mcp__cyboflow__cyboflow_report_finding'));
+    d.handleEvent(toolResult('tu_1', 'Error: Stream closed', true));
+    expect(onFailure).not.toHaveBeenCalled();
   });
 
   it('never throws on a malformed/unknown event', () => {
