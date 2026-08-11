@@ -66,6 +66,16 @@ export interface BugReportPreview {
   logTail: BugReportLogTail;
 }
 
+/**
+ * The run a session resolves to, as reported by `bugReport:resolveRun`. Null
+ * from that channel when the session has no run at all.
+ */
+export interface BugReportRunLink {
+  runId: string;
+  /** Absent when the run points at a workflow row that no longer exists. */
+  flowName?: string;
+}
+
 export interface BugReportSubmitRequest {
   whatHappened: string;
   stepsToReproduce: string;
@@ -77,15 +87,15 @@ export interface BugReportSubmitRequest {
    */
   email?: string;
   /**
-   * The flow run the report is about. Kept distinct from `sessionId`: they are
-   * different id spaces, and folding one into the other makes the `run_id` tag
-   * unjoinable against the runs table for every report filed from a session with
-   * no run.
+   * The session the report is about, whether or not it has a run.
+   *
+   * The ONLY id the renderer supplies. The run and flow name are derived from it
+   * in the main process — the dialog can only see runs the rail still retains
+   * (non-terminal ones), which excludes exactly the runs worth reporting. They
+   * stay separate tags downstream: a session id sent as `run_id` is unjoinable
+   * against the runs table.
    */
-  runId?: string;
-  /** The session the report is about, whether or not it has a run. */
   sessionId?: string;
-  flowName?: string;
   /**
    * The exact log text the user previewed, echoed back so what they read is what
    * gets sent. Absent when they did not opt in. Size-capped by the handler.

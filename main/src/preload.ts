@@ -19,6 +19,7 @@ import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../shared/types/sessionDefaults';
 import type {
   BugReportPreview,
+  BugReportRunLink,
   BugReportSubmitRequest,
   BugReportSubmitResponse,
 } from '../../shared/types/bugReport';
@@ -486,6 +487,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('bugReport:getPreview'),
     submit: (request: BugReportSubmitRequest): Promise<IPCResponse<BugReportSubmitResponse>> =>
       ipcRenderer.invoke('bugReport:submit', request),
+    resolveRun: (sessionId: string): Promise<IPCResponse<BugReportRunLink | null>> =>
+      ipcRenderer.invoke('bugReport:resolveRun', { sessionId }),
   },
 
   // Prompts

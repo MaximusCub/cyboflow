@@ -19,11 +19,17 @@ import { collectDiagnostics, readLogTail } from '../services/telemetry/diagnosti
 import { submitBugReport } from '../services/telemetry/bugReport';
 import { resolveTelemetryCredentials } from '../services/telemetry/credentials';
 import { readTelemetryConfigSync } from '../services/configManager';
+import { resolveSessionRunHandler } from '../orchestrator/runQueries';
 import {
   BUG_REPORT_LIMITS,
   type BugReportPreview,
+  type BugReportRunLink,
   type BugReportSubmitResponse,
 } from '../../../shared/types/bugReport';
+
+const resolveRunSchema = z.object({
+  sessionId: z.string().max(200),
+});
 
 const submitSchema = z.object({
   whatHappened: z.string().trim().min(1).max(BUG_REPORT_LIMITS.whatHappenedMax),
@@ -132,12 +138,34 @@ export function __resetBugReportLimiterForTests(): void {
   limiter.served.clear();
 }
 
+/**
+ * The run/flow half of a report's tags, resolved from the session id.
+ *
+ * Returns an empty object rather than explicit undefineds so a session with no
+ * run — or a lookup that fails — simply contributes no run tags, leaving
+ * `session_id` to travel alone (a session id in `run_id` is unjoinable against
+ * the runs table). Never throws: a report must still send when this cannot
+ * resolve.
+ */
+function resolveRunTags(
+  services: AppServices,
+  sessionId: string | undefined,
+): { runId?: string; flowName?: string } {
+  if (!sessionId) return {};
+  try {
+    const run = resolveSessionRunHandler(services.databaseService.getDb(), sessionId);
+    if (!run) return {};
+    return run.flowName ? { runId: run.runId, flowName: run.flowName } : { runId: run.runId };
+  } catch {
+    return {};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
-export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServices): void {
-  void _services;
+export function registerBugReportHandlers(ipcMain: IpcMain, services: AppServices): void {
 
   ipcMain.handle('bugReport:getPreview', async () => {
     try {
@@ -158,6 +186,22 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  });
+
+  /**
+   * The run a chosen session will be tagged with. Exists so the dialog's
+   * "linked run" line reports the SAME resolution the submit path performs —
+   * a preview that disagrees with the payload is how the last consent bug got
+   * in. Read-only; a session with no run resolves to null, not an error.
+   */
+  ipcMain.handle('bugReport:resolveRun', async (_event, args: unknown) => {
+    const v = validateInput(resolveRunSchema, args, 'bugReport:resolveRun');
+    if (!v.ok) return { success: false, error: v.error };
+    const tags = resolveRunTags(services, v.value.sessionId);
+    const data: BugReportRunLink | null = tags.runId
+      ? { runId: tags.runId, flowName: tags.flowName }
+      : null;
+    return { success: true, data };
   });
 
   ipcMain.handle('bugReport:submit', async (_event, args: unknown) => {
@@ -202,9 +246,12 @@ export function registerBugReportHandlers(ipcMain: IpcMain, _services: AppServic
           // A blank or whitespace-only field is no contact info at all, not an
           // empty string to attach.
           email: request.email?.trim() || undefined,
-          runId: request.runId,
+          // Derived here, never taken from the renderer: the dialog resolves a
+          // run through the rail's active-runs store, which retains only
+          // non-terminal runs and so drops exactly the ones a report is most
+          // likely to be about.
+          ...resolveRunTags(services, request.sessionId),
           sessionId: request.sessionId,
-          flowName: request.flowName,
           logText: request.logText,
         },
         diagnostics,

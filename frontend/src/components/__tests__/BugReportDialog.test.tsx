@@ -13,11 +13,13 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type {
   BugReportPreview,
+  BugReportRunLink,
   BugReportSubmitResponse,
 } from '../../../../shared/types/bugReport';
 
 type SubmitResult = { success: boolean; data?: BugReportSubmitResponse; error?: string };
 type PreviewResult = { success: boolean; data?: BugReportPreview; error?: string };
+type RunLinkResult = { success: boolean; data?: BugReportRunLink | null; error?: string };
 
 const sessionState = {
   sessions: [
@@ -27,16 +29,8 @@ const sessionState = {
   activeSessionId: 'session-1',
 };
 
-const runsState = {
-  runsByProject: { 1: [{ id: 'run-9', session_id: 'session-1', workflowName: 'sprint' }] },
-};
-
 vi.mock('../../stores/sessionStore', () => ({
   useSessionStore: (selector: (s: typeof sessionState) => unknown) => selector(sessionState),
-}));
-
-vi.mock('../../stores/activeRunsStore', () => ({
-  useActiveRunsStore: (selector: (s: typeof runsState) => unknown) => selector(runsState),
 }));
 
 import { BugReportDialog } from '../BugReportDialog';
@@ -66,18 +60,32 @@ const submit = vi.fn(
   }),
 );
 
+/**
+ * The main process owns session→run resolution, so the dialog asks rather than
+ * deriving. Defaults to 'session-1' having a sprint run and every other session
+ * having none.
+ */
+const resolveRun = vi.fn(
+  async (..._args: unknown[]): Promise<RunLinkResult> => ({ success: true, data: null }),
+);
+
 let uuidCounter = 0;
 
 beforeEach(() => {
   vi.clearAllMocks();
   sessionState.activeSessionId = 'session-1';
   submit.mockResolvedValue({ success: true, data: { delivery: 'accepted', eventId: 'evt-1' } });
+  resolveRun.mockImplementation(async (...args: unknown[]): Promise<RunLinkResult> => ({
+    success: true,
+    data: args[0] === 'session-1' ? { runId: 'run-9', flowName: 'sprint' } : null,
+  }));
   Object.defineProperty(window, 'electronAPI', {
     configurable: true,
     value: {
       bugReport: {
         getPreview: vi.fn(async (): Promise<PreviewResult> => ({ success: true, data: PREVIEW })),
         submit,
+        resolveRun,
       },
     },
   });
@@ -344,7 +352,13 @@ describe('submission', () => {
     expect(screen.getByRole('button', { name: /send report/i })).toBeEnabled();
   });
 
-  it('links the report to the active session and its flow run', async () => {
+  /**
+   * The session id is the ONLY id the renderer sends. Deriving the run here is
+   * what broke before: the dialog could only see runs the rail still retained
+   * (non-terminal ones), so a report about a run that had already failed — the
+   * usual case — travelled with no run id at all.
+   */
+  it('sends the session id alone, leaving the run for the main process to derive', async () => {
     await openDialog();
 
     fireEvent.change(screen.getByLabelText(/what happened/i), {
@@ -353,30 +367,39 @@ describe('submission', () => {
     fireEvent.click(screen.getByRole('button', { name: /send report/i }));
 
     await waitFor(() => expect(submit).toHaveBeenCalled());
-    expect(submittedPayload()).toMatchObject({
-      runId: 'run-9',
-      sessionId: 'session-1',
-      flowName: 'sprint',
-    });
+    const payload = submittedPayload();
+    expect(payload.sessionId).toBe('session-1');
+    expect(payload).not.toHaveProperty('runId');
+    expect(payload).not.toHaveProperty('flowName');
   });
 
-  /**
-   * A session with no flow run must not have its session id sent as `run_id` —
-   * different id spaces, and the tag would point at a run that does not exist.
-   */
-  it('sends only a session id when the chosen session has no run', async () => {
+  it('shows the run the report will be tagged with, as the main process resolves it', async () => {
     await openDialog();
+
+    expect(await screen.findByText(/linked to the sprint run/i)).toBeInTheDocument();
+    expect(resolveRun).toHaveBeenCalledWith('session-1');
+  });
+
+  it('drops the linked-run line when the chosen session has no run', async () => {
+    await openDialog();
+    expect(await screen.findByText(/linked to the sprint run/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/where did this happen/i), {
       target: { value: 'session-2' },
     });
-    fireEvent.change(screen.getByLabelText(/what happened/i), {
-      target: { value: 'It froze.' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /send report/i }));
 
-    await waitFor(() => expect(submit).toHaveBeenCalled());
-    expect(submittedPayload()).toMatchObject({ runId: undefined, sessionId: 'session-2' });
+    await waitFor(() => expect(screen.queryByText(/linked to the/i)).not.toBeInTheDocument());
+  });
+
+  /**
+   * A quick session's run resolves with no flow name (the `__quick__` sentinel
+   * is suppressed upstream), which must not blank out the whole line.
+   */
+  it('still reports a link when the run has no flow name', async () => {
+    resolveRun.mockResolvedValue({ success: true, data: { runId: 'run-9' } });
+    await openDialog();
+
+    expect(await screen.findByText(/linked to the run in this session/i)).toBeInTheDocument();
   });
 
   it('reports a queued delivery honestly rather than claiming it was sent', async () => {

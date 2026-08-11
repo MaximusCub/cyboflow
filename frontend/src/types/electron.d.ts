@@ -13,6 +13,7 @@ import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type {
   BugReportPreview,
+  BugReportRunLink,
   BugReportSubmitRequest,
   BugReportSubmitResponse,
 } from '../../../shared/types/bugReport';
@@ -346,6 +347,7 @@ interface ElectronAPI {
   bugReport: {
     getPreview(): Promise<IPCResponse<BugReportPreview>>;
     submit(request: BugReportSubmitRequest): Promise<IPCResponse<BugReportSubmitResponse>>;
+    resolveRun(sessionId: string): Promise<IPCResponse<BugReportRunLink | null>>;
   };
 
   // Prompts — IPCDataResponse so callers can use response.data directly after success check

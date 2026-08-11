@@ -89,6 +89,26 @@ function submit(args: unknown): Promise<IpcResult> {
   return handler({}, args) as Promise<IpcResult>;
 }
 
+/**
+ * Stand-in for the runs table. `get` returns whatever the case queues up, so a
+ * session can resolve to a run, to nothing, or to a throwing database.
+ */
+let runRow: { runId: string; flowName: string | null } | undefined;
+let dbThrows = false;
+
+function fakeServices(): AppServices {
+  return {
+    databaseService: {
+      getDb: () => {
+        if (dbThrows) throw new Error('database is closed');
+        return {
+          prepare: () => ({ get: () => runRow, all: () => [] }),
+        };
+      },
+    },
+  } as unknown as AppServices;
+}
+
 const VALID = {
   whatHappened: 'The sidebar froze.',
   stepsToReproduce: '1. Open a run',
@@ -100,16 +120,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   service.submitBugReport.mockResolvedValue({ delivery: 'accepted', eventId: 'evt-1' });
   __resetBugReportLimiterForTests();
+  runRow = undefined;
+  dbThrows = false;
   handlers = new Map();
   const ipcMain = {
     handle: (channel: string, handler: Handler) => handlers.set(channel, handler),
   } as unknown as IpcMain;
-  registerBugReportHandlers(ipcMain, {} as AppServices);
+  registerBugReportHandlers(ipcMain, fakeServices());
 });
 
 describe('input validation', () => {
-  it('registers both channels', () => {
-    expect([...handlers.keys()].sort()).toEqual(['bugReport:getPreview', 'bugReport:submit']);
+  it('registers every channel', () => {
+    expect([...handlers.keys()].sort()).toEqual([
+      'bugReport:getPreview',
+      'bugReport:resolveRun',
+      'bugReport:submit',
+    ]);
   });
 
   it('rejects a submission with no description', async () => {
@@ -140,6 +166,100 @@ describe('input validation', () => {
 
     expect(result.success).toBe(false);
     expect(service.submitBugReport).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The renderer sends a session id and nothing else about identity: the run and
+ * flow name are derived HERE. The dialog resolves runs through the rail's
+ * active-runs store, which retains only non-terminal runs — so trusting it would
+ * drop the run id from exactly the reports most worth linking, the ones filed
+ * about a run that already failed.
+ */
+describe('run derivation', () => {
+  function tagsFromLastSubmit(): { runId?: string; sessionId?: string; flowName?: string } {
+    return service.submitBugReport.mock.calls[0][0] as {
+      runId?: string;
+      sessionId?: string;
+      flowName?: string;
+    };
+  }
+
+  it('derives the run and flow from the session id', async () => {
+    runRow = { runId: 'run-9', flowName: 'sprint' };
+
+    await submit({ ...VALID, sessionId: 'session-1' });
+
+    expect(tagsFromLastSubmit()).toMatchObject({
+      runId: 'run-9',
+      flowName: 'sprint',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('ignores a run id supplied by the renderer', async () => {
+    runRow = { runId: 'run-from-db', flowName: 'ship' };
+
+    await submit({ ...VALID, sessionId: 'session-1', runId: 'run-forged', flowName: 'forged' });
+
+    expect(tagsFromLastSubmit()).toMatchObject({ runId: 'run-from-db', flowName: 'ship' });
+  });
+
+  it('sends the session alone when it has no run', async () => {
+    runRow = undefined;
+
+    await submit({ ...VALID, sessionId: 'session-1' });
+
+    const tags = tagsFromLastSubmit();
+    expect(tags.sessionId).toBe('session-1');
+    // NOT the session id: `run_id` must stay joinable against the runs table.
+    expect(tags.runId).toBeUndefined();
+    expect(tags.flowName).toBeUndefined();
+  });
+
+  it('keeps the run id when its workflow row is gone', async () => {
+    runRow = { runId: 'run-9', flowName: null };
+
+    await submit({ ...VALID, sessionId: 'session-1' });
+
+    const tags = tagsFromLastSubmit();
+    expect(tags.runId).toBe('run-9');
+    expect(tags.flowName).toBeUndefined();
+  });
+
+  it('still files the report when the lookup throws', async () => {
+    dbThrows = true;
+
+    const result = await submit({ ...VALID, sessionId: 'session-1' });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.delivery).toBe('accepted');
+    expect(tagsFromLastSubmit().runId).toBeUndefined();
+  });
+
+  it('resolves the same run for the dialog as the submit path attaches', async () => {
+    runRow = { runId: 'run-9', flowName: 'sprint' };
+    const resolve = handlers.get('bugReport:resolveRun');
+    if (!resolve) throw new Error('bugReport:resolveRun was not registered');
+
+    const shown = (await resolve({}, { sessionId: 'session-1' })) as {
+      success: boolean;
+      data: { runId: string; flowName?: string } | null;
+    };
+    await submit({ ...VALID, sessionId: 'session-1' });
+
+    expect(shown.data).toEqual({ runId: 'run-9', flowName: 'sprint' });
+    expect(tagsFromLastSubmit().runId).toBe(shown.data?.runId);
+  });
+
+  it('reports no link for a session without a run', async () => {
+    runRow = undefined;
+    const resolve = handlers.get('bugReport:resolveRun');
+    if (!resolve) throw new Error('bugReport:resolveRun was not registered');
+
+    const shown = (await resolve({}, { sessionId: 'session-1' })) as { data: unknown };
+
+    expect(shown.data).toBeNull();
   });
 });
 

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Bug, ChevronRight, ChevronDown, AlertTriangle, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { useSessionStore } from '../stores/sessionStore';
-import { useActiveRunsStore } from '../stores/activeRunsStore';
 import { Toggle } from './ui/Toggle';
 import {
   BUG_REPORT_LIMITS,
   type BugReportPreview,
+  type BugReportRunLink,
   type BugReportSubmitResponse,
 } from '../../../shared/types/bugReport';
 
@@ -84,20 +84,17 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
 
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-
-  // Flatten the per-project run map once so the session→run lookup below is cheap.
-  const allRuns = useMemo(() => Object.values(runsByProject).flat(), [runsByProject]);
 
   /**
-   * Resolve the selected session to a flow run, so the report carries a run id
-   * and flow name rather than only an opaque session id. Absent when the session
-   * has no associated run (a plain quick session).
+   * The run the chosen session will be tagged with, resolved by the main process.
+   *
+   * Deliberately NOT read from the rail's active-runs store, which retains only
+   * non-terminal runs: a report is usually filed about a run that has already
+   * failed or finished, so that store is empty of exactly the run worth linking.
+   * Resolving through the same channel the submit path uses also keeps this line
+   * honest — it reports what will actually be sent, not a second guess at it.
    */
-  const linkedRun = useMemo(
-    () => (sessionId ? allRuns.find((r) => r.session_id === sessionId) : undefined),
-    [allRuns, sessionId],
-  );
+  const [linkedRun, setLinkedRun] = useState<BugReportRunLink | null>(null);
 
   /**
    * One generation per open (and per close). The dialog stays mounted while
@@ -136,6 +133,7 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     // opening's diagnostics, and the next one would submit — and could show —
     // recorded errors and a log tail the user never reviewed in this dialog.
     setPreview(null);
+    setLinkedRun(null);
     setSend({ phase: 'idle' });
   }, []);
 
@@ -161,6 +159,30 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
     })();
   }, [isOpen, resetForm]);
 
+  /**
+   * Re-resolve whenever the chosen session changes. Generation-guarded like the
+   * preview: a resolution in flight when the user switches sessions — or closes
+   * the dialog — must not label the next choice with the previous one's run.
+   */
+  useEffect(() => {
+    if (!isOpen) return;
+    const generation = generationRef.current;
+    if (!sessionId) {
+      setLinkedRun(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await window.electronAPI.bugReport.resolveRun(sessionId);
+        if (generationRef.current !== generation) return;
+        setLinkedRun(result.success ? (result.data ?? null) : null);
+      } catch {
+        // Best-effort: the tag is still derived in the main process at submit.
+        if (generationRef.current === generation) setLinkedRun(null);
+      }
+    })();
+  }, [isOpen, sessionId]);
+
   const canSubmit =
     whatHappened.trim().length > 0 &&
     whatHappened.length <= BUG_REPORT_LIMITS.whatHappenedMax &&
@@ -176,11 +198,9 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
         stepsToReproduce: steps,
         expectedBehavior: expected,
         email: email.trim() || undefined,
-        // Two id spaces, two tags. A session id sent as `run_id` reads as a run
-        // that does not exist.
-        runId: linkedRun?.id,
+        // The session id is the only id sent: the run and flow name are derived
+        // from it in the main process, which can see runs the rail has dropped.
         sessionId: sessionId || undefined,
-        flowName: linkedRun?.workflowName,
         // Send exactly what the user previewed, so what they read is what leaves
         // the machine — both the log text and the recorded-failure list, which is
         // the one part of the diagnostics payload that can change while the
@@ -285,7 +305,9 @@ export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
                 </select>
                 {linkedRun && (
                   <p className="text-xs text-text-tertiary">
-                    Linked to the {linkedRun.workflowName} run in this session.
+                    {linkedRun.flowName
+                      ? `Linked to the ${linkedRun.flowName} run in this session.`
+                      : 'Linked to the run in this session.'}
                   </p>
                 )}
               </div>

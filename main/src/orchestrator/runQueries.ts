@@ -8,6 +8,14 @@ import type { DatabaseLike } from './types';
 import type { WorkflowRunListRow } from '../../../shared/types/workflows';
 
 /**
+ * Name of the quick-session sentinel workflow (workflowRegistry's
+ * QUICK_WORKFLOW_NAME). Re-declared rather than imported, as
+ * chatSentinelProvider.ts does, to keep this module's standalone-typecheck
+ * invariant — it must not pull in the registry's dependency graph.
+ */
+const QUICK_WORKFLOW_SENTINEL_NAME = '__quick__';
+
+/**
  * Returns all workflow runs for a given project, ordered newest-first.
  *
  * The heavy snapshot column is excluded intentionally — callers that need
@@ -32,4 +40,44 @@ export function listRunsHandler(
         ORDER BY created_at DESC`,
     )
     .all(projectId) as WorkflowRunListRow[];
+}
+
+/** The run a session belongs to, resolved for display and for tagging. */
+export interface SessionRunRef {
+  runId: string;
+  flowName: string | null;
+}
+
+/**
+ * Resolve the newest workflow run belonging to a session, whatever its status.
+ *
+ * Deliberately NOT status-filtered. The rail's active-runs store only retains
+ * runs in a non-terminal state, so resolving a run through it loses exactly the
+ * runs a bug report is most likely to be about — the ones that already failed or
+ * finished. Anything reporting a run id must therefore query here, not read the
+ * rail.
+ *
+ * `flowName` is null for a quick session, whose run points at the internal
+ * `__quick__` sentinel workflow — a real row, so the join finds it, but not a
+ * flow anyone would recognize as one. The run id is the half that matters for
+ * triage, so a nameless flow never suppresses the link — hence LEFT JOIN, which
+ * also keeps the run id resolvable if a workflow row ever goes missing.
+ */
+export function resolveSessionRunHandler(
+  db: DatabaseLike,
+  sessionId: string,
+): SessionRunRef | null {
+  const row = db
+    .prepare(
+      `SELECT r.id AS runId, w.name AS flowName
+         FROM workflow_runs r
+         LEFT JOIN workflows w ON w.id = r.workflow_id
+        WHERE r.session_id = ?
+        ORDER BY r.created_at DESC
+        LIMIT 1`,
+    )
+    .get(sessionId) as { runId: string; flowName: string | null } | undefined;
+  if (!row) return null;
+  const named = row.flowName && row.flowName !== QUICK_WORKFLOW_SENTINEL_NAME;
+  return { runId: row.runId, flowName: named ? row.flowName : null };
 }
