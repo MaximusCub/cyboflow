@@ -9,50 +9,86 @@
  * output (and vitest is silent for long stretches), a stopped session hard-kills
  * the tree, and cyboflow's own teardown is a `killProcessTree` SIGKILL. A SIGKILL'd
  * root cannot clean up after itself, so its workers are adopted by launchd and keep
- * running — spinning at ~100% CPU on a full test file's heap, forever, with nobody
- * left to read their results. Two of them were observed holding ~2 GB and two cores
- * for 24 minutes, which is what motivated this file.
+ * running. Two were observed holding ~2 GB and two cores for 24 minutes, which
+ * pushed a 16 GB box to 79 MB free and 13.9 GB of swap.
  *
- * WHY IT LIVES IN THE WORKER rather than in a reaper. This is the only layer that
- * fires at the MOMENT the root dies instead of at the next gate or the next app
- * boot, and the only one that works when cyboflow is not running at all. The
- * companion layers — orphan reaping in `vitestForkCap.ts` and `VitestOrphanReaper`
- * in the main process — are defence in depth for workers that predate this code or
- * that somehow miss their own poll.
+ * WHY THIS RUNS ON A SEPARATE THREAD — the part that is not obvious, and that a
+ * plain `setInterval` gets wrong. When the root dies, the worker's IPC channel
+ * breaks and the resulting uncaught exception wedges the process inside the libuv
+ * CHECK phase, re-entering V8's own stack-trace formatter forever. Sampled stack
+ * of a real orphan:
+ *
+ *     uv_run -> uv__run_check -> CheckImmediate -> ReportPendingMessages
+ *            -> TriggerUncaughtException -> ErrorStackGetter -> FormatStackTrace -> ...
+ *
+ * The loop never advances to `uv__run_timers`, so NO main-thread JS callback can
+ * ever run again — not a timer, not `process.on('disconnect')`, not an exit hook.
+ * Both were tried against a live orphan and neither fired. A `worker_threads`
+ * watchdog has its own isolate and event loop on its own OS thread, so it keeps
+ * ticking while the main thread is wedged, and `process.kill(pid, 'SIGKILL')` from
+ * it takes down the whole process regardless. Verified end to end: a process spun
+ * up at 98% CPU in an infinite loop self-terminated within 1s of being orphaned.
+ *
+ * COST. The extra isolate measures ~12 MB RSS per worker. That is paid only while
+ * a gate is running, and under managed mode — the case that actually produces
+ * orphans — the fork cap is small (see `shared/types/testConcurrency.ts`), so it is
+ * tens of MB against the ~2 GB a single orphan pair costs.
  *
  * SAFETY. Arming is gated on two independently-verified facts (see
  * {@link isForkPoolWorker}), and the orphan test itself is `ppid === 1`, which is a
  * proof rather than a heuristic: a live worker always has its root as parent. A
  * deliberately detached run (`nohup pnpm test:unit &`) reparents the ROOT, which is
  * titled `node (vitest)` and never matches the worker pattern.
+ *
+ * This is the innermost of three layers; `vitestForkCap.ts` reaps at gate start and
+ * `VitestOrphanReaper` sweeps from the main process.
  */
-import { isMainThread } from 'node:worker_threads';
+import { isMainThread, Worker } from 'node:worker_threads';
 
 import { isVitestWorkerTitle, ORPHAN_PPID } from './shared/types/testConcurrency';
 
 /**
- * How often a worker checks whether it has been orphaned. Short enough that a
- * runaway fork is measured in seconds rather than the 24 minutes we observed,
- * long enough to be free: this is one integer read off `process`, no syscall.
+ * How often the watchdog thread checks whether we have been orphaned. Short
+ * enough that a runaway fork is measured in seconds rather than the 24 minutes we
+ * observed, long enough to be free: one integer read off `process`, no syscall.
  */
 export const ORPHAN_POLL_INTERVAL_MS = 5_000;
 
-/** Injectable seams so the watchdog is unit-testable without forking anything. */
+/**
+ * The watchdog thread's entire program. Kept as a string and run with
+ * `eval: true` so there is no second file to resolve — a setup file is loaded
+ * through vite, and a path-based worker entry would have to survive that.
+ *
+ * SIGKILL, not `process.exit()`: `process.exit()` inside a worker thread ends only
+ * that thread, and the wedged main thread would carry on. The signal is delivered
+ * to the process and is uncatchable, which is the only thing that reliably stops a
+ * main thread stuck in a native loop.
+ */
+export const WATCHDOG_THREAD_SOURCE = `
+const ORPHAN_PPID = ${ORPHAN_PPID};
+setInterval(() => {
+  if (process.ppid === ORPHAN_PPID) {
+    process.kill(process.pid, 'SIGKILL');
+  }
+}, INTERVAL_MS);
+`;
+
+/** A spawned watchdog, narrowed to what this module uses. */
+export interface WatchdogHandle {
+  unref?: () => void;
+  terminate?: () => void;
+}
+
+/** Injectable seams so the watchdog is unit-testable without spawning threads. */
 export interface OrphanWatchdogDeps {
   /** This process's title. Defaults to `process.title`. */
   title?: string;
-  /** Current parent pid, re-read on every poll. Defaults to `() => process.ppid`. */
-  getPpid?: () => number;
-  /** True when this is the main thread of its process. Defaults to node's value. */
+  /** True when this is the main thread of its own process. Defaults to node's value. */
   mainThread?: boolean;
-  /** Exit the process. Defaults to `process.exit`. */
-  exit?: (code: number) => void;
-  /** Timer factory. Defaults to `setInterval` (the handle is unref'd when it can be). */
-  schedule?: (fn: () => void, ms: number) => { unref?: () => void };
-  /** Cancel a timer. Defaults to `clearInterval`. */
-  cancel?: (handle: unknown) => void;
-  /** Where to announce a self-terminate. Defaults to `process.stderr`. */
-  warn?: (message: string) => void;
+  /** Poll cadence handed to the thread. Defaults to {@link ORPHAN_POLL_INTERVAL_MS}. */
+  intervalMs?: number;
+  /** Spawn the watchdog. Defaults to a `worker_threads` Worker running the source above. */
+  spawn?: (source: string) => WatchdogHandle;
 }
 
 /**
@@ -65,10 +101,20 @@ export interface OrphanWatchdogDeps {
  *  - it must be the main thread of its own process, which excludes the `threads`
  *    pool. A worker THREAD shares the root's pid, so it would inherit the root's
  *    ppid — and a detached (`nohup`) root has ppid 1, which would otherwise read as
- *    "orphaned" and make a healthy run kill itself.
+ *    "orphaned" and make a healthy run kill itself. It also stops the watchdog
+ *    thread we spawn from recursively spawning one of its own.
  */
 export function isForkPoolWorker(title: string, mainThread: boolean): boolean {
   return mainThread && isVitestWorkerTitle(title);
+}
+
+/** Default spawner: a real worker thread, unref'd so it never holds us open. */
+function defaultSpawn(source: string): WatchdogHandle {
+  const worker = new Worker(source, { eval: true });
+  // Never let the watchdog be the reason the process stays alive: a healthy
+  // worker must still exit the instant its pool releases it.
+  worker.unref();
+  return worker;
 }
 
 /**
@@ -77,38 +123,25 @@ export function isForkPoolWorker(title: string, mainThread: boolean): boolean {
  * setup file — including from the frontend's jsdom suite and from a human's
  * terminal run.
  *
- * Returns a disarm function when armed (used by the tests; a real worker simply
- * exits with the process).
+ * Returns a disarm function when armed. Fail-soft: if the thread cannot be
+ * spawned at all, the gate proceeds unwatched rather than failing, and the outer
+ * two layers still cover it.
  */
 export function startOrphanWatchdog(deps: OrphanWatchdogDeps = {}): (() => void) | undefined {
   const title = deps.title ?? process.title;
   const mainThread = deps.mainThread ?? isMainThread;
   if (!isForkPoolWorker(title, mainThread)) return undefined;
 
-  const getPpid = deps.getPpid ?? (() => process.ppid);
-  const exit = deps.exit ?? ((code: number) => process.exit(code));
-  const schedule = deps.schedule ?? ((fn, ms) => setInterval(fn, ms));
-  const cancel = deps.cancel ?? ((handle) => clearInterval(handle as NodeJS.Timeout));
-  const warn = deps.warn ?? ((message: string) => process.stderr.write(message + '\n'));
+  const intervalMs = deps.intervalMs ?? ORPHAN_POLL_INTERVAL_MS;
+  const spawn = deps.spawn ?? defaultSpawn;
+  const source = WATCHDOG_THREAD_SOURCE.replace('INTERVAL_MS', String(intervalMs));
 
-  // A worker can be orphaned before its first poll — check once up front so a
-  // fork that starts life parentless does not linger a full interval.
-  if (getPpid() === ORPHAN_PPID) {
-    warn(`[vitest] worker ${process.pid} orphaned (root gone) — exiting`);
-    exit(0);
+  try {
+    const handle = spawn(source);
+    return () => handle.terminate?.();
+  } catch {
+    // A sandbox that forbids threads, or a node build without worker_threads.
+    // Losing the watchdog is not worth losing the test run over.
     return undefined;
   }
-
-  const handle = schedule(() => {
-    if (getPpid() !== ORPHAN_PPID) return;
-    warn(`[vitest] worker ${process.pid} orphaned (root gone) — exiting`);
-    cancel(handle);
-    exit(0);
-  }, ORPHAN_POLL_INTERVAL_MS);
-
-  // Never let the watchdog itself be the reason the process stays alive: a
-  // healthy worker must still exit the instant its pool releases it.
-  handle.unref?.();
-
-  return () => cancel(handle);
 }
