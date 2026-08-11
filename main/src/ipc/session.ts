@@ -10,7 +10,8 @@ import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
-import { trackUsage } from '../services/telemetry';
+import { trackUsage, captureSeamError } from '../services/telemetry';
+import { classifyErrorPattern } from '../orchestrator/programmatic/systemicError';
 import {
   validateSessionExists,
   validatePanelSessionOwnership,
@@ -81,6 +82,32 @@ import { computeState as computeClaudeDetectionState } from './claudeDetection';
  * resume offer is gated on this — otherwise the first message rides a failed spawn
  * and is lost. Mirrors TranscriptTailSource's path scheme.
  */
+/**
+ * Report a swallowed EAGER PTY spawn failure (create-quick's fire-and-forget
+ * `startPanel`) to Sentry.
+ *
+ * The eager spawn is deliberately fail-soft — create-quick has already returned
+ * `success` plus a `claudePanelId`, and a later `sessions:input` re-spawns the
+ * REPL — but fail-soft is also INVISIBLE: the renderer mounts a terminal on a
+ * `cyboflow:pty:<id>` channel that will never emit a byte and shows a bare
+ * cursor indefinitely, with no error on any surface. Only `spawnCliProcess`'s
+ * own final failure self-reports (`pty-spawn-failed`); anything `startPanel`
+ * throws before reaching it (worktree checks, settings writes, briefing prep)
+ * previously died in a `console.error` nobody would ever read on a user's
+ * machine. This makes that class of blank terminal diagnosable.
+ *
+ * Fixed message + bounded `errorClass` per captureSeamError's payload rules —
+ * the raw error text stays in the local console.error at the call site.
+ */
+function reportEagerSpawnFailure(err: unknown, substrate: string, cliTool: string): void {
+  const errorClass = classifyErrorPattern(err instanceof Error ? err.message : String(err));
+  captureSeamError(
+    'eager-pty-spawn-failed',
+    new Error(`eager ${cliTool} REPL spawn failed (${errorClass})`),
+    { substrate, cliTool, errorClass },
+  );
+}
+
 function interactiveTranscriptExists(
   worktreePath: string | null | undefined,
   claudeSessionId: string | null | undefined,
@@ -1208,6 +1235,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Eager Codex PTY spawn failed for session ${session.id}:`, err);
+              reportEagerSpawnFailure(err, 'interactive', 'codex');
             });
           await sessionManager.updateSession(session.id, { status: 'running' });
         } catch (error) {
@@ -1292,6 +1320,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               // Fail-soft: a spawn failure leaves the session usable — the next
               // sessions:input re-spawns the REPL with the user's prompt.
               console.error(`[IPC] Eager interactive REPL spawn failed for session ${session.id}:`, err);
+              // …but fail-soft is INVISIBLE: create-quick already returned
+              // success + a claudePanelId, so the renderer mounts a terminal on
+              // a channel that will never emit a byte and shows a bare cursor
+              // forever, with no error anywhere. Only spawnCliProcess's own
+              // final failure self-reports (`pty-spawn-failed`); anything
+              // startPanel throws BEFORE that (worktree/settings/briefing prep)
+              // died here in a console.error. Report it so a blank terminal is
+              // diagnosable instead of silent. Fixed message + bounded
+              // errorClass — the raw text stays in the console.error above.
+              reportEagerSpawnFailure(err, 'interactive', 'claude');
             });
           // Mirror sessions:input — the REPL is live; show the session as running.
           await sessionManager.updateSession(session.id, { status: 'running' });
