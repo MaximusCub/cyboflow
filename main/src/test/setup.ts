@@ -1,6 +1,14 @@
 // Test setup file for Vitest
 import { vi } from 'vitest';
 
+import { startOrphanWatchdog } from '../../../vitestOrphanWatchdog';
+
+// Exit if our vitest root dies. A fork-pool worker has no lifetime link to its
+// parent and macOS has no PDEATHSIG, so a hard-killed root (agent Bash timeout,
+// stopped session, killProcessTree) otherwise leaves this process spinning at
+// full CPU forever. No-op unless we really are a fork-pool worker.
+startOrphanWatchdog();
+
 // Mock Electron modules
 vi.mock('electron', () => ({
   app: {

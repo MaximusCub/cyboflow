@@ -1,6 +1,13 @@
 import '@testing-library/jest-dom';
 import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
+
+import { startOrphanWatchdog } from '../../../vitestOrphanWatchdog';
+
+// Exit if our vitest root dies — see main/src/test/setup.ts for the why. jsdom
+// still runs inside a real forked node process, so this suite leaks orphans too.
+startOrphanWatchdog();
+
 afterEach(() => { cleanup(); });
 
 if (typeof globalThis.ResizeObserver === 'undefined') {
