@@ -5308,6 +5308,13 @@ app.whenReady().then(async () => {
       // (merge / createPr / dismiss). Fail-soft is handled inside the router.
       reapPrototypeServers: (runId) =>
         prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
+      // Visual-verify cleanup on the MERGE / CREATE-PR close-out path. Deliberately
+      // the SAME closure the cancel/dismiss bag above wires, so both ways a run can
+      // end reach one implementation: without it, merging left a draining
+      // verification to deliver a finding onto a closed-out run. Fail-soft inside
+      // the router; tryGetInstance keeps it a no-op when verification is disabled.
+      cancelVerificationsForRun: (runId) =>
+        VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
       // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
       // run's outcome and recompute the linked task's derived execution stage.
       // getInstance() resolves the singleton initialized during service construction.

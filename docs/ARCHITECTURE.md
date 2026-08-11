@@ -222,13 +222,16 @@ Two deliberate decisions on this path, recorded so they are not re-litigated:
   small agent-slot pool, a chatty quick session can delay them. Accepted as-is;
   revisit by giving quick traffic its own class if that becomes a real queue.
 
-KNOWN GAP (unfixed): session **dismiss/cancel** cancels a run's in-flight
-verifications before archiving (`cancelRunHandler.ts` →
-`cancelVerificationsForRun`), but the **Merge / Create-PR close-out** path
-completes the chat sentinel WITHOUT that cancel — so a still-running
-verification can deliver a finding + screenshots artifact onto an
-already-closed-out session. Low frequency; the fix is to wire the same cancel
-into close-out.
+Every way a run can END cancels its outstanding verifications, through one
+implementation (`VerificationScheduler.cancelForRun`) reached from two bags:
+**dismiss/cancel** via `cancelRunHandler.ts`, and **Merge / Create-PR** via
+`RunCloseoutDeps.cancelVerificationsForRun` in the `runs` router. Close-out
+cancels alongside the other live-process teardown, BEFORE the worktree
+mutation — a draining verification would otherwise both deliver a finding +
+screenshots artifact onto an already-closed-out run and hold a snapshot
+worktree cut from the worktree being removed. Fail-soft on both paths: the
+verification queue is downstream of the run's terminal state and never blocks
+a close-out.
 
 The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–2
 implemented) sits on top of the agent engine: failures are classified
