@@ -28,6 +28,7 @@ import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchest
 import {
   createModuleFakeSdk,
   scenario,
+  sdkSystemInit,
   sdkSystemTaskStarted,
   sdkSystemTaskUpdated,
   sdkSystemTaskNotification,
@@ -35,8 +36,10 @@ import {
 } from '../../../../test/fakes/fakeSdk';
 import {
   ClaudeCodeManager,
+  createBackgroundTaskState,
   trackBackgroundTasks,
   shouldHoldFlowTurnOpen,
+  type BackgroundTaskState,
 } from '../claudeCodeManager';
 import { ModelAvailabilityService } from '../../../modelAvailabilityService';
 import type { SessionManager } from '../../../sessionManager';
@@ -81,40 +84,67 @@ const flush = () => new Promise<void>((r) => setImmediate(r));
 // ---------------------------------------------------------------------------
 
 describe('trackBackgroundTasks', () => {
+  /** State seeded with the given live task ids and no owed continuation. */
+  function stateWith(...ids: string[]): BackgroundTaskState {
+    const state = createBackgroundTaskState();
+    for (const id of ids) state.live.add(id);
+    return state;
+  }
+
   it('registers on task_started and retires on task_notification', () => {
-    const live = new Set<string>();
-    trackBackgroundTasks(sdkSystemTaskStarted('t1'), live);
-    trackBackgroundTasks(sdkSystemTaskStarted('t2'), live);
-    expect([...live].sort()).toEqual(['t1', 't2']);
-    trackBackgroundTasks(sdkSystemTaskNotification('t1'), live);
-    expect([...live]).toEqual(['t2']);
+    const state = createBackgroundTaskState();
+    trackBackgroundTasks(sdkSystemTaskStarted('t1'), state);
+    trackBackgroundTasks(sdkSystemTaskStarted('t2'), state);
+    expect([...state.live].sort()).toEqual(['t1', 't2']);
+    trackBackgroundTasks(sdkSystemTaskNotification('t1'), state);
+    expect([...state.live]).toEqual(['t2']);
   });
 
   it('retires on a settled task_updated patch but keeps live statuses', () => {
-    const live = new Set<string>(['t1', 't2', 't3']);
-    trackBackgroundTasks(sdkSystemTaskUpdated('t1', { status: 'completed' }), live);
-    trackBackgroundTasks(sdkSystemTaskUpdated('t2', { status: 'running' }), live);
+    const state = stateWith('t1', 't2', 't3');
+    trackBackgroundTasks(sdkSystemTaskUpdated('t1', { status: 'completed' }), state);
+    trackBackgroundTasks(sdkSystemTaskUpdated('t2', { status: 'running' }), state);
     // A patch with no status (e.g. a description update) never settles.
-    trackBackgroundTasks(sdkSystemTaskUpdated('t3', { description: 'still going' }), live);
-    expect([...live].sort()).toEqual(['t2', 't3']);
+    trackBackgroundTasks(sdkSystemTaskUpdated('t3', { description: 'still going' }), state);
+    expect([...state.live].sort()).toEqual(['t2', 't3']);
     // Unknown status vocabulary defaults to SETTLED (fail toward closing turns).
-    trackBackgroundTasks(sdkSystemTaskUpdated('t2', { status: 'exploded' }), live);
-    expect([...live]).toEqual(['t3']);
+    trackBackgroundTasks(sdkSystemTaskUpdated('t2', { status: 'exploded' }), state);
+    expect([...state.live]).toEqual(['t3']);
   });
 
   it('ignores non-system events, missing task ids, and non-object events', () => {
-    const live = new Set<string>(['t1']);
-    trackBackgroundTasks({ type: 'assistant', task_id: 't1', subtype: 'task_notification' }, live);
-    trackBackgroundTasks({ type: 'system', subtype: 'task_notification' }, live);
-    trackBackgroundTasks(null, live);
-    trackBackgroundTasks('result', live);
-    expect([...live]).toEqual(['t1']);
+    const state = stateWith('t1');
+    trackBackgroundTasks({ type: 'assistant', task_id: 't1', subtype: 'task_notification' }, state);
+    trackBackgroundTasks({ type: 'system', subtype: 'task_notification' }, state);
+    trackBackgroundTasks(null, state);
+    trackBackgroundTasks('result', state);
+    expect([...state.live]).toEqual(['t1']);
+    expect(state.continuationPending).toBe(false);
   });
 
   it('is idempotent for repeated notifications of an already-settled task', () => {
-    const live = new Set<string>();
-    trackBackgroundTasks(sdkSystemTaskNotification('never-seen'), live);
-    expect(live.size).toBe(0);
+    const state = createBackgroundTaskState();
+    trackBackgroundTasks(sdkSystemTaskNotification('never-seen'), state);
+    expect(state.live.size).toBe(0);
+  });
+
+  // The continuation window (2026-08-11): the notification is the CLI's trigger
+  // to open one more turn, and its system/init is the proof that it did.
+  it('arms continuationPending on a task_notification and disarms it on the next init', () => {
+    const state = createBackgroundTaskState();
+    trackBackgroundTasks(sdkSystemTaskStarted('t1'), state);
+    expect(state.continuationPending).toBe(false);
+    trackBackgroundTasks(sdkSystemTaskNotification('t1'), state);
+    expect(state.continuationPending).toBe(true);
+    trackBackgroundTasks(sdkSystemInit({ sessionId: SESSION_UUID }), state);
+    expect(state.continuationPending).toBe(false);
+  });
+
+  it('does NOT arm continuationPending on a settled task_updated (only the notification continues)', () => {
+    const state = stateWith('t1');
+    trackBackgroundTasks(sdkSystemTaskUpdated('t1', { status: 'completed' }), state);
+    expect(state.live.size).toBe(0);
+    expect(state.continuationPending).toBe(false);
   });
 });
 
@@ -127,6 +157,7 @@ describe('shouldHoldFlowTurnOpen', () => {
     spawnKey: 'run-1',
     runId: 'run-1',
     liveBackgroundTaskCount: 1,
+    continuationPending: false,
     hasWarmInput: true,
     warmDisabled: false,
     terminalError: null,
@@ -137,8 +168,16 @@ describe('shouldHoldFlowTurnOpen', () => {
     expect(shouldHoldFlowTurnOpen(holdable)).toBe(true);
   });
 
+  // The 2026-08-11 gate loss: no task is live at the result, but the CLI still
+  // owes the continuation the notification opened.
+  it('holds a warm flow turn with no live task when a continuation is owed', () => {
+    expect(
+      shouldHoldFlowTurnOpen({ ...holdable, liveBackgroundTaskCount: 0, continuationPending: true }),
+    ).toBe(true);
+  });
+
   it.each([
-    ['no live tasks', { liveBackgroundTaskCount: 0 }],
+    ['no live tasks and no owed continuation', { liveBackgroundTaskCount: 0 }],
     ['quick chat turn (spawnKey ≠ runId)', { runId: '__quick__sentinel' }],
     ['fan-out lane (composite spawnKey)', { spawnKey: 'run-1:item-2' }],
     ['single-shot process (no warm input)', { hasWarmInput: false }],
@@ -147,6 +186,25 @@ describe('shouldHoldFlowTurnOpen', () => {
     ['aborted', { aborted: true }],
   ] as const)('never holds: %s', (_label, override) => {
     expect(shouldHoldFlowTurnOpen({ ...holdable, ...override })).toBe(false);
+  });
+
+  // An owed continuation does not buy past the scope guards either.
+  it.each([
+    ['quick chat turn', { runId: '__quick__sentinel' }],
+    ['fan-out lane', { spawnKey: 'run-1:item-2' }],
+    ['single-shot process', { hasWarmInput: false }],
+    ['warm kill switch', { warmDisabled: true }],
+    ['terminal error', { terminalError: 'usage limit' }],
+    ['aborted', { aborted: true }],
+  ] as const)('an owed continuation never overrides the scope guard: %s', (_label, override) => {
+    expect(
+      shouldHoldFlowTurnOpen({
+        ...holdable,
+        liveBackgroundTaskCount: 0,
+        continuationPending: true,
+        ...override,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -183,8 +241,14 @@ describe('ClaudeCodeManager — flow turn held open while background tasks run',
 
   /**
    * The observed production stream shape: two subagents spawn, the parent's turn
-   * produces TWO intermediate results while they run (the CLI auto-continues past
-   * each), and only the third result arrives with no live task.
+   * produces intermediate results while they run, and the CLI auto-continues
+   * past each — opening every continuation with its own `system/init`.
+   *
+   * The third result is the 2026-08-11 shape: `task-b`'s notification landed
+   * BEFORE it (the subagent settled while the parent was still writing), so no
+   * task is live, yet the CLI still owes the continuation it just opened. Only
+   * the fourth result — inside that continuation, with nothing owed — is the
+   * real boundary.
    */
   function autoContinuingScenario() {
     return scenario()
@@ -194,16 +258,40 @@ describe('ClaudeCodeManager — flow turn held open while background tasks run',
       .assistantText('spawned both context agents')
       .resultSuccess({ result: 'waiting for agents' })
       .autoContinue()
+      .systemInit({ sessionId: SESSION_UUID })
       .taskNotification('task-a')
       .assistantText('one done, one to go')
       .resultSuccess({ result: 'still waiting' })
       .autoContinue()
+      .systemInit({ sessionId: SESSION_UUID })
       .taskNotification('task-b')
-      .assistantText('both done — continuing the flow')
+      .assistantText('both done — wrapping up')
+      .resultSuccess({ result: 'wrap-up' })
+      .autoContinue()
+      .systemInit({ sessionId: SESSION_UUID })
+      .assistantText('continuing the flow')
       .resultSuccess({ result: 'walk finished' })
       // Trailing step: the generator PARKS at the final result awaiting a push
       // (the multi-turn warm shape), so the process stays warm-idle for the
       // park assertions instead of draining to process death.
+      .assistantText('next turn — never reached');
+  }
+
+  /**
+   * A notification whose continuation NEVER arrives — the pathological case the
+   * grace bound exists for. The stream simply stops after the held result.
+   */
+  function silentAfterNotificationScenario() {
+    return scenario()
+      .systemInit({ sessionId: SESSION_UUID })
+      .taskStarted('task-a')
+      .assistantText('spawned the context agent')
+      .resultSuccess({ result: 'waiting for the agent' })
+      .autoContinue()
+      .systemInit({ sessionId: SESSION_UUID })
+      .taskNotification('task-a')
+      .assistantText('agent done')
+      .resultSuccess({ result: 'held awaiting a continuation that never comes' })
       .assistantText('next turn — never reached');
   }
 
@@ -228,16 +316,59 @@ describe('ClaudeCodeManager — flow turn held open while background tasks run',
     });
     await flush();
 
-    // ONE logical turn: the two intermediate results ended nothing.
+    // ONE logical turn: the three intermediate results ended nothing — including
+    // 'wrap-up', which has NO live task and would have ended the turn (killing
+    // the gate the continuation went on to open) before the continuation hold.
     expect(log).toEqual([
       'result:waiting for agents',
       'result:still waiting',
+      'result:wrap-up',
       'result:walk finished',
       'exit',
     ]);
     // The process parks warm-idle after the real boundary, ready for the next turn.
     expect(getSdkRuns(mgr).get(panelId)?.turnInFlight).toBe(false);
     expect(getSdkRuns(mgr).get(panelId)?.warm).not.toBeNull();
+  });
+
+  it('releases a continuation-only hold when the CLI goes silent, settling the turn', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const panelId = 'p-bg-silent';
+      fakeSdk.setScenario(silentAfterNotificationScenario());
+
+      const log: string[] = [];
+      mgr.on('output', (evt: { data?: { type?: string; result?: string } }) => {
+        if (evt.data?.type === 'result') log.push(`result:${evt.data.result}`);
+      });
+      mgr.on('exit', () => log.push('exit'));
+
+      const spawned = mgr.spawnCliProcess({
+        panelId,
+        sessionId: panelId,
+        worktreePath: '/tmp/wt',
+        prompt: 'plan the ideas',
+        permissionMode: 'ignore',
+      });
+      await flush();
+
+      // Held: the notification owes a continuation, so the turn has NOT ended.
+      expect(log).toEqual([
+        'result:waiting for the agent',
+        'result:held awaiting a continuation that never comes',
+      ]);
+
+      // The bound fires: the warm input closes, the loop drains, and the
+      // process-death boundary settles the held turn.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await spawned;
+      await flush();
+
+      expect(log.filter((entry) => entry === 'exit')).toHaveLength(1);
+      expect(getSdkRuns(mgr).has(panelId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('kill switch (single-shot path): the first result still ends the turn', async () => {

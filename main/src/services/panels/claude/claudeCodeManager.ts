@@ -218,26 +218,60 @@ function terminalResultError(event: unknown): string | null {
 }
 
 /**
+ * Per-subprocess background-subagent bookkeeping consulted by the per-turn
+ * boundary ({@link shouldHoldFlowTurnOpen}).
+ *
+ *  - `live` — task ids the CLI still reports as running.
+ *  - `continuationPending` — a `task_notification` has been delivered whose CLI
+ *    AUTO-CONTINUATION has not started yet. The notification is the CLI's
+ *    trigger to abort the current query and open one more turn on the same
+ *    conversation, so a result that lands in the window between the two is NOT
+ *    the end of the logical turn (see shouldHoldFlowTurnOpen).
+ */
+export interface BackgroundTaskState {
+  live: Set<string>;
+  continuationPending: boolean;
+}
+
+/** Fresh per-subprocess background-task state. Exported for unit tests. */
+export function createBackgroundTaskState(): BackgroundTaskState {
+  return { live: new Set<string>(), continuationPending: false };
+}
+
+/**
  * Track the CLI's background-subagent task lifecycle. SDK ≥0.3.201 runs
  * Agent-tool subagents in the BACKGROUND by default, surfacing their lifecycle
  * as `system` events on the parent stream: `task_started` registers a live
  * task (it arrives BEFORE the spawn-ack tool_result, so tracking can never
  * race the turn's result event), a settled `task_updated` patch or a
- * `task_notification` retires it. The per-turn boundary consults the live set
+ * `task_notification` retires it. The per-turn boundary consults this state
  * via {@link shouldHoldFlowTurnOpen}. Exported for unit tests.
+ *
+ * `task_notification` ALSO arms `continuationPending`, and a `system/init`
+ * (the first event of the CLI's continuation query) disarms it — the
+ * notification→continuation window the 2026-08-11 launch-run gate loss fell
+ * into. See shouldHoldFlowTurnOpen.
  */
-export function trackBackgroundTasks(event: unknown, live: Set<string>): void {
+export function trackBackgroundTasks(event: unknown, state: BackgroundTaskState): void {
   if (typeof event !== 'object' || event === null) return;
   const e = event as { type?: unknown; subtype?: unknown; task_id?: unknown; patch?: unknown };
-  if (e.type !== 'system' || typeof e.task_id !== 'string') return;
+  if (e.type !== 'system') return;
+  // A new query has begun in this process — the continuation a prior
+  // notification promised is now IN the stream, so the hold is no longer owed.
+  if (e.subtype === 'init') {
+    state.continuationPending = false;
+    return;
+  }
+  if (typeof e.task_id !== 'string') return;
   if (e.subtype === 'task_started') {
-    live.add(e.task_id);
+    state.live.add(e.task_id);
   } else if (e.subtype === 'task_notification') {
-    live.delete(e.task_id);
+    state.live.delete(e.task_id);
+    state.continuationPending = true;
   } else if (e.subtype === 'task_updated') {
     const status = (e.patch as { status?: unknown } | null | undefined)?.status;
     if (typeof status === 'string' && !LIVE_TASK_STATUSES.has(status)) {
-      live.delete(e.task_id);
+      state.live.delete(e.task_id);
     }
   }
 }
@@ -253,7 +287,20 @@ export function trackBackgroundTasks(event: unknown, live: Set<string>): void {
  * RunExecutor fire 'drained' (rest to awaiting_review + run-level step-'done')
  * mid-flow — the false "Workflow complete". Holding the LOGICAL turn open
  * (skip the boundary, keep consuming the same query()) defers the boundary to
- * the first result with no live background task.
+ * the first result that neither has a live background task NOR owes a
+ * continuation.
+ *
+ * THE CONTINUATION WINDOW (2026-08-11). Liveness alone is not enough. The CLI
+ * opens the auto-continuation on the `task_notification`, not on the result, so
+ * when the notification lands BEFORE the parent's result (a subagent that
+ * settles while the parent is still writing its wrap-up text) the live set is
+ * already empty at the result. Ending the turn there parked the session warm,
+ * the next spawn found it resume-ineligible and closed it — and the CLI's
+ * continuation, which had already started ~57ms after the result, had its first
+ * tool call cancelled at entry (`toolDenialKind:'cancelled'`, abort reason
+ * "background"). In the diagnosed launch run that tool WAS the human checkpoint
+ * gate: the agent read the cancellation as a user decline and walked past it.
+ * So a delivered-but-not-yet-started continuation holds the turn too.
  *
  * Scope guards:
  *  - flow runs only (`spawnKey === runId`; RunExecutor spawns with
@@ -263,19 +310,26 @@ export function trackBackgroundTasks(event: unknown, live: Set<string>): void {
  *    the result, taking its tasks with it, so there is nothing to wait for;
  *  - never on a terminal error or an abort (the process is going away).
  *
+ * A continuation-only hold is BOUNDED by the caller: if the CLI produces no
+ * further event within BACKGROUND_CONTINUATION_GRACE_MS the held turn is
+ * released by closing the warm input, which settles it through the normal
+ * process-death boundary. A liveness hold keeps its original open-ended
+ * semantics (a subagent may legitimately run for many minutes).
+ *
  * Exported for unit tests.
  */
 export function shouldHoldFlowTurnOpen(params: {
   spawnKey: string;
   runId: string;
   liveBackgroundTaskCount: number;
+  continuationPending: boolean;
   hasWarmInput: boolean;
   warmDisabled: boolean;
   terminalError: string | null;
   aborted: boolean;
 }): boolean {
   return (
-    params.liveBackgroundTaskCount > 0 &&
+    (params.liveBackgroundTaskCount > 0 || params.continuationPending) &&
     params.spawnKey === params.runId &&
     params.hasWarmInput &&
     !params.warmDisabled &&
@@ -446,6 +500,16 @@ const SDK_FIRST_EVENT_TIMEOUT_MS = 30_000;
  * subprocess (and its worktree file handles) open on an abandoned session.
  */
 const SDK_WARM_SESSION_TTL_MS = 15 * 60_000;
+
+/**
+ * How long a flow turn held open SOLELY because a `task_notification` owes an
+ * auto-continuation waits for that continuation to produce its first event
+ * before the hold is released (see shouldHoldFlowTurnOpen). Every continuation
+ * observed on SDK 0.3.224 starts within ~60ms, so 5s is two orders of magnitude
+ * of headroom; the bound exists only so a CLI that retires a task and then goes
+ * silent cannot wedge the turn — and therefore the run — open forever.
+ */
+const BACKGROUND_CONTINUATION_GRACE_MS = 5_000;
 
 /**
  * Hard cap on warmCloseReasonBySpawn — best-effort diagnostics whose entries can
@@ -774,6 +838,7 @@ type ColdSpawnReason =
   | 'ttl-expired'
   | 'post-error'
   | 'idle-evicted'
+  | 'continuation-timeout'
   | 'disabled'
   | `fingerprint:${string}`;
 
@@ -1804,16 +1869,28 @@ export class ClaudeCodeManager extends AbstractCliManager {
           })
         : null;
     let gateRecoveryDetector = makeGateDetector();
-    // Live background-subagent tasks for THIS subprocess (SDK ≥0.3.201 Agent-tool
-    // default). Scoped to the process: it spans warm turns (a task can outlive the
-    // turn that spawned it) and is cleared on a fallback retry (a new query() is a
-    // new subprocess — the old process's tasks died with it).
-    const liveBackgroundTasks = new Set<string>();
+    // Background-subagent state for THIS subprocess (SDK ≥0.3.201 Agent-tool
+    // default): the live task set plus the owed-continuation flag. Scoped to the
+    // process: it spans warm turns (a task can outlive the turn that spawned it)
+    // and is reset on a fallback retry (a new query() is a new subprocess — the
+    // old process's tasks died with it).
+    const backgroundTasks = createBackgroundTaskState();
+    // Bounds a continuation-only hold (see shouldHoldFlowTurnOpen): armed when a
+    // result is held with no live task, cleared by the CLI's very next event.
+    let continuationGraceTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearContinuationGraceTimer = (): void => {
+      if (continuationGraceTimer !== null) {
+        clearTimeout(continuationGraceTimer);
+        continuationGraceTimer = null;
+      }
+    };
     try {
       retry: while (true) {
         attempt++;
         terminalError = null;
-        liveBackgroundTasks.clear();
+        backgroundTasks.live.clear();
+        backgroundTasks.continuationPending = false;
+        clearContinuationGraceTimer();
         if (firstEventTimer) clearTimeout(firstEventTimer);
         firstEventTimer = setTimeout(() => {
           if (abortController.signal.aborted) return;
@@ -1864,9 +1941,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
             if (abortController.signal.aborted) break;
 
             // Background-subagent lifecycle (task_started / task_updated /
-            // task_notification system events) — feeds the per-turn boundary's
-            // hold-open decision below.
-            trackBackgroundTasks(event, liveBackgroundTasks);
+            // task_notification / init system events) — feeds the per-turn
+            // boundary's hold-open decision below.
+            trackBackgroundTasks(event, backgroundTasks);
+            // The CLI produced an event, so it is not the silent-after-notification
+            // case the grace timer guards. The held-result branch below re-arms if
+            // the continuation still has not started by the next result.
+            clearContinuationGraceTimer();
 
             // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
             // is_error RESULT event (never a throw), so it lands here, not in the
@@ -1983,7 +2064,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
               shouldHoldFlowTurnOpen({
                 spawnKey,
                 runId,
-                liveBackgroundTaskCount: liveBackgroundTasks.size,
+                liveBackgroundTaskCount: backgroundTasks.live.size,
+                continuationPending: backgroundTasks.continuationPending,
                 hasWarmInput: run.warm !== null,
                 warmDisabled: warmSdkDisabled(),
                 terminalError,
@@ -1991,8 +2073,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
               })
             ) {
               this.logger?.info(
-                `[ClaudeCodeManager] holding flow turn open past result: ${liveBackgroundTasks.size} background subagent task(s) still running (panel ${displayPanelId})`,
+                backgroundTasks.live.size > 0
+                  ? `[ClaudeCodeManager] holding flow turn open past result: ${backgroundTasks.live.size} background subagent task(s) still running (panel ${displayPanelId})`
+                  : `[ClaudeCodeManager] holding flow turn open past result: awaiting the CLI's continuation of a settled background subagent (panel ${displayPanelId})`,
               );
+              // Bound a continuation-only hold: no live task means nothing else
+              // will wake this turn if the CLI never opens the continuation, so
+              // release it by closing the warm input — the loop then drains and
+              // the process-death boundary settles the held turn. Cleared by the
+              // CLI's next event (above), which is the expected outcome.
+              if (backgroundTasks.live.size === 0 && continuationGraceTimer === null) {
+                continuationGraceTimer = setTimeout(() => {
+                  continuationGraceTimer = null;
+                  if (abortController.signal.aborted) return;
+                  this.logger?.warn(
+                    `[ClaudeCodeManager] no CLI continuation within ${BACKGROUND_CONTINUATION_GRACE_MS}ms of a background-task notification — releasing the held turn (panel ${displayPanelId})`,
+                  );
+                  void this.closeWarmSession(spawnKey, 'continuation-timeout');
+                }, BACKGROUND_CONTINUATION_GRACE_MS);
+              }
               continue;
             }
             if (isResultEvent(event)) {
@@ -2057,6 +2156,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
           // CLI's stdin. Idempotent with the result-event and abort closes.
           promptInput.close();
           abortController.signal.removeEventListener('abort', closeInputOnAbort);
+          // The hold this timer bounds cannot outlive the loop that owns it.
+          clearContinuationGraceTimer();
           // Drop the live steer target so injectSteering can no longer push into
           // this closed input. On a model-fallback `continue retry` the next loop
           // iteration re-publishes the fresh input; on process death it stays null.
@@ -2275,7 +2376,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // path re-invoking after a TTL close already started) re-closes harmlessly and
     // awaits the same iteratorDone.
     run.closing = true;
-    if (reason === 'ttl-expired' || reason === 'post-error' || reason === 'idle-evicted') {
+    if (
+      reason === 'ttl-expired' ||
+      reason === 'post-error' ||
+      reason === 'idle-evicted' ||
+      reason === 'continuation-timeout'
+    ) {
       this.recordWarmCloseReason(spawnKey, reason);
     }
     this.clearWarmTimers(run);
