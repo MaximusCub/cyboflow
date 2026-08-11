@@ -843,6 +843,33 @@ type ColdSpawnReason =
   | `fingerprint:${string}`;
 
 /**
+ * The subset of {@link ColdSpawnReason} that describes a warm session closing on
+ * its own — as opposed to a plain cold start ('fresh'/'no-warm'), warm sessions
+ * being off ('disabled'), or an input change ('fingerprint:…'), none of which are
+ * a close. These are the reasons {@link ClaudeCodeManager.recordWarmCloseReason}
+ * hands forward so the NEXT cold spawn's [Timing] log can name why the warm
+ * session it expected was gone.
+ *
+ * Single-sourced as a const array so the membership test, the map's value type,
+ * and the recorder's parameter type cannot drift apart — adding a member to the
+ * array is the only edit a new close reason needs. `satisfies` keeps every entry
+ * a real ColdSpawnReason.
+ */
+const WARM_CLOSE_REASONS = [
+  'ttl-expired',
+  'post-error',
+  'idle-evicted',
+  'continuation-timeout',
+] as const satisfies readonly ColdSpawnReason[];
+
+type WarmCloseReason = (typeof WARM_CLOSE_REASONS)[number];
+
+/** Narrow a cold-spawn reason to one that describes a warm session closing. */
+function isWarmCloseReason(reason: ColdSpawnReason): reason is WarmCloseReason {
+  return (WARM_CLOSE_REASONS as readonly string[]).includes(reason);
+}
+
+/**
  * One cyboflow turn on an SDK run. `done` settles when the turn reaches its rest
  * boundary (result event) OR the process dies mid-turn; `terminalError` carries a
  * fatal turn's message for spawnCliProcess to reject on. The timestamps drive the
@@ -1022,7 +1049,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * {@link recordWarmCloseReason} (evict oldest) so it cannot grow unboundedly
    * over a long-lived app session.
    */
-  private readonly warmCloseReasonBySpawn = new Map<string, 'ttl-expired' | 'post-error' | 'idle-evicted'>();
+  private readonly warmCloseReasonBySpawn = new Map<string, WarmCloseReason>();
 
   /**
    * Monotonic counter stamped onto a warm session's `parkSeq` each time it parks
@@ -1032,7 +1059,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private warmParkSeq = 0;
 
   /** Record a warm-close reason, evicting the oldest entry past the cap. */
-  private recordWarmCloseReason(spawnKey: string, reason: 'ttl-expired' | 'post-error' | 'idle-evicted'): void {
+  private recordWarmCloseReason(spawnKey: string, reason: WarmCloseReason): void {
     // Re-set moves the key to the tail so eviction stays oldest-first.
     this.warmCloseReasonBySpawn.delete(spawnKey);
     this.warmCloseReasonBySpawn.set(spawnKey, reason);
@@ -2376,12 +2403,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // path re-invoking after a TTL close already started) re-closes harmlessly and
     // awaits the same iteratorDone.
     run.closing = true;
-    if (
-      reason === 'ttl-expired' ||
-      reason === 'post-error' ||
-      reason === 'idle-evicted' ||
-      reason === 'continuation-timeout'
-    ) {
+    if (isWarmCloseReason(reason)) {
       this.recordWarmCloseReason(spawnKey, reason);
     }
     this.clearWarmTimers(run);
