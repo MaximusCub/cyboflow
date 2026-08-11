@@ -87,6 +87,23 @@ const OVERRIDE_OPTIONS: { value: IdeaComponentStateValue; label: string }[] = [
   { value: 'skipped', label: 'Skipped' },
 ];
 
+/**
+ * Display-only `<select>` value for a row whose visual state is "needs review".
+ *
+ * A needs-review row is `state='incomplete'` PLUS a stale marker, so binding the
+ * control to `entry.state` would park it on the "Not started" option — which both
+ * misreports the row (the strip beside it says "Needs review") and makes the
+ * demote-to-not-started transition UNSELECTABLE: re-picking the option a select
+ * already sits on fires no `change` event in any browser, so the confirm below
+ * could never open and the destructive write could never be requested. Binding to
+ * this sentinel instead keeps the two distinguishable, so choosing "Not started"
+ * is a real change. It is rendered as a DISABLED option (displayable, never
+ * choosable) and only for rows that are actually stale — the ledger has three
+ * states, and this is not a fourth one, just how the fourth VISUAL state shows up
+ * in a control that writes `state`.
+ */
+const NEEDS_REVIEW_OPTION_VALUE = '__needs-review__';
+
 export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): React.JSX.Element {
   const [rows, setRows] = useState<IdeaComponentState[]>(components);
   const [pending, setPending] = useState<IdeaComponentKey | null>(null);
@@ -147,10 +164,14 @@ export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): Re
               {LEDGER_STATE_LABEL[visual]}
             </span>
             <select
-              value={entry.state}
+              value={visual === 'needs-review' ? NEEDS_REVIEW_OPTION_VALUE : entry.state}
               disabled={pending === key}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
+                // Unreachable via the UI (the sentinel's option is disabled), but
+                // it is never a state the write path accepts — refuse it rather
+                // than casting it into an IdeaComponentStateValue.
+                if (e.target.value === NEEDS_REVIEW_OPTION_VALUE) return;
                 const nextState = e.target.value as IdeaComponentStateValue;
                 // Gate the one destructive transition — see confirmDemote's
                 // comment above — behind a confirm instead of committing it
@@ -167,6 +188,11 @@ export function LedgerExpand({ ideaId, components, now }: LedgerExpandProps): Re
               data-testid={`ledger-override-${key}`}
               className="rounded-button border border-border-primary bg-surface-primary px-1 py-0.5 text-[10px] text-text-secondary disabled:opacity-50"
             >
+              {visual === 'needs-review' && (
+                <option value={NEEDS_REVIEW_OPTION_VALUE} disabled>
+                  {LEDGER_STATE_LABEL['needs-review']}
+                </option>
+              )}
               {OVERRIDE_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}

@@ -76,6 +76,27 @@ describe('LedgerExpand destructive-demote confirm', () => {
     });
   }
 
+  // FIND (live smoke): the confirm below was UNREACHABLE in a real browser. The
+  // control was bound to `entry.state`, and a needs-review row IS
+  // `state='incomplete'`, so the select already sat on "Not started" — and
+  // re-picking the option a select is already on emits no `change` event, so the
+  // guard never ran. The suite missed it because `fireEvent.change` fabricates a
+  // change for a value the control already holds, which no browser ever does.
+  // Pin the precondition itself rather than the synthetic event: the row must not
+  // be parked on the very option the confirm is supposed to intercept.
+  it('does not park a needs-review row on the option the confirm intercepts (else the change event never fires)', () => {
+    render(<LedgerExpand ideaId="idea_1" components={staleComponents()} now={Date.now()} />);
+    const select = screen.getByTestId('ledger-override-prototype') as HTMLSelectElement;
+
+    expect(select.value).not.toBe('incomplete');
+    // ...and it reports the state it is actually in, instead of claiming "Not started".
+    expect(select.selectedOptions[0]).toHaveTextContent('Needs review');
+    // The displayed value is a display-only sentinel — never a choosable write.
+    expect(select.selectedOptions[0].disabled).toBe(true);
+    // A row with NO stale marker is unaffected: it still binds to its real state.
+    expect((screen.getByTestId('ledger-override-epics') as HTMLSelectElement).value).toBe('incomplete');
+  });
+
   it('does NOT commit immediately when demoting a currently needs-review row to Not started — it stages a confirm', () => {
     render(<LedgerExpand ideaId="idea_1" components={staleComponents()} now={Date.now()} />);
 
