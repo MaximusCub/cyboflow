@@ -207,6 +207,29 @@ non-interactive or untrusted caller.
 specific request id — e.g. a quick chat session after a context compaction
 drops it.
 
+Two deliberate decisions on this path, recorded so they are not re-litigated:
+
+- **The proven-runbook gate has ONE enforcement point, at drain** (and only for
+  a task that `derivesEnvironment`, i.e. carries a build or serve). It is
+  deliberately NOT also checked at enqueue. The cost is one throwaway queue row
+  per attempt on a project whose runbook is unproven; the benefit is that the
+  two enqueue paths (this MCP seam and the programmatic
+  `enqueueTaskVerification`) can never drift into applying two versions of one
+  rule. Add a second check only if you are prepared to keep both in lockstep.
+- **Quick requests drain at the SAME priority as live sprint lanes.** Only
+  `setup_proof` is deprioritized (the §5.4 priority classes above), so a quick
+  request lands in class 0 FIFO alongside a sprint's merge gates and, against a
+  small agent-slot pool, a chatty quick session can delay them. Accepted as-is;
+  revisit by giving quick traffic its own class if that becomes a real queue.
+
+KNOWN GAP (unfixed): session **dismiss/cancel** cancels a run's in-flight
+verifications before archiving (`cancelRunHandler.ts` →
+`cancelVerificationsForRun`), but the **Merge / Create-PR close-out** path
+completes the chat sentinel WITHOUT that cancel — so a still-running
+verification can deliver a finding + screenshots artifact onto an
+already-closed-out session. Low frequency; the fix is to wire the same cancel
+into close-out.
+
 The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–2
 implemented) sits on top of the agent engine: failures are classified
 `env | deliverable | ambiguous` (`failureClassifier.ts` — env requires
