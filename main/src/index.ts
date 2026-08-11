@@ -151,6 +151,7 @@ import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
+import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
@@ -472,6 +473,13 @@ let designFeedbackOutbox: DesignFeedbackOutbox | null = null;
 // process.kill + fs.existsSync) — safe to construct at module load. Wired into
 // WorktreeManager (reap on worktree removal) and the boot sweep below.
 const codexBrokerReaper = new CodexBrokerReaper();
+
+// Reaper for abandoned vitest fork-pool workers (see VitestOrphanReaper). A gate
+// whose root was hard-killed — an agent Bash timeout, a stopped session, run
+// teardown — leaves its pool spinning at full CPU forever. Stateless (ps +
+// process.kill), so safe to construct at module load; boot-swept and then swept on
+// an interval below, and stopped in before-quit.
+const vitestOrphanReaper = new VitestOrphanReaper();
 
 // Issue-tracker sync loop — Linear/Plane (docs/proposals/tracker-sync-integration.md).
 // Module-level so the before-quit handler can stop it; constructed + started in
@@ -799,6 +807,17 @@ function runDeferredStartupWork(): void {
   void codexBrokerReaper.sweepOrphans().catch((err) => {
     console.error('[Main] codex-broker boot sweep failed:', err);
   });
+
+  // Boot sweep + periodic sweep: kill vitest pool workers whose root has died.
+  // Unlike the codex-broker sweeps this needs no worktree scoping and is safe
+  // mid-session — `ppid === 1` on a worker is a proof of abandonment, not a guess
+  // (a live worker always has its root as parent), and a detached `nohup` gate
+  // reparents the ROOT, which is never matched. Mid-session sweeping is the point:
+  // sprint lanes are where abandoned forks come from. Fire-and-forget.
+  void vitestOrphanReaper.sweep().catch((err) => {
+    console.error('[Main] vitest-orphan boot sweep failed:', err);
+  });
+  vitestOrphanReaper.start();
 
   // Design Mode v1 boot recovery (design-mode.md "Design feedback v1"): re-drive
   // every design-feedback batch a crash left queued/dispatching/dispatched.
@@ -5349,6 +5368,11 @@ app.on('before-quit', async (event) => {
   if (trackerSyncService) {
     trackerSyncService.stop();
   }
+
+  // Stop the vitest-orphan sweep timer. Its handle is unref'd so it could never
+  // hold the process open, but leaving a sweep to fire into a torn-down app is
+  // pointless work.
+  vitestOrphanReaper.stop();
 
   // Stop orchestrator (drains run queues)
   if (orchestrator) {

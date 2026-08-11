@@ -41,16 +41,20 @@
  * failure is logged and swallowed, never thrown — reaping must never block
  * close-out or boot.
  */
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import type { LoggerLike } from '../orchestrator/types';
+import { collectProcessTree, listProcessTable, parsePsOutput, type ProcessRow } from './processTable';
 
-/** A single process row parsed from `ps` output. */
-export interface CodexBrokerProcess {
-  pid: number;
-  ppid: number;
-  command: string;
-}
+/**
+ * A single process row parsed from `ps` output. Alias of the shared
+ * {@link ProcessRow} — kept as a named export because this module's public API
+ * has always spoken in these terms.
+ */
+export type CodexBrokerProcess = ProcessRow;
+
+// The ps parser and tree walk are shared with VitestOrphanReaper; re-exported here
+// so this module's long-standing API surface is unchanged.
+export { parsePsOutput, collectProcessTree };
 
 /** Construction-time seams — the real `ps`/`process.kill`/`fs` impls are the defaults. */
 export interface CodexBrokerReaperOptions {
@@ -86,86 +90,6 @@ export function parseBrokerCwd(command: string): string | null {
   return match ? match[1] : null;
 }
 
-/**
- * Parse `ps -axo pid=,ppid=,command=` output into rows. Each line is leading
- * whitespace + numeric pid + whitespace + numeric ppid + a space + the full
- * command line. Lines that do not match are skipped.
- */
-export function parsePsOutput(stdout: string): CodexBrokerProcess[] {
-  const rows: CodexBrokerProcess[] = [];
-  for (const rawLine of stdout.split('\n')) {
-    const line = rawLine.replace(/^\s+/, '');
-    if (line.length === 0) continue;
-    const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    if (!match) continue;
-    const pid = Number.parseInt(match[1], 10);
-    const ppid = Number.parseInt(match[2], 10);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    rows.push({ pid, ppid, command: match[3] });
-  }
-  return rows;
-}
-
-/**
- * Collect `rootPids` plus every descendant, walking the ppid table. Guards:
- * pids ≤ 1 are never traversed or included (never chase launchd/kernel), a pid is
- * only ever visited once (cycle-safe), and a root not present in `procs` is still
- * returned (a broker whose children already exited). Returns a de-duplicated set.
- */
-export function collectProcessTree(
-  rootPids: number[],
-  procs: CodexBrokerProcess[],
-): Set<number> {
-  const childrenByPpid = new Map<number, number[]>();
-  for (const p of procs) {
-    if (p.pid <= 1) continue;
-    const list = childrenByPpid.get(p.ppid);
-    if (list) list.push(p.pid);
-    else childrenByPpid.set(p.ppid, [p.pid]);
-  }
-
-  const result = new Set<number>();
-  const queue: number[] = [];
-  for (const root of rootPids) {
-    if (root > 1 && !result.has(root)) {
-      result.add(root);
-      queue.push(root);
-    }
-  }
-  while (queue.length > 0) {
-    const pid = queue.shift()!;
-    const kids = childrenByPpid.get(pid);
-    if (!kids) continue;
-    for (const kid of kids) {
-      if (kid > 1 && !result.has(kid)) {
-        result.add(kid);
-        queue.push(kid);
-      }
-    }
-  }
-  return result;
-}
-
-/** Default process lister: `ps -axo pid=,ppid=,command=` (no header, all processes). */
-function defaultListProcesses(): Promise<CodexBrokerProcess[]> {
-  return new Promise<CodexBrokerProcess[]>((resolve, reject) => {
-    execFile(
-      'ps',
-      ['-axo', 'pid=,ppid=,command='],
-      // Command lines can be long; 16 MiB is comfortably above any realistic
-      // full process table.
-      { maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
-          return;
-        }
-        resolve(parsePsOutput(stdout));
-      },
-    );
-  });
-}
-
 /** Default killer: SIGTERM the PID. May throw (dead/reparented PID) — caller guards. */
 function defaultKillPid(pid: number): void {
   process.kill(pid, 'SIGTERM');
@@ -178,7 +102,7 @@ export class CodexBrokerReaper {
   private readonly logger?: LoggerLike;
 
   constructor(opts: CodexBrokerReaperOptions = {}) {
-    this.listProcesses = opts.listProcesses ?? defaultListProcesses;
+    this.listProcesses = opts.listProcesses ?? listProcessTable;
     this.killPid = opts.killPid ?? defaultKillPid;
     this.pathExists = opts.pathExists ?? existsSync;
     this.logger = opts.logger;
