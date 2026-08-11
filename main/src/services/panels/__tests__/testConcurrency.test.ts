@@ -4,10 +4,14 @@ import {
   MANAGED_TEST_CONCURRENCY_ENV,
   MIN_MANAGED_FORKS,
   isManagedTestConcurrency,
+  isOrphanedWorker,
+  isVitestRootTitle,
+  isVitestWorkerTitle,
   managedForkCap,
   managedTestConcurrencyEnv,
   parseExplicitForkCap,
   resolveForkCap,
+  shouldReapOrphans,
 } from '../../../../../shared/types/testConcurrency';
 import { buildCodexAppServerEnvironment } from '../codex/appServer/runConfig';
 
@@ -55,6 +59,82 @@ describe('managedForkCap', () => {
 
   it('stays at the floor on a single-core box rather than returning 0', () => {
     expect(managedForkCap(1, 1)).toBe(MIN_MANAGED_FORKS);
+  });
+
+  it('subtracts unreapable orphans from the cores it divides up', () => {
+    // Two abandoned forks are pinning two of the ten cores, so this gate may
+    // only plan around eight.
+    expect(managedForkCap(10, 1, 2)).toBe(7);
+    expect(managedForkCap(10, 2, 2)).toBe(4);
+  });
+
+  it('is unchanged when there are no orphans', () => {
+    expect(managedForkCap(10, 1, 0)).toBe(managedForkCap(10, 1));
+    expect(managedForkCap(10, 3, 0)).toBe(managedForkCap(10, 3));
+  });
+
+  it('holds the floor when orphans have swallowed the whole box', () => {
+    expect(managedForkCap(10, 1, 10)).toBe(MIN_MANAGED_FORKS);
+    expect(managedForkCap(10, 1, 99)).toBe(MIN_MANAGED_FORKS);
+  });
+
+  it('ignores a nonsense orphan count', () => {
+    expect(managedForkCap(10, 1, -5)).toBe(9);
+  });
+});
+
+describe('isOrphanedWorker', () => {
+  it('is true only for an indexed worker title adopted by init', () => {
+    expect(isOrphanedWorker('node (vitest 2)', 1)).toBe(true);
+    expect(isOrphanedWorker('node (vitest 17)', 1)).toBe(true);
+  });
+
+  it('is false for a worker with a live root', () => {
+    expect(isOrphanedWorker('node (vitest 2)', 4242)).toBe(false);
+  });
+
+  it('is false for a ROOT at ppid 1 — that is just a detached (nohup) gate', () => {
+    // The regression that would make the reaper kill healthy runs.
+    expect(isOrphanedWorker('node (vitest)', 1)).toBe(false);
+  });
+
+  it('is false for anything that is not a vitest worker', () => {
+    expect(isOrphanedWorker('node', 1)).toBe(false);
+    expect(isOrphanedWorker('/usr/bin/node ./server.js', 1)).toBe(false);
+    expect(isOrphanedWorker('launchd', 1)).toBe(false);
+  });
+
+  it('tolerates the padding ps emits around a title', () => {
+    expect(isOrphanedWorker('  node (vitest 2)  ', 1)).toBe(true);
+  });
+});
+
+describe('isVitestRootTitle / isVitestWorkerTitle', () => {
+  it('separates the root from its workers', () => {
+    expect(isVitestRootTitle('node (vitest)')).toBe(true);
+    expect(isVitestRootTitle('node (vitest 1)')).toBe(false);
+    expect(isVitestWorkerTitle('node (vitest 1)')).toBe(true);
+    expect(isVitestWorkerTitle('node (vitest)')).toBe(false);
+  });
+});
+
+describe('shouldReapOrphans', () => {
+  it('reaps under managed mode — that is where abandoned forks come from', () => {
+    expect(shouldReapOrphans(undefined, '1')).toBe(true);
+  });
+
+  it('leaves a human terminal run alone by default', () => {
+    expect(shouldReapOrphans(undefined, undefined)).toBe(false);
+  });
+
+  it('lets an explicit setting win in both directions', () => {
+    expect(shouldReapOrphans('1', undefined)).toBe(true);
+    expect(shouldReapOrphans('0', '1')).toBe(false);
+  });
+
+  it('ignores an unrecognised value and falls back to managed mode', () => {
+    expect(shouldReapOrphans('yes', '1')).toBe(true);
+    expect(shouldReapOrphans('yes', undefined)).toBe(false);
   });
 });
 
