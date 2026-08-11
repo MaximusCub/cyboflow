@@ -206,6 +206,21 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     interactiveRunId !== null && !showDemoTerminal && !isCodexPtySession,
   );
 
+  // Arm the resume offer from the LIVE liveness signal, not only from the
+  // one-shot probe above. That probe runs once on mount, when a REPL that later
+  // dies mid-session was still alive — so a mid-session death used to surface
+  // NOTHING: the retry card correctly defers to resume (restarting would
+  // discard the conversation), but resume's own gate never re-evaluated. The
+  // offer only appeared if the user happened to navigate away and back, which
+  // remounts the panel and re-runs the probe. Honours the same "Start fresh"
+  // opt-out, so a declined offer is never re-raised by the poll.
+  useEffect(() => {
+    if (!terminalHealth.resumable) return;
+    const sessionId = panel.sessionId;
+    if (!sessionId || declinedResumeSessions.has(sessionId)) return;
+    setCanOfferResume(true);
+  }, [terminalHealth.resumable, panel.sessionId]);
+
   // The "Resuming…" hint is a transient cue shown while claude reopens the prior
   // conversation. Auto-clear it so it never sticks forever.
   useEffect(() => {

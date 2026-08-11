@@ -45,6 +45,17 @@ const DEAD_PROBES_TO_STALL = 2;
 export interface InteractiveTerminalHealth {
   /** The REPL is dead with no prior conversation to resume — it will never paint. */
   stalled: boolean;
+  /**
+   * The REPL is dead but its conversation survives on disk — the RESUME case.
+   *
+   * Surfaced as a live signal because ClaudePanel's own resume-eligibility probe
+   * fires ONCE on mount, when a REPL that later dies mid-session was still
+   * alive. Without this, a mid-session death showed nothing at all: `stalled`
+   * correctly defers to the resume prompt, but the prompt's own gate never
+   * re-evaluated, so the deferral fell into a black hole until the user
+   * navigated away and back (remounting the panel re-ran its one-shot probe).
+   */
+  resumable: boolean;
   /** Stalled AND unrecoverable (worktree gone) — explain rather than offer retry. */
   worktreeMissing: boolean;
   /** A restart is in flight. */
@@ -61,6 +72,7 @@ export function useInteractiveTerminalHealth(
   enabled: boolean,
 ): InteractiveTerminalHealth {
   const [stalled, setStalled] = useState(false);
+  const [resumable, setResumable] = useState(false);
   const [worktreeMissing, setWorktreeMissing] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +83,7 @@ export function useInteractiveTerminalHealth(
     // the previous panel's verdict.
     deadProbesRef.current = 0;
     setStalled(false);
+    setResumable(false);
     setWorktreeMissing(false);
     setError(null);
     if (!enabled || !sessionId) return;
@@ -86,26 +99,34 @@ export function useInteractiveTerminalHealth(
           // Alive — clear any prior verdict (covers a successful retry too).
           deadProbesRef.current = 0;
           setStalled(false);
+          setResumable(false);
           setWorktreeMissing(false);
           return;
         }
-        if (data.claudeSessionId) {
-          // Recoverable by RESUME, not restart — leave it to ResumeSessionPrompt.
-          deadProbesRef.current = 0;
+        deadProbesRef.current += 1;
+        if (deadProbesRef.current < DEAD_PROBES_TO_STALL) return;
+        // Dead, confirmed. Which recovery applies depends on whether the prior
+        // conversation survived: resume beats restart, because restarting
+        // discards it.
+        if (data.claudeSessionId && data.worktreeExists) {
+          setResumable(true);
           setStalled(false);
           return;
         }
-        deadProbesRef.current += 1;
-        if (deadProbesRef.current >= DEAD_PROBES_TO_STALL) {
-          setStalled(true);
-          setWorktreeMissing(!data.worktreeExists);
-        }
+        setResumable(false);
+        setStalled(true);
+        setWorktreeMissing(!data.worktreeExists);
       } catch {
         // A failed probe is not evidence of a dead REPL — leave the verdict
         // unchanged and let the next tick decide.
       }
     };
 
+    // Probe immediately as well as on the interval: waiting a full POLL_MS
+    // before the FIRST probe pushed the earliest possible verdict out to
+    // 2 × POLL_MS. The consecutive-probe threshold still guards against calling
+    // a spawning REPL dead.
+    void probe();
     const timer = setInterval(() => void probe(), POLL_MS);
     return () => {
       cancelled = true;
@@ -125,6 +146,7 @@ export function useInteractiveTerminalHealth(
           // fresh spawn dies too, so a repeatedly-failing REPL stays visible).
           deadProbesRef.current = 0;
           setStalled(false);
+          setResumable(false);
           return;
         }
         setError(res?.error ?? 'Failed to restart the terminal');
@@ -135,5 +157,5 @@ export function useInteractiveTerminalHealth(
       .finally(() => setRetrying(false));
   }, [sessionId, panelId, retrying]);
 
-  return { stalled, worktreeMissing, retrying, error, retry };
+  return { stalled, resumable, worktreeMissing, retrying, error, retry };
 }

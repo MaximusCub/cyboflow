@@ -44,7 +44,20 @@ function probeResult(
   };
 }
 
-/** Advance N poll ticks, flushing the promise each probe returns. */
+/**
+ * Flush the IMMEDIATE mount probe (the hook probes once on mount as well as on
+ * the interval, so the first verdict does not wait a full POLL_MS).
+ */
+async function flushMount(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+}
+
+/**
+ * Advance N poll ticks, flushing the promise each probe returns. Total probes
+ * after `flushMount(); tick(n)` is n + 1.
+ */
 async function tick(count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
     await act(async () => {
@@ -77,32 +90,72 @@ describe('useInteractiveTerminalHealth', () => {
     expect(result.current.stalled).toBe(false);
   });
 
+  it('probes immediately on mount, so the first verdict does not wait a full interval', async () => {
+    mockGetResumeState.mockResolvedValue(probeResult());
+    renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
+    await flushMount();
+    expect(mockGetResumeState).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT stall on a single dead probe — a spawning REPL is not a dead one', async () => {
     mockGetResumeState.mockResolvedValue(probeResult());
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(1);
+    await flushMount();
     expect(result.current.stalled).toBe(false);
   });
 
   it('stalls once the REPL reads dead on consecutive probes', async () => {
     mockGetResumeState.mockResolvedValue(probeResult());
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.stalled).toBe(true);
     expect(result.current.worktreeMissing).toBe(false);
   });
 
-  it('never stalls when a prior conversation is resumable — that is the resume prompt\'s job', async () => {
+  it('reports a dead-but-resumable REPL as resumable, never as stalled', async () => {
+    // The regression this exists for: a REPL that dies MID-SESSION used to
+    // surface nothing at all. `stalled` correctly defers to the resume prompt,
+    // but that prompt's own eligibility is probed once at mount — when the REPL
+    // was still alive — so the deferral fell into a black hole until the user
+    // navigated away and back. The live `resumable` signal is what closes it.
     mockGetResumeState.mockResolvedValue(probeResult({ claudeSessionId: 'uuid-1' }));
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(4);
+    await flushMount();
+    await tick(1);
+    expect(result.current.resumable).toBe(true);
     expect(result.current.stalled).toBe(false);
+  });
+
+  it('clears resumable again once the REPL is back', async () => {
+    mockGetResumeState.mockResolvedValue(probeResult({ claudeSessionId: 'uuid-1' }));
+    const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
+    await flushMount();
+    await tick(1);
+    expect(result.current.resumable).toBe(true);
+
+    mockGetResumeState.mockResolvedValue(probeResult({ replRunning: true, claudeSessionId: 'uuid-1' }));
+    await tick(1);
+    expect(result.current.resumable).toBe(false);
+  });
+
+  it('a resumable REPL whose worktree is gone stalls instead — resume needs the worktree', async () => {
+    mockGetResumeState.mockResolvedValue(
+      probeResult({ claudeSessionId: 'uuid-1', worktreeExists: false }),
+    );
+    const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
+    await flushMount();
+    await tick(1);
+    expect(result.current.resumable).toBe(false);
+    expect(result.current.stalled).toBe(true);
+    expect(result.current.worktreeMissing).toBe(true);
   });
 
   it('reports an unrecoverable stall when the worktree is gone', async () => {
     mockGetResumeState.mockResolvedValue(probeResult({ worktreeExists: false }));
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.worktreeMissing).toBe(true);
   });
 
@@ -118,8 +171,10 @@ describe('useInteractiveTerminalHealth', () => {
     mockGetResumeState.mockResolvedValueOnce(probeResult({ replRunning: true }));
     mockGetResumeState.mockResolvedValue(probeResult());
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    // dead, live (resets), dead → only ONE dead probe has accumulated.
-    await tick(3);
+    // probe 1 (mount) dead, probe 2 live (resets), probe 3 dead → only ONE dead
+    // probe has accumulated, so no verdict yet.
+    await flushMount();
+    await tick(2);
     expect(result.current.stalled).toBe(false);
     await tick(1);
     expect(result.current.stalled).toBe(true);
@@ -128,7 +183,8 @@ describe('useInteractiveTerminalHealth', () => {
   it('clears the stall on a successful retry and calls restartInteractive for the panel', async () => {
     mockGetResumeState.mockResolvedValue(probeResult());
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.stalled).toBe(true);
 
     await act(async () => {
@@ -144,7 +200,8 @@ describe('useInteractiveTerminalHealth', () => {
     mockGetResumeState.mockResolvedValue(probeResult());
     mockRestart.mockResolvedValue({ success: false, error: 'Claude is turned off in Settings' });
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.stalled).toBe(true);
 
     await act(async () => {
@@ -159,7 +216,8 @@ describe('useInteractiveTerminalHealth', () => {
   it('re-stalls when the restarted REPL dies again, so a broken terminal stays visible', async () => {
     mockGetResumeState.mockResolvedValue(probeResult());
     const { result } = renderHook(() => useInteractiveTerminalHealth('s1', 'p1', true));
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.stalled).toBe(true);
 
     await act(async () => {
@@ -167,6 +225,8 @@ describe('useInteractiveTerminalHealth', () => {
     });
     expect(result.current.stalled).toBe(false);
 
+    // The retry reset the dead-probe run, and there is no remount here — so the
+    // threshold must be re-earned from the interval alone.
     await tick(2);
     expect(result.current.stalled).toBe(true);
   });
@@ -177,7 +237,8 @@ describe('useInteractiveTerminalHealth', () => {
       ({ panelId }: { panelId: string }) => useInteractiveTerminalHealth('s1', panelId, true),
       { initialProps: { panelId: 'p1' } },
     );
-    await tick(2);
+    await flushMount();
+    await tick(1);
     expect(result.current.stalled).toBe(true);
 
     rerender({ panelId: 'p2' });
