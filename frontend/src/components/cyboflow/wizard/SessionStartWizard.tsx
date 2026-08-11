@@ -535,6 +535,16 @@ export default function SessionStartWizard(): React.JSX.Element {
         isDesignLaunchRef.current = false;
         useDesignModeStore.getState().enterDesignMode(sessionId);
       }
+      // CyboflowRoot reads navigationStore.activeProjectId as its `projectId`
+      // prop, and gates the WHOLE quick-session surface on it being non-null
+      // (QuickSessionCanvas + TerminalDock + dock tabs). Nothing on the way into
+      // this wizard sets it — goToWizard doesn't, and neither do its callers
+      // (landing CTAs, onboarding's handleAddProject) — so a user who has never
+      // clicked a project/session in the sidebar (i.e. a first-run user) would
+      // land on the bare panel fallback with no canvas and no dock. Stamp it
+      // here exactly as the two workflow launch paths (launchRun / launchBatch)
+      // already do before their own goToSession.
+      useNavigationStore.getState().setActiveProjectId(selectedProjectId);
       useNavigationStore.getState().goToSession();
     },
   });

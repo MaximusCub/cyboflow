@@ -838,6 +838,26 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
+  // CyboflowRoot takes navigationStore.activeProjectId as its `projectId` prop and
+  // gates the ENTIRE quick-session surface (QuickSessionCanvas + TerminalDock +
+  // dock tabs) on it being non-null. Nothing on the way into this wizard sets it,
+  // so without this stamp a first-run user — who has never clicked a project or
+  // session in the sidebar — landed on the bare panel fallback: no canvas, no dock.
+  it('stamps activeProjectId before navigating on a quick-session launch', async () => {
+    act(() => {
+      useNavigationStore.setState({ activeProjectId: null });
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(useNavigationStore.getState().activeProjectId).toBe(1);
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+
   it('threads the chosen substrate into a quick-session launch', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
