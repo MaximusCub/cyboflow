@@ -116,6 +116,14 @@ export class API {
       return window.electronAPI.sessions.resumeInteractive(sessionId, panelId, acknowledgeProviderDisabled);
     },
 
+    // Spawn a FRESH REPL for a panel whose interactive terminal is dead (the
+    // stalled terminal's Retry). Unlike resumeInteractive this needs no prior
+    // conversation — it is the recovery for a REPL that never started at all.
+    async restartInteractive(sessionId: string, panelId?: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.restartInteractive(sessionId, panelId);
+    },
+
     async getOutput(sessionId: string, limit?: number) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getOutput(sessionId, limit);

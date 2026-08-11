@@ -2036,6 +2036,91 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
+  /**
+   * Restart a DEAD interactive REPL from scratch — the "Retry" action behind the
+   * terminal's stalled state.
+   *
+   * The twin of `sessions:resume-interactive`, for the case that handler
+   * explicitly refuses: no prior conversation to resume. That is exactly the
+   * shape of the reported bug — create-quick's eager spawn is fire-and-forget
+   * and fail-soft, so a spawn that dies leaves a panel whose terminal never
+   * receives a byte and never will. There was no way back from that state short
+   * of typing a message (which re-spawns via sessions:input) or discarding the
+   * session; this gives the blank terminal an explicit recovery.
+   *
+   * Same spawn the eager path performs (fresh REPL, QUICK_PTY_BRIEFING, the
+   * panel's persisted model / fast-mode / effort), and — following the resume
+   * handler's hard-won lesson — the provider gate is decided HERE, where the
+   * answer can reach the user, rather than inside the fire-and-forget spawn
+   * whose rejection only ever reached a `.catch` that logs.
+   */
+  ipcMain.handle('sessions:restart-interactive', async (_event, sessionId: string, panelId?: string) => {
+    try {
+      const dbSession = databaseService.getSession(sessionId);
+      if (!dbSession) {
+        return { success: false, error: 'Session not found' };
+      }
+      const targetPanel = resolveResumeTargetPanel(sessionId, panelId);
+      if (!targetPanel) {
+        return { success: false, error: 'No Claude panel for this session' };
+      }
+      if (resolvePanelSubstrate(targetPanel, dbSession) !== 'interactive') {
+        return { success: false, error: 'Panel is not backed by an interactive REPL' };
+      }
+      const claudePanelId = targetPanel.id;
+      // Already live — the REPL recovered (or was never actually dead) between
+      // the stall probe and this click. Nothing to do; a second spawn on a live
+      // panel would orphan the first.
+      if (interactiveCliManager.isPanelRunning(claudePanelId)) {
+        return { success: true };
+      }
+      assertAgentProviderAllowed('claude', 'restarting this terminal session');
+      const session = await sessionManager.getSession(sessionId);
+      if (!session) {
+        return { success: false, error: 'Session not found' };
+      }
+      const panelLaunchSettings = databaseService.getPanelSettings(claudePanelId);
+      const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
+      const panelFastMode = panelLaunchSettings?.fastMode === true;
+      const rawEffort = panelLaunchSettings?.reasoningEffort;
+      const panelReasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
+      // Seed the facade's runId→panelId translation BEFORE the spawn, exactly as
+      // the create-quick eager path and the resume handler do.
+      const gateRunId = dbSession.chat_run_id ?? dbSession.run_id;
+      if (gateRunId) {
+        registerLivePanel(gateRunId, claudePanelId);
+      }
+      console.log(`[IPC] Restarting interactive REPL for session ${sessionId} (panel ${claudePanelId})`);
+      // ⚠️ NEVER await startPanel — the interactive spawn promise resolves only
+      // when the REPL EXITS (persistent-session contract).
+      void interactiveCliManager
+        .startPanel(
+          claudePanelId,
+          sessionId,
+          session.worktreePath,
+          QUICK_PTY_BRIEFING,
+          session.permissionMode,
+          panelModel,
+          undefined, // effort — the ultracode card setting is a launch-time choice
+          panelFastMode,
+          undefined, // resumeSessionId — a restart is a FRESH conversation
+          panelReasoningEffort,
+        )
+        .catch((err: unknown) => {
+          console.error(`[IPC] Interactive restart spawn failed for session ${sessionId}:`, err);
+          reportEagerSpawnFailure(err, 'interactive', 'claude');
+        });
+      await sessionManager.updateSession(sessionId, { status: 'running' });
+      return { success: true };
+    } catch (error) {
+      console.error('[IPC] Failed to restart interactive session:', error);
+      // Pass a provider-disabled refusal through as user-authored copy (mirrors
+      // the resume handler) so the retry button can say WHY it refused.
+      const disabled = agentProviderDisabledMessage(error);
+      return { success: false, error: disabled ?? 'Failed to restart interactive session' };
+    }
+  });
+
   ipcMain.handle('sessions:get-or-create-main-repo', async (_event, projectId: number) => {
     try {
       console.log('[IPC] sessions:get-or-create-main-repo handler called with projectId:', projectId);

@@ -139,6 +139,13 @@ interface ElectronAPI {
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
     getInteractiveResumeState: (sessionId: string, panelId?: string) => Promise<IPCResponse<InteractiveResumeState>>;
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean) => Promise<IPCResponse<void>>;
+    /**
+     * Spawn a FRESH interactive REPL for a panel whose REPL is dead — the
+     * terminal's "Retry" action. Distinct from resumeInteractive, which requires
+     * a prior conversation on disk and refuses without one; this starts a new
+     * conversation in the same worktree. Handler: `sessions:restart-interactive`.
+     */
+    restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
     // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data

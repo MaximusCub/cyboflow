@@ -10,6 +10,9 @@ import { useSessionStore } from '../../../stores/sessionStore';
 import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
 import { ResumeSessionPrompt } from '../../cyboflow/ResumeSessionPrompt';
 import { useIsAgentProviderEnabled } from '../../../hooks/useAgentProviderAccess';
+import { useInteractiveTerminalHealth } from '../../../hooks/useInteractiveTerminalHealth';
+import { Button } from '../../ui/Button';
+import { AlertTriangle } from 'lucide-react';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { API } from '../../../utils/api';
@@ -190,6 +193,18 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
       cancelled = true;
     };
   }, [panel.sessionId, panel.id, interactiveRunId, showDemoTerminal, isCodexPtySession]);
+
+  // Dead-terminal detection + retry. Same enablement guard as the resume probe
+  // above — and Codex PTY is excluded for a hard reason: the probe asks Claude's
+  // interactiveCliManager whether the panel's process is alive, and it knows
+  // nothing about Codex panels, so every healthy Codex terminal would read as
+  // dead. `guardFirstInteraction` cases (demo) are excluded for the same reason
+  // their resume probe is: there is no real REPL to be alive.
+  const terminalHealth = useInteractiveTerminalHealth(
+    panel.sessionId,
+    panel.id,
+    interactiveRunId !== null && !showDemoTerminal && !isCodexPtySession,
+  );
 
   // The "Resuming…" hint is a transient cue shown while claude reopens the prior
   // conversation. Auto-clear it so it never sticks forever.
@@ -411,6 +426,53 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             data-testid="resume-restored-hint"
           >
             Resuming previous session — your conversation will reappear below.
+          </div>
+        )}
+        {/* Dead REPL with nothing to resume — the terminal will never paint, so
+            say so and offer a way back. Deliberately a floating card rather than
+            a full-surface scrim: the REPL can also die AFTER painting, and
+            blanking out the user's existing scrollback to show this would
+            destroy the very context they need to understand what happened.
+            Suppressed while the resume prompt owns the surface (resume beats
+            restart — a fresh start throws the prior conversation away). */}
+        {!showDemoTerminal && terminalHealth.stalled && !canOfferResume && (
+          <div
+            className="absolute left-1/2 top-1/2 z-10 w-[min(420px,90%)] -translate-x-1/2 -translate-y-1/2 border border-border-primary bg-surface-primary px-5 py-4 shadow-lg"
+            role="alert"
+            data-testid="terminal-stalled-notice"
+          >
+            <div className="flex items-center gap-1.5 text-status-error">
+              <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+              <span
+                className="font-semibold uppercase"
+                style={{ fontSize: '10px', letterSpacing: '0.18em' }}
+              >
+                Terminal not running
+              </span>
+            </div>
+            <p className="mt-2 text-text-secondary" style={{ fontSize: '11.5px', lineHeight: 1.5 }}>
+              {terminalHealth.worktreeMissing
+                ? "This session's worktree is no longer on disk, so its terminal can't be restarted. Dismiss the session to clean it up."
+                : "This session's terminal isn't running — it either failed to start or has exited. Restarting opens a new terminal in the same worktree."}
+            </p>
+            {terminalHealth.error !== null && (
+              <p className="mt-2 text-status-error" style={{ fontSize: '11.5px', lineHeight: 1.5 }}>
+                {terminalHealth.error}
+              </p>
+            )}
+            {!terminalHealth.worktreeMissing && (
+              <div className="mt-4 flex justify-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={terminalHealth.retrying}
+                  onClick={terminalHealth.retry}
+                  data-testid="terminal-stalled-retry"
+                >
+                  {terminalHealth.retrying ? 'Starting…' : 'Retry'}
+                </Button>
+              </div>
+            )}
           </div>
         )}
         {/* A failed resume must not leave a blank terminal and no explanation. */}

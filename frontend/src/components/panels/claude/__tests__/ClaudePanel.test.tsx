@@ -38,6 +38,22 @@ const mocks = vi.hoisted(() => {
   return { holder };
 });
 
+/** Mutable return value of the mocked useInteractiveTerminalHealth (reset per test). */
+const { terminalHealth, mockTerminalHealthRetry, mockTerminalHealthArgs } = vi.hoisted(() => {
+  const retry = vi.fn();
+  return {
+    terminalHealth: {
+      stalled: false,
+      worktreeMissing: false,
+      retrying: false,
+      error: null as string | null,
+      retry,
+    },
+    mockTerminalHealthRetry: retry,
+    mockTerminalHealthArgs: vi.fn(),
+  };
+});
+
 vi.mock('../../../../hooks/useClaudePanel', () => ({
   useClaudePanel: () => ({
     activeSession: mocks.holder.activeSession,
@@ -105,6 +121,16 @@ vi.mock('../../../cyboflow/InteractiveTerminalView', () => ({
       InteractiveTerminalView:{runId}:guard={String(guardFirstInteraction)}
     </div>
   ),
+}));
+
+// Dead-terminal detector — its own liveness/threshold logic is covered in
+// useInteractiveTerminalHealth.test.ts; here it is a controllable stub so the
+// panel's RENDER contract for the stalled state can be asserted directly.
+vi.mock('../../../../hooks/useInteractiveTerminalHealth', () => ({
+  useInteractiveTerminalHealth: (sessionId: string | null, panelId: string, enabled: boolean) => {
+    mockTerminalHealthArgs(sessionId, panelId, enabled);
+    return terminalHealth;
+  },
 }));
 
 vi.mock('../../../cyboflow/ResumeSessionPrompt', () => ({
@@ -312,6 +338,14 @@ function makeQuestion(overrides: Partial<Question> = {}): Question {
 beforeEach(() => {
   mocks.holder.activeSession = undefined;
   mocks.holder.messages = [];
+  Object.assign(terminalHealth, {
+    stalled: false,
+    worktreeMissing: false,
+    retrying: false,
+    error: null,
+  });
+  mockTerminalHealthRetry.mockReset();
+  mockTerminalHealthArgs.mockReset();
   useSessionStore.setState({ sessions: [], activeSessionId: null, activeMainRepoSession: null });
   usePendingSendStore.setState({ byHost: {} });
   useQuestionStore.setState({ queue: [], otherText: {} });
@@ -356,6 +390,65 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(composer).toHaveAttribute('data-pty-open', 'false');
     // Approvals stay mounted exactly as before.
     expect(screen.getByTestId('pending-approvals-for-run')).toHaveTextContent('run-q1');
+  });
+
+  it('a stalled terminal shows the retry card, and Retry restarts the REPL', () => {
+    terminalHealth.stalled = true;
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+    const notice = screen.getByTestId('terminal-stalled-notice');
+    expect(notice).toHaveTextContent('Terminal not running');
+    // The terminal itself stays mounted BEHIND the card — a REPL can die after
+    // painting, and blanking the scrollback would destroy the context that
+    // explains why.
+    expect(screen.getByTestId('interactive-terminal-view')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('terminal-stalled-retry'));
+    expect(mockTerminalHealthRetry).toHaveBeenCalledOnce();
+  });
+
+  it('offers no retry when the worktree is gone — a restart could only fail', () => {
+    terminalHealth.stalled = true;
+    terminalHealth.worktreeMissing = true;
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+    expect(screen.getByTestId('terminal-stalled-notice')).toHaveTextContent('no longer on disk');
+    expect(screen.queryByTestId('terminal-stalled-retry')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a refused restart and disables the button while one is in flight', () => {
+    terminalHealth.stalled = true;
+    terminalHealth.retrying = true;
+    terminalHealth.error = 'Claude is turned off in Settings';
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+    expect(screen.getByTestId('terminal-stalled-notice')).toHaveTextContent(
+      'Claude is turned off in Settings',
+    );
+    expect(screen.getByTestId('terminal-stalled-retry')).toBeDisabled();
+  });
+
+  it('never shows the retry card while a resume is on offer — resume beats restart', () => {
+    terminalHealth.stalled = true;
+    // Resumable: REPL down but the prior conversation survives on disk. Restart
+    // would throw that history away, so ResumeSessionPrompt owns this surface.
+    mockGetResumeState.mockResolvedValue({
+      success: true,
+      data: { replRunning: false, claudeSessionId: 'uuid-1', worktreeExists: true },
+    });
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+    return waitFor(() => {
+      expect(screen.getByTestId('resume-session-prompt')).toBeInTheDocument();
+      expect(screen.queryByTestId('terminal-stalled-notice')).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not enable the dead-terminal probe for a Codex PTY panel (wrong manager would read every healthy terminal as dead)', () => {
+    renderWithProvider(
+      makeSession({ substrate: 'interactive', runId: 'run-q1', agentRuntime: 'codex-pty' }),
+    );
+    expect(mockTerminalHealthArgs).toHaveBeenCalledWith('s1', 'panel-1', false);
   });
 
   it('Ctrl+G toggles the composer ptyOpen flag', () => {
