@@ -1,41 +1,83 @@
 /**
  * McpOrphanTripwire unit tests.
  *
- * These drive the tripwire through its injected `listProcesses`/`resolveScriptPath`
- * seams — no real `ps` or electron `app.isPackaged` — so the detection predicate
- * (script-path match AND ppid===1 AND age > gate), `parseEtime`'s three macOS
- * shapes, and the fail-soft / non-blocking interval behavior are asserted
- * deterministically.
+ * These drive the tripwire through its injected `listProcesses`/`resolveScriptPath`/
+ * `now` seams — no real `ps`, no electron `app.isPackaged`, no fake timers for the
+ * scan-level tests — so the detection predicate (script-path match, ppid===1,
+ * CONFIRMED ACROSS SCANS rather than age-gated), `parseEtime`'s three macOS shapes,
+ * and the fail-soft / non-blocking interval behavior are asserted deterministically.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   McpOrphanTripwire,
   parseEtime,
   parseMcpOrphanPsOutput,
-  MCP_ORPHAN_AGE_GATE_SECONDS,
   MCP_ORPHAN_SCAN_INTERVAL_MS,
+  MCP_ORPHAN_GRACE_MS,
+  MCP_ORPHAN_CONFIRM_DELAY_MS,
+  MCP_ORPHAN_START_TIME_TOLERANCE_SEC,
   type McpOrphanProcess,
 } from './mcpOrphanTripwire';
 import { PARENT_WATCHDOG_INTERVAL_MS } from '../orchestrator/mcpServer/parentWatchdog';
 
 const SCRIPT_PATH = '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js';
 
-/** Build a lister that returns a fixed process table. */
+/** An arbitrary but fixed epoch-ms starting point for the clock seam. */
+const START_MS = 1_700_000_000_000;
+
+/** Build a lister that returns a fixed process table on every call. */
 function fixedLister(rows: McpOrphanProcess[]): () => Promise<McpOrphanProcess[]> {
   return () => Promise.resolve(rows);
 }
 
-/** The command line a real orphaned cyboflowMcpServer would show in `ps`, at `etime`. */
+/**
+ * A lister whose rows can be swapped out between scans, to simulate a process
+ * table that changes over wall-clock time (a process aging, disappearing, or a
+ * pid being reused).
+ */
+function mutableLister(initial: McpOrphanProcess[]): {
+  listProcesses: () => Promise<McpOrphanProcess[]>;
+  setRows: (rows: McpOrphanProcess[]) => void;
+} {
+  let rows = initial;
+  return {
+    listProcesses: () => Promise.resolve(rows),
+    setRows: (next) => {
+      rows = next;
+    },
+  };
+}
+
+/**
+ * A no-op structured logger satisfying the now-required `logger` option.
+ * Deliberately not type-annotated as `LoggerLike` here — keeping the inferred
+ * vi.fn() return type lets tests that assert on call history (`.mock.calls`)
+ * do so without a cast.
+ */
+function fakeLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
+/** The injectable `now` seam: an explicit clock, advanced by the test, no fake timers. */
+function makeClock(startMs: number): { now: () => number; advance: (ms: number) => void } {
+  let currentMs = startMs;
+  return {
+    now: () => currentMs,
+    advance: (ms: number) => {
+      currentMs += ms;
+    },
+  };
+}
+
+/** The command line a real orphaned cyboflowMcpServer would show in `ps`. */
 function orphanCommand(): string {
   return `/usr/local/bin/node ${SCRIPT_PATH}`;
 }
 
-/** Age gate is derived from the watchdog interval — assert the derivation itself. */
-describe('MCP_ORPHAN_AGE_GATE_SECONDS', () => {
-  it('is exactly 2x PARENT_WATCHDOG_INTERVAL_MS, in seconds', () => {
-    expect(MCP_ORPHAN_AGE_GATE_SECONDS).toBe((PARENT_WATCHDOG_INTERVAL_MS * 2) / 1000);
-  });
-});
+/** Build an orphaned-process row: matching script path, ppid 1, at the given age. */
+function orphanRow(pid: number, etimeSeconds: number): McpOrphanProcess {
+  return { pid, ppid: 1, etimeSeconds, command: orphanCommand() };
+}
 
 describe('parseEtime', () => {
   it('parses mm:ss', () => {
@@ -102,100 +144,239 @@ describe('parseMcpOrphanPsOutput', () => {
   });
 });
 
-describe('McpOrphanTripwire.scan — detection predicate', () => {
-  const OLD_AGE = MCP_ORPHAN_AGE_GATE_SECONDS + 60;
-  const YOUNG_AGE = MCP_ORPHAN_AGE_GATE_SECONDS - 60;
+describe('MCP_ORPHAN_GRACE_MS / MCP_ORPHAN_CONFIRM_DELAY_MS', () => {
+  it('the grace window is exactly 2x PARENT_WATCHDOG_INTERVAL_MS', () => {
+    expect(MCP_ORPHAN_GRACE_MS).toBe(PARENT_WATCHDOG_INTERVAL_MS * 2);
+  });
 
-  it('counts a genuine orphan: matching script path, ppid===1, age > gate', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 1, etimeSeconds: OLD_AGE, command: orphanCommand() },
-    ];
+  it('the confirm delay is past the grace window, so a scheduled rescan can always confirm', () => {
+    expect(MCP_ORPHAN_CONFIRM_DELAY_MS).toBeGreaterThan(MCP_ORPHAN_GRACE_MS);
+  });
+});
+
+describe('McpOrphanTripwire.scan — confirmation across scans', () => {
+  it('a) FIRST SIGHTING NEVER COUNTS', async () => {
+    const clock = makeClock(START_MS);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: fixedLister([orphanRow(500, 600)]),
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
+
+    await expect(tripwire.scan()).resolves.toBe(0);
+  });
+
+  it('b) CONFIRMED ON A LATER SCAN, at least MCP_ORPHAN_GRACE_MS after the first sighting', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(500, 600)]);
+    const tripwire = new McpOrphanTripwire({
+      listProcesses: lister.listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
+    });
+
+    await expect(tripwire.scan()).resolves.toBe(0); // first sighting
+
+    const elapsedMs = MCP_ORPHAN_GRACE_MS;
+    clock.advance(elapsedMs);
+    // Still alive: a real `ps` would report its age grown by the same wall time.
+    lister.setRows([orphanRow(500, 600 + elapsedMs / 1000)]);
 
     await expect(tripwire.scan()).resolves.toBe(1);
   });
 
-  it('does NOT count a matching command whose ppid is not 1 (spawner still alive)', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 4242, etimeSeconds: OLD_AGE, command: orphanCommand() },
-    ];
+  it('c) NOT CONFIRMED when the second scan is short of the grace window', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(500, 600)]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
+
+    await expect(tripwire.scan()).resolves.toBe(0);
+
+    const elapsedMs = MCP_ORPHAN_GRACE_MS - 1000;
+    clock.advance(elapsedMs);
+    lister.setRows([orphanRow(500, 600 + elapsedMs / 1000)]);
 
     await expect(tripwire.scan()).resolves.toBe(0);
   });
 
-  it('does NOT count a too-young orphan (within the watchdog reap window)', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 1, etimeSeconds: YOUNG_AGE, command: orphanCommand() },
-    ];
+  it('d) REGRESSION GUARD: a long-lived process that JUST became orphaned is not counted instantly', async () => {
+    // Under the old age-gate semantics (etime > gate), a 3-hour-old process
+    // sailed straight through on its very first sighting — exactly the false
+    // alarm confirmation-across-scans replaced. A second scan only ~1s later
+    // must still read 0.
+    const clock = makeClock(START_MS);
+    const threeHours = 3 * 3600;
+    const lister = mutableLister([orphanRow(500, threeHours)]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
+
+    await expect(tripwire.scan()).resolves.toBe(0);
+
+    clock.advance(1000);
+    lister.setRows([orphanRow(500, threeHours + 1)]);
 
     await expect(tripwire.scan()).resolves.toBe(0);
   });
 
-  it('does NOT count a process exactly AT the age gate (strictly greater-than)', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 1, etimeSeconds: MCP_ORPHAN_AGE_GATE_SECONDS, command: orphanCommand() },
-    ];
+  it('e) DISAPPEARS BEFORE CONFIRMATION (healthy watchdog case) is forgotten, not fast-tracked on reappearance', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(500, 600)]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
 
+    await expect(tripwire.scan()).resolves.toBe(0); // first sighting
+
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([]); // the watchdog reaped it before confirmation
+    await expect(tripwire.scan()).resolves.toBe(0);
+
+    // A NEW process later reuses the pid. If the old sighting had survived,
+    // this would wrongly confirm instantly — it must start over instead.
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([orphanRow(500, 30)]);
     await expect(tripwire.scan()).resolves.toBe(0);
   });
 
-  it('does NOT count a command outside this install\'s resolved script path', async () => {
-    const rows: McpOrphanProcess[] = [
-      {
-        pid: 500,
-        ppid: 1,
-        etimeSeconds: OLD_AGE,
-        // A different install's MCP server, or an unrelated node process.
-        command: '/usr/local/bin/node /some/other/install/cyboflowMcpServer.js',
-      },
-      { pid: 501, ppid: 1, etimeSeconds: OLD_AGE, command: '/usr/local/bin/node --eval "1"' },
-    ];
+  it('f) PID REUSE GUARD: a new process on a reused pid does not inherit the old confirmation clock', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(4242, 600)]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
+    });
+
+    await expect(tripwire.scan()).resolves.toBe(0); // first sighting of pid 4242
+
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    // Same pid, but its derived start time is nowhere near the remembered
+    // one (a freshly-started process, not the original aged by the grace
+    // window) — well beyond MCP_ORPHAN_START_TIME_TOLERANCE_SEC.
+    lister.setRows([orphanRow(4242, 10)]);
+    await expect(tripwire.scan()).resolves.toBe(0); // treated as a new sighting, not a confirmation
+
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([orphanRow(4242, 10 + MCP_ORPHAN_GRACE_MS / 1000)]);
+    await expect(tripwire.scan()).resolves.toBe(1); // confirms on its own clock
+  });
+
+  it('g) START-TIME JITTER within tolerance still confirms', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(500, 600)]);
+    const tripwire = new McpOrphanTripwire({
+      listProcesses: lister.listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
 
     await expect(tripwire.scan()).resolves.toBe(0);
+
+    const elapsedMs = MCP_ORPHAN_GRACE_MS;
+    clock.advance(elapsedMs);
+    // A few seconds of jitter versus wall time (etime's 1s granularity, plus
+    // non-simultaneous clock reads) — still comfortably inside tolerance.
+    const jitterSec = MCP_ORPHAN_START_TIME_TOLERANCE_SEC - 2;
+    lister.setRows([orphanRow(500, 600 + elapsedMs / 1000 - jitterSec)]);
+
+    await expect(tripwire.scan()).resolves.toBe(1);
   });
 
-  it('does NOT count a row with an unparseable age (never guesses)', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 1, etimeSeconds: null, command: orphanCommand() },
-    ];
+  it('h) does NOT count a matching command whose ppid is not 1, across repeated scans', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([{ pid: 500, ppid: 4242, etimeSeconds: 600, command: orphanCommand() }]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
 
     await expect(tripwire.scan()).resolves.toBe(0);
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([
+      { pid: 500, ppid: 4242, etimeSeconds: 600 + MCP_ORPHAN_GRACE_MS / 1000, command: orphanCommand() },
+    ]);
+    await expect(tripwire.scan()).resolves.toBe(0);
   });
 
-  it('counts multiple genuine orphans and ignores non-matching rows in the same scan', async () => {
-    const rows: McpOrphanProcess[] = [
-      { pid: 500, ppid: 1, etimeSeconds: OLD_AGE, command: orphanCommand() },
-      { pid: 501, ppid: 1, etimeSeconds: OLD_AGE, command: orphanCommand() },
-      { pid: 502, ppid: 4242, etimeSeconds: OLD_AGE, command: orphanCommand() }, // spawner alive
-      { pid: 503, ppid: 1, etimeSeconds: YOUNG_AGE, command: orphanCommand() }, // too young
-    ];
+  it("h) does NOT count a command outside this install's resolved script path, across repeated scans", async () => {
+    const clock = makeClock(START_MS);
+    const otherInstallCommand = '/usr/local/bin/node /some/other/install/cyboflowMcpServer.js';
+    const lister = mutableLister([{ pid: 500, ppid: 1, etimeSeconds: 600, command: otherInstallCommand }]);
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister(rows),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
     });
+
+    await expect(tripwire.scan()).resolves.toBe(0);
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([
+      { pid: 500, ppid: 1, etimeSeconds: 600 + MCP_ORPHAN_GRACE_MS / 1000, command: otherInstallCommand },
+    ]);
+    await expect(tripwire.scan()).resolves.toBe(0);
+  });
+
+  it('h) does NOT count a row with an unparseable age, and never remembers it', async () => {
+    const clock = makeClock(START_MS);
+    const tripwire = new McpOrphanTripwire({
+      listProcesses: fixedLister([{ pid: 500, ppid: 1, etimeSeconds: null, command: orphanCommand() }]),
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
+    });
+
+    await expect(tripwire.scan()).resolves.toBe(0);
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    // Still unparseable on the second scan — if it had been remembered
+    // despite the null etime, this would be indistinguishable from a
+    // confirmation.
+    await expect(tripwire.scan()).resolves.toBe(0);
+  });
+
+  it('i) MULTIPLE GENUINE ORPHANS confirm together; non-matching rows in the same scan are ignored', async () => {
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([
+      orphanRow(500, 600),
+      orphanRow(501, 600),
+      { pid: 502, ppid: 4242, etimeSeconds: 600, command: orphanCommand() }, // spawner alive
+      { pid: 503, ppid: 1, etimeSeconds: 600, command: '/usr/local/bin/node --eval "1"' }, // unrelated
+    ]);
+    const tripwire = new McpOrphanTripwire({
+      listProcesses: lister.listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+      now: clock.now,
+    });
+
+    await expect(tripwire.scan()).resolves.toBe(0); // first sighting of both candidates
+
+    const elapsedMs = MCP_ORPHAN_GRACE_MS;
+    clock.advance(elapsedMs);
+    lister.setRows([
+      orphanRow(500, 600 + elapsedMs / 1000),
+      orphanRow(501, 600 + elapsedMs / 1000),
+      { pid: 502, ppid: 4242, etimeSeconds: 600 + elapsedMs / 1000, command: orphanCommand() },
+      { pid: 503, ppid: 1, etimeSeconds: 600 + elapsedMs / 1000, command: '/usr/local/bin/node --eval "1"' },
+    ]);
 
     await expect(tripwire.scan()).resolves.toBe(2);
   });
@@ -206,6 +387,7 @@ describe('McpOrphanTripwire fail-soft', () => {
     const tripwire = new McpOrphanTripwire({
       listProcesses: () => Promise.reject(new Error('ps blew up')),
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
     });
 
     await expect(tripwire.scan()).resolves.toBe(0);
@@ -213,33 +395,37 @@ describe('McpOrphanTripwire fail-soft', () => {
 
   it('does not throw and returns 0 when resolving the script path fails', async () => {
     const tripwire = new McpOrphanTripwire({
-      listProcesses: fixedLister([
-        { pid: 500, ppid: 1, etimeSeconds: MCP_ORPHAN_AGE_GATE_SECONDS + 1, command: orphanCommand() },
-      ]),
+      listProcesses: fixedLister([orphanRow(500, 600)]),
       resolveScriptPath: () => {
         throw new Error('electron app not ready');
       },
+      logger: fakeLogger(),
     });
 
     await expect(tripwire.scan()).resolves.toBe(0);
   });
 
   it('logs a warning only when count > 0, and debug when count === 0', async () => {
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const logger = fakeLogger();
 
     const quiet = new McpOrphanTripwire({ listProcesses: fixedLister([]), resolveScriptPath: () => SCRIPT_PATH, logger });
     await quiet.scan();
     expect(logger.warn).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalled();
 
+    const clock = makeClock(START_MS);
+    const lister = mutableLister([orphanRow(500, 600)]);
     const loud = new McpOrphanTripwire({
-      listProcesses: fixedLister([
-        { pid: 500, ppid: 1, etimeSeconds: MCP_ORPHAN_AGE_GATE_SECONDS + 1, command: orphanCommand() },
-      ]),
+      listProcesses: lister.listProcesses,
       resolveScriptPath: () => SCRIPT_PATH,
       logger,
+      now: clock.now,
     });
-    await loud.scan();
+    await loud.scan(); // first sighting — still 0, still debug
+    clock.advance(MCP_ORPHAN_GRACE_MS);
+    lister.setRows([orphanRow(500, 600 + MCP_ORPHAN_GRACE_MS / 1000)]);
+    await loud.scan(); // confirmed
+
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toMatch(/orphaned/i);
   });
@@ -253,7 +439,11 @@ describe('McpOrphanTripwire.start/stop', () => {
   it('scans immediately on start, then again on the hourly interval', async () => {
     vi.useFakeTimers();
     const listProcesses = vi.fn().mockResolvedValue([]);
-    const tripwire = new McpOrphanTripwire({ listProcesses, resolveScriptPath: () => SCRIPT_PATH });
+    const tripwire = new McpOrphanTripwire({
+      listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+    });
 
     tripwire.start();
     await vi.waitFor(() => expect(listProcesses).toHaveBeenCalledTimes(1));
@@ -267,7 +457,11 @@ describe('McpOrphanTripwire.start/stop', () => {
   it('is idempotent: a second start() does not double the interval', async () => {
     vi.useFakeTimers();
     const listProcesses = vi.fn().mockResolvedValue([]);
-    const tripwire = new McpOrphanTripwire({ listProcesses, resolveScriptPath: () => SCRIPT_PATH });
+    const tripwire = new McpOrphanTripwire({
+      listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+    });
 
     tripwire.start();
     await vi.waitFor(() => expect(listProcesses).toHaveBeenCalledTimes(1));
@@ -283,7 +477,11 @@ describe('McpOrphanTripwire.start/stop', () => {
   it('stop() clears the interval and is idempotent', async () => {
     vi.useFakeTimers();
     const listProcesses = vi.fn().mockResolvedValue([]);
-    const tripwire = new McpOrphanTripwire({ listProcesses, resolveScriptPath: () => SCRIPT_PATH });
+    const tripwire = new McpOrphanTripwire({
+      listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+    });
 
     tripwire.start();
     await vi.waitFor(() => expect(listProcesses).toHaveBeenCalledTimes(1));
@@ -293,6 +491,27 @@ describe('McpOrphanTripwire.start/stop', () => {
 
     await vi.advanceTimersByTimeAsync(MCP_ORPHAN_SCAN_INTERVAL_MS * 3);
     expect(listProcesses).toHaveBeenCalledTimes(1); // no further scans after stop
+  });
+
+  it('stop() also cancels a pending confirmation rescan', async () => {
+    vi.useFakeTimers();
+    // A first sighting (an unconfirmed candidate) arms a one-shot rescan at
+    // MCP_ORPHAN_CONFIRM_DELAY_MS, independent of the hourly interval and of
+    // start()/stop() ever having been called.
+    const listProcesses = vi.fn().mockResolvedValue([orphanRow(500, 600)]);
+    const tripwire = new McpOrphanTripwire({
+      listProcesses,
+      resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
+    });
+
+    await tripwire.scan();
+    expect(listProcesses).toHaveBeenCalledTimes(1);
+
+    tripwire.stop();
+
+    await vi.advanceTimersByTimeAsync(MCP_ORPHAN_CONFIRM_DELAY_MS * 2);
+    expect(listProcesses).toHaveBeenCalledTimes(1); // the armed rescan never fired
   });
 
   it('unref()s the interval so it never holds the event loop open', () => {
@@ -311,6 +530,7 @@ describe('McpOrphanTripwire.start/stop', () => {
     const tripwire = new McpOrphanTripwire({
       listProcesses: () => Promise.resolve([]),
       resolveScriptPath: () => SCRIPT_PATH,
+      logger: fakeLogger(),
     });
     tripwire.start();
     expect(unref).toHaveBeenCalledTimes(1);

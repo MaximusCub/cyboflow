@@ -486,10 +486,16 @@ const vitestOrphanReaper = new VitestOrphanReaper();
 // see parentWatchdog.ts) for orphaned cyboflowMcpServer subprocesses. Has NO
 // kill authority — it exists solely to prove the Phase 1 ppid-watchdog fix is
 // still working, since a CLI-spawned server's own stderr is unreachable once
-// its parent is dead. Module-level so the before-quit handler can stop() the
-// same instance the boot sweep started(); stateless otherwise (ps only), so
-// it is safe to construct at module load.
-const mcpOrphanTripwire = new McpOrphanTripwire();
+// its parent is dead.
+//
+// Null until boot wires it, like trackerSyncService below: its entire output is
+// log lines, so it MUST be constructed with the real application logger, and
+// that does not exist at module load. (Constructing it here with no logger
+// silently produced a tripwire that observed correctly and reported to nobody —
+// a verification channel verifying nothing, which is the exact failure it is
+// meant to catch elsewhere. The logger is now a required constructor arg so
+// that instance no longer type-checks.)
+let mcpOrphanTripwire: McpOrphanTripwire | null = null;
 
 // Issue-tracker sync loop — Linear/Plane (docs/proposals/tracker-sync-integration.md).
 // Module-level so the before-quit handler can stop it; constructed + started in
@@ -830,10 +836,13 @@ function runDeferredStartupWork(): void {
   vitestOrphanReaper.start();
 
   // Observe-only tripwire for orphaned cyboflowMcpServer subprocesses (Phase 3
-  // of the spawner-death fix — see McpOrphanTripwire's docstring for why this
-  // must be periodic + age-gated rather than a one-shot boot scan). start() is
-  // idempotent and fires one scan immediately, then hourly; its own scan() is
-  // fail-soft, so no .catch() is needed here.
+  // of the spawner-death fix — see McpOrphanTripwire's docstring for why this is
+  // periodic, and why it confirms across scans rather than gating on age).
+  // Constructed here rather than at module load because it reports exclusively
+  // through the logger, which does not exist until boot. start() is idempotent
+  // and fires one scan immediately, then hourly; scan() is fail-soft, so no
+  // .catch() is needed.
+  mcpOrphanTripwire = new McpOrphanTripwire({ logger: makeLoggerLike(logger) });
   mcpOrphanTripwire.start();
 
   // Design Mode v1 boot recovery (design-mode.md "Design feedback v1"): re-drive
@@ -5394,7 +5403,7 @@ app.on('before-quit', async (event) => {
   // Stop the MCP-orphan tripwire's hourly scan. Its interval is already
   // unref'd (never holds the event loop open on its own), so this is cleanup
   // for tidiness rather than a shutdown-correctness requirement.
-  mcpOrphanTripwire.stop();
+  mcpOrphanTripwire?.stop();
 
   // Stop orchestrator (drains run queues)
   if (orchestrator) {

@@ -1,6 +1,12 @@
 # PLAN: orphaned `cyboflowMcpServer` processes — root cause + self-termination fix
 
-> **Revision 4.** Rev 1 proposed an external `ps` reaper and called the root cause unknown.
+> **Revision 5 — IMPLEMENTED.** Shipped across five commits (`65dd4fd4`…`59902d1a`) plus the
+> round-4 review fixes. Two defects found after implementation are recorded inline: the age gate
+> measured the wrong quantity (§7), and the production tripwire was constructed without a logger,
+> so it observed correctly and reported to nobody — its `logger` is now a required constructor
+> argument, making that instance impossible to build.
+>
+> Rev 1 proposed an external `ps` reaper and called the root cause unknown.
 > Rev 2 established the root cause from source and moved the fix inside the server. Rev 3
 > fixed rev 2's coverage and observability defects. Rev 4 fixes rev 3's own defects, found in
 > adversarial review round 3 — most importantly a verification channel that could not observe
@@ -248,11 +254,29 @@ in observability costume.
 **The scan is periodic.** An `unref()`'d hourly interval plus one boot scan. It kills nothing,
 so every safety objection to periodic scanning is inapplicable; the cost is one `ps` per hour.
 
-**Age gate — required, not optional.** A periodic scan can sample an orphan during the ≤60 s
-window in which Phase 1's watchdog is legitimately about to kill it, producing a false alarm
-that would discredit the only signal we have. So the scan reads `etime` and counts a process
-only once its age **exceeds twice the watchdog interval** (120 s). This is what makes "non-zero
-⇒ the fix is broken" a sound inference rather than a probabilistic one.
+**A grace window is required, not optional.** A periodic scan can sample an orphan during the
+≤60 s window in which Phase 1's watchdog is legitimately about to kill it, producing a false
+alarm that would discredit the only signal we have.
+
+**[rev4 error] — the age gate measured the wrong quantity.** Rev 4 specified this as "count a
+process only once its `etime` exceeds twice the watchdog interval". Codex caught it in round 4:
+`etime` is a process's **total lifetime**, not how long it has been orphaned. A server that ran
+healthily for three hours and lost its spawner one second before a scan has an `etime` of three
+hours, clears any age threshold instantly, and is counted — *precisely* the false alarm the gate
+was introduced to prevent. The gate excluded nothing except short-lived servers, which are not
+the population at risk.
+
+What actually separates the two cases is **duration spent orphaned**, which no single `ps` row
+carries. So the implementation requires a process to be observed at `ppid === 1` on **two scans
+at least 120 s apart**. A watchdog-doomed orphan dies within ~60 s and never reaches the second
+sighting; a genuine leak persists forever and always does. `etime` is still read, but only to
+derive a start time that identifies a process across scans (guarding against PID reuse). A
+confirmation rescan is armed when a first sighting appears, so a boot-stranded orphan surfaces
+in minutes rather than at the next hourly tick.
+
+This is the **third** time in this document that a verification mechanism turned out not to
+measure what it claimed — after rev 2's unobservable stderr and rev 3's boot-only scan. The
+recurring error is asserting that a signal exists without tracing the path it travels.
 
 *Verified:* macOS `ps` supports `etime` (`[[dd-]hh:]mm:ss`) but **not** `etimes`. An unknown
 keyword makes `ps` print `ps: etimes: keyword not found` to stderr, **still exit 0, and silently
