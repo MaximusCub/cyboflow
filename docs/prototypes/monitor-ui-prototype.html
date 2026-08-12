@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Monitor — Cyboflow</title>
+<style>
+/* ============================================================================
+   DESIGN TOKENS — lifted verbatim from frontend/src/styles/tokens/*.css
+   Paper theme lives on bare :root (app default). Dark theme is applied under
+   prefers-color-scheme: dark (the static, JS-free equivalent of the .dark class
+   the app toggles). Switchable rounded radii restored in dark, matching
+   effects.css `:root.dark, :root.light`.
+   ========================================================================== */
+:root {
+  /* ── Primitives (paper / Protoflow warm-paper + terracotta) ── */
+  --paper:#f5f1e8; --paper-2:#ebe4d2; --paper-3:#efeadc; --paper-4:#e1d8c0; --paper-white:#ffffff;
+  --ink:#1a1815; --ink-2:#6a5e44; --ink-3:#9c8e6c; --line:#d8cfb8; --line-2:#e6dec7;
+  --terracotta:#c96442; --terracotta-rgb:201 100 66; --terracotta-deep:#a8543a;
+  --green-accent:#2d8a5b; --amber-accent:#d4a72c; --warm-red:#b5482f;
+  --human:#d99a3d;
+  --color-phase-plan:#3b6dd6; --color-phase-compound:#8b5cf6;
+
+  /* gray/blue primitives (used by dark override) */
+  --gray-50:rgb(249 250 251); --gray-100:rgb(243 244 246); --gray-200:rgb(229 231 235);
+  --gray-300:rgb(209 213 219); --gray-400:rgb(156 163 175); --gray-500:rgb(107 114 128);
+  --gray-600:rgb(75 85 99); --gray-700:rgb(55 65 81); --gray-750:rgb(42 50 63);
+  --gray-800:rgb(31 41 55); --gray-850:rgb(24 32 44); --gray-900:rgb(17 24 39);
+  --blue-400:rgb(96 165 250); --blue-500:rgb(59 130 246); --blue-600:rgb(37 99 235); --blue-700:rgb(29 78 216);
+  --green-500:rgb(34 197 94); --amber-500:rgb(245 158 11); --red-500:rgb(239 68 68); --red-600:rgb(220 38 38);
+
+  /* ── Semantic tokens (paper) ── */
+  --color-bg-primary:var(--paper); --color-bg-secondary:var(--paper-2); --color-bg-tertiary:var(--paper-3);
+  --color-bg-hover:var(--paper-2); --color-bg-active:var(--line-2);
+  --color-surface-primary:var(--paper-white); --color-surface-secondary:var(--paper-2);
+  --color-surface-sunken:var(--paper-4);
+  --color-text-primary:var(--ink); --color-text-secondary:var(--ink-2); --color-text-tertiary:var(--ink-3);
+  --color-text-muted:var(--ink-3);
+  --color-border-primary:var(--line); --color-border-secondary:var(--line); --color-border-tertiary:var(--line-2);
+  --color-border-hover:var(--ink); --color-border-emphasized:var(--ink);
+  --color-interactive-primary:var(--terracotta); --color-interactive-hover:var(--terracotta-deep);
+  --color-interactive-text:var(--terracotta); --color-interactive-rgb:var(--terracotta-rgb);
+  --color-text-on-interactive:var(--paper);
+  --color-status-success:var(--green-accent); --color-status-warning:var(--amber-accent);
+  --color-status-error:var(--warm-red); --color-status-info:var(--color-phase-plan);
+  --color-status-neutral:var(--ink-3);
+  --color-card-bg:var(--paper-white); --color-card-border:var(--line); --color-card-nested-bg:var(--paper-2);
+  --color-human:var(--human);
+  --color-scrollbar-thumb:var(--line); --color-scrollbar-track:var(--paper-2);
+
+  /* Typography (mono everywhere) */
+  --font-family-mono:'JetBrains Mono','SF Mono',Monaco,'Cascadia Code','Roboto Mono',Consolas,'Courier New',monospace;
+
+  /* Radii — paper is sharp; badges are pills */
+  --card-radius:0; --button-radius:0; --input-radius:0; --badge-radius:9999px;
+  --shadow-sm:0 1px 3px 0 rgba(0,0,0,.1),0 1px 2px -1px rgba(0,0,0,.1);
+  --shadow-dropdown-elevated:0 8px 25px rgba(0,0,0,.15),0 3px 10px rgba(0,0,0,.1);
+}
+
+/* ── Dark theme (static equivalent of the app's .dark class) ── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-primary:var(--gray-900); --color-bg-secondary:var(--gray-800); --color-bg-tertiary:var(--gray-700);
+    --color-bg-hover:var(--gray-700); --color-bg-active:var(--gray-600);
+    --color-surface-primary:var(--gray-800); --color-surface-secondary:var(--gray-700);
+    --color-surface-sunken:var(--gray-900);
+    --color-text-primary:rgb(255 255 255); --color-text-secondary:var(--gray-100);
+    --color-text-tertiary:var(--gray-300); --color-text-muted:var(--gray-400);
+    --color-border-primary:var(--gray-750); --color-border-secondary:var(--gray-700);
+    --color-border-tertiary:var(--gray-800); --color-border-hover:var(--gray-600); --color-border-emphasized:var(--gray-50);
+    --color-interactive-primary:var(--blue-600); --color-interactive-hover:var(--blue-700);
+    --color-interactive-text:var(--blue-400); --color-interactive-rgb:37 99 235;
+    --color-text-on-interactive:rgb(255 255 255);
+    --color-status-success:var(--green-500); --color-status-warning:var(--amber-500);
+    --color-status-error:var(--red-500); --color-status-info:var(--blue-500); --color-status-neutral:var(--gray-400);
+    --color-card-bg:var(--gray-800); --color-card-border:var(--gray-750); --color-card-nested-bg:var(--gray-700);
+    --color-scrollbar-thumb:var(--gray-600); --color-scrollbar-track:var(--gray-800);
+    /* switchable themes restore rounded radii */
+    --card-radius:.5rem; --button-radius:.375rem; --input-radius:.375rem;
+  }
+}
+
+/* ============================================================================
+   COMPONENT LAYER — plain CSS bound to the tokens above (Tailwind utilities in
+   the real app are 1:1 aliases of these vars).
+   ========================================================================== */
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;}
+body{
+  font-family:var(--font-family-mono);
+  background:var(--color-bg-primary);
+  color:var(--color-text-primary);
+  font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+.eyebrow{text-transform:uppercase;letter-spacing:.16em;font-size:.625rem;line-height:1.2;font-weight:700;color:var(--color-text-tertiary);}
+
+/* App shell */
+.app-shell{display:flex;flex-direction:column;height:100vh;overflow:hidden;background:var(--color-bg-primary);}
+
+/* View header (matches InsightsView idiom) */
+.mon-header{
+  flex-shrink:0;border-bottom:1px solid var(--color-border-primary);
+  background:var(--color-bg-secondary);padding:16px 28px;
+  display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+}
+.mon-header h1{margin:4px 0 0;font-size:22px;font-weight:700;letter-spacing:-.01em;color:var(--color-text-primary);}
+.mon-header-actions{display:flex;align-items:center;gap:10px;flex-shrink:0;padding-top:4px;}
+.refreshed{font-size:11px;color:var(--color-text-tertiary);}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--color-border-primary);
+  background:var(--color-surface-primary);color:var(--color-text-secondary);
+  font-family:inherit;font-size:11px;font-weight:600;padding:5px 10px;border-radius:var(--button-radius);
+  cursor:pointer;transition:all .15s;white-space:nowrap;}
+.btn:hover{border-color:var(--color-border-emphasized);color:var(--color-text-primary);}
+.btn-primary{border-color:rgba(var(--color-interactive-rgb),.5);color:var(--color-interactive-text);}
+.btn-primary:hover{background:var(--color-interactive-primary);color:var(--color-text-on-interactive);border-color:transparent;}
+.btn-danger{border-color:color-mix(in srgb,var(--color-status-error) 45%,transparent);color:var(--color-status-error);}
+.btn-danger:hover{background:var(--color-status-error);color:#fff;border-color:transparent;}
+.btn-icon{padding:4px 6px;}
+.btn svg{width:13px;height:13px;}
+
+/* Toolbar strip: stat tiles + global actions */
+.toolbar{flex-shrink:0;border-bottom:1px solid var(--color-border-primary);background:var(--color-bg-primary);
+  padding:14px 28px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+.tiles{display:flex;gap:10px;flex-wrap:wrap;}
+.tile{border:1px solid var(--color-border-primary);background:var(--color-surface-primary);
+  border-radius:var(--card-radius);padding:8px 14px;min-width:112px;}
+.tile .k{font-size:22px;font-weight:700;line-height:1.1;color:var(--color-text-primary);}
+.tile .l{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--color-text-tertiary);margin-top:2px;}
+.tile.warn{border-color:color-mix(in srgb,var(--color-status-warning) 45%,transparent);
+  background:color-mix(in srgb,var(--color-status-warning) 8%,var(--color-surface-primary));}
+.tile.warn .k{color:var(--color-status-warning);}
+.toolbar-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
+.select{font-family:inherit;font-size:11px;font-weight:600;color:var(--color-text-secondary);
+  background:var(--color-surface-primary);border:1px solid var(--color-border-primary);
+  border-radius:var(--input-radius);padding:5px 8px;cursor:pointer;}
+
+/* Scroll body */
+.scroll{flex:1;overflow-y:auto;padding:20px 28px 40px;}
+.scroll::-webkit-scrollbar{width:10px;}
+.scroll::-webkit-scrollbar-track{background:var(--color-scrollbar-track);}
+.scroll::-webkit-scrollbar-thumb{background:var(--color-scrollbar-thumb);border-radius:9999px;}
+.wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:32px;}
+
+/* Section */
+.section > .section-head{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;}
+.section-head .count{font-size:11px;color:var(--color-text-tertiary);}
+.section-sub{font-size:11px;color:var(--color-text-tertiary);margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0;}
+
+/* Ports grid */
+.ports{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;}
+.port-card{border:1px solid var(--color-card-border);background:var(--color-card-bg);
+  border-radius:var(--card-radius);padding:12px 14px;box-shadow:var(--shadow-sm);}
+.port-card.warn{border-color:color-mix(in srgb,var(--color-status-warning) 45%,transparent);}
+.port-card.error{border-color:color-mix(in srgb,var(--color-status-error) 45%,transparent);}
+.port-top{display:flex;align-items:center;gap:8px;}
+.port-name{font-size:13px;font-weight:700;color:var(--color-text-primary);}
+.port-desc{font-size:11px;color:var(--color-text-tertiary);margin-top:6px;line-height:1.45;}
+.port-meta{font-size:11px;color:var(--color-text-secondary);margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.mono-dim{color:var(--color-text-tertiary);}
+
+/* Status dot */
+.dot{width:8px;height:8px;border-radius:9999px;flex-shrink:0;display:inline-block;}
+.dot.ok{background:var(--color-status-success);}
+.dot.warn{background:var(--color-status-warning);}
+.dot.err{background:var(--color-status-error);}
+.dot.info{background:var(--color-status-info);}
+.dot.run{background:var(--color-interactive-primary);}
+.dot.idle{background:var(--color-status-neutral);}
+.dot.pulse{position:relative;}
+.dot.pulse::after{content:"";position:absolute;inset:0;border-radius:9999px;background:inherit;
+  opacity:.6;animation:ping 1.4s cubic-bezier(0,0,.2,1) infinite;}
+@keyframes ping{75%,100%{transform:scale(2.2);opacity:0;}}
+@media (prefers-reduced-motion:reduce){.dot.pulse::after{animation:none;}}
+
+/* Badges — .eyebrow pill triad recipe from markers.tsx */
+.badge{display:inline-flex;align-items:center;gap:4px;text-transform:uppercase;letter-spacing:.08em;
+  font-size:9.5px;font-weight:700;line-height:1;padding:3px 7px;border-radius:9999px;border:1px solid var(--color-border-primary);
+  background:var(--color-bg-tertiary);color:var(--color-text-secondary);white-space:nowrap;}
+.badge svg{width:10px;height:10px;}
+.badge.info{border-color:color-mix(in srgb,var(--color-status-info) 40%,transparent);
+  background:color-mix(in srgb,var(--color-status-info) 10%,transparent);color:var(--color-status-info);}
+.badge.warn{border-color:color-mix(in srgb,var(--color-status-warning) 40%,transparent);
+  background:color-mix(in srgb,var(--color-status-warning) 10%,transparent);color:var(--color-status-warning);}
+.badge.err{border-color:color-mix(in srgb,var(--color-status-error) 40%,transparent);
+  background:color-mix(in srgb,var(--color-status-error) 10%,transparent);color:var(--color-status-error);}
+.badge.ok{border-color:color-mix(in srgb,var(--color-status-success) 40%,transparent);
+  background:color-mix(in srgb,var(--color-status-success) 10%,transparent);color:var(--color-status-success);}
+.badge.brand{border-color:rgba(var(--color-interactive-rgb),.4);
+  background:rgba(var(--color-interactive-rgb),.1);color:var(--color-interactive-text);}
+.badge.human{border-color:color-mix(in srgb,var(--color-human) 45%,transparent);
+  background:color-mix(in srgb,var(--color-human) 12%,transparent);color:var(--color-human);}
+
+/* Worktree card */
+.wt-card{border:1px solid var(--color-card-border);background:var(--color-card-bg);
+  border-radius:var(--card-radius);box-shadow:var(--shadow-sm);overflow:hidden;}
+.wt-card.orphan{border-color:color-mix(in srgb,var(--color-status-warning) 50%,transparent);}
+.wt-card + .wt-card{margin-top:12px;}
+.wt-head{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;}
+.wt-head-main{min-width:0;flex:1;}
+.wt-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.wt-name{font-size:13px;font-weight:700;color:var(--color-text-primary);}
+.wt-owner{font-size:11px;color:var(--color-text-secondary);margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.wt-branch{color:var(--color-text-tertiary);}
+.wt-stats{display:flex;align-items:center;gap:14px;margin-top:8px;flex-wrap:wrap;font-size:11px;color:var(--color-text-secondary);}
+.wt-stats .s{display:flex;align-items:center;gap:5px;}
+.wt-stats .s .lbl{color:var(--color-text-tertiary);}
+.wt-head-actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+
+/* Process list nested in card */
+.proc-list{border-top:1px solid var(--color-border-tertiary);background:var(--color-card-nested-bg);}
+.proc-row{display:grid;grid-template-columns:20px 150px 1fr 64px 64px 60px 30px;gap:10px;align-items:center;
+  padding:8px 14px;font-size:11.5px;border-top:1px solid var(--color-border-tertiary);}
+.proc-row:first-child{border-top:none;}
+.proc-name{font-weight:600;color:var(--color-text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.proc-detail{color:var(--color-text-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.proc-metric{text-align:right;color:var(--color-text-secondary);font-variant-numeric:tabular-nums;}
+.proc-metric .u{color:var(--color-text-tertiary);font-size:9.5px;}
+.proc-metric.hot{color:var(--color-status-warning);font-weight:700;}
+.kill{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;
+  border:1px solid var(--color-border-primary);border-radius:var(--button-radius);background:transparent;
+  color:var(--color-text-tertiary);cursor:pointer;transition:all .15s;}
+.kill:hover{border-color:color-mix(in srgb,var(--color-status-error) 55%,transparent);color:var(--color-status-error);
+  background:color-mix(in srgb,var(--color-status-error) 8%,transparent);}
+.kill svg{width:13px;height:13px;}
+.proc-head{grid-template-columns:20px 150px 1fr 64px 64px 60px 30px;padding:6px 14px;border-top:1px solid var(--color-border-tertiary);}
+.proc-head span{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--color-text-tertiary);font-weight:700;}
+.proc-head .r{text-align:right;}
+
+/* Card footer */
+.wt-foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--color-border-tertiary);
+  background:var(--color-card-bg);flex-wrap:wrap;}
+.wt-foot .ports-held{font-size:11px;color:var(--color-text-tertiary);display:flex;align-items:center;gap:6px;}
+.wt-foot .foot-actions{margin-left:auto;display:flex;gap:6px;}
+.protected-note{font-size:10.5px;color:var(--color-text-tertiary);display:flex;align-items:center;gap:5px;}
+.protected-note svg{width:12px;height:12px;color:var(--color-human);}
+
+/* Orphan callout */
+.reclaim-note{font-size:11px;color:var(--color-text-secondary);background:color-mix(in srgb,var(--color-status-warning) 7%,transparent);
+  border:1px solid color-mix(in srgb,var(--color-status-warning) 30%,transparent);
+  border-radius:var(--card-radius);padding:8px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+.reclaim-note svg{width:14px;height:14px;color:var(--color-status-warning);flex-shrink:0;}
+
+/* ── Kind indicator ──────────────────────────────────────────────────────────
+   Two independent axes, deliberately encoded differently so they never blur:
+     KIND  (worktree vs process) → icon tile hue + shape + KIND badge
+     STATE (orphan / healthy)    → card border tint + section placement
+   Worktree = folder glyph, info hue, square tile (a place on disk).
+   Process  = chip glyph, compound/violet hue, pill tile (a running thing).
+   ------------------------------------------------------------------------ */
+.kind-tile{width:34px;height:34px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  border:1px solid;margin-top:1px;}
+.kind-tile svg{width:17px;height:17px;}
+.kind-tile.wt{border-radius:var(--card-radius);
+  border-color:color-mix(in srgb,var(--color-status-info) 45%,transparent);
+  background:color-mix(in srgb,var(--color-status-info) 12%,transparent);color:var(--color-status-info);}
+.kind-tile.proc{border-radius:9999px;
+  border-color:color-mix(in srgb,var(--color-phase-compound) 50%,transparent);
+  background:color-mix(in srgb,var(--color-phase-compound) 12%,transparent);color:var(--color-phase-compound);}
+.badge.kind-wt{border-color:color-mix(in srgb,var(--color-status-info) 45%,transparent);
+  background:color-mix(in srgb,var(--color-status-info) 12%,transparent);color:var(--color-status-info);}
+.badge.kind-proc{border-color:color-mix(in srgb,var(--color-phase-compound) 50%,transparent);
+  background:color-mix(in srgb,var(--color-phase-compound) 12%,transparent);color:var(--color-phase-compound);}
+
+/* Orphan subgroups — split the reap backlog by kind */
+.orphan-group + .orphan-group{margin-top:18px;}
+.orphan-group-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.orphan-group-head svg{width:13px;height:13px;}
+.orphan-group-head .t{text-transform:uppercase;letter-spacing:.1em;font-size:9.5px;font-weight:700;}
+.orphan-group-head .c{font-size:10.5px;color:var(--color-text-tertiary);}
+.orphan-group-head.wt .t,.orphan-group-head.wt svg{color:var(--color-status-info);}
+.orphan-group-head.proc .t,.orphan-group-head.proc svg{color:var(--color-phase-compound);}
+
+/* ── Disk-measurement states ─────────────────────────────────────────────────
+   Disk sizing runs off the poll loop (lazy, staggered, concurrency 1), so a
+   card's disk figure has three legible states. Skeleton matches the app's
+   `animate-pulse` loading idiom; both animations honour reduced-motion.
+   ------------------------------------------------------------------------ */
+.skel{display:inline-block;height:9px;width:46px;border-radius:9999px;vertical-align:middle;
+  background:var(--color-surface-sunken);border:1px solid var(--color-border-tertiary);
+  animation:skelpulse 1.5s ease-in-out infinite;}
+@keyframes skelpulse{0%,100%{opacity:1}50%{opacity:.4}}
+.measuring{display:inline-flex;align-items:center;gap:5px;color:var(--color-text-tertiary);}
+.spin{width:11px;height:11px;flex-shrink:0;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.skel,.spin{animation:none;}}
+.tile .l .measuring{font-size:10px;text-transform:uppercase;letter-spacing:.08em;}
+
+/* ── Segmented control: group-by toggle ── */
+.seg{display:inline-flex;border:1px solid var(--color-border-primary);border-radius:var(--button-radius);overflow:hidden;}
+.seg-btn{font-family:inherit;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  padding:5px 10px;border:none;background:var(--color-surface-primary);color:var(--color-text-tertiary);
+  cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px;}
+.seg-btn + .seg-btn{border-left:1px solid var(--color-border-primary);}
+.seg-btn svg{width:12px;height:12px;}
+.seg-btn:hover{color:var(--color-text-primary);background:var(--color-bg-hover);}
+.seg-btn[aria-pressed="true"]{background:var(--color-interactive-primary);color:var(--color-text-on-interactive);}
+
+/* ── Process-type group (alternate grouping) ── */
+.type-group{border:1px solid var(--color-card-border);background:var(--color-card-bg);
+  border-radius:var(--card-radius);box-shadow:var(--shadow-sm);overflow:hidden;}
+.type-group + .type-group{margin-top:12px;}
+.type-head{display:flex;align-items:center;gap:10px;padding:10px 14px;}
+.type-head .kind-tile{width:28px;height:28px;}
+.type-head .kind-tile svg{width:14px;height:14px;}
+.type-name{font-size:12.5px;font-weight:700;color:var(--color-text-primary);}
+.type-agg{font-size:10.5px;color:var(--color-text-tertiary);margin-top:2px;}
+.type-head-actions{margin-left:auto;display:flex;gap:6px;flex-shrink:0;}
+.proc-row.by-type{grid-template-columns:20px 1fr 190px 64px 64px 60px 30px;}
+.proc-row.by-type .owner-cell{font-size:11px;color:var(--color-text-secondary);display:flex;align-items:center;gap:5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.proc-row.by-type .owner-cell svg{width:11px;height:11px;color:var(--color-status-info);flex-shrink:0;}
+.proc-row.by-type .owner-cell.none{color:var(--color-status-warning);}
+.proc-row.by-type .owner-cell.none svg{color:var(--color-status-warning);}
+
+/* ── Alternate-state preview frame (static prototype convention) ── */
+.alt-preview{border:1px dashed var(--color-border-hover);border-radius:var(--card-radius);
+  padding:14px;background:color-mix(in srgb,var(--color-text-tertiary) 5%,transparent);}
+.alt-label{display:flex;align-items:center;gap:8px;margin-bottom:12px;}
+.alt-label .t{text-transform:uppercase;letter-spacing:.1em;font-size:9.5px;font-weight:700;color:var(--color-text-tertiary);}
+.alt-label .d{font-size:10.5px;color:var(--color-text-muted);}
+
+/* ── Confirm dialog (shown before every destructive action) ── */
+.modal-frame{position:relative;border:1px solid var(--color-border-primary);border-radius:var(--card-radius);
+  background:var(--color-bg-primary);padding:28px;display:flex;align-items:center;justify-content:center;
+  min-height:330px;overflow:hidden;}
+.modal-frame::before{content:"";position:absolute;inset:0;background:var(--color-modal-overlay,rgba(26,24,21,.55));}
+.modal{position:relative;width:100%;max-width:480px;background:var(--color-surface-primary);
+  border:1px solid var(--color-border-primary);border-radius:var(--card-radius);
+  box-shadow:var(--shadow-dropdown-elevated);overflow:hidden;}
+.modal-head{display:flex;align-items:flex-start;gap:11px;padding:16px 18px 12px;}
+.modal-head .warn-tile{width:32px;height:32px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  border-radius:9999px;background:color-mix(in srgb,var(--color-status-error) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--color-status-error) 40%,transparent);color:var(--color-status-error);}
+.modal-head .warn-tile svg{width:16px;height:16px;}
+.modal-title{font-size:14px;font-weight:700;color:var(--color-text-primary);}
+.modal-sub{font-size:11.5px;color:var(--color-text-secondary);margin-top:4px;line-height:1.5;}
+.modal-body{padding:0 18px 14px;}
+.reap-list{border:1px solid var(--color-border-tertiary);border-radius:var(--card-radius);
+  background:var(--color-surface-sunken);overflow:hidden;}
+.reap-item{display:flex;align-items:center;gap:8px;padding:7px 11px;font-size:11px;color:var(--color-text-secondary);}
+.reap-item + .reap-item{border-top:1px solid var(--color-border-tertiary);}
+.reap-item .nm{color:var(--color-text-primary);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.reap-item .sz{margin-left:auto;color:var(--color-text-tertiary);flex-shrink:0;}
+.reap-item svg{width:12px;height:12px;flex-shrink:0;}
+.reap-item .kw{color:var(--color-status-info);}
+.reap-item .kp{color:var(--color-phase-compound);}
+.danger-note{display:flex;align-items:flex-start;gap:7px;font-size:11px;line-height:1.5;margin-top:10px;
+  padding:8px 10px;border-radius:var(--card-radius);color:var(--color-status-error);
+  border:1px solid color-mix(in srgb,var(--color-status-error) 35%,transparent);
+  background:color-mix(in srgb,var(--color-status-error) 8%,transparent);}
+.danger-note svg{width:13px;height:13px;flex-shrink:0;margin-top:1px;}
+.modal-opt{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--color-text-secondary);margin-top:11px;}
+.modal-opt input{accent-color:var(--color-interactive-primary);width:13px;height:13px;}
+.modal-foot{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--color-border-tertiary);
+  background:var(--color-bg-secondary);}
+.modal-foot .undo{font-size:10.5px;color:var(--color-text-tertiary);}
+.modal-foot .acts{margin-left:auto;display:flex;gap:8px;}
+.btn-solid-danger{background:var(--color-status-error);color:#fff;border-color:transparent;}
+.btn-solid-danger:hover{background:var(--color-status-error);color:#fff;filter:brightness(.9);border-color:transparent;}
+
+.disclaimer{font-size:10.5px;color:var(--color-text-muted);text-align:center;padding-top:8px;}
+</style>
+</head>
+<body>
+<div class="app-shell" data-design-id="monitor-view">
+
+  <!-- View header -->
+  <header class="mon-header" data-design-id="monitor-header">
+    <div>
+      <div class="eyebrow" data-design-id="monitor-eyebrow">System · live process &amp; worktree monitor</div>
+      <h1 data-design-id="monitor-title">Monitor</h1>
+    </div>
+    <div class="mon-header-actions">
+      <span class="refreshed" data-design-id="monitor-refreshed">Updated 2s ago</span>
+      <button class="btn" data-design-id="monitor-autorefresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        Auto · 2.5s
+      </button>
+      <button class="btn btn-primary" data-design-id="monitor-refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- Toolbar: stat tiles + global reap actions -->
+  <div class="toolbar" data-design-id="monitor-toolbar">
+    <div class="tiles">
+      <div class="tile" data-design-id="tile-worktrees"><div class="k">7</div><div class="l">Worktrees</div></div>
+      <div class="tile" data-design-id="tile-processes"><div class="k">12</div><div class="l">Processes</div></div>
+      <div class="tile" data-design-id="tile-disk">
+        <div class="k">2.5<span style="font-size:13px"> GB</span></div>
+        <div class="l"><span class="measuring">
+          <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
+          Disk · 3 of 5
+        </span></div>
+      </div>
+      <div class="tile warn" data-design-id="tile-orphans"><div class="k">2</div><div class="l">Orphans · 1 wt · 1 proc</div></div>
+    </div>
+    <div class="toolbar-right">
+      <div class="seg" role="group" aria-label="Group by" data-design-id="monitor-groupby">
+        <button class="seg-btn" aria-pressed="true" data-design-id="monitor-groupby-worktree">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+          Worktree
+        </button>
+        <button class="seg-btn" aria-pressed="false" data-design-id="monitor-groupby-proctype">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg>
+          Process type
+        </button>
+      </div>
+      <select class="select" data-design-id="monitor-sort" aria-label="Sort worktrees">
+        <option>Sort: Disk (largest)</option>
+        <option>Sort: Idle time</option>
+        <option>Sort: CPU</option>
+        <option>Sort: Owner</option>
+      </select>
+      <button class="btn btn-danger" data-design-id="monitor-reap-stale">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>
+        Reap all stale
+      </button>
+    </div>
+  </div>
+
+  <!-- Scroll body -->
+  <div class="scroll" data-design-id="monitor-scroll">
+    <div class="wrap">
+
+      <!-- ─── Ports & sockets ─── -->
+      <section class="section" data-design-id="section-ports">
+        <div class="section-head">
+          <h2 class="eyebrow">Ports &amp; sockets</h2>
+          <span class="count">3 held · 1 conflict</span>
+          <span class="section-sub">Reused patterns: TCP probe · OrchSocketServer connection map</span>
+        </div>
+        <div class="ports">
+          <div class="port-card" data-design-id="port-4521">
+            <div class="port-top"><span class="dot ok"></span><span class="port-name">:4521</span><span class="badge ok" style="margin-left:auto">Held</span></div>
+            <div class="port-desc">Vite renderer dev server</div>
+            <div class="port-meta"><span class="mono-dim">pid</span> 48210 · <span class="mono-dim">pnpm dev</span> (concurrently)</div>
+          </div>
+          <div class="port-card" data-design-id="port-9223">
+            <div class="port-top"><span class="dot ok"></span><span class="port-name">:9223</span><span class="badge ok" style="margin-left:auto">Held</span></div>
+            <div class="port-desc">Chrome DevTools protocol (CDP) — this app</div>
+            <div class="port-meta"><span class="mono-dim">pid</span> 48190 · Electron main</div>
+          </div>
+          <div class="port-card" data-design-id="port-orchsock">
+            <div class="port-top"><span class="dot info"></span><span class="port-name">orch.sock</span><span class="badge info" style="margin-left:auto">Listening</span></div>
+            <div class="port-desc">~/.cyboflow/sockets/orch.sock</div>
+            <div class="port-meta"><span class="mono-dim">4 clients</span> · 3 runs bound</div>
+          </div>
+          <div class="port-card warn" data-design-id="port-4521-foreign">
+            <div class="port-top"><span class="dot warn"></span><span class="port-name">:4521</span><span class="badge warn" style="margin-left:auto">Conflict</span></div>
+            <div class="port-desc">Foreign instance (dev-dmg) also bound — renderer may load the wrong build</div>
+            <div class="port-meta"><span class="mono-dim">pid</span> 39004 · <span class="mono-dim">kind</span> dev_dmg</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── Orphans (primary reap target) ─── -->
+      <section class="section" data-design-id="section-orphans">
+        <div class="section-head">
+          <h2 class="eyebrow" style="color:var(--color-status-warning)">Orphans — reclaim</h2>
+          <span class="count">2 items · ~394 MB</span>
+        </div>
+        <div class="reclaim-note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+          No live session or run owns these. Safe to prune / kill — this is the reap backlog.
+        </div>
+
+        <!-- ── Orphan subgroup: stale worktrees (disk to reclaim) ── -->
+        <div class="orphan-group" data-design-id="orphan-group-worktrees">
+          <div class="orphan-group-head wt">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+            <span class="t">Stale worktrees</span>
+            <span class="c">1 · 214 MB on disk</span>
+          </div>
+
+          <div class="wt-card orphan" data-design-id="orphan-wt-sprint-9f3a1c22">
+            <div class="wt-head">
+              <span class="kind-tile wt" title="Worktree — a directory on disk" data-design-id="orphan-wt-kind-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+              </span>
+              <div class="wt-head-main">
+                <div class="wt-title-row">
+                  <span class="badge kind-wt" data-design-id="orphan-wt-kind-badge">Worktree</span>
+                  <span class="wt-name">.cyboflow/worktrees/sprint/9f3a1c22</span>
+                  <span class="badge warn">Orphan</span>
+                  <span class="badge">Dirty · 5 files</span>
+                </div>
+                <div class="wt-owner">Owner run <span class="wt-branch">Sprint · IDEA-039</span> — completed &amp; dismissed 6d ago</div>
+                <div class="wt-stats">
+                  <span class="s"><span class="lbl">branch</span> cyboflow/sprint/9f3a1c22</span>
+                  <span class="s"><span class="lbl">disk</span> 214 MB</span>
+                  <span class="s"><span class="lbl">idle</span> 6d</span>
+                </div>
+              </div>
+              <div class="wt-head-actions">
+                <button class="btn btn-danger" data-design-id="orphan-wt-prune">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>
+                  Prune worktree
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Orphan subgroup: orphaned processes (CPU/RAM to reclaim) ── -->
+        <div class="orphan-group" data-design-id="orphan-group-processes">
+          <div class="orphan-group-head proc">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg>
+            <span class="t">Orphaned processes</span>
+            <span class="c">1 · 180 MB RAM · 2.1% CPU</span>
+          </div>
+
+          <div class="wt-card orphan" data-design-id="orphan-proc-broker-51022">
+            <div class="wt-head">
+              <span class="kind-tile proc" title="Process — a running PID" data-design-id="orphan-proc-kind-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg>
+              </span>
+              <div class="wt-head-main">
+                <div class="wt-title-row">
+                  <span class="badge kind-proc" data-design-id="orphan-proc-kind-badge">Process</span>
+                  <span class="wt-name">app-server-broker.mjs</span>
+                  <span class="badge warn">Detached broker</span>
+                  <span class="badge">reparented → launchd</span>
+                </div>
+                <div class="wt-owner">Codex plugin broker — its worktree no longer exists</div>
+                <div class="wt-stats">
+                  <span class="s"><span class="lbl">pid</span> 51022</span>
+                  <span class="s"><span class="lbl">cpu</span> 2.1%</span>
+                  <span class="s"><span class="lbl">mem</span> 180 MB</span>
+                  <span class="s"><span class="lbl">up</span> 4h 12m</span>
+                </div>
+              </div>
+              <div class="wt-head-actions">
+                <button class="btn btn-danger" data-design-id="orphan-proc-kill">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>
+                  Kill tree
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── Active worktrees (grouped cards) ─── -->
+      <section class="section" data-design-id="section-worktrees">
+        <div class="section-head">
+          <h2 class="eyebrow">Active worktrees</h2>
+          <span class="count">5 owned · 10 processes</span>
+        </div>
+
+        <!-- WT 1: session, dirty, holds dev server -->
+        <div class="wt-card" data-design-id="wt-ivory-juniper">
+          <div class="wt-head">
+            <span class="kind-tile wt" title="Worktree — a directory on disk">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+            </span>
+            <div class="wt-head-main">
+              <div class="wt-title-row">
+                <span class="wt-name">ivory-juniper-20260727</span>
+                <span class="badge brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v8"/><path d="M8 12h8"/><circle cx="12" cy="12" r="9"/></svg>Session</span>
+                <span class="badge warn">Dirty · 3 files</span>
+                <span class="badge ok">↑2 ahead</span>
+              </div>
+              <div class="wt-owner">Design: process &amp; worktree monitor <span class="wt-branch">· cyboflow/ivory-juniper-20260727</span></div>
+              <div class="wt-stats">
+                <span class="s"><span class="lbl">disk</span> 312 MB</span>
+                <span class="s"><span class="lbl">age</span> 1h 6m</span>
+                <span class="s"><span class="lbl">last viewed</span> now</span>
+              </div>
+            </div>
+            <div class="wt-head-actions">
+              <button class="btn btn-primary" data-design-id="wt-ivory-open">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+                Open session
+              </button>
+              <button class="btn btn-icon" title="Reveal in Finder" data-design-id="wt-ivory-reveal">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+              </button>
+              <button class="btn btn-icon" title="More" data-design-id="wt-ivory-menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="proc-list">
+            <div class="proc-row proc-head">
+              <span></span><span>Process</span><span>Detail</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+            </div>
+            <div class="proc-row" data-design-id="proc-ivory-claude">
+              <span class="dot run pulse" title="running"></span>
+              <span class="proc-name">claude</span>
+              <span class="proc-detail"><span class="badge brand">CLI · SDK</span> pid 48350</span>
+              <span class="proc-metric hot">8.2<span class="u">%</span></span>
+              <span class="proc-metric">420<span class="u">MB</span></span>
+              <span class="proc-metric">12m</span>
+              <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+            </div>
+            <div class="proc-row" data-design-id="proc-ivory-devserver">
+              <span class="dot info" title="running"></span>
+              <span class="proc-name">pnpm dev</span>
+              <span class="proc-detail"><span class="badge info">Shell PTY</span> pid 48420 · holds :4521</span>
+              <span class="proc-metric">3.1<span class="u">%</span></span>
+              <span class="proc-metric">512<span class="u">MB</span></span>
+              <span class="proc-metric">1h</span>
+              <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+            </div>
+          </div>
+          <div class="wt-foot">
+            <span class="ports-held"><span class="dot ok"></span>Holds :4521 (dev server)</span>
+            <div class="foot-actions">
+              <button class="btn" data-design-id="wt-ivory-killall">Kill all processes</button>
+              <button class="btn btn-danger" data-design-id="wt-ivory-prune">Prune worktree</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- WT 2: run, clean, codex + detached broker -->
+        <div class="wt-card" data-design-id="wt-sprint-a1b2c3d4">
+          <div class="wt-head">
+            <span class="kind-tile wt" title="Worktree — a directory on disk">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+            </span>
+            <div class="wt-head-main">
+              <div class="wt-title-row">
+                <span class="wt-name">.cyboflow/worktrees/sprint/a1b2c3d4</span>
+                <span class="badge human"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7 12 3l8 4-8 4-8-4Z"/><path d="M4 12l8 4 8-4"/></svg>Run</span>
+                <span class="badge ok">Clean</span>
+              </div>
+              <div class="wt-owner">Sprint · IDEA-041 — lane 2/4 running <span class="wt-branch">· cyboflow/sprint/a1b2c3d4</span></div>
+              <div class="wt-stats">
+                <span class="s" data-design-id="wt-sprint-disk-measuring">
+                  <span class="lbl">disk</span>
+                  <span class="measuring">
+                    <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
+                    measuring…
+                  </span>
+                </span>
+                <span class="s"><span class="lbl">age</span> 22m</span>
+              </div>
+            </div>
+            <div class="wt-head-actions">
+              <button class="btn btn-primary" data-design-id="wt-sprint-open">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+                Open run
+              </button>
+              <button class="btn btn-icon" title="Reveal in Finder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg></button>
+              <button class="btn btn-icon" title="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
+            </div>
+          </div>
+          <div class="proc-list">
+            <div class="proc-row proc-head">
+              <span></span><span>Process</span><span>Detail</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+            </div>
+            <div class="proc-row" data-design-id="proc-sprint-codex">
+              <span class="dot run pulse" title="running"></span>
+              <span class="proc-name">codex</span>
+              <span class="proc-detail"><span class="badge brand">CLI · Codex</span> pid 49001</span>
+              <span class="proc-metric hot">5.4<span class="u">%</span></span>
+              <span class="proc-metric">380<span class="u">MB</span></span>
+              <span class="proc-metric">20m</span>
+              <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+            </div>
+            <div class="proc-row" data-design-id="proc-sprint-broker">
+              <span class="dot idle" title="detached"></span>
+              <span class="proc-name">app-server-broker.mjs</span>
+              <span class="proc-detail"><span class="badge">Codex broker · detached</span> pid 49010</span>
+              <span class="proc-metric">1.2<span class="u">%</span></span>
+              <span class="proc-metric">210<span class="u">MB</span></span>
+              <span class="proc-metric">20m</span>
+              <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+            </div>
+          </div>
+          <div class="wt-foot">
+            <span class="ports-held mono-dim">No ports held</span>
+            <div class="foot-actions">
+              <button class="btn" data-design-id="wt-sprint-killall">Kill all processes</button>
+              <button class="btn btn-danger" data-design-id="wt-sprint-prune">Prune worktree</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- WT 3: in-place session — protected -->
+        <div class="wt-card" data-design-id="wt-main-inplace">
+          <div class="wt-head">
+            <span class="kind-tile wt" title="Worktree — your real checkout">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+            </span>
+            <div class="wt-head-main">
+              <div class="wt-title-row">
+                <span class="wt-name">main <span class="mono-dim">(in-place)</span></span>
+                <span class="badge brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v8"/><path d="M8 12h8"/><circle cx="12" cy="12" r="9"/></svg>Session</span>
+                <span class="badge ok">Clean</span>
+              </div>
+              <div class="wt-owner">Quick fix: null-check in parser <span class="wt-branch">· your real checkout</span></div>
+              <div class="wt-stats">
+                <span class="s" data-design-id="wt-main-disk-queued">
+                  <span class="lbl">disk</span>
+                  <span class="skel" role="status" aria-label="Disk size queued for measurement"></span>
+                </span>
+                <span class="s"><span class="lbl">age</span> 8m</span>
+              </div>
+            </div>
+            <div class="wt-head-actions">
+              <button class="btn btn-primary" data-design-id="wt-main-open">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+                Open session
+              </button>
+              <button class="btn btn-icon" title="Reveal in Finder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg></button>
+              <button class="btn btn-icon" title="More"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
+            </div>
+          </div>
+          <div class="proc-list">
+            <div class="proc-row proc-head">
+              <span></span><span>Process</span><span>Detail</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+            </div>
+            <div class="proc-row" data-design-id="proc-main-claude">
+              <span class="dot idle" title="waiting"></span>
+              <span class="proc-name">claude</span>
+              <span class="proc-detail"><span class="badge brand">CLI · SDK</span> pid 50110 · idle</span>
+              <span class="proc-metric">0.3<span class="u">%</span></span>
+              <span class="proc-metric">288<span class="u">MB</span></span>
+              <span class="proc-metric">8m</span>
+              <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+            </div>
+          </div>
+          <div class="wt-foot">
+            <span class="protected-note">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6l-8-3Z"/></svg>
+              In-place — pruning disabled (this is your working checkout)
+            </span>
+            <div class="foot-actions">
+              <button class="btn" data-design-id="wt-main-killall">Kill all processes</button>
+              <button class="btn" disabled style="opacity:.5;cursor:not-allowed" data-design-id="wt-main-prune">Prune worktree</button>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ─── Alternate toggle state: grouped by process type ─── -->
+      <section class="section" data-design-id="section-groupby-proctype-preview">
+        <div class="alt-preview">
+          <div class="alt-label">
+            <span class="t">Toggle state B — grouped by process type</span>
+            <span class="d">same data, "Process type" selected in the group-by control (static prototype shows both states)</span>
+          </div>
+
+          <div class="type-group" data-design-id="type-group-claude-sdk">
+            <div class="type-head">
+              <span class="kind-tile proc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg></span>
+              <div>
+                <div class="type-name">CLI · Claude SDK</div>
+                <div class="type-agg">2 processes · 8.5% CPU · 708 MB</div>
+              </div>
+              <div class="type-head-actions">
+                <button class="btn btn-danger" data-design-id="type-claude-killall">Kill all (2)</button>
+              </div>
+            </div>
+            <div class="proc-list">
+              <div class="proc-row by-type proc-head">
+                <span></span><span>Process</span><span>Worktree</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+              </div>
+              <div class="proc-row by-type">
+                <span class="dot run pulse"></span>
+                <span class="proc-name">claude <span class="proc-detail">pid 48350</span></span>
+                <span class="owner-cell"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>ivory-juniper-20260727</span>
+                <span class="proc-metric hot">8.2<span class="u">%</span></span>
+                <span class="proc-metric">420<span class="u">MB</span></span>
+                <span class="proc-metric">12m</span>
+                <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+              <div class="proc-row by-type">
+                <span class="dot idle"></span>
+                <span class="proc-name">claude <span class="proc-detail">pid 50110 · idle</span></span>
+                <span class="owner-cell"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>main (in-place)</span>
+                <span class="proc-metric">0.3<span class="u">%</span></span>
+                <span class="proc-metric">288<span class="u">MB</span></span>
+                <span class="proc-metric">8m</span>
+                <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="type-group" data-design-id="type-group-codex-broker">
+            <div class="type-head">
+              <span class="kind-tile proc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg></span>
+              <div>
+                <div class="type-name">Codex broker · detached <span class="badge warn" style="margin-left:4px">1 orphan</span></div>
+                <div class="type-agg">2 processes · 3.3% CPU · 390 MB · reparented to launchd</div>
+              </div>
+              <div class="type-head-actions">
+                <button class="btn btn-danger" data-design-id="type-broker-killall">Kill all (2)</button>
+              </div>
+            </div>
+            <div class="proc-list">
+              <div class="proc-row by-type proc-head">
+                <span></span><span>Process</span><span>Worktree</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+              </div>
+              <div class="proc-row by-type">
+                <span class="dot idle"></span>
+                <span class="proc-name">app-server-broker.mjs <span class="proc-detail">pid 49010</span></span>
+                <span class="owner-cell"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>sprint/a1b2c3d4</span>
+                <span class="proc-metric">1.2<span class="u">%</span></span>
+                <span class="proc-metric">210<span class="u">MB</span></span>
+                <span class="proc-metric">20m</span>
+                <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+              <div class="proc-row by-type">
+                <span class="dot warn"></span>
+                <span class="proc-name">app-server-broker.mjs <span class="proc-detail">pid 51022</span></span>
+                <span class="owner-cell none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>none — orphaned</span>
+                <span class="proc-metric">2.1<span class="u">%</span></span>
+                <span class="proc-metric">180<span class="u">MB</span></span>
+                <span class="proc-metric">4h</span>
+                <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="type-group" data-design-id="type-group-shell-pty">
+            <div class="type-head">
+              <span class="kind-tile proc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg></span>
+              <div>
+                <div class="type-name">Shell PTY</div>
+                <div class="type-agg">1 process · 3.1% CPU · 512 MB · holds :4521</div>
+              </div>
+              <div class="type-head-actions">
+                <button class="btn btn-danger" data-design-id="type-shell-killall">Kill all (1)</button>
+              </div>
+            </div>
+            <div class="proc-list">
+              <div class="proc-row by-type proc-head">
+                <span></span><span>Process</span><span>Worktree</span><span class="r">CPU</span><span class="r">Mem</span><span class="r">Up</span><span></span>
+              </div>
+              <div class="proc-row by-type">
+                <span class="dot info"></span>
+                <span class="proc-name">pnpm dev <span class="proc-detail">pid 48420</span></span>
+                <span class="owner-cell"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>ivory-juniper-20260727</span>
+                <span class="proc-metric">3.1<span class="u">%</span></span>
+                <span class="proc-metric">512<span class="u">MB</span></span>
+                <span class="proc-metric">1h</span>
+                <button class="kill" title="Kill tree"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── Confirm dialog — gates every destructive action ─── -->
+      <section class="section" data-design-id="section-confirm-preview">
+        <div class="section-head">
+          <h2 class="eyebrow">Confirm — gates every reap action</h2>
+          <span class="section-sub">Shown for Prune · Kill tree · Kill all · Reap all stale</span>
+        </div>
+        <div class="modal-frame">
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" data-design-id="confirm-dialog">
+            <div class="modal-head">
+              <span class="warn-tile">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+              </span>
+              <div>
+                <div class="modal-title" id="confirm-title" data-design-id="confirm-title">Reap 2 orphans?</div>
+                <div class="modal-sub">Reclaims <strong>214 MB</strong> disk and <strong>180 MB</strong> RAM. This cannot be undone.</div>
+              </div>
+            </div>
+            <div class="modal-body">
+              <div class="reap-list" data-design-id="confirm-manifest">
+                <div class="reap-item">
+                  <svg class="kw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>
+                  <span class="nm">sprint/9f3a1c22</span>
+                  <span class="badge warn">Dirty · 5 files</span>
+                  <span class="sz">214 MB</span>
+                </div>
+                <div class="reap-item">
+                  <svg class="kp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3"/></svg>
+                  <span class="nm">app-server-broker.mjs</span>
+                  <span class="proc-detail">pid 51022 + 3 children</span>
+                  <span class="sz">180 MB</span>
+                </div>
+              </div>
+              <div class="danger-note" data-design-id="confirm-dirty-warning">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+                <span><strong>sprint/9f3a1c22 has 5 uncommitted files.</strong> Pruning discards them permanently — nothing is stashed.</span>
+              </div>
+              <label class="modal-opt" data-design-id="confirm-delete-branch">
+                <input type="checkbox" /> Also delete branch <span class="mono-dim">cyboflow/sprint/9f3a1c22</span>
+              </label>
+            </div>
+            <div class="modal-foot">
+              <span class="undo">Esc to cancel</span>
+              <div class="acts">
+                <button class="btn" data-design-id="confirm-cancel">Cancel</button>
+                <button class="btn btn-solid-danger" data-design-id="confirm-accept">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>
+                  Reap 2 items
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="disclaimer" data-design-id="monitor-disclaimer">
+        Static prototype · sample data. Live CPU/mem, disk sizing, and the process registry are not yet plumbed (see spec).
+      </div>
+
+    </div>
+  </div>
+</div>
+</body>
+</html>
