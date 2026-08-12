@@ -2326,3 +2326,196 @@ describe('WorkflowPicker — Launch seed-prompt gate', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// GLOBAL launch defaults — `config.defaultLaunchModel` / `defaultAgentRuntime`,
+// the resolver's MIDDLE rung. ONE global runtime, coerced per surface: this
+// panel drives BOTH a workflow launch (Start Run, which cannot run codex-pty)
+// and a quick session (Quick Session, which can).
+// ---------------------------------------------------------------------------
+
+describe('WorkflowPicker — global launch defaults (defaultLaunchModel / defaultAgentRuntime)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
+    ]);
+    useConfigStore.setState({ config: null });
+  });
+
+  afterEach(() => {
+    useConfigStore.setState({ config: null });
+  });
+
+  /** Install ONLY the two globals (plus whatever else a case needs). */
+  function setGlobals(globals: Partial<AppConfig>): void {
+    act(() => {
+      useConfigStore.setState({ config: globals as AppConfig });
+    });
+  }
+
+  const runtimeControl = (): string =>
+    (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+  const modelControl = (): string =>
+    (screen.getByLabelText('Select Claude model') as HTMLSelectElement).value;
+
+  it('Start Run sends the GLOBAL defaultLaunchModel (and the control shows it)', async () => {
+    setGlobals({ defaultLaunchModel: 'sonnet' });
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await waitFor(() => expect(modelControl()).toBe('sonnet'));
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowId: 'wf-1', model: 'sonnet' }),
+    );
+  });
+
+  it('a stored per-workflow model still BEATS the global default', async () => {
+    setGlobals({
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { 'workflow:wf-1': { model: 'haiku' } },
+    });
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await waitFor(() => expect(modelControl()).toBe('haiku'));
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'haiku' }));
+  });
+
+  it('Start Run adopts a workflow-capable global runtime, substrate and all', async () => {
+    setGlobals({ defaultAgentRuntime: 'claude-interactive' });
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await waitFor(() => expect(runtimeControl()).toBe('claude-interactive'));
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-interactive',
+        // Derived FROM the runtime — the pair can never disagree.
+        substrate: 'interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  // Workflow coercion: codex-pty is quick-session-only. Seeding it here would
+  // DISABLE Start Run ("Codex PTY is only available for quick sessions"), so the
+  // workflow-key seeding path drops it and falls back to the substrate rung.
+  it('Start Run DROPS a quick-only global runtime (codex-pty) and stays launchable', async () => {
+    setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    expect(runtimeControl()).toBe('claude-sdk');
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'claude-sdk', substrate: 'sdk', model: 'opus' }),
+    );
+  });
+
+  it('Quick Session sends the GLOBAL defaultLaunchModel', async () => {
+    setGlobals({ defaultLaunchModel: 'sonnet' });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+  });
+
+  // The rung-ordering guard on the quick side: the global runtime's implied
+  // transport beats the quick substrate preference, which is deliberately set
+  // to the OPPOSITE value here so "runtime won" and "preference won" differ.
+  it('Quick Session sends the global runtime AND the substrate it implies', async () => {
+    setGlobals({
+      defaultAgentRuntime: 'claude-interactive',
+      quickSessionDefaultSubstrate: 'sdk',
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-interactive',
+        substrate: 'interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  // The other half of the coercion: the SAME global the workflow path drops is
+  // launchable as a quick session, so this button sends it.
+  it('Quick Session ACCEPTS the quick-only global runtime (codex-pty) the workflow path drops', async () => {
+    setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentProvider: 'codex' }),
+    );
+    // A Codex runtime carries no Claude transport, so none is sent.
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('substrate');
+  });
+
+  // AC5 — with NEITHER global set both payloads are byte-identical.
+  it('REGRESSION: with NEITHER global set, Start Run and Quick Session payloads are unchanged', async () => {
+    setGlobals({ defaultLaunchModel: undefined, defaultAgentRuntime: undefined });
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      model: 'opus',
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'interactive',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-interactive',
+      claudeConfig: { model: 'opus', fastMode: false },
+    });
+  });
+});

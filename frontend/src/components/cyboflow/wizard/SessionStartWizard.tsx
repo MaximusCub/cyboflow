@@ -289,6 +289,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   // open, untouched wizard instead of going stale.
   const runTypeDefaults = useConfigStore((s) => s.config?.runTypeDefaults);
   const globalPermissionMode = useConfigStore((s) => s.config?.defaultAgentPermissionMode);
+  // The user's GLOBAL launch model + agent runtime (one field each, shared by
+  // quick sessions and flow runs). The model is normalized exactly as main's
+  // configManager.getGlobalLaunchModel normalizes it — trimmed, blank ⇒ unset —
+  // so a hand-edited config.json resolves the same on both sides.
+  const globalLaunchModel = useConfigStore((s) => s.config?.defaultLaunchModel)?.trim() || undefined;
+  const globalAgentRuntime = useConfigStore((s) => s.config?.defaultAgentRuntime);
   const { isAliasUsable } = useModelAvailability();
   // The run-type-defaults key for the CURRENT card. Quick AND Ultracode share
   // the synthetic global 'quick' key (Ultracode is a quick-shaped launch and
@@ -332,6 +338,24 @@ export default function SessionStartWizard(): React.JSX.Element {
     selection?.kind === 'ultracode' && isAliasUsable(ULTRACODE_DEFAULT_MODEL)
       ? ULTRACODE_DEFAULT_MODEL
       : DEFAULT_QUICK_MODEL;
+  // The GLOBAL runtime default, coerced to what THIS card can actually launch:
+  //   - workflow → `workflowRuntimeForLaunch`, so a global `codex-pty`
+  //     (quick-session-only) is DROPPED and the card falls back to the
+  //     substrate rung's Claude SDK default instead of seeding a runtime that
+  //     would block the launch CTA.
+  //   - quick / ultracode → the full session set (codex-pty included).
+  //   - design → never: it is hard-pinned to the Claude SDK substrate
+  //     (design-mode.md "Session plumbing", a security boundary), so no global
+  //     may move it.
+  // 'codex-exec' is outside LaunchAgentRuntime on both surfaces and is dropped.
+  const globalCardRuntime: LaunchAgentRuntime | undefined =
+    globalAgentRuntime === undefined ||
+    globalAgentRuntime === 'codex-exec' ||
+    selection?.kind === 'design'
+      ? undefined
+      : selection?.kind === 'workflow'
+        ? (workflowRuntimeForLaunch(globalAgentRuntime) ?? undefined)
+        : globalAgentRuntime;
   /**
    * Every Configure control seeds from the SAME canonical resolver the launch
    * seams use (`resolveRunTypeLaunchDefaults`: stored → globals → floor). Seeding
@@ -349,10 +373,22 @@ export default function SessionStartWizard(): React.JSX.Element {
    * `useQuickSession.startWithDefaults`, had already rejected. Every
    * `launcherDefaultRuntime` is a Claude runtime, so the projection is lossless
    * and `runtimeSeed` below inverts it.
+   *
+   * The `agentRuntime` rung carries the user's GENUINE global runtime and
+   * nothing else (`globalCardRuntime`, already coerced to this card's launch
+   * kind). It deliberately outranks `launcherDefaultRuntime`: a real user-set
+   * runtime beats a per-card default, and — being a real runtime — it owns the
+   * substrate it implies, so the pair stays consistent.
+   *
+   * `model` keeps `launcherDefaultModel` as its FLOOR and puts the global
+   * `defaultLaunchModel` above it, matching the comment above: an explicitly
+   * configured default outranks the (Ultracode/Fable) floor. A stored per-type
+   * model still beats both.
    */
   const launchGlobals: RunTypeLaunchGlobals = {
-    model: launcherDefaultModel,
+    model: globalLaunchModel ?? launcherDefaultModel,
     ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+    ...(globalCardRuntime !== undefined ? { agentRuntime: globalCardRuntime } : {}),
     substrate: substrateForRuntime(launcherDefaultRuntime),
   };
   const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);

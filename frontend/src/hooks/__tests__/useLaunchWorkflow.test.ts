@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
 import type { RunTypeDefaults } from '../../../../shared/types/sessionDefaults';
+import type { AgentRuntime } from '../../../../shared/types/agentRuntime';
 
 const { mockEnsureSession, mockStartMutate, mockSubscribe, mockConfigState } = vi.hoisted(() => ({
   mockEnsureSession: vi.fn(),
@@ -20,6 +21,11 @@ const { mockEnsureSession, mockStartMutate, mockSubscribe, mockConfigState } = v
       demoMode: false as boolean,
       interactivePtyOnly: false as boolean,
       runTypeDefaults: undefined as Record<string, RunTypeDefaults> | undefined,
+      // The two GLOBAL launch defaults (commit 87ab7929) — the resolver's
+      // middle rung, unset by default so every existing payload assertion below
+      // still describes an unconfigured install.
+      defaultLaunchModel: undefined as string | undefined,
+      defaultAgentRuntime: undefined as AgentRuntime | undefined,
     },
   },
 }));
@@ -54,6 +60,8 @@ beforeEach(() => {
   mockConfigState.config.demoMode = false;
   mockConfigState.config.interactivePtyOnly = false;
   mockConfigState.config.runTypeDefaults = undefined;
+  mockConfigState.config.defaultLaunchModel = undefined;
+  mockConfigState.config.defaultAgentRuntime = undefined;
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
@@ -382,6 +390,95 @@ describe('useLaunchWorkflow — stored per-run-type launch defaults', () => {
     expect(mockStartMutate).toHaveBeenCalledWith(
       expect.objectContaining({ permissionMode: 'dontAsk' }),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // The GLOBAL rung: config.defaultLaunchModel / config.defaultAgentRuntime.
+  // -------------------------------------------------------------------------
+
+  it('sends the GLOBAL defaultLaunchModel when no per-workflow model is stored', async () => {
+    mockConfigState.config.defaultLaunchModel = 'sonnet';
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
+  });
+
+  it('a stored per-workflow model still BEATS the global default (rung order)', async () => {
+    mockConfigState.config.defaultLaunchModel = 'sonnet';
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { model: 'haiku' } };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(expect.objectContaining({ model: 'haiku' }));
+  });
+
+  it('treats a blank defaultLaunchModel as unset (parity with configManager.getGlobalLaunchModel)', async () => {
+    mockConfigState.config.defaultLaunchModel = '  ';
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus' }));
+  });
+
+  // The rung-ordering guard: the runtime OWNS its implied substrate, so the
+  // PAIR must agree — never 'claude-interactive' next to an 'sdk' floor.
+  it('sends the GLOBAL defaultAgentRuntime AND the substrate it implies', async () => {
+    mockConfigState.config.defaultAgentRuntime = 'claude-interactive';
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'claude-interactive', substrate: 'interactive' }),
+    );
+  });
+
+  it('DROPS a global runtime a workflow cannot run on (codex-pty) and still launches on the floor', async () => {
+    mockConfigState.config.defaultAgentRuntime = 'codex-pty';
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    let runId: string | null = null;
+    await act(async () => {
+      runId = await result.current.launch('wf-sprint');
+    });
+    // The launch proceeds — the runtime is dropped, never sent, never blocking.
+    expect(runId).toBe('run-9');
+    expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'sdk', model: 'opus' }),
+    );
+  });
+
+  it('a stored per-workflow agentRuntime still BEATS the global default', async () => {
+    mockConfigState.config.defaultAgentRuntime = 'claude-interactive';
+    mockConfigState.config.runTypeDefaults = { 'workflow:wf-sprint': { agentRuntime: 'codex-sdk' } };
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-sdk' }),
+    );
+  });
+
+  // AC5 — the criterion that matters most, restated with both fields present
+  // on the config object but unset.
+  it('REGRESSION: with NEITHER global set the payload is byte-identical', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith({
+      workflowId: 'wf-sprint',
+      projectId: 7,
+      substrate: 'sdk',
+      sessionId: 'session-1',
+      permissionMode: 'default',
+      model: 'opus',
+    });
   });
 
   it('keys the whole settings bundle per call — another workflow’s defaults do not leak', async () => {

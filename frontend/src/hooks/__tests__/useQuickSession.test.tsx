@@ -765,6 +765,182 @@ describe('useQuickSession — startWithDefaults()', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GLOBAL launch defaults — `config.defaultLaunchModel` / `defaultAgentRuntime`,
+// the resolver's MIDDLE rung. Both were empty at every seam, so a global model
+// fell straight from a per-type override to the hardcoded floor.
+// ---------------------------------------------------------------------------
+
+describe('useQuickSession — global launch defaults (defaultLaunchModel / defaultAgentRuntime)', () => {
+  it('sends the GLOBAL defaultLaunchModel when no per-type model is stored', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { defaultLaunchModel: 'sonnet' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: { model: 'sonnet', fastMode: false } }),
+    );
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'sonnet');
+  });
+
+  it('a stored per-type model still BEATS the global default (rung order)', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          defaultLaunchModel: 'sonnet',
+          runTypeDefaults: { 'workflow:flow-a': { model: 'haiku' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('workflow:flow-a');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: expect.objectContaining({ model: 'haiku' }) }),
+    );
+  });
+
+  it('treats a blank defaultLaunchModel as unset (parity with configManager.getGlobalLaunchModel)', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { defaultLaunchModel: '   ' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claudeConfig: { model: DEFAULT_QUICK_MODEL, fastMode: false },
+      }),
+    );
+  });
+
+  // The rung-ordering guard: a runtime OWNS the substrate it implies, so the
+  // resolved PAIR must agree — the global runtime's 'interactive' beats the
+  // 'sdk' quick-substrate preference deliberately set to the opposite value.
+  it('sends the GLOBAL defaultAgentRuntime AND the substrate it implies', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          defaultAgentRuntime: 'claude-interactive',
+          quickSessionDefaultSubstrate: 'sdk',
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-interactive',
+        substrate: 'interactive',
+      }),
+    );
+  });
+
+  it('accepts a quick-session-only global runtime (codex-pty)', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { defaultAgentRuntime: 'codex-pty', defaultLaunchModel: 'sonnet' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      // A codex runtime routes the model through `agentModel`, not claudeConfig.
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'sonnet' }),
+    );
+  });
+
+  it('DROPS a global runtime no launch surface offers (codex-exec) instead of sending it', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { defaultAgentRuntime: 'codex-exec' } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+    // …and the substrate falls through to the quick floor, not to nothing.
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'interactive' }),
+    );
+  });
+
+  it('a stored per-type agentRuntime still BEATS the global default', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          defaultAgentRuntime: 'codex-pty',
+          runTypeDefaults: { quick: { agentRuntime: 'claude-interactive' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'claude-interactive', substrate: 'interactive' }),
+    );
+  });
+
+  // AC5 — THE criterion that matters most: with NEITHER global set the payload
+  // is byte-identical to the pre-feature one. Exact equality, not
+  // objectContaining, and an explicit "no runtime key at all".
+  it('REGRESSION: with NEITHER global set the payload is byte-identical', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          defaultLaunchModel: undefined,
+          defaultAgentRuntime: undefined,
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'interactive',
+      claudeConfig: { model: DEFAULT_QUICK_MODEL, fastMode: false },
+    });
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Source guard (TASK-153 AC4) — startWithDefaults must be a NEW, additive
 // method that delegates to `start` positionally, not an expansion of
 // `start`'s own signature. Read the source text directly (the same idiom

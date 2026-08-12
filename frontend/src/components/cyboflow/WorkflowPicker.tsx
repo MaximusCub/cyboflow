@@ -103,10 +103,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * the global values the screen happened to display, i.e. lost data on ordinary
    * use. Every control the save CTA captures must therefore also seed from it.
    *
-   * `model` is deliberately NOT given a global rung: there is no global model
-   * default in this ladder (a `config.defaultModel` fallback is exactly what
-   * DEFAULT_RUN_TYPE_MODEL_FLOORS exists to prevent), so it resolves stored →
-   * the per-kind floor (Opus for a workflow key).
+   * `model`'s global rung is `config.defaultLaunchModel` — the user's global
+   * launch model, NOT the legacy `config.defaultModel` (that one feeds the
+   * assistant fallback and must never reach a launch; it is exactly what
+   * DEFAULT_RUN_TYPE_MODEL_FLOORS exists to prevent). Unset/blank ⇒ the
+   * per-kind floor (Opus for a workflow key), i.e. unchanged.
    *
    * Keyed on the selected workflow (`selectedId` is null until the list loads,
    * hence the '' key), so switching flows re-seeds every control to the NEW
@@ -123,12 +124,31 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * `{ substrate: 'interactive' }` came back as `agentRuntime: 'claude-sdk'`
    * (synthetic global) + `substrate: 'interactive'` (stored), and `runtimeSeed`
    * below then seeded the picker to a runtime the launch would not use.
+   *
+   * The one thing that DOES belong on the `agentRuntime` rung is the user's
+   * genuine global runtime (`config.defaultAgentRuntime`) — coerced for THIS
+   * key's launch kind first: these seeds drive a WORKFLOW launch, so a global
+   * `codex-pty` (quick-session-only) is dropped and the seed falls back to the
+   * substrate rung, rather than seeding a runtime that would block Start Run.
    */
   const runTypeKey = workflowRunTypeKey(selectedId ?? '');
   const runTypeDefaults = useConfigStore((s) => s.config?.runTypeDefaults);
   const globalPermissionMode = useConfigStore((s) => s.config?.defaultAgentPermissionMode);
+  // Normalized the same way main's configManager.getGlobalLaunchModel does it —
+  // trimmed, blank ⇒ unset — so a hand-edited config.json cannot resolve
+  // differently in the renderer than it does on the main side.
+  const globalLaunchModel = useConfigStore((s) => s.config?.defaultLaunchModel)?.trim() || undefined;
+  const globalAgentRuntime = useConfigStore((s) => s.config?.defaultAgentRuntime);
+  // Workflow-scoped view of the global runtime (null ⇒ this surface's workflow
+  // launches ignore it). 'codex-exec' is outside LaunchAgentRuntime entirely.
+  const globalWorkflowRuntime =
+    globalAgentRuntime !== undefined && globalAgentRuntime !== 'codex-exec'
+      ? workflowRuntimeForLaunch(globalAgentRuntime)
+      : null;
   const launchGlobals: RunTypeLaunchGlobals = {
+    ...(globalLaunchModel !== undefined ? { model: globalLaunchModel } : {}),
     ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+    ...(globalWorkflowRuntime !== null ? { agentRuntime: globalWorkflowRuntime } : {}),
     substrate: substrateForRuntime(DEFAULT_SESSION_AGENT_RUNTIME),
   };
   const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
@@ -609,11 +629,21 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // then set Agent runtime back to "Follow defaults"). `resolved.substrate` is
     // now taken verbatim rather than re-derived from the runtime, so this seam
     // and `useQuickSession.startWithDefaults` resolve the SAME transport.
+    //
+    // The user's GENUINE global runtime does ride the `agentRuntime` rung — and
+    // this is a QUICK launch, so the whole SessionAgentRuntime set is accepted
+    // (including `codex-pty`, which the workflow seeds above drop). Only
+    // 'codex-exec' is filtered, matching useQuickSession.startWithDefaults.
     const quickDefaults = resolveRunTypeLaunchDefaults(
       QUICK_RUN_TYPE_KEY,
       useConfigStore.getState().config?.runTypeDefaults,
       {
+        // Unread today — the launch model comes from the `model` control below,
+        // whose own seed already carries this same global rung — but passed so
+        // the quick ladder resolved here is the one a quick launch really uses.
+        ...(globalLaunchModel !== undefined ? { model: globalLaunchModel } : {}),
         ...(globalPermissionMode !== undefined ? { permissionMode: globalPermissionMode } : {}),
+        ...(isSessionAgentRuntime(globalAgentRuntime) ? { agentRuntime: globalAgentRuntime } : {}),
         substrate: quickDefaultSubstrate,
       },
     );
@@ -677,6 +707,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     permissionMode,
     isPermissionModeTouched,
     globalPermissionMode,
+    globalLaunchModel,
+    globalAgentRuntime,
     startQuickSession,
     quickDefaultSubstrate,
   ]);

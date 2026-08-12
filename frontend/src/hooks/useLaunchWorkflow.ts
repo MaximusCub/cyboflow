@@ -152,14 +152,31 @@ export function useLaunchWorkflow(
         // Read the config INSIDE the callback, keyed off THIS call's
         // workflowId — a hook-level selector would capture the wrong (or a
         // stale) workflow's defaults, since `launch` is generic over any id.
+        const config = useConfigStore.getState().config;
         const resolved = resolveRunTypeLaunchDefaults(
           workflowRunTypeKey(workflowId),
-          useConfigStore.getState().config?.runTypeDefaults,
-          { permissionMode: globalPermissionMode },
+          config?.runTypeDefaults,
+          {
+            permissionMode: globalPermissionMode,
+            // The GLOBAL launch model — the middle rung, below a stored
+            // `workflow:<id>` model and above DEFAULT_WORKFLOW_MODEL. Trimmed,
+            // blank ⇒ unset, matching main's configManager.getDefaultLaunchModel.
+            model: config?.defaultLaunchModel?.trim() || undefined,
+            // The GLOBAL agent runtime rides the `agentRuntime` rung VERBATIM —
+            // it is a genuine user-set runtime, the only thing this rung is for.
+            // Nothing synthesized from a substrate preference may go here (a
+            // resolved runtime OWNS its implied substrate and would outrank a
+            // stored substrate). Workflow-invalid values are dropped below,
+            // exactly like a workflow-invalid STORED value.
+            agentRuntime: config?.defaultAgentRuntime,
+          },
         );
-        // A stored runtime a workflow simply cannot run on (codex-pty, and the
+        // A runtime a workflow simply cannot run on (codex-pty, and the
         // session-only 'codex-exec' that never reaches a launch surface) is
         // dropped, never sent — the launch proceeds on the backend's default.
+        // This is the one coercion point for BOTH the stored and the global
+        // rung, so a global `codex-pty` degrades to the workflow floor rather
+        // than blocking the launch.
         const storedRuntime = resolved.agentRuntime;
         const agentRuntime =
           storedRuntime !== undefined && storedRuntime !== 'codex-exec'

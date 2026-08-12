@@ -181,7 +181,13 @@ export interface RunTypeBaseline {
  *    baseline and every diff chip would vanish (rule 1 in the module doc).
  *    The globals passed here are the same ones the launch seams pass:
  *    `quickSessionDefaultSubstrate` for the quick key
- *    (useQuickSession.startWithDefaults) and `defaultAgentPermissionMode`.
+ *    (useQuickSession.startWithDefaults), `defaultAgentPermissionMode`, and the
+ *    two shared launch globals `defaultLaunchModel` / `defaultAgentRuntime`.
+ *    The runtime is coerced to the key's own launch kind first
+ *    (`agentRuntimeOptions`), because that is what the launch does: a global
+ *    `codex-pty` is quick-session-only, so a FLOW key's launch drops it and
+ *    lands on the workflow floor — and the baseline has to say so, or every
+ *    flow row would show a phantom runtime chip.
  *
  * 2. **`agentRuntime` is projected from the resolved SUBSTRATE.** The resolver
  *    returns `undefined` for an unconfigured runtime on purpose — that omission
@@ -198,14 +204,34 @@ export interface RunTypeBaseline {
  *    `DEFAULT_SESSION_AGENT_RUNTIME`. That is the fix, not a side effect — the
  *    old value was the contradictory half. A workflow key is unchanged
  *    (`sdk` ⇒ `claude-sdk` == `DEFAULT_WORKFLOW_AGENT_RUNTIME`).
+ *
+ *    When `defaultAgentRuntime` IS set the resolver returns it, so the gap
+ *    never opens and the projection does not run. A Codex global therefore
+ *    surfaces as the baseline runtime verbatim — exactly what the launch sends
+ *    — while `substrate` stays on its floor, since a Codex runtime implies no
+ *    Claude transport to move it to.
  */
 export function resolveRunTypeBaseline(
   key: string,
   config: AppConfig | null | undefined,
 ): RunTypeBaseline {
   const quick = runTypeKindForKey(key) === 'quick';
+  // Trimmed, blank ⇒ unset — the same normalization main's
+  // configManager.getGlobalLaunchModel applies, so the chips describe the model
+  // a launch would really resolve.
+  const globalModel = config?.defaultLaunchModel?.trim() || undefined;
+  // Coerced to this key's launch kind — `agentRuntimeOptions` is the same
+  // per-kind set the detail screen offers, so a global the key cannot launch on
+  // is dropped here exactly as the launch seam drops it.
+  const globalRuntime = config?.defaultAgentRuntime;
+  const usableRuntime =
+    globalRuntime !== undefined && agentRuntimeOptions(key).includes(globalRuntime)
+      ? globalRuntime
+      : undefined;
   const resolved = resolveRunTypeLaunchDefaults(key, undefined, {
+    model: globalModel,
     permissionMode: config?.defaultAgentPermissionMode,
+    agentRuntime: usableRuntime,
     substrate: quick
       ? (config?.quickSessionDefaultSubstrate ?? DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.quick)
       : DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS.workflow,

@@ -314,13 +314,33 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     (key: string): Promise<void> => {
       const config = useConfigStore.getState().config;
       const runTypeDefaults = config?.runTypeDefaults;
+      // The GLOBAL launch model (`config.defaultLaunchModel`), normalized the
+      // same way main's `configManager.getGlobalLaunchModel` normalizes it —
+      // trimmed, and blank ⇒ unset — so the renderer and main cannot resolve a
+      // hand-edited config.json differently.
+      const globalLaunchModel = config?.defaultLaunchModel?.trim() || undefined;
+      // The GLOBAL agent runtime, taken ONLY when it is launchable as a quick
+      // session. `codex-exec` (never offered by any picker, reachable via a
+      // hand-edited config) is dropped here rather than sent as an unlaunchable
+      // runtime; every other member of the union is a valid quick session,
+      // including `codex-pty`.
+      const globalAgentRuntime = config?.defaultAgentRuntime;
       // This seam always creates a QUICK session, so the quick-kind floors
       // apply even when the caller hands over a workflow key — pin them here
-      // rather than let the key pick the (workflow) floor table.
+      // rather than let the key pick the (workflow) floor table. The global
+      // model sits BETWEEN the stored per-type value and that floor.
+      //
+      // `agentRuntime` is the rung a GENUINE user-set global runtime rides, and
+      // nothing else: a resolved runtime OWNS its implied substrate, so a
+      // runtime synthesized from `quickSessionDefaultSubstrate` here would
+      // outrank a stored substrate carrying no runtime of its own. The
+      // substrate preference therefore stays on the SUBSTRATE rung below, where
+      // a stored substrate still beats it.
       const globals: RunTypeLaunchGlobals = {
-        model: DEFAULT_RUN_TYPE_MODEL_FLOORS.quick,
+        model: globalLaunchModel ?? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick,
         permissionMode: config?.defaultAgentPermissionMode,
         substrate: config?.quickSessionDefaultSubstrate ?? DEFAULT_QUICK_SUBSTRATE,
+        ...(isSessionAgentRuntime(globalAgentRuntime) ? { agentRuntime: globalAgentRuntime } : {}),
       };
       const resolved = resolveRunTypeLaunchDefaults(key, runTypeDefaults, globals);
       // Effort always resolves off the quick key — see the doc above.
@@ -329,9 +349,10 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         runTypeDefaults,
         globals,
       );
-      // `start` takes the session-scoped runtime union; a stored 'codex-exec'
-      // (never written by the settings UI, but reachable via a hand-edited
-      // config) is dropped rather than sent as an unlaunchable runtime.
+      // `start` takes the session-scoped runtime union; a 'codex-exec' (never
+      // written by the settings UI, but reachable via a hand-edited config) is
+      // dropped rather than sent as an unlaunchable runtime. The global rung is
+      // already filtered above, so this now only guards a STORED value.
       const agentRuntime = isSessionAgentRuntime(resolved.agentRuntime)
         ? resolved.agentRuntime
         : undefined;

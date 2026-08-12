@@ -192,6 +192,100 @@ describe('resolveRunTypeBaseline', () => {
       ).map((c) => c.field),
     ).toEqual(['model', 'substrate', 'agentRuntime']);
   });
+
+  // -------------------------------------------------------------------------
+  // The GLOBAL launch defaults (`defaultLaunchModel` / `defaultAgentRuntime`).
+  // The baseline has to move with them or the chips describe a launch nobody
+  // performs: a run type that merely RESTATES the global would chip, and a run
+  // type that genuinely overrides it would not.
+  // -------------------------------------------------------------------------
+
+  it('takes the model from the global defaultLaunchModel, on both key kinds', () => {
+    const config: AppConfig = { gitRepoPath: '/repo', defaultLaunchModel: 'sonnet' };
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).model).toBe('sonnet');
+    expect(resolveRunTypeBaseline('workflow:wf-1', config).model).toBe('sonnet');
+  });
+
+  it('treats a blank defaultLaunchModel as unset (parity with configManager.getGlobalLaunchModel)', () => {
+    const config: AppConfig = { gitRepoPath: '/repo', defaultLaunchModel: '  ' };
+    expect(resolveRunTypeBaseline('workflow:wf-1', config).model).toBe('opus');
+  });
+
+  it('takes the runtime from the global defaultAgentRuntime, moving the substrate WITH it', () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultAgentRuntime: 'claude-interactive',
+    };
+    expect(resolveRunTypeBaseline('workflow:wf-1', config)).toEqual({
+      model: 'opus',
+      substrate: 'interactive',
+      agentRuntime: 'claude-interactive',
+      permissionMode: 'default',
+    });
+  });
+
+  // The workflow coercion, restated as a baseline: a flow key's LAUNCH drops a
+  // global codex-pty and lands on the workflow floor, so the baseline must say
+  // 'claude-sdk' — otherwise every flow row would show a phantom runtime chip
+  // against a runtime no flow run can use.
+  it('drops a global runtime the key cannot launch on (codex-pty on a flow key)', () => {
+    const config: AppConfig = { gitRepoPath: '/repo', defaultAgentRuntime: 'codex-pty' };
+    expect(resolveRunTypeBaseline('workflow:wf-1', config).agentRuntime).toBe('claude-sdk');
+    expect(resolveRunTypeBaseline('workflow:wf-1', config).substrate).toBe('sdk');
+    // …while the quick key, which CAN launch it, adopts it.
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).agentRuntime).toBe('codex-pty');
+  });
+
+  it('drops a global runtime no key offers (codex-exec)', () => {
+    const config: AppConfig = { gitRepoPath: '/repo', defaultAgentRuntime: 'codex-exec' };
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config).agentRuntime).toBe('claude-interactive');
+    expect(resolveRunTypeBaseline('workflow:wf-1', config).agentRuntime).toBe('claude-sdk');
+  });
+
+  // AC6 — the chips, which is what this baseline exists for.
+  it('shows NO chips for a run type that merely restates the globals, and chips one that overrides them', () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: 'sonnet',
+      defaultAgentRuntime: 'claude-interactive',
+    };
+    const baseline = resolveRunTypeBaseline('workflow:wf-1', config);
+    // Follows the globals — every stored value equals what a launch resolves.
+    expect(
+      runTypeOverrideChips(
+        { model: 'sonnet', agentRuntime: 'claude-interactive', substrate: 'interactive' },
+        baseline,
+      ),
+    ).toEqual([]);
+    // Overrides them — both fields differ from the resolved global baseline.
+    expect(
+      runTypeOverrideChips({ model: 'haiku', agentRuntime: 'claude-sdk' }, baseline).map((c) => ({
+        field: c.field,
+        baseline: c.baseline,
+      })),
+    ).toEqual([
+      { field: 'model', baseline: 'Sonnet 5 · 1M' },
+      { field: 'agentRuntime', baseline: 'Claude interactive' },
+    ]);
+  });
+
+  // AC5 for this seam: with neither global set the baseline is unchanged.
+  it('REGRESSION: with NEITHER global set the baselines are exactly the pre-feature ones', () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: undefined,
+      defaultAgentRuntime: undefined,
+    };
+    expect(resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, config)).toEqual(
+      resolveRunTypeBaseline(QUICK_RUN_TYPE_KEY, NO_CONFIG),
+    );
+    expect(resolveRunTypeBaseline('workflow:wf-1', config)).toEqual({
+      model: 'opus',
+      substrate: 'sdk',
+      agentRuntime: 'claude-sdk',
+      permissionMode: 'default',
+    });
+  });
 });
 
 describe('runTypeOverrideChips', () => {

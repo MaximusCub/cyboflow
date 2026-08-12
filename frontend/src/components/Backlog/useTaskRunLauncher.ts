@@ -40,14 +40,28 @@ import { notifyWorkflowRunStarted } from '../../utils/onboarding';
  * lookup — a hook-level selector would be keyed wrong.
  */
 function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
+  const config = useConfigStore.getState().config;
   const resolved = resolveRunTypeLaunchDefaults(
     workflowRunTypeKey(workflowId),
-    useConfigStore.getState().config?.runTypeDefaults,
-    { permissionMode: globalPermissionMode },
+    config?.runTypeDefaults,
+    {
+      permissionMode: globalPermissionMode,
+      // The GLOBAL launch model — the middle rung, below a stored
+      // `workflow:<id>` model and above DEFAULT_WORKFLOW_MODEL. Trimmed, blank
+      // ⇒ unset, matching main's configManager.getDefaultLaunchModel.
+      model: config?.defaultLaunchModel?.trim() || undefined,
+      // The GLOBAL agent runtime rides the `agentRuntime` rung VERBATIM — that
+      // rung is for a genuine user-set runtime and nothing else (a resolved
+      // runtime OWNS its implied substrate, so anything synthesized from a
+      // substrate preference would outrank a stored substrate). A
+      // workflow-invalid value is dropped below, like a stored one.
+      agentRuntime: config?.defaultAgentRuntime,
+    },
   );
-  // A stored runtime a workflow cannot run on (codex-pty, and the session-only
+  // A runtime a workflow cannot run on (codex-pty, and the session-only
   // 'codex-exec' that never reaches a launch surface) is dropped rather than
-  // sent — the launch still proceeds on the backend's default.
+  // sent — the launch still proceeds on the backend's default. One coercion
+  // point for BOTH the stored and the global rung.
   const storedRuntime = resolved.agentRuntime;
   const agentRuntime =
     storedRuntime !== undefined && storedRuntime !== 'codex-exec'

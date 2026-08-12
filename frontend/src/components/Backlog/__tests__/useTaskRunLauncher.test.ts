@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
 import type { RunTypeDefaults } from '../../../../../shared/types/sessionDefaults';
+import type { AgentRuntime } from '../../../../../shared/types/agentRuntime';
 
 const { mockListQuery, mockStartMutate, mockEnsureSession, mockTrackEvent, mockConfigState } = vi.hoisted(() => ({
   mockListQuery: vi.fn(),
@@ -24,6 +25,10 @@ const { mockListQuery, mockStartMutate, mockEnsureSession, mockTrackEvent, mockC
     config: null as {
       defaultAgentPermissionMode?: string;
       runTypeDefaults?: Record<string, RunTypeDefaults>;
+      // The two GLOBAL launch defaults (commit 87ab7929) — the resolver's
+      // middle rung, shared by quick sessions and flow runs.
+      defaultLaunchModel?: string;
+      defaultAgentRuntime?: AgentRuntime;
     } | null,
   },
 }));
@@ -437,6 +442,130 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
     expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
     expect(mockStartMutate.mock.calls[1][0]).not.toHaveProperty('agentRuntime');
     expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'sonnet' });
+  });
+
+  // -------------------------------------------------------------------------
+  // The GLOBAL rung: config.defaultLaunchModel / config.defaultAgentRuntime.
+  // Both call sites resolve through the same `resolveLaunchDefaults`, so each
+  // case is asserted on `launch` AND `launchSprintBatch`.
+  // -------------------------------------------------------------------------
+
+  it('sends the GLOBAL defaultLaunchModel on both call sites when nothing per-type is stored', async () => {
+    mockConfigState.config = { defaultLaunchModel: 'sonnet' };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_9', ['t1'], 7);
+    });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'sonnet' });
+    expect(mockStartMutate.mock.calls[1][0]).toMatchObject({ model: 'sonnet' });
+  });
+
+  it('a stored per-workflow model still BEATS the global default on both call sites', async () => {
+    mockConfigState.config = {
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { 'workflow:wf-sprint': { model: 'haiku' } },
+    };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_9', ['t1'], 7);
+    });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'haiku' });
+    expect(mockStartMutate.mock.calls[1][0]).toMatchObject({ model: 'haiku' });
+  });
+
+  it('treats a blank defaultLaunchModel as unset (parity with configManager.getGlobalLaunchModel)', async () => {
+    mockConfigState.config = { defaultLaunchModel: '\t ' };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'opus' });
+  });
+
+  // The rung-ordering guard: the resolved runtime OWNS its substrate, so the
+  // pair is asserted together on both call sites.
+  it('sends the GLOBAL defaultAgentRuntime AND the substrate it implies, on both call sites', async () => {
+    mockConfigState.config = { defaultAgentRuntime: 'claude-interactive' };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_9', ['t1'], 7);
+    });
+    for (const call of [0, 1]) {
+      expect(mockStartMutate.mock.calls[call][0]).toMatchObject({
+        agentRuntime: 'claude-interactive',
+        substrate: 'interactive',
+      });
+    }
+  });
+
+  it('DROPS a global runtime a workflow cannot run on (codex-pty) and still launches, on both call sites', async () => {
+    mockConfigState.config = { defaultAgentRuntime: 'codex-pty' };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    let runId: string | null = null;
+    await act(async () => {
+      runId = await result.current.launch('tsk_1', 7, 'task');
+    });
+    let batchRunId: string | null = null;
+    await act(async () => {
+      batchRunId = await result.current.launchSprintBatch('epic_9', ['t1'], 7);
+    });
+    expect(runId).toBe('run-1');
+    expect(batchRunId).toBe('run-1');
+    expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
+    expect(mockStartMutate.mock.calls[1][0]).not.toHaveProperty('agentRuntime');
+    // …and the launch lands on the workflow floor, not on a half-applied global.
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ substrate: 'sdk', model: 'opus' });
+  });
+
+  it('a stored per-workflow agentRuntime still BEATS the global default', async () => {
+    mockConfigState.config = {
+      defaultAgentRuntime: 'claude-interactive',
+      runTypeDefaults: { 'workflow:wf-sprint': { agentRuntime: 'codex-sdk' } },
+    };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ agentRuntime: 'codex-sdk' });
+  });
+
+  // AC5, restated with both global keys present on the config object but unset.
+  it('REGRESSION: with NEITHER global set both payloads are byte-identical', async () => {
+    mockConfigState.config = { defaultLaunchModel: undefined, defaultAgentRuntime: undefined };
+    const { result } = renderHook(() => useTaskRunLauncher());
+    await act(async () => {
+      await result.current.launch('tsk_1', 7, 'task');
+    });
+    await act(async () => {
+      await result.current.launchSprintBatch('epic_9', ['t1', 't2'], 7);
+    });
+    expect(mockStartMutate.mock.calls[0][0]).toEqual({
+      workflowId: 'wf-sprint',
+      projectId: 7,
+      sessionId: 'sess-1',
+      model: 'opus',
+      permissionMode: 'default',
+      substrate: 'sdk',
+      taskIds: ['tsk_1'],
+    });
+    expect(mockStartMutate.mock.calls[1][0]).toEqual({
+      workflowId: 'wf-sprint',
+      projectId: 7,
+      sessionId: 'sess-1',
+      taskIds: ['t1', 't2'],
+      model: 'opus',
+      permissionMode: 'default',
+      substrate: 'sdk',
+    });
   });
 
   it('launch: resolves the bundle AFTER the async workflowId lookup — a planner-keyed entry never applies to a task launch', async () => {

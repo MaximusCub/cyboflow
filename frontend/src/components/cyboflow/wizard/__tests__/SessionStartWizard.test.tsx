@@ -3216,3 +3216,199 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
     expect(screen.getByTestId('wizard-launch-summary')).not.toHaveTextContent('selected');
   });
 });
+
+// ---------------------------------------------------------------------------
+// GLOBAL launch defaults — `config.defaultLaunchModel` / `defaultAgentRuntime`,
+// the resolver's MIDDLE rung, seeded into every card's Configure controls. ONE
+// global runtime, coerced per card: quick/ultracode take the whole session set,
+// a workflow card drops what a flow run cannot launch, and design is never
+// moved (it is hard-pinned to the Claude SDK substrate).
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — global launch defaults (defaultLaunchModel / defaultAgentRuntime)', () => {
+  beforeEach(() => {
+    // A non-gated custom flow, so the workflow card launches DIRECTLY.
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+  });
+
+  /** Install ONLY the globals a case needs (nothing stored per-run-type). */
+  function setGlobals(globals: Partial<AppConfig>): void {
+    act(() => {
+      useConfigStore.setState({ config: globals as AppConfig });
+    });
+  }
+
+  it('seeds BOTH cards from the global defaultLaunchModel and launches with it', async () => {
+    setGlobals({ defaultLaunchModel: 'sonnet' });
+    await renderLockedWizard();
+
+    await selectQuickAndConfigure();
+    await waitFor(() => expect(claudeModelValue()).toBe('sonnet'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ claudeConfig: expect.objectContaining({ model: 'sonnet' }) }),
+    );
+
+    await backToWorkflow();
+    await selectWorkflowAndConfigure();
+    await waitFor(() => expect(claudeModelValue()).toBe('sonnet'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
+  });
+
+  it('a stored per-run-type model still BEATS the global default', async () => {
+    setGlobals({
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { 'workflow:wf-1': { model: 'haiku' } },
+    });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await waitFor(() => expect(claudeModelValue()).toBe('haiku'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'haiku' }));
+  });
+
+  // The rung-ordering guard: the global runtime OWNS its transport, so it beats
+  // the quick substrate preference (set to the OPPOSITE value here) and the two
+  // fields are asserted as a PAIR.
+  it('seeds the quick card from the global runtime, substrate and all', async () => {
+    setGlobals({
+      defaultAgentRuntime: 'claude-interactive',
+      quickSessionDefaultSubstrate: 'sdk',
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-interactive',
+        substrate: 'interactive',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  it('the quick card ACCEPTS a quick-only global runtime (codex-pty)', async () => {
+    setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await waitFor(() => expect(runtimeValue()).toBe('codex-pty'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentProvider: 'codex' }),
+    );
+  });
+
+  // …and the SAME global, on a workflow card, is dropped rather than blocking
+  // the CTA with "Codex PTY is only available for quick sessions."
+  it('the workflow card DROPS the quick-only global runtime and still launches on the floor', async () => {
+    setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    expect(runtimeValue()).toBe('claude-sdk');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-sdk',
+        substrate: 'sdk',
+        agentProvider: 'claude',
+      }),
+    );
+  });
+
+  it('a workflow-capable global runtime rides a workflow launch, substrate and all', async () => {
+    setGlobals({ defaultAgentRuntime: 'claude-interactive' });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'claude-interactive', substrate: 'interactive' }),
+    );
+  });
+
+  // Design is a security boundary (design-mode.md "Session plumbing"): the MCP
+  // scope mechanism that limits a design session's toolset exists only on the
+  // SDK path, so NO global may move it off claude-sdk.
+  it('the design card ignores the global runtime entirely (stays hard-pinned to the Claude SDK)', async () => {
+    setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    await renderLockedWizard();
+    await selectDesignAndConfigure();
+
+    // The runtime picker is hidden for design, so the LAUNCH is the assertion:
+    // through the idea gate, then the createQuick payload.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        designIdeaId: 'IDEA-7',
+      }),
+    );
+  });
+
+  // AC5 — with NEITHER global set the payloads are byte-identical.
+  it('REGRESSION: with NEITHER global set both launch payloads are unchanged', async () => {
+    setGlobals({ defaultLaunchModel: undefined, defaultAgentRuntime: undefined });
+    await renderLockedWizard();
+
+    await selectQuickAndConfigure();
+    expect(runtimeValue()).toBe('claude-interactive');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'interactive',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-interactive',
+      claudeConfig: { model: 'opus', fastMode: false },
+    });
+
+    await backToWorkflow();
+    await selectWorkflowAndConfigure();
+    expect(runtimeValue()).toBe('claude-sdk');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        projectId: 1,
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        permissionMode: 'default',
+        model: 'opus',
+      }),
+    );
+  });
+});
