@@ -2066,26 +2066,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* Offered ONLY once the controls diverge from their seeds (see
-                isSaveDefaultDirty): with the card already showing the stored
-                default there is nothing to write, so the affordance stays out of
-                the way. A secondary Button, deliberately quieter than the
-                primary launch CTA. Omitted entirely for `design`, which is
-                excluded from stored defaults. */}
-            {selection.kind !== 'design' && isSaveDefaultDirty && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={handleSaveDefault}
-                disabled={isSavingDefault}
-                data-testid="wizard-save-default"
-                className="self-start"
-              >
-                Save as default for {saveDefaultLabel}
-              </Button>
-            )}
-
             {/* Save-as-default outcome. Undo is offered ONLY for a write the
                 store confirmed landed — a failure toast carries no Undo, because
                 replaying it would delete a default the failed write never
@@ -2179,6 +2159,25 @@ export default function SessionStartWizard(): React.JSX.Element {
               >
                 {ctaLabel}
               </button>
+              {/* Offered ONLY once the controls diverge from their seeds (see
+                  isSaveDefaultDirty): with the card already showing the stored
+                  default there is nothing to write, so the affordance stays out
+                  of the way. Sits BELOW the primary launch button so the reading
+                  order matches the priority. Omitted entirely for `design`,
+                  which is excluded from stored defaults. */}
+              {selection.kind !== 'design' && isSaveDefaultDirty && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleSaveDefault}
+                  disabled={isSavingDefault}
+                  data-testid="wizard-save-default"
+                  className="self-start"
+                >
+                  Save as default for {saveDefaultLabel}
+                </Button>
+              )}
             </div>
           </div>
         )}

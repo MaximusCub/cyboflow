@@ -821,25 +821,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         />
       )}
 
-      {/* Offered ONLY once the controls diverge from their seeds (see
-          isSaveDefaultDirty): with the screen already showing the stored default
-          there is nothing to write, so the affordance stays out of the way. A
-          secondary Button, deliberately quieter than the primary "Start Run"
-          below it. */}
-      {selectedId !== null && isSaveDefaultDirty && (
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={handleSaveDefault}
-          disabled={isSavingDefault}
-          data-testid="workflow-picker-save-default"
-          className="self-start"
-        >
-          Save as default for {selectedWorkflowTitle}
-        </Button>
-      )}
-
       {combinedError && (
         <p className="text-xs text-status-error" role="alert">
           {combinedError}
@@ -871,6 +852,26 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           New flow
         </button>
       </div>
+
+      {/* Offered ONLY once the controls diverge from their seeds (see
+          isSaveDefaultDirty): with the screen already showing the stored default
+          there is nothing to write, so the affordance stays out of the way. Sits
+          BELOW the primary "Start Run" row so the reading order matches the
+          priority — launching is the point of this panel, saving a default is
+          the aside. */}
+      {selectedId !== null && isSaveDefaultDirty && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={handleSaveDefault}
+          disabled={isSavingDefault}
+          data-testid="workflow-picker-save-default"
+          className="self-start"
+        >
+          Save as default for {selectedWorkflowTitle}
+        </Button>
+      )}
 
       {editorMode !== null && (
         <WorkflowEditorModal
