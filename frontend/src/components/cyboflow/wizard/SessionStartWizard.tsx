@@ -111,6 +111,7 @@ import { ChevronDown } from 'lucide-react';
 import { cn } from '../../../utils/cn';
 import { sameStringSet } from '../../../utils/sameStringSet';
 import { Switch } from '../../ui/Switch';
+import { Button } from '../../ui/Button';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { SessionActionToast } from '../SessionActionToast';
 import { WizardStepHeader } from './WizardStepHeader';
@@ -355,6 +356,11 @@ export default function SessionStartWizard(): React.JSX.Element {
     substrate: substrateForRuntime(launcherDefaultRuntime),
   };
   const launchDefaults = resolveRunTypeLaunchDefaults(runTypeKey, runTypeDefaults, launchGlobals);
+  // The model + permission seeds, named so the "Save as default" dirty check
+  // (below, near handleSaveDefault) can compare each control against EXACTLY the
+  // value it was seeded with rather than re-reading the resolver field by field.
+  const modelSeed = launchDefaults.model;
+  const permissionModeSeed = launchDefaults.permissionMode;
   // Per-launch Claude model for QUICK, ULTRACODE, DESIGN and workflow launches
   // (Configure ③). Driven by useSeededSelection: the value re-seeds REACTIVELY
   // from the resolved default while the current key is untouched, and each key
@@ -373,7 +379,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     reseed: reseedModel,
   } = useSeededSelection<string>({
     key: runTypeKey,
-    seed: launchDefaults.model,
+    seed: modelSeed,
     fallback: DEFAULT_QUICK_MODEL,
   });
   // Per-run/per-session agent permission. The seed already carries the global
@@ -385,7 +391,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     setByUser: setPermissionModeByUser,
   } = useSeededSelection<PermissionMode>({
     key: runTypeKey,
-    seed: launchDefaults.permissionMode,
+    seed: permissionModeSeed,
     fallback: DEFAULT_PERMISSION_MODE,
   });
   // Per-launch agent runtime. Runtime is projected onto the legacy substrate
@@ -1421,6 +1427,49 @@ export default function SessionStartWizard(): React.JSX.Element {
     });
   }, [saveDefault, selection?.kind, model, permissionMode, effectiveRuntime, reasoningEffort]);
 
+  /**
+   * The value the reasoning-effort control was SEEDED with, restated exactly as
+   * the seeding effect above resolves it: the stored quick effort when one is
+   * stored AND it is on the current provider's scale, else `null` ("provider
+   * default", the control's own untouched state). Only the quick card has an
+   * effort control (and only it writes the field), so every other card seeds
+   * `null` and the comparison below is a no-op for them.
+   */
+  const reasoningEffortSeed: ReasoningEffort | null =
+    storedQuickEffort !== undefined &&
+    isValidEffortForProvider(effectiveProvider, storedQuickEffort)
+      ? storedQuickEffort
+      : null;
+
+  /**
+   * Whether the Configure controls currently differ from what they were SEEDED
+   * with — the sole visibility condition for the save CTA (there is nothing to
+   * save while the screen already shows the stored default).
+   *
+   * Compared against the seeds, never against `isTouched`: `setByUser` latches on
+   * ANY user pick, including one that sets a control straight back to the value
+   * it already held, which would strand the CTA on screen with nothing to write.
+   * Seed-comparison instead makes the affordance self-correcting — reverting a
+   * change hides it again, a successful save re-seeds the controls to the values
+   * just stored (so it hides itself), and an Undo re-seeds them back (so it
+   * returns).
+   *
+   * The compared set is exactly the set `handleSaveDefault` writes, minus
+   * `substrate` (derived from the runtime, so the runtime comparison covers it).
+   * Effort therefore counts on the QUICK card only — the one card that writes
+   * the field (ultracode shares the key but pins xhigh with no control, and the
+   * `reasoningEffort` state itself is wizard-wide, so an unguarded comparison
+   * would leak a quick-card effort pick onto a workflow card as a phantom
+   * "dirty"). The runtime compared is the PICKER's value against the picker's
+   * seed — not `effectiveRuntime`, whose card-kind pins (ultracode/design) are
+   * not control state and would read as permanently dirty.
+   */
+  const isSaveDefaultDirty =
+    model !== modelSeed ||
+    permissionMode !== permissionModeSeed ||
+    agentRuntime !== runtimeSeed ||
+    (selection?.kind === 'quick' && reasoningEffort !== reasoningEffortSeed);
+
   const combinedError = launchError ?? quickError;
 
   // Selected-project banner card — shared by the workflow step (②) and the
@@ -2017,21 +2066,24 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* Enabled from the moment the card opens, even with no knob
-                touched — storing the current (possibly untouched) values is a
-                legitimate "this run type follows today's global default"
-                confirmation, so there is deliberately no dirty check. Omitted
-                for `design`, which is excluded from stored defaults. */}
-            {selection.kind !== 'design' && (
-              <button
+            {/* Offered ONLY once the controls diverge from their seeds (see
+                isSaveDefaultDirty): with the card already showing the stored
+                default there is nothing to write, so the affordance stays out of
+                the way. A secondary Button, deliberately quieter than the
+                primary launch CTA. Omitted entirely for `design`, which is
+                excluded from stored defaults. */}
+            {selection.kind !== 'design' && isSaveDefaultDirty && (
+              <Button
                 type="button"
+                variant="secondary"
+                size="sm"
                 onClick={handleSaveDefault}
                 disabled={isSavingDefault}
                 data-testid="wizard-save-default"
-                className="self-start text-xs font-medium text-interactive underline underline-offset-2 hover:text-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                className="self-start"
               >
                 Save as default for {saveDefaultLabel}
-              </button>
+              </Button>
             )}
 
             {/* Save-as-default outcome. Undo is offered ONLY for a write the

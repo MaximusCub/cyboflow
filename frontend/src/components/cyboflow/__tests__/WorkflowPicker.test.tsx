@@ -1638,7 +1638,10 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
 
   // ── AC2: round-trip integrity — THE data-loss case ───────────────────────
 
-  it('re-saving an untouched screen writes back what was STORED, not the global defaults', async () => {
+  // The save CTA only appears once a control leaves its seed, so the round-trip
+  // is exercised by editing ONE knob: everything the user did NOT touch must
+  // still be written back from the STORED entry, never from the global rung.
+  it('writes back what was STORED for the untouched controls, not the global defaults', async () => {
     setConfig(
       { 'workflow:wf-1': { model: 'sonnet', permissionMode: 'auto', agentRuntime: 'claude-interactive' } },
       { defaultAgentPermissionMode: 'dontAsk' },
@@ -1647,6 +1650,11 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
     await findEnabledStartRun();
     await waitFor(() => expect(runtimeValue()).toBe('claude-interactive'));
 
+    // One real edit — the model — reveals the CTA. Permission + runtime stay
+    // untouched, still seeded from the stored entry.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'haiku' } });
+    });
     await act(async () => {
       fireEvent.click(screen.getByTestId('workflow-picker-save-default'));
     });
@@ -1655,7 +1663,7 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
     expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
       kind: 'merge',
       value: {
-        model: 'sonnet',
+        model: 'haiku',
         permissionMode: 'auto',
         agentRuntime: 'claude-interactive',
         // The stored entry carried no substrate; the runtime OWNS it, so the
@@ -1837,19 +1845,115 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
     useConfigStore.setState({ config: null });
   });
 
-  /** Resolve the save CTA once the workflow list has settled a real selection. */
+  /** Move the model control off its seeded value (the CTA's dirty condition). */
+  async function chooseModel(model: string): Promise<void> {
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: model } });
+    });
+  }
+
+  /**
+   * Settle the workflow list, then REVEAL the CTA by moving the model off its
+   * seeded value ('opus', the workflow floor, with nothing stored). The
+   * affordance is dirty-gated: an untouched screen matches the stored default,
+   * so there is nothing to save and no CTA at all.
+   */
   async function findSaveDefault(): Promise<HTMLElement> {
     await findEnabledStartRun();
+    await chooseModel('sonnet');
     return screen.getByTestId('workflow-picker-save-default');
   }
 
-  it('renders the CTA labelled with the selected flow title, enabled before any knob is touched', async () => {
+  it('renders NO CTA until a control leaves its seeded value, then labels it with the flow title', async () => {
     render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
 
-    const saveBtn = await findSaveDefault();
+    // Nothing stored, nothing touched ⇒ nothing to save.
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
+
+    await chooseModel('sonnet');
+    const saveBtn = screen.getByTestId('workflow-picker-save-default');
     // 'custom' has no static title → title-cased by workflowTitleForName.
     expect(saveBtn).toHaveTextContent('Save as default for Custom');
     expect(saveBtn).toBeEnabled();
+    // The shared secondary Button — not the former inline text link.
+    expect(saveBtn).toHaveClass('bg-surface-secondary');
+    expect(saveBtn).not.toHaveClass('underline');
+  });
+
+  // The case a naive `isTouched` implementation gets wrong: `setByUser` latches
+  // on ANY pick, including one that lands back on the seeded value — which would
+  // strand the CTA on screen with nothing to write.
+  it('hides the CTA again when the change is reverted to the seeded value', async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await chooseModel('sonnet');
+    expect(screen.getByTestId('workflow-picker-save-default')).toBeInTheDocument();
+
+    await chooseModel('opus');
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
+  });
+
+  it('reveals the CTA for a permission-mode change and hides it on revert', async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Permission mode: Don't ask"));
+    });
+    expect(screen.getByTestId('workflow-picker-save-default')).toBeInTheDocument();
+
+    // Back to the seeded mode (the 'default' floor).
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Permission mode: Ask before edits'));
+    });
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
+  });
+
+  it('reveals the CTA for a runtime change and hides it on revert', async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
+      });
+    });
+    expect(screen.getByTestId('workflow-picker-save-default')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-sdk' },
+      });
+    });
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
+  });
+
+  it('renders NO CTA for a flow whose stored default the untouched controls already show', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: {
+            'workflow:wf-1': {
+              model: 'haiku',
+              permissionMode: 'auto',
+              agentRuntime: 'claude-interactive',
+              substrate: 'interactive',
+            },
+          },
+        } as unknown as AppConfig,
+        applyRunTypeDefault: mockApplyRunTypeDefault,
+      });
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    // The controls SEEDED to the stored entry, so there is nothing to save.
+    await waitFor(() =>
+      expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('haiku'),
+    );
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
   });
 
   it('persists model + permission mode + runtime/substrate under the selected flow key WITHOUT launching', async () => {
@@ -1864,7 +1968,7 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
     expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
       kind: 'merge',
       value: {
-        model: 'opus',
+        model: 'sonnet',
         permissionMode: 'default',
         agentRuntime: 'claude-sdk',
         substrate: 'sdk',
@@ -1918,8 +2022,10 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
   it('leaves the in-flight launch payload byte-identical (side-effect-only)', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    // Baseline launch payload, BEFORE any save.
+    // Baseline launch payload, BEFORE any save — taken with the model already
+    // moved off its seed, since that edit is what reveals the CTA at all.
     const startRunBtn = await findEnabledStartRun();
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -1986,6 +2092,52 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
       kind: 'replace',
       value: previous,
     });
+  });
+
+  // The visibility rule is seed-based, so the affordance is self-correcting: a
+  // confirmed write makes live == seed (nothing left to save), and an Undo puts
+  // the old stored entry back, which makes them diverge again.
+  it('hides itself after a successful save and comes back after Undo', async () => {
+    // Stand in for the real store action: remember what was written and hand
+    // back the prior entry as `previous` (what Undo replays).
+    let stored: RunTypeDefaults | null = null;
+    mockApplyRunTypeDefault.mockImplementation(async (_key, op) => {
+      const previous = stored;
+      // This surface's patch is total for the fixture (no null members), so
+      // 'merge' and 'replace' collapse to "this value is now stored".
+      stored = op.kind === 'replace' ? op.value : (op.value as RunTypeDefaults);
+      return { ok: true, previous };
+    });
+    /** The post-write `fetchConfig` the real store action performs. */
+    function refreshConfig(): void {
+      act(() => {
+        useConfigStore.setState({
+          config: {
+            runTypeDefaults: stored === null ? {} : { 'workflow:wf-1': stored },
+          } as unknown as AppConfig,
+        });
+      });
+    }
+    render(<WorkflowPicker projectId={1} />);
+
+    const saveBtn = await findSaveDefault();
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    refreshConfig();
+
+    // The seed is now the value just stored, so live == seed and there is
+    // nothing left to save.
+    expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('session-action-toast-action'));
+    });
+    refreshConfig();
+
+    // Undo deleted the key, so the controls re-seed to the 'opus' floor while the
+    // (still-standing) 'sonnet' pick diverges from it again.
+    expect(screen.getByTestId('workflow-picker-save-default')).toBeInTheDocument();
   });
 
   it('a FAILED write shows a failure toast and offers NO Undo (never a deleting replace)', async () => {

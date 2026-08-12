@@ -370,6 +370,13 @@ function effortValue(): string {
   return (screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value;
 }
 
+/** Change the Claude model on ③ (a real user pick → setByUser). */
+async function chooseModel(model: string): Promise<void> {
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: model } });
+  });
+}
+
 /** Change the agent runtime on ③. */
 async function chooseRuntime(runtime: string): Promise<void> {
   await act(async () => {
@@ -1790,11 +1797,12 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
 
   // ── AC2: round-trip integrity — THE data-loss case ───────────────────────
 
-  it('re-saving an untouched screen writes back what was STORED, not the global defaults', async () => {
-    // The defect in one test: seed from a stored default, touch nothing, hit
-    // "Save as default". Before the fix the permission/runtime controls showed
-    // the global values, so this write silently replaced the user's stored
-    // per-type default with them.
+  // The defect in one test: seed from a stored default, edit ONE knob, hit "Save
+  // as default". Before the fix the permission/runtime controls showed the
+  // global values, so this write silently replaced the user's stored per-type
+  // default with them. (The CTA is dirty-gated, hence the one real edit — every
+  // OTHER control stays untouched, which is what this pins.)
+  it('writes back what was STORED for the untouched controls, not the global defaults', async () => {
     setConfig(
       {
         'workflow:wf-1': {
@@ -1808,6 +1816,9 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    // One real edit reveals the CTA; permission + runtime stay seeded from the
+    // stored entry.
+    await chooseModel('haiku');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -1816,7 +1827,7 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
       kind: 'merge',
       value: {
-        model: 'sonnet',
+        model: 'haiku',
         permissionMode: 'auto',
         agentRuntime: 'claude-interactive',
         // The stored entry carried no substrate (picking a runtime in Settings
@@ -1856,13 +1867,16 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     expect(runtimeValue()).toBe('claude-sdk');
     expect(effortValue()).toBe('high');
 
+    // The CTA is dirty-gated, so move ONE control (the model) off its seed; the
+    // permission, runtime and effort round-trip untouched.
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
     expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('quick', {
       kind: 'merge',
       value: {
-        model: 'haiku',
+        model: 'sonnet',
         permissionMode: 'acceptEdits',
         agentRuntime: 'claude-sdk',
         substrate: 'sdk',
@@ -2118,21 +2132,77 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     });
   });
 
-  it('renders the CTA on the workflow card, enabled before any knob is touched', async () => {
+  it('renders NO CTA on the workflow card until a control leaves its seeded value', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    // Nothing stored, nothing touched ⇒ nothing to save.
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+    // The launch surface itself is unaffected.
+    expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
+
+    await chooseModel('sonnet');
     const saveBtn = screen.getByTestId('wizard-save-default');
     expect(saveBtn).toHaveTextContent('Save as default for Custom');
     expect(saveBtn).toBeEnabled();
-    // It is a peer of the launch summary, not a post-launch prompt.
-    expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
+    // The shared secondary Button — not the former inline text link.
+    expect(saveBtn).toHaveClass('bg-surface-secondary');
+    expect(saveBtn).not.toHaveClass('underline');
+  });
+
+  // The case a naive `isTouched` implementation gets wrong: `setByUser` latches
+  // on ANY pick, including one that lands back on the seeded value — which would
+  // strand the CTA on screen with nothing to write.
+  it('hides the CTA again when a change is reverted to the seeded value', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseModel('sonnet');
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+    await chooseModel('opus');
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+
+    await choosePermission("Don't ask");
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+    await choosePermission('Ask before edits');
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+
+    await chooseRuntime('claude-interactive');
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+    await chooseRuntime('claude-sdk');
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+  });
+
+  it('renders NO CTA for a card whose stored default the untouched controls already show', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: {
+            'workflow:wf-1': {
+              model: 'haiku',
+              permissionMode: 'auto',
+              agentRuntime: 'claude-interactive',
+              substrate: 'interactive',
+            },
+          },
+        } as unknown as AppConfig,
+        applyRunTypeDefault: mockApplyRunTypeDefault,
+      });
+    });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // Seeded straight from the stored entry ⇒ nothing to save.
+    expect(claudeModelValue()).toBe('haiku');
+    expect(runtimeValue()).toBe('claude-interactive');
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
   });
 
   it('writes model + permission + runtime/substrate under the workflow key WITHOUT launching', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2141,7 +2211,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     expect(mockApplyRunTypeDefault).toHaveBeenCalledWith('workflow:wf-1', {
       kind: 'merge',
       value: {
-        model: 'opus',
+        model: 'sonnet',
         permissionMode: 'default',
         agentRuntime: 'claude-sdk',
         substrate: 'sdk',
@@ -2159,10 +2229,14 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    // Pick a non-default effort so the captured value is unambiguous.
+    // Pick a non-default effort so the captured value is unambiguous. On the
+    // quick key effort is part of the saved field set, so this alone is enough
+    // to reveal the CTA.
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
     await act(async () => {
       fireEvent.change(screen.getByTestId('wizard-effort-select'), { target: { value: 'high' } });
     });
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2185,12 +2259,47 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     expect(mockCreateQuick).not.toHaveBeenCalled();
   });
 
+  // The effort control belongs to the quick key alone. A pick made on the quick
+  // card must NOT read as "dirty" on a workflow card, whose saved field set
+  // excludes it. (Same provider on both cards here, so the cross-provider reset
+  // does not fire and the picked effort genuinely survives the card switch.)
+  it('does not count a quick-card effort pick as dirty on a workflow card', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { quickSessionDefaultSubstrate: 'sdk' } as unknown as AppConfig,
+        applyRunTypeDefault: mockApplyRunTypeDefault,
+      });
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('wizard-effort-select'), { target: { value: 'high' } });
+    });
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+
+    await backToWorkflow();
+    await selectWorkflowAndConfigure();
+    expect(runtimeValue()).toBe('claude-sdk');
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+
+    // …and the pick really did survive the card switch (no cross-provider reset
+    // fired), so the assertion above was about the EXCLUSION, not a cleared value.
+    await backToWorkflow();
+    await selectQuickAndConfigure();
+    expect(effortValue()).toBe('high');
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+  });
+
   it("sends reasoningEffort: null from the quick card's 'Default' option (clears a stored effort)", async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
     // Untouched select — '' means "provider default", i.e. no explicit pin.
     expect(effortValue()).toBe('');
+    // Dirty a DIFFERENT control, so the effort stays at its untouched default.
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2208,6 +2317,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectUltracodeAndConfigure();
 
+    await chooseModel('sonnet');
     expect(screen.getByTestId('wizard-save-default')).toHaveTextContent(
       'Save as default for Quick sessions',
     );
@@ -2237,6 +2347,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    // The runtime change is itself the dirty edit that reveals the CTA.
     await chooseRuntime('codex-sdk');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
@@ -2254,8 +2365,10 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
   it('leaves the launch payload byte-identical (side-effect-only)', async () => {
     // Baseline: launch with no save at all. A successful wizard launch latches
     // startInFlightRef and navigates, so the "after" case needs its own mount.
+    // Both halves make the same model edit — the one that reveals the CTA.
     const unmount = await renderLockedWizard();
     await selectWorkflowAndConfigure();
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
@@ -2267,6 +2380,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     // Same wizard, but the CTA fires before the launch.
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2285,6 +2399,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2314,6 +2429,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2328,6 +2444,52 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     });
   });
 
+  // The visibility rule is seed-based, so the affordance is self-correcting: a
+  // confirmed write makes live == seed (nothing left to save), and an Undo puts
+  // the old stored entry back, which makes them diverge again.
+  it('hides itself after a successful save and comes back after Undo', async () => {
+    // Stand in for the real store action: remember what was written and hand
+    // back the prior entry as `previous` (what Undo replays).
+    let stored: RunTypeDefaults | null = null;
+    mockApplyRunTypeDefault.mockImplementation(async (_key, op) => {
+      const previous = stored;
+      // This card's patch is total for the fixture (no null members), so 'merge'
+      // and 'replace' collapse to "this value is now stored".
+      stored = op.kind === 'replace' ? op.value : (op.value as RunTypeDefaults);
+      return { ok: true, previous };
+    });
+    /** The post-write `fetchConfig` the real store action performs. */
+    function refreshConfig(): void {
+      act(() => {
+        useConfigStore.setState({
+          config: {
+            runTypeDefaults: stored === null ? {} : { 'workflow:wf-1': stored },
+          } as unknown as AppConfig,
+        });
+      });
+    }
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseModel('sonnet');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+    refreshConfig();
+
+    // The seed is now the value just stored, so there is nothing left to save.
+    expect(screen.queryByTestId('wizard-save-default')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('session-action-toast-action'));
+    });
+    refreshConfig();
+
+    // Undo deleted the key, so the controls re-seed to the 'opus' floor while the
+    // (still-standing) 'sonnet' pick diverges from it again.
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+  });
+
   it('a FAILED write shows a failure toast and offers NO Undo (never a deleting replace)', async () => {
     // The data-loss fix: the failed write left the stored default standing, so
     // an Undo replaying `{ kind: 'replace', value: null }` would delete a
@@ -2336,6 +2498,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    await chooseModel('sonnet');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-save-default'));
     });
@@ -2356,6 +2519,7 @@ describe('SessionStartWizard — "Save as default" CTA + Undo (TASK-157)', () =>
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    await chooseModel('sonnet');
     const saveBtn = screen.getByTestId('wizard-save-default');
     // Two clicks in ONE tick: only the synchronous ref latch can stop the
     // second — `disabled` has not re-rendered yet.

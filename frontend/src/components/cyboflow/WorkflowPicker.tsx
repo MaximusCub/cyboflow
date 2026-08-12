@@ -30,6 +30,7 @@ import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
+import { Button } from '../ui/Button';
 import {
   type PermissionMode,
   type WorkflowRow,
@@ -139,6 +140,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const runtimeSeed: LaunchAgentRuntime = isSessionAgentRuntime(launchDefaults.agentRuntime)
     ? launchDefaults.agentRuntime
     : claudeRuntimeFromSubstrate(launchDefaults.substrate);
+  // The other two seeds, named so the "Save as default" dirty check below can
+  // compare against EXACTLY what each control was seeded with. Comparing against
+  // the raw resolver output field-by-field would be wrong for `agentRuntime` (it
+  // resolves to `undefined` when nothing is stored, while the control always
+  // holds a concrete runtime — a permanent false "dirty"), so every control's
+  // comparison goes through the seed it was actually given.
+  const modelSeed = launchDefaults.model;
+  const permissionModeSeed = launchDefaults.permissionMode;
 
   /**
    * The per-run Claude model choice (Configure model dropdown). Threaded into
@@ -152,7 +161,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     isTouched: isModelTouched,
   } = useSeededSelection<string>({
     key: runTypeKey,
-    seed: launchDefaults.model,
+    seed: modelSeed,
     fallback: DEFAULT_WORKFLOW_MODEL,
   });
 
@@ -169,7 +178,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     isTouched: isPermissionModeTouched,
   } = useSeededSelection<PermissionMode>({
     key: runTypeKey,
-    seed: launchDefaults.permissionMode,
+    seed: permissionModeSeed,
     fallback: DEFAULT_PERMISSION_MODE,
   });
 
@@ -714,6 +723,28 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     });
   }, [saveDefault, model, permissionMode, agentRuntime]);
 
+  /**
+   * Whether the Configure controls currently differ from what they were SEEDED
+   * with — the sole visibility condition for the save CTA (there is nothing to
+   * save while the screen already shows the stored default).
+   *
+   * Compared against the seeds, never against `isTouched`: `setByUser` latches on
+   * ANY user pick, including one that sets a control straight back to the value
+   * it already held, which would strand the CTA on screen with nothing to write.
+   * Seed-comparison instead makes the affordance self-correcting — reverting a
+   * change hides it again, a successful save re-seeds the controls to the values
+   * just stored (so it hides itself), and an Undo re-seeds them back (so it
+   * returns).
+   *
+   * The compared set is exactly the set `handleSaveDefault` writes, minus
+   * `substrate` (derived from the runtime, so the runtime comparison covers it).
+   * `reasoningEffort` is quick-key-only and this surface has no effort control.
+   */
+  const isSaveDefaultDirty =
+    model !== modelSeed ||
+    permissionMode !== permissionModeSeed ||
+    agentRuntime !== runtimeSeed;
+
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
   const selectedSubstrate = substrateForRuntime(agentRuntime);
@@ -790,20 +821,23 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         />
       )}
 
-      {/* Enabled from the moment a flow is selected, even with no knob touched —
-          storing the current (possibly untouched) values is a legitimate "this
-          flow follows today's global default" confirmation, so there is
-          deliberately no dirty check to gate it. */}
-      {selectedId !== null && (
-        <button
+      {/* Offered ONLY once the controls diverge from their seeds (see
+          isSaveDefaultDirty): with the screen already showing the stored default
+          there is nothing to write, so the affordance stays out of the way. A
+          secondary Button, deliberately quieter than the primary "Start Run"
+          below it. */}
+      {selectedId !== null && isSaveDefaultDirty && (
+        <Button
           type="button"
+          variant="secondary"
+          size="sm"
           onClick={handleSaveDefault}
           disabled={isSavingDefault}
           data-testid="workflow-picker-save-default"
-          className="self-start text-xs font-medium text-interactive underline underline-offset-2 hover:text-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="self-start"
         >
           Save as default for {selectedWorkflowTitle}
-        </button>
+        </Button>
       )}
 
       {combinedError && (
