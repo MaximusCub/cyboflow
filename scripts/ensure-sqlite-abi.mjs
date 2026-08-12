@@ -37,10 +37,18 @@
  *   node scripts/ensure-sqlite-abi.mjs --check host       # read-only: which ABI is installed?
  *   node scripts/ensure-sqlite-abi.mjs --print-key host   # diagnostics
  *
+ * Swaps are ATOMIC and MUTUALLY EXCLUSIVE. The artifact is never rewritten in
+ * place — it is staged beside itself and renamed over, so a process that already
+ * has it mmap'd keeps the old inode and never sees bytes change under it (see
+ * installArtifact for the crash this prevents). Concurrent swappers serialize on
+ * a lock next to the artifact, since a worktree without its own node_modules
+ * shares the parent checkout's copy.
+ *
  * ENV
- *   SQLITE_ABI_CACHE_DIR   override the cache location (default <repo>/.abi-cache)
- *   SQLITE_ABI_MODULE_DIR  test seam — point at a fixture better-sqlite3 dir
- *   SQLITE_ABI_FAKE        test seam — see "FAKE MODE" below
+ *   SQLITE_ABI_CACHE_DIR     override the cache location (default <repo>/.abi-cache)
+ *   SQLITE_ABI_MODULE_DIR    test seam — point at a fixture better-sqlite3 dir
+ *   SQLITE_ABI_FAKE          test seam — see "FAKE MODE" below
+ *   SQLITE_ABI_LOCK_WAIT_MS  test seam — shorten the swap-lock wait
  *
  * FAKE MODE (tests only)
  *   With SQLITE_ABI_FAKE=1 no child process is spawned and nothing is compiled.
@@ -108,6 +116,49 @@ function resolveModuleDir() {
 
 function artifactPath(moduleDir) {
   return path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node');
+}
+
+/**
+ * Put `bytes at sourcePath` in place at `destination` WITHOUT ever rewriting the
+ * destination's existing inode.
+ *
+ * This is not a style preference — it is the fix for a real crash class.
+ * `fs.copyFileSync` truncates and rewrites the destination IN PLACE, keeping the
+ * same inode (measured; not folklore). Any process that already has that .node
+ * mmap'd therefore sees its bytes change underneath it, and because macOS
+ * validates code-signed pages LAZILY — on fault, not at load — the next page
+ * fault against the mapping fails validation and the process dies with
+ * `EXC_BAD_ACCESS / KERN_CODESIGN_ERROR`, dyld's Mach-O header parse
+ * (`mach_o::Universal::isUniversal` / `compatibleSlice`) sitting on the stack.
+ * That is Sentry CYBOFLOW-APP-6: 53 events spread evenly across 12 releases,
+ * i.e. long-standing tooling rather than any one build.
+ *
+ * Staging into the SAME directory and renaming fixes it: rename(2) is atomic and
+ * swaps the inode, so a live mapping keeps pointing at the old one and never
+ * observes a byte change. Same directory matters — a cross-filesystem rename
+ * would fall back to a copy and reintroduce the tear.
+ */
+function installArtifact(sourcePath, destination) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const staging = `${destination}.staging-${process.pid}`;
+  try {
+    fs.copyFileSync(sourcePath, staging);
+    fs.renameSync(staging, destination);
+  } finally {
+    fs.rmSync(staging, { force: true });
+  }
+}
+
+/** As installArtifact, for content we generate rather than copy (FAKE mode). */
+function writeArtifact(destination, contents) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const staging = `${destination}.staging-${process.pid}`;
+  try {
+    fs.writeFileSync(staging, contents);
+    fs.renameSync(staging, destination);
+  } finally {
+    fs.rmSync(staging, { force: true });
+  }
 }
 
 /**
@@ -243,8 +294,7 @@ function saveToCache(key, moduleDir) {
   if (!key) return false;
   const destination = cachePath(key);
   if (fs.existsSync(destination)) return false;
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.copyFileSync(artifactPath(moduleDir), destination);
+  installArtifact(artifactPath(moduleDir), destination);
   log(`banked current artifact in cache as ${key}`);
   return true;
 }
@@ -254,9 +304,7 @@ function restoreFromCache(key, moduleDir) {
   if (!key) return false;
   const source = cachePath(key);
   if (!fs.existsSync(source)) return false;
-  const destination = artifactPath(moduleDir);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.copyFileSync(source, destination);
+  installArtifact(source, artifactPath(moduleDir));
   return true;
 }
 
@@ -272,9 +320,7 @@ function rebuild(target, moduleDir) {
   log(`cache miss — rebuilding better-sqlite3 for the ${target} ABI (this is the slow path)`);
 
   if (FAKE) {
-    const destination = artifactPath(moduleDir);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, `abi:${target}\n`);
+    writeArtifact(artifactPath(moduleDir), `abi:${target}\n`);
     return true;
   }
 
@@ -283,7 +329,121 @@ function rebuild(target, moduleDir) {
       ? [process.execPath, [path.join(repoRoot, 'scripts', 'rebuild-better-sqlite3-host.mjs')]]
       : ['pnpm', ['run', 'electron:rebuild']];
 
-  return spawnSync(command, args, { cwd: repoRoot, stdio: 'inherit' }).status === 0;
+  // node-gyp writes build/Release/better_sqlite3.node itself, so installArtifact
+  // cannot stage this one — the rewrite happens inside the child. Evict the old
+  // artifact by RENAMING it aside first: the compiler then creates a fresh inode,
+  // and any process still holding the old one keeps a stable mapping (rename does
+  // not disturb mappings, and neither does the unlink below — the inode outlives
+  // its last link while mapped). Without this, a cache-miss rebuild tears live
+  // readers exactly the way the in-place copy used to.
+  const artifact = artifactPath(moduleDir);
+  const evicted = `${artifact}.evicted-${process.pid}`;
+  let didEvict = false;
+  try {
+    fs.renameSync(artifact, evicted);
+    didEvict = true;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err; // nothing installed yet — nothing to evict
+  }
+
+  const ok = spawnSync(command, args, { cwd: repoRoot, stdio: 'inherit' }).status === 0;
+
+  if (didEvict) {
+    // On failure put it back: a failed rebuild must not leave the tree emptier
+    // than it found it, or the next run has no artifact to bank or fall back to.
+    if (!ok && !fs.existsSync(artifact)) fs.renameSync(evicted, artifact);
+    else fs.rmSync(evicted, { force: true });
+  }
+  return ok;
+}
+
+/**
+ * Serialize ABI swaps across processes.
+ *
+ * The rename in installArtifact protects READERS (a live mmap never sees bytes
+ * change). This lock protects the SWAP ITSELF from another swapper: without it,
+ * two flips to different targets can interleave their bank/restore/rebuild steps
+ * and leave the cache holding an artifact filed under the wrong ABI.
+ *
+ * The lock lives beside the ARTIFACT, not in the repo-local cache dir, because
+ * the artifact is the contended resource — a git worktree with no node_modules
+ * of its own resolves the PARENT checkout's copy (see noteModuleLocation), so
+ * siblings must contend on the same lock rather than one per worktree.
+ *
+ * mkdir is the primitive: it is atomic and fails EEXIST when already held.
+ */
+const LOCK_POLL_MS = 100;
+// A genuine cache-miss rebuild takes minutes, so the wait has to outlast one.
+// SQLITE_ABI_LOCK_WAIT_MS is a test seam — the contention tests would otherwise
+// have to sit through the real ten minutes to observe a give-up.
+const LOCK_WAIT_MS = Number.parseInt(process.env.SQLITE_ABI_LOCK_WAIT_MS ?? '', 10) || 10 * 60_000;
+const LOCK_STALE_MS = 20 * 60_000;
+
+function lockPath(moduleDir) {
+  return path.join(moduleDir, 'build', 'Release', '.abi-swap.lock');
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** A lock is stale if its owner died, or it has simply sat there far too long. */
+function lockIsStale(dir) {
+  let stat;
+  try {
+    stat = fs.statSync(dir);
+  } catch {
+    return false; // vanished — not stale, just gone
+  }
+  if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) return true;
+  const pid = Number.parseInt(fs.readFileSync(path.join(dir, 'owner'), 'utf8').trim(), 10);
+  if (!Number.isInteger(pid)) return true;
+  try {
+    process.kill(pid, 0); // signal 0 tests liveness without delivering anything
+    return false;
+  } catch {
+    return true; // owner is gone; it died holding the lock
+  }
+}
+
+function withSwapLock(moduleDir, fn) {
+  const dir = lockPath(moduleDir);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let held = false;
+  let announced = false;
+
+  while (!held) {
+    try {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'owner'), `${process.pid}\n`);
+      held = true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      if (lockIsStale(dir)) {
+        log('breaking a stale ABI-swap lock (owner is gone)');
+        fs.rmSync(dir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        // Never proceed unserialized: that is the corruption this prevents.
+        fail(`another ABI swap has held ${dir} for over ${LOCK_WAIT_MS / 60_000} minutes.`);
+        fail('If nothing is really running, remove that directory and retry.');
+        return 1;
+      }
+      if (!announced) {
+        log('waiting for another ABI swap to finish…');
+        announced = true;
+      }
+      sleepSync(LOCK_POLL_MS);
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function ensure(target) {
@@ -294,7 +454,10 @@ function ensure(target) {
     return 1;
   }
   noteModuleLocation(moduleDir);
+  return withSwapLock(moduleDir, () => ensureLocked(target, moduleDir));
+}
 
+function ensureLocked(target, moduleDir) {
   const moduleVersion = readJson(path.join(moduleDir, 'package.json'))?.version ?? 'unknown';
   const key = cacheKey(target, moduleVersion);
 

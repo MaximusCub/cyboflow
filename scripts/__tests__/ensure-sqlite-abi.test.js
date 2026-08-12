@@ -293,3 +293,113 @@ test('a better-sqlite3 upgrade misses the cache rather than restoring a stale ar
     ws.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Crash-class regression: never rewrite a mapped artifact's inode in place.
+//
+// fs.copyFileSync truncates and rewrites the destination, KEEPING its inode, so
+// a process holding that .node mmap'd sees its bytes change underneath it. macOS
+// validates code-signed pages lazily, on fault, so the next page fault against
+// the mapping dies with EXC_BAD_ACCESS / KERN_CODESIGN_ERROR — Sentry
+// CYBOFLOW-APP-6. Asserting on the INODE rather than on bytes is the point: the
+// bytes were always correct, and a byte-only assertion passes on the buggy code.
+// ---------------------------------------------------------------------------
+
+const inodeOf = (file) => fs.statSync(file).ino;
+
+test('a cache restore replaces the artifact inode instead of rewriting it in place', () => {
+  const ws = makeWorkspace({ stamp: 'abi:host\nhost-bytes' });
+  try {
+    run(['host'], ws); // bank the host artifact
+    fs.writeFileSync(ws.artifact, 'abi:electron\nelectron-bytes');
+    const before = inodeOf(ws.artifact);
+
+    const result = run(['host'], ws);
+    assert.match(result.stdout, /restored the host ABI from cache/);
+    assert.equal(ws.readArtifact(), 'abi:host\nhost-bytes');
+    assert.notEqual(inodeOf(ws.artifact), before, 'restore must swap the inode, not rewrite in place');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('a rebuild replaces the artifact inode too (node-gyp writes it in place)', () => {
+  const ws = makeWorkspace({ stamp: 'abi:electron\nelectron-bytes' });
+  try {
+    const before = inodeOf(ws.artifact);
+    const result = run(['host'], ws);
+    assert.match(result.stdout, /cache miss — rebuilding/);
+    assert.notEqual(inodeOf(ws.artifact), before, 'rebuild must evict the old inode first');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('a swap leaves no staging or evicted files behind', () => {
+  const ws = makeWorkspace({ stamp: 'abi:host\nhost-bytes' });
+  try {
+    run(['host'], ws);
+    fs.writeFileSync(ws.artifact, 'abi:electron\nelectron-bytes');
+    run(['host'], ws);
+
+    const stray = fs
+      .readdirSync(path.dirname(ws.artifact))
+      .filter((e) => e.includes('.staging-') || e.includes('.evicted-'));
+    assert.deepEqual(stray, []);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The swap lock. The rename above protects READERS; this protects two SWAPPERS
+// from interleaving their bank/restore/rebuild steps.
+// ---------------------------------------------------------------------------
+
+const lockDirOf = (ws) => path.join(ws.moduleDir, 'build', 'Release', '.abi-swap.lock');
+
+test('a lock held by a live process blocks a second swap rather than racing it', () => {
+  const ws = makeWorkspace({ stamp: 'abi:electron\nelectron-bytes' });
+  try {
+    // process.pid is by definition alive, so this lock can never look stale.
+    fs.mkdirSync(lockDirOf(ws), { recursive: true });
+    fs.writeFileSync(path.join(lockDirOf(ws), 'owner'), `${process.pid}\n`);
+
+    const result = run(['host'], ws, { SQLITE_ABI_LOCK_WAIT_MS: '600' });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /waiting for another ABI swap/);
+    // It gave up instead of proceeding: the artifact is untouched.
+    assert.equal(ws.readArtifact(), 'abi:electron\nelectron-bytes');
+  } finally {
+    fs.rmSync(lockDirOf(ws), { recursive: true, force: true });
+    ws.cleanup();
+  }
+});
+
+test('a lock whose owner died is broken rather than waited out', () => {
+  const ws = makeWorkspace({ stamp: 'abi:electron\nelectron-bytes' });
+  try {
+    // A pid that has certainly exited: spawn a child and let it finish.
+    const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    fs.mkdirSync(lockDirOf(ws), { recursive: true });
+    fs.writeFileSync(path.join(lockDirOf(ws), 'owner'), `${dead.pid}\n`);
+
+    const result = run(['host'], ws);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /breaking a stale ABI-swap lock/);
+    assert.match(ws.readArtifact(), /^abi:host/);
+  } finally {
+    fs.rmSync(lockDirOf(ws), { recursive: true, force: true });
+    ws.cleanup();
+  }
+});
+
+test('the lock is released after a successful swap', () => {
+  const ws = makeWorkspace({ stamp: 'abi:electron\nelectron-bytes' });
+  try {
+    run(['host'], ws);
+    assert.equal(fs.existsSync(lockDirOf(ws)), false);
+  } finally {
+    ws.cleanup();
+  }
+});
