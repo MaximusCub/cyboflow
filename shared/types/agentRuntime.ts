@@ -27,6 +27,20 @@ export const DEFAULT_WORKFLOW_AGENT_RUNTIME: WorkflowAgentRuntime = 'claude-sdk'
 
 export const AGENT_PROVIDERS = ['claude', 'codex'] as const;
 
+/**
+ * Every member of the `AgentRuntime` union, in declaration order. Unlike
+ * SESSION_AGENT_RUNTIMES / WORKFLOW_AGENT_RUNTIMES this is the FULL set — it
+ * exists for validating a runtime read back off a user-editable surface
+ * (config.json), where the surface itself is not scoped to one launch kind.
+ */
+export const ALL_AGENT_RUNTIMES = [
+  'claude-sdk',
+  'claude-interactive',
+  'codex-sdk',
+  'codex-pty',
+  'codex-exec',
+] as const;
+
 export const SESSION_AGENT_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
@@ -50,6 +64,15 @@ export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string>
 
 export function isWorkflowRuntimeSupported(value: unknown): value is WorkflowAgentRuntime {
   return typeof value === 'string' && (WORKFLOW_AGENT_RUNTIMES as readonly string[]).includes(value);
+}
+
+/**
+ * True for ANY member of the AgentRuntime union (including 'codex-exec', which
+ * neither of the launch-kind-scoped guards accepts). Use the scoped guards when
+ * validating a value against a specific launch kind.
+ */
+export function isAgentRuntime(value: unknown): value is AgentRuntime {
+  return typeof value === 'string' && (ALL_AGENT_RUNTIMES as readonly string[]).includes(value);
 }
 
 export function isAgentProvider(value: unknown): value is AgentProvider {

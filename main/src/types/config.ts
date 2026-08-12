@@ -1,4 +1,4 @@
-import type { AgentProviderAccess } from '../../../shared/types/agentRuntime';
+import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -97,6 +97,24 @@ export interface AppConfig {
   agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global default MODEL for launches — quick sessions AND flow runs alike. The
+  // middle rung of resolveRunTypeLaunchDefaults (shared/types/sessionDefaults.ts):
+  //   per-run-type stored value → defaultLaunchModel → DEFAULT_RUN_TYPE_MODEL_FLOORS.
+  // DISTINCT from the legacy `defaultModel` above, which feeds the global assistant
+  // fallback and the legacy panel backfill and is deliberately NEVER consulted by a
+  // launch (see ConfigManager.getDefaultLaunchModel). Absent/blank ⇒ the per-kind
+  // floor, so launches stay byte-identical until the user sets this. NOT seeded
+  // into constructor defaults.
+  defaultLaunchModel?: string;
+  // Global default AGENT RUNTIME for launches — quick sessions AND flow runs alike
+  // (one field for both surfaces). The middle rung of resolveRunTypeLaunchDefaults:
+  //   per-run-type stored value → defaultAgentRuntime → undefined.
+  // There is deliberately NO floor: an unresolved runtime must be OMITTED from a
+  // launch payload rather than synthesized, which is what keeps an install that
+  // never sets this byte-identical. Read via ConfigManager.getDefaultAgentRuntime()
+  // (invalid values floor to undefined — config.json is user-editable). NOT seeded
+  // into constructor defaults.
+  defaultAgentRuntime?: AgentRuntime;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
   // The global-default rung of resolveExecutionModel; floors to 'programmatic' when unset (new
   // SDK flow runs default to the in-process host loop) and is ignored on the interactive substrate
@@ -251,6 +269,12 @@ export interface UpdateConfigRequest {
   agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global default launch MODEL for quick sessions AND flow runs (see
+  // AppConfig.defaultLaunchModel). Separate from `defaultModel` above.
+  defaultLaunchModel?: string;
+  // Global default launch AGENT RUNTIME for quick sessions AND flow runs (see
+  // AppConfig.defaultAgentRuntime).
+  defaultAgentRuntime?: AgentRuntime;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
   defaultExecutionModel?: ExecutionModel;
   // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).

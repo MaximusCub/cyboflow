@@ -1,4 +1,4 @@
-import type { AgentProviderAccess } from '../../../shared/types/agentRuntime';
+import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -53,6 +53,18 @@ export interface AppConfig {
   agentProviderAccess?: AgentProviderAccess;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global default MODEL for launches — quick sessions AND flow runs alike. The
+  // middle rung of resolveRunTypeLaunchDefaults (shared/types/sessionDefaults.ts):
+  //   per-run-type stored value → defaultLaunchModel → DEFAULT_RUN_TYPE_MODEL_FLOORS.
+  // Absent/blank ⇒ the per-kind floor. Deliberately unrelated to the main-side
+  // legacy `defaultModel`, which feeds the assistant fallback and never a launch.
+  defaultLaunchModel?: string;
+  // Global default AGENT RUNTIME for launches — quick sessions AND flow runs alike
+  // (one field for both surfaces). The middle rung of resolveRunTypeLaunchDefaults:
+  //   per-run-type stored value → defaultAgentRuntime → undefined.
+  // There is deliberately NO floor: an unresolved runtime is OMITTED from the launch
+  // payload rather than synthesized, keeping an unconfigured install byte-identical.
+  defaultAgentRuntime?: AgentRuntime;
   // Global default execution model for new SDK workflow runs ('orchestrated' |
   // 'programmatic'). Floors to 'programmatic' when unset — new SDK flow runs
   // default to the in-process host loop; the interactive substrate always
