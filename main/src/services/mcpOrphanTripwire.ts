@@ -1,6 +1,6 @@
 /**
  * McpOrphanTripwire — the OBSERVE-ONLY verification channel for the
- * cyboflowMcpServer spawner-death fix (parentWatchdog, commit adbe2146).
+ * cyboflowMcpServer spawner-death fix (see orchestrator/mcpServer/parentWatchdog.ts).
  *
  * WHY THIS EXISTS. The Phase 1 fix (ppid watchdog + stdin-EOF fast path) lives
  * entirely INSIDE the cyboflowMcpServer subprocess. If it silently stops working

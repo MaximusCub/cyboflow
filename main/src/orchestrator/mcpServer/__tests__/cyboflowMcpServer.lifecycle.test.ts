@@ -104,6 +104,25 @@ async function withDeadline<T>(p: Promise<T>, ms: number, what: string): Promise
 }
 
 /**
+ * Poll `predicate` until it holds, or throw once `timeoutMs` elapses. Preferred
+ * over a fixed sleep anywhere a real process has to reach a state: a fixed budget
+ * that a loaded CI runner overshoots fails in a way that reads as "the fix is
+ * broken" rather than "the machine was slow".
+ */
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+  what: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(25);
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+}
+
+/**
  * The parent pid of `pid` as the kernel reports it, or null when the process is
  * gone. `ps` rather than anything in-process because the target of the orphan
  * test is NOT our child — once its spawner exits we have no handle on it at all.
@@ -207,10 +226,18 @@ describeIfBuilt('cyboflowMcpServer subprocess lifecycle', () => {
 
       // main() waits 100ms for the IPC socket, then connects the stdio
       // transport — which is what puts stdin in flowing mode and makes 'end'
-      // observable at all. Give that comfortably enough time.
-      await sleep(800);
+      // observable at all. POLL for that rather than sleeping a fixed span: a
+      // loaded CI runner can miss any fixed budget, and the failure would look
+      // like the fix being broken rather than the machine being slow.
+      await waitFor(
+        () => acceptedConnections > before,
+        5_000,
+        'the server to connect to the orchestrator socket',
+      );
+      // The transport connects a fixed 100ms after that; give it a moment so
+      // stdin is genuinely flowing before EOF is delivered.
+      await sleep(300);
       expect(child.exitCode).toBeNull();
-      expect(acceptedConnections).toBeGreaterThan(before);
 
       child.stdin?.end();
 
@@ -261,15 +288,24 @@ describeIfBuilt('cyboflowMcpServer subprocess lifecycle', () => {
       // server with that fd as stdin, prints the pid, and exits — leaving a
       // server whose stdin is open, whose orchestrator socket is up, and whose
       // only remaining death signal is ppid === 1.
-      const watchdogMs = 2_500;
+      // Sized for CI HEADROOM, not for speed. The two waits below (finding the
+      // orphan, then the attribution window) must both complete comfortably
+      // before the first watchdog tick, or a slow runner turns a passing test
+      // into a spurious failure: observe at ~2s + sleep 1s would cross a 2.5s
+      // interval. With 6s the worst case is ~3s, leaving 3s of slack.
+      const watchdogMs = 6_000;
       // How long the orphan must survive BEFORE the watchdog is due, to show
       // that no other shutdown path is doing the killing. Every competing path
       // (stdin EOF, stdin close, orchestrator socket close) fires within
       // milliseconds of the event that triggers it, so an orphan still alive
-      // most of a second after losing its spawner can only be waiting on the
-      // poll. Measured out-of-band: with the 60 s default this orphan is still
-      // alive at ppid=1 after 12 s; with a 1.5 s override it dies at ~1.8 s.
+      // a full second after losing its spawner can only be waiting on the poll.
+      // Measured out-of-band: with the 60 s default this orphan is still alive
+      // at ppid=1 after 12 s; with a 1.5 s override it dies at ~1.8 s.
       const attributionWindowMs = 1_000;
+      // Cap the hunt for the orphan independently of the watchdog interval —
+      // it is normally found in a few hundred ms, and bounding it here is what
+      // keeps (observe + attribute) < watchdogMs as the interval grows.
+      const orphanObserveBudgetMs = 2_000;
       const fifoPath = path.join(tmpDir, 'stdin.fifo');
       fs.rmSync(fifoPath, { force: true });
       execFileSync('mkfifo', [fifoPath]);
@@ -331,7 +367,7 @@ describeIfBuilt('cyboflowMcpServer subprocess lifecycle', () => {
         // a server that died at boot for an unrelated reason would pass. Fail
         // loudly if the orphan state is never observed.
         let observedOrphanAlive = false;
-        const orphanDeadline = Date.now() + watchdogMs * 0.9;
+        const orphanDeadline = Date.now() + orphanObserveBudgetMs;
         while (Date.now() < orphanDeadline) {
           const ppid = ppidOf(serverPid);
           if (ppid === 1) {

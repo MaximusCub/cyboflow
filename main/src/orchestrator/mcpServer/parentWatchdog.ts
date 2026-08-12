@@ -24,6 +24,18 @@
  * than to 1, so this never fires. cyboflow is macOS-only; the failure mode is
  * "watchdog does not fire", never "watchdog kills a live server".
  *
+ * THE ONE ASSUMPTION THAT COULD MAKE THIS FIRE ON A LIVE SERVER, pinned here so a
+ * future reader can check it rather than rediscover it: `ppid === 1` means "useful
+ * life over" only because the process holding our stdin pipe IS our parent. cyboflow
+ * does not spawn these servers — the `claude` CLI does, from the MCP config we write
+ * — so that is a property of a third party, not of this repo. It holds today (the
+ * host scan that motivated this fix showed 13 correctly-parented servers). It would
+ * break if a future `claude` release interposed a launcher that hands off the pipes
+ * and exits without exec'ing: ppid would go to 1 while stdin stayed live, and every
+ * MCP server would be killed one interval into a healthy session. That failure is
+ * loud (all cyboflow_* tools stop working at once), not silent, but if this file is
+ * ever touched again, re-check that assumption before trusting it.
+ *
  * The polling shape is deliberate: the only event-driven parent-death notification
  * on macOS is kqueue `EVFILT_PROC`/`NOTE_EXIT`, which needs native bindings this
  * subprocess explicitly cannot have (it is bundled standalone with no node_modules,

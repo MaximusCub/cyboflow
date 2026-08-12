@@ -209,10 +209,18 @@ MCP child. Both halves are wrong. Verified:
   (`nodePath === process.execPath ? { ...env, ELECTRON_RUN_AS_NODE: '1' } : env`), and only
   inside the "spawn with Node.js directly" fallback. A PTY spawn of the `claude` binary itself
   never sets it.
-- **The SDK has no execPath spawn at all.** `@anthropic-ai/claude-agent-sdk@0.3.224` contains
-  zero occurrences of either `ELECTRON_RUN_AS_NODE` or `process.execPath`, and cyboflow points
-  it at the packaged `claude` binary via `pathToClaudeCodeExecutable`
-  (`claudeCodeManager.ts:2813`).
+- **The SDK does not spawn an interpreter via execPath.** cyboflow points it at the packaged
+  `claude` binary via `pathToClaudeCodeExecutable` (`claudeCodeManager.ts:2813`), and
+  `ELECTRON_RUN_AS_NODE` appears nowhere in `@anthropic-ai/claude-agent-sdk@0.3.224`.
+
+  **[rev4 error] — a "verified" absolute that a grep refutes.** Rev 4 stated the SDK "contains
+  zero occurrences of either `ELECTRON_RUN_AS_NODE` or `process.execPath`". The second half is
+  false: `bridge.mjs` carries six `execPath` references. They survived my grep only because the
+  bundle is minified, so they read `$f.execPath` / `og.execPath` rather than the literal
+  `process.execPath` I searched for — a literal-string grep cannot establish absence in minified
+  code. They are execa's `preferLocal` PATH-priming machinery, not an interpreter spawn, so the
+  conclusion above is unchanged; the *claim* was still stated more absolutely than the evidence
+  supported. Fourth instance of this document's recurring error.
 
 So there is **no inherited mask on the SDK substrate**, and only a narrow branch-local one on
 PTY. The omission is latent for a simpler reason: `findNodeExecutable()` reaches its

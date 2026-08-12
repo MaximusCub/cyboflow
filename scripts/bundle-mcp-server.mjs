@@ -7,8 +7,11 @@
  * stock node cannot read — so the subprocess dies with MODULE_NOT_FOUND and every
  * MCP connection fails. (It only works in dev because the repo's node_modules is on
  * disk.) Bundling inlines the SDK so the subprocess needs no node_modules at all and
- * runs from any location, asar or not. The server has no relative imports and no
- * native deps (only `net` + the SDK), so a single self-contained file is sufficient.
+ * runs from any location, asar or not. The server has no native deps (only `net`,
+ * the SDK, and a few sibling modules such as ./parentWatchdog), all of which esbuild
+ * inlines here — so a single self-contained file is sufficient. NOTE: because those
+ * relative imports are inlined rather than resolved at runtime, a sibling module the
+ * server needs is only present in the shipped artifact if this bundle step ran.
  *
  * Runs after `tsc` in build:main; rewrites the compiled file in place (via a temp
  * file to avoid esbuild's overwrite-input guard).
