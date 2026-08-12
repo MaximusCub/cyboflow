@@ -1876,6 +1876,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // in flight — stamped onto the turn record so spawnCliProcess can reject on it.
     // Reset at each turn boundary and at each model-fallback retry.
     let terminalError: string | null = null;
+    // The errorClass the `sdk-session-terminal-result` seam last reported for the
+    // turn in flight, or null if that seam has not fired for it. One upstream
+    // condition (an overload / usage limit) routinely surfaces BOTH ways: the CLI
+    // emits an is_error result AND the query then throws carrying the same cause,
+    // which billed one incident as two Sentry issues. The catch below reports only
+    // when this does not already name the same class. Deliberately NOT reset
+    // alongside `terminalError` at the turn boundary — a throw arriving just after
+    // a terminal result belongs to that same turn — so it is cleared only where a
+    // genuinely new turn begins: a warm park and a model-fallback retry.
+    let terminalResultClass: string | null = null;
     // First-event watchdog for the COLD query attempt (see SDK_FIRST_EVENT_TIMEOUT_MS):
     // armed per attempt, cleared by the first event and in the finally. A warm
     // turn's per-turn watchdog is armed separately (driveWarmTurn). Report-only.
@@ -1915,6 +1925,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       retry: while (true) {
         attempt++;
         terminalError = null;
+        terminalResultClass = null;
         backgroundTasks.live.clear();
         backgroundTasks.continuationPending = false;
         clearContinuationGraceTimer();
@@ -2073,6 +2084,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
               // execution-error result can contain tool output); the bounded
               // errorClass carries the cause.
               const resultErrorClass = classifyErrorPattern(resultErr);
+              terminalResultClass = resultErrorClass;
               captureSeamError('sdk-session-terminal-result', new Error(`sdk terminal result (${resultErrorClass})`), {
                 substrate: 'sdk',
                 errorClass: resultErrorClass,
@@ -2171,6 +2183,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
                 if (steeredThisTurn) abortController.abort();
               } else {
                 this.armWarmIdleTimer(run, spawnKey);
+                // Parking starts a genuinely new turn on the next push, so a later
+                // throw is no longer attributable to this turn's terminal result.
+                // Only cleared here: on the closing path the query is ending, and a
+                // throw during that drain IS this turn's failure surfacing twice.
+                terminalResultClass = null;
               }
               // Reset for the next warm turn.
               terminalError = null;
@@ -2208,11 +2225,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // in the local logger.error above. Distinct from the is_error RESULT seam
         // below (a fatal turn the CLI reports without throwing).
         const sdkErrorClass = classifyErrorPattern(errMsg);
-        captureSeamError('sdk-session-error', new Error(`sdk session error (${sdkErrorClass})`), {
-          substrate: 'sdk',
-          packaged: String(Boolean(app.isPackaged)),
-          errorClass: sdkErrorClass,
-        });
+        // Suppress only the exact double-report: this turn's is_error result already
+        // reported the SAME class, so the throw is that condition surfacing a second
+        // way, not a distinct root cause. A throw of a DIFFERENT class after a
+        // terminal result is new information and still reports. The local
+        // logger.error above, the 'error' emit, and terminalError are all unchanged —
+        // this narrows telemetry only.
+        if (sdkErrorClass !== terminalResultClass) {
+          captureSeamError('sdk-session-error', new Error(`sdk session error (${sdkErrorClass})`), {
+            substrate: 'sdk',
+            packaged: String(Boolean(app.isPackaged)),
+            errorClass: sdkErrorClass,
+          });
+        }
         // A thrown SDK error (auth / network / spawn failure) is terminal too.
         terminalError = errMsg;
         // Reactive availability detection: if the failure names the pinned MODEL

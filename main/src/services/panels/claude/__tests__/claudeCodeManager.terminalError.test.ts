@@ -20,6 +20,14 @@
  *       Session Error stays inline exactly as before;
  *   (d) a THROWN SDK error (auth / network / spawn failure) on a flow run also
  *       REJECTS with SdkSessionTerminalError.
+ *
+ * (e)/(f) pin the SEAM-REPORTING half. One upstream condition — an Anthropic
+ * overload — routinely surfaces BOTH ways in a single turn: the CLI emits an
+ * is_error result and the query then throws carrying the same cause. That billed
+ * one incident as two Sentry issues (CYBOFLOW-APP-Z + CYBOFLOW-APP-10, same
+ * trace, 576ms apart). The catch now reports only when its class differs from
+ * the one this turn's terminal result already reported — a DIFFERENT class after
+ * a terminal result is new information and must still report.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -40,11 +48,26 @@ const LIMIT_MESSAGE = "You've hit your limit · resets 7:10pm";
 
 const h = vi.hoisted(() => {
   const calls: Array<{ model?: string }> = [];
+  const seams: string[] = [];
   const state = {
-    mode: 'usage-limit' as 'usage-limit' | 'maxturns' | 'throws',
+    mode: 'usage-limit' as
+      | 'usage-limit'
+      | 'maxturns'
+      | 'throws'
+      | 'overload-result-then-throw'
+      | 'overload-result-then-auth-throw',
   };
-  return { calls, state };
+  return { calls, seams, state };
 });
+
+// Record which seams fire without touching the rest of the telemetry module
+// (other units under test import from it too).
+vi.mock('../../../telemetry', async (importActual) => ({
+  ...(await importActual<typeof import('../../../telemetry')>()),
+  captureSeamError: vi.fn((seam: string) => {
+    h.seams.push(seam);
+  }),
+}));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => {
   const queryFn = vi.fn(
@@ -55,6 +78,23 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
         yield { type: 'system', subtype: 'init', session_id: 'sess-1' } as unknown;
         if (mode === 'throws') {
           throw new Error('Invalid API key · please run /login');
+        }
+        if (mode === 'overload-result-then-throw' || mode === 'overload-result-then-auth-throw') {
+          // The real CYBOFLOW-APP-Z/-10 shape: a fatal is_error result lands, then
+          // the same underlying failure tears the stream down a beat later.
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            result: 'API Error: 529 {"type":"overloaded_error"}',
+            duration_ms: 400,
+            num_turns: 0,
+          } as unknown;
+          throw new Error(
+            mode === 'overload-result-then-throw'
+              ? 'API Error: 529 overloaded_error'
+              : 'API Error: 401 {"type":"authentication_error"}',
+          );
         }
         if (mode === 'maxturns') {
           yield {
@@ -114,6 +154,7 @@ describe('ClaudeCodeManager — terminal turn-error propagation', () => {
 
   beforeEach(() => {
     h.calls.length = 0;
+    h.seams.length = 0;
     h.state.mode = 'usage-limit';
     ModelAvailabilityService._resetForTesting();
     ModelAvailabilityService.initialize();
@@ -235,5 +276,52 @@ describe('ClaudeCodeManager — terminal turn-error propagation', () => {
     await expect(spawn).rejects.toThrow('Invalid API key');
     // The 'error' event still fired for the UI toast.
     expect(errors).toHaveLength(1);
+    // Nothing suppressed here: no terminal result preceded the throw.
+    expect(h.seams).toEqual(['sdk-session-error']);
+  });
+
+  // -------------------------------------------------------------------------
+  // (e) One overload surfacing BOTH ways in a turn reports ONE seam, not two.
+  // -------------------------------------------------------------------------
+  it('reports a single seam when an is_error result and the throw share a class', async () => {
+    h.state.mode = 'overload-result-then-throw';
+    const mgr = new ClaudeCodeManager(createMockSessionManager(undefined), undefined, undefined, db);
+    // EventEmitter throws ERR_UNHANDLED_ERROR on an unlistened 'error' emit.
+    mgr.on('error', () => {});
+
+    await expect(
+      mgr.spawnCliProcess({
+        panelId: 'p-overload',
+        sessionId: 'p-overload',
+        worktreePath: '/tmp/test-worktree',
+        prompt: 'go',
+        permissionMode: 'ignore',
+      }),
+    ).rejects.toBeInstanceOf(SdkSessionTerminalError);
+
+    // The result seam owns the report; the throw is the same condition surfacing
+    // a second way and is NOT billed as its own issue.
+    expect(h.seams).toEqual(['sdk-session-terminal-result']);
+  });
+
+  // -------------------------------------------------------------------------
+  // (f) A DIFFERENT class after a terminal result is new information → both fire.
+  // -------------------------------------------------------------------------
+  it('still reports a throw whose class differs from the terminal result', async () => {
+    h.state.mode = 'overload-result-then-auth-throw';
+    const mgr = new ClaudeCodeManager(createMockSessionManager(undefined), undefined, undefined, db);
+    mgr.on('error', () => {});
+
+    await expect(
+      mgr.spawnCliProcess({
+        panelId: 'p-overload-auth',
+        sessionId: 'p-overload-auth',
+        worktreePath: '/tmp/test-worktree',
+        prompt: 'go',
+        permissionMode: 'ignore',
+      }),
+    ).rejects.toBeInstanceOf(SdkSessionTerminalError);
+
+    expect(h.seams).toEqual(['sdk-session-terminal-result', 'sdk-session-error']);
   });
 });
