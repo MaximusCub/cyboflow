@@ -2155,7 +2155,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 onClick={handleStart}
                 disabled={selection === null || ctaBusy || workflowRuntimeBlocked || mixedProviderPrompt !== null}
                 data-testid="wizard-cta"
-                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                className="w-full rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {ctaLabel}
               </button>
@@ -2169,11 +2169,11 @@ export default function SessionStartWizard(): React.JSX.Element {
                 <Button
                   type="button"
                   variant="secondary"
-                  size="sm"
+                  size="md"
+                  fullWidth
                   onClick={handleSaveDefault}
                   disabled={isSavingDefault}
                   data-testid="wizard-save-default"
-                  className="self-start"
                 >
                   Save as default for {saveDefaultLabel}
                 </Button>

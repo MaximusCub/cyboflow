@@ -864,10 +864,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           type="button"
           variant="secondary"
           size="sm"
+          fullWidth
           onClick={handleSaveDefault}
           disabled={isSavingDefault}
           data-testid="workflow-picker-save-default"
-          className="self-start"
         >
           Save as default for {selectedWorkflowTitle}
         </Button>
