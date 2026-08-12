@@ -6,6 +6,7 @@ import * as net from 'net';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { REPORTABLE_ARTIFACT_ATYPES } from '../../../../shared/types/artifacts';
 import { ASSISTANT_REFERENCE } from '../agentThread/assistantReference';
+import { startParentWatchdog, resolveWatchdogIntervalMs } from './parentWatchdog';
 
 // ---------------------------------------------------------------------------
 // Env-var bootstrap — must happen before anything else
@@ -129,7 +130,20 @@ function connectToOrchestrator(): net.Socket {
     rejectAllPending(err);
   });
 
-  socket.on('close', () => { console.error('[Cyboflow MCP] IPC socket closed — exiting'); process.exit(0); });
+  // The orchestrator went away (app quit / crash). This is a SECOND, coarser
+  // tether than the spawner-death path below: this socket is APP-GLOBAL, so it
+  // closes when the Electron main process dies, not when this server's `claude`
+  // spawner does. It is kept because it is still correct — a server with no
+  // orchestrator can do nothing useful — but it must never again be mistaken
+  // for a per-run lifetime bound. See PLAN-mcp-orphan-reaper.md §2.
+  //
+  // LOAD-BEARING INVARIANT: a server whose spawner has died is provably useless
+  // because MCP requests arrive ONLY via stdin — this socket carries only
+  // server-initiated request/reply traffic (see sendQuery), never unsolicited
+  // orchestrator-pushed messages. If anyone adds a push channel here
+  // (cancellation, config reload, a question-gate answer path), that invariant
+  // breaks and the shutdown policy below has to be revisited.
+  socket.on('close', () => { shutdown('IPC socket closed'); });
 
   return socket;
 }
@@ -146,8 +160,14 @@ function sendQuery(
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
 
-    // timeoutMs null = wait forever. Safe because a pending entry cannot
-    // outlive the run: the IPC socket closing exits this whole process.
+    // timeoutMs null = wait forever. Safe only because this process exits when
+    // its SPAWNER dies (stdin EOF / the ppid watchdog — see the shutdown block
+    // near the bottom of this file), which bounds a pending entry by the run.
+    //
+    // It is NOT made safe by the IPC socket closing, which is what this comment
+    // used to claim. CYBOFLOW_ORCH_SOCKET is app-global: it outlives every run
+    // in the app's lifetime, so tethering to it is exactly what leaked 40
+    // orphaned servers in a single uptime. Do not restore that reasoning.
     const timer = timeoutMs === null
       ? undefined
       : setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, timeoutMs);
@@ -2767,17 +2787,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // ---------------------------------------------------------------------------
-// Signal handlers (must reference ipcClient, installed after bootstrap)
+// Shutdown + spawner-death detection
+//
+// INSTALLED AT MODULE SCOPE ON PURPOSE — never inside main(). 'end' is emitted
+// exactly once; a listener attached after `await server.connect()` misses an
+// already-emitted 'end' forever, which recreates the very orphan class this
+// exists to prevent. Module scope is always safe because no I/O event is
+// delivered before the event loop starts, so nothing can be missed here.
+// See PLAN-mcp-orphan-reaper.md §5.
 // ---------------------------------------------------------------------------
 
-process.on('SIGTERM', () => {
-  if (ipcClient) ipcClient.end();
-  process.exit(0);
-});
+let shuttingDown = false;
 
-process.on('SIGINT', () => {
+/**
+ * Idempotent shutdown. 'close' follows 'end' on a readable stream, so this
+ * double-fires by construction; `process.exit` on the first call preempts the
+ * second today, but the guard is what keeps that true if any async cleanup
+ * (buffer flush, socket end-wait) is ever added below.
+ */
+function shutdown(reason: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`[Cyboflow MCP] ${reason} — exiting`);
   if (ipcClient) ipcClient.end();
   process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// FAST PATH: the spawner closing its end of the pipe. Fires in milliseconds
+// rather than up to one watchdog interval, but is not a guarantee — the MCP
+// SDK's StdioServerTransport.close() pauses stdin when it was the sole 'data'
+// listener, after which EOF is never observed, and 'end' only fires at all once
+// something has put stdin in flowing mode (the transport's own 'data' listener
+// does this, so the pre-connect window is covered by the watchdog below, not by
+// this). Attaching 'end'/'close' neither resumes nor consumes the stream, so it
+// cannot perturb the transport's own reads.
+process.stdin.on('end', () => shutdown('stdin EOF'));
+process.stdin.on('close', () => shutdown('stdin closed'));
+
+// GUARANTEE: poll for reparent-to-launchd. See parentWatchdog.ts for why ppid is
+// the primary signal and stdin EOF the optimization, not the reverse.
+startParentWatchdog({
+  intervalMs: resolveWatchdogIntervalMs(),
+  onOrphaned: (reason) => shutdown(reason),
 });
 
 // ---------------------------------------------------------------------------
