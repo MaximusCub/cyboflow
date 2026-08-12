@@ -44,6 +44,26 @@ vi.mock('../../../stores/configStore', () => ({
   useConfigStore: () => ({ fetchConfig: vi.fn().mockResolvedValue(undefined) }),
 }));
 
+/**
+ * The Codex model catalog the Default-Launch-Model picker reads under a Codex
+ * global runtime — faked at the store so the option set is deterministic (the
+ * real one fetches `model/list` off the bundled runtime, which this file's API
+ * mock does not carry).
+ */
+const CODEX_MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto/default', description: 'Use the Codex runtime default', isDefault: false },
+  { id: 'gpt-5-codex', label: 'GPT-5 Codex', description: 'Codex-tuned', isDefault: true },
+];
+
+vi.mock('../../../stores/codexModelCatalogStore', () => ({
+  useCodexModelCatalog: () => ({
+    options: CODEX_MODEL_OPTIONS,
+    defaultModel: 'gpt-5-codex',
+    loading: false,
+    error: null,
+  }),
+}));
+
 /** Frozen classification — do NOT re-derive from section order. */
 const FEATURE_CONTROLS = [
   'Cyboflow Attribution',
@@ -224,13 +244,116 @@ describe('Settings — AI tab groups', () => {
       await screen.findByTestId('settings-session-settings');
 
       fireEvent.click(screen.getByTestId('default-launch-model-haiku'));
-      fireEvent.click(screen.getByTestId('default-agent-runtime-codex-pty'));
+      fireEvent.click(screen.getByTestId('default-agent-runtime-claude-interactive'));
       fireEvent.click(screen.getByRole('button', { name: /save/i }));
 
       await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
       expect(configUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ defaultLaunchModel: 'haiku', defaultAgentRuntime: 'codex-pty' }),
+        expect.objectContaining({
+          defaultLaunchModel: 'haiku',
+          defaultAgentRuntime: 'claude-interactive',
+        }),
       );
+    });
+
+    /**
+     * The two halves are ONE setting: a model from the other provider's family
+     * cannot launch on the chosen runtime, and this rung feeds every launch with
+     * no per-run-type override. The per-run-type editor already refuses the pair;
+     * these pin that the global rung refuses it in BOTH edit orders, at the
+     * `API.config.update` payload — component state agreeing is not enough, since
+     * the payload is what a launch actually reads back.
+     */
+    describe('cross-family pairs are unsavable', () => {
+      it('runtime last: a Claude model picked first moves onto the Codex family', async () => {
+        render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+        await screen.findByTestId('settings-session-settings');
+
+        fireEvent.click(screen.getByTestId('default-launch-model-haiku'));
+        fireEvent.click(screen.getByTestId('default-agent-runtime-codex-pty'));
+        fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+        await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ defaultLaunchModel: 'auto', defaultAgentRuntime: 'codex-pty' }),
+        );
+      });
+
+      it('model last: with the runtime on Codex, no Claude alias is even offered', async () => {
+        render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+        await screen.findByTestId('settings-session-settings');
+
+        fireEvent.click(screen.getByTestId('default-agent-runtime-codex-sdk'));
+        // The reverse order cannot reassemble the pair: the picker now offers the
+        // Codex catalog only.
+        expect(screen.queryByTestId('default-launch-model-opus')).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId('default-launch-model-gpt-5-codex'));
+        fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+        await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            defaultLaunchModel: 'gpt-5-codex',
+            defaultAgentRuntime: 'codex-sdk',
+          }),
+        );
+      });
+
+      it('a stored Codex model is cleared when the runtime moves back to Claude', async () => {
+        configGet.mockResolvedValue({
+          success: true,
+          data: baseConfig({ defaultLaunchModel: 'gpt-5-codex', defaultAgentRuntime: 'codex-sdk' }),
+        });
+        render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+        await screen.findByTestId('settings-session-settings');
+
+        fireEvent.click(screen.getByTestId('default-agent-runtime-claude-sdk'));
+        fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+        await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+        const payload = configUpdate.mock.calls[0][0] as Record<string, unknown>;
+        // Cleared, not rewritten to an invented Claude alias — the per-kind floor
+        // applies at launch.
+        expect(payload).toHaveProperty('defaultLaunchModel', undefined);
+        expect(payload).toHaveProperty('defaultAgentRuntime', 'claude-sdk');
+      });
+
+      // "Built-in default" survives the coercion: an unset model with a Codex
+      // runtime stays unset rather than being pinned to a concrete value.
+      it('keeps an unset model unset under a Codex runtime', async () => {
+        render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+        await screen.findByTestId('settings-session-settings');
+
+        fireEvent.click(screen.getByTestId('default-agent-runtime-codex-sdk'));
+        expect(screen.getByTestId('default-launch-model-unset')).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+        await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+        const payload = configUpdate.mock.calls[0][0] as Record<string, unknown>;
+        expect(payload).toHaveProperty('defaultLaunchModel', undefined);
+        expect(payload).toHaveProperty('defaultAgentRuntime', 'codex-sdk');
+      });
+
+      // …and the same when the model was explicitly cleared under a Codex runtime.
+      it('keeps an explicit "Built-in default" click unset under a Codex runtime', async () => {
+        configGet.mockResolvedValue({
+          success: true,
+          data: baseConfig({ defaultLaunchModel: 'gpt-5-codex', defaultAgentRuntime: 'codex-sdk' }),
+        });
+        render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+        await screen.findByTestId('settings-session-settings');
+
+        fireEvent.click(screen.getByTestId('default-launch-model-unset'));
+        fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+        await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+        const payload = configUpdate.mock.calls[0][0] as Record<string, unknown>;
+        expect(payload).toHaveProperty('defaultLaunchModel', undefined);
+        expect(payload).toHaveProperty('defaultAgentRuntime', 'codex-sdk');
+      });
     });
 
     it('clears both back to undefined — never null, never ""', async () => {

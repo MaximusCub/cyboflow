@@ -17,9 +17,11 @@ import {
   coerceDraftForModel,
   coerceDraftForRuntime,
   coerceDraftForSubstrate,
+  coerceGlobalLaunchModel,
   draftFromStored,
   draftUsesCodexRuntime,
   effectiveRuntimeForDraft,
+  globalRuntimeUsesCodex,
   isQuickRunTypeKey,
   patchFromDraft,
   resolveRunTypeBaseline,
@@ -36,6 +38,10 @@ import {
   substrateForRuntime,
   type AgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
+import {
+  isCodexModelFamily,
+  isCodexModelSelection,
+} from '../../../../../shared/types/agentModels';
 import {
   resolveRunTypeLaunchDefaults,
   type RunTypeDefaults,
@@ -698,6 +704,90 @@ describe('runtime-family coercion — every edit order', () => {
         const next = coerceDraftForRuntime(draft({ substrate }), runtime, flow);
         // Kept only when it IS the implied transport; cleared otherwise.
         expect(next.substrate).toBe(implied === substrate ? substrate : null);
+      }
+    }
+  });
+});
+
+/**
+ * The SAME invariant one rung up: `config.defaultLaunchModel` +
+ * `config.defaultAgentRuntime` (Settings → Session settings → Global defaults)
+ * feed every launch that has no per-run-type override, so a cross-family pair
+ * stored there is the widest version of the pair the detail screen refuses.
+ *
+ * The global rung has no baseline above it — only the hardcoded floor — so the
+ * fallback is "absent" (`''`), and ABSENT IS NEVER COERCED in either direction:
+ * "Built-in default" has to stay reachable.
+ */
+describe('global-rung runtime-family coercion (Default Launch Model / Agent Runtime)', () => {
+  describe('globalRuntimeUsesCodex', () => {
+    it('reads the provider off the runtime, and treats an unset global as Claude', () => {
+      // Unset ⇒ each launch kind falls through to its own floor, and every floor
+      // is a Claude runtime — so the model controls stay Claude-scoped.
+      expect(globalRuntimeUsesCodex(undefined)).toBe(false);
+      expect(globalRuntimeUsesCodex('claude-sdk')).toBe(false);
+      expect(globalRuntimeUsesCodex('claude-interactive')).toBe(false);
+      expect(globalRuntimeUsesCodex('codex-sdk')).toBe(true);
+      expect(globalRuntimeUsesCodex('codex-pty')).toBe(true);
+    });
+  });
+
+  // Runtime edited last: the two-click order the UI actually exposes (pick a
+  // model, then flip the runtime).
+  describe('runtime last', () => {
+    it('replaces a Claude alias with the Codex sentinel under any Codex runtime', () => {
+      expect(coerceGlobalLaunchModel('opus', 'codex-sdk')).toBe('auto');
+      expect(coerceGlobalLaunchModel('haiku', 'codex-pty')).toBe('auto');
+    });
+
+    it('clears a Codex model back to "Built-in default" under a Claude runtime', () => {
+      // No baseline above a global: falling back to the floor is the honest
+      // answer, not inventing a Claude alias the user never picked.
+      expect(coerceGlobalLaunchModel('gpt-5-codex', 'claude-sdk')).toBe('');
+      expect(coerceGlobalLaunchModel('gpt-5-codex', 'claude-interactive')).toBe('');
+      // …and the same when the runtime is cleared: an unset global resolves to
+      // the (Claude) floors, so the Codex model can no longer launch either.
+      expect(coerceGlobalLaunchModel('gpt-5-codex', undefined)).toBe('');
+    });
+  });
+
+  // Model edited last — the reverse order. Unreachable from the picker itself
+  // (the options are runtime-scoped), so this guards a stale/restored value.
+  describe('model last', () => {
+    it('keeps a same-family pick verbatim', () => {
+      expect(coerceGlobalLaunchModel('sonnet', 'claude-interactive')).toBe('sonnet');
+      expect(coerceGlobalLaunchModel('sonnet', undefined)).toBe('sonnet');
+      expect(coerceGlobalLaunchModel('gpt-5-codex', 'codex-sdk')).toBe('gpt-5-codex');
+    });
+
+    it("treats 'auto' as family-neutral — it is a valid selection on both sides", () => {
+      expect(coerceGlobalLaunchModel('auto', 'codex-sdk')).toBe('auto');
+      expect(coerceGlobalLaunchModel('auto', 'claude-sdk')).toBe('auto');
+    });
+  });
+
+  // The "Built-in default" contract: clearing must never become a value.
+  it('never turns an unset model into a concrete one, Codex runtime included', () => {
+    for (const runtime of [undefined, ...SESSION_AGENT_RUNTIMES] as const) {
+      expect(coerceGlobalLaunchModel('', runtime)).toBe('');
+    }
+  });
+
+  // The property the two edit paths exist to guarantee: whatever is stored is
+  // launchable on whatever runtime is stored beside it.
+  it('leaves no cross-family pair reachable for any model × runtime combination', () => {
+    const models = ['fable', 'opus', 'sonnet', 'haiku', 'auto', 'gpt-5-codex', 'gpt-5', ''];
+    for (const runtime of [undefined, ...SESSION_AGENT_RUNTIMES] as const) {
+      for (const model of models) {
+        const coerced = coerceGlobalLaunchModel(model, runtime);
+        if (coerced === '') continue; // absent ⇒ the launch floor applies
+        expect(
+          globalRuntimeUsesCodex(runtime)
+            ? isCodexModelSelection(coerced)
+            : !isCodexModelFamily(coerced),
+        ).toBe(true);
+        // Idempotent: re-coercing a coerced value changes nothing.
+        expect(coerceGlobalLaunchModel(coerced, runtime)).toBe(coerced);
       }
     }
   });

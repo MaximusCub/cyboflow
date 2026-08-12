@@ -7,7 +7,7 @@
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { SessionSettings } from '../SessionSettings';
 import type { SessionSettingsProps } from '../SessionSettings';
 import { MODEL_OPTIONS } from '../../cyboflow/unified/ModelPill';
@@ -18,6 +18,27 @@ import {
 
 vi.mock('../../../utils/telemetry', () => ({
   trackEvent: vi.fn(),
+}));
+
+/**
+ * The Codex model catalog the Default-Launch-Model picker reads once the global
+ * runtime is Codex — faked at the store (the pattern `RunTypeOverridesSection`'s
+ * spec uses) so the option set is deterministic; the real store fetches
+ * `model/list` off the bundled runtime.
+ */
+const CODEX_MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto/default', description: 'Use the Codex runtime default', isDefault: false },
+  { id: 'gpt-5-codex', label: 'GPT-5 Codex', description: 'Codex-tuned', isDefault: true },
+  { id: 'gpt-5', label: 'GPT-5', description: 'General purpose', isDefault: false },
+];
+
+vi.mock('../../../stores/codexModelCatalogStore', () => ({
+  useCodexModelCatalog: () => ({
+    options: CODEX_MODEL_OPTIONS,
+    defaultModel: 'gpt-5-codex',
+    loading: false,
+    error: null,
+  }),
 }));
 
 function renderGroup(over: Partial<SessionSettingsProps> = {}) {
@@ -206,6 +227,109 @@ describe('SessionSettings', () => {
 
       fireEvent.click(screen.getByTestId('default-launch-model-unset'));
       expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('');
+    });
+  });
+
+  /**
+   * The two global launch defaults are ONE setting in two halves: a model from
+   * the other provider's family cannot launch on the chosen runtime. The
+   * per-run-type editor already refuses that pair; this rung feeds every launch
+   * WITHOUT a per-type override, so it has to refuse it the same two ways —
+   * runtime-scoped options, plus coercion on every edit path.
+   */
+  describe('runtime/model family agreement', () => {
+    /** The model option ids currently rendered, in order. */
+    const renderedModelIds = (): string[] =>
+      Array.from(document.body.querySelectorAll('[data-testid^="default-launch-model-"]'))
+        .map((el) => el.getAttribute('data-testid') ?? '')
+        .map((id) => id.replace('default-launch-model-', ''));
+
+    it('offers Claude aliases under a Claude runtime (and while unset)', () => {
+      renderGroup({ defaultAgentRuntime: 'claude-interactive' });
+      expect(renderedModelIds()).toEqual(['unset', ...MODEL_OPTIONS.map((o) => o.id)]);
+
+      cleanup();
+      renderGroup({ defaultAgentRuntime: undefined });
+      expect(renderedModelIds()).toEqual(['unset', ...MODEL_OPTIONS.map((o) => o.id)]);
+    });
+
+    it.each(['codex-sdk', 'codex-pty'] as const)(
+      'offers the Codex catalog under %s — no Claude alias in sight',
+      (runtime) => {
+        renderGroup({ defaultAgentRuntime: runtime });
+
+        expect(renderedModelIds()).toEqual([
+          'unset',
+          ...CODEX_MODEL_OPTIONS.map((o) => o.id),
+        ]);
+        for (const claudeOnly of ['opus', 'sonnet', 'haiku', 'fable']) {
+          expect(screen.queryByTestId(`default-launch-model-${claudeOnly}`)).not.toBeInTheDocument();
+        }
+      },
+    );
+
+    // Runtime last — the order two ordinary clicks reach: pick a Claude model,
+    // then a Codex runtime.
+    it('moves a stored Claude model onto the Codex family when the runtime flips', () => {
+      const props = renderGroup({ defaultLaunchModel: 'opus' });
+
+      fireEvent.click(screen.getByTestId('default-agent-runtime-codex-sdk'));
+
+      expect(props.onDefaultAgentRuntimeChange).toHaveBeenCalledWith('codex-sdk');
+      expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('auto');
+    });
+
+    it('clears a stored Codex model when the runtime flips back to Claude', () => {
+      const props = renderGroup({ defaultLaunchModel: 'gpt-5-codex', defaultAgentRuntime: 'codex-sdk' });
+
+      fireEvent.click(screen.getByTestId('default-agent-runtime-claude-sdk'));
+
+      expect(props.onDefaultAgentRuntimeChange).toHaveBeenCalledWith('claude-sdk');
+      expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('');
+    });
+
+    // Clearing the runtime is NOT a no-op: every launch kind then falls through
+    // to its own (Claude) floor, so a Codex model can no longer launch either.
+    it('clears a stored Codex model when the runtime is cleared to "Built-in default"', () => {
+      const props = renderGroup({ defaultLaunchModel: 'gpt-5-codex', defaultAgentRuntime: 'codex-pty' });
+
+      fireEvent.click(screen.getByTestId('default-agent-runtime-unset'));
+
+      expect(props.onDefaultAgentRuntimeChange).toHaveBeenCalledWith(undefined);
+      expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('');
+    });
+
+    it('leaves a same-family model untouched on a runtime change', () => {
+      const props = renderGroup({ defaultLaunchModel: 'sonnet' });
+
+      fireEvent.click(screen.getByTestId('default-agent-runtime-claude-interactive'));
+
+      expect(props.onDefaultAgentRuntimeChange).toHaveBeenCalledWith('claude-interactive');
+      expect(props.onDefaultLaunchModelChange).not.toHaveBeenCalled();
+    });
+
+    // Model last — the reverse order. A same-family pick rides through verbatim.
+    it('reports a Codex model verbatim under a Codex runtime', () => {
+      const props = renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+
+      fireEvent.click(screen.getByTestId('default-launch-model-gpt-5-codex'));
+      expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('gpt-5-codex');
+    });
+
+    // "Built-in default" must survive BOTH halves: clearing the model under a
+    // Codex runtime stays cleared (the floor applies at launch), and flipping
+    // the runtime while the model is unset invents nothing.
+    it('never turns "Built-in default" into a concrete model', () => {
+      const props = renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+
+      fireEvent.click(screen.getByTestId('default-launch-model-unset'));
+      expect(props.onDefaultLaunchModelChange).toHaveBeenCalledWith('');
+
+      cleanup();
+      const next = renderGroup({ defaultLaunchModel: '' });
+      fireEvent.click(screen.getByTestId('default-agent-runtime-codex-pty'));
+      expect(next.onDefaultAgentRuntimeChange).toHaveBeenCalledWith('codex-pty');
+      expect(next.onDefaultLaunchModelChange).not.toHaveBeenCalled();
     });
   });
 

@@ -5,7 +5,8 @@ import { SettingsSection } from '../ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector';
 import { MODEL_OPTIONS } from '../cyboflow/unified/ModelPill';
 import { RunTypeOverridesSection } from './RunTypeOverridesSection';
-import { runTypeValueLabel } from './runTypeOverrides';
+import { coerceGlobalLaunchModel, globalRuntimeUsesCodex, runTypeValueLabel } from './runTypeOverrides';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { trackEvent } from '../../utils/telemetry';
 import {
   SESSION_AGENT_RUNTIMES,
@@ -103,6 +104,47 @@ export function SessionSettings({
   const runtimeIsWorkflowCapable =
     defaultAgentRuntime === undefined || isWorkflowAgentRuntime(defaultAgentRuntime);
 
+  /**
+   * The two global launch defaults are ONE setting in two halves: a model from
+   * the other provider's family cannot launch on the chosen runtime, and this
+   * rung feeds every launch that has no per-run-type override. The per-type
+   * editor (`RunTypeOverrideDetail`) already refuses that pair the same two ways
+   * — scope the offered options to the effective runtime, AND coerce on every
+   * edit path so no edit ORDER can reassemble it — so the global rung does the
+   * same, through the same `coerceModelForRuntime`.
+   *
+   * Codex options come from the same `model/list` catalog the launch pickers
+   * render (`ModelSelector` / `ModelPill` via `useCodexModelCatalog`), never a
+   * second hardcoded list, so Settings cannot offer a model a launch would not.
+   */
+  const usesCodex = globalRuntimeUsesCodex(defaultAgentRuntime);
+  const { options: codexModelOptions } = useCodexModelCatalog(usesCodex);
+  const modelOptions: readonly { id: string; label: string; hint: string }[] = usesCodex
+    ? codexModelOptions.map((o) => ({ id: o.id, label: o.label, hint: o.description }))
+    : MODEL_OPTIONS.map((o) => ({
+        id: o.id,
+        label: o.label,
+        hint: o.context ? `${o.description} · ${o.context}` : o.description,
+      }));
+
+  // Model edited last. A cross-family value can still arrive here from a stale
+  // render or a hand-edited config.json restored into the field, so the pick is
+  // projected onto the runtime's family rather than trusted. "Built-in default"
+  // ('') passes through untouched — clearing a setting must stay a clear.
+  const handleLaunchModelPick = (model: string): void => {
+    onDefaultLaunchModelChange(coerceGlobalLaunchModel(model, defaultAgentRuntime));
+  };
+
+  // Runtime edited last — the reverse order, and the one that is reachable with
+  // two ordinary clicks: pick a Claude model, then a Codex runtime. The model
+  // moves WITH the runtime (to the Codex sentinel, or back to "Built-in default"
+  // when a Codex model can no longer launch), so the saved pair always agrees.
+  const handleAgentRuntimePick = (runtime: AgentRuntime | undefined): void => {
+    onDefaultAgentRuntimeChange(runtime);
+    const coerced = coerceGlobalLaunchModel(defaultLaunchModel, runtime);
+    if (coerced !== defaultLaunchModel) onDefaultLaunchModelChange(coerced);
+  };
+
   return (
     <section data-testid="settings-session-settings">
       <CollapsibleCard
@@ -172,8 +214,9 @@ export function SessionSettings({
               the field, so the ladder falls through to the per-kind floor
               (DEFAULT_RUN_TYPE_MODEL_FLOORS). Absent must stay distinguishable
               from a set value, hence the explicit choice rather than preselecting
-              a model. Options come from the launch pickers' own MODEL_OPTIONS —
-              never a second hand-written alias list. */}
+              a model. Options come from the launch pickers' own lists — the
+              Claude aliases (MODEL_OPTIONS) or, under a Codex global runtime,
+              the Codex catalog — never a second hand-written list. */}
           <SettingsSection
             title="Default Launch Model"
             description="Which model a new quick session or flow run starts on"
@@ -183,7 +226,7 @@ export function SessionSettings({
               <button
                 type="button"
                 data-testid="default-launch-model-unset"
-                onClick={() => onDefaultLaunchModelChange('')}
+                onClick={() => handleLaunchModelPick('')}
                 aria-pressed={defaultLaunchModel === ''}
                 className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                   defaultLaunchModel === ''
@@ -194,12 +237,12 @@ export function SessionSettings({
                 <span className="text-text-primary font-medium text-sm">Built-in default</span>
                 <span className="text-xs text-text-tertiary">Let each launch kind use its own floor</span>
               </button>
-              {MODEL_OPTIONS.map((option) => (
+              {modelOptions.map((option) => (
                 <button
                   key={option.id}
                   type="button"
                   data-testid={`default-launch-model-${option.id}`}
-                  onClick={() => onDefaultLaunchModelChange(option.id)}
+                  onClick={() => handleLaunchModelPick(option.id)}
                   aria-pressed={defaultLaunchModel === option.id}
                   className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                     defaultLaunchModel === option.id
@@ -208,16 +251,16 @@ export function SessionSettings({
                   }`}
                 >
                   <span className="text-text-primary font-medium text-sm">{option.label}</span>
-                  <span className="text-xs text-text-tertiary">
-                    {option.context ? `${option.description} · ${option.context}` : option.description}
-                  </span>
+                  <span className="text-xs text-text-tertiary">{option.hint}</span>
                 </button>
               ))}
             </div>
             <p className="text-xs text-text-tertiary mt-2">
               Seeds both quick sessions and flow runs. A per-session-type override (below) still wins,
               and so does a model picked in the launch wizard. On "Built-in default" nothing is stored:
-              quick sessions and flow runs each fall back to their own built-in model.
+              quick sessions and flow runs each fall back to their own built-in model. The list follows
+              the agent runtime below — switching to a Codex runtime offers Codex models and moves a
+              Claude model off, since a model can only start on its own provider.
             </p>
           </SettingsSection>
 
@@ -235,7 +278,7 @@ export function SessionSettings({
               <button
                 type="button"
                 data-testid="default-agent-runtime-unset"
-                onClick={() => onDefaultAgentRuntimeChange(undefined)}
+                onClick={() => handleAgentRuntimePick(undefined)}
                 aria-pressed={defaultAgentRuntime === undefined}
                 className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                   defaultAgentRuntime === undefined
@@ -255,7 +298,7 @@ export function SessionSettings({
                     type="button"
                     data-testid={`default-agent-runtime-${runtime}`}
                     disabled={!enabled}
-                    onClick={() => onDefaultAgentRuntimeChange(runtime)}
+                    onClick={() => handleAgentRuntimePick(runtime)}
                     aria-pressed={selected}
                     className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed ${
                       selected

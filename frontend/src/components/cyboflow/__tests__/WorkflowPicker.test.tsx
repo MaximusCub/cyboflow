@@ -2469,8 +2469,69 @@ describe('WorkflowPicker — global launch defaults (defaultLaunchModel / defaul
 
   // The other half of the coercion: the SAME global the workflow path drops is
   // launchable as a quick session, so this button sends it.
+  //
+  // The MODEL is asserted here too, and that is the load-bearing half: this
+  // panel has ONE model control, seeded off the WORKFLOW key (so Claude-family,
+  // since the workflow path just dropped the Codex global). Forwarding it
+  // verbatim would launch `agentRuntime: 'codex-pty'` with `agentModel: 'opus'`
+  // — a combination no Codex session can honour.
   it('Quick Session ACCEPTS the quick-only global runtime (codex-pty) the workflow path drops', async () => {
     setGlobals({ defaultAgentRuntime: 'codex-pty' });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    // The workflow-keyed control is Claude — the fallback the quick launch would
+    // otherwise inherit.
+    expect(runtimeControl()).toBe('claude-sdk');
+    expect(modelControl()).toBe('opus');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'codex-pty',
+        agentProvider: 'codex',
+        agentModel: 'auto',
+      }),
+    );
+    // A Codex runtime carries no Claude transport, and no Claude model config.
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('substrate');
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('claudeConfig');
+  });
+
+  // The same hole reached through the OTHER trigger — a stored quick runtime,
+  // which is reachable today with no global set at all. The workflow control
+  // stays Claude (it keys off `workflow:wf-1`), so an untouched model must NOT
+  // ride the Codex quick launch.
+  it('Quick Session never pairs a Codex quick runtime with the Claude workflow control', async () => {
+    setGlobals({ runTypeDefaults: { quick: { agentRuntime: 'codex-sdk' } } });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    expect(modelControl()).toBe('opus');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'codex-sdk',
+        agentProvider: 'codex',
+        agentModel: 'auto',
+      }),
+    );
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('claudeConfig');
+  });
+
+  // A stored quick MODEL still beats the fallback — in either family. The
+  // family guard only fires when the stored value cannot launch on the resolved
+  // runtime, never as a blanket override of the user's stored choice.
+  it('a stored quick model still wins over the fallback (Codex family)', async () => {
+    setGlobals({
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { quick: { agentRuntime: 'codex-sdk', model: 'gpt-5-codex' } },
+    });
     render(<WorkflowPicker projectId={1} />);
     await findEnabledStartRun();
 
@@ -2479,10 +2540,54 @@ describe('WorkflowPicker — global launch defaults (defaultLaunchModel / defaul
     });
 
     expect(mockCreateQuick).toHaveBeenCalledWith(
-      expect.objectContaining({ agentRuntime: 'codex-pty', agentProvider: 'codex' }),
+      expect.objectContaining({ agentRuntime: 'codex-sdk', agentModel: 'gpt-5-codex' }),
     );
-    // A Codex runtime carries no Claude transport, so none is sent.
-    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('substrate');
+  });
+
+  it('a stored quick model still wins over the fallback (Claude family)', async () => {
+    setGlobals({
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { quick: { agentRuntime: 'claude-sdk', model: 'haiku' } },
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-sdk',
+        claudeConfig: { model: 'haiku', fastMode: false },
+      }),
+    );
+  });
+
+  // The Claude side of the guard is a NO-OP: a Claude quick runtime forwards the
+  // control's Claude model exactly as before the family check existed.
+  it('Quick Session on a Claude quick runtime forwards the control model unchanged', async () => {
+    setGlobals({
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { quick: { agentRuntime: 'claude-interactive' } },
+    });
+    render(<WorkflowPicker projectId={1} />);
+    await findEnabledStartRun();
+    await waitFor(() => expect(modelControl()).toBe('sonnet'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRuntime: 'claude-interactive',
+        agentProvider: 'claude',
+        substrate: 'interactive',
+        claudeConfig: { model: 'sonnet', fastMode: false },
+      }),
+    );
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('agentModel');
   });
 
   // AC5 — with NEITHER global set both payloads are byte-identical.

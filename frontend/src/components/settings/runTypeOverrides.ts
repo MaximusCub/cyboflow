@@ -26,6 +26,7 @@ import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector
 import { DEFAULT_CODEX_MODEL } from '../cyboflow/ModelSelector';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import {
+  DEFAULT_SESSION_AGENT_RUNTIME,
   SESSION_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIMES,
   claudeRuntimeFromSubstrate,
@@ -504,18 +505,26 @@ export function draftUsesCodexRuntime(
  * under a Codex runtime "follow defaults" IS the cross-family combination — it
  * is replaced with the explicit Codex sentinel instead. This mirrors
  * `ModelSelector`, whose `allowDefaultOption` is likewise Claude-path only.
+ *
+ * `fallbackModel` is what a Codex value degrades to on a Claude runtime (and
+ * what a `null` degrades FROM on a Codex one). It is deliberately the bare model
+ * string rather than a `RunTypeBaseline`: this function only ever read
+ * `baseline.model`, and the GLOBAL rung (Settings → "Default Launch Model") has
+ * no baseline above it — only the hardcoded floor — yet must enforce exactly
+ * this invariant. Taking the fallback directly is what lets both rungs share ONE
+ * coercion instead of growing a second near-identical copy.
  */
 export function coerceModelForRuntime(
   model: string | null,
   runtime: AgentRuntime,
-  baseline: RunTypeBaseline,
+  fallbackModel: string,
 ): string | null {
   if (providerForRuntime(runtime) === 'codex') {
-    const effective = model ?? baseline.model;
+    const effective = model ?? fallbackModel;
     return isCodexModelSelection(effective) ? effective : DEFAULT_CODEX_MODEL;
   }
   if (model === null) return null;
-  return isCodexModelFamily(model) ? baseline.model : model;
+  return isCodexModelFamily(model) ? fallbackModel : model;
 }
 
 /**
@@ -554,7 +563,7 @@ export function coerceDraftForRuntime(
 ): RunTypeDraft {
   const next: RunTypeDraft = { ...draft, agentRuntime: runtime };
 
-  next.model = coerceModelForRuntime(draft.model, runtime, baseline);
+  next.model = coerceModelForRuntime(draft.model, runtime, baseline.model);
 
   const impliedSubstrate = substrateForRuntime(runtime);
   if (next.substrate !== null && next.substrate !== impliedSubstrate) {
@@ -577,7 +586,7 @@ export function coerceDraftForModel(
 ): RunTypeDraft {
   return {
     ...draft,
-    model: coerceModelForRuntime(model, effectiveRuntimeForDraft(draft, baseline), baseline),
+    model: coerceModelForRuntime(model, effectiveRuntimeForDraft(draft, baseline), baseline.model),
   };
 }
 
@@ -608,4 +617,62 @@ export function coerceDraftForSubstrate(
   if (implied === null) return { ...draft, substrate: null };
   if (implied === substrate) return { ...draft, substrate };
   return { ...draft, substrate, agentRuntime: claudeRuntimeFromSubstrate(substrate) };
+}
+
+// ---------------------------------------------------------------------------
+// The GLOBAL rung — Settings → "Default Launch Model" / "Default Agent Runtime"
+// ---------------------------------------------------------------------------
+
+/**
+ * The global model field's "absent" marker. `SessionSettings` holds the field as
+ * a plain string with `''` meaning "Built-in default", and `Settings.tsx`'s save
+ * maps that back to `undefined` so config.json stays free of the key.
+ */
+const GLOBAL_MODEL_UNSET = '';
+
+/**
+ * The runtime the GLOBAL rung would actually launch on. A global left on
+ * "Built-in default" is NOT family-neutral: each launch kind then falls through
+ * to its own floor, and every floor is a Claude runtime — so an unset global
+ * scopes the model controls to Claude exactly as a Claude global does. Only the
+ * FAMILY of the returned runtime is ever read.
+ */
+function effectiveGlobalRuntime(runtime: AgentRuntime | undefined): AgentRuntime {
+  return runtime ?? DEFAULT_SESSION_AGENT_RUNTIME;
+}
+
+/** True when the global rung would launch on the Codex provider. */
+export function globalRuntimeUsesCodex(runtime: AgentRuntime | undefined): boolean {
+  return providerForRuntime(effectiveGlobalRuntime(runtime)) === 'codex';
+}
+
+/**
+ * The global rung's model coercion — the SAME invariant the per-type editor
+ * enforces ({@link coerceDraftForRuntime} / {@link coerceDraftForModel}),
+ * through the SAME {@link coerceModelForRuntime}, expressed in the global
+ * field's `''`-means-absent vocabulary. The global rung feeds every launch that
+ * has no per-type override, so a cross-family pair stored here is the widest
+ * version of the combination the detail screen already refuses.
+ *
+ * There is no baseline above a global — only the hardcoded floor — so the
+ * fallback IS "absent": a Codex model under a Claude runtime clears back to
+ * "Built-in default" rather than inventing a Claude alias the user never picked.
+ *
+ * ABSENT IS NEVER COERCED. `''` stays `''` under a Codex runtime too, even
+ * though an unset model resolves to the (Claude) floor at launch: turning a
+ * cleared field into a concrete value would make "Built-in default" impossible
+ * to select, and clearing a setting must stay a clear. Only a CONCRETE
+ * cross-family value is rewritten. (That is the one place this rung diverges
+ * from `coerceModelForRuntime`'s `null` branch, whose null means "this KEY
+ * stores no model" — a key that still has a global above it to fall through to.)
+ */
+export function coerceGlobalLaunchModel(
+  model: string,
+  runtime: AgentRuntime | undefined,
+): string {
+  if (model === GLOBAL_MODEL_UNSET) return model;
+  return (
+    coerceModelForRuntime(model, effectiveGlobalRuntime(runtime), GLOBAL_MODEL_UNSET) ??
+    GLOBAL_MODEL_UNSET
+  );
 }

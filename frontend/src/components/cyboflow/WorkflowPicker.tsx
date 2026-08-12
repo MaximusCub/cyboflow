@@ -674,19 +674,32 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // The family guard is load-bearing: the 'quick' default is stored without
     // regard to this launch's runtime, so an untouched Codex-runtime quick
     // session could otherwise be handed a Claude model (and vice versa). When
-    // the stored value is incompatible we fall back to the live control value,
-    // which the coercion effect above already keeps family-correct.
+    // the stored value is incompatible we fall back to the live control value —
+    // which must itself be family-checked against THIS launch's runtime, not
+    // trusted as-is.
+    //
+    // That fallback is the panel's single, WORKFLOW-keyed model control, and the
+    // runtime-coercion effect above only keeps it in step with the WORKFLOW
+    // runtime picker. An UNTOUCHED runtime resolves the 'quick' key separately
+    // (a stored `quick.agentRuntime`, or a global `defaultAgentRuntime`), so the
+    // two can legitimately disagree — and a Claude-seeded control handed to a
+    // Codex quick session is exactly the combination no launch can honour. The
+    // Codex sentinel is used instead, matching what the effect would have done
+    // had the runtime picker itself been flipped.
+    const codexQuickLaunch = isCodexRuntime(sessionRuntime);
+    const fallbackModel =
+      codexQuickLaunch && !isCodexModelSelection(model) ? DEFAULT_CODEX_MODEL : model;
     const storedQuickModel = useConfigStore.getState().config?.runTypeDefaults?.quick?.model;
     const quickModel =
       isModelTouched || storedQuickModel === undefined
-        ? model
+        ? fallbackModel
         : (
-            isCodexRuntime(sessionRuntime)
+            codexQuickLaunch
               ? isCodexModelSelection(storedQuickModel)
               : !isCodexModelFamily(storedQuickModel)
           )
           ? storedQuickModel
-          : model;
+          : fallbackModel;
     void startQuickSession(
       quickPermissionMode,
       quickSubstrate,
