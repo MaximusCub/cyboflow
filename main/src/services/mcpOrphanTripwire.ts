@@ -216,6 +216,11 @@ function defaultListProcesses(): Promise<McpOrphanProcess[]> {
 /**
  * Timer handle carrying Node's `unref`. See {@link McpOrphanTripwire.start} —
  * the recurring scan must never be the reason the process fails to exit.
+ *
+ * Intentionally a twin of the same interface in
+ * orchestrator/mcpServer/parentWatchdog.ts rather than a shared import; that
+ * file is bundled standalone for the MCP subprocess, so sharing would couple the
+ * bundle to this tree. See the rationale there before merging them.
  */
 interface UnreffableTimer {
   unref?: () => void;

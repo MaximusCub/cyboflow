@@ -60,7 +60,16 @@ export const MIN_WATCHDOG_INTERVAL_MS = 100;
  */
 export const WATCHDOG_INTERVAL_ENV = 'CYBOFLOW_MCP_PARENT_WATCHDOG_MS';
 
-/** A timer handle that may or may not carry Node's `unref` (browser/fake timers). */
+/**
+ * A timer handle that may or may not carry Node's `unref` (browser/fake timers).
+ *
+ * DELIBERATELY DUPLICATED in services/mcpOrphanTripwire.ts rather than shared.
+ * This file is bundled STANDALONE by scripts/bundle-mcp-server.mjs, which inlines
+ * imports transitively — so an import into the main-process utils tree would be
+ * fine today and would silently break the subprocess bundle the moment anything
+ * in that shared module reached for `electron` or a native dep. Three structural
+ * lines are a cheaper price than that coupling.
+ */
 interface UnreffableTimer {
   unref?: () => void;
 }
