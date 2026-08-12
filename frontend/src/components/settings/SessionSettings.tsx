@@ -1,10 +1,19 @@
-import { FileText, FolderOpen, ShieldCheck, SlidersHorizontal, Terminal, Zap } from 'lucide-react';
+import { Bot, Cpu, FileText, FolderOpen, ShieldCheck, SlidersHorizontal, Terminal, Zap } from 'lucide-react';
 import { Checkbox, Textarea } from '../ui/Input';
 import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector';
+import { MODEL_OPTIONS } from '../cyboflow/unified/ModelPill';
 import { RunTypeOverridesSection } from './RunTypeOverridesSection';
+import { runTypeValueLabel } from './runTypeOverrides';
 import { trackEvent } from '../../utils/telemetry';
+import {
+  SESSION_AGENT_RUNTIMES,
+  isRuntimeProviderEnabled,
+  isWorkflowAgentRuntime,
+  type AgentProviderAccess,
+  type AgentRuntime,
+} from '../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { PermissionMode } from '../../../../shared/types/workflows';
@@ -24,6 +33,29 @@ export interface SessionSettingsProps {
   onGlobalSystemPromptChange: (prompt: string) => void;
   defaultAgentPermissionMode: PermissionMode;
   onDefaultAgentPermissionModeChange: (mode: PermissionMode) => void;
+  /**
+   * `config.defaultLaunchModel` — the GLOBAL middle rung of
+   * `resolveRunTypeLaunchDefaults`. `''` means the field is absent, i.e. every
+   * launch kind falls through to its own floor; the save path in `Settings.tsx`
+   * turns `''` back into `undefined` so config.json stays free of the key.
+   */
+  defaultLaunchModel: string;
+  onDefaultLaunchModelChange: (model: string) => void;
+  /**
+   * `config.defaultAgentRuntime` — ONE global runtime shared by both launch
+   * surfaces, coerced per surface (a quick-only runtime is dropped by a flow
+   * launch). `undefined` means absent: no runtime is sent at all, which is what
+   * keeps an unconfigured install's launch payload byte-identical.
+   */
+  defaultAgentRuntime: AgentRuntime | undefined;
+  onDefaultAgentRuntimeChange: (runtime: AgentRuntime | undefined) => void;
+  /**
+   * Per-provider access toggles (Settings → Integrations). A runtime whose
+   * provider is switched off must not be selectable here, exactly as in every
+   * other runtime picker — the renderer read is a courtesy, the launch seams
+   * still fail closed.
+   */
+  agentProviderAccess?: AgentProviderAccess;
   defaultExecutionModel: ExecutionModel;
   onDefaultExecutionModelChange: (model: ExecutionModel) => void;
   quickSessionWorktreeMode: QuickSessionWorktreeMode;
@@ -41,6 +73,11 @@ export function SessionSettings({
   onGlobalSystemPromptChange,
   defaultAgentPermissionMode,
   onDefaultAgentPermissionModeChange,
+  defaultLaunchModel,
+  onDefaultLaunchModelChange,
+  defaultAgentRuntime,
+  onDefaultAgentRuntimeChange,
+  agentProviderAccess,
   defaultExecutionModel,
   onDefaultExecutionModelChange,
   quickSessionWorktreeMode,
@@ -52,6 +89,20 @@ export function SessionSettings({
   autoGradeVariantRuns,
   onAutoGradeVariantRunsChange,
 }: SessionSettingsProps): React.JSX.Element {
+  // A runtime on a switched-off provider is not offered. The CURRENT value is
+  // kept in the list even when its provider is off — otherwise a stored runtime
+  // would silently vanish from the UI while still being resolved at launch — but
+  // it renders disabled, so it cannot be (re)selected either way.
+  const runtimeOptions = SESSION_AGENT_RUNTIMES.filter(
+    (runtime) => isRuntimeProviderEnabled(agentProviderAccess, runtime) || runtime === defaultAgentRuntime,
+  );
+  // The honest half of "one global runtime, coerced per surface": `codex-pty` is
+  // a member of SessionAgentRuntime but NOT of WorkflowAgentRuntime, so a flow
+  // launch drops it and falls back to the workflow floor. Decided from the shared
+  // guard, never a hardcoded runtime id, so a future quick-only runtime is covered.
+  const runtimeIsWorkflowCapable =
+    defaultAgentRuntime === undefined || isWorkflowAgentRuntime(defaultAgentRuntime);
+
   return (
     <section data-testid="settings-session-settings">
       <CollapsibleCard
@@ -114,6 +165,136 @@ export function SessionSettings({
             </div>
             <p className="text-xs text-text-tertiary mt-2">
               Applies to workflow runs on both CLI substrates. "Auto" uses Claude's native permission classifier; "Don't ask" skips all permission prompts.
+            </p>
+          </SettingsSection>
+
+          {/* The GLOBAL model rung. "Built-in default" is not a value — it CLEARS
+              the field, so the ladder falls through to the per-kind floor
+              (DEFAULT_RUN_TYPE_MODEL_FLOORS). Absent must stay distinguishable
+              from a set value, hence the explicit choice rather than preselecting
+              a model. Options come from the launch pickers' own MODEL_OPTIONS —
+              never a second hand-written alias list. */}
+          <SettingsSection
+            title="Default Launch Model"
+            description="Which model a new quick session or flow run starts on"
+            icon={<Cpu className="w-4 h-4" />}
+          >
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                data-testid="default-launch-model-unset"
+                onClick={() => onDefaultLaunchModelChange('')}
+                aria-pressed={defaultLaunchModel === ''}
+                className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                  defaultLaunchModel === ''
+                    ? 'border-interactive bg-interactive-surface'
+                    : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                }`}
+              >
+                <span className="text-text-primary font-medium text-sm">Built-in default</span>
+                <span className="text-xs text-text-tertiary">Let each launch kind use its own floor</span>
+              </button>
+              {MODEL_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  data-testid={`default-launch-model-${option.id}`}
+                  onClick={() => onDefaultLaunchModelChange(option.id)}
+                  aria-pressed={defaultLaunchModel === option.id}
+                  className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                    defaultLaunchModel === option.id
+                      ? 'border-interactive bg-interactive-surface'
+                      : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                  }`}
+                >
+                  <span className="text-text-primary font-medium text-sm">{option.label}</span>
+                  <span className="text-xs text-text-tertiary">
+                    {option.context ? `${option.description} · ${option.context}` : option.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-text-tertiary mt-2">
+              Seeds both quick sessions and flow runs. A per-session-type override (below) still wins,
+              and so does a model picked in the launch wizard. On "Built-in default" nothing is stored:
+              quick sessions and flow runs each fall back to their own built-in model.
+            </p>
+          </SettingsSection>
+
+          {/* ONE global runtime for both launch surfaces, coerced per surface.
+              SESSION_AGENT_RUNTIMES is the superset of the two launch kinds;
+              `codex-exec` is deliberately absent (headless — it reaches no launch
+              picker). When the pick is not workflow-capable the control SAYS SO
+              rather than presenting a setting flow runs silently ignore. */}
+          <SettingsSection
+            title="Default Agent Runtime"
+            description="Which agent runtime a new quick session or flow run starts on"
+            icon={<Bot className="w-4 h-4" />}
+          >
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                data-testid="default-agent-runtime-unset"
+                onClick={() => onDefaultAgentRuntimeChange(undefined)}
+                aria-pressed={defaultAgentRuntime === undefined}
+                className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                  defaultAgentRuntime === undefined
+                    ? 'border-interactive bg-interactive-surface'
+                    : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                }`}
+              >
+                <span className="text-text-primary font-medium text-sm">Built-in default</span>
+                <span className="text-xs text-text-tertiary">Let each launch surface choose</span>
+              </button>
+              {runtimeOptions.map((runtime) => {
+                const enabled = isRuntimeProviderEnabled(agentProviderAccess, runtime);
+                const selected = defaultAgentRuntime === runtime;
+                return (
+                  <button
+                    key={runtime}
+                    type="button"
+                    data-testid={`default-agent-runtime-${runtime}`}
+                    disabled={!enabled}
+                    onClick={() => onDefaultAgentRuntimeChange(runtime)}
+                    aria-pressed={selected}
+                    className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed ${
+                      selected
+                        ? 'border-interactive bg-interactive-surface'
+                        : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                    }`}
+                  >
+                    <span className="text-text-primary font-medium text-sm">
+                      {runTypeValueLabel('agentRuntime', runtime)}
+                    </span>
+                    <span className="text-xs text-text-tertiary">
+                      {!enabled
+                        ? 'Provider off'
+                        : isWorkflowAgentRuntime(runtime)
+                          ? 'Quick sessions and flow runs'
+                          : 'Quick sessions only'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {!runtimeIsWorkflowCapable && (
+              <p
+                data-testid="default-agent-runtime-workflow-note"
+                className="text-xs text-status-warning mt-2"
+              >
+                Applies to quick sessions only. Flow runs cannot use{' '}
+                {defaultAgentRuntime === undefined
+                  ? 'this runtime'
+                  : runTypeValueLabel('agentRuntime', defaultAgentRuntime)}
+                , so they will ignore this setting and start on their own default runtime.
+              </p>
+            )}
+            <p className="text-xs text-text-tertiary mt-2">
+              Seeds both quick sessions and flow runs; a per-session-type override (below) or a runtime
+              picked at launch still wins. Choosing a Claude runtime also decides that launch's
+              substrate — "Claude interactive" runs on the terminal and "Claude SDK" in-process — which
+              outranks the "Quick Session Runtime" setting below. Leave this on "Built-in default" for
+              that setting to decide the substrate.
             </p>
           </SettingsSection>
 

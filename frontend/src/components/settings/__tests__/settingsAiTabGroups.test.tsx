@@ -1,12 +1,16 @@
 /**
- * Settings AI tab — the 12 sections now live in two top-level groups inside the
- * SAME tab: "Feature controls" (is the capability available at all) and
- * "Session settings" (what a new session or run starts with). This pins the
- * user-approved, frozen membership of each group — an earlier decomposition pass
- * inverted three rows — plus zero content loss, the surviving `initialTab: 'ai'`
- * entry point, and the unchanged single `API.config.update` round trip (the
- * groups are props-in/callback-out containers over Settings.tsx's lifted state,
- * NOT self-fetching panels like IntegrationsSettings).
+ * Settings AI tab — the sections live in two top-level groups inside the SAME
+ * tab: "Feature controls" (is the capability available at all) and "Session
+ * settings" (what a new session or run starts with). This pins the user-approved,
+ * frozen membership of each group — an earlier decomposition pass inverted three
+ * rows — plus zero content loss, the surviving `initialTab: 'ai'` entry point,
+ * and the unchanged single `API.config.update` round trip (the groups are
+ * props-in/callback-out containers over Settings.tsx's lifted state, NOT
+ * self-fetching panels like IntegrationsSettings).
+ *
+ * The two global launch defaults (model + agent runtime) were added to Session
+ * settings, taking the original 12 sections to 14; they are the same class as
+ * "Agent Permission Mode" (what a launch starts with), not a capability gate.
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -53,6 +57,8 @@ const FEATURE_CONTROLS = [
 const SESSION_SETTINGS = [
   'Global Instructions',
   'Agent Permission Mode',
+  'Default Launch Model',
+  'Default Agent Runtime',
   'Workflow Orchestration',
   'Quick Sessions',
   'Quick Session Runtime',
@@ -90,7 +96,7 @@ describe('Settings — AI tab groups', () => {
     expect(screen.getByRole('heading', { name: 'Session settings', level: 3 })).toBeInTheDocument();
   });
 
-  it('renders all 12 sections with zero content loss', async () => {
+  it('renders all 14 sections with zero content loss', async () => {
     render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
     await screen.findByTestId('settings-feature-controls');
 
@@ -170,6 +176,107 @@ describe('Settings — AI tab groups', () => {
         autoGradeVariantRuns: false,
       }),
     );
+  });
+
+  // The two global launch defaults are the middle rung of
+  // resolveRunTypeLaunchDefaults. They must ride the SAME single config.update
+  // round trip as every other control in this group — not a standalone save —
+  // and "built-in default" must reach config as `undefined`, since that is the
+  // only value the ladder reads as absent and falls through on.
+  describe('global launch defaults', () => {
+    it('renders the built-in-default state and writes nothing on mount when neither is set', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('settings-session-settings');
+
+      expect(screen.getByTestId('default-launch-model-unset')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('default-agent-runtime-unset')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.queryByTestId('default-agent-runtime-workflow-note')).not.toBeInTheDocument();
+      expect(configUpdate).not.toHaveBeenCalled();
+    });
+
+    it('loads stored values and round-trips them through API.config.update', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ defaultLaunchModel: 'sonnet', defaultAgentRuntime: 'claude-interactive' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('settings-session-settings');
+
+      expect(screen.getByTestId('default-launch-model-sonnet')).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('default-agent-runtime-claude-interactive')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+      expect(configUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultLaunchModel: 'sonnet',
+          defaultAgentRuntime: 'claude-interactive',
+        }),
+      );
+    });
+
+    it('carries a changed model and runtime into the one shared save', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('settings-session-settings');
+
+      fireEvent.click(screen.getByTestId('default-launch-model-haiku'));
+      fireEvent.click(screen.getByTestId('default-agent-runtime-codex-pty'));
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+      expect(configUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultLaunchModel: 'haiku', defaultAgentRuntime: 'codex-pty' }),
+      );
+    });
+
+    it('clears both back to undefined — never null, never ""', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ defaultLaunchModel: 'opus', defaultAgentRuntime: 'codex-sdk' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('settings-session-settings');
+
+      fireEvent.click(screen.getByTestId('default-launch-model-unset'));
+      fireEvent.click(screen.getByTestId('default-agent-runtime-unset'));
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() => expect(configUpdate).toHaveBeenCalledTimes(1));
+      const payload = configUpdate.mock.calls[0][0] as Record<string, unknown>;
+      expect(payload).toHaveProperty('defaultLaunchModel', undefined);
+      expect(payload).toHaveProperty('defaultAgentRuntime', undefined);
+    });
+
+    // The setting is one global field coerced per surface: a quick-only runtime
+    // never reaches a flow run, and the control has to say so rather than look
+    // effective everywhere.
+    it('surfaces the workflow-inapplicable note for a stored quick-only runtime', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ defaultAgentRuntime: 'codex-pty' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+
+      expect(await screen.findByTestId('default-agent-runtime-workflow-note')).toHaveTextContent(
+        /quick sessions only/i,
+      );
+    });
+
+    it('hides a runtime whose provider is switched off', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ agentProviderAccess: { claude: true, codex: false } }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('default-agent-runtime-claude-sdk');
+
+      expect(screen.queryByTestId('default-agent-runtime-codex-sdk')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-agent-runtime-codex-pty')).not.toBeInTheDocument();
+    });
   });
 
   it('carries edits from BOTH groups into the same save', async () => {

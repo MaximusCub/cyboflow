@@ -6,6 +6,7 @@ import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { Project } from '../types/project';
+import type { AgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -85,6 +86,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // assistantEnabled — it lives on this tab but is not gated by the rail toggle.
   const [sessionSummaryEnabled, setSessionSummaryEnabled] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
+  // Global default MODEL for launches (quick sessions AND flow runs) — the middle
+  // rung of resolveRunTypeLaunchDefaults. '' = the field is ABSENT, so each launch
+  // kind falls through to its own floor; the save path maps '' back to undefined
+  // so config.json stays free of the key (same idiom as assistantModel).
+  const [defaultLaunchModel, setDefaultLaunchModel] = useState('');
+  // Global default AGENT RUNTIME for launches — one field for both surfaces.
+  // undefined = absent, which is what keeps an unconfigured install's launch
+  // payload byte-identical (there is deliberately no floor for this one).
+  const [defaultAgentRuntime, setDefaultAgentRuntime] = useState<AgentRuntime | undefined>(undefined);
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
   const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
@@ -189,6 +199,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setSessionSummaryEnabled(data.sessionSummaryEnabled !== false);
       setExcludedProjectPaths(new Set(data.assistantExcludedProjectPaths ?? []));
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
+      setDefaultLaunchModel(data.defaultLaunchModel ?? '');
+      setDefaultAgentRuntime(data.defaultAgentRuntime ?? undefined);
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
@@ -264,6 +276,13 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
           .map((p) => p.path)
           .filter((path) => excludedProjectPaths.has(path)),
         defaultAgentPermissionMode,
+        // Both launch defaults send an EXPLICIT undefined for "built-in default":
+        // updateConfig spreads the patch, so the key is present-with-undefined and
+        // overwrites a stored value, and JSON.stringify then drops it from
+        // config.json. undefined (never null / '') is what the resolution ladder
+        // reads as "unset" and falls through on.
+        defaultLaunchModel: defaultLaunchModel.trim() ? defaultLaunchModel.trim() : undefined,
+        defaultAgentRuntime,
         interactivePtyOnly,
         defaultExecutionModel,
         quickSessionWorktreeMode,
@@ -695,6 +714,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onGlobalSystemPromptChange={setGlobalSystemPrompt}
               defaultAgentPermissionMode={defaultAgentPermissionMode}
               onDefaultAgentPermissionModeChange={setDefaultAgentPermissionMode}
+              defaultLaunchModel={defaultLaunchModel}
+              onDefaultLaunchModelChange={setDefaultLaunchModel}
+              defaultAgentRuntime={defaultAgentRuntime}
+              onDefaultAgentRuntimeChange={setDefaultAgentRuntime}
+              agentProviderAccess={_config?.agentProviderAccess}
               defaultExecutionModel={defaultExecutionModel}
               onDefaultExecutionModelChange={setDefaultExecutionModel}
               quickSessionWorktreeMode={quickSessionWorktreeMode}
