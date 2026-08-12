@@ -35,7 +35,8 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
-import { isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import { isSessionAgentRuntime, providerForRuntime } from '../../../shared/types/agentRuntime';
+import { DEFAULT_CODEX_MODEL, isCodexModelSelection } from '../../../shared/types/agentModels';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { RunTypeLaunchGlobals } from '../../../shared/types/sessionDefaults';
 import {
@@ -356,12 +357,24 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       const agentRuntime = isSessionAgentRuntime(resolved.agentRuntime)
         ? resolved.agentRuntime
         : undefined;
+      // Keep the model in the resolved runtime's family. `resolved.model` can be
+      // a Claude value with a Codex runtime whenever the model rung falls
+      // through to a global or floor that knows nothing about the runtime — the
+      // quick floor is always Claude — which would launch Codex with e.g.
+      // 'opus'. Only the Codex direction needs this: every Claude-family floor
+      // is already valid under a Claude runtime.
+      const model =
+        agentRuntime !== undefined &&
+        providerForRuntime(agentRuntime) === 'codex' &&
+        !isCodexModelSelection(resolved.model)
+          ? DEFAULT_CODEX_MODEL
+          : resolved.model;
 
       return start(
         resolved.permissionMode,
         resolved.substrate,
         undefined,
-        resolved.model,
+        model,
         undefined,
         undefined,
         undefined,

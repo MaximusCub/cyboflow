@@ -551,6 +551,71 @@ describe('useQuickSession — startWithDefaults()', () => {
     );
   });
 
+  // Cross-family guard. The model rung can fall through to a global or floor
+  // that knows nothing about the runtime, and every quick floor is Claude —
+  // so a Codex runtime would otherwise launch with 'opus'.
+  it('coerces a Claude-family model to the Codex default when the resolved runtime is Codex', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: { quick: { agentRuntime: 'codex-sdk' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-sdk', agentModel: 'auto' }),
+    );
+  });
+
+  it('leaves a genuine Codex model selection alone under a Codex runtime', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: { quick: { agentRuntime: 'codex-sdk', model: 'gpt-5.4' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentRuntime: 'codex-sdk', agentModel: 'gpt-5.4' }),
+    );
+  });
+
+  it('leaves the Claude floor untouched when the resolved runtime is Claude', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: {
+          runTypeDefaults: { quick: { agentRuntime: 'claude-interactive' } },
+        } as unknown as AppConfig,
+      });
+    });
+
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.startWithDefaults('quick');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claudeConfig: expect.objectContaining({ model: DEFAULT_QUICK_MODEL }),
+      }),
+    );
+  });
+
   it('reads substrate from config.quickSessionDefaultSubstrate when set', async () => {
     act(() => {
       useConfigStore.setState({
@@ -687,7 +752,11 @@ describe('useQuickSession — startWithDefaults()', () => {
 
     expect(mockCreateQuick).toHaveBeenCalledWith(
       // A codex runtime routes the model through `agentModel`, not claudeConfig.
-      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'sonnet' }),
+      // The stored 'sonnet' is Claude-family and cannot launch on codex, so it
+      // is coerced to the Codex default rather than forwarded verbatim — this
+      // pair is only reachable from a hand-edited config now that the Settings
+      // editor refuses to save it.
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'auto' }),
     );
   });
 
@@ -867,8 +936,9 @@ describe('useQuickSession — global launch defaults (defaultLaunchModel / defau
     });
 
     expect(mockCreateQuick).toHaveBeenCalledWith(
-      // A codex runtime routes the model through `agentModel`, not claudeConfig.
-      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'sonnet' }),
+      // The global 'sonnet' is Claude-family; a codex runtime cannot launch it,
+      // so it coerces to the Codex default. Only the RUNTIME survives verbatim.
+      expect.objectContaining({ agentRuntime: 'codex-pty', agentModel: 'auto' }),
     );
   });
 

@@ -65,6 +65,17 @@ export function isCodexModelSelection(model: string): boolean {
 }
 
 /**
+ * The Codex-family model to fall back to when a Claude-family value would
+ * otherwise be paired with a Codex runtime. `'auto'` lets Codex pick, so it is
+ * safe wherever a concrete model is not required.
+ *
+ * Declared here rather than in the renderer's ModelSelector (which re-exports
+ * it) so the non-UI launch seams can reach it without a hook importing from a
+ * component.
+ */
+export const DEFAULT_CODEX_MODEL = 'auto';
+
+/**
  * Normalize a persisted picker value against the provider that owns it.
  *
  * This preserves valid user-facing aliases such as `opus`, `sonnet`, and `gpt-*`

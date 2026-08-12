@@ -35,7 +35,9 @@ export { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults
  */
 export const ULTRACODE_DEFAULT_MODEL = 'fable';
 
-export const DEFAULT_CODEX_MODEL = 'auto';
+/** Re-exported from shared so the launch seams can reach it without importing
+ *  a component; this stays the canonical import site for UI code. */
+export { DEFAULT_CODEX_MODEL } from '../../../../shared/types/agentModels';
 
 interface ModelSelectorProps {
   value: string;
