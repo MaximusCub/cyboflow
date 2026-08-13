@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TypedEventNarrowing } from '../typedEventNarrowing';
+import { claudeStreamEventSchema, claudeStreamEventSchemaByType } from '../schemas';
 import {
   systemInit,
   assistant,
@@ -244,5 +245,87 @@ describe('TypedEventNarrowing', () => {
       session_id: '9ac69ae6-7b4a-4007-b470-b6c9628dfb71',
     });
     expect('kind' in updated).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Union equivalence
+  //
+  // narrow() dispatches on the top-level `type` and parses ONE branch instead
+  // of walking the whole z.union, because Zod builds a ZodError for every
+  // non-matching branch and that dominated main-process CPU while runs streamed.
+  // These pin the two properties that make the swap safe: the dispatch map
+  // covers exactly the union's branches, and it accepts/rejects the same values.
+  // -------------------------------------------------------------------------
+
+  it('dispatch map covers exactly the top-level types the union accepts', () => {
+    expect(Object.keys(claudeStreamEventSchemaByType).sort()).toEqual([
+      'assistant',
+      'rate_limit_event',
+      'result',
+      'session_info',
+      'stream_event',
+      'system',
+      'user',
+    ]);
+  });
+
+  it('narrows every content-block kind, and rejects an unknown or malformed one', () => {
+    // contentBlockSchema is a discriminatedUnion parsed once PER BLOCK, so this
+    // pins that all three arms still narrow and that a bad block still sinks the
+    // whole event to __unknown__ (rather than being silently dropped or kept).
+    const withBlocks = (content: unknown[]) => ({
+      type: 'assistant',
+      message: {
+        id: 'm1', type: 'message', role: 'assistant', model: 'claude',
+        content, stop_reason: null, stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      session_id: 'sess', uuid: 'u1',
+    });
+
+    const ok = narrower.narrow(withBlocks([
+      { type: 'text', text: 'hi' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } },
+      { type: 'thinking', thinking: 'hmm' },
+    ]));
+    expect('kind' in ok).toBe(false);
+
+    // Unknown discriminant.
+    const unknownBlock = narrower.narrow(withBlocks([{ type: 'image', source: {} }]));
+    expect('kind' in unknownBlock && unknownBlock.kind).toBe('__unknown__');
+
+    // Known discriminant, wrong payload — must NOT slip through.
+    const malformed = narrower.narrow(withBlocks([{ type: 'text', text: 42 }]));
+    expect('kind' in malformed && malformed.kind).toBe('__unknown__');
+  });
+
+  it('agrees with the full union on both accepted and rejected values', () => {
+    const corpus: unknown[] = [
+      systemInit(),
+      assistant(),
+      resultSuccess(),
+      streamEventSignatureDelta(),
+      streamEventThinkingDelta(),
+      // Rejected: unknown discriminant, missing discriminant, wrong shape for a
+      // KNOWN type, non-object, and a null/absent type.
+      { type: 'totally_unknown', foo: 1 },
+      { subtype: 'init' },
+      { type: 'assistant' },
+      { type: 'result', subtype: 'success' },
+      'not-an-object',
+      42,
+      null,
+      { type: null },
+    ];
+
+    for (const value of corpus) {
+      const viaUnion = claudeStreamEventSchema.safeParse(value);
+      const viaNarrow = narrower.narrow(value);
+      const narrowRejected = 'kind' in viaNarrow && viaNarrow.kind === '__unknown__';
+      expect(narrowRejected).toBe(!viaUnion.success);
+      if (viaUnion.success) {
+        expect(viaNarrow).toEqual(viaUnion.data);
+      }
+    }
   });
 });

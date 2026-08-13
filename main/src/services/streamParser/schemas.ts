@@ -225,7 +225,16 @@ const systemUnionSchema = z.discriminatedUnion('subtype', [
 // Assistant variant schema
 // ---------------------------------------------------------------------------
 
-const contentBlockSchema = z.union([
+// discriminatedUnion, not union: this parses once PER CONTENT BLOCK of every
+// assistant message, so a plain union would build a ZodError for each
+// non-matching block type on every block (see the dispatch-map comment at the
+// bottom of this file for why that is expensive). All three arms are plain
+// objects pinning a distinct `type`, which is exactly what Zod 3's
+// discriminatedUnion requires. Accept/reject behaviour is unchanged — only the
+// error SHAPE on failure differs, and the sole consumer
+// (TypedEventNarrowing.narrow) discards the error and falls back to
+// `__unknown__`.
+const contentBlockSchema = z.discriminatedUnion('type', [
   textBlockSchema,
   toolUseBlockSchema,
   thinkingBlockSchema,
@@ -264,7 +273,8 @@ const userEventSchema = z.object({
     // Primarily tool_result blocks (SDK user turns); may also carry text blocks for
     // genuine user-text turns (the on-demand monitor's injected conversation turns).
     // Mirrors the additive widening of UserEvent.message.content in claudeStream.ts.
-    content: z.array(z.union([toolResultBlockSchema, textBlockSchema])),
+    // discriminatedUnion for the same per-block reason as contentBlockSchema.
+    content: z.array(z.discriminatedUnion('type', [toolResultBlockSchema, textBlockSchema])),
   }).passthrough(),
   // Two wire shapes observed: the file-tool metadata OBJECT (SamSaffron gist), and
   // an ARRAY of content blocks — what an MCP tool result carries (confirmed in the
@@ -458,6 +468,48 @@ export const claudeStreamEventSchema = z.union([
   resultUnionSchema,
   streamEventSchema,
 ]);
+
+// ---------------------------------------------------------------------------
+// Top-level branch dispatch (performance)
+//
+// `z.union` has no fast path: Zod 3 tries each branch in order and CONSTRUCTS A
+// FULL ZodError for every one that does not match — including the branches it
+// discards before reaching the one that does. Since each ZodError captures a
+// stack trace, the cost lands on every single streamed event. Profiling the
+// main process under two concurrent sprint runs put `ZodError` construction at
+// ~39% of ALL main-process CPU, with GC (churning those errors) next at ~10%.
+//
+// Every branch above pins a distinct top-level `type` literal, so the branch a
+// value can possibly match is fully determined by `type` alone. This map makes
+// that dispatch O(1) and parses exactly ONE branch, which is semantically
+// identical to the union — a value whose `type` is X cannot match any branch
+// that pins a different literal, and a value with a missing/non-string `type`
+// matches nothing either way (both routes yield the `__unknown__` fallback).
+//
+// The union above is retained as the source of truth for the drift bridges;
+// {@link TypedEventNarrowing} is the only runtime consumer and it uses this map.
+// ---------------------------------------------------------------------------
+
+export const claudeStreamEventSchemaByType = {
+  system: systemUnionSchema,
+  session_info: sessionInfoSchema,
+  rate_limit_event: rateLimitEventSchema,
+  assistant: assistantEventSchema,
+  user: userEventSchema,
+  result: resultUnionSchema,
+  stream_event: streamEventSchema,
+} as const;
+
+// Compile-time coverage bridges — the reason a forgotten map entry cannot
+// silently demote a whole event variant to `__unknown__` at runtime. Adding a
+// branch to the union without adding it here (or vice versa) fails `tsc`.
+type MapBranchOutput = z.infer<
+  (typeof claudeStreamEventSchemaByType)[keyof typeof claudeStreamEventSchemaByType]
+>;
+const _mapCoversUnion: MapBranchOutput = {} as z.infer<typeof claudeStreamEventSchema>;
+void _mapCoversUnion;
+const _unionCoversMap: z.infer<typeof claudeStreamEventSchema> = {} as MapBranchOutput;
+void _unionCoversMap;
 
 // ---------------------------------------------------------------------------
 // Compile-time drift bridges
