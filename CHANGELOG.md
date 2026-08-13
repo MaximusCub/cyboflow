@@ -6,6 +6,27 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-08-13
+
+### Added
+
+- **In-app bug reporting**: a "Report a bug" button folded into the sidebar version block opens a structured reporting dialog backed by an isolated Sentry client and a validated `bugReport` IPC boundary (rate limiting, idempotency, and a minted event id so delivery can be tracked). The dialog previews the recorded errors it will attach, derives the bug's run from its session, tags session and run separately, and offers an optional log opt-in — with delivery confirmed from the transport's own send result rather than from `flush()`.
+- **Retry button for dead terminals**: an interactive terminal that has died now shows a retry affordance, and a mid-session REPL death is surfaced instead of leaving a blank pane.
+
+### Changed
+
+- Bug-report dialog defaults to the expanded details panel with the log opt-in as a toggle, always shows the email field (no consent checkbox), and keeps the user's report, session, and log-consent choices across close and reopen.
+
+### Fixed
+
+- **sqlite ABI swap is now atomic** — the ABI guard writes a fresh file and renames it rather than rewriting a memory-mapped `.node` in place, fixing a `KERN_CODESIGN_ERROR` at `dlopen` from lazy page validation.
+- **Orphaned worker reaping**: abandoned vitest pool workers are reaped from the main process, the orphan watchdog runs on its own thread instead of a stalled timer, the fork-cap governor sees and reaps orphaned workers, and pool workers whose root has died exit on their own.
+- Report swallowed eager PTY spawn failures instead of showing a silent blank terminal.
+- Stamp `activeProjectId` on the wizard's quick-session launch, so the quick surface (canvas, dock, tabs) renders on first run.
+- Hold the flow turn open across the CLI's owed continuation, so a launch gate is no longer lost in the continuation window.
+- Widen the gate-failure detector to MCP gates and cancellations.
+- Stop billing one SDK failure as two Sentry issues.
+
 ## [0.2.1] — 2026-08-10
 
 ### Added
