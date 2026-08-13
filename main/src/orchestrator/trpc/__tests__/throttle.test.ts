@@ -2,11 +2,13 @@
  * Unit tests for throttleAsyncIterator.
  *
  * Uses vi.useFakeTimers() for deterministic rate measurement — no wall-clock
- * dependence. Two test cases:
+ * dependence. Test cases:
  *   1. Rate cap: source produces events continuously for 1 simulated second →
  *      throttle emits ≈ hz ± 10 times.
  *   2. Coalescing-latest: multiple source events within one tick window →
  *      only the latest event is emitted.
+ *   3. Idle costs nothing: a subscription whose source is quiet holds NO timer,
+ *      and returns to holding none after a burst settles.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { throttleAsyncIterator } from '../throttle';
@@ -189,5 +191,48 @@ describe('throttleAsyncIterator', () => {
     // Exactly one event should have been emitted — and it must be 10 (latest wins).
     expect(results).toHaveLength(1);
     expect(results[0]).toBe(10);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 3: An idle subscription arms no timer.
+  //
+  // This is the property that matters for main-process CPU. The throttle used
+  // to hold a setInterval for its whole life, so N live subscriptions cost
+  // N * hz wakeups/second whether or not anything was streaming. Assert the
+  // timer only exists while a value is actually pending.
+  // -------------------------------------------------------------------------
+  it('holds no timer while the source is idle', async () => {
+    const { push, done, iterable } = makeManualIterator<number>();
+    const throttled = throttleAsyncIterator(iterable, 60);
+
+    const results: number[] = [];
+    const drainPromise = (async () => {
+      for await (const v of throttled) {
+        results.push(v);
+      }
+    })();
+
+    // A live subscription that has never seen a value must be timer-free.
+    await drainMicrotasks(50);
+    await vi.advanceTimersByTimeAsync(1000);
+    await drainMicrotasks(50);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(results).toHaveLength(0);
+
+    // A burst arms exactly one timer, no matter how many values it carries.
+    push(1);
+    push(2);
+    await drainMicrotasks(50);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Once the burst has drained, the subscription goes back to costing nothing.
+    await vi.advanceTimersByTimeAsync(100);
+    await drainMicrotasks(50);
+    expect(results).toEqual([2]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    done();
+    await drainMicrotasks(50);
+    await drainPromise;
   });
 });
