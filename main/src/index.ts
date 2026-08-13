@@ -1,3 +1,9 @@
+// FIRST import, deliberately: the timer census can only attribute timers
+// scheduled AFTER it patches the globals, and several services schedule one at
+// module-import time. A no-op unless CYBOFLOW_PERF_TRACE=1.
+import { installTimerCensus } from './services/timerCensus';
+installTimerCensus();
+
 import {
   app,
   BrowserWindow,

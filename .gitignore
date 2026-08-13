@@ -123,3 +123,6 @@ shared/*.d.ts
 shared/*.d.ts.map
 .cyboflow/worktrees/
 frontend/dist-harness/
+
+# Perf profiling artifacts (scripts/profile-electron.mjs)
+.perf/
