@@ -567,3 +567,24 @@ sections above already incorporate them. For provenance:
 | 6 | high | Live T0 dispatch paths missing from the inventory (`useClaudePanel.ts:28-47`, `ipc/session.ts` queue handlers, `sessionManager.addPanelOutput` refresh signal) | §5.5: inventory extended + four-event-class registry tests |
 | 7 | high | Only `confirm` UI-request kind handled; blocking `select`/`input`/`editor` frames hang the turn | §5.3: every blocking kind answered deterministically, per-kind tests |
 | 8 | medium | Absent provider-access key floors to enabled → OMP defaults ON for existing installs | §4 item 5 + §13: per-provider `defaultEnabled`, new providers absent⇒disabled |
+
+## 15. Implementation-review dispositions (Codex, 2026-08-14, post-Phase-2)
+
+Phases 0–2 were implemented on `hazy-glade-20260814` and the full branch diff was adversarially
+reviewed by Codex against this document as the spec (verdict: needs-attention, 5 high findings).
+All five were verified and fixed on the same branch. For provenance:
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | Packaged builds unconditionally refused every omp-sdk launch (the gate .ts shipped nowhere; the resolver threw under `app.isPackaged`) | `extraResources` entry `omp-gate/ompGateExtension.ts` + resolver reads `process.resourcesPath`; a config-shape test pins the from/to pair against the resolver constants |
+| 2 | high | An empty `cyboflowMcpToolNames` fell back to the spoofable `mcp__cyboflow_` prefix — in-place sessions pass an empty list, and a foreign server named `cyboflow-extra` sanitizes into that namespace | Prefix fallback deleted; exact membership is the ONLY MCP auto-allow path; empty/absent/malformed auto-allows nothing (undecidable MCP calls fall to the human gate) |
+| 3 | high | A whole-run OMP launch could resolve onto the deferred orchestrated/T2 plane (no envelope, no question bridge, `task` denied) | `ProviderOrchestratedUnsupportedError` at `createRun` (own copy — the mixed-provider prompt's text is Codex-specific) via a `SUPPORTS_ORCHESTRATED` predicate that defaults new providers unsupported; `runExecutor`'s missing-runner fallback fails the run loudly; quick sentinel exempt |
+| 4 | high | A/B quick arms stamped an omp-sdk arm's SESSION row `claude-sdk` (the arm stamp recognized only codex-sdk), dispatching its chat turns to Claude while the sentinel said omp | `resolveNonClaudeSessionRuntime` (registry-driven, single-sourced with the quick-create handler); end-to-end arm test asserts session row + sentinel agree |
+| 5 | high | Name-only `read`/`grep` auto-allow let `ssh://` targets ride the allow→auto-approve chain (OMP self-escalates scheme targets to remote exec) with zero human involvement | All three mode-scoped allowlists (incl. Bash allow-rules, no carve-outs) narrowed by a recursive URI-scheme scan over the call arguments; scheme-bearing targets fall to the human gate; mutation-verified tests |
+
+Known follow-ups deliberately left open: the SessionStartWizard's Orchestration tri-state still
+offers OMP+orchestrated and only learns of the refusal at launch (pre-empting it in the renderer is
+the trigger to move `SUPPORTS_ORCHESTRATED` into `shared/`); the mixed-provider prompt's hardcoded
+Codex copy predates this branch and misdescribes an OMP per-agent pin; `omp-pty` has no live smoke
+beyond the version probe; the >25 s human-approval constraint (§5.3) stands until a `tool_call`
+budget knob is upstreamed to OMP.
