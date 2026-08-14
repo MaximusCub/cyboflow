@@ -3620,11 +3620,23 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const gitFileStats = await computeSessionFileStats({
         worktreePath: session.worktreePath,
         baseCommit: session.baseCommit,
-        // Only consulted when the recorded branch point no longer resolves.
-        resolveMainBranch: async () => {
+        // Only consulted when the recorded branch point no longer resolves —
+        // which is the normal case for a main-repo session, since those are
+        // created without a base_commit.
+        resolveFallbackRef: async () => {
           try {
             const project = sessionManager.getProjectForSession(sessionId);
-            return project?.path ? await worktreeManager.getProjectMainBranch(project.path) : null;
+            if (!project?.path) return null;
+            const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
+            // A main-repo session works ON the main branch, so comparing against
+            // that branch is comparing HEAD to itself: its own commits advance
+            // the ref and vanish from the count. Compare against the remote tip
+            // instead — the same ref getSessionCommitHistory uses for the Diff
+            // tab, so card and panel keep agreeing.
+            if (!session.isMainRepo) return mainBranch;
+            return (
+              (await worktreeManager.getOriginBranch(session.worktreePath, mainBranch)) ?? mainBranch
+            );
           } catch {
             return null;
           }

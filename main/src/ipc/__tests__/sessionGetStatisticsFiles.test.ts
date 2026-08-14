@@ -100,6 +100,8 @@ function makeServices(opts: {
   getDiffStatsAgainstRef: ReturnType<typeof vi.fn>;
   baseCommit?: string;
   worktreePath?: string | null;
+  isMainRepo?: boolean;
+  originBranch?: string | null;
 }) {
   const fakeDb = { prepare: vi.fn(() => ({ all: vi.fn(() => []) })) };
 
@@ -114,6 +116,7 @@ function makeServices(opts: {
         worktreePath: opts.worktreePath === undefined ? WORKTREE : opts.worktreePath,
         baseBranch: 'main',
         baseCommit: opts.baseCommit,
+        isMainRepo: opts.isMainRepo ?? false,
       })),
       getProjectForSession: vi.fn(() => ({ id: 1, path: '/tmp/project' })),
     },
@@ -134,7 +137,10 @@ function makeServices(opts: {
       getDb: vi.fn(() => fakeDb),
     },
     taskQueue: {},
-    worktreeManager: { getProjectMainBranch: vi.fn(async () => 'main') },
+    worktreeManager: {
+      getProjectMainBranch: vi.fn(async () => 'main'),
+      getOriginBranch: vi.fn(async () => (opts.originBranch === undefined ? 'origin/main' : opts.originBranch)),
+    },
     gitDiffManager: { getDiffStatsAgainstRef: opts.getDiffStatsAgainstRef },
     cliManagerFactory: {},
     claudeCodeManager: { isPanelRunning: vi.fn(() => false) },
@@ -216,6 +222,40 @@ describe('sessions:get-statistics — file statistics', () => {
     expect(result.data.files.totalLinesAdded).toBe(7);
     expect(result.data.files.totalLinesDeleted).toBe(3);
     expect(result.data.files.filesModified).toEqual(['legacy.ts']);
+  });
+
+  it('compares a main-repo session against the REMOTE tip, not the branch it commits to', async () => {
+    // A main-repo session works on the main branch itself and is created with
+    // no base_commit, so comparing against `main` compares HEAD to itself: its
+    // own commits advance the ref and disappear from the count. The Diff tab
+    // uses origin/<main> for these sessions; the card must agree.
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 30, deletions: 4, filesChanged: 3 },
+      changedFiles: ['a.ts', 'b.ts', 'c.ts'],
+    }));
+    const handlers = makeServices({ getDiffStatsAgainstRef, baseCommit: undefined, isMainRepo: true });
+
+    const result = await invoke(handlers);
+
+    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'origin/main');
+    expect(result.data.files.totalFilesChanged).toBe(3);
+  });
+
+  it('falls back to the local main branch for a main-repo session with no remote', async () => {
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['a.ts'],
+    }));
+    const handlers = makeServices({
+      getDiffStatsAgainstRef,
+      baseCommit: undefined,
+      isMainRepo: true,
+      originBranch: null,
+    });
+
+    await invoke(handlers);
+
+    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'main');
   });
 
   it('falls back to the project main branch when the recorded base commit no longer resolves', async () => {

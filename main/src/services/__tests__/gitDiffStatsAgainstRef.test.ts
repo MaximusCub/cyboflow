@@ -109,6 +109,30 @@ describe('GitDiffManager.getDiffStatsAgainstRef', () => {
     });
   });
 
+  it('does not read an oversize untracked file — it still counts as a changed file', async () => {
+    await withTempDir('gitdiff-vs-ref-oversize-', async (tmpDir) => {
+      const manager = new GitDiffManager();
+      initRepo(tmpDir);
+      const baseSha = headSha(tmpDir);
+
+      // Over the 1MB read bound: this method runs on the session-stats poll, so
+      // reading it whole would block the main process every few seconds.
+      const bigPath = path.join(tmpDir, 'huge.log');
+      fs.writeFileSync(bigPath, lines(200_000));
+      expect(fs.statSync(bigPath).size).toBeGreaterThan(1024 * 1024);
+      fs.writeFileSync(path.join(tmpDir, 'small.ts'), lines(4));
+
+      const result = await manager.getDiffStatsAgainstRef(tmpDir, baseSha);
+
+      // additions === 4 IS the proof the big file was never read: had it been,
+      // its 200k lines would dominate the count.
+      expect(result.stats.additions).toBe(4);
+      // It is still visible as a changed file; only its line count is omitted.
+      expect(result.changedFiles.sort()).toEqual(['huge.log', 'small.ts']);
+      expect(result.stats.filesChanged).toBe(2);
+    });
+  });
+
   it('reports a clean worktree at its own branch point as zero, not as noise', async () => {
     await withTempDir('gitdiff-vs-ref-clean-', async (tmpDir) => {
       const manager = new GitDiffManager();

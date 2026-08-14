@@ -192,8 +192,15 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
       return;
     }
     let cancelled = false;
+    // Skip a tick whose predecessor is still in flight. The handler behind this
+    // call runs git against the session worktree, so on a large or slow tree a
+    // response can outlive the 5s interval — without this, ticks would stack up
+    // into overlapping git work that only falls further behind.
+    let inFlight = false;
 
     const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await API.sessions.getStatistics(sessionId);
         if (cancelled || sessionIdRef.current !== sessionId) return;
@@ -202,6 +209,8 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
         }
       } catch {
         // Best-effort: keep the last known snapshot on a transient failure.
+      } finally {
+        inFlight = false;
       }
     };
 

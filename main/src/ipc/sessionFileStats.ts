@@ -16,6 +16,13 @@
  * committed AND uncommitted AND untracked work, and — unlike a comparison
  * against live main — survives the session's commits being merged into main
  * (see getSessionCommitHistory in ipc/git.ts for the same rationale).
+ *
+ * Known and accepted: an IN-PLACE session works in the user's own checkout
+ * rather than a private worktree, so pre-existing dirty or untracked files
+ * there count toward its totals. That is deliberate — the Diff tab shows those
+ * same files for the same session, and a card that disagreed with the panel
+ * beside it is the bug this whole module exists to fix. Isolating them would
+ * need a dirty-tree baseline captured at session start, which nothing records.
  */
 import type { GitDiffManager } from '../services/gitDiffManager';
 import type { Logger } from '../utils/logger';
@@ -67,22 +74,24 @@ export async function computeSessionFileStats(params: {
   worktreePath: string | null | undefined;
   baseCommit?: string | null;
   /**
-   * Lazy on purpose: resolving the project's main branch costs its own git
-   * child process, and this whole function runs on the stats poll. A session
-   * whose `base_commit` still resolves — nearly all of them — never pays it.
+   * Ref to compare against when `baseCommit` does not resolve (or was never
+   * recorded, as for a main-repo session). Lazy on purpose: resolving it costs
+   * its own git child process, and this whole function runs on the stats poll,
+   * so a session whose `base_commit` still resolves — nearly all of them —
+   * never pays for it.
    */
-  resolveMainBranch?: () => Promise<string | null | undefined>;
+  resolveFallbackRef?: () => Promise<string | null | undefined>;
   gitDiffManager: DiffStatsSource;
   logger?: Logger;
 }): Promise<SessionFileStats | null> {
-  const { worktreePath, baseCommit, resolveMainBranch, gitDiffManager, logger } = params;
+  const { worktreePath, baseCommit, resolveFallbackRef, gitDiffManager, logger } = params;
   if (!worktreePath) return null;
 
   try {
     const baseRef =
       (await resolveSessionDiffBaseRef(worktreePath, [baseCommit])) ??
-      (resolveMainBranch
-        ? await resolveSessionDiffBaseRef(worktreePath, [await resolveMainBranch()])
+      (resolveFallbackRef
+        ? await resolveSessionDiffBaseRef(worktreePath, [await resolveFallbackRef()])
         : null);
     if (!baseRef) {
       logger?.verbose(`[SessionFileStats] No resolvable base ref in ${worktreePath}`);

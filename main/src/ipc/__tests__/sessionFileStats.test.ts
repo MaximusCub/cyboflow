@@ -71,12 +71,12 @@ describe('computeSessionFileStats', () => {
       fs.writeFileSync(path.join(tmpDir, 'a.ts'), 'one\ntwo\n');
       commitAll(tmpDir, 'work');
       fs.writeFileSync(path.join(tmpDir, 'untracked.ts'), 'three\n');
-      const resolveMainBranch = vi.fn(async () => 'main');
+      const resolveFallbackRef = vi.fn(async () => 'main');
 
       const stats = await computeSessionFileStats({
         worktreePath: tmpDir,
         baseCommit,
-        resolveMainBranch,
+        resolveFallbackRef,
         gitDiffManager: new GitDiffManager(),
       });
 
@@ -88,7 +88,7 @@ describe('computeSessionFileStats', () => {
       });
       // The main-branch fallback costs its own git process, so the common path
       // (a resolvable base commit) must never reach for it.
-      expect(resolveMainBranch).not.toHaveBeenCalled();
+      expect(resolveFallbackRef).not.toHaveBeenCalled();
     });
   });
 
@@ -102,7 +102,7 @@ describe('computeSessionFileStats', () => {
       const stats = await computeSessionFileStats({
         worktreePath: tmpDir,
         baseCommit: MISSING_SHA,
-        resolveMainBranch: async () => 'main',
+        resolveFallbackRef: async () => 'main',
         gitDiffManager: new GitDiffManager(),
       });
 
@@ -132,7 +132,7 @@ describe('computeSessionFileStats', () => {
       const stats = await computeSessionFileStats({
         worktreePath: tmpDir,
         baseCommit: MISSING_SHA,
-        resolveMainBranch: async () => 'no-such-branch',
+        resolveFallbackRef: async () => 'no-such-branch',
         gitDiffManager,
       });
 
@@ -152,7 +152,7 @@ describe('computeSessionFileStats', () => {
       const stats = await computeSessionFileStats({
         worktreePath: tmpDir,
         baseCommit: headSha(tmpDir),
-        resolveMainBranch: async () => 'main',
+        resolveFallbackRef: async () => 'main',
         gitDiffManager,
         logger: logger as unknown as Parameters<typeof computeSessionFileStats>[0]['logger'],
       });

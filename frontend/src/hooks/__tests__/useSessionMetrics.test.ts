@@ -187,6 +187,42 @@ describe('useSessionMetrics', () => {
     }
   });
 
+  it('skips a poll tick while the previous request is still in flight', async () => {
+    // The handler behind getStatistics runs git against the session worktree, so
+    // on a large tree a response can outlive the 5s interval. Without the
+    // in-flight guard the ticks stack into overlapping git work.
+    vi.useFakeTimers();
+    try {
+      let release: ((value: unknown) => void) | undefined;
+      mockGetStatistics.mockImplementation(
+        () => new Promise((resolve) => { release = resolve; }),
+      );
+
+      renderHook(() => useSessionMetrics(makeSession()));
+      expect(mockGetStatistics).toHaveBeenCalledTimes(1);
+
+      // Three intervals elapse while the first call is still unresolved.
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenCalledTimes(1);
+
+      // Once it settles, the next tick issues a fresh request.
+      await act(async () => {
+        release?.(STATS);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back to the worktree basename for the branch when stats omit it', async () => {
     mockGetStatistics.mockResolvedValue({
       success: true,
