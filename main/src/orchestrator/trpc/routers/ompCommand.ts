@@ -5,10 +5,12 @@
  * capability, NOT merely `ctx.userId === 'local'`) and is audited twice —
  * ATTEMPTED before delegation, COMPLETED after — with input/result redacted.
  *
- * Audit is FAIL-CLOSED: an authorized OR unauthorized attempt with an audit
- * sink present always records a terminal outcome, including `forbidden` and
- * thrown adapter failures. A missing audit sink is refused (a privileged
- * mutation without an audit trail is never allowed).
+ * Audit is FAIL-CLOSED: every attempt with an audit sink present records a
+ * terminal outcome, including `forbidden` and thrown adapter failures. A
+ * missing audit sink is refused (a privileged mutation without an audit trail
+ * is never allowed). A single operationId is minted per request, threaded into
+ * the adapter request, echoed in the result, and recorded in both audit rows —
+ * so audit trail, adapter result, and idempotency key all correlate.
  *
  * In Phase 2 the injected `OmpCommandAdapter` is a stub that fails closed with
  * `unavailable`, so no real command can run even though the router, its
@@ -45,7 +47,7 @@ export interface OmpAuditEntry {
 
 type OmpAuditSink = (entry: OmpAuditEntry) => void;
 
-/** Redact command input to a stable, non-sensitive summary. */
+/** Redact command input to a stable, non-sensitive summary (field keys only). */
 function redactInput(input: unknown): string {
   if (input === null || input === undefined) return '';
   if (typeof input === 'object') {
@@ -60,15 +62,33 @@ interface OmpCommandCtx {
   auditOmp?: OmpAuditSink;
 }
 
+const scopeSchema = z
+  .object({
+    repo: z
+      .object({
+        path: z.string(),
+        access: z.enum(['none', 'read', 'overlay_write', 'host_write']),
+        include: z.array(z.string()).optional(),
+        exclude: z.array(z.string()).optional(),
+      })
+      .optional(),
+    shell: z.object({ allowed: z.boolean(), commands: z.array(z.string()).optional() }).optional(),
+    network: z.object({ allowed: z.boolean(), domains: z.array(z.string()).optional() }).optional(),
+    secrets: z.object({ allowed: z.boolean(), names: z.array(z.string()).optional() }).optional(),
+  })
+  .optional();
+
 /**
- * Authorize, audit, and dispatch one command. Every attempt — authorized or
- * not, adapter present or not — records a redacted terminal outcome when an
- * audit sink is configured; otherwise the command is refused outright.
+ * Authorize, audit, and dispatch one command. Mints a single operationId,
+ * threads it into the request, records both audit rows with it, and returns the
+ * adapter result (which must echo it). An unauthorized attempt with an audit
+ * sink still records attempted + forbidden completed before failing closed.
  */
-async function runGuarded<TReq>(
+async function runGuarded<TInput extends { idempotencyKey?: string }, TReq>(
   ctx: OmpCommandCtx,
   verb: string,
-  input: TReq,
+  input: TInput,
+  buildReq: (input: TInput, operationId: string) => TReq,
   invoke: (adapter: OmpCommandAdapter, req: TReq) => Promise<OmpCommandResult>,
 ): Promise<OmpCommandResult> {
   // A privileged mutation without an audit trail is refused, not allowed.
@@ -81,13 +101,12 @@ async function runGuarded<TReq>(
     };
   }
 
-  const operationId = randomUUID();
+  // One correlation token: the client-supplied idempotency key, else minted.
+  const operationId = input.idempotencyKey ?? randomUUID();
   const principal = ctx.principal?.userId ?? 'unknown';
   ctx.auditOmp({ verb, principal, outcome: 'attempted', operationId, detail: redactInput(input) });
 
   if (!hasSupervise(ctx.principal)) {
-    // Unauthorized attempts are the most security-relevant: record them before
-    // failing closed, never silently.
     ctx.auditOmp({ verb, principal, outcome: 'completed', operationId, detail: 'forbidden' });
     throw new TRPCError({
       code: 'FORBIDDEN',
@@ -105,7 +124,7 @@ async function runGuarded<TReq>(
     };
   } else {
     try {
-      result = await invoke(ctx.ompCommand, input);
+      result = await invoke(ctx.ompCommand, buildReq(input, operationId));
     } catch (error) {
       result = {
         ok: false,
@@ -116,8 +135,6 @@ async function runGuarded<TReq>(
     }
   }
 
-  // Terminal outcome always recorded, redacted: never raw result.detail (a
-  // future real adapter may echo task text or proof bytes).
   ctx.auditOmp({
     verb,
     principal,
@@ -128,20 +145,59 @@ async function runGuarded<TReq>(
   return result;
 }
 
+const idempotency = z.object({ idempotencyKey: z.string().optional() });
+
+const spawnInput = idempotency.extend({
+  model: z.string(),
+  task: z.string(),
+  label: z.string().optional(),
+  target: z.string().optional(),
+  workspace: z.string().optional(),
+  cwd: z.string().optional(),
+  timeoutMs: z.number().optional(),
+  executionMode: z.enum(['auto', 'subprocess', 'shepherd']).optional(),
+  intent: z.enum(['read_only', 'mutating', 'high_stakes_mutating', 'external_side_effect']).optional(),
+  scope: scopeSchema,
+});
+
+type SpawnInput = z.infer<typeof spawnInput>;
+const killInput = idempotency.extend({ workerId: z.string(), timeoutMs: z.number().optional() });
+const proposalInput = idempotency.extend({ proposalId: z.string(), reason: z.string() });
+const verifyInput = idempotency.extend({ proposalId: z.string() });
+type KillInput = z.infer<typeof killInput>;
+type ProposalInput = z.infer<typeof proposalInput>;
+type VerifyInput = z.infer<typeof verifyInput>;
+
+function toSpawnReq(input: SpawnInput, operationId: string): OmpSpawnRequest {
+  return { ...input, operationId };
+}
+function toKillReq(input: KillInput, operationId: string): OmpKillRequest {
+  return { ...input, operationId };
+}
+function toApplyReq(input: ProposalInput, operationId: string): OmpApplyRequest {
+  return { ...input, operationId };
+}
+function toDiscardReq(input: ProposalInput, operationId: string): OmpDiscardRequest {
+  return { ...input, operationId };
+}
+function toVerifyReq(input: VerifyInput, operationId: string): OmpVerifyRequest {
+  return { ...input, operationId };
+}
+
 export const ompCommandRouter = router({
   spawn: protectedProcedure
-    .input(z.object({ model: z.string(), task: z.string(), label: z.string().optional(), cwd: z.string().optional(), timeoutMs: z.number().optional() }))
-    .mutation(({ ctx, input }) => runGuarded<OmpSpawnRequest>(ctx, 'spawn', input, (a, req) => a.spawn(req))),
+    .input(spawnInput)
+    .mutation(({ ctx, input }) => runGuarded(ctx, 'spawn', input, toSpawnReq, (a, req) => a.spawn(req))),
   kill: protectedProcedure
-    .input(z.object({ workerId: z.string(), timeoutMs: z.number().optional() }))
-    .mutation(({ ctx, input }) => runGuarded<OmpKillRequest>(ctx, 'kill', input, (a, req) => a.kill(req))),
+    .input(killInput)
+    .mutation(({ ctx, input }) => runGuarded(ctx, 'kill', input, toKillReq, (a, req) => a.kill(req))),
   applyProposal: protectedProcedure
-    .input(z.object({ proposalId: z.string(), reason: z.string() }))
-    .mutation(({ ctx, input }) => runGuarded<OmpApplyRequest>(ctx, 'apply', input, (a, req) => a.apply(req))),
+    .input(proposalInput)
+    .mutation(({ ctx, input }) => runGuarded(ctx, 'apply', input, toApplyReq, (a, req) => a.apply(req))),
   discard: protectedProcedure
-    .input(z.object({ proposalId: z.string(), reason: z.string() }))
-    .mutation(({ ctx, input }) => runGuarded<OmpDiscardRequest>(ctx, 'discard', input, (a, req) => a.discard(req))),
+    .input(proposalInput)
+    .mutation(({ ctx, input }) => runGuarded(ctx, 'discard', input, toDiscardReq, (a, req) => a.discard(req))),
   verifyRun: protectedProcedure
-    .input(z.object({ proposalId: z.string() }))
-    .mutation(({ ctx, input }) => runGuarded<OmpVerifyRequest>(ctx, 'verifyRun', input, (a, req) => a.verifyRun(req))),
+    .input(verifyInput)
+    .mutation(({ ctx, input }) => runGuarded(ctx, 'verifyRun', input, toVerifyReq, (a, req) => a.verifyRun(req))),
 });

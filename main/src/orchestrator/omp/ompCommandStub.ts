@@ -1,12 +1,10 @@
 /**
  * Stub implementation of `OmpCommandAdapter` — Phase 2 of the OMP plan.
  *
- * Every method fails closed with `unavailable` and a synthetic operationId, so
- * the command ROUTER and its authorization/audit path can ship and be tested
- * before any real command exists. Real implementations are a separate ADR
- * (Phase 3) with its own go/no-go.
+ * Every method fails closed with `unavailable`, echoing the request's
+ * `operationId` verbatim so the audit trail and the returned result correlate
+ * on one token. Real implementations are a separate ADR (Phase 3).
  */
-import { randomUUID } from 'node:crypto';
 import type {
   OmpApplyRequest,
   OmpCommandAdapter,
@@ -20,32 +18,32 @@ import type {
 export class OmpCommandStub implements OmpCommandAdapter {
   readonly authority = 'supervise' as const;
 
-  private unavailable(verb: string): OmpCommandResult {
+  private unavailable(verb: string, operationId: string): OmpCommandResult {
     return {
       ok: false,
-      operationId: randomUUID(),
+      operationId,
       error: 'unavailable',
       detail: `omp:${verb} not implemented (Phase 3 ADR)`,
     };
   }
 
-  spawn(_req: OmpSpawnRequest): Promise<OmpCommandResult> {
-    return Promise.resolve(this.unavailable('spawn'));
+  spawn(req: OmpSpawnRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('spawn', req.operationId));
   }
 
-  kill(_req: OmpKillRequest): Promise<OmpCommandResult> {
-    return Promise.resolve(this.unavailable('kill'));
+  kill(req: OmpKillRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('kill', req.operationId));
   }
 
-  apply(_req: OmpApplyRequest): Promise<OmpCommandResult> {
-    return Promise.resolve(this.unavailable('apply'));
+  apply(req: OmpApplyRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('apply', req.operationId));
   }
 
-  discard(_req: OmpDiscardRequest): Promise<OmpCommandResult> {
-    return Promise.resolve(this.unavailable('discard'));
+  discard(req: OmpDiscardRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('discard', req.operationId));
   }
 
-  verifyRun(_req: OmpVerifyRequest): Promise<OmpCommandResult> {
-    return Promise.resolve(this.unavailable('verifyRun'));
+  verifyRun(req: OmpVerifyRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('verifyRun', req.operationId));
   }
 }

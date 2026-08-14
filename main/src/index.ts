@@ -332,6 +332,9 @@ function setAppTitle() {
 }
 let taskQueue: TaskQueue | null = null;
 let orchestrator: Orchestrator | null = null;
+// Read-only OMP fleet adapter — ONE module-scope instance shared by the
+// Orchestrator (dep bag) and the tRPC context, so both layers observe the same source.
+const fleetRegistryReader = new FleetRegistryReader();
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
@@ -713,9 +716,6 @@ let verifyHostProbes: VerifyHostProbesLike | undefined;
  */
 function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const db = makeDatabaseLike(databaseService);
-  // Read-only OMP fleet adapter, constructed once per window attach (not per
-  // request). The tRPC createContext closure passes this same instance.
-  const fleetRegistryReader = new FleetRegistryReader();
   // Privileged OMP commands are a stub in Phase 2 (fail closed). The supervise
   // capability is OFF for the v1 'local' principal, so every command is FORBIDDEN.
   const ompCommand = new OmpCommandStub();
@@ -3679,6 +3679,7 @@ app.whenReady().then(async () => {
       db,
       logger: loggerLike,
       runQueues,
+      omp: fleetRegistryReader,
       // Review-item write chokepoint. Used at start to drain any LEGACY
       // idle-session review items (the mint was retired for the live
       // QuickSessionsTable — see Orchestrator.start / drainLegacyIdleReviewItems).
