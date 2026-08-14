@@ -1,0 +1,639 @@
+/**
+ * Socket-gate + sentinel tests for the OMP gating extension.
+ *
+ * These drive a REAL Unix-socket server speaking the orchestrator's actual wire
+ * shape — the `shell-approval-request` arm declared at
+ * `main/src/orchestrator/mcpServer/mcpQueryHandler.ts:854-860` and the verdict
+ * frame `writeShellVerdict` emits at `mcpQueryHandler.ts:5477-5492` — rather
+ * than a stubbed socket, so the framing (NDJSON, requestId correlation, split
+ * and batched frames) is exercised end to end.
+ *
+ * The invariant under test: every non-verdict outcome REJECTS. OMP converts a
+ * rejected `tool_call` handler into `{ block: true, reason }`
+ * (`extensibility/extensions/runner.ts:1235-1270`), so a rejection here is a
+ * blocked tool call with the reason surfaced to the model — never a silent pass.
+ */
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  ENV_ORCH_SOCKET,
+  HUMAN_DECISION_BUDGET_MS,
+  MOST_RESTRICTIVE_GATE_CONFIG,
+  createToolCallHandler,
+  requestSocketDecision,
+  writeGateSentinel,
+  type OmpGateLogger,
+  type OmpGateRuntime,
+} from '../ompGateExtension';
+import type { OmpGateSentinel, OmpToolCallEvent } from '../ompGateTypes';
+
+const silentLogger: OmpGateLogger = {
+  debug: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
+// ---------------------------------------------------------------------------
+// Temp dirs + a real orchestrator-shaped socket server
+// ---------------------------------------------------------------------------
+
+const tempDirs: string[] = [];
+const servers: net.Server[] = [];
+/**
+ * Every server-side connection, destroyed before `server.close()` in teardown.
+ * `close()` waits for open connections, and a half-closed one would hang the
+ * afterEach hook rather than the assertion.
+ */
+const serverConnections: net.Socket[] = [];
+
+function makeTempDir(): string {
+  // Short prefix on purpose: a Unix socket path is capped near 104 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ompgate-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+interface StubOrchestrator {
+  socketPath: string;
+  /** Every request frame the server received, parsed. */
+  received: Record<string, unknown>[];
+  /** Drop every accepted connection — the "orchestrator went away" lever. */
+  dropConnections: () => void;
+  /** True once the client hung up — how the server learns the gate gave up. */
+  connectionClosed: boolean;
+}
+
+/**
+ * Start a server that answers each `shell-approval-request` using `respond`.
+ * Returning `null` means "answer nothing" (the human-is-slow case).
+ */
+async function startOrchestrator(
+  respond: (req: Record<string, unknown>) => string | null,
+): Promise<StubOrchestrator> {
+  const socketPath = path.join(makeTempDir(), 's');
+  const received: Record<string, unknown>[] = [];
+  const connections: net.Socket[] = [];
+
+  const server = net.createServer((conn) => {
+    connections.push(conn);
+    serverConnections.push(conn);
+    conn.on('close', () => {
+      result.connectionClosed = true;
+    });
+    let buf = '';
+    conn.on('data', (chunk: Buffer) => {
+      buf += chunk.toString('utf8');
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const raw = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (raw.trim().length === 0) continue;
+        const req = JSON.parse(raw) as Record<string, unknown>;
+        received.push(req);
+        const reply = respond(req);
+        if (reply !== null) conn.write(reply);
+      }
+    });
+    conn.on('error', () => undefined);
+  });
+  servers.push(server);
+
+  const result: StubOrchestrator = {
+    socketPath,
+    received,
+    dropConnections: () => {
+      for (const conn of connections.splice(0)) conn.destroy();
+    },
+    connectionClosed: false,
+  };
+
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  return result;
+}
+
+/** The exact frame `writeShellVerdict` emits. */
+function verdictFrame(
+  requestId: string,
+  permissionDecision: 'allow' | 'deny',
+  permissionDecisionReason?: string,
+): string {
+  return (
+    JSON.stringify({
+      type: 'mcp-query-response',
+      requestId,
+      ok: true,
+      data: {
+        permissionDecision,
+        ...(permissionDecisionReason ? { permissionDecisionReason } : {}),
+      },
+    }) + '\n'
+  );
+}
+
+afterEach(async () => {
+  for (const conn of serverConnections.splice(0)) conn.destroy();
+  await Promise.all(
+    servers.splice(0).map(
+      (s) =>
+        new Promise<void>((resolve) => {
+          s.close(() => resolve());
+        }),
+    ),
+  );
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// requestSocketDecision
+// ---------------------------------------------------------------------------
+
+describe('requestSocketDecision', () => {
+  it('sends the orchestrator wire shape verbatim', async () => {
+    const orch = await startOrchestrator((req) =>
+      verdictFrame(String(req['requestId']), 'allow'),
+    );
+
+    await requestSocketDecision({
+      socketPath: orch.socketPath,
+      runId: 'run-42',
+      toolName: 'bash',
+      toolInput: { command: 'ls -la' },
+      logger: silentLogger,
+    });
+
+    expect(orch.received).toHaveLength(1);
+    const req = orch.received[0]!;
+    expect(req['type']).toBe('shell-approval-request');
+    expect(req['runId']).toBe('run-42');
+    expect(req['toolName']).toBe('bash');
+    expect(req['toolInput']).toEqual({ command: 'ls -la' });
+    expect(typeof req['requestId']).toBe('string');
+  });
+
+  it('resolves allow on an allow verdict', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'write',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).resolves.toEqual({ decision: 'allow' });
+  });
+
+  it('resolves deny and carries the human-supplied reason through', async () => {
+    const orch = await startOrchestrator((req) =>
+      verdictFrame(String(req['requestId']), 'deny', 'not on this branch'),
+    );
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'write',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).resolves.toEqual({ decision: 'deny', reason: 'not on this branch' });
+  });
+
+  it('ignores frames for other requestIds and stray unparseable lines', async () => {
+    const orch = await startOrchestrator(
+      (req) =>
+        'not json at all\n' +
+        verdictFrame('some-other-request', 'deny') +
+        verdictFrame(String(req['requestId']), 'allow'),
+    );
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'read',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).resolves.toEqual({ decision: 'allow' });
+  });
+
+  it('rejects when the socket does not exist (orchestrator unreachable)', async () => {
+    const socketPath = path.join(makeTempDir(), 'absent');
+
+    await expect(
+      requestSocketDecision({
+        socketPath,
+        runId: 'r',
+        toolName: 'bash',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow(/unreachable|failing closed/i);
+  });
+
+  it('rejects when the orchestrator closes before answering', async () => {
+    const socketPath = path.join(makeTempDir(), 's');
+    const server = net.createServer((conn) => {
+      serverConnections.push(conn);
+      conn.end();
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+    await expect(
+      requestSocketDecision({
+        socketPath,
+        runId: 'r',
+        toolName: 'bash',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow(/before a decision|failing closed/i);
+  });
+
+  it('rejects on a correlated frame carrying no decision', async () => {
+    const orch = await startOrchestrator(
+      (req) =>
+        JSON.stringify({ type: 'mcp-query-response', requestId: req['requestId'], ok: true, data: {} }) +
+        '\n',
+    );
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'bash',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow(/malformed/i);
+  });
+
+  it('rejects on an ok:false frame rather than reading its data', async () => {
+    const orch = await startOrchestrator(
+      (req) =>
+        JSON.stringify({
+          type: 'mcp-query-response',
+          requestId: req['requestId'],
+          ok: false,
+          data: { permissionDecision: 'allow' },
+        }) + '\n',
+    );
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'bash',
+        toolInput: {},
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow(/malformed/i);
+  });
+
+  it('keeps waiting while the human thinks, well inside the budget', async () => {
+    const orch = await startOrchestrator(() => null);
+
+    let settled = false;
+    const pending = requestSocketDecision({
+      socketPath: orch.socketPath,
+      runId: 'r',
+      toolName: 'bash',
+      toolInput: {},
+      logger: silentLogger,
+    });
+    const observed = pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(settled).toBe(false);
+
+    // Socket liveness still ends the wait early, and still THROWS — that is
+    // what keeps "orchestrator down" separable from "nobody answered".
+    orch.dropConnections();
+    await observed;
+    await expect(pending).rejects.toThrow(/failing closed/i);
+  });
+
+  it('settles as a timeout — NOT a throw — when the budget expires', async () => {
+    const orch = await startOrchestrator(() => null);
+
+    await expect(
+      requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: 'bash',
+        toolInput: {},
+        logger: silentLogger,
+        budgetMs: 60,
+      }),
+    ).resolves.toEqual({ decision: 'timeout' });
+  });
+
+  it('destroys the connection on budget expiry so the orchestrator sees a disconnect', async () => {
+    const orch = await startOrchestrator(() => null);
+    const closed = new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        if (orch.connectionClosed) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 10);
+    });
+
+    await requestSocketDecision({
+      socketPath: orch.socketPath,
+      runId: 'r',
+      toolName: 'bash',
+      toolInput: {},
+      logger: silentLogger,
+      budgetMs: 60,
+    });
+
+    await closed;
+    expect(orch.connectionClosed).toBe(true);
+  });
+
+  it('drops the socket from the in-flight set on budget expiry', async () => {
+    const orch = await startOrchestrator(() => null);
+    const inFlight = new Set<net.Socket>();
+
+    await requestSocketDecision({
+      socketPath: orch.socketPath,
+      runId: 'r',
+      toolName: 'bash',
+      toolInput: {},
+      logger: silentLogger,
+      budgetMs: 60,
+      inFlight,
+    });
+
+    expect(inFlight.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The budget, on fake timers, at the real 25s boundary
+// ---------------------------------------------------------------------------
+
+/**
+ * A stub socket so the budget can be tested at its true value without a 25s
+ * wall-clock wait. Real I/O and fake timers do not mix; the injectable
+ * `connect` seam exists for exactly this.
+ */
+function makeStubSocket(): {
+  socket: net.Socket;
+  emit: (event: string, arg?: unknown) => void;
+  destroyed: () => boolean;
+  /** The requestId of the frame the gate wrote, for correlating a reply. */
+  requestId: () => string;
+} {
+  const handlers = new Map<string, Array<(arg?: unknown) => void>>();
+  const written: string[] = [];
+  let wasDestroyed = false;
+  const on = (event: string, cb: (arg?: unknown) => void): net.Socket => {
+    const list = handlers.get(event) ?? [];
+    list.push(cb);
+    handlers.set(event, list);
+    return socket;
+  };
+  const socket = {
+    on,
+    once: on,
+    write: (chunk: string) => {
+      written.push(chunk);
+      return true;
+    },
+    end: () => undefined,
+    destroy: () => {
+      wasDestroyed = true;
+    },
+  } as unknown as net.Socket;
+
+  return {
+    socket,
+    emit: (event, arg) => (handlers.get(event) ?? []).slice().forEach((h) => h(arg)),
+    destroyed: () => wasDestroyed,
+    requestId: () => {
+      const frame = JSON.parse(written[0] ?? '{}') as { requestId?: string };
+      return frame.requestId ?? '';
+    },
+  };
+}
+
+describe('the human-decision budget at its real value', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(`expires at exactly ${HUMAN_DECISION_BUDGET_MS}ms, 5s inside OMP's 30s cap`, async () => {
+    vi.useFakeTimers();
+    const stub = makeStubSocket();
+
+    const pending = requestSocketDecision({
+      socketPath: '/unused',
+      runId: 'r',
+      toolName: 'bash',
+      toolInput: {},
+      logger: silentLogger,
+      connect: () => stub.socket,
+    });
+    stub.emit('connect');
+
+    await vi.advanceTimersByTimeAsync(HUMAN_DECISION_BUDGET_MS - 1);
+    expect(stub.destroyed()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ decision: 'timeout' });
+    expect(stub.destroyed()).toBe(true);
+    // 5s of margin for the block to travel back before OMP aborts the handler.
+    expect(HUMAN_DECISION_BUDGET_MS).toBe(25_000);
+  });
+
+  it('lets a verdict arriving at 24.9s win the race', async () => {
+    vi.useFakeTimers();
+    const stub = makeStubSocket();
+
+    const pending = requestSocketDecision({
+      socketPath: '/unused',
+      runId: 'r',
+      toolName: 'bash',
+      toolInput: {},
+      logger: silentLogger,
+      connect: () => stub.socket,
+    });
+    stub.emit('connect');
+
+    await vi.advanceTimersByTimeAsync(24_900);
+    // The real server correlates by requestId; read it off the written frame.
+    stub.emit(
+      'data',
+      Buffer.from(
+        JSON.stringify({
+          type: 'mcp-query-response',
+          requestId: stub.requestId(),
+          ok: true,
+          data: { permissionDecision: 'allow' },
+        }) + '\n',
+      ),
+    );
+
+    await expect(pending).resolves.toEqual({ decision: 'allow' });
+
+    // Advancing past the budget must not disturb the settled promise.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stub.destroyed()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The handler end to end
+// ---------------------------------------------------------------------------
+
+function runtimeFor(socketPath: string | undefined, overrides: Partial<OmpGateRuntime> = {}): OmpGateRuntime {
+  return {
+    config: { ...MOST_RESTRICTIVE_GATE_CONFIG },
+    runId: 'run-1',
+    socketPath,
+    logger: silentLogger,
+    inFlight: new Set<net.Socket>(),
+    ...overrides,
+  };
+}
+
+function toolCall(toolName: string, input: Record<string, unknown> = {}): OmpToolCallEvent {
+  return { type: 'tool_call', toolName, toolCallId: 'call-1', input };
+}
+
+describe('createToolCallHandler', () => {
+  it('returns undefined (no opinion) when the human approves', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+    const handler = createToolCallHandler(runtimeFor(orch.socketPath));
+
+    await expect(handler(toolCall('bash', { command: 'ls' }))).resolves.toBeUndefined();
+  });
+
+  it('returns a block carrying the human deny reason', async () => {
+    const orch = await startOrchestrator((req) =>
+      verdictFrame(String(req['requestId']), 'deny', 'too risky'),
+    );
+    const handler = createToolCallHandler(runtimeFor(orch.socketPath));
+
+    const result = await handler(toolCall('bash', { command: 'rm -rf /' }));
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain('too risky');
+  });
+
+  it('THROWS when the orchestrator is unreachable — OMP turns that into a block', async () => {
+    const handler = createToolCallHandler(runtimeFor(path.join(makeTempDir(), 'absent')));
+
+    await expect(handler(toolCall('bash'))).rejects.toThrow(/failing closed/i);
+  });
+
+  it(`THROWS when ${ENV_ORCH_SOCKET} is unset — there is nobody to ask`, async () => {
+    const handler = createToolCallHandler(runtimeFor(undefined));
+
+    await expect(handler(toolCall('bash'))).rejects.toThrow(new RegExp(ENV_ORCH_SOCKET));
+  });
+
+  it('never touches the socket for a locally decided call', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'deny'));
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: { ...MOST_RESTRICTIVE_GATE_CONFIG, autoAllowTools: ['read'] },
+      }),
+    );
+
+    await expect(handler(toolCall('read', { path: '/x' }))).resolves.toBeUndefined();
+    expect(orch.received).toHaveLength(0);
+  });
+
+  it('blocks a disallowed tool without asking the human', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: { ...MOST_RESTRICTIVE_GATE_CONFIG, disallowedTools: ['bash'] },
+      }),
+    );
+
+    const result = await handler(toolCall('bash'));
+    expect(result?.block).toBe(true);
+    expect(orch.received).toHaveLength(0);
+  });
+
+  it('returns a BLOCK (not a throw) when the human decision budget expires', async () => {
+    const orch = await startOrchestrator(() => null);
+    const handler = createToolCallHandler(runtimeFor(orch.socketPath, { budgetMs: 60 }));
+
+    const result = await handler(toolCall('bash', { command: 'ls' }));
+
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toMatch(/no decision arrived within 25s/i);
+    // The sentence has to tell the model what to do next, not just that it failed.
+    expect(result?.reason).toMatch(/retry|permission mode/i);
+  });
+
+  it('distinguishes budget expiry from orchestrator-down: one blocks, the other throws', async () => {
+    const slow = await startOrchestrator(() => null);
+    const blocked = await createToolCallHandler(
+      runtimeFor(slow.socketPath, { budgetMs: 60 }),
+    )(toolCall('bash'));
+    expect(blocked?.block).toBe(true);
+
+    const down = createToolCallHandler(
+      runtimeFor(path.join(makeTempDir(), 'absent'), { budgetMs: 60 }),
+    );
+    await expect(down(toolCall('bash'))).rejects.toThrow(/unreachable|failing closed/i);
+  });
+
+  it('deregisters the socket from the in-flight set once a verdict lands', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+    const runtime = runtimeFor(orch.socketPath);
+    const handler = createToolCallHandler(runtime);
+
+    await handler(toolCall('bash'));
+    expect(runtime.inFlight.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The load sentinel
+// ---------------------------------------------------------------------------
+
+describe('writeGateSentinel', () => {
+  it('writes {loadedAt, runId, pid} to the configured path', () => {
+    const sentinelPath = path.join(makeTempDir(), 'sentinel.json');
+
+    expect(writeGateSentinel(sentinelPath, 'run-9', silentLogger)).toBe(true);
+
+    const sentinel = JSON.parse(fs.readFileSync(sentinelPath, 'utf8')) as OmpGateSentinel;
+    expect(sentinel.runId).toBe('run-9');
+    expect(sentinel.pid).toBe(process.pid);
+    expect(Number.isNaN(Date.parse(sentinel.loadedAt))).toBe(false);
+  });
+
+  it('reports failure without creating a file when the path is unwritable', () => {
+    const sentinelPath = path.join(makeTempDir(), 'no-such-dir', 'sentinel.json');
+
+    expect(writeGateSentinel(sentinelPath, 'run-9', silentLogger)).toBe(false);
+    expect(fs.existsSync(sentinelPath)).toBe(false);
+  });
+
+  it('reports failure when the sentinel path is unset', () => {
+    expect(writeGateSentinel(undefined, 'run-9', silentLogger)).toBe(false);
+    expect(writeGateSentinel('  ', 'run-9', silentLogger)).toBe(false);
+  });
+});
