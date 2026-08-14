@@ -110,7 +110,7 @@ import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
-import type { VerifyHostProbesLike } from './orchestrator/trpc/context';
+import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -715,6 +715,18 @@ if (!gotSingleInstanceLock) {
 let verifyHostProbes: VerifyHostProbesLike | undefined;
 
 /**
+ * The health panel's runbook-status resolver — the SAME closure the scheduler's
+ * `runbookStatus` dependency gets (assigned together at the wiring site below).
+ *
+ * One implementation, deliberately: the panel's badge and the §3.2 degrade gate
+ * answer the same question, and a second read of `verify_runbook_local.status`
+ * is how they came to disagree — a record marked proven whose portable half sits
+ * on an unmerged branch made the gate skip every request while the panel showed
+ * "Set up". See {@link ContextDeps.verifyRunbookStatus}.
+ */
+let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -764,6 +776,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // attached before initializeServices finished still sees the probes
         // once they exist.
         verifyHostProbes,
+        verifyRunbookStatus,
       }),
   });
 }
@@ -1992,6 +2005,21 @@ async function initializeServices(): Promise<boolean> {
     },
     logger: cyboflowLogger,
   });
+
+  // ONE resolver, two consumers: the scheduler's §3.2 degrade gate (below) and
+  // the health panel's setup badge (via the tRPC context). Probed against the
+  // PROJECT path — both ask a project-level question ("has this project ever
+  // proven a runbook for this modality, and does that proof still hold here?"),
+  // while the enqueue-time injection (scheduler.resolveProvenRunbook) probes the
+  // requesting RUN's worktree, which is the tree whose commands would actually
+  // execute. No project path (a deleted/unresolvable project row) ⇒ 'absent',
+  // which skips with the setup CTA rather than guessing.
+  verifyRunbookStatus = async (projectId, modality) => {
+    const projectPath = databaseService.getProject(projectId)?.path;
+    if (!projectPath) return 'absent';
+    return verifyRunbookStore.status(projectId, projectPath, modality);
+  };
+
   const verificationAgentRunner = new VerificationAgentRunner({
     // The SAME binary the capability gate measured — see verifyPeekabooPath.
     peekabooBin: verifyPeekabooPath,
@@ -2159,11 +2187,7 @@ async function initializeServices(): Promise<boolean> {
     // which is the tree whose commands would actually execute. No project path
     // (a deleted/unresolvable project row) ⇒ 'absent', which skips with the setup
     // CTA rather than guessing.
-    runbookStatus: async (projectId, modality) => {
-      const projectPath = databaseService.getProject(projectId)?.path;
-      if (!projectPath) return 'absent';
-      return verifyRunbookStore.status(projectId, projectPath, modality);
-    },
+    runbookStatus: verifyRunbookStatus,
     // The same store instance backs the enqueue-time pinned injection (§5.2 seam
     // 3) and the ENGINE-ENFORCED proof flip (§5.3) — a setup-proof request that
     // actually passed is the only transition into 'proven'.

@@ -10,7 +10,8 @@
  * this single file (or injecting a session resolver at server-init time).
  */
 import type { DatabaseLike } from '../types';
-import type { NativeGrantProbe } from '../../../../shared/types/visualVerification';
+import type { NativeGrantProbe, VerificationModality } from '../../../../shared/types/visualVerification';
+import type { VerifyRunbookStatus } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
@@ -354,7 +355,43 @@ export interface ContextDeps {
    * reporting a host with nothing installed, which would be a lie).
    */
   verifyHostProbes?: VerifyHostProbesLike;
+
+  /**
+   * Resolve a (project, modality) runbook's status the way the ENGINE resolves
+   * it — `VerifyRunbookStore.status()` probed against the project checkout.
+   *
+   * WHY THE PANEL MAY NOT READ `verify_runbook_local.status` DIRECTLY. That
+   * column is one conjunct of the answer, not the answer. `'proven'` is
+   * re-checked on every read against the portable file in the probed tree, a
+   * fresh project input-hash, and the host fingerprint (runbookStore's class
+   * doc: "any component changing demotes"). A record can therefore read
+   * `'proven'` while the gate honestly refuses every request — most commonly
+   * because the setup flow committed the portable half on its own branch and
+   * that branch has not merged, so the project checkout does not carry the file
+   * at all. Reading the column alone renders a green "Set up" badge over exactly
+   * the failure the badge exists to warn about, which is the "green badge" the
+   * store's doc names as the thing this design was built to prevent.
+   *
+   * Injected from `main/src/index.ts` as the SAME closure the scheduler's
+   * `runbookStatus` dependency gets, so the panel and the degrade gate cannot
+   * diverge — the property the neighbouring host-probe rows already hold.
+   *
+   * `undefined` ⇒ the panel reports every record as `unproven-draft`. Never
+   * `'proven'`: unwired is a wiring bug, and inheriting the store's "no failure
+   * mode may produce a spurious proven" rule means failing to the pessimistic
+   * answer rather than the reassuring one.
+   */
+  verifyRunbookStatus?: VerifyRunbookStatusLike;
 }
+
+/**
+ * Resolve one (project, modality) runbook status. See
+ * {@link ContextDeps.verifyRunbookStatus} for why this exists at all.
+ */
+export type VerifyRunbookStatusLike = (
+  projectId: number,
+  modality: VerificationModality,
+) => Promise<VerifyRunbookStatus>;
 
 /**
  * Creates the tRPC request context.
@@ -380,6 +417,7 @@ export function createContext(deps: ContextDeps = {}): {
   agentThreadStore?: AgentThreadStoreLike;
   agentProposalExecutor?: AgentProposalExecutorLike;
   verifyHostProbes?: VerifyHostProbesLike;
+  verifyRunbookStatus?: VerifyRunbookStatusLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -392,6 +430,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    verifyRunbookStatus,
   } = deps;
   return {
     userId: 'local' as const,
@@ -405,6 +444,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    verifyRunbookStatus,
   };
 }
 

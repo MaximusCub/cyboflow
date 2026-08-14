@@ -47,6 +47,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
+import type { VerifyRunbookStatusLike } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import type { DatabaseLike } from '../../../types';
 import type {
@@ -201,14 +202,24 @@ function seedRequest(
   }
 }
 
-function buildCaller(migrations?: readonly string[]): {
+/**
+ * `verifyRunbookStatus` defaults to `'proven'` — "the live conjunction still
+ * holds", which is the premise every test here except the drift ones is built
+ * on. It is consulted ONLY for records already stored proven (the router never
+ * probes a draft, since the conjunction can only demote), so this default
+ * cannot launder an unproven record into a proven one.
+ */
+function buildCaller(
+  migrations?: readonly string[],
+  verifyRunbookStatus: VerifyRunbookStatusLike = async () => 'proven',
+): {
   caller: ReturnType<typeof appRouter.createCaller>;
   db: Database.Database;
   adapter: DatabaseLike;
 } {
   const db = buildDb(migrations);
   const adapter = dbAdapter(db);
-  const caller = appRouter.createCaller(createContext({ db: adapter }));
+  const caller = appRouter.createCaller(createContext({ db: adapter, verifyRunbookStatus }));
   return { caller, db, adapter };
 }
 
@@ -875,7 +886,7 @@ describe('verificationRequests.health', () => {
     seedCapability(db, { projectId: 1, modality: 'web', runbookHash: 'hash-new', status: 'active', envFailures: 1, hostGeneration: 2, updatedAt: '2026-08-01T00:00:00.000Z' });
     // The stale row: a superseded revision, tripped, and updated MORE recently.
     seedCapability(db, { projectId: 1, modality: 'web', runbookHash: 'hash-old', status: 'suppressed', reason: 'port taken', envFailures: 5, hostGeneration: 2, suppressedUntil: future, updatedAt: '2026-08-02T00:00:00.000Z' });
-    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), verifyRunbookStatus: async () => 'proven' }));
 
     const health = await caller.cyboflow.verificationRequests.health({ projectId: 1 });
     const web = health.modalities.find((m) => m.modality === 'web');
@@ -1366,13 +1377,29 @@ describe('verificationRequests.setupByProject', () => {
     while (cleanups.length) cleanups.pop()?.close();
   });
 
-  function setup(migrations: readonly string[] = [...MIGRATIONS, '096_verify_runbook_local.sql']): {
+  /**
+   * `verifyRunbookStatus` stands in for the live conjunction the ENGINE
+   * resolves (portable file present in the probed tree + input hash + host
+   * fingerprint). It defaults to echoing the stored column, which is the
+   * "nothing has drifted" case; a test that wants drift overrides it.
+   *
+   * Passing a resolver at all is the point: without one the router reports every
+   * record as unproven, so a test that forgot to inject it cannot accidentally
+   * assert a green badge.
+   */
+  function setup(
+    migrations: readonly string[] = [...MIGRATIONS, '096_verify_runbook_local.sql'],
+    verifyRunbookStatus: VerifyRunbookStatusLike = async () => 'proven',
+  ): {
     caller: ReturnType<typeof appRouter.createCaller>;
     db: Database.Database;
   } {
     const db = buildDb(migrations);
     cleanups.push(db);
-    return { caller: appRouter.createCaller(createContext({ db: dbAdapter(db) })), db };
+    return {
+      caller: appRouter.createCaller(createContext({ db: dbAdapter(db), verifyRunbookStatus })),
+      db,
+    };
   }
 
   function seedRunbook(
@@ -1448,5 +1475,71 @@ describe('verificationRequests.setupByProject', () => {
     const rows = await caller.cyboflow.verificationRequests.setupByProject();
 
     expect(rows).toEqual([{ projectId: 1, status: 'unproven', provenModalities: [] }]);
+  });
+
+  it('a record marked proven whose runbook is NOT in the project checkout reads `unproven`', async () => {
+    // THE REGRESSION. The setup flow commits the portable half on its own
+    // branch; until that merges, the project checkout does not carry
+    // `.cyboflow/verify-runbook.json`, so VerifyRunbookStore.status() answers
+    // 'unproven-draft' (its documented pre-merge case, which deliberately does
+    // NOT demote the record) and the §3.2 gate skips every build/serve request
+    // with "no proven verification runbook".
+    //
+    // Reading `verify_runbook_local.status` directly showed "Set up" through all
+    // of that — a green badge over precisely the failure it exists to warn
+    // about. Observed for real: a project whose proof lived on an unmerged
+    // branch showed as set up while every verification it queued was refused.
+    const { caller, db } = setup(undefined, async () => 'unproven-draft');
+    seedRunbook(db, 1, 'web', 'proven');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows).toEqual([{ projectId: 1, status: 'unproven', provenModalities: [] }]);
+  });
+
+  it('reports `unproven` when no resolver is wired — never a spurious `proven`', async () => {
+    // The store's invariant ("no failure mode may produce a spurious 'proven'")
+    // extends to its consumers: an unwired resolver is a wiring bug, and the
+    // reassuring answer is the one that must not survive it.
+    const db = buildDb([...MIGRATIONS, '096_verify_runbook_local.sql']);
+    cleanups.push(db);
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    db.prepare(
+      `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, status)
+       VALUES (1, 'web', 'h', '{}', 'proven')`,
+    ).run();
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows).toEqual([{ projectId: 1, status: 'unproven', provenModalities: [] }]);
+  });
+
+  it('a THROWING resolver degrades that modality rather than failing the query', async () => {
+    const { caller, db } = setup(undefined, async () => {
+      throw new Error('probe blew up');
+    });
+    seedRunbook(db, 1, 'web', 'proven');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(rows).toEqual([{ projectId: 1, status: 'unproven', provenModalities: [] }]);
+  });
+
+  it('does not probe a record already stored unproven — the conjunction can only demote', async () => {
+    // The stored column is one conjunct: a record that is not proven cannot be
+    // promoted by re-checking the others. Probing it would burn a file read and
+    // an input hash to reach the answer already in hand.
+    const probed: string[] = [];
+    const { caller, db } = setup(undefined, async (projectId, modality) => {
+      probed.push(`${projectId}:${modality}`);
+      return 'proven';
+    });
+    seedRunbook(db, 1, 'web', 'unproven-draft');
+    seedRunbook(db, 1, 'cdp-app', 'proven');
+
+    const rows = await caller.cyboflow.verificationRequests.setupByProject();
+
+    expect(probed).toEqual(['1:cdp-app']);
+    expect(rows).toEqual([{ projectId: 1, status: 'proven', provenModalities: ['cdp-app'] }]);
   });
 });
