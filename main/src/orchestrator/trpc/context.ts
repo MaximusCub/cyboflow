@@ -13,6 +13,7 @@ import type { DatabaseLike } from '../types';
 import type { NativeGrantProbe } from '../../../../shared/types/visualVerification';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { OmpControlPlaneAdapter } from '../../../../shared/types/omp';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
@@ -354,6 +355,8 @@ export interface ContextDeps {
    * reporting a host with nothing installed, which would be a lie).
    */
   verifyHostProbes?: VerifyHostProbesLike;
+  /** Read-only OMP fleet adapter (getFleetSnapshot). Absent => fleetSnapshot returns 'unavailable'. */
+  omp?: OmpControlPlaneAdapter;
 }
 
 /**
@@ -380,6 +383,7 @@ export function createContext(deps: ContextDeps = {}): {
   agentThreadStore?: AgentThreadStoreLike;
   agentProposalExecutor?: AgentProposalExecutorLike;
   verifyHostProbes?: VerifyHostProbesLike;
+  omp?: OmpControlPlaneAdapter;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -392,6 +396,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    omp,
   } = deps;
   return {
     userId: 'local' as const,
@@ -405,6 +410,7 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    omp,
   };
 }
 

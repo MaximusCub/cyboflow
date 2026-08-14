@@ -75,6 +75,7 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
+import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
@@ -711,6 +712,9 @@ let verifyHostProbes: VerifyHostProbesLike | undefined;
  */
 function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const db = makeDatabaseLike(databaseService);
+  // Read-only OMP fleet adapter, constructed once per window attach (not per
+  // request). The tRPC createContext closure passes this same instance.
+  const fleetRegistryReader = new FleetRegistryReader();
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -721,6 +725,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         workflowRegistry,
         agentOverrideRouter: AgentOverrideRouter.getInstance(),
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        omp: fleetRegistryReader,
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).

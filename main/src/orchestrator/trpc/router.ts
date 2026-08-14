@@ -30,6 +30,7 @@ import { pluginsRouter } from './routers/plugins';
 import { variantsRouter } from './routers/variants';
 import { experimentsRouter } from './routers/experiments';
 import { verificationRequestsRouter } from './routers/verificationRequests';
+import { ompRouter } from './routers/omp';
 
 export const appRouter = router({
   cyboflow: router({
@@ -57,6 +58,7 @@ export const appRouter = router({
     variants: variantsRouter,
     verificationRequests: verificationRequestsRouter,
     workflows: workflowsRouter,
+    omp: ompRouter,
   }),
 });
 
