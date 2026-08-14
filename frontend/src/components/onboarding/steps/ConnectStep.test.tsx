@@ -16,14 +16,29 @@ const CODEX_DETECTED: ProviderDetectionResult<'codex'> = {
   state: 'detected',
 };
 
+const OMP_DETECTED: ProviderDetectionResult<'omp'> = {
+  binaryPath: '/usr/local/bin/omp',
+  version: '17.3.3',
+  state: 'detected',
+};
+
+const OMP_UNAVAILABLE: ProviderDetectionResult<'omp'> = {
+  binaryPath: null,
+  version: null,
+  state: 'unavailable',
+};
+
 const baseProps = {
   claudeDetection: CLAUDE_DETECTED,
   claudeConnected: false,
   codexDetection: CODEX_DETECTED,
   codexConnected: false,
+  ompDetection: OMP_DETECTED,
+  ompConnected: false,
   checking: false,
   onToggleClaude: vi.fn(),
   onToggleCodex: vi.fn(),
+  onToggleOmp: vi.fn(),
   onRecheck: vi.fn(),
   onLocate: vi.fn(),
   onInstall: vi.fn(),
@@ -46,6 +61,24 @@ describe('ConnectStep', () => {
     expect(onToggleClaude).toHaveBeenCalledOnce();
     expect(onToggleCodex).toHaveBeenCalledOnce();
     expect(screen.getByText(/ChatGPT connected/)).toHaveTextContent('plus');
+  });
+
+  it('shows an independent OMP toggle that fires onToggleOmp', () => {
+    const onToggleOmp = vi.fn();
+    render(<ConnectStep {...baseProps} onToggleOmp={onToggleOmp} />);
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Use OMP in Cyboflow' }));
+    expect(onToggleOmp).toHaveBeenCalledOnce();
+  });
+
+  it('shows OMP as optional (never in the claude/codex must-fix panel) when its binary is missing', () => {
+    render(<ConnectStep {...baseProps} ompDetection={OMP_UNAVAILABLE} />);
+
+    // Claude and Codex are both ready, so the mandatory panel is absent...
+    expect(screen.queryByText(/Claude Code is not installed/)).not.toBeInTheDocument();
+    // ...but OMP still gets its own low-key, non-blocking hint.
+    expect(screen.getByText(/OMP is optional/)).toBeInTheDocument();
+    expect(screen.getByText(/curl -fsSL https:\/\/omp\.sh\/install \| sh/)).toBeInTheDocument();
   });
 
   it('disables a logged-out provider without disabling an authenticated sibling', () => {

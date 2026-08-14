@@ -9,11 +9,13 @@ import { IntegrationsSettings } from './IntegrationsSettings';
 
 const detectClaude = vi.fn();
 const detectCodex = vi.fn();
+const detectOmp = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
     providers: {
-      detect: (provider: string) => (provider === 'claude' ? detectClaude() : detectCodex()),
+      detect: (provider: string) =>
+        provider === 'claude' ? detectClaude() : provider === 'codex' ? detectCodex() : detectOmp(),
     },
   },
 }));
@@ -37,11 +39,30 @@ const CODEX_CONNECTED: ProviderDetectionResult<'codex'> = {
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
 };
 
+const OMP_DETECTED: ProviderDetectionResult<'omp'> = {
+  state: 'detected',
+  binaryPath: '/usr/local/bin/omp',
+  version: '17.3.3',
+};
+
+const OMP_MISSING: ProviderDetectionResult<'omp'> = {
+  state: 'unavailable',
+  binaryPath: null,
+  version: null,
+};
+
+const OMP_UNSUPPORTED_VERSION: ProviderDetectionResult<'omp'> = {
+  state: 'unavailable',
+  binaryPath: '/usr/local/bin/omp',
+  version: '3.0.0',
+};
+
 let updateConfig: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   detectClaude.mockReset().mockResolvedValue({ success: true, data: CLAUDE_CONNECTED });
   detectCodex.mockReset().mockResolvedValue({ success: true, data: CODEX_CONNECTED });
+  detectOmp.mockReset().mockResolvedValue({ success: true, data: OMP_MISSING });
   updateConfig = vi.fn().mockResolvedValue(true);
   useConfigStore.setState({ config: null, error: null, updateConfig });
 });
@@ -102,10 +123,11 @@ describe('IntegrationsSettings — provider access toggles', () => {
 
     fireEvent.click(await screen.findByRole('switch', { name: 'Use Codex in Cyboflow' }));
 
-    // Full object, never a partial patch — the sibling must not be dropped.
+    // Full object, never a partial patch — the siblings must not be dropped.
+    // OMP rides along at its untouched default (absent ⇒ off).
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: false },
+        agentProviderAccess: { claude: true, codex: false, omp: false },
       }),
     );
   });
@@ -120,7 +142,7 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(codexSwitch);
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true },
+        agentProviderAccess: { claude: true, codex: true, omp: false },
       }),
     );
   });
@@ -138,7 +160,10 @@ describe('IntegrationsSettings — provider access toggles', () => {
   });
 
   it('explains what a disabled provider means, and warns about the Claude-only surfaces', async () => {
-    setProviderAccess({ claude: false, codex: true });
+    // omp: true so ONLY the Claude row is disabled here — otherwise OMP's
+    // own (identical) "hidden from every runtime picker" hint would collide
+    // with Claude's and make findByText ambiguous.
+    setProviderAccess({ claude: false, codex: true, omp: true });
     render(<IntegrationsSettings />);
 
     expect(await screen.findByText(/hidden from every runtime picker/i)).toBeInTheDocument();
@@ -156,5 +181,96 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(await screen.findByRole('switch', { name: 'Use Codex in Cyboflow' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('disk full');
+  });
+});
+
+describe('IntegrationsSettings — OMP card', () => {
+  it('detects OMP is not gated by picker selectability — the card still shows and probes', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_DETECTED });
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByText('omp 17.3.3')).toBeInTheDocument();
+    expect(screen.getByText('/usr/local/bin/omp')).toBeInTheDocument();
+    expect(detectOmp).toHaveBeenCalled();
+  });
+
+  it('names an unsupported version explicitly rather than claiming omp is missing', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_UNSUPPORTED_VERSION });
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByText('Unsupported version')).toBeInTheDocument();
+    expect(screen.getByText(/Found omp 3\.0\.0, but this version isn't supported/)).toBeInTheDocument();
+  });
+
+  it('shows an Install action only when the binary was not found at all', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_MISSING });
+    render(<IntegrationsSettings />);
+
+    await screen.findByText('Not available');
+    expect(screen.getByRole('button', { name: 'Install' })).toBeInTheDocument();
+  });
+
+  it('does not offer Install for an unsupported-but-found version', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_UNSUPPORTED_VERSION });
+    render(<IntegrationsSettings />);
+
+    await screen.findByText('Unsupported version');
+    // The Claude install button exists elsewhere in some states, so scope to
+    // the absence of a SECOND Install action rather than absence entirely.
+    expect(screen.queryAllByRole('button', { name: 'Install' })).toHaveLength(0);
+  });
+
+  it('defaults OFF (absent access key), unlike claude/codex which default on', async () => {
+    setProviderAccess(undefined);
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByRole('switch', { name: 'Use Claude Code in Cyboflow' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Use Codex in Cyboflow' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Use OMP in Cyboflow' })).not.toBeChecked();
+  });
+
+  it('persists the FULL triple (including the untouched claude/codex members) when OMP is switched on', async () => {
+    setProviderAccess(undefined);
+    render(<IntegrationsSettings />);
+
+    fireEvent.click(await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' }));
+
+    await waitFor(() =>
+      expect(updateConfig).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: true, omp: true },
+      }),
+    );
+  });
+
+  it('reflects a saved omp:true setting', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' })).toBeChecked();
+  });
+
+  it('does not count OMP as the "last enabled provider" — turning it off never locks it when claude/codex are also on', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<IntegrationsSettings />);
+
+    const ompSwitch = await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' });
+    expect(ompSwitch).toBeEnabled();
+    fireEvent.click(ompSwitch);
+
+    await waitFor(() =>
+      expect(updateConfig).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: true, omp: false },
+      }),
+    );
+  });
+
+  it('locks OMP itself as the last enabled provider so the app can never end up with none', async () => {
+    setProviderAccess({ claude: false, codex: false, omp: true });
+    render(<IntegrationsSettings />);
+
+    const ompSwitch = await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' });
+    expect(ompSwitch).toBeDisabled();
+    fireEvent.click(ompSwitch);
+    expect(updateConfig).not.toHaveBeenCalled();
   });
 });

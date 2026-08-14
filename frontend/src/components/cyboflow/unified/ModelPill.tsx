@@ -7,6 +7,8 @@ import { cn } from '../../../utils/cn';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../../stores/claudeModelCatalogStore';
+import { useOmpModelCatalog } from '../../../stores/ompModelCatalogStore';
+import { groupOmpOptionsByProvider } from './ompModelGrouping';
 import {
   AGENT_PROVIDER_LABELS,
   type AgentProvider,
@@ -64,6 +66,10 @@ export function modelDisplayLabel(
 ): string {
   const active = id ?? 'auto';
   if (agentProvider === 'codex') return active === 'auto' ? 'Auto/default' : active;
+  // OMP has no 'auto' value of its own — the absence of a selection already
+  // means "use OMP's default" everywhere in this module, so 'Default' is the
+  // honest label rather than borrowing Codex's synthesized 'Auto/default'.
+  if (agentProvider === 'omp') return active === 'auto' ? 'Default' : active;
   const o = OPTION_BY_ID.get(active);
   if (!o) return active;
   return o.context ? `${o.label} · ${o.context}` : o.label;
@@ -115,29 +121,42 @@ export function ModelPill({
   onModelChange,
 }: ModelPillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const isOmp = agentProvider === 'omp';
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const { options: codexCatalogOptions } = useCodexModelCatalog(agentProvider === 'codex');
   // Dynamic Claude catalog: the "Other models" the login can select, appended
   // below the four pinned families. Only fetched for a Claude picker.
-  const { options: claudeCatalogOptions } = useClaudeModelCatalog(agentProvider !== 'codex');
+  const { options: claudeCatalogOptions } = useClaudeModelCatalog(agentProvider !== 'codex' && !isOmp);
+  const {
+    options: ompCatalogOptions,
+    loading: ompLoading,
+    error: ompError,
+  } = useOmpModelCatalog(isOmp);
+  const ompGroups = groupOmpOptionsByProvider(ompCatalogOptions);
   const active = currentModel ?? 'auto';
   const codexOptions: ReadonlyArray<ModelOption> = codexCatalogOptions.map((option) => ({
     ...option,
     context: null,
   }));
-  const options = agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
+  // OMP renders its own grouped item list below (no pinned families, no 'auto'
+  // synthesis) rather than feeding the generic options.map loop, which assumes
+  // the ModelOption shape (context/description) OMP's catalog does not carry.
+  const options = isOmp ? [] : agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
   // A dynamic (non-pinned) Claude id displays its friendly parsed label; a pinned
   // alias falls through to modelDisplayLabel (which knows the curated "Opus 5 · 1M").
   const claudeDynamicActive =
-    agentProvider !== 'codex'
+    agentProvider !== 'codex' && !isOmp
       ? claudeCatalogOptions.find((option) => option.id === active)
       : undefined;
   const claudeDynamicLabel = claudeDynamicActive
     ? formatDynamicClaudeLabel(claudeDynamicActive)
     : undefined;
+  const ompActive = ompCatalogOptions.find((option) => option.id === active);
   const label = agentProvider === 'codex'
     ? (codexOptions.find((option) => option.id === active)?.label ?? modelDisplayLabel(active, agentProvider))
-    : (claudeDynamicLabel ?? modelDisplayLabel(active, agentProvider));
+    : isOmp
+      ? (ompActive?.label ?? modelDisplayLabel(active, agentProvider))
+      : (claudeDynamicLabel ?? modelDisplayLabel(active, agentProvider));
 
   const handleSelect = async (model: string): Promise<void> => {
     setOpen(false);
@@ -174,7 +193,7 @@ export function ModelPill({
 
   // "Other models" — the dynamic Claude catalog below the pinned four. A disabled,
   // non-clickable header row acts as the section divider (Dropdown has no separator).
-  if (agentProvider !== 'codex' && claudeCatalogOptions.length > 0) {
+  if (agentProvider !== 'codex' && !isOmp && claudeCatalogOptions.length > 0) {
     items.push({
       id: '__claude_other_models_header',
       label: 'Other models',
@@ -192,6 +211,40 @@ export function ModelPill({
         onClick: () => void handleSelect(option.id),
         variant: 'default',
       });
+    }
+  }
+
+  // OMP's catalog — grouped by ompProvider (e.g. 'anthropic', 'openai'), each
+  // group under its own disabled header row (same divider idiom as "Other
+  // models" above). No pinned families and no synthesized 'auto' row: the
+  // catalog is the whole list, and every entry is directly usable (no
+  // availability guard — that machinery is Claude-only).
+  if (isOmp) {
+    if (ompGroups.length === 0) {
+      items.push({
+        id: '__omp_empty',
+        label: ompLoading ? 'Loading OMP models…' : ompError ? 'Could not load OMP models' : 'No OMP models available',
+        disabled: true,
+        variant: 'default',
+      });
+    }
+    for (const [ompProvider, groupOptions] of ompGroups) {
+      items.push({
+        id: `__omp_group_${ompProvider}`,
+        label: ompProvider,
+        disabled: true,
+        variant: 'default',
+      });
+      for (const option of groupOptions) {
+        items.push({
+          id: option.id,
+          label: option.label,
+          icon: Cpu,
+          iconColor: 'text-text-secondary',
+          onClick: () => void handleSelect(option.id),
+          variant: 'default',
+        });
+      }
     }
   }
 

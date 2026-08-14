@@ -451,6 +451,16 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(mockTerminalHealthArgs).toHaveBeenCalledWith('s1', 'panel-1', false);
   });
 
+  // isOmpPtySession twin of the Codex PTY case above, now that OmpPtyManager
+  // exists (docs/proposals/omp-provider-integration.md §5.2) — the health
+  // probe knows nothing about OMP panels either.
+  it('does not enable the dead-terminal probe for an OMP PTY panel (wrong manager would read every healthy terminal as dead)', () => {
+    renderWithProvider(
+      makeSession({ substrate: 'interactive', runId: 'run-q1', agentRuntime: 'omp-pty' }),
+    );
+    expect(mockTerminalHealthArgs).toHaveBeenCalledWith('s1', 'panel-1', false);
+  });
+
   it('Ctrl+G toggles the composer ptyOpen flag', () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
     const get = () => screen.getByTestId('quick-session-composer');
@@ -495,6 +505,38 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
   });
 
+  // Registry-driven (AGENT_PROVIDER_LABELS via paneProvider !== 'claude'), same
+  // mechanism as the Codex case above — no OMP-specific arm was needed.
+  it('labels an OMP SDK quick session as OMP', () => {
+    renderWithProvider(makeSession({
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      runId: 'run-omp-sdk',
+    }));
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-name', 'OMP');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
+  });
+
+  it("agentRuntime omp-pty renders the terminal keyed by the panel's OWN id and names the panel OMP (not 'Terminal')", () => {
+    renderWithProvider(
+      makeSession({
+        substrate: 'interactive',
+        agentProvider: 'omp',
+        agentRuntime: 'omp-pty',
+        runId: 'run-omp',
+      }),
+    );
+
+    expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
+      'InteractiveTerminalView:panel-1',
+    );
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-name', 'OMP');
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
+    expect(mockGetResumeState).not.toHaveBeenCalled();
+  });
+
   it('shows a Codex SDK session as working as soon as its optimistic send exists', () => {
     usePendingSendStore.setState({
       byHost: {
@@ -512,6 +554,31 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       agentProvider: 'codex',
       agentRuntime: 'codex-sdk',
       runId: 'run-codex-sdk',
+    }));
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-running', 'true');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-waiting', 'true');
+  });
+
+  // omp-sdk emits no stream deltas either (v1 — §5.1's "dropped in v1" call),
+  // so it needs the SAME optimistic-send preference the Codex case proves.
+  it('shows an OMP SDK session as working as soon as its optimistic send exists', () => {
+    usePendingSendStore.setState({
+      byHost: {
+        'panel-1': [{
+          id: 'pending-1',
+          text: 'hello',
+          createdAt: Date.now(),
+          status: 'sending',
+        }],
+      },
+    });
+
+    renderWithProvider(makeSession({
+      status: 'stopped',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      runId: 'run-omp-sdk',
     }));
 
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-running', 'true');

@@ -75,14 +75,15 @@ interface UseQuickSessionReturn {
    * `reasoningEffort` (IDEA-029, the wizard's effort select / the in-composer
    * EffortPill) rides claudeConfig alongside model/fastMode for the interactive
    * eager spawn, and is persisted on the frontend-created panel the same way model
-   * is — for BOTH Claude SDK and codex-sdk (codex-sdk has no eager server spawn, so
-   * its panel is frontend-created here and startCodexSdkTurn reads the persisted
-   * effort per turn). A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false
-   * is excluded — codex-pty emits no effort flag and its panel is
-   * server-eager-created, so it never reaches the persistence branch. The
+   * is — for Claude SDK AND every structured non-Claude runtime with no eager
+   * server spawn of its own (codex-sdk, omp-sdk): each has its panel
+   * frontend-created here, and its turn-start seam reads the persisted effort
+   * per turn. A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false is
+   * excluded — codex-pty/omp-pty emit no effort flag and their panels are
+   * server-eager-created, so neither reaches the persistence branch. The
    * claudeConfig ride stays Claude-only (create-quick reads it for
-   * `quickAgentProvider === 'claude'`); codex-sdk relies solely on the setEffort
-   * persistence below.
+   * `quickAgentProvider === 'claude'`); codex-sdk and omp-sdk rely solely on the
+   * setEffort persistence below.
    *
    * `designIdeaId` (Design Mode, design-mode.md): the idea a design session
    * binds to, threaded into createQuick so the server can validate the idea
@@ -171,15 +172,24 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       setIsStarting(true);
 
       try {
-        const isCodexRuntime =
-          agentProvider === 'codex' || agentRuntime === 'codex-sdk' || agentRuntime === 'codex-pty';
+        // OMP follows Codex's path here: no claudeConfig blob, model persisted
+        // via agentModel/setModel like Codex's, no eager server spawn to
+        // receive claudeConfig on the interactive substrate (Codex/OMP have no
+        // "interactive" substrate of their own — each names its transport in
+        // the runtime id). Structural check (providerForRuntime) rather than a
+        // per-runtime literal list, so a future non-Claude runtime is covered
+        // automatically instead of needing its own arm here.
+        const runtimeProvider = agentRuntime !== undefined ? providerForRuntime(agentRuntime) : undefined;
+        const isNonClaudeRuntime =
+          (agentProvider !== undefined && agentProvider !== 'claude') ||
+          (runtimeProvider !== undefined && runtimeProvider !== 'claude');
         // model + fastMode + reasoningEffort ride the request as claudeConfig so the
         // INTERACTIVE eager spawn (server-side) receives them; the SDK panel is
         // created on the frontend below and persisted there. Sending both ways is
         // harmless — the SDK create-quick path ignores claudeConfig (no panel to
         // start yet).
         const claudeConfig =
-          !isCodexRuntime && (model !== undefined || fastMode === true || reasoningEffort !== undefined)
+          !isNonClaudeRuntime && (model !== undefined || fastMode === true || reasoningEffort !== undefined)
             ? {
                 ...(model !== undefined ? { model } : {}),
                 fastMode: fastMode === true,
@@ -194,7 +204,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           ...(substrate ? { substrate } : {}),
           ...(agentProvider ? { agentProvider } : {}),
           ...(agentRuntime ? { agentRuntime } : {}),
-          ...(isCodexRuntime && model !== undefined ? { agentModel: model } : {}),
+          ...(isNonClaudeRuntime && model !== undefined ? { agentModel: model } : {}),
           ...(effort ? { effort } : {}),
           ...(claudeConfig ? { claudeConfig } : {}),
           // Per-session MCP deny / plugin selection chosen in the wizard's Advanced
@@ -243,8 +253,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // claudeConfig only reaches the interactive eager spawn, never this
           // frontend-created SDK panel.
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
-          // fastMode is Claude-only (no Codex analogue).
-          if (!isCodexRuntime) {
+          // fastMode is Claude-only (no Codex or OMP analogue).
+          if (!isNonClaudeRuntime) {
             await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
           }
           // Reasoning effort persists for every effort-capable runtime that owns a

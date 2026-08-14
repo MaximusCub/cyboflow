@@ -254,6 +254,99 @@ describe('useQuickSession — always creates both panels', () => {
     expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'gpt-5.5');
     expect(mockSetFastMode).not.toHaveBeenCalled();
   });
+
+  // omp-sdk follows codex-sdk's path exactly (docs/proposals/omp-provider-
+  // integration.md §5.5): agentModel + setModel persistence, no claudeConfig
+  // blob, no fastMode (Claude-only).
+  it('creates a provider-neutral Chat panel for omp-sdk quick sessions, mirroring codex-sdk', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        undefined,
+        undefined,
+        'anthropic/claude-3-5-sonnet-20240620',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'omp',
+        'omp-sdk',
+      );
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      agentModel: 'anthropic/claude-3-5-sonnet-20240620',
+    }));
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('claudeConfig');
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'anthropic/claude-3-5-sonnet-20240620');
+    expect(mockSetFastMode).not.toHaveBeenCalled();
+  });
+
+  // Structural check (providerForRuntime), not a literal 'omp-sdk'/'omp-pty'
+  // list — an agentProvider explicitly passed as 'omp' with NO agentRuntime
+  // must still route as non-Claude.
+  it('treats an explicit agentProvider="omp" (no agentRuntime) as non-Claude too', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        undefined,
+        undefined,
+        'anthropic/claude-3-5-sonnet-20240620',
+        true, // fastMode requested but must be dropped — non-Claude
+        undefined,
+        undefined,
+        undefined,
+        'omp',
+      );
+    });
+
+    expect(mockCreateQuick.mock.calls[0][0]).not.toHaveProperty('claudeConfig');
+    expect(mockSetFastMode).not.toHaveBeenCalled();
+  });
+});
+
+describe('useQuickSession — OMP PTY fallback panel', () => {
+  it('creates a usable Chat panel when eager server-side panel creation failed, mirroring codex-pty', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        'interactive',
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'omp',
+        'omp-pty',
+      );
+    });
+
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(1, {
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {
+      sessionId: 'sess-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/wt-001' },
+    });
+  });
 });
 
 describe('useQuickSession — server-created claude panel (claudePanelId)', () => {

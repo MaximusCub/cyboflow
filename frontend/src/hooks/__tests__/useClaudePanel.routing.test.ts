@@ -76,6 +76,33 @@ describe('dispatchQuickSessionInput', () => {
     expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'do it now', 'opus', true, 'pending-9');
     expect(mocks.sessionSendInput).not.toHaveBeenCalled();
   });
+
+  // omp-sdk takes the SAME route as codex-sdk (docs/proposals/omp-provider-
+  // integration.md §5.5): first message via sessions:input, follow-ups via the
+  // panel-scoped panels:continue.
+  it('routes initial OMP SDK input through sessions:input', async () => {
+    await dispatchQuickSessionInput(session('omp-sdk'), 'panel-1', 'hello OMP', 'initial');
+
+    expect(mocks.sessionSendInput).toHaveBeenCalledWith('session-1', 'hello OMP');
+    expect(mocks.panelSendInput).not.toHaveBeenCalled();
+  });
+
+  it('routes continued OMP SDK input through the panel-scoped panels:continue (queue guard + interrupt parity)', async () => {
+    mocks.panelContinue.mockResolvedValue({ success: true, data: { queued: true } });
+    const res = await dispatchQuickSessionInput(
+      session('omp-sdk'),
+      'panel-1',
+      'continue OMP',
+      'continue',
+      undefined,
+      false,
+      'pending-o',
+    );
+
+    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-1', 'continue OMP', undefined, false, 'pending-o');
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+    expect(res).toEqual({ success: true, error: undefined, queued: true });
+  });
 });
 
 /**
@@ -128,6 +155,47 @@ describe('dispatchQuickSessionInput — per-panel substrate overrides', () => {
 
   it('leaves an INHERITED codex-pty panel on the PTY path', async () => {
     await dispatchQuickSessionInput(session('codex-pty'), 'panel-1', 'hi', 'initial', undefined, undefined, undefined, null);
+
+    expect(mocks.panelSendInput).toHaveBeenCalledWith('panel-1', 'hi\n');
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+  });
+
+  // omp-pty mirrors codex-pty identically for the panel-substrate-override case.
+  it('sends an interactive-override panel in an OMP SDK session down the PTY path', async () => {
+    await dispatchQuickSessionInput(
+      session('omp-sdk'),
+      'panel-2',
+      'hi',
+      'initial',
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+    );
+
+    expect(mocks.panelSendInput).toHaveBeenCalledWith('panel-2', 'hi\n');
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+  });
+
+  it('sends an sdk-override panel in an OMP terminal session to the panel-scoped OMP SDK path', async () => {
+    await dispatchQuickSessionInput(
+      session('omp-pty'),
+      'panel-2',
+      'hi',
+      'initial',
+      undefined,
+      undefined,
+      undefined,
+      'sdk',
+    );
+
+    expect(mocks.panelContinue).toHaveBeenCalledWith('panel-2', 'hi', undefined, undefined, undefined);
+    expect(mocks.sessionSendInput).not.toHaveBeenCalled();
+    expect(mocks.panelSendInput).not.toHaveBeenCalled();
+  });
+
+  it('leaves an INHERITED omp-pty panel on the PTY path', async () => {
+    await dispatchQuickSessionInput(session('omp-pty'), 'panel-1', 'hi', 'initial', undefined, undefined, undefined, null);
 
     expect(mocks.panelSendInput).toHaveBeenCalledWith('panel-1', 'hi\n');
     expect(mocks.sessionSendInput).not.toHaveBeenCalled();

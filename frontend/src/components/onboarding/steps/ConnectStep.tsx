@@ -5,9 +5,17 @@ interface ConnectStepProps {
   claudeConnected: boolean;
   codexDetection: ProviderDetectionResult<'codex'> | null;
   codexConnected: boolean;
+  /**
+   * OMP is OPTIONAL: unlike Claude/Codex, its row never gates Continue (see
+   * onboardingStore.isNextGateBlocked) and its toggle defaults off. Null while
+   * the probe hasn't run yet, same convention as the other two.
+   */
+  ompDetection: ProviderDetectionResult<'omp'> | null;
+  ompConnected: boolean;
   checking: boolean;
   onToggleClaude: () => void;
   onToggleCodex: () => void;
+  onToggleOmp: () => void;
   onRecheck: () => void;
   onLocate: () => void;
   onInstall: () => void;
@@ -93,22 +101,38 @@ function codexDetail(detection: ProviderDetectionResult<'codex'>): string {
   return `ChatGPT connected${plan}${email}`;
 }
 
+/** OMP has no login for Cyboflow to observe — its evidence is a binary + version. */
+function ompDetail(detection: ProviderDetectionResult<'omp'>): string {
+  if (detection.state === 'unavailable') {
+    return detection.binaryPath
+      ? 'Found, but this version of omp is unsupported'
+      : 'Not found on this machine — optional';
+  }
+  const version = detection.version ? ` · ${detection.version}` : '';
+  return `Detected${version}`;
+}
+
 /** Step 1: enable at least one detected provider; enabling both is supported. */
 export function ConnectStep({
   claudeDetection,
   claudeConnected,
   codexDetection,
   codexConnected,
+  ompDetection,
+  ompConnected,
   checking,
   onToggleClaude,
   onToggleCodex,
+  onToggleOmp,
   onRecheck,
   onLocate,
   onInstall,
 }: ConnectStepProps): React.JSX.Element {
-  const loading = checking || claudeDetection === null || codexDetection === null;
+  const loading =
+    checking || claudeDetection === null || codexDetection === null || ompDetection === null;
   const claudeReady = claudeDetection?.state === 'detected';
   const codexReady = codexDetection?.state === 'detected';
+  const ompReady = ompDetection?.state === 'detected';
   const hasConnectedProvider =
     (claudeReady && claudeConnected) || (codexReady && codexConnected);
 
@@ -121,7 +145,7 @@ export function ConnectStep({
       {loading ? (
         <div className="flex items-center gap-3 border border-border-primary bg-surface-primary px-[15px] py-3.5">
           <span className="h-[7px] w-[7px] flex-shrink-0 animate-cfpulse rounded-full bg-interactive" />
-          <span className="text-[11px] text-text-secondary">Checking Claude Code and Codex…</span>
+          <span className="text-[11px] text-text-secondary">Checking Claude Code, Codex, and OMP…</span>
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -141,6 +165,40 @@ export function ConnectStep({
             connected={codexReady && codexConnected}
             onToggle={onToggleCodex}
           />
+          {/* OMP — optional, off by default. Its row never gates Continue (see
+              onboardingStore.isNextGateBlocked), so it is presented the same way
+              as the other two but never appears in the "must fix" panel below. */}
+          <ProviderRow
+            name="OMP"
+            mark="◇"
+            detail={ompDetail(ompDetection)}
+            ready={ompReady}
+            connected={ompReady && ompConnected}
+            onToggle={onToggleOmp}
+          />
+          {/* OMP's own hint, independent of the claude/codex "must fix" panel
+              below — an undetected OMP never blocks Continue, so it gets its
+              own low-key note rather than joining the mandatory-fix copy. */}
+          {ompDetection.state === 'unavailable' && (
+            <div className="border border-border-primary bg-[var(--paper-3)] px-3.5 py-2.5 text-[10px] leading-[1.55] text-text-secondary">
+              <div>
+                OMP is optional. Install via{' '}
+                <code className="border border-border-primary bg-bg-primary px-1">
+                  curl -fsSL https://omp.sh/install | sh
+                </code>{' '}
+                or{' '}
+                <code className="border border-border-primary bg-bg-primary px-1">
+                  brew install can1357/tap/omp
+                </code>
+                , then run <code className="border border-border-primary bg-bg-primary px-1">omp</code>{' '}
+                in a terminal and{' '}
+                <code className="border border-border-primary bg-bg-primary px-1">/login &lt;provider&gt;</code>.
+              </div>
+              <div className="mt-2">
+                <GhostButton label="↻ Check again" onClick={onRecheck} />
+              </div>
+            </div>
+          )}
 
           {(claudeDetection.state !== 'detected' || codexDetection.state !== 'detected') && (
             <div className="border border-border-primary bg-[var(--paper-3)] px-3.5 py-2.5 text-[10px] leading-[1.55] text-text-secondary">

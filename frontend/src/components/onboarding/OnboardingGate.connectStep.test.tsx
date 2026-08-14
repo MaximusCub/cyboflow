@@ -50,6 +50,12 @@ const CODEX_DETECTED: ProviderDetectionResult<'codex'> = {
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
 };
 
+const OMP_DETECTED: ProviderDetectionResult<'omp'> = {
+  state: 'detected',
+  binaryPath: '/usr/local/bin/omp',
+  version: '17.3.3',
+};
+
 function baseAppConfig(access?: AgentProviderAccess): AppConfig {
   return {
     gitRepoPath: '/repo',
@@ -67,16 +73,21 @@ const INITIAL_ONBOARDING_STATE = {
   connected: false,
   codexDetection: null,
   codexConnected: false,
+  ompDetection: null,
+  ompConnected: false,
   permMode: 'auto' as const,
   hydrated: false,
 };
 
-// Both probes report a healthy account, so the step's toggles are enabled and
-// the "at least one detected provider" gate can actually be satisfied.
+// All three probes report a healthy account/binary, so the step's toggles are
+// enabled and the "at least one detected provider" gate can actually be
+// satisfied. OMP never participates in that gate (it is optional), but its
+// probe still needs a response or the step stays in its loading state.
 const invoke = vi.fn(async (channel: string, provider?: string) => {
   if (channel === PROVIDERS_DETECT_CHANNEL) {
     if (provider === 'claude') return { success: true, data: CLAUDE_DETECTED };
     if (provider === 'codex') return { success: true, data: CODEX_DETECTED };
+    if (provider === 'omp') return { success: true, data: OMP_DETECTED };
   }
   return { success: true };
 });
@@ -145,9 +156,11 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
 
     // Full object, never a partial patch: the provider the user left off must be
     // written as explicitly off, not merely omitted (omission floors to ON).
+    // OMP rides along at its untouched default (false) — the same absent⇒
+    // disabled floor AGENT_PROVIDER_REGISTRY.omp itself uses.
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: false },
+        agentProviderAccess: { claude: true, codex: false, omp: false },
       }),
     );
     await waitFor(() => expect(useOnboardingStore.getState().step).toBe(2));
@@ -162,8 +175,59 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
 
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true },
+        agentProviderAccess: { claude: true, codex: true, omp: false },
       }),
+    );
+  });
+
+  it('leaves OMP off by default even when Continue is clicked without touching its toggle', async () => {
+    await mountAtConnectStep(baseAppConfig());
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Use Claude Code in Cyboflow' }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ agentProviderAccess: expect.objectContaining({ omp: false }) }),
+      ),
+    );
+  });
+
+  it('persists an explicit OMP opt-in alongside claude/codex, and never gates Continue on it', async () => {
+    await mountAtConnectStep(baseAppConfig());
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Use Claude Code in Cyboflow' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Use OMP in Cyboflow' }));
+    const continueButton = screen.getByRole('button', { name: /Continue/ });
+    // Enabled purely off the claude toggle — OMP is never part of the gate.
+    expect(continueButton).toBeEnabled();
+    fireEvent.click(continueButton);
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: false, omp: true },
+      }),
+    );
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(2));
+  });
+
+  it('seeds the OMP toggle from a saved setting, defaulting OFF when absent', async () => {
+    await mountAtConnectStep(baseAppConfig({ claude: true, codex: false, omp: true }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: 'Use OMP in Cyboflow' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      ),
+    );
+  });
+
+  it('leaves the OMP toggle off on a pristine install, unlike claude/codex which seed true', async () => {
+    await mountAtConnectStep(baseAppConfig());
+
+    expect(screen.getByRole('switch', { name: 'Use OMP in Cyboflow' })).toHaveAttribute(
+      'aria-checked',
+      'false',
     );
   });
 

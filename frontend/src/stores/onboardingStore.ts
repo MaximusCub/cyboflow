@@ -125,6 +125,22 @@ interface OnboardingState {
   codexDetection: ProviderDetectionResult<'codex'> | null;
   /** Step-1 consent toggle for the ChatGPT-authenticated Codex runtime. */
   codexConnected: boolean;
+  /**
+   * Latest providers:detect('omp') result; null = probe not yet run. OMP is an
+   * OPTIONAL row on step 1 — unlike claude/codex it never participates in
+   * isNextGateBlocked, since its runtimes are not yet offered by any picker
+   * (RUNTIME_CAPABILITIES.selectableInPickers), so "connected" here means only
+   * "the provider-access toggle will be turned on", not "ready to launch".
+   */
+  ompDetection: ProviderDetectionResult<'omp'> | null;
+  /**
+   * Step-1 consent toggle for OMP. Defaults false and STAYS false unless the
+   * user explicitly opts in — mirrors AGENT_PROVIDER_REGISTRY.omp.defaultEnabled
+   * (absent access-map key floors to disabled for OMP, unlike claude/codex) so
+   * onboarding never turns a provider on that a fresh install would otherwise
+   * leave off.
+   */
+  ompConnected: boolean;
   /** Step-2 selection; 'auto' preselected per design, persisted to config on step-2 next(). */
   permMode: PermissionMode;
   /** Boot gate resolved — render nothing until true (no-flash rule, docs/CODE-PATTERNS.md). */
@@ -168,6 +184,8 @@ interface OnboardingState {
   setConnected: (connected: boolean) => void;
   setCodexDetection: (result: ProviderDetectionResult<'codex'> | null) => void;
   setCodexConnected: (connected: boolean) => void;
+  setOmpDetection: (result: ProviderDetectionResult<'omp'> | null) => void;
+  setOmpConnected: (connected: boolean) => void;
   setPermMode: (mode: PermissionMode) => void;
   /** The user clicked the highlighted coachmark target (capture-phase listener). */
   anchorActioned: () => void;
@@ -203,6 +221,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   connected: false,
   codexDetection: null,
   codexConnected: false,
+  ompDetection: null,
+  ompConnected: false,
   permMode: 'auto',
   hydrated: false,
 
@@ -238,6 +258,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     detection: null,
     codexConnected: false,
     codexDetection: null,
+    ompConnected: false,
+    ompDetection: null,
     permMode: 'auto',
     hydrated: true,
   }),
@@ -330,6 +352,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   setConnected: (connected) => set({ connected }),
   setCodexDetection: (codexDetection) => set({ codexDetection }),
   setCodexConnected: (codexConnected) => set({ codexConnected }),
+  setOmpDetection: (ompDetection) => set({ ompDetection }),
+  setOmpConnected: (ompConnected) => set({ ompConnected }),
   setPermMode: (permMode) => set({ permMode }),
 
   anchorActioned: () => {
