@@ -588,9 +588,9 @@ export interface WorkflowAgentCustomCopy {
  * this workflow's `agentConfigs` -> an A/B variant's agent delta. So this
  * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
  *
- * An empty `{}` config (none of `model`, `custom`, `runtime`, `codexModel`, nor
- * `effort` set) carries no signal and must NEVER be persisted — the workflow
- * editor prunes it before write.
+ * An empty `{}` config (none of `model`, `custom`, `runtime`, `providerModel`
+ * (nor its deprecated alias `codexModel`), nor `effort` set) carries no signal
+ * and must NEVER be persisted — the workflow editor prunes it before write.
  */
 export interface WorkflowAgentConfig {
   /**
@@ -610,11 +610,21 @@ export interface WorkflowAgentConfig {
    */
   runtime?: WorkflowLaunchableRuntime;
   /**
-   * Codex model id (e.g. `'gpt-5.2-codex'`) used when `runtime === 'codex-sdk'`.
-   * Free-form string rather than an enum: Codex model ids are discovered
-   * dynamically from the Codex catalogue, not a fixed union like
-   * {@link AgentModelAlias}. Ignored for Claude runtimes, which keep using
-   * `model`.
+   * The model id for this agent's resolved NON-CLAUDE provider (e.g.
+   * `'gpt-5.2-codex'` when `runtime === 'codex-sdk'`). Free-form string rather
+   * than an enum: a non-Claude provider's model ids are discovered dynamically
+   * from its own catalogue, not a fixed union like {@link AgentModelAlias}.
+   * Ignored for Claude runtimes, which keep using `model`. A future provider
+   * reuses this same field — it is keyed by "resolved non-Claude provider",
+   * not by any one provider's name.
+   */
+  providerModel?: string;
+  /**
+   * @deprecated Read-compat alias of {@link providerModel}. Persisted workflow
+   * definitions and the MCP `cyboflow_update_workflow`/`cyboflow_create_variant`
+   * writers may still write this key; every read seam normalizes via
+   * `providerModel ?? codexModel` (an explicit `providerModel` wins). New
+   * writers should set `providerModel` instead.
    */
   codexModel?: string;
   /**

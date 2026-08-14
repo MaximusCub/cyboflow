@@ -55,7 +55,13 @@ export interface AgentDraft {
   model?: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
   runtime?: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when `runtime`
+   * names a non-Claude provider (e.g. `'codex-sdk'`); `null`/omitted = that
+   * provider's default.
+   */
+  providerModel?: string | null;
+  /** @deprecated Alias of {@link providerModel}; unused once a caller sets providerModel directly. */
   codexModel?: string | null;
   enabledMcps: string[];
   isCustom: boolean;

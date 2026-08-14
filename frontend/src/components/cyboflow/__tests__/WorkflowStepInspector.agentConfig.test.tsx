@@ -69,6 +69,7 @@ function makeEntry(overrides: Partial<AgentEntry> = {}): AgentEntry {
     tools: ['Read', 'Edit', 'Write'],
     model: null,
     runtime: null,
+    providerModel: null,
     codexModel: null,
     enabledMcps: ['filesystem'],
     source: 'builtin',
@@ -268,9 +269,9 @@ describe('AgentConfigSection — Codex model picker', () => {
     expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'auto', 'gpt-5.2-codex']);
   });
 
-  it('reflects a pinned codexModel and dispatches SET_AGENT_CODEX_MODEL on change', () => {
+  it('reflects a pinned providerModel and dispatches SET_AGENT_PROVIDER_MODEL on change', () => {
     const { dispatch } = renderInspector({
-      definition: makeDefinition({ implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } }),
+      definition: makeDefinition({ implement: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' } }),
       selectedStepId: 'impl',
     });
     openAgentTab();
@@ -279,18 +280,29 @@ describe('AgentConfigSection — Codex model picker', () => {
     expect(select.value).toBe('gpt-5.2-codex');
 
     fireEvent.change(select, { target: { value: 'auto' } });
-    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: 'auto' });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_PROVIDER_MODEL', agentKey: 'implement', providerModel: 'auto' });
   });
 
-  it('maps the "(inherit)" option back to a null codexModel', () => {
-    const { dispatch } = renderInspector({
+  it('reflects a pin carried under the deprecated codexModel alias (a definition an older writer saved)', () => {
+    renderInspector({
       definition: makeDefinition({ implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } }),
       selectedStepId: 'impl',
     });
     openAgentTab();
 
+    const select = screen.getByTestId('inspector-codex-model-select') as HTMLSelectElement;
+    expect(select.value).toBe('gpt-5.2-codex');
+  });
+
+  it('maps the "(inherit)" option back to a null providerModel', () => {
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
     fireEvent.change(screen.getByTestId('inspector-codex-model-select'), { target: { value: '' } });
-    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: null });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_PROVIDER_MODEL', agentKey: 'implement', providerModel: null });
   });
 });
 
@@ -698,7 +710,7 @@ describe('AgentConfigSection — fan-out inner variant', () => {
     expect(codexSelect.value).toBe('');
 
     fireEvent.change(codexSelect, { target: { value: 'auto' } });
-    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: 'auto' });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_PROVIDER_MODEL', agentKey: 'implement', providerModel: 'auto' });
   });
 
   function fanOutInnerCodexDefinition(): WorkflowDefinition {

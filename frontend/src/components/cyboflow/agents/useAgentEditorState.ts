@@ -32,8 +32,12 @@ export interface AgentDraft {
   model: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null` to inherit the run-level runtime. */
   runtime: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`, or `null` for the default. */
-  codexModel: string | null;
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when
+   * `runtime` names a non-Claude provider (e.g. `'codex-sdk'`), or `null` for
+   * that provider's default.
+   */
+  providerModel: string | null;
   /** MCP server names granted to this agent (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
 }
@@ -52,7 +56,7 @@ export type AgentEditorAction =
   | { type: 'SET_SYSTEM_PROMPT'; systemPrompt: string }
   | { type: 'SET_MODEL'; model: AgentModelAlias | null }
   | { type: 'SET_RUNTIME'; runtime: WorkflowAgentRuntime | null }
-  | { type: 'SET_CODEX_MODEL'; codexModel: string | null }
+  | { type: 'SET_PROVIDER_MODEL'; providerModel: string | null }
   | { type: 'TOGGLE_TOOL'; tool: CliTool }
   | { type: 'TOGGLE_MCP'; server: string };
 
@@ -77,7 +81,10 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
     enabledTools: CLI_TOOLS.filter((t) => enabled.has(t)),
     model: entry.model,
     runtime,
-    codexModel: entry.codexModel,
+    // Normalize the read seam here too (belt-and-suspenders — the server
+    // already resolves both fields to the same value): an explicit
+    // providerModel wins over the deprecated codexModel alias.
+    providerModel: entry.providerModel ?? entry.codexModel,
     // Sort so the structural dirty check is order-independent (the catalogue
     // has no fixed order like CLI_TOOLS); TOGGLE_MCP keeps the array sorted.
     enabledMcps: [...entry.enabledMcps].sort(),
@@ -107,26 +114,30 @@ export function agentEditorReducer(
     case 'SET_MODEL':
       return { ...state, draft: { ...state.draft, model: action.model } };
 
-    case 'SET_RUNTIME':
+    case 'SET_RUNTIME': {
       // A model pin is only meaningful alongside a pinned runtime — under an
       // INHERITED runtime the effective provider depends on the run, so the pin
       // is non-deterministic (and on a programmatic run it is dropped outright).
-      // So each model field survives ONLY under its own provider's runtime:
-      // Codex model under 'codex-sdk', Claude model under a Claude runtime, and
-      // neither under inherit. Mirrors the server-side normalizeRuntime.
+      // So each model field survives ONLY under its own provider's runtime: the
+      // provider model under a non-Claude runtime, the Claude model under a
+      // Claude runtime, and neither under inherit. Mirrors the server-side
+      // normalizeRuntime (keyed on the CLAUDE runtimes, not a literal
+      // 'codex-sdk' check, so a future non-Claude runtime behaves the same way).
+      const isClaudeRuntime = action.runtime === 'claude-sdk' || action.runtime === 'claude-interactive';
       return {
         ...state,
         draft: {
           ...state.draft,
           runtime: action.runtime,
-          codexModel: action.runtime === 'codex-sdk' ? state.draft.codexModel : null,
-          model:
-            action.runtime !== null && action.runtime !== 'codex-sdk' ? state.draft.model : null,
+          providerModel:
+            action.runtime !== null && !isClaudeRuntime ? state.draft.providerModel : null,
+          model: isClaudeRuntime ? state.draft.model : null,
         },
       };
+    }
 
-    case 'SET_CODEX_MODEL':
-      return { ...state, draft: { ...state.draft, codexModel: action.codexModel } };
+    case 'SET_PROVIDER_MODEL':
+      return { ...state, draft: { ...state.draft, providerModel: action.providerModel } };
 
     case 'TOGGLE_TOOL': {
       const has = state.draft.enabledTools.includes(action.tool);
@@ -156,7 +167,7 @@ export function agentEditorReducer(
 export function initAgentEditorState(entry: AgentEntry | null): AgentEditorState {
   const draft: AgentDraft = entry
     ? draftFromEntry(entry)
-    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], model: null, runtime: null, codexModel: null, enabledMcps: [] };
+    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], model: null, runtime: null, providerModel: null, enabledMcps: [] };
   return { draft, baseline: structuredClone(draft) };
 }
 

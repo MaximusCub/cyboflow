@@ -1,12 +1,19 @@
 /**
- * Unit tests for the per-agent RUNTIME resolution added by migration 070.
+ * Unit tests for the per-agent RUNTIME resolution added by migration 070, and
+ * the `provider_model` generalization added by migration 104.
  *
- * An override row's `runtime` / `codex_model` cells flow onto the EffectiveAgent
- * (mergeAgent override branch + customAgent) so `resolveStepAgent` — and thus the
- * programmatic spawn — pick up the global agent editor's runtime pin. An
- * unoverridden builtin (or a row predating the migration) inherits (runtime
- * absent). `buildEffectiveEntry` surfaces the pair on the wire `AgentEntry` as
- * `null` when absent. A workflow-scoped config still WINS over the base pin.
+ * An override row's `runtime` / `codex_model` / `provider_model` cells flow
+ * onto the EffectiveAgent (mergeAgent override branch + customAgent) so
+ * `resolveStepAgent` — and thus the programmatic spawn — pick up the global
+ * agent editor's runtime pin. An unoverridden builtin (or a row predating
+ * either migration) inherits (runtime absent). `buildEffectiveEntry` surfaces
+ * the pair on the wire `AgentEntry` as `null` when absent. A workflow-scoped
+ * config still WINS over the base pin.
+ *
+ * The read-seam normalization rule under test: `providerModel ?? codexModel`
+ * (an explicit `provider_model` column wins; a pre-104 row with only
+ * `codex_model` set still resolves), and `codexModel` on the resulting
+ * `EffectiveAgent`/`AgentEntry` always MIRRORS the resolved value.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -50,6 +57,7 @@ function row(overrides: Partial<AgentOverrideRow> = {}): AgentOverrideRow {
     model: null,
     runtime: null,
     codex_model: null,
+    provider_model: null,
     created_at: '2026-07-17T00:00:00.000Z',
     updated_at: '2026-07-17T00:00:00.000Z',
     ...overrides,
@@ -57,18 +65,31 @@ function row(overrides: Partial<AgentOverrideRow> = {}): AgentOverrideRow {
 }
 
 describe('effectiveAgents runtime resolution (migration 070)', () => {
-  it('an unoverridden builtin inherits (runtime + codexModel absent)', () => {
+  it('an unoverridden builtin inherits (runtime + providerModel/codexModel absent)', () => {
     const eff = mergeAgent(builtin('planner'), null);
     expect(eff.runtime).toBeUndefined();
+    expect(eff.providerModel).toBeUndefined();
     expect(eff.codexModel).toBeUndefined();
   });
 
-  it('mergeAgent surfaces a codex-sdk override row runtime + codex model', () => {
+  it('mergeAgent surfaces a codex-sdk override row runtime + LEGACY codex_model (pre-104 row)', () => {
     const eff = mergeAgent(
       builtin('planner'),
       row({ runtime: 'codex-sdk', codex_model: 'gpt-5.2-codex' }),
     );
     expect(eff.runtime).toBe('codex-sdk');
+    // A row with only the legacy column set still resolves — normalized onto
+    // BOTH fields (providerModel primary, codexModel mirrored).
+    expect(eff.providerModel).toBe('gpt-5.2-codex');
+    expect(eff.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('mergeAgent prefers an explicit provider_model over a stale codex_model', () => {
+    const eff = mergeAgent(
+      builtin('planner'),
+      row({ runtime: 'codex-sdk', codex_model: 'gpt-5-stale', provider_model: 'gpt-5.2-codex' }),
+    );
+    expect(eff.providerModel).toBe('gpt-5.2-codex');
     expect(eff.codexModel).toBe('gpt-5.2-codex');
   });
 
@@ -77,31 +98,35 @@ describe('effectiveAgents runtime resolution (migration 070)', () => {
     expect(eff.runtime).toBeUndefined();
   });
 
-  it('a Claude-runtime override carries no codexModel', () => {
+  it('a Claude-runtime override carries no providerModel/codexModel', () => {
     const eff = mergeAgent(builtin('planner'), row({ runtime: 'claude-interactive' }));
     expect(eff.runtime).toBe('claude-interactive');
+    expect(eff.providerModel).toBeUndefined();
     expect(eff.codexModel).toBeUndefined();
   });
 
-  it('customAgent surfaces its row runtime + codex model', () => {
+  it('customAgent surfaces its row runtime + provider model (mirrored onto codexModel)', () => {
     const eff = customAgent(
-      row({ agent_key: 'my-helper', is_custom: 1, base_agent_key: null, runtime: 'codex-sdk', codex_model: 'gpt-5.2-codex' }),
+      row({ agent_key: 'my-helper', is_custom: 1, base_agent_key: null, runtime: 'codex-sdk', provider_model: 'gpt-5.2-codex' }),
     );
     expect(eff.source).toBe('custom');
     expect(eff.runtime).toBe('codex-sdk');
+    expect(eff.providerModel).toBe('gpt-5.2-codex');
     expect(eff.codexModel).toBe('gpt-5.2-codex');
   });
 
-  it('buildEffectiveEntry surfaces runtime/codexModel as null when absent', () => {
+  it('buildEffectiveEntry surfaces runtime/providerModel/codexModel as null when absent', () => {
     const entry = buildEffectiveEntry(mergeAgent(builtin('planner'), null), null, EMPTY_USAGE);
     expect(entry.runtime).toBeNull();
+    expect(entry.providerModel).toBeNull();
     expect(entry.codexModel).toBeNull();
   });
 
-  it('buildEffectiveEntry surfaces the pinned runtime/codexModel', () => {
+  it('buildEffectiveEntry surfaces the pinned runtime/providerModel/codexModel', () => {
     const eff = mergeAgent(builtin('planner'), row({ runtime: 'codex-sdk', codex_model: 'gpt-5.2-codex' }));
     const entry = buildEffectiveEntry(eff, row({ runtime: 'codex-sdk', codex_model: 'gpt-5.2-codex' }), EMPTY_USAGE);
     expect(entry.runtime).toBe('codex-sdk');
+    expect(entry.providerModel).toBe('gpt-5.2-codex');
     expect(entry.codexModel).toBe('gpt-5.2-codex');
   });
 
@@ -115,6 +140,25 @@ describe('effectiveAgents runtime resolution (migration 070)', () => {
     const base = mergeAgent(builtin('planner'), row({ runtime: 'codex-sdk', codex_model: 'gpt-5.2-codex' }));
     const [result] = applyWorkflowAgentConfigs([base], {});
     expect(result.runtime).toBe('codex-sdk');
+    expect(result.providerModel).toBe('gpt-5.2-codex');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('a workflow config providerModel WINS over a stale config codexModel', () => {
+    const base = mergeAgent(builtin('planner'), row({ runtime: 'claude-interactive' }));
+    const [result] = applyWorkflowAgentConfigs([base], {
+      planner: { runtime: 'codex-sdk', codexModel: 'gpt-5-stale', providerModel: 'gpt-5.2-codex' },
+    });
+    expect(result.providerModel).toBe('gpt-5.2-codex');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('a workflow config with only the LEGACY codexModel key still resolves', () => {
+    const base = mergeAgent(builtin('planner'), row({ runtime: 'claude-interactive' }));
+    const [result] = applyWorkflowAgentConfigs([base], {
+      planner: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' },
+    });
+    expect(result.providerModel).toBe('gpt-5.2-codex');
     expect(result.codexModel).toBe('gpt-5.2-codex');
   });
 });

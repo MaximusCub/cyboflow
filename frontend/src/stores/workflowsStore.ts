@@ -136,7 +136,7 @@ export function toAgentGalleryEntry(entry: AgentEntry): AgentGalleryEntry {
     model: agentRunTargetLabel({
       runtime: entry.runtime,
       model: entry.model,
-      codexModel: entry.codexModel,
+      providerModel: entry.providerModel,
     }),
   };
 }

@@ -172,7 +172,14 @@ export interface DefaultProgrammaticRunnerDeps {
   resolveStepAgent?: (
     runId: string,
     agentKey: string,
-  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string; effort?: ReasoningEffort } | undefined;
+  ) =>
+    | {
+        runtime?: WorkflowAgentRuntime;
+        providerModel?: string;
+        codexModel?: string;
+        effort?: ReasoningEffort;
+      }
+    | undefined;
   logger?: LoggerLike;
 }
 

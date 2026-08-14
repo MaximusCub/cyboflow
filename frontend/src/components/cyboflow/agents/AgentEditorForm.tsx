@@ -308,11 +308,11 @@ export function AgentEditorForm({
             <span className="flex-1 h-px bg-border-subtle" />
           </div>
           <select
-            value={draft.codexModel ?? ''}
+            value={draft.providerModel ?? ''}
             onChange={(e) =>
               dispatch({
-                type: 'SET_CODEX_MODEL',
-                codexModel: e.target.value === '' ? null : e.target.value,
+                type: 'SET_PROVIDER_MODEL',
+                providerModel: e.target.value === '' ? null : e.target.value,
               })
             }
             aria-label="Agent Codex model"

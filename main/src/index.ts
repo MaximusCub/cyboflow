@@ -2767,7 +2767,7 @@ async function initializeServices(): Promise<boolean> {
     // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
     // FULL effective agent set (project overrides + workflow agentConfigs + variant
     // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/model/codexModel/effort. Absent EVERY override
+    // requested agentKey's runtime/model/providerModel/effort. Absent EVERY override
     // (unoverridden agent) -> undefined, so the step spawns under the run-level
     // provider/runtime/model with no per-agent effort. Effort is returned even
     // without a runtime override so a Claude agent can carry a reasoning-effort pin
@@ -2806,7 +2806,11 @@ async function initializeServices(): Promise<boolean> {
       return {
         ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
         ...(model ? { model } : {}),
-        ...(a.codexModel ? { codexModel: a.codexModel } : {}),
+        // a.providerModel is already normalized (providerModel ?? codexModel) by
+        // effectiveAgents; codexModel mirrors it so a not-yet-migrated consumer of
+        // this return shape (there is none left in-tree, but the field stays a
+        // read-compat alias) still sees the correct value.
+        ...(a.providerModel ? { providerModel: a.providerModel, codexModel: a.providerModel } : {}),
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },

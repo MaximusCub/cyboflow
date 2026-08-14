@@ -51,7 +51,15 @@ export interface EffectiveAgent {
    * inherit the run-level provider/runtime (no per-agent source sets this yet).
    */
   runtime?: WorkflowAgentRuntime;
-  /** Codex model id used when `runtime === 'codex-sdk'`. Absent -> inherit. */
+  /**
+   * The model id for this agent's resolved NON-CLAUDE provider, when overridden
+   * (e.g. used when `runtime === 'codex-sdk'`). Already normalized via
+   * `providerModel ?? codexModel` at the point this is set — see
+   * {@link runtimeFields} — so `codexModel` below always mirrors it. Absent ->
+   * inherit.
+   */
+  providerModel?: string;
+  /** @deprecated Mirrors {@link providerModel} for callers that have not migrated. */
   codexModel?: string;
   /**
    * Reasoning-effort override carried verbatim from the config; the whole
@@ -104,8 +112,12 @@ function parseAgentRuntime(value: string | null | undefined): WorkflowAgentRunti
   return isWorkflowLaunchableRuntime(value) ? value : undefined;
 }
 
-/** Narrow an override row's `codex_model` cell to a non-empty string, or `undefined`. */
-function parseCodexModel(value: string | null | undefined): string | undefined {
+/**
+ * Narrow an override row's `codex_model` or `provider_model` cell to a
+ * non-empty string, or `undefined`. Both columns share this shape (free-form,
+ * nullable); the caller decides which cell to normalize.
+ */
+function parseProviderModel(value: string | null | undefined): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
@@ -149,19 +161,26 @@ export function mergeAgent(
 }
 
 /**
- * The optional `runtime` / `codexModel` overlay carried by an override row.
+ * The optional `runtime` / `providerModel` overlay carried by an override row.
  * Spread onto an EffectiveAgent so an inherited runtime stays ABSENT (undefined),
  * keeping the `agent.runtime === undefined` fallback checks in the overlay exact.
+ *
+ * `providerModel` is the READ-SEAM normalization: `row.provider_model ??
+ * row.codex_model` (an explicit `provider_model` wins; a pre-104 row with only
+ * `codex_model` set still resolves). `codexModel` on the returned object always
+ * mirrors the SAME resolved value, so a not-yet-migrated reader sees the
+ * correct model id under either key.
  */
 function runtimeFields(override: AgentOverrideRow): {
   runtime?: WorkflowAgentRuntime;
+  providerModel?: string;
   codexModel?: string;
 } {
   const runtime = parseAgentRuntime(override.runtime);
-  const codexModel = parseCodexModel(override.codex_model);
+  const providerModel = parseProviderModel(override.provider_model) ?? parseProviderModel(override.codex_model);
   return {
     ...(runtime ? { runtime } : {}),
-    ...(codexModel ? { codexModel } : {}),
+    ...(providerModel ? { providerModel, codexModel: providerModel } : {}),
   };
 }
 
@@ -266,8 +285,10 @@ export function applyVariantAgentDeltas(
  *   - `runtime` (when a valid {@link isWorkflowLaunchableRuntime} value) replaces the
  *     runtime; an unrecognized value leaves the existing runtime unchanged. This
  *     slice is TYPES + RESOLUTION ONLY — nothing downstream reads `runtime` yet;
- *   - `codexModel` (when a non-empty string) replaces the Codex model id; anything
- *     else leaves the existing value unchanged;
+ *   - `providerModel` (when a non-empty string; its deprecated alias `codexModel`
+ *     is read the SAME way — `providerModel ?? codexModel`, an explicit
+ *     `providerModel` wins) replaces the resolved non-Claude provider's model id;
+ *     anything else leaves the existing value unchanged;
  *   - in ANY of these cases `rawContent` is DROPPED and `source` flips `builtin →
  *     builtin-override`, so the overlay renders the config via `renderAgentMarkdown`
  *     instead of writing the stale verbatim builtin `.md`. (A `builtin-override` /
@@ -279,8 +300,8 @@ export function applyVariantAgentDeltas(
  * (Agents-pane pin/body) but a VARIANT delta still wins over the workflow config for
  * the fields it touches. A config key with no matching effective agent is silently
  * ignored (configs never ADD agents — an unspawnable key is a no-op). An empty
- * config (none of `model`, `custom`, `runtime`, `codexModel`, which the editor
- * never persists) leaves its agent unchanged.
+ * config (none of `model`, `custom`, `runtime`, `providerModel`/`codexModel`, which
+ * the editor never persists) leaves its agent unchanged.
  */
 export function applyWorkflowAgentConfigs(
   effective: EffectiveAgent[],
@@ -293,6 +314,7 @@ export function applyWorkflowAgentConfigs(
       (config.custom === undefined &&
         config.model === undefined &&
         config.runtime === undefined &&
+        config.providerModel === undefined &&
         config.codexModel === undefined &&
         config.effort === undefined)
     ) {
@@ -327,20 +349,26 @@ export function applyWorkflowAgentConfigs(
     }
     const model = isAgentModelAlias(config.model) ? config.model : agent.model;
     const runtime = isWorkflowLaunchableRuntime(config.runtime) ? config.runtime : agent.runtime;
-    const codexModel =
-      typeof config.codexModel === 'string' && config.codexModel.length > 0
-        ? config.codexModel
-        : agent.codexModel;
+    // READ-SEAM normalization: an explicit config.providerModel wins over its
+    // deprecated alias config.codexModel (an out-of-band-edited spec, or a
+    // pre-generalization MCP write, may still carry only the old key).
+    const configProviderModel =
+      typeof config.providerModel === 'string' && config.providerModel.length > 0
+        ? config.providerModel
+        : typeof config.codexModel === 'string' && config.codexModel.length > 0
+          ? config.codexModel
+          : undefined;
+    const providerModel = configProviderModel ?? agent.providerModel;
     const effort = isAnyEffortLevel(config.effort) ? config.effort : agent.effort;
 
     // Nothing valid applied (a malformed custom that degraded to absent AND no valid
-    // model/runtime/codexModel/effort) → leave the agent fully untouched, exactly like
-    // an empty `{}` config: no spurious source flip / rawContent drop.
+    // model/runtime/providerModel/effort) → leave the agent fully untouched, exactly
+    // like an empty `{}` config: no spurious source flip / rawContent drop.
     if (
       !hasCustom &&
       model === agent.model &&
       runtime === agent.runtime &&
-      codexModel === agent.codexModel &&
+      providerModel === agent.providerModel &&
       effort === agent.effort
     ) {
       return agent;
@@ -352,7 +380,21 @@ export function applyWorkflowAgentConfigs(
     // source guarantees a builtin no longer writes its stale verbatim body).
     const { rawContent: _dropped, ...rest } = agent;
     void _dropped;
-    return { ...rest, description, systemPrompt, tools, enabledMcps, model, runtime, codexModel, effort, source };
+    // codexModel mirrors the resolved providerModel so a not-yet-migrated reader
+    // sees the correct value under either key (same contract as runtimeFields).
+    return {
+      ...rest,
+      description,
+      systemPrompt,
+      tools,
+      enabledMcps,
+      model,
+      runtime,
+      providerModel,
+      codexModel: providerModel,
+      effort,
+      source,
+    };
   });
 }
 
@@ -378,7 +420,8 @@ export function buildEffectiveEntry(
     tools: effective.tools,
     model: effective.model,
     runtime: effective.runtime ?? null,
-    codexModel: effective.codexModel ?? null,
+    providerModel: effective.providerModel ?? effective.codexModel ?? null,
+    codexModel: effective.codexModel ?? effective.providerModel ?? null,
     enabledMcps: effective.enabledMcps,
     source: effective.source,
     isCustom: effective.source === 'custom',

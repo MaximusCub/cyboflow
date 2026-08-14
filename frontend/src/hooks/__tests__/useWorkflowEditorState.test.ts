@@ -1127,70 +1127,103 @@ describe('workflowEditorReducer — SET_AGENT_RUNTIME', () => {
   });
 });
 
-describe('workflowEditorReducer — SET_AGENT_CODEX_MODEL', () => {
-  it('sets a codexModel for an agent with no prior config', () => {
+describe('workflowEditorReducer — SET_AGENT_PROVIDER_MODEL', () => {
+  it('sets a providerModel for an agent with no prior config', () => {
     const next = workflowEditorReducer(makeState(), {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'gpt-5.2-codex',
+      providerModel: 'gpt-5.2-codex',
     });
-    expect(next.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.2-codex' } });
+    expect(next.definition.agentConfigs).toEqual({ executor: { providerModel: 'gpt-5.2-codex' } });
   });
 
-  it('overwrites an existing codexModel', () => {
+  it('overwrites an existing providerModel', () => {
     const first = workflowEditorReducer(makeState(), {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'gpt-5.2-codex',
+      providerModel: 'gpt-5.2-codex',
     });
     const second = workflowEditorReducer(first, {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'auto',
+      providerModel: 'auto',
     });
-    expect(second.definition.agentConfigs).toEqual({ executor: { codexModel: 'auto' } });
+    expect(second.definition.agentConfigs).toEqual({ executor: { providerModel: 'auto' } });
   });
 
   it('clearing the only field prunes the agent entry and the whole map', () => {
-    const withCodexModel = workflowEditorReducer(makeState(), {
-      type: 'SET_AGENT_CODEX_MODEL',
+    const withProviderModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'gpt-5.2-codex',
+      providerModel: 'gpt-5.2-codex',
     });
-    const cleared = workflowEditorReducer(withCodexModel, {
-      type: 'SET_AGENT_CODEX_MODEL',
+    const cleared = workflowEditorReducer(withProviderModel, {
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: null,
+      providerModel: null,
     });
     expect(cleared.definition.agentConfigs).toBeUndefined();
     expect('agentConfigs' in cleared.definition).toBe(false);
   });
 
-  it('clearing runtime AND codexModel together prunes the whole entry (no empty {})', () => {
+  it('clearing runtime AND providerModel together prunes the whole entry (no empty {})', () => {
     const withRuntime = workflowEditorReducer(makeState(), {
       type: 'SET_AGENT_RUNTIME',
       agentKey: 'executor',
       runtime: 'codex-sdk',
     });
     const withBoth = workflowEditorReducer(withRuntime, {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'gpt-5.2-codex',
+      providerModel: 'gpt-5.2-codex',
     });
     const runtimeCleared = workflowEditorReducer(withBoth, {
       type: 'SET_AGENT_RUNTIME',
       agentKey: 'executor',
       runtime: null,
     });
-    expect(runtimeCleared.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.2-codex' } });
+    expect(runtimeCleared.definition.agentConfigs).toEqual({ executor: { providerModel: 'gpt-5.2-codex' } });
 
     const bothCleared = workflowEditorReducer(runtimeCleared, {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: null,
+      providerModel: null,
     });
     expect(bothCleared.definition.agentConfigs).toBeUndefined();
     expect(JSON.stringify(bothCleared.definition)).not.toContain('agentConfigs');
+  });
+
+  // migration 104: providerModel generalizes the deprecated codexModel alias.
+  // A config loaded from a persisted spec may still carry only the old key.
+  it('setting a new providerModel drops a stale codexModel from the same config', () => {
+    const withLegacy = workflowEditorReducer(makeState(), {
+      type: 'SET_DEFINITION',
+      definition: { ...makeState().definition, agentConfigs: { executor: { runtime: 'codex-sdk', codexModel: 'gpt-5-stale' } } },
+      name: 'wf',
+    });
+    const next = workflowEditorReducer(withLegacy, {
+      type: 'SET_AGENT_PROVIDER_MODEL',
+      agentKey: 'executor',
+      providerModel: 'gpt-5.2-codex',
+    });
+    expect(next.definition.agentConfigs).toEqual({
+      executor: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' },
+    });
+  });
+
+  it('clearing providerModel also clears a config that only ever carried the legacy codexModel key', () => {
+    const withLegacy = workflowEditorReducer(makeState(), {
+      type: 'SET_DEFINITION',
+      definition: { ...makeState().definition, agentConfigs: { executor: { codexModel: 'gpt-5.2-codex' } } },
+      name: 'wf',
+    });
+    const cleared = workflowEditorReducer(withLegacy, {
+      type: 'SET_AGENT_PROVIDER_MODEL',
+      agentKey: 'executor',
+      providerModel: null,
+    });
+    expect(cleared.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in cleared.definition).toBe(false);
   });
 });
 
@@ -1219,11 +1252,11 @@ describe('workflowEditorReducer — SET_AGENT_EFFORT (IDEA-029)', () => {
     expect('agentConfigs' in cleared.definition).toBe(false);
   });
 
-  it('composes with a codex-model pin and clears independently (no empty {})', () => {
+  it('composes with a provider-model pin and clears independently (no empty {})', () => {
     const withCodex = workflowEditorReducer(makeState(), {
-      type: 'SET_AGENT_CODEX_MODEL',
+      type: 'SET_AGENT_PROVIDER_MODEL',
       agentKey: 'executor',
-      codexModel: 'gpt-5.6-sol',
+      providerModel: 'gpt-5.6-sol',
     });
     const withBoth = workflowEditorReducer(withCodex, {
       type: 'SET_AGENT_EFFORT',
@@ -1231,14 +1264,14 @@ describe('workflowEditorReducer — SET_AGENT_EFFORT (IDEA-029)', () => {
       effort: 'xhigh',
     });
     expect(withBoth.definition.agentConfigs).toEqual({
-      executor: { codexModel: 'gpt-5.6-sol', effort: 'xhigh' },
+      executor: { providerModel: 'gpt-5.6-sol', effort: 'xhigh' },
     });
     const effortCleared = workflowEditorReducer(withBoth, {
       type: 'SET_AGENT_EFFORT',
       agentKey: 'executor',
       effort: null,
     });
-    expect(effortCleared.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.6-sol' } });
+    expect(effortCleared.definition.agentConfigs).toEqual({ executor: { providerModel: 'gpt-5.6-sol' } });
   });
 });
 

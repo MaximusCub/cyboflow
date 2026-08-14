@@ -1179,7 +1179,7 @@ function AgentConfigSection({
           {selectedRuntime === 'codex-sdk' ? (
             <CodexAgentModelSelect
               agentKey={agentKey}
-              codexModel={config?.codexModel}
+              providerModel={config?.providerModel ?? config?.codexModel}
               isInner={isInner}
               dispatch={dispatch}
             />
@@ -1258,12 +1258,12 @@ function AgentConfigSection({
  */
 function CodexAgentModelSelect({
   agentKey,
-  codexModel,
+  providerModel,
   isInner,
   dispatch,
 }: {
   agentKey: string;
-  codexModel: string | undefined;
+  providerModel: string | undefined;
   isInner: boolean;
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }) {
@@ -1277,12 +1277,12 @@ function CodexAgentModelSelect({
       <label style={labelStyle} htmlFor={id}>codex model</label>
       <select
         id={id}
-        value={codexModel ?? ''}
+        value={providerModel ?? ''}
         onChange={(e) =>
           dispatch({
-            type: 'SET_AGENT_CODEX_MODEL',
+            type: 'SET_AGENT_PROVIDER_MODEL',
             agentKey,
-            codexModel: e.target.value === '' ? null : e.target.value,
+            providerModel: e.target.value === '' ? null : e.target.value,
           })
         }
         style={inputStyle}

@@ -115,7 +115,7 @@ export type WorkflowEditorAction =
   | { type: 'SET_AGENT_MODEL'; agentKey: string; model: AgentModelAlias | null }
   | { type: 'SET_AGENT_CUSTOM'; agentKey: string; custom: WorkflowAgentCustomCopy | null }
   | { type: 'SET_AGENT_RUNTIME'; agentKey: string; runtime: WorkflowAgentRuntime | null }
-  | { type: 'SET_AGENT_CODEX_MODEL'; agentKey: string; codexModel: string | null }
+  | { type: 'SET_AGENT_PROVIDER_MODEL'; agentKey: string; providerModel: string | null }
   | { type: 'SET_AGENT_EFFORT'; agentKey: string; effort: ReasoningEffort | null }
   | SetAgentCustomFieldAction;
 
@@ -221,8 +221,8 @@ function swap<T>(arr: readonly T[], i: number, j: number): T[] {
  *
  * Enforces the two prune invariants so the modal's structural (JSON) dirty
  * check never sees a no-op edit as a diff:
- *   - a config left with none of `model` / `custom` / `runtime` / `codexModel`
- *     is dropped from the map
+ *   - a config left with none of `model` / `custom` / `runtime` /
+ *     `providerModel` / `codexModel` is dropped from the map
  *   - a map left empty is removed entirely (key absent, not `{}`)
  */
 function mapAgentConfig(
@@ -239,6 +239,7 @@ function mapAgentConfig(
     next.model === undefined &&
     next.custom === undefined &&
     next.runtime === undefined &&
+    next.providerModel === undefined &&
     next.codexModel === undefined &&
     next.effort === undefined;
   if (isEmpty) {
@@ -720,15 +721,25 @@ export function workflowEditorReducer(
       return { ...state, definition };
     }
 
-    case 'SET_AGENT_CODEX_MODEL': {
+    case 'SET_AGENT_PROVIDER_MODEL': {
       const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
-        if (action.codexModel === null) {
-          if (config.codexModel === undefined) return config;
+        if (action.providerModel === null) {
+          // Clear BOTH keys: a config loaded from a persisted spec may carry
+          // only the deprecated `codexModel` alias, and leaving it behind would
+          // make a "clear the pin" edit silently keep resolving to the stale
+          // value (providerModel ?? codexModel — the alias would still win).
+          if (config.providerModel === undefined && config.codexModel === undefined) return config;
           const rest = { ...config };
+          delete rest.providerModel;
           delete rest.codexModel;
           return rest;
         }
-        return { ...config, codexModel: action.codexModel };
+        // Setting a new pin also drops the deprecated alias so the persisted
+        // config converges onto the one canonical key rather than carrying a
+        // stale codexModel value alongside the fresh providerModel.
+        const { codexModel: _dropped, ...rest } = config;
+        void _dropped;
+        return { ...rest, providerModel: action.providerModel };
       });
       return { ...state, definition };
     }

@@ -43,6 +43,7 @@ const BUILTIN_ENTRY: AgentEntry = {
   tools: ['Read', 'Edit', 'Write', 'Bash'],
   model: null,
   runtime: null,
+  providerModel: null,
   codexModel: null,
   enabledMcps: [],
   source: 'builtin',

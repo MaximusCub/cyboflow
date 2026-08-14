@@ -23,9 +23,11 @@
  * to the Claude `query`. On the Claude branch model resolution is
  * Claude-namespace-only (a pinned alias → concrete, else the Claude-provider run
  * model, else a validated Claude default). On the Codex branch the model is
- * `agent.codexModel`, else the Codex-provider run model, else the account default
- * the query resolves. When a request routes to Codex but no `codexQuery` dep is
- * wired, it maps to the fail-open `skipped` bucket — never a silent Claude fallback.
+ * `agent.providerModel` (normalized `providerModel ?? codexModel` upstream by
+ * effectiveAgents, so either field reads the same value), else the
+ * Codex-provider run model, else the account default the query resolves. When a
+ * request routes to Codex but no `codexQuery` dep is wired, it maps to the
+ * fail-open `skipped` bucket — never a silent Claude fallback.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -694,7 +696,7 @@ export function verifyHarnessContract(provider: AgentProvider): string {
  * model resolution, reached when {@link resolveVerifyProvider} returns `claude`. A
  * pinned alias resolves through the injected alias→concrete mechanism; an unpinned
  * agent inherits the run model ONLY on a Claude-provider run; otherwise the
- * validated Claude default. The result is ALWAYS a Claude id — `agent.codexModel`
+ * validated Claude default. The result is ALWAYS a Claude id — `agent.providerModel`
  * is never consulted and the run model is used only when the run is Claude, so a
  * `gpt-*` id cannot reach the Claude query.
  */
@@ -738,15 +740,16 @@ function normalizeCodexModelSelection(value: string | null | undefined): string 
 
 /**
  * The CODEX branch model (§5.4 step 1), reached when {@link resolveVerifyProvider}
- * returns `codex`. A pinned `agent.codexModel` wins; else the run model when the run
- * itself is Codex; else `undefined` — the Codex query then resolves the account's
- * default model. Both sources pass through {@link normalizeCodexModelSelection}, so
- * an `'auto'`/`'default'` sentinel (or a cross-family id) falls through rather than
- * reaching the query verbatim.
+ * returns `codex`. A pinned `agent.providerModel` (normalized `providerModel ??
+ * codexModel` upstream, so either field carries the same value) wins; else the
+ * run model when the run itself is Codex; else `undefined` — the Codex query
+ * then resolves the account's default model. Both sources pass through
+ * {@link normalizeCodexModelSelection}, so an `'auto'`/`'default'` sentinel (or a
+ * cross-family id) falls through rather than reaching the query verbatim.
  */
 export function resolveVerifyCodexModel(resolved: ResolvedVerifyAgent): string | undefined {
   const { agent, runProvider, runModel } = resolved;
-  const pinned = normalizeCodexModelSelection(agent.codexModel);
+  const pinned = normalizeCodexModelSelection(agent.providerModel ?? agent.codexModel);
   if (pinned) return pinned;
   if (runProvider === 'codex') return normalizeCodexModelSelection(runModel);
   return undefined;

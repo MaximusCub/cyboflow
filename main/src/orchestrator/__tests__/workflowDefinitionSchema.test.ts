@@ -459,8 +459,9 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Accept: a config with only "runtime" set, or "runtime" + "codexModel".
-  // Both count as signal — types + resolution only in this slice.
+  // Accept: a config with only "runtime" set, or "runtime" + "providerModel"
+  // (or its deprecated alias "codexModel"). All count as signal — types +
+  // resolution only in this slice.
   // -------------------------------------------------------------------------
   it('accepts a config with only "runtime" set', () => {
     const def = makeValidDefinition();
@@ -468,9 +469,28 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
 
-  it('accepts a config with "runtime" and "codexModel" set together', () => {
+  it('accepts a config with "runtime" and "providerModel" set together', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  // migration 104: providerModel generalizes codexModel. A definition an older
+  // writer (the pre-generalization editor, or an MCP caller that has not
+  // migrated) saved with ONLY the deprecated key must still validate — this is
+  // "old-key data still works", the read-compat contract this migration exists
+  // to preserve.
+  it('accepts a config with "runtime" and the DEPRECATED "codexModel" set together (old-key data still works)', () => {
     const def = makeValidDefinition();
     def.agentConfigs = { implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  it('accepts a config with BOTH "providerModel" and "codexModel" set (providerModel wins downstream, at effectiveAgents)', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex', codexModel: 'gpt-5-stale' },
+    };
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
 
@@ -485,8 +505,14 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Reject: an empty-string codexModel.
+  // Reject: an empty-string providerModel / codexModel.
   // -------------------------------------------------------------------------
+  it('rejects an empty-string providerModel', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { providerModel: '' } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
   it('rejects an empty-string codexModel', () => {
     const def = makeValidDefinition();
     def.agentConfigs = { implement: { codexModel: '' } };
@@ -495,7 +521,8 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
 
   // -------------------------------------------------------------------------
   // Reject: a truly-empty {} entry still carries no signal even with the new
-  // fields available — none of model/custom/runtime/codexModel are set.
+  // fields available — none of model/custom/runtime/providerModel/codexModel
+  // are set.
   // -------------------------------------------------------------------------
   it('still rejects a truly-empty {} agentConfigs entry', () => {
     const def = makeValidDefinition();
