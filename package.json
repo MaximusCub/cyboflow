@@ -63,7 +63,7 @@
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
-    "test:build": "node build/afterSign.test.js && node scripts/configure-build.test.js",
+    "test:build": "node build/afterSign.test.js && node build/verifyArtifact.test.js && node scripts/configure-build.test.js",
     "verify:schema": "node scripts/verify-schema-parity.js",
     "test:unit": "node scripts/ensure-sqlite-abi.mjs host && pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && node scripts/__tests__/ensure-sqlite-abi.test.js && pnpm run test:build",
     "test:gate": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.gate.ts",
@@ -141,6 +141,7 @@
       }
     ],
     "afterSign": "build/afterSign.js",
+    "artifactBuildCompleted": "build/verifyArtifact.js",
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "main/assets/icon.icns",
