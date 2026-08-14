@@ -4412,12 +4412,21 @@ export class McpQueryHandler {
     }
 
     // Disabled run → no-op SKIP (never an error). A typeOverride cannot enable it.
+    //
+    // The ack ALWAYS names its reason. A bare `{ skipped: true }` is not a usable
+    // answer for the caller: at least three different conditions skip a request
+    // (this branch, plus the scheduler's §3.2 no-proven-runbook degrade and its
+    // capability suppressions), and an agent handed an unlabelled skip has no way
+    // to tell them apart — so it GUESSES, and the guess reads to a human as a
+    // diagnosis. That is not hypothetical: a quick session skipped here for a
+    // plain disabled switch reported "no proven verification runbook" to the user,
+    // because that was the only skip reason named anywhere in its context.
     if (!enabled || stampedType === null) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { skipped: true },
+        data: { skipped: true, reason: this.disabledSkipReason(isQuickRun, enabled) },
       });
       return;
     }
@@ -5536,6 +5545,49 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
     });
+  }
+
+  /**
+   * The human-readable reason for a DISABLED-posture verification skip.
+   *
+   * Three conditions land in that one branch and they are not interchangeable —
+   * each has a different fix, and only the caller can carry that to the user:
+   *
+   *   - a QUICK session whose posture resolved off ⇒ the master switch (or the
+   *     project's `.cyboflow/verify.json`) is off. Fixable in Settings, and the
+   *     late binding means it takes effect on the NEXT call — no restart, no new
+   *     session. Naming that is the whole point: the fix is one toggle away.
+   *   - a FLOW run stamped disabled ⇒ the stamp is immutable (migration 055, no
+   *     UPDATE path), so no setting change rescues THIS run; it needs a new one.
+   *   - enabled but no type resolved ⇒ a posture that survived the enablement
+   *     ladder yet named no verification type. Rare, and worth saying plainly
+   *     rather than folding into "disabled", which would be a lie.
+   *
+   * Deliberately NOT a reason this function can emit: anything about runbooks.
+   * The runbook gate lives in the scheduler and fires only AFTER a row exists —
+   * a request skipped here never reached it, so claiming it did would invent
+   * evidence.
+   */
+  private disabledSkipReason(isQuickRun: boolean, enabled: boolean): string {
+    if (enabled) {
+      return (
+        'visual verification is enabled but resolved no verification type — nothing was enqueued. ' +
+        'Check the project/global visualVerify defaultType.'
+      );
+    }
+    if (isQuickRun) {
+      return (
+        'visual verification is turned OFF — nothing was enqueued, no budget spent. ' +
+        'Enable it in Settings (or in this project/worktree\'s .cyboflow/verify.json); a quick ' +
+        'session reads the switch on every call, so the next request picks it up with no restart ' +
+        'and no new session. This skip says NOTHING about whether the project has a runbook.'
+      );
+    }
+    return (
+      "this run's visual-verification posture was stamped disabled when the run was created, and " +
+      'that stamp is immutable — changing the setting now cannot enable THIS run; a new run is ' +
+      'required. This skip says NOTHING about whether the project has a runbook.'
+    );
   }
 
   /**

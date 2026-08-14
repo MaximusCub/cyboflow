@@ -4883,7 +4883,17 @@ describe('McpQueryHandler — mcp-request-verification', () => {
 
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(true);
-    expect(response.data).toEqual({ skipped: true });
+
+    // The ack NAMES its reason. A flow run's stamp is immutable, so the honest
+    // reason says a new run is needed — not "flip a setting", which would send
+    // the caller after a fix that cannot work here.
+    const data = response.data as { skipped: boolean; reason: string };
+    expect(data.skipped).toBe(true);
+    expect(data.reason).toMatch(/immutable/i);
+    expect(data.reason).toMatch(/new run/i);
+    // NEVER the runbook: this branch skips before a row exists, so the
+    // scheduler's runbook gate was never consulted and cannot be blamed.
+    expect(data.reason).not.toMatch(/runbook for this project/i);
 
     const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
     expect(count.n).toBe(0);
@@ -5941,7 +5951,19 @@ describe('McpQueryHandler — mcp-request-verification', () => {
 
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(true);
-    expect(response.data).toEqual({ skipped: true });
+
+    // REGRESSION (observed in dogfooding): a quick session skipped here for a
+    // plain disabled master switch, and — handed a bare `{ skipped: true }` —
+    // told the user the project had "no proven verification runbook". That was
+    // the only skip reason named anywhere in its context, so it filled the gap
+    // with the wrong one and the user chased a runbook that was not the problem.
+    // The reason must therefore be present, point at the switch, say the fix
+    // takes effect without a restart, and disclaim the runbook explicitly.
+    const data = response.data as { skipped: boolean; reason: string };
+    expect(data.skipped).toBe(true);
+    expect(data.reason).toMatch(/turned OFF/i);
+    expect(data.reason).toMatch(/no restart/i);
+    expect(data.reason).toMatch(/says NOTHING about whether the project has a runbook/i);
 
     const count = vdb
       .prepare("SELECT COUNT(*) AS n FROM verification_requests WHERE run_id = 'run-quick-disabled'")
