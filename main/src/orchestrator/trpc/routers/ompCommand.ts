@@ -145,7 +145,10 @@ async function runGuarded<TInput extends { idempotencyKey?: string }, TReq>(
   return result;
 }
 
-const idempotency = z.object({ idempotencyKey: z.string().optional() });
+// Bounded, log-safe token: UUID/ULID/snowflake-shaped. Rejects whitespace and
+// control characters so a caller cannot inject newlines into the audit trail.
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const idempotency = z.object({ idempotencyKey: z.string().max(128).regex(IDEMPOTENCY_KEY_PATTERN).optional() });
 
 const spawnInput = idempotency.extend({
   model: z.string(),

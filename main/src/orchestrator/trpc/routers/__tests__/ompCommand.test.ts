@@ -87,4 +87,11 @@ describe('cyboflow.ompCommand authorization', () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error).toBe('unavailable');
   });
+
+  it('rejects an idempotencyKey with newline/control characters (log-injection guard)', async () => {
+    const caller = callerWith({ principal: SUPERVISE, ompCommand: new OmpCommandStub(), auditOmp: () => {} });
+    await expect(
+      caller.cyboflow.ompCommand.spawn({ model: 'm', task: 't', idempotencyKey: 'forged\nop=evil' }),
+    ).rejects.toBeDefined();
+  });
 });
