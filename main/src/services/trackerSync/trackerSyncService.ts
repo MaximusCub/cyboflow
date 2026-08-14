@@ -2216,6 +2216,8 @@ function appendWriteBackLines(
 ): void {
   const sent = ambiguous.sent + (drained?.sent ?? 0);
   const created = ambiguous.created + (drained?.created ?? 0);
+  const pushed = ambiguous.pushedIdeas + (drained?.pushedIdeas ?? 0);
+  const mirrored = created - pushed;
   const recovered = ambiguous.ambiguousResolved;
   const retries = ambiguous.retriesScheduled + (drained?.retriesScheduled ?? 0);
   const failed = ambiguous.failedTerminal + (drained?.failedTerminal ?? 0);
@@ -2226,7 +2228,8 @@ function appendWriteBackLines(
     entries.push({ marker: '·', line: `recovered ${plural(recovered, 'in-flight write')}` });
   }
   if (sent > 0) entries.push({ marker: '✓', line: `wrote ${plural(sent, 'issue state')}` });
-  if (created > 0) entries.push({ marker: '✓', line: `mirrored ${plural(created, 'sub-issue')}` });
+  if (pushed > 0) entries.push({ marker: '✓', line: `pushed ${plural(pushed, 'idea')}` });
+  if (mirrored > 0) entries.push({ marker: '✓', line: `mirrored ${plural(mirrored, 'sub-issue')}` });
   if (superseded > 0) {
     entries.push({ marker: '·', line: `${plural(superseded, 'stale state write')} superseded` });
   }

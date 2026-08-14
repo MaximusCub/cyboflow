@@ -1344,12 +1344,16 @@ describe('TrackerSyncService direction modes', () => {
       entityType: 'idea',
       fields: { title: 'A locally-filed idea' },
     });
-    await service.syncConnection(CONN_ID);
+    const pass = await service.syncConnection(CONN_ID);
 
     expect(adapter.createIssueCalls).toHaveLength(1);
     const link = getLinkByEntity(raw, 'idea', created.taskId, 'linear');
     expect(link?.external_id).toBe(adapter.createIssueCalls[0].clientKey);
     expect(link?.orphaned_at).toBeNull();
+    // A pushed idea is logged as a push, not mislabeled a mirrored sub-issue.
+    const lines = pass.entries.map((e) => e.line);
+    expect(lines).toContain('pushed 1 idea');
+    expect(lines).not.toContain('mirrored 1 sub-issue');
   });
 
   it('holds every direction at once, and a single Sync now runs all three', async () => {

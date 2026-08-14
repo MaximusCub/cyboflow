@@ -88,6 +88,12 @@ export interface OutboxReport {
   sent: number;
   /** Issues created — mirrored children AND pushed ideas, including ones ADOPTED by ambiguous recovery. */
   created: number;
+  /**
+   * The `create_issue` subset of {@link created} — top-level issues created for
+   * pushed local ideas. Split out so the sync log can word a pushed idea as
+   * "pushed", not mislabel it a mirrored sub-issue.
+   */
+  pushedIdeas: number;
   /** Rows that will never be retried (4xx, unresolvable state, malformed payload). */
   failedTerminal: number;
   /** Rows re-queued with a backoff `next_attempt_at`. */
@@ -110,6 +116,7 @@ function emptyReport(): OutboxReport {
   return {
     sent: 0,
     created: 0,
+    pushedIdeas: 0,
     failedTerminal: 0,
     retriesScheduled: 0,
     ambiguousResolved: 0,
@@ -439,6 +446,7 @@ async function processPush(
 
   adoptPushedIssue(deps, connection, row, issue, groupOfState(providerStates, issue.stateId));
   report.created += 1;
+  report.pushedIdeas += 1;
   return false;
 }
 
@@ -564,6 +572,7 @@ export async function processAmbiguous(
     const outcome = await resolveAmbiguous(deps, connection, row);
     if (outcome === 'adopted') {
       report.created += 1;
+      if (row.kind === 'create_issue') report.pushedIdeas += 1;
       report.ambiguousResolved += 1;
     } else if (outcome === 'orphaned') {
       report.orphanedCreates += 1;
