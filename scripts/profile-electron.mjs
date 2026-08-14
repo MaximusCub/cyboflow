@@ -479,11 +479,14 @@ async function heap() {
 }
 
 /**
- * Census the main process's live libuv handles, and measure how often timers
- * actually fire. In Electron the main loop is Chromium's message pump with node
- * integration polled on top, so every libuv timer wakeup costs a cross-thread
- * signal + a pump round trip — the wakeup RATE drives idle CPU far more than the
- * JS work each callback does. This is the instrument that shows the rate.
+ * Census the main process's live libuv handles (what is keeping the loop alive
+ * right now). In Electron the main loop is Chromium's message pump with node
+ * integration polled on top, so every libuv wakeup costs a cross-thread signal
+ * + a pump round trip.
+ *
+ * This reports STANDING handles, not a rate. For wakeups-per-second attributed
+ * to the code that scheduled them, use the in-process TimerCensus — the
+ * `[perf-timers]` line under `pnpm dev:perf`.
  */
 async function handles() {
   const target = await mainTarget();
@@ -497,24 +500,6 @@ async function handles() {
         counts[kind] = (counts[kind] ?? 0) + 1;
       }
       return counts;
-    })()`;
-
-    // Count timer callbacks over the window by monkey-patching the timer list
-    // walker is not possible from here, so instead sample setInterval/setTimeout
-    // registrations and measure loop wakeups via a high-resolution probe.
-    const probeStart = `(() => {
-      globalThis.__perfProbe = { fires: 0, byDelay: {} };
-      const realSetInterval = setInterval;
-      const realSetTimeout = setTimeout;
-      globalThis.__perfProbeRestore = () => {
-        globalThis.setInterval = realSetInterval;
-        globalThis.setTimeout = realSetTimeout;
-      };
-      // Wrap only NEW registrations; already-live intervals are counted by the
-      // handle census above, and their delay is reported by _idleTimeout below.
-      const live = [];
-      globalThis.__perfProbeLive = live;
-      return true;
     })()`;
 
     // Walk node's internal timer lists to read the delay of every LIVE timer.
@@ -538,37 +523,19 @@ async function handles() {
       client.send('Runtime.evaluate', { expression: measure, returnByValue: true, includeCommandLineAPI: true }),
       client.send('Runtime.evaluate', { expression: liveTimers, returnByValue: true, includeCommandLineAPI: true }),
     ]);
-    void probeStart;
 
-    // Measure the real wakeup rate: schedule nothing, just read the monotonic
-    // count of timer-list drains that node performs over the window.
-    const rateExpr = `(async () => {
-      const t0 = process.hrtime.bigint();
-      let ticks = 0;
-      await new Promise((resolve) => {
-        const started = Date.now();
-        const iv = setInterval(() => {
-          ticks += 1;
-          if (Date.now() - started >= ${Math.min(durationMs, 10000)}) { clearInterval(iv); resolve(); }
-        }, 1);
-      });
-      const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
-      // A 1ms interval can only fire as fast as the loop turns, so ticks/elapsed
-      // is a direct measure of the main loop's achievable turn rate.
-      return { elapsedMs, ticks, loopTurnsPerSec: Math.round((ticks / elapsedMs) * 1000) };
-    })()`;
-    const rateRes = await client.send('Runtime.evaluate', {
-      expression: rateExpr,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-
+    // NOTE: there is deliberately no "wakeup rate" number here. An earlier
+    // version scheduled its own `setInterval(…, 1)` and reported how fast THAT
+    // fired, which measures the profiler's own timer, not the app's — an idle
+    // app and one already carrying a 60Hz interval produced nearly identical
+    // figures. Timer wakeup RATE comes from the in-process TimerCensus
+    // (`[perf-timers]` under `pnpm dev:perf`), which counts real fires per site;
+    // this command reports the live HANDLE census only.
     console.log(JSON.stringify({
       label,
       capturedAt: new Date().toISOString(),
       activeResources: censusRes.result.value,
       activeHandles: timersRes.result.value,
-      loopRate: rateRes.result.value,
     }, null, 2));
   } finally {
     client.close();

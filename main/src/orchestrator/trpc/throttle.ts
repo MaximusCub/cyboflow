@@ -23,10 +23,10 @@
  * ## Algorithm
  *
  * 1. A background consumer loop reads from `source`, always overwriting
- *    `latest`, setting `dirty = true`, and asking for a flush to be scheduled.
- * 2. `scheduleFlush` arms a SINGLE `setTimeout` for the earliest instant the
- *    rate cap allows (`intervalMs` after the last emission). When it fires it
- *    moves `latest` into the queue and clears `dirty`.
+ *    `latest`, setting `dirty = true`, and arming the cooldown.
+ * 2. `armCooldown` runs a SINGLE `setTimeout(intervalMs)`. When it fires it
+ *    moves `latest` into the queue, clears `dirty`, and re-arms; an expiry
+ *    with nothing pending stops the chain instead.
  * 3. The outer generator dequeues and yields, blocking between dequeues
  *    until the next flush signal or source completion.
  *
@@ -45,15 +45,24 @@
  *
  * ## Emission-timing equivalence
  *
- * `lastEmitAt` starts at construction time, so the first value is still held
- * for a full `intervalMs` rather than emitted on the leading edge — matching
- * the old fixed-grid behaviour (a value is never forwarded faster than the cap
- * would have allowed) and keeping coalescing observable to callers.
+ * The cadence is driven by a COOLDOWN chain, never by comparing wall-clock
+ * timestamps. A value arriving while idle arms a timer for `intervalMs` and is
+ * held until it fires — so, exactly as under the old fixed grid, the first
+ * value of a burst is coalesced with everything else that lands in that window
+ * rather than escaping on the leading edge. Each emission re-arms the cooldown;
+ * when it expires with nothing pending, the chain stops and the subscription
+ * goes back to holding no timer.
+ *
+ * Deliberately NO `Date.now()` arithmetic. Deriving the delay from a wall-clock
+ * delta makes the throttle wrong across a system clock adjustment in both
+ * directions: a backward jump would stall a pending final value for the size of
+ * the jump, and a forward jump would compute a zero delay and let emissions
+ * exceed `hz`. Relative timer delays are immune to both.
  *
  * ## Lifecycle / cleanup
  *
  * When the outer generator is returned or thrown (client disconnect, error),
- * the `finally` block sets `done = true`, clears any pending flush timer, and
+ * the `finally` block sets `done = true`, clears any pending cooldown timer, and
  * awaits the consumer promise so the background loop exits cleanly.
  */
 
@@ -83,13 +92,9 @@ export async function* throttleAsyncIterator<T>(
   // Pending resolve callback: the outer generator awaits this between yields.
   let waitResolve: (() => void) | null = null;
 
-  // The single in-flight flush timer, or null when nothing is pending. At most
-  // one exists at a time, and none at all while the source is quiet.
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // Wall-clock of the last emission, seeded at construction so the first value
-  // is rate-limited exactly as the old fixed-grid interval limited it.
-  let lastEmitAt = Date.now();
+  // The single in-flight cooldown timer, or null when the chain is stopped. At
+  // most one exists at a time, and none at all while the source is quiet.
+  let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Wake up the outer generator loop (new value enqueued or source done). */
   function wake(): void {
@@ -106,23 +111,24 @@ export async function* throttleAsyncIterator<T>(
     const toEmit = latest as T;
     dirty = false;
     latest = undefined;
-    lastEmitAt = Date.now();
     queue.push(toEmit);
     wake();
   }
 
   /**
-   * Arm the flush timer for the earliest instant the rate cap allows. A no-op
-   * when one is already pending (so a burst of source events shares a single
-   * timer) or when the generator has been torn down.
+   * Start one `intervalMs` cooldown. When it expires, anything that arrived
+   * during the window is emitted (coalesced to the latest) and the cooldown
+   * re-arms; if nothing arrived, the chain stops and we hold no timer until the
+   * next value. A no-op when a cooldown is already running or after teardown.
    */
-  function scheduleFlush(): void {
-    if (flushTimer !== null || done) return;
-    const delay = Math.max(0, intervalMs - (Date.now() - lastEmitAt));
-    flushTimer = setTimeout(() => {
-      flushTimer = null;
+  function armCooldown(): void {
+    if (cooldownTimer !== null || done) return;
+    cooldownTimer = setTimeout(() => {
+      cooldownTimer = null;
+      if (!dirty) return; // quiet window — stop the chain, go back to zero timers
       flush();
-    }, delay);
+      armCooldown();
+    }, intervalMs);
   }
 
   // Background consumer: reads source, updates latest+dirty, and arms the
@@ -134,7 +140,7 @@ export async function* throttleAsyncIterator<T>(
         if (done) break;
         latest = event;
         dirty = true;
-        scheduleFlush();
+        armCooldown();
       }
     } finally {
       sourceDone = true;
@@ -150,8 +156,8 @@ export async function* throttleAsyncIterator<T>(
       }
 
       // If source is done and queue is empty and nothing dirty remains,
-      // we are finished. (A still-dirty value keeps us here: its flush timer
-      // was armed when it was set, so it will fire and wake us — that's what
+      // we are finished. (A still-dirty value keeps us here: its cooldown was
+      // armed when it was set, so it will fire and wake us — that's what
       // ensures the very last event is not lost when the source exhausts
       // quickly.)
       if (sourceDone && queue.length === 0 && !dirty) {
@@ -171,9 +177,9 @@ export async function* throttleAsyncIterator<T>(
     }
   } finally {
     done = true;
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
+    if (cooldownTimer !== null) {
+      clearTimeout(cooldownTimer);
+      cooldownTimer = null;
     }
     wake(); // unblock consumer if waiting
     await consumerPromise;

@@ -9,9 +9,23 @@
 import { claudeStreamEventSchemaByType } from './schemas';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { ILogger } from './types';
+import type { ZodTypeAny } from 'zod';
 
-/** The `type` values that have a schema branch. */
-type KnownEventType = keyof typeof claudeStreamEventSchemaByType;
+/**
+ * Runtime branch lookup, as a Map rather than a plain-object index.
+ *
+ * This MUST NOT be an object property lookup. `'constructor' in obj` — and
+ * likewise `toString`, `valueOf`, `__proto__`, `hasOwnProperty` — is true for
+ * any object literal via Object.prototype, so a wire event of
+ * `{ type: 'constructor' }` would pass the guard and then resolve to
+ * `Object`, whose `.safeParse` does not exist: a TypeError thrown straight
+ * out of `narrow()`, breaking its documented NEVER-throws contract and taking
+ * the streaming pipeline with it. A Map has no prototype chain to fall
+ * through, so an unknown `type` is simply a miss.
+ */
+const BRANCH_BY_TYPE: ReadonlyMap<string, ZodTypeAny> = new Map(
+  Object.entries(claudeStreamEventSchemaByType),
+);
 
 export class TypedEventNarrowing {
   private readonly logger: Pick<ILogger, 'verbose'> | undefined;
@@ -44,11 +58,11 @@ export class TypedEventNarrowing {
     const rawType = rawObj['type'];
     const wireType = typeof rawType === 'string' ? rawType : undefined;
 
-    if (wireType !== undefined && wireType in claudeStreamEventSchemaByType) {
-      const branch = claudeStreamEventSchemaByType[wireType as KnownEventType];
+    const branch = wireType === undefined ? undefined : BRANCH_BY_TYPE.get(wireType);
+    if (branch !== undefined) {
       const result = branch.safeParse(parsed);
       if (result.success) {
-        return result.data;
+        return result.data as ClaudeStreamEvent;
       }
     }
 

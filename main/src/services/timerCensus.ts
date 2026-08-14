@@ -97,6 +97,31 @@ function callSite(): string {
 type TimerCallback = (...args: unknown[]) => void;
 
 /**
+ * Copy the real timer's own SYMBOL properties onto the wrapper.
+ *
+ * `setTimeout` and `setImmediate` carry `Symbol(nodejs.util.promisify.custom)`,
+ * which is what makes `util.promisify(setTimeout)(ms, value)` resolve after
+ * `ms`. A bare wrapper function does not have it, so promisify silently falls
+ * back to callback-style and calls `setTimeout(ms, value, cb)` — the delay
+ * lands in the callback slot and the promise REJECTS with ERR_INVALID_ARG_TYPE.
+ * An instrument that changes the behaviour of the code it measures is worse
+ * than no instrument, so the hook is carried across.
+ *
+ * Deliberately symbols only: copying every own descriptor would drag in
+ * `length` / `name` / `prototype`, where a non-configurable mismatch can throw.
+ */
+function carryOwnSymbols(target: object, source: unknown): void {
+  // `source` is a global that a host may simply not provide (`setImmediate` is
+  // absent under some test environments and in browsers). Installing the census
+  // must never be what takes the process down, so a missing global is skipped.
+  if (typeof source !== 'function') return;
+  for (const symbol of Object.getOwnPropertySymbols(source)) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, symbol);
+    if (descriptor) Object.defineProperty(target, symbol, descriptor);
+  }
+}
+
+/**
  * Wrap a callback so each invocation is counted against the `stats` bucket its
  * creation site owns.
  */
@@ -150,9 +175,18 @@ export function installTimerCensus(): void {
       );
     };
 
-  globals.setTimeout = wrapScheduler(realSetTimeout, 'timeout') as typeof setTimeout;
-  globals.setInterval = wrapScheduler(realSetInterval, 'interval') as typeof setInterval;
-  globals.setImmediate = function scheduledImmediate(callback: TimerCallback, ...args: unknown[]) {
+  const wrappedTimeout = wrapScheduler(realSetTimeout, 'timeout');
+  const wrappedInterval = wrapScheduler(realSetInterval, 'interval');
+  carryOwnSymbols(wrappedTimeout, realSetTimeout);
+  carryOwnSymbols(wrappedInterval, realSetInterval);
+  globals.setTimeout = wrappedTimeout as typeof setTimeout;
+  globals.setInterval = wrappedInterval as typeof setInterval;
+
+  // Same reason as carryOwnSymbols' guard: no setImmediate on this host, so
+  // there is nothing to wrap and nothing to attribute.
+  if (typeof realSetImmediate !== 'function') return;
+
+  const wrappedImmediate = function scheduledImmediate(callback: TimerCallback, ...args: unknown[]) {
     const site = callSite();
     const stats = statsFor(site, 'immediate');
     stats.created += 1;
@@ -161,7 +195,9 @@ export function installTimerCensus(): void {
       countingWrapper(stats, callback) as unknown as (...a: unknown[]) => void,
       ...args,
     );
-  } as unknown as typeof setImmediate;
+  };
+  carryOwnSymbols(wrappedImmediate, realSetImmediate);
+  globals.setImmediate = wrappedImmediate as unknown as typeof setImmediate;
 }
 
 /** One reported row, richest-first by fire count. */
@@ -178,8 +214,14 @@ export interface TimerCensusRow {
  * Drain the census into a sorted snapshot and reset the per-interval counters.
  * Sites are kept (not deleted) so a long-lived interval keeps its identity
  * across reports; only the counters reset.
+ *
+ * Returns EVERY site, deliberately. Truncating here would corrupt the headline
+ * wakeup rate: the counters are reset for all sites but only the returned rows
+ * are summable, so a slice would silently under-report exactly when the process
+ * is busiest (many sites firing) — i.e. it would bias the measurement in the
+ * flattering direction. {@link formatTimerCensus} truncates for DISPLAY only.
  */
-export function drainTimerCensus(limit = 8): TimerCensusRow[] {
+export function drainTimerCensus(): TimerCensusRow[] {
   const rows: TimerCensusRow[] = [];
   for (const [site, stats] of sites) {
     if (stats.fires === 0 && stats.created === 0) continue;
@@ -196,19 +238,25 @@ export function drainTimerCensus(limit = 8): TimerCensusRow[] {
     stats.callbackMs = 0;
   }
   rows.sort((a, b) => b.fires - a.fires);
-  return rows.slice(0, limit);
+  return rows;
 }
 
-/** Format a census snapshot as a single log-friendly line. */
-export function formatTimerCensus(rows: TimerCensusRow[]): string {
+/**
+ * Format a census snapshot as a single log-friendly line, showing only the
+ * busiest `limit` sites (the tail is noise) plus a count of what was elided —
+ * silent truncation would read as "these are all the timers" when they are not.
+ */
+export function formatTimerCensus(rows: TimerCensusRow[], limit = 8): string {
   if (rows.length === 0) return '(no timers)';
-  return rows
+  const shown = rows.slice(0, limit);
+  const elided = rows.length - shown.length;
+  return shown
     .map(
       (row) =>
         `${row.site}[${row.kind === 'interval' ? 'iv' : row.kind === 'timeout' ? 'to' : 'im'}@${row.minDelayMs}ms]=` +
         `${row.fires}x/${row.callbackMs}ms`,
     )
-    .join(' ');
+    .join(' ') + (elided > 0 ? ` (+${elided} more sites)` : '');
 }
 
 /** Test-only: drop all recorded sites so cases do not leak into each other. */

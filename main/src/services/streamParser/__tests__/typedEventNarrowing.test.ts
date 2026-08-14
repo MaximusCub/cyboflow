@@ -269,6 +269,45 @@ describe('TypedEventNarrowing', () => {
     ]);
   });
 
+  it('maps each key to the branch that actually pins that literal', () => {
+    // Key coverage alone is not enough: swapping two map values would keep both
+    // the key list and the compile-time output-union bridges satisfied while
+    // silently routing every event of those two types to the wrong schema.
+    // Read each branch's DECLARED `type` literal and require it to equal its key.
+    interface LiteralLike { value: unknown }
+    interface ObjectLike { shape: { type: LiteralLike } }
+    interface UnionLike { options: ObjectLike[] }
+
+    const declaredTypes = (branch: unknown): unknown[] => {
+      if (typeof branch !== 'object' || branch === null) return [];
+      if ('options' in branch) {
+        return (branch as UnionLike).options.map((option) => option.shape.type.value);
+      }
+      if ('shape' in branch) return [(branch as ObjectLike).shape.type.value];
+      return [];
+    };
+
+    for (const [key, branch] of Object.entries(claudeStreamEventSchemaByType)) {
+      const literals = declaredTypes(branch);
+      expect(literals.length).toBeGreaterThan(0);
+      // Every arm of a branch (a subtype-discriminated union has several) must
+      // pin the same top-level `type`, and it must be the key it is filed under.
+      for (const literal of literals) expect(literal).toBe(key);
+    }
+  });
+
+  it('returns __unknown__ (never throws) for prototype-named event types', () => {
+    // `'constructor' in obj` is true via Object.prototype, so an object-index
+    // guard would pass and then call `.safeParse` on Object itself — a TypeError
+    // out of a function documented to NEVER throw. Ordinary JSON can carry these.
+    for (const type of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      const event = JSON.parse(JSON.stringify({ type, anything: 1 })) as unknown;
+      let result: ReturnType<TypedEventNarrowing['narrow']> | undefined;
+      expect(() => { result = narrower.narrow(event); }).not.toThrow();
+      expect(result && 'kind' in result && result.kind).toBe('__unknown__');
+    }
+  });
+
   it('narrows every content-block kind, and rejects an unknown or malformed one', () => {
     // contentBlockSchema is a discriminatedUnion parsed once PER BLOCK, so this
     // pins that all three arms still narrow and that a bad block still sinks the
@@ -316,6 +355,16 @@ describe('TypedEventNarrowing', () => {
       42,
       null,
       { type: null },
+      // Prototype-reachable names: the old union rejected these, and so must the
+      // dispatch path (rather than resolving to Object.prototype members).
+      { type: 'constructor' },
+      { type: 'toString' },
+      { type: 'valueOf' },
+      { type: 'hasOwnProperty' },
+      // Non-string discriminants.
+      { type: 1 },
+      { type: { toString: () => 'assistant' } },
+      [],
     ];
 
     for (const value of corpus) {

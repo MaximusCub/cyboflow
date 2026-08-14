@@ -19,11 +19,22 @@ const send = (method, params) => new Promise((resolve, reject) => {
 
 // superjson is what the app's tRPC link uses, so inputs must be wrapped the
 // same way ({ json: <value> }) and outputs unwrapped from the same envelope.
+// The listener and the timeout are BOTH torn down on settle. They live in the
+// renderer, not in this process, so leaking them would accumulate listeners and
+// 2-minute timers inside the very app being profiled — measurement contaminating
+// the measurement.
 const expr = `(() => new Promise((resolve) => {
   const id = Math.floor(Math.random() * 1e9);
-  const off = window.electronTRPC.onMessage((msg) => {
+  let timer = null;
+  let off = null;
+  const settle = (value) => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    if (typeof off === 'function') { off(); off = null; }
+    resolve(value);
+  };
+  off = window.electronTRPC.onMessage((msg) => {
     if (msg?.id !== id) return;
-    resolve(JSON.parse(JSON.stringify(msg)));
+    settle(JSON.parse(JSON.stringify(msg)));
   });
   window.electronTRPC.sendMessage({
     id,
@@ -36,7 +47,7 @@ const expr = `(() => new Promise((resolve) => {
       context: {},
     },
   });
-  setTimeout(() => resolve({ timeout: true }), 120000);
+  timer = setTimeout(() => settle({ timeout: true }), 120000);
 }))()`;
 const res = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
 console.log(JSON.stringify(res.result?.value ?? res.exceptionDetails ?? res, null, 2));

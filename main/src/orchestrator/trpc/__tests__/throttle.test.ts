@@ -225,6 +225,14 @@ describe('throttleAsyncIterator', () => {
     await drainMicrotasks(50);
     expect(vi.getTimerCount()).toBe(1);
 
+    // A post-idle value must still be HELD for a full interval and coalesced —
+    // not emitted on the leading edge. (Deriving the delay from a wall-clock
+    // delta got this wrong: after an idle gap the computed delay collapsed to
+    // zero, so value 1 escaped immediately and 2 followed separately.)
+    await vi.advanceTimersByTimeAsync(5);
+    await drainMicrotasks(20);
+    expect(results).toEqual([]);
+
     // Once the burst has drained, the subscription goes back to costing nothing.
     await vi.advanceTimersByTimeAsync(100);
     await drainMicrotasks(50);
@@ -234,5 +242,56 @@ describe('throttleAsyncIterator', () => {
     done();
     await drainMicrotasks(50);
     await drainPromise;
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 4: the cap holds across a system clock jump.
+  //
+  // An earlier version computed each delay from a `Date.now()` delta, which is
+  // wrong in BOTH directions: a forward jump made the delay collapse to zero
+  // (emitting faster than hz), and a backward jump inflated it by the size of
+  // the jump (stalling a pending final value). The cadence must come from
+  // relative timer delays only, so moving the wall clock must change nothing.
+  // -------------------------------------------------------------------------
+  it('is unaffected by system clock jumps in either direction', async () => {
+    const { push, done, iterable } = makeManualIterator<number>();
+    const throttled = throttleAsyncIterator(iterable, 60);
+
+    const results: number[] = [];
+    const drainPromise = (async () => {
+      for await (const v of throttled) results.push(v);
+    })();
+
+    const realNow = Date.now;
+    try {
+      push(1);
+      await drainMicrotasks(30);
+
+      // Jump the wall clock forward an hour without advancing timers.
+      Date.now = () => realNow() + 3_600_000;
+      await drainMicrotasks(30);
+      // The value is still held: only the timer decides, not the clock.
+      expect(results).toEqual([]);
+
+      // And it still lands on the normal cadence, not instantly.
+      await vi.advanceTimersByTimeAsync(17);
+      await drainMicrotasks(30);
+      expect(results).toEqual([1]);
+
+      // Now jump backward an hour and send a final value + completion. It must
+      // not be stalled by the (negative) apparent elapsed time.
+      Date.now = () => realNow() - 3_600_000;
+      push(2);
+      done();
+      await drainMicrotasks(30);
+      await vi.advanceTimersByTimeAsync(17);
+      await drainMicrotasks(30);
+      expect(results).toEqual([1, 2]);
+    } finally {
+      Date.now = realNow;
+    }
+
+    await drainPromise;
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
