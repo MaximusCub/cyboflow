@@ -245,6 +245,50 @@ describe('throttleAsyncIterator', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test 5: teardown completes even against an uncooperative source.
+  //
+  // The consumer loop is suspended in `iterator.next()` and only re-reads `done`
+  // once a value arrives, so a source that never produces again cannot be woken
+  // from inside. Teardown must therefore not block on it — otherwise .return()
+  // (a client disconnect) stays pending forever and the subscription leaks.
+  // -------------------------------------------------------------------------
+  it('returns promptly when the source is parked in next() and ignores cancellation', async () => {
+    let returnCalled = false;
+    // Never yields, never completes, and its return() never settles either —
+    // the worst-behaved source the throttle could be handed.
+    const hostileSource: AsyncIterable<number> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => new Promise<IteratorResult<number>>(() => undefined),
+        return: () => {
+          returnCalled = true;
+          return new Promise<IteratorResult<number>>(() => undefined);
+        },
+      }),
+    };
+
+    const controller = new AbortController();
+    const throttled = throttleAsyncIterator(hostileSource, 60, controller.signal);
+
+    // Start consuming so the generator is live and parked between emissions.
+    const drained: number[] = [];
+    const drainPromise = (async () => {
+      for await (const v of throttled) drained.push(v);
+    })();
+    await drainMicrotasks(50);
+
+    // The disconnect. Before the signal existed this could not be observed at
+    // all: the generator was suspended at an internal await, so `.return()` was
+    // merely QUEUED and its teardown never ran — here that is a test timeout.
+    controller.abort();
+    await drainMicrotasks(50);
+    await drainPromise;
+
+    expect(drained).toEqual([]);
+    expect(returnCalled).toBe(true); // the source WAS asked to cancel
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
   // Test 4: the cap holds across a system clock jump.
   //
   // An earlier version computed each delay from a `Date.now()` delta, which is

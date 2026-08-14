@@ -246,7 +246,9 @@ export const eventsRouter = router({
       // SSE transport always provides it, but the type allows undefined).
       const abortSignal = signal ?? new AbortController().signal;
       const source = makePlaceholderAsyncIterator<StreamEvent>(abortSignal);
-      for await (const ev of throttleAsyncIterator(source, 60)) {
+      // Signal threaded through: between emissions the throttle parks at an
+      // internal await, where `.return()` alone cannot run its teardown.
+      for await (const ev of throttleAsyncIterator(source, 60, abortSignal)) {
         yield ev;
       }
     }),

@@ -62,8 +62,28 @@
  * ## Lifecycle / cleanup
  *
  * When the outer generator is returned or thrown (client disconnect, error),
- * the `finally` block sets `done = true`, clears any pending cooldown timer, and
- * awaits the consumer promise so the background loop exits cleanly.
+ * the `finally` block sets `done = true`, clears any pending cooldown timer,
+ * and cancels the source via `iterator.return()`.
+ *
+ * It deliberately does NOT wait for the background consumer. Teardown here must
+ * always complete promptly: a source parked in `next()` cannot see `done`, so
+ * blocking on it would leave a client disconnect pending indefinitely. A source
+ * is therefore expected to end on cancellation, but is not TRUSTED to — the
+ * throttle stays correct either way.
+ *
+ * ## Why `signal` is needed for that to be true
+ *
+ * Cleanup code alone is not enough, because between emissions this generator is
+ * suspended at an internal `await` (not at a `yield`). Calling `.return()` on an
+ * async generator in that state does NOT run its `finally` — the request is
+ * QUEUED until the generator next resumes. With an idle source there is nothing
+ * to resume it, so a client disconnect would hang and the subscription would be
+ * retained, with none of the teardown below ever executing.
+ *
+ * Passing the subscription's `AbortSignal` gives the generator an external wake:
+ * on abort it resumes, breaks the loop, and runs teardown deterministically.
+ * Callers that own a signal (every tRPC subscription does) SHOULD pass it.
+ * Omitting it preserves the old behaviour exactly, including that hazard.
  */
 
 /**
@@ -73,11 +93,14 @@
  *
  * @param source - Any async iterable (EventEmitter-backed iterator, etc.).
  * @param hz     - Target emission rate in events per second (e.g. 60).
+ * @param signal - The subscription's AbortSignal. Strongly recommended: without
+ *                 it, teardown cannot interrupt an idle generator (see above).
  * @returns      An async generator suitable for use in a tRPC subscription.
  */
 export async function* throttleAsyncIterator<T>(
   source: AsyncIterable<T>,
   hz: number,
+  signal?: AbortSignal,
 ): AsyncGenerator<T> {
   const intervalMs = 1000 / hz;
 
@@ -131,14 +154,21 @@ export async function* throttleAsyncIterator<T>(
     }, intervalMs);
   }
 
+  // An EXPLICIT iterator rather than `for await`, so teardown can reach in and
+  // cancel a source that is currently parked inside `next()`. `for await` only
+  // calls `.return()` when its loop exits, which is exactly what cannot happen
+  // in that state.
+  const iterator = source[Symbol.asyncIterator]();
+
   // Background consumer: reads source, updates latest+dirty, and arms the
-  // flush. Deliberately does NOT enqueue directly — only `flush` does, so the
+  // cooldown. Deliberately does NOT enqueue directly — only `flush` does, so the
   // rate cap and coalescing stay in one place.
   const consumerPromise = (async () => {
     try {
-      for await (const event of source) {
-        if (done) break;
-        latest = event;
+      while (!done) {
+        const next = await iterator.next();
+        if (next.done === true || done) break;
+        latest = next.value;
         dirty = true;
         armCooldown();
       }
@@ -148,11 +178,22 @@ export async function* throttleAsyncIterator<T>(
     }
   })();
 
+  // The external wake described in the header: an abort resolves whatever the
+  // generator is parked on, so teardown can actually run.
+  const onAbort = (): void => wake();
+  signal?.addEventListener('abort', onAbort);
+
   try {
     while (!done) {
       // Drain the queue first.
       while (queue.length > 0) {
         yield queue.shift() as T;
+      }
+
+      // Cancelled — stop, even mid-burst. Checked after the drain so anything
+      // already flushed still reaches the client.
+      if (signal?.aborted === true) {
+        break;
       }
 
       // If source is done and queue is empty and nothing dirty remains,
@@ -167,8 +208,10 @@ export async function* throttleAsyncIterator<T>(
       // Wait for next wake() call (tick enqueue or source-done).
       await new Promise<void>((resolve) => {
         // Re-check inside the constructor to avoid a race between the
-        // `while(queue.length)` check above and registering the callback.
-        if (queue.length > 0 || (sourceDone && !dirty)) {
+        // `while(queue.length)` check above and registering the callback —
+        // including an abort that landed in that window, which would otherwise
+        // park us with the listener already spent.
+        if (queue.length > 0 || (sourceDone && !dirty) || signal?.aborted === true) {
           resolve();
         } else {
           waitResolve = resolve;
@@ -177,11 +220,27 @@ export async function* throttleAsyncIterator<T>(
     }
   } finally {
     done = true;
+    signal?.removeEventListener('abort', onAbort);
     if (cooldownTimer !== null) {
       clearTimeout(cooldownTimer);
       cooldownTimer = null;
     }
     wake(); // unblock consumer if waiting
-    await consumerPromise;
+
+    // Cancel the source, then let the consumer wind down on its own.
+    //
+    // Teardown must NOT block on the consumer. It used to `await consumerPromise`,
+    // but `wake()` cannot reach that loop — it is suspended in `iterator.next()`,
+    // and `done` is only re-read once a value arrives. A source that never
+    // produces again (nor honours cancellation) therefore left `.return()` on
+    // this generator pending FOREVER, so a client disconnect never completed and
+    // the subscription's state stayed retained. Awaiting bought nothing in
+    // return: all the consumer does on exit is set `sourceDone` and `wake()`,
+    // neither of which is observable once the generator has returned.
+    //
+    // `.catch` on both: after teardown a source error has no consumer, and an
+    // unhandled rejection must not escape into the process.
+    void Promise.resolve(iterator.return?.()).catch(() => undefined);
+    void consumerPromise.catch(() => undefined);
   }
 }
