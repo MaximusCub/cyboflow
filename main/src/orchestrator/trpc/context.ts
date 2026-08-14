@@ -14,6 +14,7 @@ import type { NativeGrantProbe } from '../../../../shared/types/visualVerificati
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { OmpControlPlaneAdapter } from '../../../../shared/types/omp';
+import type { OmpCommandAdapter, OmpPrincipal } from '../../../../shared/types/ompCommand';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
@@ -357,6 +358,12 @@ export interface ContextDeps {
   verifyHostProbes?: VerifyHostProbesLike;
   /** Read-only OMP fleet adapter (getFleetSnapshot). Absent => fleetSnapshot returns 'unavailable'. */
   omp?: OmpControlPlaneAdapter;
+  /** Immutable per-request principal. v1: hardcoded 'local', supervise capability OFF by default. */
+  principal?: OmpPrincipal;
+  /** Privileged command adapter. Absent => every ompCommand mutation returns 'unavailable'. */
+  ompCommand?: OmpCommandAdapter;
+  /** Redacted audit sink for OMP commands (attempted + completed). Injected as a closure like setDockBadge. */
+  auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
 }
 
 /**
@@ -384,6 +391,9 @@ export function createContext(deps: ContextDeps = {}): {
   agentProposalExecutor?: AgentProposalExecutorLike;
   verifyHostProbes?: VerifyHostProbesLike;
   omp?: OmpControlPlaneAdapter;
+  principal?: OmpPrincipal;
+  ompCommand?: OmpCommandAdapter;
+  auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -397,6 +407,9 @@ export function createContext(deps: ContextDeps = {}): {
     agentProposalExecutor,
     verifyHostProbes,
     omp,
+    principal,
+    ompCommand,
+    auditOmp,
   } = deps;
   return {
     userId: 'local' as const,
@@ -411,6 +424,9 @@ export function createContext(deps: ContextDeps = {}): {
     agentProposalExecutor,
     verifyHostProbes,
     omp,
+    principal,
+    ompCommand,
+    auditOmp,
   };
 }
 

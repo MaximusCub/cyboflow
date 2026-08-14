@@ -76,6 +76,7 @@ import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
+import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
@@ -715,6 +716,12 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   // Read-only OMP fleet adapter, constructed once per window attach (not per
   // request). The tRPC createContext closure passes this same instance.
   const fleetRegistryReader = new FleetRegistryReader();
+  // Privileged OMP commands are a stub in Phase 2 (fail closed). The supervise
+  // capability is OFF for the v1 'local' principal, so every command is FORBIDDEN.
+  const ompCommand = new OmpCommandStub();
+  const auditOmp = (entry: { verb: string; principal: string; outcome: string; operationId: string; detail: string }) => {
+    logger.info(`omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`);
+  };
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -726,6 +733,8 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         agentOverrideRouter: AgentOverrideRouter.getInstance(),
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
         omp: fleetRegistryReader,
+        ompCommand,
+        auditOmp,
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).
