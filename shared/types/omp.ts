@@ -123,6 +123,38 @@ export type OmpSnapshotResult =
     };
 
 /**
+ * Renderer-safe worker projection. The full WorkerEntry carries task text,
+ * lastOutput, repoPath, allowedPaths, and failure-report output — none of which
+ * may cross the IPC boundary. This DTO is produced in MAIN before the tRPC
+ * reply; the renderer only ever sees these summary fields.
+ */
+export interface OmpFleetWorkerView {
+  id: string;
+  label: string | null;
+  model: string;
+  status: WorkerStatus;
+  backend: OmpBackend;
+  spawnedAt: string;
+  lastSeenAt: string;
+}
+
+export interface OmpFleetViewSnapshot {
+  version: number;
+  savedAt: string;
+  totalWorkers: number;
+  workers: OmpFleetWorkerView[];
+}
+
+/** Renderer-facing result: a redacted summary, never the raw registry. */
+export type OmpFleetViewResult =
+  | { ok: true; snapshot: OmpFleetViewSnapshot }
+  | {
+      ok: false;
+      error: "unavailable" | "unsupported-version" | "malformed";
+      detail: string;
+    };
+
+/**
  * Read-only control-plane adapter. This is the ONLY surface the renderer/other
  * code consumes. It deliberately exposes no mutators: proposal/proof read and
  * command (spawn/kill/verify/apply) surfaces are separate, privileged
