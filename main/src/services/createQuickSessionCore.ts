@@ -23,6 +23,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import {
   claudeRuntimeFromSubstrate,
   isWorkflowRunStorableRuntime,
+  providerForRuntime,
   type AgentProvider,
   type SessionAgentRuntime,
   type WorkflowRunStorableRuntime,
@@ -288,6 +289,54 @@ export async function createQuickSessionCore(
     }
     throw err;
   }
+}
+
+/**
+ * The STRUCTURED (non-PTY) runtime a quick launch resolves onto when it names a
+ * PROVIDER but no runtime — the wizard never sends a bare provider for a
+ * terminal launch, so the structured lane is the honest projection.
+ *
+ * An exhaustive Record so a provider added to the union cannot ship without
+ * someone naming its lane here; the `claude` row exists to satisfy that
+ * exhaustiveness and is deliberately NOT consulted by the create-quick handler
+ * (Claude keeps its substrate ladder — see ipc/session.ts).
+ */
+export const QUICK_PROVIDER_SDK_RUNTIME: Readonly<Record<AgentProvider, SessionAgentRuntime>> = {
+  claude: 'claude-sdk',
+  codex: 'codex-sdk',
+  omp: 'omp-sdk',
+};
+
+/**
+ * The NON-Claude runtime a launch request resolves onto, or undefined when it
+ * resolves onto Claude (whose runtime comes from the substrate instead) — i.e.
+ * exactly what {@link QuickSessionRuntimeStampInput.sessionAgentRuntime} wants.
+ *
+ * Mirrors the `nonClaudeQuickRuntime` ladder in the `sessions:create-quick`
+ * handler, minus the rungs only that handler has (the design-session pin and the
+ * provider-access reroute, both of which resolve the provider BEFORE this
+ * projection). The A/B quick-arm path (index.ts `createArmSession`) has neither
+ * rung, so this is its whole derivation.
+ *
+ * Generic ON PURPOSE. The arm stamp used to test `agentRuntime === 'codex-sdk'`,
+ * which meant an `omp-sdk` arm stamped no runtime at all and
+ * {@link stampQuickSessionRuntimeConfig} derived `claude-sdk` from the SDK
+ * substrate: the sentinel run row said omp-sdk while the session row said
+ * claude-sdk, and every chat turn dispatched to Claude. A per-provider literal
+ * is wrong here by construction — the answer is "whatever provider this runtime
+ * belongs to", read from the registry.
+ */
+export function resolveNonClaudeSessionRuntime(request: {
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+}): SessionAgentRuntime | undefined {
+  const runtime =
+    request.agentRuntime ??
+    (request.agentProvider !== undefined && request.agentProvider !== 'claude'
+      ? QUICK_PROVIDER_SDK_RUNTIME[request.agentProvider]
+      : undefined);
+  if (runtime === undefined) return undefined;
+  return providerForRuntime(runtime) === 'claude' ? undefined : runtime;
 }
 
 /** Input for {@link stampQuickSessionRuntimeConfig}. */

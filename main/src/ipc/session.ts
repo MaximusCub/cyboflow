@@ -33,7 +33,11 @@ import type { SessionOutput, Session as SessionType } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
-import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from '../services/createQuickSessionCore';
+import {
+  createQuickSessionCore,
+  stampQuickSessionRuntimeConfig,
+  QUICK_PROVIDER_SDK_RUNTIME,
+} from '../services/createQuickSessionCore';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -89,6 +93,11 @@ import { computeState as computeClaudeDetectionState } from './claudeDetection';
  * resume offer is gated on this — otherwise the first message rides a failed spawn
  * and is lost. Mirrors TranscriptTailSource's path scheme.
  */
+
+// QUICK_PROVIDER_SDK_RUNTIME (the provider → structured-runtime projection this
+// handler's ladder reads) lives in createQuickSessionCore.ts, next to the stamp
+// chokepoint, so the A/B quick-arm path resolves against the SAME table.
+
 /**
  * Report a swallowed EAGER PTY spawn failure (create-quick's fire-and-forget
  * `startPanel`) to Sentry.
@@ -106,22 +115,6 @@ import { computeState as computeClaudeDetectionState } from './claudeDetection';
  * Fixed message + bounded `errorClass` per captureSeamError's payload rules —
  * the raw error text stays in the local console.error at the call site.
  */
-/**
- * The STRUCTURED (non-PTY) runtime a quick launch resolves onto when it names a
- * PROVIDER but no runtime — the wizard never sends a bare provider for a
- * terminal launch, so the structured lane is the honest projection.
- *
- * An exhaustive Record so a provider added to the union cannot ship without
- * someone naming its lane here; the `claude` row exists to satisfy that
- * exhaustiveness and is deliberately NOT consulted (Claude keeps its substrate
- * ladder — see the create-quick handler).
- */
-const QUICK_PROVIDER_SDK_RUNTIME: Readonly<Record<AgentProvider, SessionAgentRuntime>> = {
-  claude: 'claude-sdk',
-  codex: 'codex-sdk',
-  omp: 'omp-sdk',
-};
-
 function reportEagerSpawnFailure(err: unknown, substrate: string, cliTool: string): void {
   const errorClass = classifyErrorPattern(err instanceof Error ? err.message : String(err));
   captureSeamError(

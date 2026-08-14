@@ -238,6 +238,103 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
     await expect(executor.execute(run.id)).rejects.toThrow('phase boom');
   });
 
+  // ── the orchestrated fallback is provider-gated ───────────────────────────
+  //
+  // Falling back to orchestrated when no runner is wired assumes the run's
+  // provider can HOST an orchestrated turn. OMP ships the programmatic lane
+  // only, so for it the fallback would spawn a main orchestrator with no prompt
+  // envelope and no question bridge — the exact run createRun refuses to stamp,
+  // reached the back way.
+
+  it('REFUSES the orchestrated fallback for a programmatic-only provider, failing the run loudly', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/wt',
+      execution_model: 'programmatic',
+      agent_provider: 'omp',
+      agent_runtime: 'omp-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const { mock: lifecycle, failed } = makeLifecycleTransitions();
+    // No programmatic runner injected — this IS the fallback condition.
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger(), undefined, lifecycle);
+
+    await expect(executor.execute(run.id)).rejects.toThrow(/no orchestrated integration in this build/);
+
+    // The orchestrator turn was never spawned.
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+    // And the refusal rode the normal failed-lifecycle arm (thrown INSIDE the
+    // try), so the run lands in `failed` with the reason instead of being logged
+    // and abandoned by RunLauncher's catch.
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(failed.mock.calls[0][2]).toMatch(/OMP/);
+  });
+
+  it('still falls through to orchestrated for a provider that DOES support it', async () => {
+    // Codex has the orchestrated pieces, so the pre-existing degrade-rather-than-
+    // dead-end behaviour must be untouched for it.
+    const run = makeWorkflowRunRow({
+      worktree_path: '/wt',
+      execution_model: 'programmatic',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = makeExecutor(spawner, registry);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+  });
+
+  it('falls through for a legacy row carrying no provider columns at all', async () => {
+    // A pre-provider-axis row means "it ran as Claude", which supports
+    // orchestrated — the guard must not turn those into failures.
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = makeExecutor(spawner, registry);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+  });
+
+  it('an OMP run WITH a runner injected is unaffected — it takes the programmatic path', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/wt',
+      execution_model: 'programmatic',
+      agent_provider: 'omp',
+      agent_runtime: 'omp-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const runner = makeRunner();
+    const executor = makeExecutor(spawner, registry, runner);
+
+    await executor.execute(run.id);
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
   it('requestProgrammaticCancel aborts the in-flight controller signal and is a no-op for unknown/orchestrated runs', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });

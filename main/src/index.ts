@@ -266,7 +266,11 @@ import {
 } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
-import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from './services/createQuickSessionCore';
+import {
+  createQuickSessionCore,
+  resolveNonClaudeSessionRuntime,
+  stampQuickSessionRuntimeConfig,
+} from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -4895,17 +4899,24 @@ app.whenReady().then(async () => {
         // agent_runtime. Without this the sub-form's substrate and permission
         // picks silently never applied: the arm ran as an SDK session on the
         // global permission default while its run row claimed otherwise. Infra
-        // arms (no quickConfig) keep their pre-existing NULL stamps. The resolved
-        // runtime mirrors the quick handler's derivation; the arm wire schema
-        // offers only Claude and codex-sdk, so no PTY runtime can appear here.
+        // arms (no quickConfig) keep their pre-existing NULL stamps.
+        //
+        // The runtime is derived GENERICALLY, through the same helper the quick
+        // handler's ladder ends in (resolveNonClaudeSessionRuntime): a
+        // provider-literal test here used to recognize only codex-sdk, so an
+        // omp-sdk arm stamped nothing and the shared chokepoint fell back to
+        // deriving claude-sdk from the SDK substrate — the sentinel run row said
+        // omp-sdk while sessions.agent_runtime said claude-sdk, and every chat
+        // turn in that arm dispatched to Claude. The arm wire schema carries only
+        // STORABLE runtimes, so no PTY runtime can appear here.
         if (quickConfig) {
           try {
-            const armCodexSdk =
-              quickConfig.agentRuntime === 'codex-sdk' ||
-              (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined);
+            const armSessionRuntime = resolveNonClaudeSessionRuntime(quickConfig);
             stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
               resolvedSubstrate,
-              ...(armCodexSdk ? { sessionAgentRuntime: 'codex-sdk' as const } : {}),
+              ...(armSessionRuntime !== undefined
+                ? { sessionAgentRuntime: armSessionRuntime }
+                : {}),
               requestedAgentMode: quickConfig.permissionMode,
             });
           } catch (err) {

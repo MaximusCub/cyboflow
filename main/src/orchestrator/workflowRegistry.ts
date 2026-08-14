@@ -22,7 +22,11 @@ import {
   parseWorkflowDefinition,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../shared/types/workflows';
-import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
+import {
+  MixedProviderOrchestratedError,
+  ProviderOrchestratedUnsupportedError,
+} from '../../../shared/types/executionModelErrors';
+import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
 import { loadBuiltInAgents } from './agents/agentCatalogue';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
@@ -1374,6 +1378,28 @@ export class WorkflowRegistry {
           globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
           env: process.env,
         });
+
+    // Whole-run provider / orchestrated guard. The mixed-provider guard below is
+    // deliberately scoped to a CLAUDE base provider, because a whole-run
+    // non-Claude request is one consistent provider rather than a mix. That
+    // exemption assumes the provider can actually HOST an orchestrated run — one
+    // process walking the DAG with the prompt envelope and question bridge — and
+    // that is a per-provider capability, not a given: OMP shipped its
+    // programmatic lane only. Refuse here, before any workflow_runs row exists,
+    // so a launch that would otherwise start a main orchestrator outside the
+    // shipped contract fails with a sentence naming the fix instead.
+    //
+    // The `__quick__` sentinel is EXEMPT and must stay so: it hard-pins
+    // 'orchestrated' above (a quick chat is not a DAG), and its provider is
+    // whatever the quick SESSION resolved onto — tripping this would make every
+    // OMP quick session unlaunchable.
+    if (
+      executionModel === 'orchestrated' &&
+      !isQuickSentinel &&
+      !providerSupportsOrchestrated(agentProvider)
+    ) {
+      throw new ProviderOrchestratedUnsupportedError(providerLabel(agentProvider));
+    }
 
     // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent
     // NON-CLAUDE runtime pin — set EITHER in a workflow agent config
