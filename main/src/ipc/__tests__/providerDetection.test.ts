@@ -24,6 +24,15 @@ vi.mock('../../utils/claudeCodeTest', () => ({
     version: '1.2.3',
   })),
 }));
+// The omp probe now really shells out to findExecutableInPath('omp') (see
+// ompAvailability.ts) — pin it to "not found" so this suite is deterministic
+// regardless of whether the machine running it happens to have omp on PATH.
+// detectOmpAvailability's own found/missing/too-old/probe-failure behavior is
+// covered by services/panels/omp/__tests__/ompAvailability.test.ts.
+vi.mock('../../utils/shellPath', () => ({
+  getShellPath: () => '/usr/bin:/bin',
+  findExecutableInPath: () => null,
+}));
 
 import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { AppServices } from '../types';
@@ -70,12 +79,10 @@ describe('registerProviderDetectionHandlers', () => {
     expect(detectChatGptAccount).toHaveBeenCalledOnce();
   });
 
-  it('answers for a provider whose real probe has not been built yet', async () => {
-    // The registry is exhaustive, so OMP already has an entry — but its binary
-    // discovery ladder lands with the OMP managers. Until then the honest answer
-    // is 'unavailable' with no evidence: a build that cannot run OMP must not
-    // report it as usable, and the channel must not throw for a declared
-    // provider either.
+  it('reports omp unavailable when the binary is not on PATH', async () => {
+    // findExecutableInPath is mocked to return null above, so the real
+    // detectOmpAvailability probe short-circuits to 'unavailable' without
+    // ever calling --version.
     const { handlers } = register();
 
     await expect(handlers.get(PROVIDERS_DETECT_CHANNEL)?.({}, 'omp')).resolves.toEqual({

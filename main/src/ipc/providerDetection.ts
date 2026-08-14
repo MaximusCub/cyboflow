@@ -8,6 +8,7 @@ import {
 } from '../../../shared/types/onboarding';
 import { probeClaudeDetection } from './claudeDetection';
 import { probeCodexDetection } from './codexDetection';
+import { detectOmpAvailability } from '../services/panels/omp/ompAvailability';
 import type { AppServices } from './types';
 
 /**
@@ -32,12 +33,14 @@ export type ProviderDetectionProbe<P extends AgentProvider> = (
 const PROVIDER_DETECTION_PROBES: { [P in AgentProvider]: ProviderDetectionProbe<P> } = {
   claude: probeClaudeDetection,
   codex: probeCodexDetection,
-  // The real probe is the `omp` binary discovery ladder plus a version check —
-  // it arrives with `OmpPtyManager`, which owns that ladder (Phase 1, §5.2).
-  // Reporting 'unavailable' until then is the truthful answer for a build that
-  // cannot run OMP at all, and it keeps the Integrations card honest rather than
-  // claiming a provider the app has no manager for.
-  omp: async () => ({ state: 'unavailable', binaryPath: null, version: null }),
+  // PATH discovery + version-floor check (main/src/services/panels/omp/ompAvailability.ts,
+  // proposal §3.3/§5.2). No `services` dependency yet: there is no Settings
+  // custom-path field for OMP today (no `ompExecutablePath` config key), and
+  // OMP owns its own provider credentials, so there is nothing else in
+  // AppServices for this probe to consult. `omp: () => detectOmpAvailability()`
+  // rather than `omp: detectOmpAvailability` keeps the registry entry's
+  // signature visually aligned with its neighbors despite ignoring `services`.
+  omp: () => detectOmpAvailability(),
 };
 
 type DetectionResponse =
