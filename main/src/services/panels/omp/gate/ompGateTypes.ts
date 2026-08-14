@@ -190,11 +190,15 @@ export interface OmpGateConfig {
   permissionMode: OmpGatePermissionMode;
   /** Tools cyboflow refuses outright, in EVERY mode (including `dontAsk`). */
   disallowedTools: string[];
-  /** Read-safe tools cyboflow pre-cleared; auto-allowed in every gated mode. */
+  /**
+   * Read-safe tools cyboflow pre-cleared; auto-allowed in every gated mode —
+   * UNLESS the call's arguments name a URI-scheme target, which disqualifies
+   * every name-based shortcut (`hasUriSchemeTarget` in ompGateExtension.ts).
+   */
   autoAllowTools: string[];
-  /** cyboflow's edit-tool set; honored only in `acceptEdits` / `auto`. */
+  /** cyboflow's edit-tool set; honored only in `acceptEdits` / `auto`, and subject to the same argument narrowing. */
   editTools: string[];
-  /** Merged permission-rule allowlist; honored only in `auto`. */
+  /** Merged permission-rule allowlist; honored only in `auto`, and subject to the same argument narrowing. */
   allowRules: string[];
   /** Deny OMP's `task` subagent tool (hook scope inside subagents is unverified). */
   denyTaskTool: boolean;
@@ -202,14 +206,15 @@ export interface OmpGateConfig {
    * The EXACT composed names of cyboflow's own MCP tools, as OMP presents them
    * to the hook (e.g. `mcp__cyboflow_report_finding` — see (g) above).
    *
-   * When present and non-empty, rule 3 matches these names exactly and the
-   * `mcp__cyboflow_` prefix heuristic is not consulted. That closes a real
-   * spoofing hole: OMP auto-imports foreign MCP configs, and a server named
-   * `cyboflow-extra` sanitizes to `cyboflow_extra`, producing tool names that
-   * share the prefix and would otherwise be auto-allowed.
+   * THIS LIST IS THE WHOLE OF RULE 3. Membership is exact; there is no prefix
+   * heuristic behind it. A `mcp__cyboflow_` prefix test would auto-allow a
+   * FOREIGN server's tools, because OMP auto-imports the user's own MCP configs
+   * and a server named `cyboflow-extra` sanitizes to `cyboflow_extra` (see (g)),
+   * yielding `mcp__cyboflow_extra_*`.
    *
-   * Optional so an older manager that does not compute the list still works —
-   * omitting it falls back to the prefix match with that caveat.
+   * Optional so an older manager that does not compute the list still works.
+   * Absent, empty, or malformed means NO MCP tool is auto-allowed — MCP calls
+   * fall through to the human gate like any other undecidable tool.
    */
   cyboflowMcpToolNames?: string[];
 }

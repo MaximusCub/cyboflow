@@ -4,9 +4,10 @@
  * The interesting assertions are the two translations that would fail SILENTLY
  * in production: a tool name that maps to something OMP never emits simply never
  * matches (a deny that does not deny, an allowlist that does not allow), and a
- * cyboflow MCP tool name that drifts out of the hardcoded list falls back to the
- * spoofable prefix heuristic. So the MCP list is re-derived from
- * `cyboflowMcpServer.ts` here rather than restated.
+ * cyboflow MCP tool name that drifts out of the hardcoded list stops being
+ * auto-allowed at all (the gate matches on exact membership only, so drift shows
+ * up as our own flow tools suddenly prompting a human). So the MCP list is
+ * re-derived from `cyboflowMcpServer.ts` here rather than restated.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -121,6 +122,36 @@ describe('buildOmpGateConfig', () => {
     expect(buildOmpGateConfig(base).cyboflowMcpToolNames).toContain('mcp__cyboflow_report_finding');
   });
 
+  /**
+   * The empty in-place list is a SECURITY property, not an omission. A
+   * legitimate cyboflow MCP tool cannot occur in an in-place session — but a
+   * spoofed one can, because OMP auto-imports the user's own MCP configs and a
+   * server named `cyboflow-extra` yields `mcp__cyboflow_extra_*`. Exact-empty
+   * means the gate auto-allows neither.
+   */
+  it('leaves an in-place session unable to auto-allow ANY MCP tool, spoofed or real', () => {
+    const inPlace = buildOmpGateConfig({ ...base, cyboflowMcpAvailable: false });
+
+    expect(
+      decideToolCall({ toolName: 'mcp__cyboflow_extra_exfiltrate', input: {} }, inPlace).kind,
+    ).toBe('ask');
+    expect(decideToolCall({ toolName: 'mcp__cyboflow_report_finding', input: {} }, inPlace).kind).toBe(
+      'ask',
+    );
+  });
+
+  it('gates a spoofed MCP name even for a worktree session that HAS the real list', () => {
+    const wired = buildOmpGateConfig(base);
+
+    expect(decideToolCall({ toolName: 'mcp__cyboflow_report_finding', input: {} }, wired)).toEqual({
+      kind: 'allow',
+      rule: 'cyboflow-mcp',
+    });
+    expect(
+      decideToolCall({ toolName: 'mcp__cyboflow_extra_exfiltrate', input: {} }, wired).kind,
+    ).toBe('ask');
+  });
+
   it('carries permission rules through verbatim for the gate to parse', () => {
     const config = buildOmpGateConfig({ ...base, allowRules: ['Bash(git status:*)', 'Read'] });
     expect(config.allowRules).toEqual(['Bash(git status:*)', 'Read']);
@@ -150,12 +181,26 @@ describe('buildOmpGateConfig', () => {
       decideToolCall({ toolName: 'mcp__cyboflow_request_verification', input: {} }, strict).kind,
     ).toBe('block');
 
+    // `read` is on the auto-allow list by NAME, but OMP escalates an `ssh://`
+    // read to a remote exec-tier operation (read.ts:401), so the real config the
+    // manager ships must still route that one to a human.
+    expect(decideToolCall({ toolName: 'read', input: { path: 'ssh://h/x' } }, strict)).toEqual({
+      kind: 'ask',
+    });
+    expect(decideToolCall({ toolName: 'grep', input: { path: 'ssh://h/x' } }, strict)).toEqual({
+      kind: 'ask',
+    });
+
     const acceptEdits = buildOmpGateConfig({ ...base, permissionMode: 'acceptEdits' });
     expect(decideToolCall({ toolName: 'write', input: {} }, acceptEdits)).toEqual({
       kind: 'allow',
       rule: 'edit-tool',
     });
     expect(decideToolCall({ toolName: 'bash', input: { command: 'ls' } }, acceptEdits)).toEqual({
+      kind: 'ask',
+    });
+    // An ssh:// WRITE is the worse half of the same hole.
+    expect(decideToolCall({ toolName: 'write', input: { path: 'ssh://h/x' } }, acceptEdits)).toEqual({
       kind: 'ask',
     });
 

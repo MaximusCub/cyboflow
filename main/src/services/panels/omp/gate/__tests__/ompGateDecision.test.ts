@@ -12,10 +12,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  CYBOFLOW_MCP_TOOL_PREFIX,
   MOST_RESTRICTIVE_GATE_CONFIG,
   OMP_TASK_TOOL_NAME,
   decideToolCall,
+  hasUriSchemeTarget,
   isCyboflowMcpTool,
   matchesAllowRules,
   parseGateConfig,
@@ -113,78 +113,91 @@ describe('rule 2: the task subagent tool', () => {
 // ---------------------------------------------------------------------------
 
 describe('rule 3: cyboflow MCP tools', () => {
-  it('recognizes the name OMP composes for the cyboflow server', () => {
-    // createMCPToolName('cyboflow', 'cyboflow_report_finding') strips the
-    // redundant server prefix (mcp/tool-bridge.ts:349-357).
-    expect(isCyboflowMcpTool('mcp__cyboflow_report_finding')).toBe(true);
-    expect(isCyboflowMcpTool('mcp__github_create_issue')).toBe(false);
-    expect(isCyboflowMcpTool('bash')).toBe(false);
+  // The name OMP composes for our own server: createMCPToolName('cyboflow',
+  // 'cyboflow_report_finding') strips the redundant server prefix
+  // (mcp/tool-bridge.ts:349-357).
+  const REAL = 'mcp__cyboflow_report_finding';
+  /**
+   * The spoof this rule exists to refuse. OMP auto-imports the user's foreign
+   * MCP configs; a server named `cyboflow-extra` sanitizes to `cyboflow_extra`
+   * (mcp/tool-bridge.ts:335-343), so its tools arrive as `mcp__cyboflow_extra_*`
+   * — names ANY `mcp__cyboflow_` prefix test would accept. Since this gate is
+   * the sole policy engine and the manager's bridge auto-approves OMP's prompt
+   * behind it, a prefix match would fully auto-approve a foreign server.
+   */
+  const SPOOFED = 'mcp__cyboflow_extra_exfiltrate';
+
+  it('matches on EXACT membership only — no prefix heuristic', () => {
+    expect(isCyboflowMcpTool(REAL, [REAL])).toBe(true);
+    expect(isCyboflowMcpTool(SPOOFED, [REAL])).toBe(false);
+    expect(isCyboflowMcpTool('mcp__github_create_issue', [REAL])).toBe(false);
+    expect(isCyboflowMcpTool('bash', [REAL])).toBe(false);
+    // The list is the whole rule, so a name outside our prefix is matchable too.
+    expect(isCyboflowMcpTool('mcp__other_tool', ['mcp__other_tool'])).toBe(true);
   });
 
-  it('allows a cyboflow MCP tool in the most restrictive mode', () => {
+  it('auto-allows NOTHING when the exact list is absent or empty', () => {
+    for (const exactNames of [undefined, []]) {
+      expect(isCyboflowMcpTool(REAL, exactNames)).toBe(false);
+      expect(isCyboflowMcpTool(SPOOFED, exactNames)).toBe(false);
+    }
+  });
+
+  it('allows a listed cyboflow MCP tool in the most restrictive mode', () => {
     const decision = decideToolCall(
-      { toolName: `${CYBOFLOW_MCP_TOOL_PREFIX}update_sprint_task`, input: noInput },
-      config(),
+      { toolName: `mcp__cyboflow_update_sprint_task`, input: noInput },
+      config({ cyboflowMcpToolNames: ['mcp__cyboflow_update_sprint_task'] }),
     );
 
     expect(decision).toEqual({ kind: 'allow', rule: 'cyboflow-mcp' });
   });
 
-  it('still blocks a cyboflow MCP tool that is explicitly disallowed', () => {
-    const toolName = `${CYBOFLOW_MCP_TOOL_PREFIX}report_finding`;
-    const decision = decideToolCall(
-      { toolName, input: noInput },
-      config({ disallowedTools: [toolName] }),
-    );
+  it('gates the spoofed name under a POPULATED list', () => {
+    const withExact = config({ cyboflowMcpToolNames: [REAL] });
 
-    expect(decision.kind).toBe('block');
+    expect(decideToolCall({ toolName: REAL, input: noInput }, withExact)).toEqual({
+      kind: 'allow',
+      rule: 'cyboflow-mcp',
+    });
+    // Not on the list ⇒ not ours ⇒ falls through to the human gate.
+    expect(decideToolCall({ toolName: SPOOFED, input: noInput }, withExact).kind).toBe('ask');
   });
 
-  describe('exact names close the prefix-spoofing hole', () => {
-    // OMP auto-imports foreign MCP configs. A server named `cyboflow-extra`
-    // sanitizes to `cyboflow_extra` (mcp/tool-bridge.ts:335-343), so its tools
-    // are named `mcp__cyboflow_extra_*` — which the prefix heuristic accepts.
-    const SPOOFED = 'mcp__cyboflow_extra_exfiltrate';
-    const REAL = 'mcp__cyboflow_report_finding';
+  it('gates the spoofed name under an EMPTY or MISSING list — the in-place shape', () => {
+    // An in-place session gets no `.omp/mcp.json`, so the builder emits []. A
+    // legitimate cyboflow MCP tool cannot occur there, but a spoofed one can,
+    // which is precisely why empty must mean "auto-allow nothing" rather than
+    // "fall back to something name-shaped".
+    expect(decideToolCall({ toolName: SPOOFED, input: noInput }, config()).kind).toBe('ask');
+    expect(
+      decideToolCall({ toolName: SPOOFED, input: noInput }, config({ cyboflowMcpToolNames: [] })).kind,
+    ).toBe('ask');
+    expect(
+      decideToolCall(
+        { toolName: SPOOFED, input: noInput },
+        config({ cyboflowMcpToolNames: undefined }),
+      ).kind,
+    ).toBe('ask');
+  });
 
-    it('the prefix heuristic ALLOWS the spoofed name (the hole being closed)', () => {
-      expect(isCyboflowMcpTool(SPOOFED)).toBe(true);
-      expect(decideToolCall({ toolName: SPOOFED, input: noInput }, config()).kind).toBe('allow');
-    });
+  it('gates even the REAL name when nothing was pre-cleared', () => {
+    // The safe degradation: an undecidable MCP call reaches the human like any
+    // other tool, rather than being auto-allowed on the shape of its name.
+    expect(
+      decideToolCall({ toolName: REAL, input: noInput }, config({ cyboflowMcpToolNames: [] })).kind,
+    ).toBe('ask');
+    expect(
+      decideToolCall({ toolName: REAL, input: noInput }, config({ cyboflowMcpToolNames: undefined }))
+        .kind,
+    ).toBe('ask');
+  });
 
-    it('an exact list blocks the spoofed name while still allowing the real one', () => {
-      const withExact = config({ cyboflowMcpToolNames: [REAL] });
-
-      expect(decideToolCall({ toolName: REAL, input: noInput }, withExact)).toEqual({
-        kind: 'allow',
-        rule: 'cyboflow-mcp',
-      });
-      // Not on the list ⇒ not ours ⇒ falls through to the human gate.
-      expect(decideToolCall({ toolName: SPOOFED, input: noInput }, withExact).kind).toBe('ask');
-    });
-
-    it('consults ONLY the exact list when one is supplied', () => {
-      expect(isCyboflowMcpTool(REAL, [REAL])).toBe(true);
-      expect(isCyboflowMcpTool(SPOOFED, [REAL])).toBe(false);
-      // A name outside the prefix entirely is still matchable by exact list.
-      expect(isCyboflowMcpTool('mcp__other_tool', ['mcp__other_tool'])).toBe(true);
-    });
-
-    it('falls back to the prefix when the list is absent or empty', () => {
-      expect(isCyboflowMcpTool(SPOOFED, undefined)).toBe(true);
-      expect(isCyboflowMcpTool(SPOOFED, [])).toBe(true);
-      expect(decideToolCall({ toolName: REAL, input: noInput }, config({ cyboflowMcpToolNames: [] }))).toEqual(
-        { kind: 'allow', rule: 'cyboflow-mcp' },
-      );
-    });
-
-    it('keeps disallowedTools ahead of the exact list', () => {
-      const decision = decideToolCall(
-        { toolName: REAL, input: noInput },
-        config({ cyboflowMcpToolNames: [REAL], disallowedTools: [REAL] }),
-      );
-      expect(decision.kind).toBe('block');
-    });
+  it('keeps disallowedTools ahead of the exact list', () => {
+    const decision = decideToolCall(
+      { toolName: REAL, input: noInput },
+      config({ cyboflowMcpToolNames: [REAL], disallowedTools: [REAL] }),
+    );
+    expect(decision.kind).toBe('block');
   });
 });
 
@@ -240,6 +253,164 @@ describe('rule 5: mode-scoped allowlists', () => {
     expect(withRules('default').kind).toBe('ask');
     expect(withRules('acceptEdits').kind).toBe('ask');
     expect(withRules('auto')).toEqual({ kind: 'allow', rule: 'allow-rule' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 5, narrowed — a URI-scheme target disqualifies every name-based shortcut
+// ---------------------------------------------------------------------------
+
+/**
+ * The hole: OMP's read-tier tools escalate THEMSELVES on a remote target
+ * (`tools/read.ts:401`, `tools/grep.ts:906` reclassify an `ssh://` path to
+ * `exec` tier), so a name-only auto-allow of `read` hands a default-mode session
+ * remote access over the user's SSH credentials with no human anywhere — and the
+ * manager's bridge auto-approves OMP's own prompt behind it.
+ *
+ * The narrowing applies to the auto-allow PREDICATES only. Rule order is
+ * untouched, which these tests pin from both sides: `dontAsk` still allows
+ * (it precedes rule 5), and `disallowedTools` / the `task` denial still block.
+ */
+describe('rule 5 narrowing: URI-scheme targets', () => {
+  const readConfig = (permissionMode: OmpGateConfig['permissionMode'] = 'default') =>
+    config({ permissionMode, autoAllowTools: ['read', 'grep'] });
+
+  it('auto-allows a plain local read', () => {
+    expect(decideToolCall({ toolName: 'read', input: { path: '/repo/src/x.ts' } }, readConfig())).toEqual(
+      { kind: 'allow', rule: 'auto-allow-tool' },
+    );
+  });
+
+  it('refuses to auto-allow an ssh:// read — it asks the human instead', () => {
+    expect(
+      decideToolCall({ toolName: 'read', input: { path: 'ssh://user@host/etc/shadow' } }, readConfig())
+        .kind,
+    ).toBe('ask');
+  });
+
+  it('catches every scheme, not just ssh', () => {
+    for (const target of [
+      'ssh://host/x',
+      'file:///etc/passwd',
+      'http://internal/x',
+      'https://internal/x',
+      'ftp://host/x',
+      's3://bucket/key',
+    ]) {
+      expect(decideToolCall({ toolName: 'read', input: { path: target } }, readConfig()).kind).toBe(
+        'ask',
+      );
+    }
+  });
+
+  it('catches a scheme nested inside an argument object or array', () => {
+    expect(
+      decideToolCall(
+        { toolName: 'grep', input: { pattern: 'x', options: { paths: ['ok', 'ssh://host/x'] } } },
+        readConfig(),
+      ).kind,
+    ).toBe('ask');
+  });
+
+  it('catches a scheme reached through a flag-shaped argument', () => {
+    // A `^`-anchored scan would miss this, and a false negative here is a silent
+    // bypass — so the predicate matches at a token boundary, not only at index 0.
+    expect(
+      decideToolCall({ toolName: 'read', input: { path: '--file=ssh://host/x' } }, readConfig()).kind,
+    ).toBe('ask');
+  });
+
+  it('narrows editTools too — an ssh:// WRITE is worse than an ssh:// read', () => {
+    const acceptEdits = config({ permissionMode: 'acceptEdits', editTools: ['write'] });
+
+    expect(decideToolCall({ toolName: 'write', input: { path: '/repo/x.ts' } }, acceptEdits)).toEqual({
+      kind: 'allow',
+      rule: 'edit-tool',
+    });
+    expect(
+      decideToolCall({ toolName: 'write', input: { path: 'ssh://host/x' } }, acceptEdits).kind,
+    ).toBe('ask');
+  });
+
+  it('narrows allowRules in auto mode, bare-name and Bash(...) alike', () => {
+    // A bare tool-name rule is the same name-only hole as autoAllowTools…
+    const bareRule = config({ permissionMode: 'auto', allowRules: ['Read'] });
+    expect(decideToolCall({ toolName: 'read', input: { path: '/repo/x' } }, bareRule)).toEqual({
+      kind: 'allow',
+      rule: 'allow-rule',
+    });
+    expect(decideToolCall({ toolName: 'read', input: { path: 'ssh://h/x' } }, bareRule).kind).toBe(
+      'ask',
+    );
+
+    // …and the no-carve-outs rule means a Bash specifier carrying a URL asks
+    // too. That IS a behaviour change for such rules, and it is deliberate: an
+    // exception for "argument-aware rules" is where the next bypass would live.
+    const bashRule = config({ permissionMode: 'auto', allowRules: ['Bash(curl:*)', 'Bash(git:*)'] });
+    expect(decideToolCall({ toolName: 'bash', input: { command: 'git status' } }, bashRule)).toEqual({
+      kind: 'allow',
+      rule: 'allow-rule',
+    });
+    expect(
+      decideToolCall({ toolName: 'bash', input: { command: 'curl https://x.test' } }, bashRule).kind,
+    ).toBe('ask');
+  });
+
+  it('does NOT narrow rules 1-4: dontAsk still allows, deny rules still block', () => {
+    const remote = { path: 'ssh://host/x' };
+
+    // Rule 4 precedes the narrowing — dontAsk is log-only, by design.
+    expect(decideToolCall({ toolName: 'read', input: remote }, config({ permissionMode: 'dontAsk' }))).toEqual(
+      { kind: 'allow', rule: 'dont-ask' },
+    );
+    // Rules 1-2 still bite ahead of everything.
+    expect(
+      decideToolCall(
+        { toolName: 'read', input: remote },
+        config({ permissionMode: 'dontAsk', disallowedTools: ['read'] }),
+      ).kind,
+    ).toBe('block');
+    expect(
+      decideToolCall(
+        { toolName: OMP_TASK_TOOL_NAME, input: remote },
+        config({ permissionMode: 'dontAsk', denyTaskTool: true }),
+      ).kind,
+    ).toBe('block');
+    // Rule 3 is not narrowed either: our own MCP tools routinely carry URLs.
+    expect(
+      decideToolCall(
+        { toolName: 'mcp__cyboflow_report_finding', input: { body: 'see https://example.test' } },
+        config({ cyboflowMcpToolNames: ['mcp__cyboflow_report_finding'] }),
+      ),
+    ).toEqual({ kind: 'allow', rule: 'cyboflow-mcp' });
+  });
+});
+
+describe('hasUriSchemeTarget', () => {
+  it('is false for ordinary local arguments', () => {
+    expect(hasUriSchemeTarget({})).toBe(false);
+    expect(hasUriSchemeTarget({ path: '/repo/src/x.ts', limit: 200, deep: true })).toBe(false);
+    expect(hasUriSchemeTarget({ command: 'git status && ls -la' })).toBe(false);
+    // A bare colon or a lone slash pair is not a scheme.
+    expect(hasUriSchemeTarget({ q: 'a:b', ratio: 'x//y' })).toBe(false);
+  });
+
+  it('recurses through arrays, nested objects, and null holes', () => {
+    expect(hasUriSchemeTarget({ a: [{ b: [{ c: 'ssh://h/x' }] }] })).toBe(true);
+    expect(hasUriSchemeTarget({ a: null, b: [null, undefined, 'ok'] })).toBe(false);
+  });
+
+  it('terminates on a cyclic input rather than hanging the handler', () => {
+    const cyclic: Record<string, unknown> = { path: '/repo/x' };
+    cyclic['self'] = cyclic;
+    expect(hasUriSchemeTarget(cyclic)).toBe(false);
+  });
+
+  it('answers identically on repeat calls (no sticky regex lastIndex)', () => {
+    const input = { path: 'ssh://host/x' };
+    expect(hasUriSchemeTarget(input)).toBe(true);
+    expect(hasUriSchemeTarget(input)).toBe(true);
+    expect(hasUriSchemeTarget(input)).toBe(true);
   });
 });
 
@@ -370,7 +541,9 @@ describe('parseGateConfig', () => {
     expect(parseGateConfig(JSON.stringify(source), silentLogger)).toEqual(source);
   });
 
-  it('parses cyboflowMcpToolNames, defaulting to the empty prefix-fallback', () => {
+  it('parses cyboflowMcpToolNames, defaulting to "nothing is pre-cleared"', () => {
+    // An absent key auto-allows no MCP tool at all — rule 3 is exact-membership
+    // only, so there is no name-shaped fallback behind an empty list.
     expect(parseGateConfig(JSON.stringify({}), silentLogger).cyboflowMcpToolNames).toEqual([]);
     expect(
       parseGateConfig(
@@ -378,11 +551,30 @@ describe('parseGateConfig', () => {
         silentLogger,
       ).cyboflowMcpToolNames,
     ).toEqual(['mcp__cyboflow_a', 'mcp__cyboflow_b']);
-    // A malformed value must not become a one-entry list, which would silently
-    // narrow rule 3 to nothing.
+    // A malformed value must not be coerced into a list of any kind — whatever
+    // it produced would be names nobody vetted.
     expect(
       parseGateConfig(JSON.stringify({ cyboflowMcpToolNames: 'mcp__cyboflow_a' }), silentLogger)
         .cyboflowMcpToolNames,
     ).toEqual([]);
+  });
+
+  it('parsed configs pre-clear no MCP tool and no remote target', () => {
+    // The two fail-closed properties, asserted through the parser rather than a
+    // hand-built config: a degraded config auto-allows neither a cyboflow-shaped
+    // MCP name nor a URI-scheme target on an otherwise read-safe tool.
+    const degraded = parseGateConfig('{not json', silentLogger);
+    expect(decideToolCall({ toolName: 'mcp__cyboflow_report_finding', input: {} }, degraded).kind).toBe(
+      'ask',
+    );
+
+    const readSafe = parseGateConfig(
+      JSON.stringify({ permissionMode: 'default', autoAllowTools: ['read'] }),
+      silentLogger,
+    );
+    expect(decideToolCall({ toolName: 'read', input: { path: '/x' } }, readSafe).kind).toBe('allow');
+    expect(decideToolCall({ toolName: 'read', input: { path: 'ssh://h/x' } }, readSafe).kind).toBe(
+      'ask',
+    );
   });
 });

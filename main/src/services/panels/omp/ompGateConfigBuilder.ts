@@ -45,12 +45,14 @@ import type { OmpGateConfig } from './gate/ompGateTypes';
  * memory store; `checkpoint`/`rewind` mutate git state; `inspect_image` hands
  * bytes to a vision provider. Each of those falls through to the human instead.
  *
- * KNOWN NARROWING GAP: OMP's `read`/`grep` escalate themselves to `exec` when
- * the path targets `ssh://` (read.ts:401-402, grep.ts:906-909), and the gate's
- * allowlist is name-only — it cannot express that. An `ssh://` read is therefore
- * auto-allowed by cyboflow's gate where OMP alone would have prompted. cyboflow
- * has no remote-read analogue for the rule to be written against; closing it
- * needs an argument-aware entry in the gate config, not a change here.
+ * THE REMOTE-TARGET NARROWING LIVES IN THE GATE, NOT HERE. OMP's `read`/`grep`
+ * escalate themselves to `exec` tier when the path targets `ssh://`
+ * (read.ts:401-402, grep.ts:906-909) — a remote operation over the user's own
+ * SSH credentials. This list cannot express that, because it is a list of names.
+ * The gate refuses every name-based shortcut whose ARGUMENTS carry a URI scheme
+ * (`hasUriSchemeTarget` in `gate/ompGateExtension.ts`), so an `ssh://` read
+ * reaches the human even though `read` is named here. Do not "fix" that by
+ * splitting this list — the argument is what decides, and only the gate sees it.
  */
 export const OMP_AUTO_ALLOW_TOOLS: readonly string[] = ['read', 'glob', 'grep', 'ast_grep', 'todo'];
 
@@ -219,8 +221,14 @@ export interface OmpGateConfigInput {
   allowRules?: readonly string[];
   /**
    * Whether cyboflow's MCP server is wired for this spawn. False for an in-place
-   * session (no `.omp/mcp.json` is written — proposal §5.4), where naming our
-   * tools would pre-clear names that cannot occur.
+   * session, which gets no `.omp/mcp.json` (proposal §5.4) — so the emitted
+   * `cyboflowMcpToolNames` is empty and the gate auto-allows NO MCP tool at all.
+   *
+   * That empty list is the point, not an omission. A LEGITIMATE cyboflow MCP
+   * tool cannot occur in an in-place session, but a SPOOFED one can: OMP
+   * auto-imports the user's own MCP configs, and a server named `cyboflow-extra`
+   * produces `mcp__cyboflow_extra_*` tool names. Exact-empty means those are
+   * undecidable and reach the human, which is exactly the desired outcome.
    */
   cyboflowMcpAvailable: boolean;
 }

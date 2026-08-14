@@ -561,6 +561,71 @@ describe('createToolCallHandler', () => {
     expect(orch.received).toHaveLength(0);
   });
 
+  /**
+   * The remote-target narrowing, observed at the seam that actually matters.
+   * `decideToolCall` returning `'ask'` is only half the claim — what makes an
+   * `ssh://` read safe is that a REQUEST REACHES THE ORCHESTRATOR and a human
+   * verdict comes back. OMP's `read`/`grep` escalate themselves to exec tier on
+   * an `ssh://` path (read.ts:401, grep.ts:906), so this is the difference
+   * between "cyboflow read a remote host over the user's SSH credentials with
+   * nobody watching" and "cyboflow asked".
+   */
+  it('routes an ssh:// read to the human even though `read` is auto-allowed', async () => {
+    const orch = await startOrchestrator((req) =>
+      verdictFrame(String(req['requestId']), 'deny', 'no remote reads on this run'),
+    );
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: { ...MOST_RESTRICTIVE_GATE_CONFIG, autoAllowTools: ['read'] },
+      }),
+    );
+
+    const result = await handler(toolCall('read', { path: 'ssh://user@host/etc/shadow' }));
+
+    expect(orch.received).toHaveLength(1);
+    expect(orch.received[0]?.['toolName']).toBe('read');
+    expect(orch.received[0]?.['toolInput']).toEqual({ path: 'ssh://user@host/etc/shadow' });
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain('no remote reads on this run');
+  });
+
+  it('routes an ssh:// write to the human in acceptEdits mode', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: {
+          ...MOST_RESTRICTIVE_GATE_CONFIG,
+          permissionMode: 'acceptEdits',
+          editTools: ['write'],
+        },
+      }),
+    );
+
+    // Local write: the edit-tool allowance stands, no socket traffic.
+    await expect(handler(toolCall('write', { path: '/repo/x.ts' }))).resolves.toBeUndefined();
+    expect(orch.received).toHaveLength(0);
+
+    // Remote write: the same tool, the same mode, but a human decides.
+    await expect(handler(toolCall('write', { path: 'ssh://host/x.ts' }))).resolves.toBeUndefined();
+    expect(orch.received).toHaveLength(1);
+  });
+
+  it('leaves dontAsk log-only — a remote target there still never asks', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'deny'));
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: {
+          ...MOST_RESTRICTIVE_GATE_CONFIG,
+          permissionMode: 'dontAsk',
+          autoAllowTools: ['read'],
+        },
+      }),
+    );
+
+    await expect(handler(toolCall('read', { path: 'ssh://host/x' }))).resolves.toBeUndefined();
+    expect(orch.received).toHaveLength(0);
+  });
+
   it('blocks a disallowed tool without asking the human', async () => {
     const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
     const handler = createToolCallHandler(

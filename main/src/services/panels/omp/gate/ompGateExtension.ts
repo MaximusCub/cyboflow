@@ -119,22 +119,30 @@ export const ENV_GATE_SENTINEL = 'CYBOFLOW_OMP_GATE_SENTINEL';
 export const OMP_TASK_TOOL_NAME = 'task';
 
 /**
- * Prefix of an MCP tool exposed by cyboflow's own `cyboflow` MCP server.
+ * A URI scheme sitting at a token boundary inside a tool argument: `ssh://`,
+ * `file://`, `http://`, `ftp://`, anything of that shape.
  *
- * `createMCPToolName('cyboflow', 'cyboflow_report_finding')` yields
- * `mcp__cyboflow_report_finding`: the server name is lowercased and sanitized,
- * then a redundant `<server>_` prefix on the tool name is stripped
- * (`mcp/tool-bridge.ts:335-358`).
+ * WHY THE GATE CARES (the hole this closes): OMP's read-tier tools ESCALATE
+ * THEMSELVES on a remote target. `tools/read.ts:401` and `tools/grep.ts:906`
+ * reclassify a call to `exec` tier when the path is `ssh://`, because the tool
+ * then runs a remote operation over the user's own SSH credentials. cyboflow's
+ * auto-allow sets are name lists — `read` is `read` — so without this scan a
+ * `default`-mode session would auto-allow a remote read with no human anywhere
+ * in the loop, and the manager's approval bridge would auto-approve OMP's own
+ * redundant prompt behind it.
  *
- * KNOWN LIMITATION (reported as a follow-up, not fixable inside this file): a
- * DIFFERENT MCP server whose sanitized name begins `cyboflow_` — e.g. one named
- * `cyboflow-extra`, which sanitizes to `cyboflow_extra` — produces tool names
- * that also start with this prefix and would be auto-allowed. OMP auto-imports
- * foreign MCP configs, so such a server is not purely hypothetical. The
- * available mitigation today is `disallowedTools` (rule 1), which is evaluated
- * BEFORE this rule.
+ * NOT `^`-anchored, deliberately: a target reached through a flag-shaped
+ * argument (`--file=ssh://host/x`) or embedded mid-string would evade a
+ * start-anchor, and a false negative here is a silent bypass. The boundary
+ * class in front makes this a strict superset of "the argument IS a URI".
+ *
+ * `file://` is caught deliberately too — it is path indirection, and the point
+ * is that the gate stops guessing about argument semantics it cannot verify.
+ *
+ * Deliberately un-`g`-flagged: a `g` regex carries `lastIndex` between `.test`
+ * calls, which would make this predicate answer differently on repeat inputs.
  */
-export const CYBOFLOW_MCP_TOOL_PREFIX = 'mcp__cyboflow_';
+const URI_SCHEME_TARGET = /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//i;
 
 /**
  * How long we wait for a human verdict before giving up ourselves.
@@ -164,9 +172,9 @@ export const MOST_RESTRICTIVE_GATE_CONFIG: OmpGateConfig = {
   editTools: [],
   allowRules: [],
   denyTaskTool: true,
-  // Empty = "the manager did not tell us the exact names", which keeps rule 3
-  // on its prefix fallback. There is nothing to tighten here: a config this
-  // degraded means no cyboflow MCP server was wired for the session either.
+  // Empty = "no MCP tool is pre-cleared". Rule 3 is exact-membership only, so an
+  // empty list auto-allows NOTHING and every MCP call falls to the human gate —
+  // which is the correct degradation for a config this damaged.
   cyboflowMcpToolNames: [],
 };
 
@@ -415,18 +423,52 @@ export type OmpGateDecision =
 /**
  * True when the tool is served by cyboflow's own MCP server.
  *
- * Two modes, and the exact one is strictly preferred:
- *  - `exactNames` non-empty → EXACT membership only. The prefix is not
- *    consulted at all, so a foreign server whose sanitized name starts
- *    `cyboflow_` cannot slip through.
- *  - `exactNames` absent/empty → the {@link CYBOFLOW_MCP_TOOL_PREFIX} fallback,
- *    with the spoofing caveat documented on that constant.
+ * EXACT MEMBERSHIP IS THE ONLY AUTO-ALLOW PATH. There is deliberately no
+ * `mcp__cyboflow_` prefix heuristic: OMP auto-imports the user's foreign MCP
+ * configs, and a server named `cyboflow-extra` sanitizes to `cyboflow_extra`
+ * (`mcp/tool-bridge.ts:335-343`), so its tools arrive as `mcp__cyboflow_extra_*`
+ * — names a prefix test accepts. Since this gate is the sole policy engine and
+ * the manager's bridge auto-approves OMP's redundant prompt for anything the
+ * gate passes, a prefix match is a full auto-approval of a foreign server's
+ * tools with no human in the loop.
+ *
+ * So an absent, empty, or malformed `exactNames` auto-allows NO MCP tool. That
+ * is not a breakage: an undecidable MCP call simply falls through to the
+ * ordinary decision ladder and reaches the human like any other tool.
+ *
+ * @param exactNames the composed names from `cyboflowMcpToolNames`. Required
+ *   (though it may be `undefined`) so no callsite can forget the list and
+ *   silently reopen a name-shaped allowance.
  */
-export function isCyboflowMcpTool(toolName: string, exactNames?: readonly string[]): boolean {
-  if (exactNames !== undefined && exactNames.length > 0) {
-    return exactNames.includes(toolName);
-  }
-  return toolName.startsWith(CYBOFLOW_MCP_TOOL_PREFIX);
+export function isCyboflowMcpTool(
+  toolName: string,
+  exactNames: readonly string[] | undefined,
+): boolean {
+  return exactNames !== undefined && exactNames.includes(toolName);
+}
+
+/**
+ * True when any string anywhere in a tool call's arguments names a URI-scheme
+ * target — see {@link URI_SCHEME_TARGET} for why the gate treats that as
+ * disqualifying.
+ *
+ * Recursive over arrays and nested objects, because a target can arrive one
+ * level down (`{ files: [{ path: 'ssh://host/x' }] }`) and a top-level-only scan
+ * would miss it. Object identity is tracked so a cyclic input (which JSON cannot
+ * produce, but a foreign runtime could hand us) terminates instead of hanging
+ * the handler inside OMP's 30s cap.
+ */
+export function hasUriSchemeTarget(input: Record<string, unknown>): boolean {
+  return scanForUriScheme(input, new Set<object>());
+}
+
+function scanForUriScheme(value: unknown, seen: Set<object>): boolean {
+  if (typeof value === 'string') return URI_SCHEME_TARGET.test(value);
+  if (value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const members = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  return members.some((member) => scanForUriScheme(member, seen));
 }
 
 /**
@@ -436,9 +478,10 @@ export function isCyboflowMcpTool(toolName: string, exactNames?: readonly string
  * Rule order is load-bearing:
  *  1. `disallowedTools` — refused in EVERY mode, `dontAsk` included.
  *  2. OMP's `task` subagent tool when `denyTaskTool` — likewise mode-independent.
- *  3. cyboflow's own MCP tools — always allowed (our tools, our server).
+ *  3. cyboflow's own MCP tools, by EXACT name — always allowed (our tools, our
+ *     server, reached through our own socket).
  *  4. `dontAsk` — allow (log-only), rules 1-2 having already applied.
- *  5. the mode-scoped allowlists.
+ *  5. the mode-scoped allowlists, each narrowed by {@link hasUriSchemeTarget}.
  *  6. otherwise: ask the human.
  */
 export function decideToolCall(
@@ -478,18 +521,41 @@ export function decideToolCall(
     return { kind: 'allow', rule: 'dont-ask' };
   }
 
-  // 5. Mode-scoped allowlists.
-  if (config.autoAllowTools.includes(toolName)) {
-    return { kind: 'allow', rule: 'auto-allow-tool' };
-  }
-  if (
-    (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
-    config.editTools.includes(toolName)
-  ) {
-    return { kind: 'allow', rule: 'edit-tool' };
-  }
-  if (config.permissionMode === 'auto' && matchesAllowRules(toolName, input, config.allowRules)) {
-    return { kind: 'allow', rule: 'allow-rule' };
+  // 5. Mode-scoped allowlists — every one of them NARROWED by the argument scan.
+  //
+  // The invariant, stated once and applied without carve-outs: NO auto-allow
+  // path passes a call whose arguments name a URI-scheme target. All three
+  // paths below decide on a tool NAME (or, for `allowRules`, on a name plus a
+  // bash-command specifier), and a name cannot express that OMP's own `read` /
+  // `grep` escalate themselves to remote exec-tier operations on an `ssh://`
+  // path (read.ts:401, grep.ts:906). A scheme in the arguments therefore
+  // disqualifies the shortcut and the call falls through to rule 6.
+  //
+  // This DOES reach `Bash(...)` allow rules whose command carries a URL — an
+  // `auto`-mode rule like `Bash(curl https://api.example.com:*)` now asks the
+  // human. That is the deliberate cost of a rule with no exceptions: a carve-out
+  // for "argument-aware rules" is exactly where the next bypass would live, and
+  // erring toward the human is the safe direction.
+  //
+  // Rules 1-4 are untouched: a disallowed tool and the `task` tool still block
+  // first, `dontAsk` still allows first (log-only is log-only), and our own MCP
+  // tools are not narrowed — they are exact-name matched, served by cyboflow's
+  // own server, and routinely carry URLs in finding bodies and artifact payloads.
+  const remoteTarget = hasUriSchemeTarget(input);
+
+  if (!remoteTarget) {
+    if (config.autoAllowTools.includes(toolName)) {
+      return { kind: 'allow', rule: 'auto-allow-tool' };
+    }
+    if (
+      (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
+      config.editTools.includes(toolName)
+    ) {
+      return { kind: 'allow', rule: 'edit-tool' };
+    }
+    if (config.permissionMode === 'auto' && matchesAllowRules(toolName, input, config.allowRules)) {
+      return { kind: 'allow', rule: 'allow-rule' };
+    }
   }
 
   // 6. Undecidable locally.
