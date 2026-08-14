@@ -71,7 +71,7 @@ tree, not marketing copy.
 
 ```
 AgentProvider += 'omp'
-AgentRuntime  += 'omp-sdk'   // persistent `omp --mode rpc` child process, NDJSON over stdio
+AgentRuntime  += 'omp-sdk'   // persistent `omp --mode rpc-ui` child process, NDJSON over stdio
               += 'omp-pty'   // interactive OMP TUI over the AbstractCliManager PTY path
 SessionAgentRuntime  += both
 WorkflowAgentRuntime += 'omp-sdk' only   (same reasoning that excludes codex-pty)
@@ -216,13 +216,20 @@ old code silently floored to Claude.
 
 Extends `AbstractCliManager`; the CodexSdkManager blueprint applies almost 1:1:
 
-- **Process model**: one persistent `omp --mode rpc` child per panel (and later per `spawnKey`
-  lane), spawned via the discovered binary. Warm-entry lifecycle: `WarmOmpEntry` keyed by panel,
-  15-min idle TTL, kill switch `CYBOFLOW_DISABLE_OMP_WARM=1`, fingerprint = sha1(exe path+version,
-  cwd, flags, env, model, session dir). RPC gives a true `abort` command, so interrupt is a
-  first-class RPC call, not a process kill.
+- **Process model**: one persistent `omp --mode rpc-ui` child per panel (and later per `spawnKey`
+  lane), spawned via the discovered binary. **`rpc-ui`, not plain `rpc` (implementation-verified,
+  v17.3.x)**: under `always-ask`, write/exec-tier tools require an interactive UI context; plain
+  `rpc` has none (`main.ts:1570/1765`), so the wrapper *throws* "requires approval but no
+  interactive UI available" instead of prompting — a plain-rpc session could only ever read.
+  `rpc-ui` speaks the identical NDJSON protocol and delivers the approval dialogs as
+  `extension_ui_request` frames the manager answers. Warm-entry lifecycle: `WarmOmpEntry` keyed by
+  panel, 15-min idle TTL, kill switch `CYBOFLOW_DISABLE_OMP_WARM=1`, fingerprint = sha1(exe
+  path+version, cwd, flags, gate config, env, model, session dir). RPC gives a true `abort`
+  command, so interrupt is a first-class RPC call, not a process kill. Mid-session model switching
+  uses `set_model` — which takes `{provider, modelId}` as two fields, split from cyboflow's
+  canonical `provider/id` form.
 - **Spawn flags** (explicit, never inherited defaults):
-  `--mode rpc --approval-mode <mapped> --model <selection> --session-dir <cyboflowDataDir>/omp-sessions/<panelId>
+  `--mode rpc-ui --approval-mode <mapped> --model <selection> --session-dir <cyboflowDataDir>/omp-sessions/<panelId>
   --no-title --no-extensions --no-skills -e <cyboflowGateExtension> [--resume <path>]`.
   Explicit `--approval-mode` is **non-negotiable** (OMP defaults to yolo, fact §2.5), and
   **ambient executable discovery is disabled on every cyboflow-managed spawn** (see §8.2 — this is
@@ -295,30 +302,44 @@ approval mode is set so that a missing/unloaded gate **fails closed**, never ope
 
 Mechanics:
 
-- The **gating extension** is a small cyboflow-authored OMP hook module (shipped in app resources,
-  passed via `-e <path>`): on `tool_call` it evaluates cyboflow's predicate against the structured
-  `toolName`/`input`; undecidable → connect to `CYBOFLOW_ORCH_SOCKET`, request a decision keyed by
-  `CYBOFLOW_RUN_ID`, block on it, return `{block, reason}` on deny. This is the interactive-Claude
-  shell-hook pattern (`preToolUseShellHook.ts`) ported to OMP's hook API; a handler throw blocks
-  the call (OMP-documented fail-closed semantics). It also enforces `disallowedTools`
-  (env `CYBOFLOW_DISALLOWED_TOOLS`) — closing a real Codex gap (`spawnStepRunner.ts:62-64` is
-  unenforced on codex-sdk) — and denies OMP's `task` tool outside `dontAsk` until hook scope
-  inside OMP subagents is verified (docs say subagents run forced-yolo; hook scope UNKNOWN).
-- Because OMP runs `always-ask`, a call the hook allowed still raises OMP's own (now redundant)
-  approval prompt over RPC. The **`ompApprovalBridge`** auto-approves prompts whose tool call the
-  hook has already passed (correlate via toolCallId if present on the prompt payload; if
-  correlation proves unavailable, the bridge re-applies the same predicate to the prompt payload).
-  If the gate extension failed to load, no allow-record exists and the bridge **denies with a
-  surfaced reason** — the failure mode is a blocked session, never a silent yolo. A spawn-time
-  assertion + unit test lock the mode flags.
+- The **gating extension** is a small cyboflow-authored OMP extension module (shipped as
+  TypeScript source — Bun loads TS natively, and a tsc-compiled CJS artifact fails OMP's loader
+  (implementation-verified); passed via `-e <path>`): on `tool_call` it evaluates cyboflow's
+  predicate against the structured `toolName`/`input`; undecidable → connect to
+  `CYBOFLOW_ORCH_SOCKET`, request a decision keyed by `CYBOFLOW_RUN_ID` (reusing the
+  shell-approval wire shape of `preToolUseShellHook.ts` verbatim), await it **under a 25-second
+  budget**, return `{block, reason}` on deny or budget expiry. **The budget exists because OMP
+  hard-caps extension handlers at 30 s with no knob** (`runner.ts:84`, timeout ⇒ fail-closed
+  block) — so a human approval slower than ~25 s yields a legible fail-closed block telling the
+  model to stop and let the human retry, rather than OMP's opaque timeout (which measured as
+  provoking a blind model retry that burned a second 30 s). This makes >25 s approvals a **v1
+  product constraint** on the omp-sdk lane; the durable fix is upstreaming a `tool_call` budget
+  knob to OMP (MIT). A handler throw blocks the call (OMP-verified fail-closed, stronger than
+  the docs claim: even a timeout synthesizes `{block:true}`). The gate also enforces
+  `disallowedTools` — closing a real Codex gap (`spawnStepRunner.ts:62-64` is unenforced on
+  codex-sdk) — matches cyboflow's MCP tools by **exact composed name**
+  (`cyboflowMcpToolNames` in the gate config; the bare `mcp__cyboflow_` prefix is spoofable by a
+  foreign server named e.g. `cyboflow-extra`), and denies OMP's `task` tool in every mode until
+  hook scope inside OMP subagents is verified.
+- **Hook-before-prompt ordering is source- and probe-verified** (`wrapper.ts:201-235` precedes the
+  approval gate at `:237-339`; a hook block suppresses the prompt entirely). Therefore every
+  approval prompt the RPC client sees is for a call the gate already vetted, and the
+  **`ompApprovalBridge`** auto-approves them — *gated on the load sentinel*: the gate writes a
+  sentinel file (env `CYBOFLOW_OMP_GATE_SENTINEL`) at import time, because **OMP starts the
+  session UNGATED when an `-e` load fails** (probe-verified, `loader.ts:437-443`). The manager
+  verifies the sentinel after the ready handshake and refuses the session outright when it is
+  missing; the bridge additionally denies any prompt seen without a verified sentinel. The failure
+  mode is a blocked session, never a silent yolo. A spawn-time assertion + unit test lock the
+  mode/lockdown/`-e` flags.
 - **Every blocking `extension_ui_request` kind is answered in Phase 1** (review finding: `select`,
   `input`, and `editor` are blocking too, and an unanswered one hangs the turn with no
-  `agent_end`): `confirm` → the approval path above; `select`/`input`/`editor` → deterministic
-  cancellation with a surfaced panel error (until the Phase-3 question bridge exists);
-  `notify`/`setStatus`/`setWidget`/`setTitle`/`open_url` → acknowledged and logged. Each kind gets
-  a test that asserts the turn resolves without relying on a timeout.
-- MCP write-tier prompts for the `cyboflow` server itself are auto-approved (they are our own
-  tools, same stance as Codex's `default_tools_approval_mode: 'approve'`).
+  `agent_end`): the approval-shaped `select` → the sentinel-gated approve above; non-approval
+  `select`/`confirm`/`input`/`editor` → deterministic cancellation with a surfaced panel error
+  (until the Phase-3 question bridge exists); `notify`/`setStatus`/`setWidget`/`setTitle`/
+  `open_url` → fire-and-forget per OMP's protocol (no response expected), logged. Each kind has a
+  fake-timers test asserting the turn resolves without any timeout dependence.
+- MCP write-tier prompts for the `cyboflow` server itself are auto-allowed by the gate (they are
+  our own tools, same stance as Codex's `default_tools_approval_mode: 'approve'`).
 
 ### 5.4 MCP (`cyboflow_*`) injection — worktree sessions only in v1
 
@@ -498,7 +519,8 @@ Not required (host owns gates at T1): question bridge, subagent role mapping, pr
 |---|---|---|
 | 1 | OMP's release velocity breaks the RPC contract under us | min-version floor + tested-version banner + contract fixtures; we spawn the user's binary, so breakage is visible, not silent |
 | 2 | mcp.json env injection semantics | RESOLVED — bare-name pre-connect copy from process env is documented (`docs/mcp-config.md`); contract-tested in `ompMcpConfigWriter.test.ts` |
-| 3 | Hook (`tool_call`) scope inside OMP subagents unknown | deny `task` tool outside `dontAsk` until proven; upstream question filed |
+| 3 | Hook (`tool_call`) scope inside OMP subagents unknown | deny `task` tool in EVERY mode until proven; upstream question filed |
+| 3b | OMP hard-caps `tool_call` handlers at 30 s (no knob) — human approvals slower than the gate's 25 s budget are fail-closed blocked on the omp-sdk lane | legible block reason (stops the model's blind retry loop, measured); upstream a budget knob to OMP; the review-queue flow still records the request |
 | 4 | No RPC structured-output → T3 blocked | defer T3; consider upstreaming `output_schema` |
 | 5 | No `--mcp-config` path flag → in-place sessions lack `cyboflow_*` | v1 limitation; upstream PR candidate |
 | 6 | `agent_end.isTerminal` semantics (maintenance resumes) could double-resolve a turn | manager treats only `isTerminal !== false` as terminal and ignores post-terminal events until next prompt; fixture-tested |
