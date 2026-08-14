@@ -4,6 +4,32 @@
  * Renders one of the five review-item kinds (finding | permission | decision |
  * human_task | notification) with kind-specific chrome and triage actions:
  *
+ * ## Default CTAs vs. option-carrying CTAs
+ *
+ * An escalation that carries NO options of its own (a blocking finding, a
+ * free-form action item, a `gate:human-step:*` decision minted with
+ * `payload: null` — see humanStepManager.composeGatePayload, which composes a
+ * payload for `approve-ideas` ONLY) must not have a verdict invented for it by
+ * this card. Its default actions are "Open in session →" + "Dismiss": route the
+ * human to the run, where the gate's real surface lives (the decomposed-stories
+ * tab's approve-plan control, the approve-ideas / approve-designs verdict grids,
+ * or simply the transcript), rather than offering a resolve button that settles
+ * the gate without anyone having looked at the work.
+ *
+ * That routing is SURFACE-AWARE (`surface` prop). In the queue surfaces
+ * (ReviewQueueView, the landing TypeGroupedQueue) the default pair applies. In
+ * `surface="session"` — RunPendingInputStrip, which renders this same card INSIDE
+ * the run — "Open in session" is a no-op, so those branches keep their real
+ * actions; the strip is the terminal surface for any gate whose flow has no
+ * artifact tab of its own (sprint's `human-review`, compound's
+ * `approve-learnings`, ship's gates). Removing them there would leave those gates
+ * answerable only by Dismiss, which humanGate.ts maps to a REJECT verdict.
+ *
+ * Branches that DO carry options — permission, the recovery gate's recovered
+ * answers, the idea-size guard's two mutations, approve-ideas, the
+ * experiment-comparison view, a question-sourced decision, and non-blocking
+ * finding triage — are unaffected on both surfaces.
+ *
  *   - finding      — a non-blocking observation. Triage: Dismiss / Promote to task.
  *                    When the reporting agent carries an accept-routing hint
  *                    (payload.proposedTarget), the card renders a '→ TARGET' chip
@@ -16,15 +42,18 @@
  *                    cyboflow.approvals.approve / reject via the folded approvalId.
  *   - decision     — an approve-idea / approve-plan gate (blocking). Resolving it
  *                    via reviewItems.resolve triggers aggregate-unblock → the
- *                    paused run auto-resumes (FLOW ADVANCEMENT). Surfaces "Approve"
- *                    (resolve) / "Reject" (dismiss). A `gate:'idea-size-guard'`
+ *                    paused run auto-resumes (FLOW ADVANCEMENT). The explicit
+ *                    "Approve & resume" / "Reject" verdict pair is a SESSION-surface
+ *                    action; the queue routes to the run instead. A
+ *                    `gate:'idea-size-guard'`
  *                    decision (IDEA-009: a too-large idea parked mid-batch)
  *                    surfaces its own pair instead: "Launch a separate planner"
  *                    (runs.launchSeparatePlanner) / "Return to backlog"
  *                    (runs.returnIdeaToBacklog) — both resolve the guard
  *                    server-side, never the generic resolve/dismiss.
- *   - human_task   — a free-form action item (blocking per-item). Triage:
- *                    Resolve / Dismiss / Promote to task.
+ *   - human_task   — a free-form action item (blocking per-item). Carries no
+ *                    options, so the queue offers the default pair; in-session it
+ *                    keeps Resolve / Dismiss / Promote to task.
  *   - notification — an informational FYI (e.g. a dynamic workflow finished /
  *                    stalled). The work already ran, so its only triage is
  *                    Dismiss — no Resolve, no Promote-to-task.
@@ -79,12 +108,22 @@ const KIND_ACCENT: Record<ReviewItemKind, string> = {
   notification: 'text-text-tertiary',
 };
 
+/**
+ * Where this card is mounted. 'queue' (the default — ReviewQueueView, the landing
+ * TypeGroupedQueue) routes option-less escalations to the run via the default
+ * "Open in session →" pair. 'session' (RunPendingInputStrip) is already inside the
+ * run, so those branches render their real actions instead.
+ */
+export type ReviewItemCardSurface = 'queue' | 'session';
+
 interface ReviewItemCardProps {
   item: ReviewItem;
   /** When true, renders a visible focus ring for keyboard-navigation highlighting. */
   isFocused?: boolean;
   /** Called once after a successful triage (resolve / dismiss / promote / approve / reject). */
   onResolved?: () => void;
+  /** @see ReviewItemCardSurface — defaults to 'queue'. */
+  surface?: ReviewItemCardSurface;
 }
 
 /**
@@ -253,7 +292,12 @@ function isApproveIdeasGateItem(item: ReviewItem): boolean {
   return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-ideas');
 }
 
-export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
+export function ReviewItemCard({
+  item,
+  isFocused = false,
+  onResolved,
+  surface = 'queue',
+}: ReviewItemCardProps): React.ReactElement {
   const {
     pendingItemId,
     error,
@@ -367,11 +411,12 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
     });
   };
 
-  // A question-sourced decision can only be settled by ANSWERING the question
-  // in the session chat — jump there (mirrors TypeGroupedQueue's openRunSession).
-  // Also reused by the approve-ideas gate branch: its verdicts are submitted
-  // from the run's Approve-ideas artifact tab, so the CTA is the same navigation.
-  const handleAnswerInSession = (): void => {
+  // Open the originating run as the session workspace (mirrors TypeGroupedQueue's
+  // openRunSession). This is the ONLY honest action for every escalation the queue
+  // cannot settle on its own: a question-sourced decision (answered in the chat),
+  // the approve-ideas gate (verdicts submitted from its artifact tab), and — on
+  // `surface === 'queue'` — every option-less default branch.
+  const openInSession = (): void => {
     if (item.run_id === null) return;
     useCyboflowStore.getState().setActiveRun(item.run_id);
     useNavigationStore.getState().setActiveProjectId(item.project_id);
@@ -422,6 +467,32 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   };
 
   // -- Kind-specific action row ---------------------------------------------
+
+  /**
+   * The DEFAULT actions for an escalation that provided no options of its own:
+   * route to the run, or drop the item. Never a resolve — settling a gate nobody
+   * opened is exactly what these branches used to get wrong. "Open in session" is
+   * disabled for a run-less (manual / triage-minted) item, leaving Dismiss, which
+   * matches the question-sourced and approve-ideas branches.
+   */
+  function defaultEscalationActions(): React.ReactElement {
+    return (
+      <>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={item.run_id === null}
+          onClick={openInSession}
+          data-testid="open-in-session"
+        >
+          Open in session →
+        </Button>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+          Dismiss
+        </Button>
+      </>
+    );
+  }
 
   function actions(): React.ReactElement {
     switch (item.kind) {
@@ -579,7 +650,7 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
               variant="primary"
               size="sm"
               disabled={item.run_id === null}
-              onClick={handleAnswerInSession}
+              onClick={openInSession}
               data-testid="decision-review-ideas"
             >
               Review ideas →
@@ -596,13 +667,20 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
               variant="primary"
               size="sm"
               disabled={item.run_id === null}
-              onClick={handleAnswerInSession}
+              onClick={openInSession}
               data-testid="decision-answer-in-session"
             >
               Answer in session →
             </Button>
           );
         }
+        // A `gate:human-step:*` gate carries NO options (humanStepManager mints
+        // payload: null for every step but approve-ideas), so the queue routes to
+        // the run rather than inventing a verdict — the real control is the flow's
+        // own artifact tab (decomposed-stories' approve-plan, approve-designs' grid)
+        // or the transcript. In-session the explicit pair below stays: it is the
+        // terminal surface for the flows that have no artifact tab of their own.
+        if (surface === 'queue') return defaultEscalationActions();
         // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
         // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
         // drafts and ends the run 'rejected' (no resume).
@@ -626,6 +704,9 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
           </Button>
         );
       case 'human_task':
+        // A free-form action item states what to do but offers no options — the
+        // queue routes to the run so the human can act, then resolve from there.
+        if (surface === 'queue') return defaultEscalationActions();
         return (
           <>
             <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve}>
@@ -642,11 +723,14 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
       case 'finding':
       default:
         // A BLOCKING finding parked a programmatic run (Fix: blocking findings must
-        // block). It needs a resolve affordance that clears it from the run's
-        // pending-blocking count and auto-resumes: Resolve (resolve → aggregate-
-        // unblock resume) + Dismiss (dismiss → aggregate-unblock resume). Non-blocking
-        // findings keep the legacy accept-routing actions below.
+        // block) — a DEFECT, not a decision. Resolving or promoting it from the queue
+        // clears the park without the defect being looked at, so the queue routes to
+        // the run (where the agent can be told to fix it) and keeps Dismiss, which
+        // still aggregate-unblocks. In-session the resolve affordance stays: Resolve
+        // (resolve → aggregate-unblock resume) + Dismiss + Promote to task.
+        // Non-blocking findings keep the accept-routing actions below on both surfaces.
         if (item.blocking) {
+          if (surface === 'queue') return defaultEscalationActions();
           return (
             <>
               <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve} data-testid="finding-resolve">
