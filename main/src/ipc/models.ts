@@ -2,23 +2,58 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { ModelAvailabilityService } from '../services/modelAvailabilityService';
 import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
-import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
+import {
+  AGENT_PROVIDERS,
+  isAgentProvider,
+  type AgentProvider,
+} from '../../../shared/types/agentRuntime';
+import type {
+  CodexModelCatalog,
+  ClaudeModelCatalog,
+  ProviderModelCatalog,
+  ProviderModelCatalogs,
+} from '../../../shared/types/agentModels';
 
-type ModelCatalogResponse =
-  | { success: true; data: CodexModelCatalog }
-  | { success: false; error: string };
+type CatalogResponse<C> = { success: true; data: C } | { success: false; error: string };
 
-type ClaudeModelCatalogResponse =
-  | { success: true; data: ClaudeModelCatalog }
-  | { success: false; error: string };
+/** Fetches one provider's model catalog. Main-owned so renderer reloads and
+ *  multiple picker mounts do not spawn redundant probes. */
+type ProviderCatalogFetcher<P extends AgentProvider> = (
+  services: AppServices,
+) => Promise<ProviderModelCatalogs[P]>;
 
 /**
- * Model IPC exposes both Claude guarded-model availability and the model catalog
- * advertised by the bundled Codex runtime. Codex discovery remains main-owned so
- * renderer reloads and multiple picker mounts do not spawn redundant probes.
+ * The provider→catalog registry behind `models:get-catalog`. An exhaustive
+ * `Record<AgentProvider, …>`, so a provider added to the union cannot ship
+ * without a discovery path — the failure mode the two provider-named channels
+ * below invited, where each picker had to learn a new channel by hand.
+ */
+const PROVIDER_CATALOG_FETCHERS: { [P in AgentProvider]: ProviderCatalogFetcher<P> } = {
+  // Dynamic Claude catalog — the "Other models" section below the pinned four.
+  claude: (services) => services.claudeModelCatalogService.getCatalog(),
+  codex: (services) => services.codexSdkManager.getCodexModelCatalog(),
+};
+
+async function fetchCatalog<P extends AgentProvider>(
+  services: AppServices,
+  provider: P,
+): Promise<CatalogResponse<ProviderModelCatalogs[P]>> {
+  try {
+    return { success: true, data: await PROVIDER_CATALOG_FETCHERS[provider](services) };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Model IPC exposes Claude guarded-model availability plus the per-provider
+ * model catalogs.
  *
- * Returns an empty map when the service isn't initialized (early boot / tests) —
- * every alias then reads as usable, the optimistic default.
+ * The availability map returns empty when the service isn't initialized (early
+ * boot / tests) — every alias then reads as usable, the optimistic default.
  */
 export function registerModelHandlers(ipcMain: IpcMain, services: AppServices): void {
   ipcMain.handle(
@@ -29,38 +64,27 @@ export function registerModelHandlers(ipcMain: IpcMain, services: AppServices): 
     }),
   );
   ipcMain.handle(
-    'models:get-codex-catalog',
-    async (): Promise<ModelCatalogResponse> => {
-      try {
-        return {
-          success: true,
-          data: await services.codexSdkManager.getCodexModelCatalog(),
-        };
-      } catch (error) {
+    'models:get-catalog',
+    async (_event, provider: unknown): Promise<CatalogResponse<ProviderModelCatalog>> => {
+      if (!isAgentProvider(provider)) {
         return {
           success: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: `Unknown agent provider "${String(provider)}" (expected one of ${AGENT_PROVIDERS.join(', ')}).`,
         };
       }
+      return fetchCatalog(services, provider);
     },
   );
-  // Dynamic Claude catalog — the "Other models" section below the pinned four.
-  // getCatalog() never throws (a failed probe resolves to an empty list), but the
-  // envelope is kept for parity with the Codex handler and belt-and-suspenders.
+  // Provider-named delegates of the generic channel above, kept until every
+  // caller flips. They share the registry, so they cannot drift from it.
+  ipcMain.handle(
+    'models:get-codex-catalog',
+    (): Promise<CatalogResponse<CodexModelCatalog>> => fetchCatalog(services, 'codex'),
+  );
+  // getCatalog() never throws (a failed probe resolves to an empty list), but
+  // the envelope is kept for parity with the Codex handler and belt-and-braces.
   ipcMain.handle(
     'models:get-claude-catalog',
-    async (): Promise<ClaudeModelCatalogResponse> => {
-      try {
-        return {
-          success: true,
-          data: await services.claudeModelCatalogService.getCatalog(),
-        };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    },
+    (): Promise<CatalogResponse<ClaudeModelCatalog>> => fetchCatalog(services, 'claude'),
   );
 }

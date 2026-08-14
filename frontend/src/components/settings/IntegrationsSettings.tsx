@@ -3,10 +3,7 @@ import type { ReactNode } from 'react';
 import { Bot, Code2, ExternalLink, RefreshCw } from 'lucide-react';
 import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import { isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
-import type {
-  ClaudeDetectionResult,
-  CodexDetectionResult,
-} from '../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useConfigStore } from '../../stores/configStore';
 import { API } from '../../utils/api';
@@ -147,7 +144,7 @@ function ProviderRow({
 }
 
 function claudeView(
-  detection: ClaudeDetectionResult | null,
+  detection: ProviderDetectionResult<'claude'> | null,
   error: string | null,
 ): ProviderViewModel {
   if (error) {
@@ -185,7 +182,7 @@ function claudeView(
 }
 
 function codexView(
-  detection: CodexDetectionResult | null,
+  detection: ProviderDetectionResult<'codex'> | null,
   error: string | null,
 ): ProviderViewModel {
   if (error) {
@@ -229,8 +226,8 @@ function responseError(provider: string, error?: string): string {
 }
 
 export function IntegrationsSettings(): React.JSX.Element {
-  const [claudeDetection, setClaudeDetection] = useState<ClaudeDetectionResult | null>(null);
-  const [codexDetection, setCodexDetection] = useState<CodexDetectionResult | null>(null);
+  const [claudeDetection, setClaudeDetection] = useState<ProviderDetectionResult<'claude'> | null>(null);
+  const [codexDetection, setCodexDetection] = useState<ProviderDetectionResult<'codex'> | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const [codexError, setCodexError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
@@ -243,8 +240,8 @@ export function IntegrationsSettings(): React.JSX.Element {
     setCodexError(null);
 
     const [claudeResult, codexResult] = await Promise.allSettled([
-      API.claude.detect(),
-      API.codex.detect(),
+      API.providers.detect('claude'),
+      API.providers.detect('codex'),
     ]);
     if (currentRequest !== requestId.current) return;
 

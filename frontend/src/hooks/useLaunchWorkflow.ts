@@ -32,7 +32,7 @@ import {
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,
 } from '../../../shared/types/sessionDefaults';
-import { workflowRuntimeForLaunch } from '../components/cyboflow/agentRuntimeUi';
+import { launchRuntimeForPickers, workflowRuntimeForLaunch } from '../components/cyboflow/agentRuntimeUi';
 import { trackEvent } from '../utils/telemetry';
 import { notifyWorkflowRunStarted } from '../utils/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -171,16 +171,16 @@ export function useLaunchWorkflow(
             agentRuntime: config?.defaultAgentRuntime,
           },
         );
-        // A runtime a workflow simply cannot run on (codex-pty, and the
-        // session-only 'codex-exec' that never reaches a launch surface) is
-        // dropped, never sent — the launch proceeds on the backend's default.
-        // This is the one coercion point for BOTH the stored and the global
-        // rung, so a global `codex-pty` degrades to the workflow floor rather
-        // than blocking the launch.
-        const storedRuntime = resolved.agentRuntime;
+        // A runtime a workflow simply cannot run on (codex-pty, and anything
+        // RUNTIME_CAPABILITIES marks unofferable — 'codex-exec', which never
+        // reaches a launch surface) is dropped, never sent; the launch proceeds
+        // on the backend's default. This is the one coercion point for BOTH the
+        // stored and the global rung, so a global `codex-pty` degrades to the
+        // workflow floor rather than blocking the launch.
+        const offerableRuntime = launchRuntimeForPickers(resolved.agentRuntime);
         const agentRuntime =
-          storedRuntime !== undefined && storedRuntime !== 'codex-exec'
-            ? (workflowRuntimeForLaunch(storedRuntime) ?? undefined)
+          offerableRuntime !== undefined
+            ? (workflowRuntimeForLaunch(offerableRuntime) ?? undefined)
             : undefined;
         const base = {
           workflowId,

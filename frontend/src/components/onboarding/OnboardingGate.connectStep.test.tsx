@@ -18,8 +18,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OnboardingGate } from './OnboardingGate';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import { useConfigStore } from '../../stores/configStore';
-import { CLAUDE_DETECT_CHANNEL, CODEX_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../../shared/types/onboarding';
+import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import type { AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import type { AppConfig } from '../../types/config';
 
@@ -38,13 +38,13 @@ vi.mock('../../utils/api', () => ({
   },
 }));
 
-const CLAUDE_DETECTED: ClaudeDetectionResult = {
+const CLAUDE_DETECTED: ProviderDetectionResult<'claude'> = {
   state: 'detected',
   credentials: { found: true, source: 'keychain', account: 'claude@example.com' },
   binary: { found: true, path: '/usr/local/bin/claude', version: '1.2.3' },
 };
 
-const CODEX_DETECTED: CodexDetectionResult = {
+const CODEX_DETECTED: ProviderDetectionResult<'codex'> = {
   state: 'detected',
   runtime: { found: true, path: '/app/codex', version: '0.144.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
@@ -73,9 +73,11 @@ const INITIAL_ONBOARDING_STATE = {
 
 // Both probes report a healthy account, so the step's toggles are enabled and
 // the "at least one detected provider" gate can actually be satisfied.
-const invoke = vi.fn(async (channel: string) => {
-  if (channel === CLAUDE_DETECT_CHANNEL) return { success: true, data: CLAUDE_DETECTED };
-  if (channel === CODEX_DETECT_CHANNEL) return { success: true, data: CODEX_DETECTED };
+const invoke = vi.fn(async (channel: string, provider?: string) => {
+  if (channel === PROVIDERS_DETECT_CHANNEL) {
+    if (provider === 'claude') return { success: true, data: CLAUDE_DETECTED };
+    if (provider === 'codex') return { success: true, data: CODEX_DETECTED };
+  }
   return { success: true };
 });
 

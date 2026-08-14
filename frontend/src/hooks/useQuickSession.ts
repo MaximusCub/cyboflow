@@ -36,6 +36,7 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { isSessionAgentRuntime, providerForRuntime } from '../../../shared/types/agentRuntime';
+import { runtimeSupportsEffort } from '../../../shared/types/agentCapabilities';
 import { DEFAULT_CODEX_MODEL, isCodexModelSelection } from '../../../shared/types/agentModels';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { RunTypeLaunchGlobals } from '../../../shared/types/sessionDefaults';
@@ -76,8 +77,9 @@ interface UseQuickSessionReturn {
    * eager spawn, and is persisted on the frontend-created panel the same way model
    * is — for BOTH Claude SDK and codex-sdk (codex-sdk has no eager server spawn, so
    * its panel is frontend-created here and startCodexSdkTurn reads the persisted
-   * effort per turn). Only codex-pty is excluded: it emits no effort flag and its
-   * panel is server-eager-created, so it never reaches the persistence branch. The
+   * effort per turn). A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false
+   * is excluded — codex-pty emits no effort flag and its panel is
+   * server-eager-created, so it never reaches the persistence branch. The
    * claudeConfig ride stays Claude-only (create-quick reads it for
    * `quickAgentProvider === 'claude'`); codex-sdk relies solely on the setEffort
    * persistence below.
@@ -248,9 +250,13 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // Reasoning effort persists for every effort-capable runtime that owns a
           // frontend-created panel: Claude SDK AND codex-sdk (startCodexSdkTurn reads
           // it per turn → buildCodexAppServerTurnOptions maps it onto the app-server
-          // turn). Only codex-pty is excluded — it is server-eager-created (so it
-          // never reaches this frontend branch) and emits no effort flag regardless.
-          if (reasoningEffort !== undefined && agentRuntime !== 'codex-pty') {
+          // turn). A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false is
+          // excluded — codex-pty is server-eager-created (so it never reaches this
+          // frontend branch) and emits no effort flag regardless.
+          if (
+            reasoningEffort !== undefined &&
+            (agentRuntime === undefined || runtimeSupportsEffort(agentRuntime))
+          ) {
             await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
           }
         }

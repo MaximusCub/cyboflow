@@ -27,6 +27,7 @@ import { SubstrateSelector } from '../SubstrateSelector';
 import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
 import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
+import { runtimesWithCapability } from '../../../../../shared/types/agentCapabilities';
 
 /** Drive the picker's provider gate through the real config store. */
 function setProviderAccess(access: AgentProviderAccess | undefined): void {
@@ -178,5 +179,23 @@ describe('SubstrateSelector — demo pin (sdk wins)', () => {
     expect(screen.getByRole('combobox', { name: /select agent runtime/i })).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The option list is hand-ordered for display, but WHICH runtimes appear is a
+ * capability question — `RUNTIME_CAPABILITIES.selectableInPickers`. Ties the two
+ * together so a runtime declared unofferable can never quietly show up here (and
+ * a newly offerable one is not silently omitted).
+ */
+describe('SubstrateSelector — offers exactly the picker-selectable runtimes', () => {
+  beforeEach(() => mockUseForcedSubstrate.mockReturnValue(null));
+
+  it('renders one option per selectable runtime and none for the rest', () => {
+    setProviderAccess({ claude: true, codex: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).toEqual(runtimesWithCapability('selectableInPickers'));
   });
 });

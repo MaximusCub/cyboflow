@@ -2,7 +2,7 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ModelPill, MODEL_OPTIONS, formatDynamicClaudeLabel } from '../ModelPill';
-import { _resetClaudeModelCatalogForTesting } from '../../../../stores/claudeModelCatalogStore';
+import { resetProviderModelCatalogsForTests } from '../../../../stores/providerModelCatalogStore';
 
 const mockSetModel = vi.fn();
 const mockGetCodexCatalog = vi.fn();
@@ -11,15 +11,15 @@ vi.mock('../../../../utils/api', () => ({
   API: {
     claudePanels: { setModel: (...args: unknown[]) => mockSetModel(...args) },
     models: {
-      getCodexCatalog: (...args: unknown[]) => mockGetCodexCatalog(...args),
-      getClaudeCatalog: (...args: unknown[]) => mockGetClaudeCatalog(...args),
+      getCatalog: (provider: string) =>
+        provider === 'codex' ? mockGetCodexCatalog() : mockGetClaudeCatalog(),
     },
   },
 }));
 
 describe('ModelPill', () => {
   beforeEach(() => {
-    _resetClaudeModelCatalogForTesting();
+    resetProviderModelCatalogsForTests();
     mockSetModel.mockReset();
     mockSetModel.mockResolvedValue({ success: true });
     // Default: no dynamic Claude models — pinned-only picker (existing tests).

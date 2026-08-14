@@ -1,12 +1,9 @@
-import type {
-  ClaudeDetectionResult,
-  CodexDetectionResult,
-} from '../../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../../shared/types/onboarding';
 
 interface ConnectStepProps {
-  claudeDetection: ClaudeDetectionResult | null;
+  claudeDetection: ProviderDetectionResult<'claude'> | null;
   claudeConnected: boolean;
-  codexDetection: CodexDetectionResult | null;
+  codexDetection: ProviderDetectionResult<'codex'> | null;
   codexConnected: boolean;
   checking: boolean;
   onToggleClaude: () => void;
@@ -80,7 +77,7 @@ function ProviderRow({
   );
 }
 
-function claudeDetail(detection: ClaudeDetectionResult): string {
+function claudeDetail(detection: ProviderDetectionResult<'claude'>): string {
   if (detection.state === 'loggedOut') return 'Installed · sign in required';
   if (detection.state === 'missing') return 'Not found on this machine';
   const version = detection.binary.version ? ` · ${detection.binary.version}` : '';
@@ -88,7 +85,7 @@ function claudeDetail(detection: ClaudeDetectionResult): string {
   return `${detection.binary.found ? 'Detected' : 'SDK ready'}${version}${account}`;
 }
 
-function codexDetail(detection: CodexDetectionResult): string {
+function codexDetail(detection: ProviderDetectionResult<'codex'>): string {
   if (detection.state === 'loggedOut') return 'Bundled runtime · ChatGPT sign-in required';
   if (detection.state === 'unavailable') return 'Bundled runtime could not be verified';
   const plan = detection.account.planType ? ` · ${detection.account.planType}` : '';

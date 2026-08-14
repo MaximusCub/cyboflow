@@ -1,43 +1,20 @@
-import { useEffect } from 'react';
-import { create } from 'zustand';
 import type { CodexModelCatalog, CodexModelOption } from '../../../shared/types/agentModels';
-import { API } from '../utils/api';
+import {
+  PROVIDER_MODEL_CATALOG_SLICES,
+  useProviderModelCatalog,
+} from './providerModelCatalogStore';
 
-interface CodexModelCatalogState {
-  catalog: CodexModelCatalog | null;
-  loading: boolean;
-  error: string | null;
-  load(): Promise<void>;
-}
-
-const useStore = create<CodexModelCatalogState>((set) => ({
-  catalog: null,
-  loading: false,
-  error: null,
-  async load() {
-    set({ loading: true, error: null });
-    try {
-      const response = await API.models.getCodexCatalog();
-      if (!response.success || !response.data) {
-        throw new Error(response.error ?? 'Codex model discovery failed');
-      }
-      set({ catalog: response.data, loading: false });
-    } catch (error) {
-      started = false;
-      set({
-        loading: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  },
-}));
-
-let started = false;
-function ensureStarted(enabled: boolean): void {
-  if (!enabled || started) return;
-  started = true;
-  void useStore.getState().load();
-}
+/**
+ * The CODEX view of the provider-keyed catalog store
+ * ({@link providerModelCatalogStore}). Everything provider-agnostic — the fetch,
+ * the one-shot latch, the error handling — lives there; what stays here is the
+ * one genuinely Codex-specific thing: the synthesized `'auto'` row.
+ *
+ * `'auto'` is a CONFIG value, not a model the runtime advertises. Selecting it
+ * means "send no model and let the Codex runtime pick", so it can never come
+ * back from `model/list` and has to be prepended locally — its description
+ * names the runtime default when discovery found one.
+ */
 
 function autoOption(catalog: CodexModelCatalog | null): CodexModelOption {
   const runtimeDefault = catalog?.models.find((model) => model.id === catalog.defaultModel);
@@ -59,19 +36,17 @@ export interface CodexModelCatalogHook {
 }
 
 export function useCodexModelCatalog(enabled = true): CodexModelCatalogHook {
-  const state = useStore();
-  useEffect(() => ensureStarted(enabled), [enabled]);
+  const { catalog, loading, error } = useProviderModelCatalog('codex', enabled);
   return {
-    options: [autoOption(state.catalog), ...(state.catalog?.models ?? [])],
-    defaultModel: state.catalog?.defaultModel ?? null,
-    loading: state.loading,
-    error: state.error,
+    options: [autoOption(catalog), ...(catalog?.models ?? [])],
+    defaultModel: catalog?.defaultModel ?? null,
+    loading,
+    error,
   };
 }
 
-export const codexModelCatalogStoreForTests = useStore;
+export const codexModelCatalogStoreForTests = PROVIDER_MODEL_CATALOG_SLICES.codex.store;
 
 export function resetCodexModelCatalogStoreForTests(): void {
-  started = false;
-  useStore.setState({ catalog: null, loading: false, error: null });
+  PROVIDER_MODEL_CATALOG_SLICES.codex.reset();
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
 
@@ -117,12 +117,12 @@ interface OnboardingState {
   maxVisitedStep: number;
   /** True when launched from Settings → Replay walkthrough (step 4 shows the existing-project state). */
   replay: boolean;
-  /** Latest claude:detect result; null = probe not yet run (step 1 shows loading). */
-  detection: ClaudeDetectionResult | null;
+  /** Latest providers:detect('claude') result; null = probe not yet run (step 1 shows loading). */
+  detection: ProviderDetectionResult<'claude'> | null;
   /** Step-1 consent toggle ("use this install for every session"). */
   connected: boolean;
-  /** Latest codex:detect result; null = probe not yet run. */
-  codexDetection: CodexDetectionResult | null;
+  /** Latest providers:detect('codex') result; null = probe not yet run. */
+  codexDetection: ProviderDetectionResult<'codex'> | null;
   /** Step-1 consent toggle for the ChatGPT-authenticated Codex runtime. */
   codexConnected: boolean;
   /** Step-2 selection; 'auto' preselected per design, persisted to config on step-2 next(). */
@@ -164,9 +164,9 @@ interface OnboardingState {
   finish: () => void;
   /** Settings → Replay walkthrough. */
   restart: () => void;
-  setDetection: (result: ClaudeDetectionResult | null) => void;
+  setDetection: (result: ProviderDetectionResult<'claude'> | null) => void;
   setConnected: (connected: boolean) => void;
-  setCodexDetection: (result: CodexDetectionResult | null) => void;
+  setCodexDetection: (result: ProviderDetectionResult<'codex'> | null) => void;
   setCodexConnected: (connected: boolean) => void;
   setPermMode: (mode: PermissionMode) => void;
   /** The user clicked the highlighted coachmark target (capture-phase listener). */

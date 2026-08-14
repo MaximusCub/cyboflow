@@ -1,19 +1,16 @@
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  ClaudeDetectionResult,
-  CodexDetectionResult,
-} from '../../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../../shared/types/onboarding';
 import { ConnectStep } from './ConnectStep';
 
-const CLAUDE_DETECTED: ClaudeDetectionResult = {
+const CLAUDE_DETECTED: ProviderDetectionResult<'claude'> = {
   credentials: { found: true, source: 'keychain', account: 'claude@example.com' },
   binary: { found: true, path: '/usr/bin/claude', version: '1.2.3' },
   state: 'detected',
 };
 
-const CODEX_DETECTED: CodexDetectionResult = {
+const CODEX_DETECTED: ProviderDetectionResult<'codex'> = {
   runtime: { found: true, path: '/app/codex', version: '0.144.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
   state: 'detected',

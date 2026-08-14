@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../../shared/types/onboarding';
-import { CLAUDE_DETECT_CHANNEL, CODEX_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
+import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { Project } from '../../types/project';
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
@@ -42,13 +42,13 @@ import { RailMapStep } from './steps/RailMapStep';
  * "Resume setup" affordance while skipped).
  */
 
-const MISSING_DETECTION: ClaudeDetectionResult = {
+const MISSING_DETECTION: ProviderDetectionResult<'claude'> = {
   credentials: { found: false, source: null, account: null },
   binary: { found: false, path: null, version: null },
   state: 'missing',
 };
 
-const UNAVAILABLE_CODEX_DETECTION: CodexDetectionResult = {
+const UNAVAILABLE_CODEX_DETECTION: ProviderDetectionResult<'codex'> = {
   runtime: { found: false, path: null, version: null },
   account: { found: false, email: null, planType: null },
   state: 'unavailable',
@@ -205,11 +205,11 @@ export function OnboardingGate(): React.JSX.Element | null {
   const runDetect = useCallback(async () => {
     setChecking(true);
     const [claudeResponse, codexResponse] = await Promise.all([
-      window.electron?.invoke(CLAUDE_DETECT_CHANNEL).catch(() => undefined) as
-        | Promise<IPCResponse<ClaudeDetectionResult> | undefined>
+      window.electron?.invoke(PROVIDERS_DETECT_CHANNEL, 'claude').catch(() => undefined) as
+        | Promise<IPCResponse<ProviderDetectionResult<'claude'>> | undefined>
         | undefined,
-      window.electron?.invoke(CODEX_DETECT_CHANNEL).catch(() => undefined) as
-        | Promise<IPCResponse<CodexDetectionResult> | undefined>
+      window.electron?.invoke(PROVIDERS_DETECT_CHANNEL, 'codex').catch(() => undefined) as
+        | Promise<IPCResponse<ProviderDetectionResult<'codex'>> | undefined>
         | undefined,
     ]);
     setDetection(

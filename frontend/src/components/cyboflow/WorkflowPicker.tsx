@@ -53,6 +53,7 @@ import {
 import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
   isCodexRuntime,
+  launchRuntimeForPickers,
   providerForRuntime,
   quickSessionRuntimeForLaunch,
   substrateForRuntime,
@@ -140,10 +141,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const globalLaunchModel = useConfigStore((s) => s.config?.defaultLaunchModel)?.trim() || undefined;
   const globalAgentRuntime = useConfigStore((s) => s.config?.defaultAgentRuntime);
   // Workflow-scoped view of the global runtime (null ⇒ this surface's workflow
-  // launches ignore it). 'codex-exec' is outside LaunchAgentRuntime entirely.
+  // launches ignore it). A runtime no picker may offer (`codex-exec`, per
+  // RUNTIME_CAPABILITIES) is outside LaunchAgentRuntime entirely.
+  const offerableGlobalRuntime = launchRuntimeForPickers(globalAgentRuntime);
   const globalWorkflowRuntime =
-    globalAgentRuntime !== undefined && globalAgentRuntime !== 'codex-exec'
-      ? workflowRuntimeForLaunch(globalAgentRuntime)
+    offerableGlobalRuntime !== undefined
+      ? workflowRuntimeForLaunch(offerableGlobalRuntime)
       : null;
   const launchGlobals: RunTypeLaunchGlobals = {
     ...(globalLaunchModel !== undefined ? { model: globalLaunchModel } : {}),

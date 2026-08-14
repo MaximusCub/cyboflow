@@ -5,8 +5,9 @@ import type { SessionCreationPreferences } from '../stores/sessionPreferencesSto
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
-import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
+import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
+import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
+import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
@@ -56,6 +57,24 @@ export interface GitErrorResponse extends IPCResponse<unknown> {
 // Check if we're running in Electron
 const isElectron = () => {
   return typeof window !== 'undefined' && window.electronAPI;
+};
+
+/**
+ * How each provider's model picker degrades when the preload bridge is absent
+ * (off Electron, or a version skew that predates `models:get-catalog`). `null`
+ * means "no honest fallback — surface the failure".
+ *
+ * The asymmetry is the pre-existing behavior of the two provider-named wrappers
+ * this replaced, kept verbatim: a Claude picker still renders its four PINNED
+ * aliases, so an empty dynamic catalog is a usable picker; a Codex picker has
+ * nothing but the discovered list, so an empty catalog would be a silently
+ * broken control rather than a degraded one.
+ */
+const CATALOG_BRIDGE_FALLBACKS: {
+  [P in AgentProvider]: (() => ProviderModelCatalogs[P]) | null;
+} = {
+  claude: () => ({ models: [], defaultModel: null }),
+  codex: null,
 };
 
 // Wrapper class for API calls that provides error handling and consistent interface
@@ -639,27 +658,23 @@ export class API {
     },
   };
 
-  static claude = {
+  static providers = {
     /**
-     * On-demand Claude Code login/binary probe for onboarding step 1. Uncached —
-     * safe to re-invoke behind a "Check again" button after the user logs in.
+     * On-demand login/runtime probe for ONE provider — Claude Code credentials +
+     * binary, Codex's bundled runtime + ChatGPT account, and whatever a later
+     * provider reports. Uncached, so onboarding's "Check again" and Settings'
+     * recheck both see the result of a sign-in the user just performed.
      */
-    async detect(): Promise<IPCResponse<ClaudeDetectionResult>> {
-      if (!isElectron() || !window.electronAPI.claude) throw new Error('Electron API not available');
-      return window.electronAPI.claude.detect();
+    async detect<P extends AgentProvider>(
+      provider: P,
+    ): Promise<IPCResponse<ProviderDetectionResult<P>>> {
+      if (!isElectron() || !window.electronAPI.providers) {
+        throw new Error('Electron API not available');
+      }
+      return window.electronAPI.providers.detect(provider);
     },
   };
 
-  static codex = {
-    /**
-     * On-demand bundled Codex runtime and ChatGPT account probe. Uncached so
-     * Settings can recheck immediately after the user signs in.
-     */
-    async detect(): Promise<IPCResponse<CodexDetectionResult>> {
-      if (!isElectron() || !window.electronAPI.codex) throw new Error('Electron API not available');
-      return window.electronAPI.codex.detect();
-    },
-  };
 
   static models = {
     /** Snapshot of guarded-model (Fable 5) availability. Empty map = all usable. */
@@ -669,20 +684,27 @@ export class API {
       if (!isElectron() || !window.electronAPI.models) throw new Error('Electron API not available');
       return window.electronAPI.models.getAvailability();
     },
-    /** Models advertised by the bundled Codex runtime for the signed-in account. */
-    async getCodexCatalog(): Promise<IPCResponse<CodexModelCatalog>> {
-      if (!isElectron() || !window.electronAPI.models?.getCodexCatalog) {
-        throw new Error('Electron API not available');
+    /**
+     * One provider's discovered model catalog — the models Codex's bundled
+     * runtime advertises for the signed-in account, or the extra Claude models
+     * the login can select below the pinned four.
+     *
+     * Off Electron (or behind a preload version skew that predates the generic
+     * channel) each provider degrades the way its own picker already expected:
+     * Claude to an empty "Other models" list, so the pinned four still render;
+     * Codex by throwing, since a Codex picker with no catalog has nothing to
+     * offer at all. Preserving that asymmetry is deliberate — it is what the two
+     * provider-named wrappers did before they collapsed into this one.
+     */
+    async getCatalog<P extends AgentProvider>(
+      provider: P,
+    ): Promise<IPCResponse<ProviderModelCatalogs[P]>> {
+      if (!isElectron() || !window.electronAPI.models?.getCatalog) {
+        const fallback = CATALOG_BRIDGE_FALLBACKS[provider];
+        if (fallback === null) throw new Error('Electron API not available');
+        return { success: true, data: fallback() };
       }
-      return window.electronAPI.models.getCodexCatalog();
-    },
-    /** Extra Claude models the signed-in login can select, below the pinned four.
-     * Fetched via the SDK's supportedModels() — empty off Electron / older bridge. */
-    async getClaudeCatalog(): Promise<IPCResponse<ClaudeModelCatalog>> {
-      if (!isElectron() || !window.electronAPI.models?.getClaudeCatalog) {
-        return { success: true, data: { models: [], defaultModel: null } };
-      }
-      return window.electronAPI.models.getClaudeCatalog();
+      return window.electronAPI.models.getCatalog(provider);
     },
     /** Subscribe to live availability flips; returns an unsubscribe fn. No-op off Electron. */
     onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {

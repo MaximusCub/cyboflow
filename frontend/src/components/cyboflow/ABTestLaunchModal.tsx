@@ -48,10 +48,12 @@ import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
-import type {
-  AgentProvider,
-  WorkflowRunStorableRuntime,
+import {
+  isWorkflowRunStorableRuntime,
+  type AgentProvider,
+  type WorkflowRunStorableRuntime,
 } from '../../../../shared/types/agentRuntime';
+import { runtimeSupportsEffort } from '../../../../shared/types/agentCapabilities';
 
 /**
  * Per-arm quick-session config, local to the modal. Mirrors the subset of the
@@ -73,16 +75,16 @@ const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
 };
 
 /**
- * The wire-schema `agentRuntime` enum for an experiment quick arm excludes
- * `codex-pty` (session-only elsewhere, not for an A/B arm) — see
+ * The wire-schema `agentRuntime` enum for an experiment quick arm is
+ * {@link WORKFLOW_RUN_STORABLE_RUNTIMES} — an A/B arm mints a `workflow_runs`
+ * row, so a runtime that row cannot carry (`codex-pty`) has to be clamped; see
  * `experimentArmQuickConfigSchema` in `experiments.ts`. `QuickArmConfigForm`'s
- * `SubstrateSelector` already disables `codex-pty` via `runtimeScope="workflow"`
- * (its `isRuntimeDisabled` disables exactly `codex-pty`, matching this
- * restriction despite the "workflow" name), so this is unreachable through the
- * UI; clamped here anyway as defense-in-depth + to satisfy the narrower type.
+ * `SubstrateSelector` already disables those runtimes via
+ * `runtimeScope="workflow"`, so this is unreachable through the UI; clamped here
+ * anyway as defense-in-depth + to satisfy the narrower type.
  */
 function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowRunStorableRuntime {
-  return runtime === 'codex-pty' ? 'codex-sdk' : runtime;
+  return isWorkflowRunStorableRuntime(runtime) ? runtime : 'codex-sdk';
 }
 
 function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive' | undefined {
@@ -148,10 +150,11 @@ function QuickArmConfigForm({
         agentProvider={provider}
         agentRuntime={config.runtime}
       />
-      {/* Reasoning-effort select — excluded for codex-pty (mirrors
-          SessionStartWizard), moot here since the runtime choice above already
-          disables codex-pty for a quick arm. */}
-      {config.runtime !== 'codex-pty' && (
+      {/* Reasoning-effort select — excluded for a runtime that drops the flag
+          (RUNTIME_CAPABILITIES.supportsEffort; mirrors SessionStartWizard), moot
+          here since the runtime choice above already disables codex-pty for a
+          quick arm. */}
+      {runtimeSupportsEffort(config.runtime) && (
         <div className="flex flex-col gap-1">
           <label
             htmlFor={`${testIdPrefix}-effort`}

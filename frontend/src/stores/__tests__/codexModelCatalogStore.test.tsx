@@ -1,9 +1,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { getCodexCatalog } = vi.hoisted(() => ({ getCodexCatalog: vi.fn() }));
+const { getCatalog } = vi.hoisted(() => ({ getCatalog: vi.fn() }));
 vi.mock('../../utils/api', () => ({
-  API: { models: { getCodexCatalog } },
+  API: { models: { getCatalog } },
 }));
 
 import {
@@ -14,12 +14,12 @@ import {
 
 describe('useCodexModelCatalog', () => {
   beforeEach(() => {
-    getCodexCatalog.mockReset();
+    getCatalog.mockReset();
     resetCodexModelCatalogStoreForTests();
   });
 
   it('loads runtime-advertised models and labels Auto with the runtime default', async () => {
-    getCodexCatalog.mockResolvedValue({
+    getCatalog.mockResolvedValue({
       success: true,
       data: {
         models: [
@@ -39,11 +39,12 @@ describe('useCodexModelCatalog', () => {
       'gpt-5.6-terra',
     ]);
     expect(result.current.options[0].description).toContain('GPT-5.6 Sol');
-    expect(getCodexCatalog).toHaveBeenCalledOnce();
+    expect(getCatalog).toHaveBeenCalledOnce();
+    expect(getCatalog).toHaveBeenCalledWith('codex');
   });
 
   it('keeps Auto available when discovery fails', async () => {
-    getCodexCatalog.mockRejectedValue(new Error('runtime unavailable'));
+    getCatalog.mockRejectedValue(new Error('runtime unavailable'));
     const { result } = renderHook(() => useCodexModelCatalog());
     await waitFor(() => expect(result.current.error).toBe('runtime unavailable'));
 
@@ -53,7 +54,7 @@ describe('useCodexModelCatalog', () => {
   it('does not load while the Codex picker is disabled', async () => {
     renderHook(() => useCodexModelCatalog(false));
     await act(async () => undefined);
-    expect(getCodexCatalog).not.toHaveBeenCalled();
+    expect(getCatalog).not.toHaveBeenCalled();
     expect(codexModelCatalogStoreForTests.getState().catalog).toBeNull();
   });
 });

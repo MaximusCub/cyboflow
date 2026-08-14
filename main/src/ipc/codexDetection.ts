@@ -1,17 +1,14 @@
-import type { IpcMain } from 'electron';
-import {
-  CODEX_DETECT_CHANNEL,
-  type CodexDetectionResult,
-} from '../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
 import type { AppServices } from './types';
 
-/** Register the short-lived Codex app-server account probe used by onboarding. */
-export function registerCodexDetectionHandlers(ipcMain: IpcMain, services: AppServices): void {
-  ipcMain.handle(
-    CODEX_DETECT_CHANNEL,
-    async (): Promise<{ success: true; data: CodexDetectionResult }> => ({
-      success: true,
-      data: await services.codexSdkManager.detectChatGptAccount(),
-    }),
-  );
+/**
+ * The CODEX half of the onboarding provider probe — a short-lived app-server
+ * account check against the bundled runtime. Registration lives in
+ * `providerDetection.ts` (the provider→probe registry behind the generic
+ * `providers:detect` channel); this module supplies Codex's probe only.
+ */
+export function probeCodexDetection(
+  services: AppServices,
+): Promise<ProviderDetectionResult<'codex'>> {
+  return services.codexSdkManager.detectChatGptAccount();
 }

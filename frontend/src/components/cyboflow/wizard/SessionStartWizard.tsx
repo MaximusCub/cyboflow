@@ -131,6 +131,10 @@ import {
   isSessionAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import {
+  runtimeSupportsEffort,
+  runtimeSupportsFastMode,
+} from '../../../../../shared/types/agentCapabilities';
+import {
   DEFAULT_PERMISSION_MODE,
   QUICK_RUN_TYPE_KEY,
   resolveRunTypeLaunchDefaults,
@@ -140,6 +144,7 @@ import {
 import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
   isCodexRuntime,
+  launchRuntimeForPickers,
   providerForRuntime,
   quickSessionRuntimeForLaunch,
   substrateForRuntime,
@@ -347,15 +352,16 @@ export default function SessionStartWizard(): React.JSX.Element {
   //   - design → never: it is hard-pinned to the Claude SDK substrate
   //     (design-mode.md "Session plumbing", a security boundary), so no global
   //     may move it.
-  // 'codex-exec' is outside LaunchAgentRuntime on both surfaces and is dropped.
+  // A runtime no picker may offer (`RUNTIME_CAPABILITIES.selectableInPickers` —
+  // `codex-exec` today) is outside LaunchAgentRuntime on both surfaces and is
+  // dropped by `launchRuntimeForPickers`.
+  const offerableGlobalRuntime = launchRuntimeForPickers(globalAgentRuntime);
   const globalCardRuntime: LaunchAgentRuntime | undefined =
-    globalAgentRuntime === undefined ||
-    globalAgentRuntime === 'codex-exec' ||
-    selection?.kind === 'design'
+    offerableGlobalRuntime === undefined || selection?.kind === 'design'
       ? undefined
       : selection?.kind === 'workflow'
-        ? (workflowRuntimeForLaunch(globalAgentRuntime) ?? undefined)
-        : globalAgentRuntime;
+        ? (workflowRuntimeForLaunch(offerableGlobalRuntime) ?? undefined)
+        : offerableGlobalRuntime;
   /**
    * Every Configure control seeds from the SAME canonical resolver the launch
    * seams use (`resolveRunTypeLaunchDefaults`: stored → globals → floor). Seeding
@@ -461,11 +467,12 @@ export default function SessionStartWizard(): React.JSX.Element {
     fallback: DEFAULT_SESSION_AGENT_RUNTIME,
   });
   const [fastMode, setFastMode] = useState<boolean>(false);
-  // Per-session reasoning-effort selection (IDEA-029), QUICK on every
-  // effort-capable runtime (Claude SDK/interactive + codex-sdk). Gated out only
-  // for codex-pty (no turn-options object) and Ultracode (pins xhigh, suppresses
-  // --effort); a workflow's per-agent effort is set in the step inspector. `null`
-  // means "provider default" (no explicit selection sent).
+  // Per-session reasoning-effort selection (IDEA-029), QUICK on every runtime
+  // whose RUNTIME_CAPABILITIES say the flag reaches the agent (Claude
+  // SDK/interactive + codex-sdk). Gated out for a runtime that drops it
+  // (codex-pty — no turn-options object) and for Ultracode (pins xhigh,
+  // suppresses --effort); a workflow's per-agent effort is set in the step
+  // inspector. `null` means "provider default" (no explicit selection sent).
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   // Tracks the previous effective runtime so the effect below clears a pending
   // effort selection on a genuine runtime transition (never on mount).
@@ -1218,7 +1225,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         quickSubstrate,
         undefined,
         model,
-        quickProvider === 'claude' && isOpusModel(model) && fastMode,
+        runtimeSupportsFastMode(sessionRuntime) && isOpusModel(model) && fastMode,
         disabledMcpServers,
         pluginSelection,
         // Workspace override (Advanced) — 'inherit' omits it (server floors to the
@@ -1770,12 +1777,13 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Reasoning-effort select — QUICK, every effort-capable runtime.
                 Shown for Claude (SDK Options.effort / interactive --effort) AND
                 codex-sdk (startCodexSdkTurn → buildCodexAppServerTurnOptions maps
-                it onto the app-server turn). Excluded only for codex-pty, whose
+                it onto the app-server turn). Excluded for a runtime whose
+                RUNTIME_CAPABILITIES.supportsEffort is false — codex-pty, whose
                 PTY CLI has no turn-options object to carry the flag. Ultracode is
                 a separate card (selection.kind==='ultracode'): its interactive
                 spawn pins xhigh and suppresses --effort, so no select there.
                 effortLevelsForProvider adapts the scale (Codex none..xhigh). */}
-            {selection.kind === 'quick' && effectiveRuntime !== 'codex-pty' && (
+            {selection.kind === 'quick' && runtimeSupportsEffort(effectiveRuntime) && (
               <div className="flex flex-col gap-1">
                 <label htmlFor="wizard-effort" className="text-xs font-medium text-text-secondary">
                   Reasoning effort
@@ -1799,7 +1807,10 @@ export default function SessionStartWizard(): React.JSX.Element {
                 </select>
               </div>
             )}
-            {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
+            {/* Fast mode — Opus-only, and only on a runtime that carries it
+                (RUNTIME_CAPABILITIES.supportsFastMode: both Claude runtimes; no
+                Codex analogue). */}
+            {selection.kind === 'quick' && runtimeSupportsFastMode(effectiveRuntime) && isOpusModel(model) && (
               <div
                 data-testid="wizard-fast-mode-row"
                 className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
@@ -2164,7 +2175,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
               />
 
-              {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
+              {selection.kind === 'quick' && runtimeSupportsFastMode(effectiveRuntime) && isOpusModel(model) && (
                 <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
               )}
               {selection.kind === 'ultracode' && (

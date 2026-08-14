@@ -1,11 +1,14 @@
 import type {
+  AgentRuntime,
   SessionAgentRuntime,
   WorkflowLaunchableRuntime,
 } from '../../../../shared/types/agentRuntime';
 import {
+  isSessionAgentRuntime,
   isWorkflowLaunchableRuntime,
   providerForRuntime,
 } from '../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
 export type LaunchAgentRuntime = SessionAgentRuntime | WorkflowLaunchableRuntime;
@@ -33,6 +36,26 @@ export function workflowRuntimeForLaunch(
 
 export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime {
   return runtime;
+}
+
+/**
+ * The launch-picker projection of a PERSISTED runtime — a stored per-run-type
+ * default or `config.defaultAgentRuntime`, either of which may be absent or (via
+ * a hand-edited config.json) name a runtime no picker offers.
+ *
+ * `undefined` means "seed nothing here and fall through to the surface's own
+ * default", which is what every seeding seam did with its own
+ * `!== undefined && !== 'codex-exec'` pair. The POLICY now comes from
+ * `RUNTIME_CAPABILITIES.selectableInPickers`; `isSessionAgentRuntime` supplies
+ * the narrowing (LaunchAgentRuntime and SessionAgentRuntime coincide), so a
+ * runtime marked unselectable can never reach a picker even if the two ever
+ * diverge.
+ */
+export function launchRuntimeForPickers(
+  runtime: AgentRuntime | undefined,
+): LaunchAgentRuntime | undefined {
+  if (!isRuntimeSelectableInPickers(runtime)) return undefined;
+  return isSessionAgentRuntime(runtime) ? runtime : undefined;
 }
 
 export function isCodexRuntime(runtime: LaunchAgentRuntime): boolean {

@@ -1,10 +1,7 @@
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ClaudeDetectionResult,
-  CodexDetectionResult,
-} from '../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import type { AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { useConfigStore } from '../../stores/configStore';
 import type { AppConfig } from '../../types/config';
@@ -15,8 +12,9 @@ const detectCodex = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
-    claude: { detect: (...args: unknown[]) => detectClaude(...args) },
-    codex: { detect: (...args: unknown[]) => detectCodex(...args) },
+    providers: {
+      detect: (provider: string) => (provider === 'claude' ? detectClaude() : detectCodex()),
+    },
   },
 }));
 
@@ -27,13 +25,13 @@ function setProviderAccess(access: AgentProviderAccess | undefined): void {
   });
 }
 
-const CLAUDE_CONNECTED: ClaudeDetectionResult = {
+const CLAUDE_CONNECTED: ProviderDetectionResult<'claude'> = {
   state: 'detected',
   credentials: { found: true, source: 'keychain', account: 'claude@example.com' },
   binary: { found: true, path: '/usr/local/bin/claude', version: '1.2.3' },
 };
 
-const CODEX_CONNECTED: CodexDetectionResult = {
+const CODEX_CONNECTED: ProviderDetectionResult<'codex'> = {
   state: 'detected',
   runtime: { found: true, path: '/app/codex', version: '0.144.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
@@ -65,7 +63,7 @@ describe('IntegrationsSettings', () => {
         state: 'loggedOut',
         credentials: { found: false, source: null, account: null },
         binary: { found: true, path: '/usr/local/bin/claude', version: '1.2.3' },
-      } satisfies ClaudeDetectionResult,
+      } satisfies ProviderDetectionResult<'claude'>,
     });
 
     render(<IntegrationsSettings />);

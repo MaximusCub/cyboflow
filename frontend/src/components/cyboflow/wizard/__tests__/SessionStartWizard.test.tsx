@@ -176,13 +176,18 @@ vi.mock('../../../../utils/api', () => ({
       continue: vi.fn().mockResolvedValue({ success: true }),
     },
     models: {
-      getCodexCatalog: vi.fn().mockResolvedValue({
-        success: true,
-        data: {
-          models: [{ id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: true }],
-          defaultModel: 'gpt-5.4',
-        },
-      }),
+      // Provider-keyed: only the Codex picker has a discovered catalog here, so
+      // Claude keeps rendering exactly its four pinned aliases.
+      getCatalog: vi.fn(async (provider: string) =>
+        provider === 'codex'
+          ? {
+              success: true,
+              data: {
+                models: [{ id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: true }],
+                defaultModel: 'gpt-5.4',
+              },
+            }
+          : { success: true, data: { models: [], defaultModel: null } }),
     },
   },
 }));

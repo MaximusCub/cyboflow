@@ -1,18 +1,20 @@
-import { IpcMain } from 'electron';
-import type { AppServices } from './types';
 import {
-  CLAUDE_DETECT_CHANNEL,
-  type ClaudeDetectionResult,
   type ClaudeDetectionState,
+  type ProviderDetectionResult,
 } from '../../../shared/types/onboarding';
 import { detectClaudeCredentials } from '../utils/claudeCredentials';
 import { detectClaudeBinary } from '../utils/claudeCodeTest';
+import type { AppServices } from './types';
 
 /**
- * Onboarding step-1 detection IPC — the on-demand Claude Code login/binary
- * probe. Idempotent, side-effect free, and UNCACHED: the onboarding "Check
- * again" button re-invokes CLAUDE_DETECT_CHANNEL and must see fresh results
- * after the user logs in or installs the binary.
+ * The CLAUDE half of the onboarding provider probe — the on-demand Claude Code
+ * login/binary check. Idempotent, side-effect free, and UNCACHED: the onboarding
+ * "Check again" button and the Settings recheck both re-invoke it and must see
+ * fresh results after the user logs in or installs the binary.
+ *
+ * Registration lives in `providerDetection.ts`, which owns the provider→probe
+ * registry behind the generic `providers:detect` channel; this module just
+ * supplies Claude's probe so each provider keeps its own evidence-gathering.
  *
  * The overall `state` is computed HERE (main-side) so every consumer agrees on
  * the mapping (shared/types/onboarding.ts):
@@ -26,19 +28,13 @@ export function computeState(credentialsFound: boolean, binaryFound: boolean): C
   return 'missing';
 }
 
-export function registerClaudeDetectionHandlers(ipcMain: IpcMain, services: AppServices): void {
-  ipcMain.handle(
-    CLAUDE_DETECT_CHANNEL,
-    async (): Promise<{ success: true; data: ClaudeDetectionResult }> => {
-      const configuredPath = services.configManager.getConfig()?.claudeExecutablePath;
-      const [credentials, binary] = await Promise.all([
-        detectClaudeCredentials(),
-        detectClaudeBinary(configuredPath),
-      ]);
-      return {
-        success: true,
-        data: { credentials, binary, state: computeState(credentials.found, binary.found) },
-      };
-    },
-  );
+export async function probeClaudeDetection(
+  services: AppServices,
+): Promise<ProviderDetectionResult<'claude'>> {
+  const configuredPath = services.configManager.getConfig()?.claudeExecutablePath;
+  const [credentials, binary] = await Promise.all([
+    detectClaudeCredentials(),
+    detectClaudeBinary(configuredPath),
+  ]);
+  return { credentials, binary, state: computeState(credentials.found, binary.found) };
 }

@@ -47,6 +47,34 @@ export interface ClaudeModelCatalog {
   defaultModel: string | null;
 }
 
+/**
+ * Which catalog shape each provider advertises.
+ *
+ * The two are deliberately NOT flattened into one type: a Codex row carries the
+ * runtime's own `isDefault` flag (there is no pinned alias list to compare it
+ * against), while a Claude row carries `resolvedModel` so a dynamic entry can be
+ * de-duped against the four pinned families. Keying them instead of merging them
+ * keeps each provider's discovery honest while giving the catalog IPC + store
+ * ONE provider-parameterized surface.
+ */
+export interface ProviderModelCatalogs {
+  claude: ClaudeModelCatalog;
+  codex: CodexModelCatalog;
+}
+
+/**
+ * Compile-time exhaustiveness: a provider added without a catalog shape leaves
+ * a non-`never` residue and fails the build here.
+ */
+type AssertEveryProviderHasCatalog<T extends never> = T;
+export type ProviderModelCatalogCoverage = AssertEveryProviderHasCatalog<
+  Exclude<AgentProvider, keyof ProviderModelCatalogs>
+>;
+
+/** The catalog `provider` advertises; unparameterized it is the union. */
+export type ProviderModelCatalog<P extends AgentProvider = AgentProvider> =
+  ProviderModelCatalogs[P];
+
 const CLAUDE_MODEL_ALIAS_SET = new Set<string>(CLAUDE_MODEL_ALIASES);
 
 export function isClaudeModelFamily(model: string): boolean {
