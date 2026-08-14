@@ -31,6 +31,34 @@ describe('agentRunTargetLabel', () => {
     );
   });
 
+  // The non-Claude arm is selected through the runtime→provider registry, not a
+  // `=== 'codex-sdk'` test. With that literal, an OMP-pinned agent fell to the
+  // CLAUDE arm and rendered "inherits run model" — the reported bug above,
+  // reproduced exactly one provider later.
+  it('shows the OMP model for an OMP-pinned agent', () => {
+    expect(
+      agentRunTargetLabel({
+        runtime: 'omp-sdk',
+        model: null,
+        providerModel: 'anthropic/claude-haiku-4-5',
+      }),
+    ).toBe('anthropic/claude-haiku-4-5');
+  });
+
+  it('falls back to the runtime label when OMP is pinned without a model', () => {
+    expect(agentRunTargetLabel({ runtime: 'omp-sdk', model: null, providerModel: null })).toBe('OMP');
+  });
+
+  it('never reports a non-Claude pin as inheriting the run model', () => {
+    // The chip's whole reason for existing: a pinned agent must never look
+    // unpinned, whichever provider it is pinned to.
+    for (const runtime of ['codex-sdk', 'omp-sdk'] as const) {
+      expect(
+        agentRunTargetLabel({ runtime, model: null, providerModel: null }),
+      ).not.toBe(INHERIT_RUN_MODEL_LABEL);
+    }
+  });
+
   it('shows the pinned Claude model under a Claude runtime', () => {
     expect(agentRunTargetLabel({ runtime: 'claude-sdk', model: 'sonnet', providerModel: null })).toBe(
       'Sonnet 5',

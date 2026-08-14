@@ -28,10 +28,12 @@ import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/type
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import {
+  AGENT_PROVIDER_LABELS,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
   isRuntimeProviderEnabled,
+  providerForRuntime,
 } from '../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
@@ -42,6 +44,7 @@ import type { McpEntry } from '../../../../shared/types/integrations';
 import { trpc } from '../../trpc/client';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
+import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
 
 type InspectorTab = 'step' | 'agent' | 'mcp';
@@ -1078,10 +1081,10 @@ function AgentConfigSection({
     pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
   const selectedRuntime: WorkflowAgentRuntime | '' = config?.runtime ?? '';
   // Claude-only agent key — always runs on Claude regardless of the run's
-  // provider or any per-agent runtime pin. No runtime select, no Codex
+  // provider or any per-agent runtime pin. No runtime select, no non-Claude
   // controls; the Claude model picker stays available. CLAUDE_ONLY_AGENT_KEYS
   // is empty today, so this branch is currently unreachable — kept for a
-  // future key that genuinely can't run on Codex.
+  // future key that genuinely can't leave the Claude namespace.
   const claudeOnly = isClaudeOnlyAgentKey(agentKey);
   // A runtime whose provider is switched off is not offerable — the deploy seam
   // (resolveStepAgent) drops such a pin, so listing it would promise a route the
@@ -1090,15 +1093,19 @@ function AgentConfigSection({
   const runtimeOptions = WORKFLOW_LAUNCHABLE_RUNTIMES.filter(
     (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === selectedRuntime,
   );
-  // The effort scale is provider-specific: Codex when the base agent is a Codex
-  // agent OR a per-agent `codex-sdk` runtime is pinned (Codex's none..xhigh),
-  // else Claude's low..max. A stale cross-provider value is dropped at spawn.
-  // A Claude-only agent key always uses the Claude scale.
-  const effortProvider: AgentProvider = claudeOnly
+  // The provider this agent ACTUALLY deploys on: a per-agent runtime pin's own
+  // provider when one is set, else the run/variant provider. Derived through the
+  // runtime registry rather than a `=== 'codex-sdk'` test, so every non-Claude
+  // provider (Codex, OMP, the next one) reaches the same arms.
+  const pinnedProvider: AgentProvider = claudeOnly
     ? 'claude'
-    : agentProvider === 'codex' || selectedRuntime === 'codex-sdk'
-      ? 'codex'
-      : 'claude';
+    : selectedRuntime === ''
+      ? agentProvider
+      : providerForRuntime(selectedRuntime);
+  const pinnedNonClaude = pinnedProvider !== 'claude';
+  // The effort scale is provider-specific (Codex's none..xhigh, OMP's own, else
+  // Claude's low..max). A stale cross-provider value is dropped at spawn.
+  const effortProvider: AgentProvider = pinnedProvider;
 
   return (
     <div style={sectionContainerStyle} data-testid={sectionTestId}>
@@ -1108,7 +1115,8 @@ function AgentConfigSection({
           <div>
             <label style={labelStyle}>runtime</label>
             <p style={hintStyle} data-testid={`${runtimeTestId}-claude-only`}>
-              <b>Always runs on Claude.</b> A Codex runtime isn&apos;t available for this agent.
+              <b>Always runs on Claude.</b> Another provider&apos;s runtime isn&apos;t available for
+              this agent.
             </p>
           </div>
           <div>
@@ -1136,14 +1144,15 @@ function AgentConfigSection({
             </p>
           </div>
         </>
-      ) : agentProvider === 'codex' ? (
-        // A Codex run is single-model (no per-agent model overlay), so a per-agent
-        // pin could never apply — show the run-level guidance instead of a picker.
+      ) : agentProvider !== 'claude' ? (
+        // A non-Claude run is single-model (no per-agent model overlay), so a
+        // per-agent pin could never apply — show the run-level guidance instead
+        // of a picker.
         <div>
           <label style={labelStyle}>model</label>
           <p style={hintStyle} data-testid={`${modelTestId}-codex-note`}>
-            Codex runs use a single model per run — set the run model above. Per-agent
-            model pins apply to Claude runtimes only.
+            {AGENT_PROVIDER_LABELS[agentProvider]} runs use a single model per run — set the run
+            model above. Per-agent model pins apply to Claude runtimes only.
           </p>
         </div>
       ) : (
@@ -1172,13 +1181,14 @@ function AgentConfigSection({
               ))}
             </select>
             <p style={hintStyle} data-testid={runtimeHintTestId}>
-              Runs every step using <b>{agentKey}</b> on this runtime. Per-step Codex applies to
-              programmatic runs.
+              Runs every step using <b>{agentKey}</b> on this runtime. A per-step non-Claude
+              runtime applies to programmatic runs.
             </p>
           </div>
-          {selectedRuntime === 'codex-sdk' ? (
-            <CodexAgentModelSelect
+          {pinnedNonClaude ? (
+            <ProviderAgentModelSelect
               agentKey={agentKey}
+              provider={pinnedProvider}
               providerModel={config?.providerModel ?? config?.codexModel}
               isInner={isInner}
               dispatch={dispatch}
@@ -1250,31 +1260,47 @@ function AgentConfigSection({
 }
 
 /**
- * The Codex model picker shown in place of the Claude model `<select>` once a
- * per-agent runtime is pinned to `'codex-sdk'`. Split out from
+ * The NON-CLAUDE model picker shown in place of the Claude model `<select>` once
+ * a per-agent runtime is pinned to another provider. Split out from
  * `AgentConfigSection` — which has early `return`s before this point — so the
- * `useCodexModelCatalog` hook call stays unconditional per render (Rules of
- * Hooks) rather than sitting after a possible early exit.
+ * catalogue hook calls stay unconditional per render (Rules of Hooks) rather
+ * than sitting after a possible early exit.
+ *
+ * Both provider catalogues are subscribed here with their own `enabled` flag:
+ * one hook per provider is the shape the stores expose, and gating the fetch
+ * keeps the unpinned provider's `model/list` probe from running at all. The
+ * label comes from {@link AGENT_PROVIDER_LABELS} rather than the literal
+ * "codex", which is exactly the kind of miss no test notices — an OMP pin used
+ * to render a field labelled "codex model".
  */
-function CodexAgentModelSelect({
+function ProviderAgentModelSelect({
   agentKey,
+  provider,
   providerModel,
   isInner,
   dispatch,
 }: {
   agentKey: string;
+  provider: AgentProvider;
   providerModel: string | undefined;
   isInner: boolean;
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }) {
-  const { options } = useCodexModelCatalog(true);
+  const { options: codexOptions } = useCodexModelCatalog(provider === 'codex');
+  const { options: ompOptions } = useOmpModelCatalog(provider === 'omp');
+  const options = provider === 'omp' ? ompOptions : codexOptions;
+  const providerLabel = AGENT_PROVIDER_LABELS[provider];
+  // The DOM ids and test ids keep their `codex` spelling: they are stable
+  // selectors shared with the editor's tests, and the control is one field
+  // whose PROVIDER varies — renaming them would churn every existing selector
+  // for no user-visible gain.
   const id = isInner ? 'insp-inner-codex-model' : 'insp-codex-model';
   const testId = isInner ? 'inspector-inner-codex-model-select' : 'inspector-codex-model-select';
   const hintTestId = isInner ? 'inspector-inner-codex-model-hint' : 'inspector-codex-model-hint';
 
   return (
     <div>
-      <label style={labelStyle} htmlFor={id}>codex model</label>
+      <label style={labelStyle} htmlFor={id}>{providerLabel} model</label>
       <select
         id={id}
         value={providerModel ?? ''}
@@ -1294,8 +1320,10 @@ function CodexAgentModelSelect({
         ))}
       </select>
       <p style={hintStyle} data-testid={hintTestId}>
-        Applies to every step using <b>{agentKey}</b> on Codex. Requires a signed-in ChatGPT account
-        for real models.
+        Applies to every step using <b>{agentKey}</b> on {providerLabel}.{' '}
+        {provider === 'codex'
+          ? 'Requires a signed-in ChatGPT account for real models.'
+          : 'The catalogue comes from the runtime, so it lists whatever accounts it has.'}
       </p>
     </div>
   );

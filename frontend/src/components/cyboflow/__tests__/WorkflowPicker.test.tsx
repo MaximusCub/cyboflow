@@ -554,7 +554,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     expect(runtimeSelect.value).toBe('claude-sdk');
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK can run workflows or quick sessions/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/A structured runtime can run workflows or quick sessions/i),
+    ).toBeInTheDocument();
     expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
   });
 

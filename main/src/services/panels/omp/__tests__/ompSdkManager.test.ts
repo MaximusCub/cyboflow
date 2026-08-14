@@ -95,6 +95,14 @@ interface FakeClientConfig {
   /** Never settle `runTurn` until `releaseTurn` is called. */
   hangTurn?: boolean;
   sessionFile?: string | undefined;
+  /**
+   * The final assistant message's text in the terminal `agent_end`. `null` makes
+   * that message TOOL-CALLS-ONLY (no text block), which is the shape that has to
+   * fall through to the RPC fallback.
+   */
+  assistantText?: string | null;
+  /** What `get_last_assistant_text` answers; omitted ⇒ the method is absent. */
+  lastAssistantText?: string | null;
 }
 
 class FakeOmpClient implements OmpRpcClientLike {
@@ -131,6 +139,12 @@ class FakeOmpClient implements OmpRpcClientLike {
   }));
   readonly getSessionStats = vi.fn(async () => ({ cost: 0.42, tokens: { total: 100 } }));
   readonly prompts: string[] = [];
+  /**
+   * Present only when the config names an answer, mirroring the optional member
+   * on {@link OmpRpcClientLike} — an absent method is the "older transport" case
+   * the manager must degrade through rather than throw on.
+   */
+  readonly getLastAssistantText?: () => Promise<string | null>;
 
   private turnIndex = 0;
   private release: (() => void) | null = null;
@@ -138,7 +152,12 @@ class FakeOmpClient implements OmpRpcClientLike {
   constructor(
     readonly options: OmpRpcClientOptions,
     private readonly config: FakeClientConfig = {},
-  ) {}
+  ) {
+    if ('lastAssistantText' in config) {
+      const answer = config.lastAssistantText ?? null;
+      this.getLastAssistantText = vi.fn(async () => answer);
+    }
+  }
 
   onEvent(listener: (event: OmpRpcEvent) => void): () => void {
     this.listeners.add(listener);
@@ -177,6 +196,10 @@ class FakeOmpClient implements OmpRpcClientLike {
 
     const usage = this.config.usagePerTurn?.[index] ?? DEFAULT_USAGE;
     this.emit(assistantMessageEnd(index, usage));
+    // `assistantText: null` is the TOOL-CALLS-ONLY final message; anything else
+    // (including the default) carries a text block.
+    const finalText =
+      'assistantText' in this.config ? this.config.assistantText : 'done';
     const agentEnd: OmpAgentEndEvent = {
       type: 'agent_end',
       isTerminal: true,
@@ -189,7 +212,15 @@ class FakeOmpClient implements OmpRpcClientLike {
               errorMessage: 'omp turn blew up',
             },
           ]
-        : [{ role: 'assistant', content: [{ type: 'text', text: 'done' }] }],
+        : [
+            {
+              role: 'assistant',
+              content:
+                finalText === null || finalText === undefined
+                  ? [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: {} }]
+                  : [{ type: 'text', text: finalText }],
+            },
+          ],
     };
     this.emit(agentEnd);
     return { completion: 'agent_end', agentEnd };
@@ -292,7 +323,22 @@ function turn(overrides: Partial<ClaudeSpawnerOptions> = {}): ClaudeSpawnerOptio
   };
 }
 
-/** Per-panel `--session-dir` roots created by `makeManager`, removed after each test. */
+/**
+ * Wait until `count` fake clients have been constructed.
+ *
+ * `spawnCliProcess` awaits the executable probe before it builds the transport,
+ * so a concurrent-lane test that inspects `clients` on the same tick sees an
+ * empty array. Polls rather than awaiting the spawn promise itself: the point of
+ * these tests is the state WHILE both turns are still in flight.
+ */
+async function waitForClients(clients: FakeOmpClient[], count: number): Promise<void> {
+  for (let attempt = 0; attempt < 200 && clients.length < count; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(clients).toHaveLength(count);
+}
+
+/** Per-spawn `--session-dir` roots created by `makeManager`, removed after each test. */
 const tempDirs: string[] = [];
 
 beforeEach(() => {
@@ -825,6 +871,254 @@ describe('OmpSdkManager — usage accounting', () => {
       // …and its (deliberately mismatched) rollup never reaches the result.
       expect(results[0].total_cost_usd).toBeCloseTo(DEFAULT_USAGE.costTotal, 10);
       expect(results[0].total_cost_usd).not.toBeCloseTo(0.42, 10);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * The typed step-output channel (`CliSpawnOutcome.resultText`) — the Phase-2
+ * headline: the workflow controller parses a code-review verdict, a task-verify
+ * PASS/FAIL, and the visual-verification fence out of this string, and every one
+ * of those paths is DEAD for a substrate that returns nothing (which is why they
+ * are dead on codex-sdk). These arms pin where the value comes from, because the
+ * two sources answer different questions: the `agent_end` frame is THIS turn's,
+ * the RPC call is the SESSION's most recent.
+ */
+describe('OmpSdkManager — resultText (typed step output)', () => {
+  it('returns the final assistant text from the turn`s own terminal agent_end', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, { assistantText: '## Verdict\nPASS' });
+
+      const outcome = await manager.spawnCliProcess(turn());
+
+      expect(outcome).toEqual({ resultText: '## Verdict\nPASS' });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('falls back to the RPC last-assistant-text when the final message is tool calls only', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db, {
+        assistantText: null,
+        lastAssistantText: 'FAIL: the acceptance criteria are unmet',
+      });
+
+      const outcome = await manager.spawnCliProcess(turn());
+
+      expect(outcome).toEqual({ resultText: 'FAIL: the acceptance criteria are unmet' });
+      expect(clients[0].getLastAssistantText).toHaveBeenCalledOnce();
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('never consults the RPC fallback when the frame already answered', async () => {
+    // The fallback is SESSION-scoped, not turn-scoped: on a warm session it can
+    // still hold the PREVIOUS turn's answer, so preferring it would let one
+    // step's verdict be read as the next step's.
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db, {
+        assistantText: 'this turn',
+        lastAssistantText: 'a stale earlier turn',
+      });
+
+      const outcome = await manager.spawnCliProcess(turn());
+
+      expect(outcome).toEqual({ resultText: 'this turn' });
+      expect(clients[0].getLastAssistantText).not.toHaveBeenCalled();
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('resolves null — never throws — when neither source has any text', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, { assistantText: null, lastAssistantText: null });
+
+      const outcome = await manager.spawnCliProcess(turn());
+
+      expect(outcome).toEqual({ resultText: null });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('resolves null when the transport has no last-assistant-text call at all', async () => {
+    // `getLastAssistantText` is optional on OmpRpcClientLike; an absent method
+    // means no fallback, not a failed turn.
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, { assistantText: null });
+
+      const outcome = await manager.spawnCliProcess(turn());
+
+      expect(outcome).toEqual({ resultText: null });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not resolve an outcome at all for a failed turn (it rejects)', async () => {
+    // A controller that read a half-finished agent's last words as a verdict
+    // would be worse than reading nothing, so the failure path never produces one.
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, { errorTurn: true, lastAssistantText: 'partial work' });
+
+      await expect(manager.spawnCliProcess(turn())).rejects.toThrow(/omp turn blew up/);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('OmpSdkManager — the system-prompt suffix', () => {
+  it('maps systemPromptAppend onto --append-system-prompt', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      await manager.spawnCliProcess(turn({ systemPromptAppend: 'You are in a cyboflow worktree.' }));
+
+      expect(clients[0].options.args).toContain('--append-system-prompt');
+      expect(clients[0].options.args).toContain('You are in a cyboflow worktree.');
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('omits the flag entirely for an absent or blank suffix', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      await manager.spawnCliProcess(turn());
+      await manager.killAllProcesses();
+      expect(clients[0].options.args).not.toContain('--append-system-prompt');
+
+      const blank = makeManager(db);
+      await blank.manager.spawnCliProcess(turn({ systemPromptAppend: '   ' }));
+      await blank.manager.killAllProcesses();
+      expect(blank.clients[0].options.args).not.toContain('--append-system-prompt');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cold-respawns a warm session when the suffix changes (it is spawn-baked)', async () => {
+    // The suffix is argv, so a parked child is still running the OLD one. If the
+    // fingerprint missed it, a resume would silently keep the previous system
+    // prompt for the rest of the session.
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      await manager.spawnCliProcess(turn({ systemPromptAppend: 'first' }));
+      expect(clients).toHaveLength(1);
+
+      await manager.spawnCliProcess(
+        turn({ systemPromptAppend: 'second', resumeSessionId: SESSION_FILE }),
+      );
+
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * T1 sprint fan-out runs SEVERAL per-step agents concurrently in ONE worktree,
+ * against ONE panel id — the lanes are told apart by `spawnKey` alone. Every
+ * per-spawn resource therefore has to be keyed on THAT, not on the panel.
+ */
+describe('OmpSdkManager — concurrent fan-out lanes', () => {
+  it('runs two lanes as two children with distinct session dirs and gate sentinels', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db, { hangTurn: true });
+
+      const laneA = manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-001', prompt: 'lane A' }));
+      const laneB = manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-002', prompt: 'lane B' }));
+
+      // Both children are live at once — neither lane serialized behind the other
+      // on the shared panel id.
+      await waitForClients(clients, 2);
+
+      const [dirA, dirB] = clients.map((c) => {
+        const args = c.options.args ?? [];
+        return args[args.indexOf('--session-dir') + 1];
+      });
+      expect(dirA).not.toBe(dirB);
+      expect(dirA).toContain('run-1-TASK-001');
+      expect(dirB).toContain('run-1-TASK-002');
+
+      const sentinelA = clients[0].options.env?.CYBOFLOW_OMP_GATE_SENTINEL;
+      const sentinelB = clients[1].options.env?.CYBOFLOW_OMP_GATE_SENTINEL;
+      expect(sentinelA).toBeDefined();
+      expect(sentinelB).toBeDefined();
+      expect(sentinelA).not.toBe(sentinelB);
+
+      // Each lane's prompt went to its OWN child rather than both to one.
+      expect(clients[0].prompts).toEqual(['lane A']);
+      expect(clients[1].prompts).toEqual(['lane B']);
+
+      // The turns resolve INDEPENDENTLY: releasing B settles B while A is still
+      // in flight, which is what a fan-out wave depends on.
+      clients[1].releaseTurn();
+      await expect(laneB).resolves.toEqual({ resultText: 'done' });
+
+      clients[0].releaseTurn();
+      await expect(laneA).resolves.toEqual({ resultText: 'done' });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still refuses a SECOND spawn on the same key while one is in flight', async () => {
+    // The per-key reservation is what keeps two turns off one child; widening
+    // the keying to spawnKey must not have widened that.
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db, { hangTurn: true });
+      const inFlight = manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-001' }));
+      await waitForClients(clients, 1);
+
+      await expect(manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-001' }))).rejects.toThrow(
+        /already running for spawn run-1:TASK-001/,
+      );
+
+      clients[0].releaseTurn();
+      await inFlight;
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps a chat panel`s session dir keyed to its panel (spawnKey defaults to panelId)', async () => {
+    // The non-fan-out path must be byte-identical: a chat panel's resume target
+    // is its session dir, and re-keying it would orphan every existing session.
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      await manager.spawnCliProcess(turn());
+
+      const args = clients[0].options.args ?? [];
+      expect(args[args.indexOf('--session-dir') + 1]).toContain('panel-1');
       await manager.killAllProcesses();
     } finally {
       db.close();

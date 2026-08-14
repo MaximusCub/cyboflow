@@ -52,7 +52,7 @@ describe('SubstrateSelector — no forced pin', () => {
     expect(screen.getByRole('option', { name: /Claude interactive/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
-    expect(screen.getByText(/Workflows can run on Claude or Codex SDK/i)).toBeInTheDocument();
+    expect(screen.getByText(/Workflows run on any structured runtime/i)).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -62,7 +62,7 @@ describe('SubstrateSelector — no forced pin', () => {
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK runs structured quick-session chat/i)).toBeInTheDocument();
+    expect(screen.getByText(/The structured runtimes run quick-session chat/i)).toBeInTheDocument();
   });
 
   it('keeps both Codex runtimes available on the mixed launcher', () => {
@@ -70,7 +70,7 @@ describe('SubstrateSelector — no forced pin', () => {
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK can run workflows or quick sessions/i)).toBeInTheDocument();
+    expect(screen.getByText(/A structured runtime can run workflows or quick sessions/i)).toBeInTheDocument();
   });
 
   it('ignores programmatic changes to a runtime disabled for the current scope', () => {
@@ -222,6 +222,31 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
     expect(offered).toContain('omp-sdk');
     expect(offered).toContain('omp-pty');
+  });
+
+  // The T1 promotion, at the picker: `omp-sdk` is a real workflow launch target
+  // and `omp-pty` still is not. The scope filter reads `workflowRuntimeForLaunch`
+  // (i.e. WORKFLOW_LAUNCHABLE_RUNTIMES), so this is what proves the launchable
+  // set actually reaches the workflow scope rather than the two OMP rows being
+  // treated alike because they share a provider.
+  it('enables omp-sdk but disables omp-pty on a workflow launch', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="workflow" />);
+
+    expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP terminal' })).toBeDisabled();
+    // The Codex split is unchanged — this promotion moved one runtime, not the
+    // whole "PTY is quick-session-only" rule.
+    expect(screen.getByRole('option', { name: /^Codex SDK$/ })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/ })).toBeDisabled();
+  });
+
+  it('leaves both OMP rows selectable on a quick session', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP terminal' })).not.toBeDisabled();
   });
 
   // The note reads "…are hidden" only when the PROVIDER TOGGLES removed

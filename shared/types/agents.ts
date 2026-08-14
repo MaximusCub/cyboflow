@@ -11,7 +11,11 @@
  */
 
 import type { CliTool } from './cliTools';
-import { WORKFLOW_AGENT_RUNTIME_LABELS, type WorkflowAgentRuntime } from './agentRuntime';
+import {
+  providerForRuntime,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+  type WorkflowAgentRuntime,
+} from './agentRuntime';
 
 /**
  * The ONE cyboflow MCP tool a subagent may reference/call: the request-only,
@@ -80,13 +84,16 @@ export function agentModelLabel(model: AgentModelAlias | null): string {
  * only at the Claude `model` alias and ignored `runtime`/`providerModel`):
  *   - inherit runtime (null): the pinned Claude model label, else the inherit
  *     sentinel (a legacy row with a model but no runtime still shows the model);
- *   - Codex runtime: the pinned Codex model id, else the runtime label ("Codex SDK");
+ *   - a NON-CLAUDE runtime: the pinned provider model id, else the runtime label
+ *     ("Codex SDK", "OMP");
  *   - a Claude runtime: the pinned Claude model label, else the runtime label.
  *
  * `providerModel` is the caller's already-normalized (`providerModel ??
- * codexModel`) value for this agent's resolved non-Claude provider — this
- * function itself is provider-neutral; only the `runtime === 'codex-sdk'` arm
- * names Codex specifically, since it is the only non-Claude provider today.
+ * codexModel`) value for this agent's resolved non-Claude provider. The
+ * non-Claude arm is selected through the runtime→provider registry, not a
+ * `=== 'codex-sdk'` test: an OMP-pinned agent otherwise fell through to the
+ * Claude arm and read as "inherits run model" — the exact bug this function was
+ * written to fix, one provider later.
  */
 export function agentRunTargetLabel(cfg: {
   runtime: WorkflowAgentRuntime | null;
@@ -97,7 +104,7 @@ export function agentRunTargetLabel(cfg: {
   if (runtime === null) {
     return model === null ? INHERIT_RUN_MODEL_LABEL : AGENT_MODEL_LABELS[model];
   }
-  if (runtime === 'codex-sdk') {
+  if (providerForRuntime(runtime) !== 'claude') {
     return providerModel !== null && providerModel !== ''
       ? providerModel
       : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];

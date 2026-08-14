@@ -25,8 +25,11 @@
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * caveats text + lock behavior are single-sourced (no drift). `runtimeScope`
- * controls Codex availability: Codex SDK is launchable for workflows and quick
- * sessions; Codex PTY remains session-only.
+ * narrows by LAUNCH KIND, not by vendor: every structured runtime is launchable
+ * for workflows and quick sessions alike, while the terminal runtimes
+ * (`codex-pty`, `omp-pty`) stay session-only — the scope test reads
+ * `workflowRuntimeForLaunch`, so a runtime joining the launchable set is offered
+ * here with no edit.
  */
 import { useEffect } from 'react';
 import {
@@ -127,12 +130,12 @@ function enabledRuntimeOptions(
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
   if (scope === 'workflow') {
-    return 'Workflows can run on Claude or Codex SDK. Codex PTY remains quick-session-only.';
+    return 'Workflows run on any structured runtime — Claude, Codex SDK, or OMP. The terminal runtimes remain quick-session-only.';
   }
   if (scope === 'session') {
-    return 'Codex SDK runs structured quick-session chat. Codex PTY opens an interactive terminal-style Codex session.';
+    return 'The structured runtimes run quick-session chat; the terminal runtimes open an interactive terminal-style session instead.';
   }
-  return 'Codex SDK can run workflows or quick sessions. Codex PTY starts quick sessions only.';
+  return 'A structured runtime can run workflows or quick sessions. The terminal runtimes start quick sessions only.';
 }
 
 /** Shared caveats-block rendering — the interactive PTY and both OMP rows use

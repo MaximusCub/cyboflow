@@ -1207,9 +1207,11 @@ export class WorkflowRegistry {
     // The stamp ladder below resolves every provider whose runtime is STORABLE.
     // A real workflow LAUNCH is narrower: it may only name a runtime the flow
     // machinery can actually deploy on (WORKFLOW_LAUNCHABLE_RUNTIMES), and a
-    // request naming any other — today only omp-sdk, whose programmatic per-step
-    // support is a later phase — would advertise support that does not exist.
-    // Refuse it where a developer sees it rather than resolving it.
+    // request naming any other would advertise support that does not exist.
+    // Refuse it where a developer sees it rather than resolving it. The two sets
+    // COINCIDE today (omp-sdk joined the launchable set in Phase 2), so nothing a
+    // caller can currently name reaches the throw — it is the seam that keeps the
+    // NEXT storable-first runtime out of a launch, not dead code.
     //
     // The SENTINEL is exempt precisely because it is not advertising anything:
     // dropping a quick session's own runtime there would fall through to
@@ -1260,8 +1262,11 @@ export class WorkflowRegistry {
     const ompSdkRequested = explicitProvider === 'omp';
     /**
      * The STRUCTURED non-Claude runtime this run resolves onto, or undefined for
-     * Claude. Non-undefined only for the sentinel outside the launchable set —
-     * the guard above already refused a real launch that named one.
+     * Claude. This is the ONE place a provider's launch arm is named: it drives
+     * the substrate projection ('sdk' — both structured runtimes piggyback it),
+     * the sdk-substrate conflict guard, and both stamps. A provider whose
+     * runtime is storable-but-not-launchable can only reach here on the
+     * sentinel; the guard above refuses a real launch that names one.
      */
     const structuredSdkRuntime: WorkflowRunStorableRuntime | undefined = codexSdkRequested
       ? 'codex-sdk'
@@ -1370,26 +1375,26 @@ export class WorkflowRegistry {
           env: process.env,
         });
 
-    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent Codex
-    // pin — set EITHER in a workflow agent config
-    // (`WorkflowAgentConfig.runtime === 'codex-sdk'`) OR in the project's
-    // `agent_overrides` catalogue via the Agents editor — is only honored by the
-    // PROGRAMMATIC step runner, which spawns each step as its own CLI process. An
-    // ORCHESTRATED run is a single agent process for the whole DAG, so a per-step
-    // Codex override would be SILENTLY IGNORED there. Guard here, before any
+    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent
+    // NON-CLAUDE runtime pin — set EITHER in a workflow agent config
+    // (`WorkflowAgentConfig.runtime`) OR in the project's `agent_overrides`
+    // catalogue via the Agents editor — is only honored by the PROGRAMMATIC step
+    // runner, which spawns each step as its own CLI process. An ORCHESTRATED run
+    // is a single agent process for the whole DAG, so a per-step provider
+    // override would be SILENTLY IGNORED there. Guard here, before any
     // workflow_runs row exists, so a mixed flow never launches silently-degraded —
     // a later slice's UI catches MixedProviderOrchestratedError to prompt "switch
     // to programmatic?" instead.
     //
-    // Scoped to the run's BASE provider being Claude: a whole-run Codex
-    // request (agentProvider === 'codex' — every step already targets Codex)
+    // Scoped to the run's BASE provider being Claude: a whole-run non-Claude
+    // request (agentProvider === 'codex' / 'omp' — every step already targets it)
     // is a single consistent provider, not a mix, and must NOT trip this.
     //
     // The `__quick__` sentinel is EXEMPT: a quick chat is a single ad-hoc Claude
-    // turn, not a DAG that dispatches step agents, so a per-agent Codex pin is
+    // turn, not a DAG that dispatches step agents, so a per-agent pin is
     // inert there — and neither the quick-session nor the chat-sentinel createRun
     // caller catches MixedProviderOrchestratedError, so tripping it would brick
-    // quick sessions project-wide the moment any agent is pinned to Codex.
+    // quick sessions project-wide the moment any agent is pinned off Claude.
     if (executionModel === 'orchestrated' && agentProvider === 'claude' && !isQuickSentinel) {
       // Resolve the same effective definition the frozen spec below is
       // derived from: a variant run's frozen opts.variantSpecJson when
@@ -1405,7 +1410,7 @@ export class WorkflowRegistry {
         opts?.variantSpecJson !== undefined
           ? parseWorkflowDefinition(opts.variantSpecJson)
           : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
-      if (this.effectiveSetPinsCodexRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
+      if (this.effectiveSetPinsNonClaudeRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
         throw new MixedProviderOrchestratedError();
       }
     }
@@ -1545,29 +1550,36 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Does an agent THIS workflow can actually dispatch resolve onto the Codex
+   * Does an agent THIS workflow can actually dispatch resolve onto a NON-CLAUDE
    * runtime? — the orchestrated mixed-provider trip condition.
    *
    * Two-part check:
    *   1. REACHABILITY — the agent keys the workflow can spawn: every phase step's
    *      agent plus every fan-out inner step's agent (resolveStepAgentKey maps a
-   *      step label to its canonical key; the `human` gate → null). A Codex pin on
+   *      step label to its canonical key; the `human` gate → null). A pin on
    *      an agent this workflow never spawns (e.g. a planner-only agent pinned in
    *      the catalogue, launched under sprint) can't cause a mix, so it must NOT
    *      trip — scoping to reachable agents avoids blocking unrelated workflows.
    *   2. EFFECTIVE RUNTIME — the project `agent_overrides` catalogue layered UNDER
    *      the workflow's `agentConfigs` (the same precedence the spawn-time overlay
    *      applies; variant deltas can't touch `runtime`, so they're excluded).
-   *      Consulting the RESOLVED set is what catches a Codex pin set through the
+   *      Consulting the RESOLVED set is what catches a pin set through the
    *      Agents editor, while a workflow config that pins an agent back to a Claude
-   *      runtime correctly MASKS a catalogue Codex pin (no false positive).
+   *      runtime correctly MASKS a catalogue non-Claude pin (no false positive).
+   *
+   * The trip condition is "the pinned runtime's provider is not Claude", read
+   * through the runtime registry — NOT a literal `=== 'codex-sdk'`. That literal
+   * is exactly what would let an `omp-sdk` per-agent pin launch an orchestrated
+   * run that silently ignores it, which is the failure this guard exists to
+   * prevent; the guard has to widen with the launchable set, not one provider
+   * behind it.
    *
    * Fail-soft: an unresolvable definition (null) or any read/parse error yields
    * `false` — an unprovable mix must never break a launch. A missing catalogue
    * table is expected on a schema-narrow test DB (→ no overrides); a genuine read
    * error is logged so a silently-disabled guard stays diagnosable.
    */
-  private effectiveSetPinsCodexRuntime(
+  private effectiveSetPinsNonClaudeRuntime(
     projectId: number,
     definition: WorkflowDefinition | null,
   ): boolean {
@@ -1593,7 +1605,7 @@ export class WorkflowRegistry {
           .all(projectId) as AgentOverrideRow[];
       } catch (err) {
         this.logger.warn(
-          `WorkflowRegistry.effectiveSetPinsCodexRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+          `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       let effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
@@ -1601,11 +1613,14 @@ export class WorkflowRegistry {
         effective = applyWorkflowAgentConfigs(effective, definition.agentConfigs);
       }
       return effective.some(
-        (agent) => agent.runtime === 'codex-sdk' && reachable.has(agent.agentKey),
+        (agent) =>
+          agent.runtime != null &&
+          providerForRuntime(agent.runtime) !== 'claude' &&
+          reachable.has(agent.agentKey),
       );
     } catch (err) {
       this.logger.warn(
-        `WorkflowRegistry.effectiveSetPinsCodexRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+        `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }

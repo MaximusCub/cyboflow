@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  lastAssistantTextIn,
   OMP_EVENT_SOURCE,
   OmpTurnProjector,
   projectOmpEvent,
@@ -324,5 +325,91 @@ describe('OmpTurnProjector', () => {
     now = 3_500;
     const [result] = projector.project({ type: 'agent_end', messages: [], isTerminal: true });
     expect(result).toMatchObject({ duration_ms: 2_500 });
+  });
+});
+
+/**
+ * `lastAssistantTextIn` is the source of `CliSpawnOutcome.resultText` for an
+ * omp-sdk step turn — the string the workflow controller parses a code-review
+ * verdict, a task-verify PASS/FAIL, and the visual-verification fence out of. It
+ * has to return the agent's ANSWER and nothing else: fold in a thinking block or
+ * a tool-call argument and the controller's parsers see text the agent never
+ * addressed to them.
+ */
+describe('ompEventProjector — lastAssistantTextIn', () => {
+  it('returns the final assistant message`s text', () => {
+    expect(lastAssistantTextIn({
+      type: 'agent_end',
+      isTerminal: true,
+      messages: [
+        { role: 'assistant', content: [{ type: 'text', text: 'thinking out loud' }] },
+        {
+          role: 'toolResult',
+          toolCallId: 'c1',
+          toolName: 'read',
+          isError: false,
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: '## Verdict\nPASS' }] },
+      ],
+    })).toBe('## Verdict\nPASS');
+  });
+
+  it('joins several text blocks of that one message', () => {
+    expect(lastAssistantTextIn({
+      type: 'agent_end',
+      isTerminal: true,
+      messages: [{
+        role: 'assistant',
+        content: [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }],
+      }],
+    })).toBe('line one\nline two');
+  });
+
+  it('ignores thinking and tool-call blocks — only the answer counts', () => {
+    expect(lastAssistantTextIn({
+      type: 'agent_end',
+      isTerminal: true,
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'the user probably wants…' },
+          { type: 'text', text: 'FAIL' },
+          { type: 'toolCall', id: 'c9', name: 'bash', arguments: { command: 'ls' } },
+        ],
+      }],
+    })).toBe('FAIL');
+  });
+
+  it('returns null for a final message with no text at all', () => {
+    // The tool-calls-only shape: the manager falls back to the RPC call here
+    // rather than reporting an empty verdict.
+    expect(lastAssistantTextIn({
+      type: 'agent_end',
+      isTerminal: true,
+      messages: [{
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: {} }],
+      }],
+    })).toBeNull();
+  });
+
+  it('stops at the LAST assistant message rather than concatenating earlier ones', () => {
+    // Earlier assistant messages are intermediate reasoning around tool calls;
+    // the verdict parsers look for a fence in the FINAL answer, and gluing the
+    // whole turn together would let an earlier draft's fence win.
+    expect(lastAssistantTextIn({
+      type: 'agent_end',
+      isTerminal: true,
+      messages: [
+        { role: 'assistant', content: [{ type: 'text', text: 'VERDICT: FAIL (draft)' }] },
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: {} }] },
+      ],
+    })).toBeNull();
+  });
+
+  it('returns null for an empty or absent message list', () => {
+    expect(lastAssistantTextIn({ type: 'agent_end', isTerminal: true, messages: [] })).toBeNull();
+    expect(lastAssistantTextIn({ type: 'agent_end', isTerminal: true })).toBeNull();
   });
 });

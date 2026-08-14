@@ -139,8 +139,10 @@ const LANE_WIRING: Readonly<Record<PanelLane, LaneWiring>> = {
   'codex-pty': { output: false, spawned: false, turnEnd: false, retainBacklogOnFailedExit: true },
   // Declared with the OMP lanes, taking the row each transport IMPLIES rather
   // than copying the two Codex asymmetries this comment warns against: the SDK
-  // lane forwards output + spawned, the PTY lane those plus turn-end. No manager
-  // registers either lane until Phase 1 (§5.1, §5.2), so nothing subscribes yet.
+  // lane forwards output + spawned, the PTY lane those plus turn-end. Both are
+  // live — `omp-sdk` additionally serves workflow runs since Phase 2, which is
+  // exactly why it keeps `spawned` where codex-sdk drops it: a turn-start waiter
+  // (nudgeRunHandler's `deliveredAt: 'turn-start'`) is satisfied on an OMP run.
   // `retainBacklogOnFailedExit` follows codex-pty for codex-pty's reason and not
   // by imitation: OMP is spawned from a user-installed binary found by a
   // discovery ladder, so a failed startup is the expected failure and its error

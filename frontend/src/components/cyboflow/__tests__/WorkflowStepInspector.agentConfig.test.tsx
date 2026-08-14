@@ -53,7 +53,36 @@ vi.mock('../../../stores/codexModelCatalogStore', () => ({
   }),
 }));
 
+// Deterministic OMP catalog — the rows are the canonical `<ompProvider>/<id>`
+// form the store composes, since that is what a pin persists.
+vi.mock('../../../stores/ompModelCatalogStore', () => ({
+  useOmpModelCatalog: () => ({
+    options: [
+      { id: 'anthropic/claude-haiku-4-5', label: 'claude-haiku-4-5', provider: 'anthropic' },
+      { id: 'openai/gpt-5.4', label: 'gpt-5.4', provider: 'openai' },
+    ],
+    loading: false,
+    error: null,
+  }),
+}));
+
 import { WorkflowStepInspector } from '../WorkflowStepInspector';
+import { useConfigStore } from '../../../stores/configStore';
+import type { AppConfig } from '../../../types/config';
+
+/**
+ * Switch a provider on for one test. OMP's access key floors to DISABLED when
+ * absent (unlike claude/codex), so its runtime row is filtered out of the picker
+ * until the user opts in — the same courtesy filter every launch surface applies.
+ */
+function enableProviders(): void {
+  useConfigStore.setState({
+    config: {
+      gitRepoPath: '/repo',
+      agentProviderAccess: { claude: true, codex: true, omp: true },
+    } as AppConfig,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -113,7 +142,7 @@ function renderInspector(opts: {
   selectedStepId: string | null;
   selectedFanOutInner?: { stepId: string; innerIndex: number } | null;
   agentEntries?: AgentEntry[];
-  agentProvider?: 'claude' | 'codex';
+  agentProvider?: 'claude' | 'codex' | 'omp';
   dispatch?: ReturnType<typeof vi.fn>;
 }) {
   const dispatch = opts.dispatch ?? vi.fn();
@@ -138,6 +167,9 @@ function openAgentTab() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockMcpsList.mockResolvedValue([{ name: 'filesystem' }, { name: 'git' }, { name: 'cyboflow' }]);
+  // The config store is module-global; reset it so one test's `enableProviders`
+  // cannot decide what a later test's picker offers.
+  useConfigStore.setState({ config: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -303,6 +335,104 @@ describe('AgentConfigSection — Codex model picker', () => {
 
     fireEvent.change(screen.getByTestId('inspector-codex-model-select'), { target: { value: '' } });
     expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_PROVIDER_MODEL', agentKey: 'implement', providerModel: null });
+  });
+});
+
+/**
+ * The per-agent provider model picker is PROVIDER-DRIVEN, not Codex-shaped.
+ *
+ * The field used to be selected by a literal `selectedRuntime === 'codex-sdk'`
+ * and labelled "codex model" in prose. Under an `omp-sdk` pin that meant the
+ * Claude alias list rendered instead of OMP's catalogue — a pin the run would
+ * then drop — and, once fixed naively, a field labelled "codex model" over OMP
+ * models. Both are exactly the kind of miss no other test notices.
+ */
+describe('AgentConfigSection — OMP model picker (the provider-driven field)', () => {
+  it('renders the OMP catalogue, labelled for OMP, once runtime is omp-sdk', () => {
+    renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'omp-sdk' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    expect(screen.queryByTestId('inspector-model-select')).not.toBeInTheDocument();
+    const select = screen.getByTestId('inspector-codex-model-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      '',
+      'anthropic/claude-haiku-4-5',
+      'openai/gpt-5.4',
+    ]);
+    // The label names the pinned provider — never the other vendor.
+    expect(screen.getByText('OMP model')).toBeInTheDocument();
+    expect(screen.queryByText('Codex model')).not.toBeInTheDocument();
+  });
+
+  it('reflects an OMP providerModel pin and dispatches SET_AGENT_PROVIDER_MODEL on change', () => {
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({
+        implement: { runtime: 'omp-sdk', providerModel: 'anthropic/claude-haiku-4-5' },
+      }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-codex-model-select') as HTMLSelectElement;
+    expect(select.value).toBe('anthropic/claude-haiku-4-5');
+
+    fireEvent.change(select, { target: { value: 'openai/gpt-5.4' } });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'SET_AGENT_PROVIDER_MODEL',
+      agentKey: 'implement',
+      providerModel: 'openai/gpt-5.4',
+    });
+  });
+
+  it('offers omp-sdk in the per-agent runtime select once the provider is on', () => {
+    enableProviders();
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({ implement: {} }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-agent-runtime-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toContain('omp-sdk');
+
+    fireEvent.change(select, { target: { value: 'omp-sdk' } });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'implement',
+      runtime: 'omp-sdk',
+    });
+  });
+
+  it('offers OMP`s effort scale under an omp-sdk pin, not Claude`s', () => {
+    // OMP's scale starts at 'off' and Claude's at 'low'; a stale cross-provider
+    // value is dropped at spawn, so offering the wrong one silently loses the pin.
+    renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'omp-sdk' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    const effort = screen.getByTestId('inspector-agent-effort-select') as HTMLSelectElement;
+    const levels = Array.from(effort.options).map((o) => o.value);
+    expect(levels).toContain('off');
+    expect(levels).toContain('max');
+    expect(levels).not.toContain('none'); // Codex's floor, not OMP's
+  });
+
+  it('shows the single-model note for a WHOLE-RUN OMP provider, named for OMP', () => {
+    renderInspector({
+      definition: makeDefinition({ implement: {} }),
+      selectedStepId: 'impl',
+      agentProvider: 'omp',
+    });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-model-select-codex-note')).toHaveTextContent(
+      /OMP runs use a single model per run/,
+    );
   });
 });
 

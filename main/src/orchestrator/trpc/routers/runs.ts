@@ -31,6 +31,7 @@ import {
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   formatProviderRuntimeConflict,
   isWorkflowLaunchableRuntime,
+  providerForRuntime,
   providerRuntimeConflict,
   type AgentProvider,
   type WorkflowLaunchableRuntime,
@@ -1193,12 +1194,21 @@ export const runsRouter = router({
           message: formatProviderRuntimeConflict(providerConflict.provider, providerConflict.runtime),
         });
       }
-      const codexSdkRequested =
-        input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk';
+      // The substrate this request IMPLIES — the same projection
+      // WorkflowRegistry.createRun applies, restated here only so a conflicting
+      // pair fails as a 400 at the wire instead of a 500 from the registry. The
+      // Claude runtimes carry the real sdk/interactive axis; every STRUCTURED
+      // non-Claude runtime piggybacks 'sdk'. Read through the provider registry,
+      // not a `=== 'codex-sdk'` test: a launchable runtime this pre-check does
+      // not recognize projects NO substrate, so the conflict slips past here and
+      // the sprint cap below is keyed on the wrong substrate.
+      const nonClaudeSdkRequested =
+        (input.agentProvider !== undefined && input.agentProvider !== 'claude') ||
+        (input.agentRuntime !== undefined && providerForRuntime(input.agentRuntime) !== 'claude');
       const substrateFromRuntime =
         input.agentRuntime === 'claude-interactive'
           ? 'interactive'
-          : input.agentRuntime === 'claude-sdk' || codexSdkRequested
+          : input.agentRuntime === 'claude-sdk' || nonClaudeSdkRequested
             ? 'sdk'
             : undefined;
       if (input.substrate && substrateFromRuntime && input.substrate !== substrateFromRuntime) {

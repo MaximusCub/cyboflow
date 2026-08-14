@@ -47,7 +47,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
-import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
 import {
   isWorkflowRunStorableRuntime,
   type AgentProvider,
@@ -94,14 +94,31 @@ function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive
 }
 
 /**
+ * The model an arm resets to when its runtime crosses into `provider`.
+ * Exhaustive over `AgentProvider`, so a provider added to the union cannot ship
+ * without someone choosing its reset value.
+ *
+ * `''` for OMP means NO PIN: unlike Codex's `'auto'` sentinel, OMP advertises no
+ * "let the runtime pick" row — its catalogue is concrete `provider/model` ids —
+ * and {@link buildQuickConfigPayload} omits the wire field entirely for it, so
+ * the arm launches on the runtime's own default.
+ */
+const QUICK_ARM_MODEL_RESET: Readonly<Record<AgentProvider, string>> = {
+  claude: DEFAULT_QUICK_MODEL,
+  codex: DEFAULT_CODEX_MODEL,
+  omp: '',
+};
+
+/**
  * Fold a runtime change into an arm's quick config. When the change crosses the
- * Claude/Codex PROVIDER boundary, reset `model` + `reasoningEffort` to the new
- * provider's defaults: the two model catalogs and effort scales (Claude low..max
- * vs Codex none..xhigh) are disjoint, so carrying the prior provider's selection
- * across would submit an invalid cross-provider value (e.g. `opus`/`max` into a
- * Codex arm). A same-provider runtime flip (claude-sdk ↔ claude-interactive)
- * keeps the model/effort — the catalog + scale are identical. Mirrors
- * SessionStartWizard's reset-on-provider-transition behaviour.
+ * PROVIDER boundary, reset `model` + `reasoningEffort` to the new provider's
+ * defaults: the model catalogs and effort scales (Claude low..max vs Codex
+ * none..xhigh vs OMP's own) are disjoint, so carrying the prior provider's
+ * selection across would submit an invalid cross-provider value (e.g.
+ * `opus`/`max` into a Codex arm). A same-provider runtime flip (claude-sdk ↔
+ * claude-interactive) keeps the model/effort — the catalog + scale are
+ * identical. Mirrors SessionStartWizard's reset-on-provider-transition
+ * behaviour.
  */
 function applyQuickArmRuntimeChange(
   config: ArmQuickConfig,
@@ -114,7 +131,7 @@ function applyQuickArmRuntimeChange(
   return {
     ...config,
     runtime,
-    model: isCodexRuntime(runtime) ? DEFAULT_CODEX_MODEL : DEFAULT_QUICK_MODEL,
+    model: QUICK_ARM_MODEL_RESET[providerForRuntime(runtime)],
     reasoningEffort: null,
   };
 }
@@ -468,7 +485,7 @@ export function ABTestLaunchModal({
     substrate?: 'sdk' | 'interactive';
     agentProvider: AgentProvider;
     agentRuntime: WorkflowRunStorableRuntime;
-    model: string;
+    model?: string;
     reasoningEffort?: ReasoningEffort;
     permissionMode: PermissionMode;
   } => {
@@ -477,7 +494,11 @@ export function ABTestLaunchModal({
       ...(substrate ? { substrate } : {}),
       agentProvider: providerForRuntime(config.runtime),
       agentRuntime: quickArmAgentRuntime(config.runtime),
-      model: config.model,
+      // OMITTED when empty — "no pin", the reset value for a provider with no
+      // "let the runtime pick" sentinel. The wire schema takes `model` as
+      // `.min(1).optional()`, so sending `''` would fail validation where
+      // sending nothing correctly means the runtime default.
+      ...(config.model !== '' ? { model: config.model } : {}),
       ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
       permissionMode: config.permissionMode,
     };

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { renderWorkflowPromptForRuntime } from '../workflowPromptRenderer';
+import {
+  PROVIDER_PROMPT_ENVELOPES,
+  renderWorkflowPromptForRuntime,
+} from '../workflowPromptRenderer';
 import type { WorkflowPrompt } from '../workflowPromptReader';
 
 const BASE_PROMPT: WorkflowPrompt = {
@@ -59,5 +62,27 @@ describe('renderWorkflowPromptForRuntime', () => {
       runtime: 'codex-sdk',
       turnKind: 'resume',
     })).toBe(BASE_PROMPT);
+  });
+
+  /**
+   * OMP runs T1 programmatic step agents but has NO envelope, and that is a
+   * decision rather than an omission: a step turn is a self-contained task whose
+   * gates the host owns, while an envelope adapts the T2 ORCHESTRATOR contract
+   * (AskUserQuestion redirection, subagent role mapping) that OMP has not been
+   * taught. Pasting Codex's in would describe a contract OMP does not implement,
+   * so identity is the correct rendering — asserted as a REFERENCE equality so a
+   * future envelope cannot slip in unnoticed.
+   */
+  it('renders an OMP programmatic-step prompt as identity, envelope-free', () => {
+    const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
+      provider: 'omp',
+      runtime: 'omp-sdk',
+      executionModel: 'programmatic',
+      turnKind: 'programmatic-step',
+    });
+
+    expect(rendered).toBe(BASE_PROMPT);
+    expect(rendered.prompt).not.toContain('# Runtime adapter');
+    expect(PROVIDER_PROMPT_ENVELOPES.omp).toBeNull();
   });
 });

@@ -37,11 +37,12 @@ import {
   CYBOFLOW_WORKFLOW_NAMES,
 } from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
+import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
   claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
+  type AgentProvider,
 } from '../../../../shared/types/agentRuntime';
 import {
   DEFAULT_PERMISSION_MODE,
@@ -52,7 +53,6 @@ import {
 } from '../../../../shared/types/sessionDefaults';
 import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
-  isCodexRuntime,
   launchRuntimeForPickers,
   providerForRuntime,
   quickSessionRuntimeForLaunch,
@@ -62,6 +62,34 @@ import {
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
 import { notifyWorkflowRunStarted } from '../../utils/onboarding';
+
+/**
+ * The model this picker falls back to when the current selection belongs to
+ * another provider's family. Exhaustive over `AgentProvider`, so a provider
+ * added to the union cannot ship without someone choosing its floor.
+ *
+ * Codex's floor is its `'auto'` sentinel ("let the runtime pick"). OMP has no
+ * such sentinel — its catalogue is concrete `provider/model` ids and the ABSENCE
+ * of a selection already means "runtime default" everywhere in the app — so its
+ * floor is the empty selection, which the launch seam sends as no model pin.
+ */
+const PROVIDER_MODEL_FLOOR: Readonly<Record<AgentProvider, string>> = {
+  claude: DEFAULT_WORKFLOW_MODEL,
+  codex: DEFAULT_CODEX_MODEL,
+  omp: '',
+};
+
+/**
+ * Does `model` belong to `provider`? — the one family test this surface uses,
+ * for the runtime-coercion effect and the quick-launch guard alike. Delegates to
+ * the shared predicates `createRun` normalizes with, so the picker and the
+ * launch never disagree about which provider owns an id. The empty selection
+ * belongs to nobody: it is "no pin", which each caller resolves for itself.
+ */
+function modelFitsProvider(provider: AgentProvider, model: string | undefined): boolean {
+  return model !== undefined && model !== '' &&
+    normalizeAgentModelSelection(provider, model) !== undefined;
+}
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -269,28 +297,33 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     if (pending.permissionMode !== undefined) setPermissionModeByUser(pending.permissionMode);
     if (pending.agentRuntime !== undefined) setAgentRuntimeByUser(pending.agentRuntime);
   }, [selectedId, setModelByUser, setPermissionModeByUser, setAgentRuntimeByUser]);
-  // Runtime-family coercion: a Codex runtime cannot run a Claude model (and vice
-  // versa), so flipping the runtime picker rewrites an incompatible selection.
+  // Runtime-family coercion: one provider's runtime cannot run another's model,
+  // so flipping the runtime picker rewrites an incompatible selection.
   // This goes through `reseed`, NOT `setByUser`: it is a PROGRAMMATIC coercion,
   // and marking the model touched here would permanently freeze reactive
   // re-seeding for a control the user never actually touched (a mere
   // Claude→Codex→Claude round trip on the runtime picker would kill the stored
-  // per-workflow default for the rest of the mount). The Claude branch re-seeds
-  // to the stored default rather than the bare floor so it survives that round
-  // trip intact — but ONLY when the stored default is itself Claude-compatible:
-  // a stale cross-family entry (a Codex id saved under a workflow key) must not
-  // be re-applied here, or the coercion would hand a Claude runtime a Codex
-  // model and then no-op forever (setValue with the same value bails out).
+  // per-workflow default for the rest of the mount). The re-seed prefers the
+  // stored default so that round trip survives intact — but ONLY when the stored
+  // default itself belongs to the new provider: a stale cross-family entry (a
+  // Codex id saved under a workflow key) must not be re-applied here, or the
+  // coercion would hand a Claude runtime a Codex model and then no-op forever
+  // (setValue with the same value bails out).
+  //
+  // "Belongs" is `normalizeAgentModelSelection`, the same shared family
+  // predicates `createRun` normalizes the launch payload with — not a
+  // Codex-vs-Claude pair of tests, which left an OMP runtime showing a Claude
+  // alias the launch then silently dropped.
+  const runtimeProvider: AgentProvider = providerForRuntime(agentRuntime);
   useEffect(() => {
-    if (isCodexRuntime(agentRuntime)) {
-      if (!isCodexModelSelection(model)) reseedModel(DEFAULT_CODEX_MODEL);
-      return;
-    }
-    if (isCodexModelFamily(model)) {
-      const seededModel = launchDefaults.model;
-      reseedModel(!isCodexModelFamily(seededModel) ? seededModel : DEFAULT_WORKFLOW_MODEL);
-    }
-  }, [agentRuntime, model, launchDefaults.model, reseedModel]);
+    if (modelFitsProvider(runtimeProvider, model)) return;
+    const seededModel = launchDefaults.model;
+    reseedModel(
+      modelFitsProvider(runtimeProvider, seededModel)
+        ? seededModel
+        : PROVIDER_MODEL_FLOOR[runtimeProvider],
+    );
+  }, [runtimeProvider, model, launchDefaults.model, reseedModel]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -666,16 +699,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       : quickDefaults.permissionMode;
     const sessionRuntime = quickSessionRuntimeForLaunch(effectiveRuntime);
     // A TOUCHED runtime pick is a real per-launch choice and owns its transport;
-    // a Codex runtime has no Claude substrate to send at all. Otherwise the
-    // resolver's answer is authoritative.
+    // a NON-CLAUDE runtime has no Claude substrate to send at all (it names its
+    // own transport in the runtime id). Otherwise the resolver's answer is
+    // authoritative.
+    const quickProvider = providerForRuntime(sessionRuntime);
     const quickSubstrate =
-      isAgentRuntimeTouched || isCodexRuntime(sessionRuntime)
+      isAgentRuntimeTouched || quickProvider !== 'claude'
         ? substrateForRuntime(sessionRuntime)
         : quickDefaults.substrate;
     // The model follows the same touched/untouched rule, with one extra guard.
     //
     // The family guard is load-bearing: the 'quick' default is stored without
-    // regard to this launch's runtime, so an untouched Codex-runtime quick
+    // regard to this launch's runtime, so an untouched non-Claude-runtime quick
     // session could otherwise be handed a Claude model (and vice versa). When
     // the stored value is incompatible we fall back to the live control value —
     // which must itself be family-checked against THIS launch's runtime, not
@@ -686,21 +721,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     // runtime picker. An UNTOUCHED runtime resolves the 'quick' key separately
     // (a stored `quick.agentRuntime`, or a global `defaultAgentRuntime`), so the
     // two can legitimately disagree — and a Claude-seeded control handed to a
-    // Codex quick session is exactly the combination no launch can honour. The
-    // Codex sentinel is used instead, matching what the effect would have done
-    // had the runtime picker itself been flipped.
-    const codexQuickLaunch = isCodexRuntime(sessionRuntime);
-    const fallbackModel =
-      codexQuickLaunch && !isCodexModelSelection(model) ? DEFAULT_CODEX_MODEL : model;
+    // non-Claude quick session is exactly the combination no launch can honour.
+    // That provider's floor is used instead, matching what the effect would have
+    // done had the runtime picker itself been flipped.
+    const fallbackModel = modelFitsProvider(quickProvider, model)
+      ? model
+      : PROVIDER_MODEL_FLOOR[quickProvider];
     const storedQuickModel = useConfigStore.getState().config?.runTypeDefaults?.quick?.model;
     const quickModel =
       isModelTouched || storedQuickModel === undefined
         ? fallbackModel
-        : (
-            codexQuickLaunch
-              ? isCodexModelSelection(storedQuickModel)
-              : !isCodexModelFamily(storedQuickModel)
-          )
+        : modelFitsProvider(quickProvider, storedQuickModel)
           ? storedQuickModel
           : fallbackModel;
     void startQuickSession(

@@ -57,12 +57,11 @@ export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
  *
  * Deliberately distinct from {@link WORKFLOW_LAUNCHABLE_RUNTIMES}: a runtime can
  * be storable (so a quick session keeps its identity on the sentinel row)
- * without yet being offered as a workflow launch target. `omp-sdk` is exactly
- * that divergence — quick sessions mint a `__quick__` sentinel run whose
- * provider/runtime the dispatch facade reads back to pick a manager, so an
- * omitted `omp-sdk` would lose the session's identity and misroute it to Claude,
- * while adding it to the LAUNCHABLE set would advertise programmatic per-step
- * support that does not exist yet.
+ * without yet being offered as a workflow launch target. The two sets COINCIDE
+ * today — `omp-sdk` was the one divergence and joined the launchable set once
+ * its programmatic per-step support landed — but they answer different
+ * questions and must stay separately stated: the next provider declared ahead of
+ * its workflow lane lands here first and only here, exactly as `omp-sdk` did.
  */
 export const WORKFLOW_RUN_STORABLE_RUNTIMES = [
   'claude-sdk',
@@ -77,13 +76,13 @@ export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)
  * What the workflow pickers offer and `WorkflowRegistry.createRun` accepts for a
  * real (non-sentinel) run — i.e. the runtimes a workflow agent may deploy on.
  * `codex-pty` and `omp-pty` are excluded because workflows need structured
- * events/usage/MCP; `omp-sdk` is excluded because its programmatic per-step
- * support is a later phase (see WORKFLOW_RUN_STORABLE_RUNTIMES).
+ * events/usage/MCP, which a TUI driven by keystrokes cannot supply.
  */
 export const WORKFLOW_LAUNCHABLE_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
   'codex-sdk',
+  'omp-sdk',
 ] as const;
 
 export type WorkflowLaunchableRuntime = (typeof WORKFLOW_LAUNCHABLE_RUNTIMES)[number];
@@ -122,6 +121,7 @@ export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowLaunchableRuntime, st
   'claude-sdk': 'Claude SDK',
   'claude-interactive': 'Claude interactive',
   'codex-sdk': 'Codex SDK',
+  'omp-sdk': 'OMP',
 };
 
 // ---------------------------------------------------------------------------
@@ -552,11 +552,11 @@ export function firstEnabledRuntime<T extends AgentRuntime>(
  * verification agent gained a Codex runtime implementation
  * (`codexVerificationAgentQuery` — the runner dispatches on the resolved
  * provider). The machinery stays wired for a future key that genuinely can't
- * run on Codex: the workflow editor (`AgentEditorForm.tsx` /
+ * run on a non-Claude provider: the workflow editor (`AgentEditorForm.tsx` /
  * `WorkflowStepInspector.tsx`) renders "Always runs on Claude" instead of a
  * runtime select for a key in this set (UI communicates the invariant); the
  * deploy seam (`resolveStepAgent`) enforces it server-side by dropping a
- * `runtime: 'codex-sdk'` pin with a logged warning — because `agentConfigs`
+ * non-Claude runtime pin with a logged warning — because `agentConfigs`
  * can also be written via the MCP workflow-config tools, bypassing the editor
  * entirely.
  */

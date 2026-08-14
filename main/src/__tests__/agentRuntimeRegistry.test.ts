@@ -32,6 +32,7 @@ import {
   AGENT_PROVIDER_TABLE,
   ALL_AGENT_RUNTIMES,
   SESSION_AGENT_RUNTIMES,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_RUN_STORABLE_RUNTIMES,
   assertProviderRuntimeConsistent,
@@ -219,24 +220,23 @@ describe('provider × runtime consistency', () => {
 });
 
 describe('storable vs launchable runtime sets', () => {
-  // The two used to agree on membership and the split was about MEANING alone.
-  // They diverge now that a provider ships quick-session support ahead of
-  // programmatic per-step support, which is the case the split was made for.
-  it('storable is a strict superset of launchable', () => {
+  // The two sets COINCIDE again now that omp-sdk's programmatic per-step support
+  // landed, but the containment direction is the invariant, not the equality: a
+  // runtime a workflow may LAUNCH on must be one a workflow_runs row can CARRY,
+  // or the launch would stamp a value the row rejects. The reverse is allowed
+  // and is how a provider ships quick sessions ahead of workflow lanes.
+  it('every launchable runtime is storable', () => {
     for (const runtime of WORKFLOW_LAUNCHABLE_RUNTIMES) {
       expect(WORKFLOW_RUN_STORABLE_RUNTIMES).toContain(runtime);
     }
-    expect(WORKFLOW_RUN_STORABLE_RUNTIMES.length).toBeGreaterThan(
-      WORKFLOW_LAUNCHABLE_RUNTIMES.length,
-    );
   });
 
-  // The quick sentinel row must keep an omp-sdk session's identity (the dispatch
-  // facade reads the row back to pick a manager), while nothing may OFFER it as
-  // a workflow launch target until its programmatic support lands.
-  it('carries omp-sdk on a run row without offering it as a launch target', () => {
+  // The quick sentinel row keeps an omp-sdk session's identity (the dispatch
+  // facade reads the row back to pick a manager) AND a workflow may now deploy
+  // step agents on it — the T1 promotion.
+  it('carries omp-sdk on a run row and offers it as a launch target', () => {
     expect(isWorkflowRunStorableRuntime('omp-sdk')).toBe(true);
-    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(false);
+    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(true);
   });
 
   it('both exclude the runtimes a workflow run cannot use', () => {
@@ -350,17 +350,16 @@ describe('normalizeAgentModelSelection', () => {
 });
 
 /**
- * OMP is DECLARED but not yet REACHABLE — its managers land in a later step.
+ * OMP is fully REACHABLE as of Phase 2 — quick sessions on both lanes, workflow
+ * runs on `omp-sdk`.
  *
- * "Declared" is easy to verify (the registries above already do). What this
- * block pins is the second half: that a claude/codex user who never opts in
- * sees no behavior change. Since the Phase-1 visibility flip the picker
- * capability offers both OMP lanes, so the remaining guards are the access
- * default (an absent key resolves to DISABLED, so every launch seam refuses
- * OMP until the user switches it on) and the workflow gate (omp-sdk is
- * storable but not launchable until its per-step phase lands).
+ * That makes the remaining guard a single one, and this block exists to pin it:
+ * a claude/codex user who never opts in sees no behavior change, because the
+ * absent access key resolves to DISABLED and every launch seam refuses OMP until
+ * the user switches it on in Settings → Integrations. The workflow gate that
+ * used to be the second guard is gone, so this one now carries the whole weight.
  */
-describe('omp is opt-in and workflow-gated', () => {
+describe('omp is opt-in', () => {
   it('resolves to DISABLED from an absent access key, unlike the two legacy providers', () => {
     expect(isAgentProviderEnabled(undefined, 'omp')).toBe(false);
     expect(isAgentProviderEnabled({ claude: true, codex: true }, 'omp')).toBe(false);
@@ -369,16 +368,20 @@ describe('omp is opt-in and workflow-gated', () => {
     expect(AGENT_PROVIDER_REGISTRY.omp.defaultEnabled).toBe(false);
   });
 
-  it('is picker-selectable for quick sessions but still guarded by provider access', () => {
+  it('is picker-selectable but still guarded by provider access', () => {
     for (const runtime of ['omp-sdk', 'omp-pty'] as const) {
       // Since the Phase-1 visibility flip, the capability offers both lanes…
       expect(isRuntimeSelectableInPickers(runtime)).toBe(true);
-      // …but workflows still refuse them (T1 lands in a later phase)…
-      expect(WORKFLOW_LAUNCHABLE_RUNTIMES).not.toContain(runtime);
-      // …and a never-touched install refuses them at every launch seam,
-      // because the absent access key resolves to disabled.
+      // …and a never-touched install still refuses them at every launch seam,
+      // because the absent access key resolves to disabled. This is now the ONLY
+      // thing standing between a default install and an OMP run: the workflow
+      // gate that used to be the second guard opened in Phase 2 for omp-sdk.
       expect(isRuntimeProviderEnabled(undefined, runtime)).toBe(false);
     }
+    // The transport split survives the T1 promotion: the structured lane
+    // launches workflows, the terminal one stays quick-session-only.
+    expect(WORKFLOW_LAUNCHABLE_RUNTIMES).toContain('omp-sdk');
+    expect(WORKFLOW_LAUNCHABLE_RUNTIMES).not.toContain('omp-pty');
   });
 
   it('is still a first-class provider everywhere identity matters', () => {
@@ -388,9 +391,12 @@ describe('omp is opt-in and workflow-gated', () => {
     expect(providerForRuntime('omp-sdk')).toBe('omp');
     expect(providerForRuntime('omp-pty')).toBe('omp');
     expect(isWorkflowRunStorableRuntime('omp-sdk')).toBe(true);
-    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(false);
+    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(true);
     expect(SESSION_AGENT_RUNTIMES).toContain('omp-sdk');
     expect(SESSION_AGENT_RUNTIMES).toContain('omp-pty');
+    // The label map is what the workflow runtime pickers read; a launchable
+    // runtime missing from it renders a blank option.
+    expect(WORKFLOW_AGENT_RUNTIME_LABELS['omp-sdk']).toBe('OMP');
   });
 
   it('names itself in user-facing copy rather than borrowing another vendor label', () => {

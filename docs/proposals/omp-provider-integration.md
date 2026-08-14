@@ -433,8 +433,15 @@ Lift the Phase-1 guard; add:
 7. Hermeticity: nothing new to decide — the §8.2 discovery lockdown already applies to every
    cyboflow-managed spawn (quick sessions and lanes alike); lanes additionally never honor the
    trusted-repo opt-in.
-8. Decide `task.isolation` interplay: OMP subagent overlay/rcopy isolation inside a cyboflow git
-   worktree is untested — v1 sets `task.isolation.mode: none` via config overlay for lane spawns.
+8. ~~Decide `task.isolation` interplay: OMP subagent overlay/rcopy isolation inside a cyboflow git
+   worktree is untested — v1 sets `task.isolation.mode: none` via config overlay for lane spawns.~~
+   **Resolved as NOT IMPLEMENTED (build decision).** The gate denies the `task` tool
+   unconditionally, in every permission mode, on every cyboflow-managed spawn
+   (`buildOmpGateConfig`'s `denyTaskTool: true`), so no subagent is ever dispatched and an
+   isolation overlay would be dead configuration implying a path that cannot happen. Task-denial
+   supersedes the isolation setting in v1; lifting `denyTaskTool` is what re-opens the question,
+   and that change owns the isolation decision. Recorded at `ompGateConfigBuilder.ts`
+   (`buildOmpGateConfig`'s doc comment) so the next reader of the deny finds it there.
 
 Not required (host owns gates at T1): question bridge, subagent role mapping, prompt envelope.
 

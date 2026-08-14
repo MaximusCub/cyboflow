@@ -210,6 +210,41 @@ function agentEndIsError(event: OmpAgentEndEvent): boolean {
   return false;
 }
 
+/**
+ * The final assistant message's TEXT in a terminal `agent_end`, or null when the
+ * turn produced none.
+ *
+ * This is the typed step-output channel for an `omp-sdk` programmatic step
+ * (`CliSpawnOutcome.resultText`): the workflow controller parses a code-review
+ * verdict, a task-verify PASS/FAIL, and the visual-verification fence out of it,
+ * and every one of those paths is dead for a substrate that returns null. The
+ * transcript is already IN the terminal `agent_end` — OMP hands the whole
+ * message list over — so the value is read from the frame the turn resolved on
+ * rather than round-tripped through another RPC call.
+ *
+ * Only `text` blocks count. `thinking` is not the agent's answer, `toolCall`
+ * blocks carry arguments, and a `redactedThinking` block is opaque ciphertext —
+ * folding any of them in would hand the controller's parsers text the agent
+ * never addressed to them.
+ *
+ * The LAST assistant message wins, and the search stops there rather than
+ * concatenating every assistant turn: a multi-step turn's earlier messages are
+ * intermediate reasoning around tool calls, and the verdict parsers look for a
+ * fence in the FINAL answer.
+ */
+export function lastAssistantTextIn(event: OmpAgentEndEvent): string | null {
+  const messages = event.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== 'assistant') continue;
+    const text = message.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    return text.length > 0 ? text : null;
+  }
+  return null;
+}
+
 function agentEndResultText(event: OmpAgentEndEvent): string | undefined {
   const messages = event.messages ?? [];
   for (let index = messages.length - 1; index >= 0; index--) {

@@ -16,6 +16,7 @@ import type {
   AgentSessionInfoEvent,
   AgentStreamEvent,
 } from '../../../../../shared/types/agentStream';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import type { ConversationMessage } from '../../../database/models';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
 import { loadMergedPermissionRules } from '../../../orchestrator/permissionRules';
@@ -39,6 +40,7 @@ import { getSharedOmpModelCatalogProbe, type OmpModelCatalogProbe } from './ompM
 import { assertOmpRequiredSpawnFlags, ompApprovalModeForMode } from './ompPtyManager';
 import { OmpRawEventSink } from './ompRawEventSink';
 import {
+  lastAssistantTextIn,
   OMP_RPC_UI_MODE_ARGS,
   OMP_THINKING_LEVELS,
   OmpRpcClient,
@@ -146,6 +148,13 @@ export interface OmpRpcClientLike {
   abort(): Promise<unknown>;
   getState(): Promise<OmpSessionState>;
   getSessionStats(): Promise<{ readonly cost: number; readonly tokens: { readonly total: number } }>;
+  /**
+   * The RPC fallback for {@link CliSpawnOutcome.resultText} when the terminal
+   * `agent_end` carried no assistant text of its own. Optional so an older fake
+   * (and any caller that only drives turns) still satisfies the interface — an
+   * absent implementation simply means no fallback, never a thrown turn.
+   */
+  getLastAssistantText?(): Promise<string | null>;
   respondToExtensionUi(response: OmpExtensionUiResponse): void;
   stop(signal?: NodeJS.Signals): Promise<void>;
 }
@@ -507,7 +516,14 @@ export class OmpSdkManager extends AbstractCliManager {
   // Spawn
   // -------------------------------------------------------------------------
 
-  override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
+  /**
+   * Resolves the turn's {@link CliSpawnOutcome} — the typed step-output channel
+   * the programmatic controller parses (`spawnStepRunner.ts` → `resultText`).
+   * `omp-sdk` is the first NON-CLAUDE runtime to carry it: codex-sdk resolves
+   * `void`, which is why the controller's verdict/fence paths are dead on Codex
+   * and live here. See {@link resolveTurnResultText}.
+   */
+  override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome> {
     // Provider-access gate (Settings → Integrations) — a switched-off provider
     // must refuse BEFORE any spawn bookkeeping or availability probe.
     this.assertProviderEnabled(options);
@@ -517,7 +533,7 @@ export class OmpSdkManager extends AbstractCliManager {
     }
     this.reservedSpawnKeys.add(spawnKey);
     try {
-      await this.spawnTrackedProcess(options, spawnKey);
+      return await this.spawnTrackedProcess(options, spawnKey);
     } finally {
       this.reservedSpawnKeys.delete(spawnKey);
     }
@@ -526,7 +542,7 @@ export class OmpSdkManager extends AbstractCliManager {
   private async spawnTrackedProcess(
     options: ClaudeSpawnerOptions,
     spawnKey: string,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome> {
     const runId = options.runId ?? options.panelId;
     // A lane spawn (fan-out step: spawnKey !== panelId) is a single-shot turn of
     // a fresh conversation — it never parks warm. Same when the switch is set.
@@ -534,15 +550,14 @@ export class OmpSdkManager extends AbstractCliManager {
     const warmEligible = !isLaneSpawn && !ompWarmDisabled();
 
     const executable = await this.getResolvedExecutable();
-    const plan = this.buildSpawnPlan(options, runId, executable);
+    const plan = this.buildSpawnPlan(options, runId, spawnKey, executable);
 
     if (warmEligible) {
       const existing = this.warmOmpRuns.get(spawnKey);
       if (existing) {
         if (this.evaluateWarmReuse(existing, options, plan.fingerprint)) {
           this.clearWarmIdleTimer(existing);
-          await this.runOneTurnGuarded(existing, options, spawnKey, false);
-          return;
+          return await this.runOneTurnGuarded(existing, options, spawnKey, false);
         }
         await this.closeWarmEntry(spawnKey, existing, false);
       }
@@ -550,7 +565,7 @@ export class OmpSdkManager extends AbstractCliManager {
 
     const entry = this.buildColdEntry(options, runId, executable, plan, warmEligible);
     if (warmEligible) this.warmOmpRuns.set(spawnKey, entry);
-    await this.runOneTurnGuarded(entry, options, spawnKey, true);
+    return await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
 
   /**
@@ -564,9 +579,9 @@ export class OmpSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     spawnKey: string,
     cold: boolean,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome> {
     try {
-      await this.runOneTurn(entry, options, spawnKey, cold);
+      return await this.runOneTurn(entry, options, spawnKey, cold);
     } catch (error) {
       if (
         this.warmOmpRuns.get(spawnKey) === entry &&
@@ -586,11 +601,19 @@ export class OmpSdkManager extends AbstractCliManager {
   private buildSpawnPlan(
     options: ClaudeSpawnerOptions,
     runId: string,
+    spawnKey: string,
     executable: ResolvedOmpExecutable,
   ): OmpSpawnPlan {
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const permissionMode = this.resolvePermissionMode(options);
-    const sessionDir = path.join(this.sessionDirRoot(), sanitizeDirSegment(options.panelId));
+    // Keyed on the SPAWN KEY, not the panel id. They are the same string for
+    // every non-fan-out spawn (the caller defaults spawnKey to panelId), so a
+    // chat panel's session dir — and therefore its resume target — is unchanged.
+    // A T1 sprint fan-out is the case that differs: its lanes share ONE panel id
+    // and run CONCURRENTLY, so a panel-keyed dir would put several live `omp`
+    // children in the same `--session-dir`, and `get_state`'s `sessionFile` is
+    // the only thing telling their session files apart.
+    const sessionDir = path.join(this.sessionDirRoot(), sanitizeDirSegment(spawnKey));
     const sentinelPath = path.join(
       os.tmpdir(),
       `cyboflow-omp-gate-${randomUUID()}.json`,
@@ -603,10 +626,23 @@ export class OmpSdkManager extends AbstractCliManager {
     });
     const model = resolveAgentModelAlias('omp', options.model);
     const thinking = this.resolveThinkingLevel(options);
+    // OMP takes a system-prompt suffix natively, so the run's
+    // `systemPromptAppend` rides the flag rather than being prepended to the
+    // prompt body the way a runtime without one would force. Empty/whitespace is
+    // dropped so a run that appends nothing spawns byte-identically.
+    //
+    // OMP's own help reads "Append text OR FILE CONTENTS", so a value that
+    // happens to be a readable path would be read from disk instead of used
+    // verbatim. Harmless for every caller in-tree — the value is multi-line
+    // prose from a workflow's markdown, never a bare path — but a future caller
+    // that passes a short single-token suffix should know.
+    const systemPromptAppend = options.systemPromptAppend?.trim();
 
     // The fingerprint deliberately sees the argv WITHOUT `--resume`: the resume
     // target changes between the first turn and its continuations, and treating
-    // that as a config change would cold-respawn every follow-up.
+    // that as a config change would cold-respawn every follow-up. Everything
+    // else baked into the spawn IS here — including `--append-system-prompt`,
+    // which a warm entry could otherwise silently keep from an earlier turn.
     const baseArgs = [
       '--approval-mode',
       ompApprovalModeForMode(permissionMode),
@@ -619,6 +655,7 @@ export class OmpSdkManager extends AbstractCliManager {
       sessionDir,
       ...(model ? ['--model', model] : []),
       ...(thinking ? ['--thinking', thinking] : []),
+      ...(systemPromptAppend ? ['--append-system-prompt', systemPromptAppend] : []),
     ];
     assertOmpSdkSpawnFlags(baseArgs);
 
@@ -825,7 +862,7 @@ export class OmpSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     spawnKey: string,
     cold: boolean,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome> {
     const displayPanelId = options.panelId;
     const runId = options.runId ?? options.panelId;
     const agentInvocationId = randomUUID();
@@ -855,6 +892,7 @@ export class OmpSdkManager extends AbstractCliManager {
     entry.currentContext = ctx;
 
     let exitCode = 0;
+    let resultText: string | null = null;
     const activeRun: ActiveOmpRun = {
       abortController,
       cancel: async () => {
@@ -941,6 +979,11 @@ export class OmpSdkManager extends AbstractCliManager {
       }
       if (ctx.turnError !== null) throw new Error(ctx.turnError);
 
+      // The typed step-output channel. Resolved only on the SUCCESS path: a
+      // failed turn throws above, and a controller that read a half-finished
+      // agent's last words as a verdict would be worse than reading nothing.
+      resultText = await this.resolveTurnResultText(entry, outcome);
+
       // The session file only exists once OMP has written one; a first turn on a
       // brand-new session may not have had it at handshake time.
       if (entry.sessionFilePath === null) {
@@ -994,6 +1037,46 @@ export class OmpSdkManager extends AbstractCliManager {
         exitCode,
         signal: null,
       });
+    }
+    return { resultText };
+  }
+
+  /**
+   * The turn's final assistant text, for {@link CliSpawnOutcome.resultText}.
+   *
+   * Primary source is the terminal `agent_end` the turn resolved on — it carries
+   * the whole message list, so no extra round trip is needed and the value can
+   * never belong to a LATER turn. The RPC `get_last_assistant_text` is the
+   * fallback for the shapes the frame cannot answer: a locally-resolved prompt
+   * (a slash command, which produces no `agent_end` at all) and an `agent_end`
+   * whose final assistant message is tool calls with no text of its own.
+   *
+   * The fallback is session-scoped, not turn-scoped, so it is consulted ONLY
+   * when the frame yielded nothing; preferring it would risk handing back the
+   * previous turn's answer on a warm session. A failing fallback degrades to
+   * null rather than failing the turn — losing a verdict costs a loopback, while
+   * throwing here would fail work the agent actually completed.
+   */
+  private async resolveTurnResultText(
+    entry: WarmOmpEntry,
+    outcome: OmpTurnOutcome,
+  ): Promise<string | null> {
+    const fromFrame = outcome.agentEnd ? lastAssistantTextIn(outcome.agentEnd) : null;
+    if (fromFrame !== null) return fromFrame;
+    if (!entry.client.getLastAssistantText) return null;
+    try {
+      const text = await withTimeout(
+        entry.client.getLastAssistantText(),
+        OMP_REQUEST_TIMEOUT_MS,
+        'omp get_last_assistant_text',
+      );
+      return text !== null && text.length > 0 ? text : null;
+    } catch (error) {
+      this.logger?.warn(
+        `[OmpSdkManager] could not read the last assistant text for run ${entry.runId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 

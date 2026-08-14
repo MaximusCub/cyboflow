@@ -942,14 +942,16 @@ describe('RunTypeOverridesSection — detail screen', () => {
     ]);
   });
 
-  it('omits the session-only runtimes on a workflow screen (LAUNCHABLE set: no PTY, no OMP yet)', async () => {
+  it('omits the session-only PTY runtimes on a workflow screen (the LAUNCHABLE set)', async () => {
     await openDetail('Sprint');
 
     const card = screen.getByTestId('knob-card-runtime');
     fireEvent.click(within(card).getByRole('switch'));
+    // 'OMP' is present, 'OMP terminal' is not: a workflow screen offers every
+    // STRUCTURED runtime and no terminal one, which is the launchable set.
     expect(
       within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
-    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude interactive', 'Codex SDK']);
+    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude interactive', 'Codex SDK', 'OMP']);
   });
 
   // AC 5 + AC 6 — a stale key is not just VISIBLE, it is operable: being able to

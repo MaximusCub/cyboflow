@@ -19,15 +19,19 @@
  *
  * Provider dispatch (§5.4 step 1): the resolved agent's runtime picks the query
  * seam. An explicit `runtime: 'codex-sdk'` pin — or an unpinned agent inheriting a
- * Codex-provider run — routes to the injected `codexQuery`; everything else routes
- * to the Claude `query`. On the Claude branch model resolution is
+ * Codex-provider run — routes to the injected `codexQuery`; a CLAUDE runtime
+ * routes to the Claude `query`. On the Claude branch model resolution is
  * Claude-namespace-only (a pinned alias → concrete, else the Claude-provider run
  * model, else a validated Claude default). On the Codex branch the model is
  * `agent.providerModel` (normalized `providerModel ?? codexModel` upstream by
  * effectiveAgents, so either field reads the same value), else the
- * Codex-provider run model, else the account default the query resolves. When a
- * request routes to Codex but no `codexQuery` dep is wired, it maps to the
- * fail-open `skipped` bucket — never a silent Claude fallback.
+ * Codex-provider run model, else the account default the query resolves.
+ *
+ * ANY non-Claude provider with no wired query seam — Codex without `codexQuery`,
+ * and every provider that has no verify seam at all (OMP today: its T3 tier is
+ * deliberately a later phase) — maps to the fail-open `skipped` bucket with an
+ * actionable message. Never a silent Claude fallback: a verifier that quietly
+ * ran on the wrong provider would report a verdict nobody asked for.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -717,9 +721,9 @@ export function resolveVerifyModel(
 
 /**
  * The provider the verifier deploys on (§5.4 step 1). An explicit agent runtime pin
- * wins (`providerForRuntime` maps `codex-sdk` → codex, the Claude runtimes → claude);
- * an unpinned agent inherits the RUN provider — so an unpinned visual-verify on a
- * Codex-provider run resolves to Codex.
+ * wins (`providerForRuntime` maps each runtime to its owner via the shared prefix
+ * registry); an unpinned agent inherits the RUN provider — so an unpinned
+ * visual-verify on a Codex-provider run resolves to Codex.
  */
 export function resolveVerifyProvider(resolved: ResolvedVerifyAgent): AgentProvider {
   return resolved.agent.runtime ? providerForRuntime(resolved.agent.runtime) : resolved.runProvider;
@@ -2011,19 +2015,27 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let queryFn: VerificationAgentQueryFn;
     let model: string | undefined;
     let verdictModel: string;
-    if (provider === 'codex') {
-      if (!this.deps.codexQuery) {
+    if (provider !== 'claude') {
+      // Keyed on "not Claude", not on `=== 'codex'`. Codex is the only non-Claude
+      // provider with a verify seam today, but the launchable set is wider than
+      // that: an `omp-sdk` pin on `visual-verify` (or an unpinned agent on an
+      // OMP-provider run) resolves here, and the `else` branch below would have
+      // run it on the CLAUDE query with a Claude model — the silent misroute this
+      // dispatch exists to prevent. T3 (juror/verifier) is deliberately a later
+      // phase for OMP, so the honest answer is a loud skip, not a fallback.
+      const providerQuery = provider === 'codex' ? this.deps.codexQuery : undefined;
+      if (!providerQuery) {
         // PRE-deploy: no session was ever opened, so this skip is not budget-charged
         // (§3.6 "unknown ⇒ do not charge" does not even apply — we know it never ran).
         return {
           status: 'skipped',
           deployed: false,
           preflight,
-          errorMessage: 'codex verify runtime not wired',
+          errorMessage: `${provider} verify runtime not wired`,
           fileNames: [],
         };
       }
-      queryFn = this.deps.codexQuery;
+      queryFn = providerQuery;
       // May be undefined — the Codex query resolves the account default in that case.
       model = resolveVerifyCodexModel(resolved);
       // The verdict label must stay a string even when the model is account-default.

@@ -105,9 +105,9 @@ const SUBSTRATE_LABELS: Record<CliSubstrate, string> = {
 
 /**
  * Local label map because `shared/types/agentRuntime` only exports
- * WORKFLOW_AGENT_RUNTIME_LABELS (three of the five runtimes) and the quick-
- * session key can legitimately store `codex-pty`. Kept in the same wording as
- * that map so the two read as one family.
+ * WORKFLOW_AGENT_RUNTIME_LABELS (the LAUNCHABLE subset) and the quick-session
+ * key can legitimately store a PTY runtime. Kept in the same wording as that map
+ * so the two read as one family.
  */
 const AGENT_RUNTIME_LABELS: Record<AgentRuntime, string> = {
   'claude-sdk': 'Claude SDK',
@@ -115,10 +115,9 @@ const AGENT_RUNTIME_LABELS: Record<AgentRuntime, string> = {
   'codex-sdk': 'Codex SDK',
   'codex-pty': 'Codex terminal',
   'codex-exec': 'Codex exec',
-  // Only reachable as the label for an ALREADY-STORED value: `agentRuntimeOptions`
-  // offers no OMP row while the runtimes are unselectable, so nothing can write
-  // one here yet. Named anyway, because the fallback for a missing key is the raw
-  // runtime id — which is what a user would otherwise read once OMP ships.
+  // `omp-sdk` is offerable on BOTH key kinds now that it is launchable;
+  // `omp-pty` stays quick-session-only, exactly as `codex-pty` does. The
+  // fallback for a missing key is the raw runtime id, so every member is named.
   'omp-sdk': 'OMP',
   'omp-pty': 'OMP terminal',
 };

@@ -234,6 +234,15 @@ export interface OmpGateConfigInput {
  * (the gate applies that before the `dontAsk` short-circuit —
  * `ompGateExtension.ts:460-469`).
  *
+ * TASK ISOLATION IS UNREACHABLE, BY THIS. The proposal's §6 item 8 planned a
+ * `task.isolation.mode: none` config overlay for lane spawns, because OMP's
+ * subagent overlay/rcopy isolation is untested inside a cyboflow git worktree.
+ * That setting only ever applies once a `task` call is ALLOWED — and this deny
+ * is unconditional, in every mode, for every spawn this manager makes. So v1
+ * ships no overlay: it would be dead configuration whose presence implies a
+ * subagent path that cannot happen. Whoever lifts `denyTaskTool` has to decide
+ * the isolation mode in the same change, or lane spawns get OMP's default.
+ *
  * The merged rules' DENY half is intentionally not forwarded: the gate has no
  * deny-rule grammar, and a denied call that is merely absent from `allowRules`
  * falls through to the human rather than being auto-allowed — the safe

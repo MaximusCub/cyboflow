@@ -379,16 +379,15 @@ describe('agentRuntimeOptions', () => {
     }
   });
 
-  // Session membership alone is not enough to be offered: omp-sdk/omp-pty are
-  // legal session runtimes declared ahead of their managers, so a picker seeded
-  // from SESSION_AGENT_RUNTIMES has to narrow by the capability as well.
-  it('offers the OMP session lanes on the quick key but never on a workflow key', () => {
-    // Since the Phase-1 visibility flip the capability opens both OMP lanes to
-    // session pickers; workflow run types still draw from the LAUNCHABLE set,
-    // which omp-sdk joins only when its per-step phase lands.
+  // Session membership alone is not enough to be offered: a picker seeded from
+  // SESSION_AGENT_RUNTIMES narrows by the picker capability, and a WORKFLOW key
+  // narrows by the LAUNCHABLE set on top of it — which is what keeps the two
+  // OMP lanes apart on a workflow key even though both are legal session
+  // runtimes on the same enabled provider.
+  it('offers both OMP lanes on the quick key but only omp-sdk on a workflow key', () => {
     expect(agentRuntimeOptions(QUICK_RUN_TYPE_KEY)).toContain('omp-sdk');
     expect(agentRuntimeOptions(QUICK_RUN_TYPE_KEY)).toContain('omp-pty');
-    expect(agentRuntimeOptions('workflow:wf-1')).not.toContain('omp-sdk');
+    expect(agentRuntimeOptions('workflow:wf-1')).toContain('omp-sdk');
     expect(agentRuntimeOptions('workflow:wf-1')).not.toContain('omp-pty');
   });
 

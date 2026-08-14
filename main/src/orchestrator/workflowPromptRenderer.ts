@@ -57,9 +57,14 @@ export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   codex: CODEX_WORKFLOW_ENVELOPE,
   // `null` per this map's own rule: an envelope is authored deliberately for a
   // provider that has been taught the orchestrator contract, never inherited
-  // from another vendor. OMP has not — it runs no workflow agents at all yet
-  // (it is absent from WORKFLOW_LAUNCHABLE_RUNTIMES), so there is no prompt to
-  // adapt. Authored when OMP gains programmatic per-step agents (Phase 2).
+  // from another vendor. OMP now runs T1 programmatic per-step agents, and that
+  // tier deliberately needs no envelope: a step turn is a self-contained task
+  // whose gates the HOST owns (proposal §6, "Not required at T1: question
+  // bridge, subagent role mapping, prompt envelope"). What an envelope adapts is
+  // the T2 ORCHESTRATOR contract — AskUserQuestion redirection, subagent role
+  // mapping — which OMP has not been taught. So an omp step prompt renders
+  // IDENTITY, and pasting Codex's envelope in would describe a contract OMP does
+  // not implement. Authored in Phase 3, with T2.
   omp: null,
 };
 
