@@ -585,6 +585,29 @@ All five were verified and fixed on the same branch. For provenance:
 Known follow-ups deliberately left open: the SessionStartWizard's Orchestration tri-state still
 offers OMP+orchestrated and only learns of the refusal at launch (pre-empting it in the renderer is
 the trigger to move `SUPPORTS_ORCHESTRATED` into `shared/`); the mixed-provider prompt's hardcoded
-Codex copy predates this branch and misdescribes an OMP per-agent pin; `omp-pty` has no live smoke
-beyond the version probe; the >25 s human-approval constraint (§5.3) stands until a `tool_call`
-budget knob is upstreamed to OMP.
+Codex copy predates this branch and misdescribes an OMP per-agent pin; the >25 s human-approval
+constraint (§5.3) stands until a `tool_call` budget knob is upstreamed to OMP.
+
+### 15.1 Full-app UI smoke (dev build, post-review)
+
+A CDP-driven smoke of the dev app (fresh data dir, real `omp` 17.3.2) covered: onboarding
+ConnectStep 3-provider detect + OMP enable; Integrations card (detected/version/path, toggle
+persisted); quick-session configure (runtime quad, OMP caveat panel, OMP-relabeled permission
+options, per-provider `optgroup` model catalog with canonical `provider/id` values); an `omp-sdk`
+read turn (auto-allowed by the gate, usage/cost accrued); a write turn approved through the
+in-session `__quick__` Pending-approvals card within the 25 s budget (file written, turn clean);
+a second write REJECTED (tool blocked, model informed legibly, no file, no retry loop); and an
+`omp-pty` terminal session (TUI boots in the panel, typed input round-trips). Zero OMP-related
+errors in either debug log.
+
+One new finding, found by the smoke's first (failed) run: **an orch socket path over the ~104-byte
+macOS `sun_path` limit breaks the OMP gate specifically.** Node silently truncates the path on both
+bind and connect (so the app "listens" and Node-side MCP clients still connect — the only tell is
+the boot log's `could not stat bound socket` ENOENT warning), but Bun inside the gate extension
+does not, so every socket-routed approval fails closed ("unreachable cyboflow orchestrator
+socket"). Fail-closed behavior itself worked exactly as designed. Exposure: any long
+`CYBOFLOW_DIR` — notably the verify-setup dogfood pattern of leasing a verification instance with
+a data dir deep under a worktree. Candidate fix: bind an additional short alias path (e.g.
+`/tmp/cyboflow-<hash>.sock`) for the gate, or preflight the length at boot and warn loudly.
+Cosmetic nit from the same pass: the Integrations card renders the version as "omp omp/17.3.2"
+(binary name prepended to the already-prefixed version string).
