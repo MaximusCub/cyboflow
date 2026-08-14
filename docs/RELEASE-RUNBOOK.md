@@ -42,7 +42,7 @@ mirror the app never reads.**
 
 ## 1. Full test gate
 
-All four must pass. `test:unit` is the AC gate; `test:integration` is the
+All of these must pass. `test:unit` is the AC gate; `test:integration` is the
 blocking mocked-SDK job for `main/src/services/panels/claude/` changes.
 
 ```bash
@@ -50,6 +50,17 @@ pnpm typecheck        # must be clean
 pnpm lint             # 0 errors (warnings are non-gating)
 pnpm test:unit        # main + frontend vitest, schema parity, build scripts
 pnpm test:integration # 18 mocked-SDK *.itest.ts
+
+# Packaged-app smoke tier (blocking since 2026-08-14): drives the built bundle
+# via Playwright _electron.launch(). e2e:prereqs rebuilds native modules for the
+# Electron ABI — later gates/builds re-ensure their own ABI automatically.
+pnpm run e2e:prereqs && pnpm run test:ci:minimal
+
+# SDK drift canaries against the REAL API (needs the authenticated `claude` CLI
+# on PATH — this machine, not CI; ~15-20 min + real token spend). They catch
+# protocol/behavior drift the mocked suites cannot see.
+pnpm test:gate        # orchestrator day-gate, real wire shapes
+pnpm smoke:sdk        # standalone raw-SDK protocol probe
 ```
 
 ## 2. Version bump + changelog
