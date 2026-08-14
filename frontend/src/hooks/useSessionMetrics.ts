@@ -11,8 +11,9 @@
  *     running). Never animated — just a number — so it ignores reduced-motion.
  *   - tokens / filesSeen / diff / model / branch: snapshot-polled from
  *     `API.sessions.getStatistics` (the SAME aggregation SessionStats uses —
- *     session_outputs token sums + execution_diffs line/file stats). Polled on a
- *     short cadence so the node tracks the running chat without a stream wire.
+ *     session_outputs + run_usage token sums, and file/line stats git-derived
+ *     from the worktree vs the session's branch point). Polled on a short
+ *     cadence so the node tracks the running chat without a stream wire.
  *
  * Returns formatted display strings (elapsed "4m 12s", tokens "12.4k") plus the
  * raw diff/files numbers so the canvas can colour the diff (+ green / − rust)

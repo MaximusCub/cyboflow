@@ -6,6 +6,7 @@ import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import type { AppServices } from './types';
 import { aggregateExecutionDiffTotals } from './executionDiffAggregation';
+import { computeSessionFileStats, type SessionFileStats } from './sessionFileStats';
 import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import { convertDbFolderToFolder } from './folders';
@@ -288,6 +289,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
     registerCodexPtyPanel, // at-spawn runId→panelId seed for Codex PTY quick sessions
     gitStatusManager,
+    gitDiffManager, // git-derived session file stats for sessions:get-statistics
     archiveProgressManager,
     configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
     chatSentinelProvider, // chat-gate vehicle resolver (revives an app_restart-parked sentinel)
@@ -3609,13 +3611,42 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // columns; see getExecutionDiffStats).
       const executionDiffs = databaseService.getExecutionDiffStats(sessionId);
       
-      // Calculate file statistics — dedups cumulative working-directory-diff
-      // rows (commit-disabled turns) so totals aren't multiplied by the
-      // number of uncommitted turns (TASK-086). See aggregateExecutionDiffTotals.
-      // totalFilesChanged is not read here — files.totalFilesChanged below uses
-      // filesModified.size (unique file count), matching pre-existing behavior.
-      const { totalLinesAdded, totalLinesDeleted, filesModified } =
-        aggregateExecutionDiffTotals(executionDiffs);
+      // File statistics come from GIT — the worktree diffed against the commit
+      // the session branched from — because execution_diffs only gets a row when
+      // the agent PROCESS EXITS: a warm-SDK / PTY quick session holds one process
+      // across every turn and therefore has NO rows however much it edits, and a
+      // session that commits its work has rows that each read zero. See
+      // ipc/sessionFileStats.ts for the full rationale.
+      const gitFileStats = await computeSessionFileStats({
+        worktreePath: session.worktreePath,
+        baseCommit: session.baseCommit,
+        // Only consulted when the recorded branch point no longer resolves.
+        resolveMainBranch: async () => {
+          try {
+            const project = sessionManager.getProjectForSession(sessionId);
+            return project?.path ? await worktreeManager.getProjectMainBranch(project.path) : null;
+          } catch {
+            return null;
+          }
+        },
+        gitDiffManager,
+        logger: services.logger,
+      });
+
+      // Fallback for a session git can no longer answer for (archived / removed
+      // worktree, gc'd base commit): the historical execution_diffs aggregation,
+      // which dedups cumulative working-directory-diff rows (commit-disabled
+      // turns) so totals aren't multiplied by the number of uncommitted turns
+      // (TASK-086). See aggregateExecutionDiffTotals.
+      const fileStats: SessionFileStats = gitFileStats ?? (() => {
+        const totals = aggregateExecutionDiffTotals(executionDiffs);
+        return {
+          totalFilesChanged: totals.filesModified.size,
+          totalLinesAdded: totals.totalLinesAdded,
+          totalLinesDeleted: totals.totalLinesDeleted,
+          filesModified: Array.from(totals.filesModified),
+        };
+      })();
 
       // MIGRATION FIX: Get prompt count and messages using appropriate method
       const statsPanels = panelManager.getPanelsForSession(sessionId);
@@ -3690,10 +3721,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           runCacheCreationTokens: runTokenTotals.runCacheCreationTokens
         },
         files: {
-          totalFilesChanged: filesModified.size,
-          totalLinesAdded,
-          totalLinesDeleted,
-          filesModified: Array.from(filesModified),
+          totalFilesChanged: fileStats.totalFilesChanged,
+          totalLinesAdded: fileStats.totalLinesAdded,
+          totalLinesDeleted: fileStats.totalLinesDeleted,
+          filesModified: fileStats.filesModified,
+          // Turns whose agent process exited — still an execution_diffs count,
+          // which is exactly what it measures.
           executionCount: executionDiffs.length
         },
         activity: {
