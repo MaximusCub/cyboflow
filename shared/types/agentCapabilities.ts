@@ -68,21 +68,20 @@ export const RUNTIME_CAPABILITIES: Readonly<Record<AgentRuntime, AgentRuntimeCap
   // it at a picker site (the pickers never receive it), so these values are
   // unreachable-by-construction rather than observed behavior.
   'codex-exec': { selectableInPickers: false, supportsEffort: false, supportsFastMode: false },
-  // DECLARED, NOT YET REACHABLE. `selectableInPickers: false` is what keeps OMP
-  // out of every launch surface while its managers are still being built — the
-  // second half of the belt-and-braces with `AGENT_PROVIDER_REGISTRY.omp`'s
-  // absent⇒disabled default (which hides it even from a user who has the binary).
-  // The flag flips in the last Phase-1 step, once both managers exist and the
-  // quick-session create path routes them; nothing else about these rows changes.
+  // Selectable since the last Phase-1 step: both managers exist and the
+  // quick-session create path routes them. Reaching OMP still requires the
+  // user to switch the provider ON — `AGENT_PROVIDER_REGISTRY.omp` defaults an
+  // absent access key to DISABLED, so pickers only offer these lanes after an
+  // explicit opt-in in Settings → Integrations or onboarding.
   //
-  // `supportsEffort` is already true for omp-sdk: OMP's RPC turn options carry a
-  // thinking level (OMP_EFFORT_LEVELS in ./reasoningEffort), so the effort control
-  // is meaningful the moment the manager lands. omp-pty takes codex-pty's answer
-  // for codex-pty's reason — the TUI is driven by keystrokes, not a turn-options
-  // object, so an effort selection would be accepted and dropped. Fast mode is
-  // the Opus-only Claude opt-in with no OMP analogue.
-  'omp-sdk': { selectableInPickers: false, supportsEffort: true, supportsFastMode: false },
-  'omp-pty': { selectableInPickers: false, supportsEffort: false, supportsFastMode: false },
+  // `supportsEffort` is true for omp-sdk: OMP's RPC turn options carry a
+  // thinking level (OMP_EFFORT_LEVELS in ./reasoningEffort). omp-pty takes
+  // codex-pty's answer for codex-pty's reason — the TUI is driven by
+  // keystrokes, not a turn-options object, so an effort selection would be
+  // accepted and dropped. Fast mode is the Opus-only Claude opt-in with no
+  // OMP analogue.
+  'omp-sdk': { selectableInPickers: true, supportsEffort: true, supportsFastMode: false },
+  'omp-pty': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
 };
 
 /**

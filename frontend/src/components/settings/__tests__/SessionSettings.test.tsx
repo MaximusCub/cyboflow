@@ -354,7 +354,9 @@ describe('SessionSettings', () => {
 
   describe('Default Agent Runtime', () => {
     it('renders the built-in-default state and every OFFERABLE session runtime', () => {
-      renderGroup();
+      // All three providers switched on, so the capability filter is the only
+      // thing deciding which session runtimes get a button.
+      renderGroup({ agentProviderAccess: { claude: true, codex: true, omp: true } });
 
       expect(screen.getByTestId('default-agent-runtime-unset')).toHaveAttribute('aria-pressed', 'true');
       // Session membership is necessary but not sufficient: the control shows a
@@ -377,10 +379,10 @@ describe('SessionSettings', () => {
       expect(screen.queryByTestId('default-agent-runtime-codex-exec')).not.toBeInTheDocument();
     });
 
-    // The same rule, for a runtime that IS a session runtime but whose managers
-    // have not shipped: declaring OMP must not put it in a settings control that
-    // would then resolve at launch onto a manager that does not exist.
-    it('never offers a runtime declared ahead of its managers', () => {
+    // OMP is picker-selectable since the visibility flip, but its absent access
+    // key floors to DISABLED — an install that never opted in must not offer it
+    // as a default runtime.
+    it('hides the OMP runtimes until the provider is switched on', () => {
       renderGroup();
 
       expect(screen.queryByTestId('default-agent-runtime-omp-sdk')).not.toBeInTheDocument();

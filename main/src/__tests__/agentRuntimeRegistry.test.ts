@@ -353,14 +353,14 @@ describe('normalizeAgentModelSelection', () => {
  * OMP is DECLARED but not yet REACHABLE — its managers land in a later step.
  *
  * "Declared" is easy to verify (the registries above already do). What this
- * block pins is the second half: that declaring it changed nothing for a
- * claude/codex user. Two independent mechanisms have to hold, because either
- * alone would be one edit away from exposing a half-built provider — the access
- * default (a user cannot switch it on, because no card offers it and the absent
- * key resolves to false) and the picker capability (no launch surface lists its
- * runtimes even if access were somehow granted).
+ * block pins is the second half: that a claude/codex user who never opts in
+ * sees no behavior change. Since the Phase-1 visibility flip the picker
+ * capability offers both OMP lanes, so the remaining guards are the access
+ * default (an absent key resolves to DISABLED, so every launch seam refuses
+ * OMP until the user switches it on) and the workflow gate (omp-sdk is
+ * storable but not launchable until its per-step phase lands).
  */
-describe('omp is declared but unreachable', () => {
+describe('omp is opt-in and workflow-gated', () => {
   it('resolves to DISABLED from an absent access key, unlike the two legacy providers', () => {
     expect(isAgentProviderEnabled(undefined, 'omp')).toBe(false);
     expect(isAgentProviderEnabled({ claude: true, codex: true }, 'omp')).toBe(false);
@@ -369,11 +369,14 @@ describe('omp is declared but unreachable', () => {
     expect(AGENT_PROVIDER_REGISTRY.omp.defaultEnabled).toBe(false);
   });
 
-  it('keeps both runtimes out of every picker-facing set', () => {
+  it('is picker-selectable for quick sessions but still guarded by provider access', () => {
     for (const runtime of ['omp-sdk', 'omp-pty'] as const) {
-      expect(isRuntimeSelectableInPickers(runtime)).toBe(false);
+      // Since the Phase-1 visibility flip, the capability offers both lanes…
+      expect(isRuntimeSelectableInPickers(runtime)).toBe(true);
+      // …but workflows still refuse them (T1 lands in a later phase)…
       expect(WORKFLOW_LAUNCHABLE_RUNTIMES).not.toContain(runtime);
-      // A disabled provider's runtimes are refused at the launch seams too.
+      // …and a never-touched install refuses them at every launch seam,
+      // because the absent access key resolves to disabled.
       expect(isRuntimeProviderEnabled(undefined, runtime)).toBe(false);
     }
   });

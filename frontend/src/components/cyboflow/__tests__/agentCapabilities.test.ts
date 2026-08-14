@@ -71,15 +71,15 @@ describe('supportsFastMode', () => {
 });
 
 /** The runtimes no picker may offer, and WHY each one is on the list. */
-const UNSELECTABLE_RUNTIMES: readonly AgentRuntime[] = ['codex-exec', 'omp-sdk', 'omp-pty'];
+const UNSELECTABLE_RUNTIMES: readonly AgentRuntime[] = ['codex-exec'];
 
 describe('selectableInPickers', () => {
-  // Two different reasons land a runtime here. codex-exec has no manager and is
-  // in neither SESSION_AGENT_RUNTIMES nor WORKFLOW_LAUNCHABLE_RUNTIMES, yet is
-  // reachable as a persisted `config.defaultAgentRuntime` — which is why four
-  // seeding seams each carried their own `!== 'codex-exec'` test. The two omp-*
-  // runtimes ARE session runtimes, declared ahead of their managers; this flag
-  // is the single switch that keeps them out of every picker until they ship.
+  // codex-exec has no manager and is in neither SESSION_AGENT_RUNTIMES nor
+  // WORKFLOW_LAUNCHABLE_RUNTIMES, yet is reachable as a persisted
+  // `config.defaultAgentRuntime` — which is why four seeding seams each carried
+  // their own `!== 'codex-exec'` test. The omp-* runtimes left this list at the
+  // Phase-1 visibility flip: their managers ship, so pickers may offer them —
+  // reaching them still requires the provider-access opt-in.
   it('is false for exactly the runtimes that may not be offered', () => {
     expect(runtimesWithCapability('selectableInPickers')).toEqual(
       ALL_AGENT_RUNTIMES.filter((runtime) => !UNSELECTABLE_RUNTIMES.includes(runtime)),

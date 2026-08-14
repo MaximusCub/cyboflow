@@ -924,17 +924,25 @@ describe('RunTypeOverridesSection — detail screen', () => {
   });
 
   // AC 3 — the quick key is the only one whose launch can reach the Codex TUI.
-  it('offers the Codex terminal runtime on the quick screen only', async () => {
+  it('offers the terminal + OMP session runtimes on the quick screen only', async () => {
     await openDetail('Quick session');
 
     const card = screen.getByTestId('knob-card-runtime');
     fireEvent.click(within(card).getByRole('switch'));
     expect(
       within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
-    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude interactive', 'Codex SDK', 'Codex terminal']);
+    ).toEqual([
+      'Follow defaults',
+      'Claude SDK',
+      'Claude interactive',
+      'Codex SDK',
+      'Codex terminal',
+      'OMP',
+      'OMP terminal',
+    ]);
   });
 
-  it('omits the Codex terminal runtime on a workflow screen (no PTY seam for a flow run)', async () => {
+  it('omits the session-only runtimes on a workflow screen (LAUNCHABLE set: no PTY, no OMP yet)', async () => {
     await openDetail('Sprint');
 
     const card = screen.getByTestId('knob-card-runtime');

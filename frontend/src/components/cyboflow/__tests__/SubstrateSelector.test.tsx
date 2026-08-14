@@ -147,13 +147,17 @@ describe('SubstrateSelector — provider access toggles', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('offers everything when the toggles were never touched (absent config field)', () => {
+  it('offers both legacy providers when the toggles were never touched (absent config field)', () => {
     setProviderAccess(undefined);
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Claude SDK/i })).toBeInTheDocument();
-    expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+    // OMP's absent key floors to DISABLED, so its lanes are access-hidden and
+    // the "…are hidden" note now fires — accurately: there IS a provider the
+    // user could switch on in Settings → Integrations.
+    expect(screen.queryByRole('option', { name: /OMP/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/turned off in Settings → Integrations are hidden/i)).toBeInTheDocument();
   });
 
   it('surfaces the PTY-only ⨯ Claude-off conflict instead of a picker with no options', () => {
@@ -192,34 +196,40 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   beforeEach(() => mockUseForcedSubstrate.mockReturnValue(null));
 
   it('renders one option per selectable runtime and none for the rest', () => {
-    setProviderAccess({ claude: true, codex: true });
+    // All providers on, so the capability tie is the only filter under test.
+    setProviderAccess({ claude: true, codex: true, omp: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
     expect(offered).toEqual(runtimesWithCapability('selectableInPickers'));
   });
 
-  // The picker HAS rows for the OMP runtimes (label and order are decided with
-  // the row, not bolted on later) — the capability is the only thing keeping
-  // them off screen. Asserted explicitly because "an option list that already
-  // contains the thing it must not show" is the arrangement most likely to leak,
-  // and turning the provider on must not be enough to reveal it either.
-  it('hides a declared-but-unselectable runtime even with its provider switched on', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
-    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
-
-    const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+  // The rows exist regardless of access (label and order are decided with the
+  // row, not bolted on later) — with the provider off, access is the only
+  // thing keeping them off screen, and an explicit false behaves like absent.
+  it('hides the OMP rows while the provider is off, and offers them once on', () => {
+    setProviderAccess({ claude: true, codex: true, omp: false });
+    const { unmount } = render(
+      <SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />,
+    );
+    let offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
     expect(offered).not.toContain('omp-sdk');
     expect(offered).not.toContain('omp-pty');
-    expect(screen.queryByRole('option', { name: /OMP/i })).not.toBeInTheDocument();
+    unmount();
+
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+    offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).toContain('omp-sdk');
+    expect(offered).toContain('omp-pty');
   });
 
   // The note reads "…are hidden" only when the PROVIDER TOGGLES removed
   // something. Counting against the raw row list instead of the selectable one
-  // would make it fire permanently, telling every user a provider is switched
-  // off when none is.
+  // would make it fire permanently: codex-exec is always unselectable and its
+  // absence must never be reported as a switched-off provider.
   it('does not claim runtimes are hidden when only unselectable ones are absent', () => {
-    setProviderAccess({ claude: true, codex: true });
+    setProviderAccess({ claude: true, codex: true, omp: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
