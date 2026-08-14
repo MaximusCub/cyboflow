@@ -39,6 +39,18 @@
  * asked about, which inverts the safety posture stated below. Routing an ask
  * match to ApprovalRouter satisfies the user's intent precisely: a human decides.
  *
+ * ## Trust model (repo-trust hole, deep-review 2026-08 P0)
+ *
+ * Allow rules are only honored from the USER settings file
+ * (`~/.claude/settings.json`). Project-level files under the worktree
+ * (`.claude/settings.json` and `.claude/settings.local.json`) contribute
+ * SUPPRESSORS only (deny and ask rules): both arrive via clone/worktree
+ * checkout (and even an untracked local file can be written by a compromised
+ * agent in an earlier session), so a hostile repo shipping `"allow": ["Bash"]`
+ * must not disable the approval gate. Suppressors can only narrow, never grant,
+ * so honoring them from the repo is safe. `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1`
+ * restores the legacy full merge until a per-project trust prompt exists.
+ *
  * Unsupported specifier kinds (e.g. Read/Edit path globs) intentionally do NOT
  * auto-allow in v1 — they keep prompting, which is no worse than today.
  *
@@ -320,9 +332,12 @@ function readRuleArray(filePath: string, key: 'allow' | 'deny' | 'ask'): string[
  * (`<projectDir>/.claude/settings.json` and `.claude/settings.local.json`)
  * settings files.
  *
- * Mirrors the SDK's `settingSources: ['user','project']`. Merge is a union of
- * each list across all present files; missing files contribute nothing. Results
- * are de-duplicated to keep the matcher cheap.
+ * Trust model (see module header): allow rules are honored from the USER file
+ * only; project files contribute suppressors (deny and ask) only, because their
+ * content is repo-controlled and a hostile repo must not be able to grant
+ * itself auto-approval. `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1` restores
+ * the legacy full merge. Deny and ask rules are always a union of every present
+ * file. Results are de-duplicated to keep the matcher cheap.
  *
  * @param projectDir - The session cwd (worktree path) whose `.claude/` is read.
  * @param homeDir    - Override for the user home dir (tests). Defaults to os.homedir().
@@ -331,17 +346,24 @@ export function loadMergedPermissionRules(
   projectDir: string,
   homeDir: string = os.homedir(),
 ): MergedPermissionRules {
-  const files = [
-    path.join(homeDir, '.claude', 'settings.json'),
+  const userFile = path.join(homeDir, '.claude', 'settings.json');
+  const projectFiles = [
     path.join(projectDir, '.claude', 'settings.json'),
     path.join(projectDir, '.claude', 'settings.local.json'),
   ];
+  const trustProject = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES === '1';
 
   const allow = new Set<string>();
   const deny = new Set<string>();
   const ask = new Set<string>();
-  for (const file of files) {
-    for (const r of readRuleArray(file, 'allow')) allow.add(r);
+
+  for (const r of readRuleArray(userFile, 'allow')) allow.add(r);
+  for (const r of readRuleArray(userFile, 'deny')) deny.add(r);
+  for (const r of readRuleArray(userFile, 'ask')) ask.add(r);
+  for (const file of projectFiles) {
+    if (trustProject) {
+      for (const r of readRuleArray(file, 'allow')) allow.add(r);
+    }
     for (const r of readRuleArray(file, 'deny')) deny.add(r);
     for (const r of readRuleArray(file, 'ask')) ask.add(r);
   }

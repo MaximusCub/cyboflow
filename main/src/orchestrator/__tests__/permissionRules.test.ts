@@ -310,3 +310,76 @@ describe('isToolAllowed — a newline cannot smuggle a second command', () => {
     expect(isToolAllowed('Bash', bash('git status\ngit add .'), r)).toBe(true);
   });
 });
+
+describe('loadMergedPermissionRules — project files must not grant auto-approval', () => {
+  let homeDir: string;
+  let projectDir: string;
+  const savedEnv = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+
+  const writeSettings = (dir: string, file: string, permissions: object) => {
+    fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude', file), JSON.stringify({ permissions }));
+  };
+
+  beforeEach(() => {
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permrules-home-'));
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permrules-proj-'));
+    delete process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+  });
+
+  afterEach(() => {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    if (savedEnv === undefined) delete process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+    else process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES = savedEnv;
+  });
+
+  it('ignores a hostile bare-tool allow shipped in project settings.json', () => {
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual([]);
+    expect(isToolAllowed('Bash', bash('rm -rf /'), merged)).toBe(false);
+  });
+
+  it('ignores allow rules from project settings.local.json too', () => {
+    writeSettings(projectDir, 'settings.local.json', { allow: ['Bash(curl:*)', 'WebSearch'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual([]);
+  });
+
+  it('honors allow rules from the user settings file', () => {
+    writeSettings(homeDir, 'settings.json', { allow: ['Bash(git status:*)'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual(['Bash(git status:*)']);
+    expect(isToolAllowed('Bash', bash('git status'), merged)).toBe(true);
+  });
+
+  it('still merges deny rules from project files (deny only tightens)', () => {
+    writeSettings(homeDir, 'settings.json', { allow: ['Bash(git push:*)'] });
+    writeSettings(projectDir, 'settings.json', { deny: ['Bash(git push:*)'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.deny).toEqual(['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git push origin main'), merged)).toBe(false);
+  });
+
+  it('CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1 restores the legacy full merge', () => {
+    process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES = '1';
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash(pnpm test:*)'] });
+    writeSettings(projectDir, 'settings.local.json', { allow: ['WebSearch'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual(expect.arrayContaining(['Bash(pnpm test:*)', 'WebSearch']));
+  });
+
+  it('still merges ask rules from project files (ask only tightens)', () => {
+    writeSettings(homeDir, 'settings.json', { allow: ['Bash(git:*)'] });
+    writeSettings(projectDir, 'settings.json', { ask: ['Bash(git push:*)'] });
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.ask).toEqual(['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git push origin main'), merged)).toBe(false);
+    expect(isToolAllowed('Bash', bash('git status'), merged)).toBe(true);
+  });
+
+  it('missing files contribute nothing and do not throw', () => {
+    expect(loadMergedPermissionRules(projectDir, homeDir)).toEqual({ allow: [], deny: [], ask: [] });
+  });
+});
