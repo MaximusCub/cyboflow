@@ -118,7 +118,7 @@ export type OmpSnapshotResult =
   | { ok: true; snapshot: RegistrySnapshot }
   | {
       ok: false;
-      error: "unavailable" | "unsupported-version" | "malformed";
+      error: "unavailable" | "missing" | "unsupported-version" | "malformed";
       detail: string;
     };
 
@@ -150,7 +150,7 @@ export type OmpFleetViewResult =
   | { ok: true; snapshot: OmpFleetViewSnapshot }
   | {
       ok: false;
-      error: "unavailable" | "unsupported-version" | "malformed";
+      error: "unavailable" | "missing" | "unsupported-version" | "malformed";
       detail: string;
     };
 

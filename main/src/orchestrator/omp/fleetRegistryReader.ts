@@ -69,9 +69,16 @@ export class FleetRegistryReader implements OmpControlPlaneAdapter {
     let text: string;
     try {
       text = readFileSync(this.registryPath, "utf8");
-    } catch {
-      // A missing or unreadable registry is a normal state (fleet never ran),
-      // not a crash.
+    } catch (error) {
+      // Distinguish "never ran here" (ENOENT) from "can't read" (permission
+      // denied, I/O error) — the two mean very different things to the UI.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return {
+          ok: false,
+          error: "missing",
+          detail: `fleet registry not found: ${this.registryPath}`,
+        };
+      }
       return {
         ok: false,
         error: "unavailable",

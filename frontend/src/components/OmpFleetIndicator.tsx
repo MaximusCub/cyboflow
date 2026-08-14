@@ -26,9 +26,16 @@ const DOT_COLOR: Record<OmpFleetUiStatus, string> = {
 
 const STATUS_LABEL: Record<OmpFleetUiStatus, string> = {
   available: 'Fleet available',
-  absent: 'No fleet',
+  absent: 'No fleet (never ran)',
   error: 'Fleet error',
   checking: 'Checking',
+};
+
+const ERROR_LABEL: Record<string, string> = {
+  unavailable: 'OMP unavailable',
+  missing: 'No fleet (never ran)',
+  malformed: 'Malformed registry',
+  'unsupported-version': 'Unsupported registry version',
 };
 
 export function OmpFleetIndicator() {
@@ -115,7 +122,7 @@ export function OmpFleetIndicator() {
             <div className="mt-2 pt-2 border-t border-border-primary">
               <p className="text-text-muted mb-1">Error</p>
               <p className="font-mono text-status-error break-all text-[10px] leading-tight">
-                {errorKind}
+                {ERROR_LABEL[errorKind] ?? errorKind}
                 {detail ? `: ${detail}` : ''}
               </p>
             </div>

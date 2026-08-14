@@ -30,7 +30,7 @@ export interface OmpFleetState {
   /** Worker count when ok, else null. */
   workerCount: number | null;
   /** Error category when !ok, else null. */
-  errorKind: 'unavailable' | 'unsupported-version' | 'malformed' | null;
+  errorKind: 'unavailable' | 'missing' | 'unsupported-version' | 'malformed' | null;
   /** Redacted detail for the popover (already flattened by main; not raw registry data). */
   detail: string | null;
   lastCheckedAt: number | null;
@@ -64,7 +64,7 @@ export const useOmpFleetStore = create<OmpFleetState & OmpFleetActions>()((set, 
       return;
     }
     set({
-      status: result.error === 'unavailable' ? 'absent' : 'error',
+      status: result.error === 'missing' ? 'absent' : 'error',
       workerCount: null,
       errorKind: result.error,
       detail: result.detail,

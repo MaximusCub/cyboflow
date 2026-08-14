@@ -185,10 +185,10 @@ describe("FleetRegistryReader", () => {
     }
   });
 
-  test("returns unavailable for a missing file", async () => {
+  test("returns missing (ENOENT) for a missing file", async () => {
     const reader = new FleetRegistryReader(join(tempDir(), "missing.json"));
     const result = await reader.getFleetSnapshot();
-    expect(result).toMatchObject({ ok: false, error: "unavailable" });
+    expect(result).toMatchObject({ ok: false, error: "missing" });
   });
 
   test("returns malformed for invalid JSON", async () => {

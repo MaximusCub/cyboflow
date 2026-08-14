@@ -73,10 +73,14 @@ describe('ompFleetStore', () => {
     });
   });
 
-  it('setSnapshot maps unavailable → absent, malformed → error', () => {
+  it('setSnapshot maps missing → absent, unavailable/malformed → error', () => {
     const s = useOmpFleetStore.getState();
-    s.setSnapshot({ ok: false, error: 'unavailable', detail: 'x' });
+
+    s.setSnapshot({ ok: false, error: 'missing', detail: 'x' });
     expect(useOmpFleetStore.getState().status).toBe('absent');
+
+    s.setSnapshot({ ok: false, error: 'unavailable', detail: 'x' });
+    expect(useOmpFleetStore.getState()).toMatchObject({ status: 'error', errorKind: 'unavailable' });
 
     s.setSnapshot({ ok: false, error: 'malformed', detail: 'x' });
     expect(useOmpFleetStore.getState()).toMatchObject({ status: 'error', errorKind: 'malformed' });
