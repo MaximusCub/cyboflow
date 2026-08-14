@@ -38,7 +38,8 @@ pnpm dev:perf          # dev + main-process perf tracer/timer census + --inspect
 pnpm typecheck && pnpm lint
 pnpm test:unit         # THE headless AC gate — for a SETTLED tree, not per-change (see below)
 pnpm test:integration  # Mocked-SDK itest suite (required for panels/claude changes)
-pnpm test:e2e          # Built-bundle Playwright; needs a real display — NOT an AC gate
+pnpm test:e2e          # Built-bundle Playwright; needs a real display. The minimal
+                       # smoke tier (test:ci:minimal) IS blocking: PR CI + release gate
 pnpm test:gate         # Day-gate integration; needs `claude` on PATH — manual only
 node scripts/ensure-sqlite-abi.mjs <host|electron>   # better-sqlite3 ABI (normally automatic)
 ```
