@@ -64,22 +64,43 @@ describe('providerForRuntime / isRuntimeProviderEnabled', () => {
 });
 
 describe('enabledAgentProviders', () => {
-  it('lists both by default and drops the switched-off one', () => {
+  // OMP is absent from every list below because its registry entry opts OUT of
+  // the legacy absent⇒enabled floor — see the omp describe block at the end.
+  it('lists the default-enabled providers and drops the switched-off one', () => {
     expect(enabledAgentProviders(undefined)).toEqual(['claude', 'codex']);
     expect(enabledAgentProviders({ claude: false, codex: true })).toEqual(['codex']);
   });
 });
 
 describe('resolveAgentProviderAccess', () => {
-  it('materializes both members from an absent or partial map', () => {
-    expect(resolveAgentProviderAccess(undefined)).toEqual({ claude: true, codex: true });
-    expect(resolveAgentProviderAccess({ codex: false })).toEqual({ claude: true, codex: false });
+  it('materializes EVERY provider at its own default from an absent or partial map', () => {
+    expect(resolveAgentProviderAccess(undefined)).toEqual({
+      claude: true,
+      codex: true,
+      omp: false,
+    });
+    expect(resolveAgentProviderAccess({ codex: false })).toEqual({
+      claude: true,
+      codex: false,
+      omp: false,
+    });
   });
 
-  it('degrades an all-off map to both-on', () => {
+  it('degrades an all-off map to the per-provider defaults', () => {
     expect(resolveAgentProviderAccess({ claude: false, codex: false })).toEqual({
       claude: true,
       codex: true,
+      omp: false,
+    });
+  });
+
+  // An explicit `omp: true` is the user's own answer and survives the floor —
+  // only an ABSENT key resolves through the registry default.
+  it('honors an explicit opt-in for a default-disabled provider', () => {
+    expect(resolveAgentProviderAccess({ omp: true })).toEqual({
+      claude: true,
+      codex: true,
+      omp: true,
     });
   });
 });

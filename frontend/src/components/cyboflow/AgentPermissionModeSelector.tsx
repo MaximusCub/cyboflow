@@ -42,14 +42,50 @@ const CODEX_PTY_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
   { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
 ];
 
+/**
+ * OMP's structured lane has no per-mode approval policy of its own to describe:
+ * Cyboflow's own PreToolUse gate is what decides, so the first three modes
+ * differ only in what that gate auto-allows and all three route the same way.
+ * `dontAsk` is the one mode that hands the decision to OMP — whose own default
+ * is approval-free ("yolo"), which is why it is spelled out rather than sharing
+ * Claude's milder "No prompts · skip permissions".
+ */
+const OMP_SDK_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow edits, safe reads & git' },
+  { id: 'auto', label: 'Auto', hint: 'Same routing · fewer prompts' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'OMP runs approval-free (yolo)' },
+];
+
+/**
+ * The OMP TUI owns its own approval prompts, exactly as the Codex one does, so
+ * the modes here are CLI flags rather than gate policy and nothing reaches the
+ * Cyboflow review queue.
+ */
+const OMP_PTY_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Read-only · asks to write' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Workspace writes · asks when needed' },
+  { id: 'auto', label: 'Auto', hint: 'Currently same as Allow edits' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
+];
+
 function permissionModeOptionsForProvider(
   agentProvider: AgentProvider,
   agentRuntime?: SessionAgentRuntime,
 ): ReadonlyArray<PermissionModeOption> {
-  if (agentProvider !== 'codex') return PERMISSION_MODE_OPTIONS;
-  return agentRuntime === 'codex-pty'
-    ? CODEX_PTY_PERMISSION_MODE_OPTIONS
-    : CODEX_SDK_PERMISSION_MODE_OPTIONS;
+  if (agentProvider === 'codex') {
+    return agentRuntime === 'codex-pty'
+      ? CODEX_PTY_PERMISSION_MODE_OPTIONS
+      : CODEX_SDK_PERMISSION_MODE_OPTIONS;
+  }
+  // Mirrors the Codex arm, including its default: an OMP session whose runtime
+  // prop is absent gets the structured set, not the terminal one.
+  if (agentProvider === 'omp') {
+    return agentRuntime === 'omp-pty'
+      ? OMP_PTY_PERMISSION_MODE_OPTIONS
+      : OMP_SDK_PERMISSION_MODE_OPTIONS;
+  }
+  return PERMISSION_MODE_OPTIONS;
 }
 
 interface AgentPermissionModeSelectorProps {
@@ -100,6 +136,13 @@ export function AgentPermissionModeSelector({
           {agentRuntime === 'codex-pty'
             ? 'Codex prompts appear in its terminal; they do not enter the Cyboflow review queue.'
             : 'Auto lets Codex review approval requests; other requested approvals use the Cyboflow review queue.'}
+        </p>
+      )}
+      {agentProvider === 'omp' && (
+        <p className="text-xs text-text-tertiary">
+          {agentRuntime === 'omp-pty'
+            ? 'OMP prompts appear in its terminal; they do not enter the Cyboflow review queue.'
+            : "Cyboflow's own gate decides these; requests appear in the review queue. Don't ask hands the decision to OMP, which runs approval-free."}
         </p>
       )}
     </div>

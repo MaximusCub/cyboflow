@@ -39,15 +39,10 @@
  * DemoCliManager, never a real vendor).
  */
 import {
+  AGENT_PROVIDER_LABELS,
   formatAgentProviderDisabled,
   type AgentProvider,
 } from '../../../shared/types/agentRuntime';
-
-/** Human label used in the thrown message. */
-const PROVIDER_LABELS: Record<AgentProvider, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-};
 
 /**
  * Thrown when a call is attempted against a provider the user switched off.
@@ -64,8 +59,8 @@ export class AgentProviderDisabledError extends Error {
     super(
       formatAgentProviderDisabled(
         provider,
-        `${PROVIDER_LABELS[provider]} is turned off, so ${context} cannot run. ` +
-          `Turn ${PROVIDER_LABELS[provider]} back on in Settings → Integrations to continue.`,
+        `${AGENT_PROVIDER_LABELS[provider]} is turned off, so ${context} cannot run. ` +
+          `Turn ${AGENT_PROVIDER_LABELS[provider]} back on in Settings → Integrations to continue.`,
       ),
     );
     this.name = 'AgentProviderDisabledError';

@@ -8,6 +8,7 @@
  * what the generic channel returns so they cannot drift apart while both exist.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { AGENT_PROVIDERS } from '../../../../shared/types/agentRuntime';
 
 vi.mock('../../utils/claudeCredentials', () => ({
   detectClaudeCredentials: vi.fn(async () => ({
@@ -69,12 +70,27 @@ describe('registerProviderDetectionHandlers', () => {
     expect(detectChatGptAccount).toHaveBeenCalledOnce();
   });
 
+  it('answers for a provider whose real probe has not been built yet', async () => {
+    // The registry is exhaustive, so OMP already has an entry — but its binary
+    // discovery ladder lands with the OMP managers. Until then the honest answer
+    // is 'unavailable' with no evidence: a build that cannot run OMP must not
+    // report it as usable, and the channel must not throw for a declared
+    // provider either.
+    const { handlers } = register();
+
+    await expect(handlers.get(PROVIDERS_DETECT_CHANNEL)?.({}, 'omp')).resolves.toEqual({
+      success: true,
+      data: { state: 'unavailable', binaryPath: null, version: null },
+    });
+  });
+
   it('rejects an unregistered provider rather than falling back to a default', async () => {
     const { handlers, detectChatGptAccount } = register();
 
     await expect(handlers.get(PROVIDERS_DETECT_CHANNEL)?.({}, 'gemini')).resolves.toEqual({
       success: false,
-      error: 'Unknown agent provider "gemini" (expected one of claude, codex).',
+      // Spelled from the registry, not frozen — see the models.test.ts twin.
+      error: `Unknown agent provider "gemini" (expected one of ${AGENT_PROVIDERS.join(', ')}).`,
     });
     expect(detectChatGptAccount).not.toHaveBeenCalled();
   });

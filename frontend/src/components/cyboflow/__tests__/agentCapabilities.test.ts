@@ -70,14 +70,19 @@ describe('supportsFastMode', () => {
   });
 });
 
+/** The runtimes no picker may offer, and WHY each one is on the list. */
+const UNSELECTABLE_RUNTIMES: readonly AgentRuntime[] = ['codex-exec', 'omp-sdk', 'omp-pty'];
+
 describe('selectableInPickers', () => {
-  // Evidence: codex-exec has no manager and is in neither SESSION_AGENT_RUNTIMES
-  // nor WORKFLOW_LAUNCHABLE_RUNTIMES, yet is reachable as a persisted
-  // `config.defaultAgentRuntime` — which is why four seeding seams each carried
-  // their own `!== 'codex-exec'` test.
-  it('is false only for codex-exec', () => {
+  // Two different reasons land a runtime here. codex-exec has no manager and is
+  // in neither SESSION_AGENT_RUNTIMES nor WORKFLOW_LAUNCHABLE_RUNTIMES, yet is
+  // reachable as a persisted `config.defaultAgentRuntime` — which is why four
+  // seeding seams each carried their own `!== 'codex-exec'` test. The two omp-*
+  // runtimes ARE session runtimes, declared ahead of their managers; this flag
+  // is the single switch that keeps them out of every picker until they ship.
+  it('is false for exactly the runtimes that may not be offered', () => {
     expect(runtimesWithCapability('selectableInPickers')).toEqual(
-      ALL_AGENT_RUNTIMES.filter((runtime) => runtime !== 'codex-exec'),
+      ALL_AGENT_RUNTIMES.filter((runtime) => !UNSELECTABLE_RUNTIMES.includes(runtime)),
     );
   });
 
@@ -86,22 +91,37 @@ describe('selectableInPickers', () => {
   });
 });
 
+describe('effort + fast mode for the OMP runtimes', () => {
+  // Evidence: OMP's RPC turn options carry a thinking level, so an effort
+  // selection genuinely reaches the structured lane — but the TUI is driven by
+  // keystrokes and has no turn-options object, exactly as codex-pty does not.
+  // Fast mode is the Opus-only Claude opt-in with no OMP analogue.
+  it('gives the structured lane effort and the terminal lane neither', () => {
+    expect(runtimeSupportsEffort('omp-sdk')).toBe(true);
+    expect(runtimeSupportsEffort('omp-pty')).toBe(false);
+    expect(runtimeSupportsFastMode('omp-sdk')).toBe(false);
+    expect(runtimeSupportsFastMode('omp-pty')).toBe(false);
+  });
+});
+
 describe('launchRuntimeForPickers', () => {
   it('passes every offerable runtime through unchanged', () => {
     for (const runtime of ALL_AGENT_RUNTIMES) {
-      if (runtime === 'codex-exec') continue;
+      if (UNSELECTABLE_RUNTIMES.includes(runtime)) continue;
       expect(launchRuntimeForPickers(runtime)).toBe(runtime);
     }
   });
 
   it('drops an unselectable or absent runtime so the surface falls back to its own default', () => {
-    expect(launchRuntimeForPickers('codex-exec')).toBeUndefined();
+    for (const runtime of UNSELECTABLE_RUNTIMES) {
+      expect(launchRuntimeForPickers(runtime)).toBeUndefined();
+    }
     expect(launchRuntimeForPickers(undefined)).toBeUndefined();
   });
 
   it('drops a runtime string that is not in the union at all', () => {
     // A hand-edited config.json can hold anything; the seeding seams must not
     // seed a picker with it.
-    expect(launchRuntimeForPickers('omp-sdk' as AgentRuntime)).toBeUndefined();
+    expect(launchRuntimeForPickers('acme-sdk' as AgentRuntime)).toBeUndefined();
   });
 });

@@ -32,12 +32,15 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.agentProviderAccess', () => {
-  it('floors to both providers enabled on a fresh instance, without seeding the field', () => {
+  it('floors each provider to its OWN default on a fresh instance, without seeding the field', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     expect(mgr.getConfig().agentProviderAccess).toBeUndefined();
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true });
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: false });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
     expect(mgr.isAgentProviderEnabled('codex')).toBe(true);
+    // A fresh install must not silently switch on a vendor introduced after the
+    // toggles existed — that is what the per-provider default is for.
+    expect(mgr.isAgentProviderEnabled('omp')).toBe(false);
   });
 
   it('reads both-enabled from a config.json with no agentProviderAccess key (back-compat)', async () => {
@@ -68,7 +71,9 @@ describe('ConfigManager.agentProviderAccess', () => {
     await mgr.initialize();
     await mgr.updateConfig({ agentProviderAccess: { codex: false } });
 
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: false });
+    // `omp` materializes too, at ITS default (false) — the absent-key floor is
+    // per-provider, not one blanket "enabled".
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: false, omp: false });
   });
 
   it('degrades an all-off map to both-enabled (never brick every launch seam)', async () => {
@@ -77,8 +82,11 @@ describe('ConfigManager.agentProviderAccess', () => {
     // Bypasses the IPC normalization (a hand-edited config.json can do this).
     await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false } });
 
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true });
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: false });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
+    // The degradation restores the DEFAULTS, so it must not switch on a
+    // provider the user has never opted into.
+    expect(mgr.isAgentProviderEnabled('omp')).toBe(false);
   });
 
   it('persists and round-trips through a fresh initialize()', async () => {

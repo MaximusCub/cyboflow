@@ -26,6 +26,8 @@ import { AskUserQuestionCard } from '../../AskUserQuestion/AskUserQuestionCard';
 import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
 import { LiveTail } from '../../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../../utils/liveTailReducer';
+import { AGENT_PROVIDER_LABELS } from '../../../../../shared/types/agentRuntime';
+import { providerForRuntime } from '../../cyboflow/agentRuntimeUi';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -301,12 +303,20 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // right after a quick-session create.
   const paneSession = panelStoreSession ?? sessionCtx?.session ?? activeSession;
   const isInteractive = interactiveRunId !== null;
+  // The composer's agent name. The two Codex arms stay as they were — a Codex
+  // panel names its vendor on either transport, and only the Claude side
+  // distinguishes "Terminal" — but the final arm now reads the provider registry
+  // instead of hardcoding 'Claude', so a non-Claude structured panel is not
+  // mislabelled. The PTY arm still recognizes Codex alone: the `isOmpPtySession`
+  // twin lands with `OmpPtyManager` (Phase 1, §5.2), until when no OMP panel can
+  // be opened at all.
+  const paneProvider = providerForRuntime(paneSession?.agentRuntime ?? 'claude-sdk');
   const agentName =
     isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
       ? 'Codex'
       : isInteractive
         ? 'Terminal'
-        : 'Claude';
+        : AGENT_PROVIDER_LABELS[paneProvider];
 
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.

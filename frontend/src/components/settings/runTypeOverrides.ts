@@ -34,6 +34,7 @@ import {
   substrateForRuntime,
   type AgentRuntime,
 } from '../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import { CLAUDE_EFFORT_LEVELS, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import {
   DEFAULT_RUN_TYPE_SUBSTRATE_FLOORS,
@@ -114,11 +115,25 @@ const AGENT_RUNTIME_LABELS: Record<AgentRuntime, string> = {
   'codex-sdk': 'Codex SDK',
   'codex-pty': 'Codex terminal',
   'codex-exec': 'Codex exec',
+  // Only reachable as the label for an ALREADY-STORED value: `agentRuntimeOptions`
+  // offers no OMP row while the runtimes are unselectable, so nothing can write
+  // one here yet. Named anyway, because the fallback for a missing key is the raw
+  // runtime id — which is what a user would otherwise read once OMP ships.
+  'omp-sdk': 'OMP',
+  'omp-pty': 'OMP terminal',
 };
 
-/** The runtimes offerable for a key — quick sessions may also use Codex PTY. */
+/**
+ * The runtimes offerable for a key — quick sessions may also use Codex PTY.
+ *
+ * Narrowed by `selectableInPickers` on top of the launch-kind set: a runtime can
+ * be a legal SESSION runtime and still not be offerable, which is how a provider
+ * declared ahead of its managers stays out of this picker without a second list
+ * to keep in sync.
+ */
 export function agentRuntimeOptions(key: string): readonly AgentRuntime[] {
-  return isQuickRunTypeKey(key) ? SESSION_AGENT_RUNTIMES : WORKFLOW_LAUNCHABLE_RUNTIMES;
+  const forKind = isQuickRunTypeKey(key) ? SESSION_AGENT_RUNTIMES : WORKFLOW_LAUNCHABLE_RUNTIMES;
+  return forKind.filter((runtime) => isRuntimeSelectableInPickers(runtime));
 }
 
 /** The model aliases the picker offers (single-sourced with the composer pill). */

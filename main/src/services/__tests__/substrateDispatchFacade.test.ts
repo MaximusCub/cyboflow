@@ -30,7 +30,7 @@ import type {
 } from '../../orchestrator/runExecutor';
 import type { AbstractCliManager } from '../panels/cli/AbstractCliManager';
 import type { LoggerLike } from '../../orchestrator/types';
-import type { PanelLane } from '../panelLane';
+import { ALL_PANEL_LANES, type PanelLane } from '../panelLane';
 import type { StreamEventPublisher } from '../../orchestrator/runLauncher';
 import type { StreamEnvelope } from '../../../../shared/types/claudeStream';
 import { bridgeEvents } from '../../orchestrator/runEventBridge';
@@ -1582,19 +1582,20 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
 // registration list is what they are about.
 // ---------------------------------------------------------------------------
 
-/** All four lanes registered, one distinct spy each — the boot wiring's shape. */
+/**
+ * EVERY lane registered, one distinct spy each — the boot wiring's shape. Built
+ * from ALL_PANEL_LANES rather than a hand-written list so a lane added to the
+ * union is covered here automatically instead of silently going untested.
+ */
 function makeFourLaneFacade(registry: WorkflowRegistryLike): {
   facade: SubstrateDispatchFacade;
   managers: Record<PanelLane, SpyManager>;
 } {
-  const managers: Record<PanelLane, SpyManager> = {
-    'claude-sdk': makeSpyManager(),
-    'claude-interactive': makeSpyManager(),
-    'codex-sdk': makeSpyManager(),
-    'codex-pty': makeSpyManager(),
-  };
+  const managers = Object.fromEntries(
+    ALL_PANEL_LANES.map((lane) => [lane, makeSpyManager()]),
+  ) as Record<PanelLane, SpyManager>;
   const facade = new SubstrateDispatchFacade({
-    managers: (Object.keys(managers) as PanelLane[]).map((lane) => ({
+    managers: ALL_PANEL_LANES.map((lane) => ({
       lane,
       manager: asManager(managers[lane]),
     })),
@@ -1662,11 +1663,23 @@ describe('SubstrateDispatchFacade — registry dispatch from the run row', () =>
     // The pre-registry chain read this as "not codex-sdk" and silently ran it on
     // Claude. NODE_ENV is 'test' under vitest, so the policy throws here.
     const run = makeWorkflowRunRow({
-      agent_runtime: 'omp-sdk' as unknown as WorkflowRunRow['agent_runtime'],
+      agent_runtime: 'acme-sdk' as unknown as WorkflowRunRow['agent_runtime'],
     });
     const { facade } = makeFourLaneFacade(makeRegistry(run));
 
     await expect(spawnOn(facade, run.id)).rejects.toThrow(/matches no registered provider prefix/);
+  });
+
+  // The quick sentinel is the only row that can carry omp-sdk today, and it
+  // carries it precisely so this dispatch resolves — a runtime declared without
+  // being wired here is the misroute the lane registry exists to prevent.
+  it('routes a declared-but-not-yet-launchable runtime to its OWN lane, never Claude', async () => {
+    const run = makeWorkflowRunRow({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('omp-sdk');
   });
 
   it('fails LOUDLY when the run names a real lane that has no registered manager', async () => {

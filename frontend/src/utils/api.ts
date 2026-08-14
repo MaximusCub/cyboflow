@@ -75,6 +75,10 @@ const CATALOG_BRIDGE_FALLBACKS: {
 } = {
   claude: () => ({ models: [], defaultModel: null }),
   codex: null,
+  // Codex's answer for Codex's reason: an OMP picker has nothing but the
+  // discovered list — no pinned aliases to fall back on — so an empty catalog
+  // would be a silently broken control rather than a degraded one.
+  omp: null,
 };
 
 // Wrapper class for API calls that provides error handling and consistent interface

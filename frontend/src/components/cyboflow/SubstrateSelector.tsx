@@ -36,6 +36,7 @@ import {
   isWorkflowLaunchableRuntime,
   type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import {
@@ -68,13 +69,30 @@ interface SubstrateSelectorProps {
   runtimeScope?: 'workflow' | 'session' | 'mixed';
 }
 
-/** Every runtime the picker can offer, in display order. */
+/** Every runtime this picker knows a row for, in display order. */
 const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = [
   { runtime: 'claude-sdk', label: 'Claude SDK (default)' },
   { runtime: 'claude-interactive', label: 'Claude interactive (PTY)' },
   { runtime: 'codex-sdk', label: 'Codex SDK' },
   { runtime: 'codex-pty', label: 'Codex PTY — quick sessions only' },
+  { runtime: 'omp-sdk', label: 'OMP' },
+  { runtime: 'omp-pty', label: 'OMP terminal' },
 ];
+
+/**
+ * The rows the picker may render at all, before the provider toggles narrow them
+ * further. Gated on `RUNTIME_CAPABILITIES.selectableInPickers` rather than on
+ * membership of the list above, so a runtime declared ahead of its managers can
+ * carry its row and label here from the start and stay invisible until that one
+ * flag flips — the alternative is a second list to remember, and a row added to
+ * only one of them.
+ *
+ * Everything downstream (the option list, the disabled-provider fallback, the
+ * "some are hidden" note) counts against THIS, never against RUNTIME_OPTIONS.
+ */
+const SELECTABLE_RUNTIME_OPTIONS = RUNTIME_OPTIONS.filter((o) =>
+  isRuntimeSelectableInPickers(o.runtime),
+);
 
 /**
  * Scope-level unavailability — rendered as a DISABLED option so the user can
@@ -93,7 +111,7 @@ function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<Subst
 function enabledRuntimeOptions(
   access: AgentProviderAccess,
 ): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return RUNTIME_OPTIONS.filter((o) => isRuntimeProviderEnabled(access, o.runtime));
+  return SELECTABLE_RUNTIME_OPTIONS.filter((o) => isRuntimeProviderEnabled(access, o.runtime));
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -161,7 +179,9 @@ export function SubstrateSelector({
   // always name a provider the backend will accept.
   const fallbackRuntime = firstEnabledRuntime(
     providerAccess,
-    RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map((o) => o.runtime),
+    SELECTABLE_RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map(
+      (o) => o.runtime,
+    ),
   );
   useEffect(() => {
     if (isRuntimeProviderEnabled(providerAccess, value)) return;
@@ -242,7 +262,7 @@ export function SubstrateSelector({
         ))}
       </select>
       <p className="text-xs text-text-tertiary">
-        {options.length === RUNTIME_OPTIONS.length
+        {options.length === SELECTABLE_RUNTIME_OPTIONS.length
           ? scopeHelp(runtimeScope)
           : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
       </p>

@@ -378,6 +378,23 @@ describe('agentRuntimeOptions', () => {
       expect(agentRuntimeOptions(QUICK_RUN_TYPE_KEY)).toContain(runtime);
     }
   });
+
+  // Session membership alone is not enough to be offered: omp-sdk/omp-pty are
+  // legal session runtimes declared ahead of their managers, so a picker seeded
+  // from SESSION_AGENT_RUNTIMES has to narrow by the capability as well.
+  it('never offers a runtime declared ahead of its managers, on either key', () => {
+    for (const key of [QUICK_RUN_TYPE_KEY, 'workflow:wf-1']) {
+      expect(agentRuntimeOptions(key)).not.toContain('omp-sdk');
+      expect(agentRuntimeOptions(key)).not.toContain('omp-pty');
+    }
+  });
+
+  it('still labels a stored OMP value rather than falling back to the raw id', () => {
+    // The label map is deliberately wider than the option list — a value that
+    // reaches the detail screen must read as a name either way.
+    expect(runTypeValueLabel('agentRuntime', 'omp-sdk')).toBe('OMP');
+    expect(runTypeValueLabel('agentRuntime', 'omp-pty')).toBe('OMP terminal');
+  });
 });
 
 describe('runTypeValueLabel', () => {

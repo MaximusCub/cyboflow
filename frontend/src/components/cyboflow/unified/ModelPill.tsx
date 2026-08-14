@@ -7,7 +7,10 @@ import { cn } from '../../../utils/cn';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../../stores/claudeModelCatalogStore';
-import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import {
+  AGENT_PROVIDER_LABELS,
+  type AgentProvider,
+} from '../../../../../shared/types/agentRuntime';
 import type { ClaudeModelOption } from '../../../../../shared/types/agentModels';
 
 /**
@@ -197,7 +200,7 @@ export function ModelPill({
       variant="default"
       icon={<Cpu className="w-3.5 h-3.5 text-text-secondary" />}
       className="transition-all duration-200 shadow-sm"
-      title={`${agentProvider === 'codex' ? 'Codex' : 'Claude'} model — applies on your next message`}
+      title={`${AGENT_PROVIDER_LABELS[agentProvider]} model — applies on your next message`}
     >
       {label}
       <ChevronDown

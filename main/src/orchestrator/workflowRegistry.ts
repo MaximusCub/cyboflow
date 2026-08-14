@@ -29,9 +29,12 @@ import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
   assertProviderRuntimeConsistent,
   claudeRuntimeFromSubstrate,
   isAgentProviderEnabled,
+  isWorkflowLaunchableRuntime,
+  providerForRuntime,
   type AgentProvider,
   type AgentProviderAccess,
   type WorkflowLaunchableRuntime,
@@ -152,6 +155,15 @@ export const QUICK_WORKFLOW_NAME = '__quick__' as const;
  * planner/sprint, not be filtered as legacy cruft.
  */
 export const LEGACY_DROPPED_WORKFLOW_NAMES = ['soloflow', 'prune'] as const;
+
+/**
+ * The providers `createRun`'s stamp ladder knows how to resolve — derived from
+ * the launchable runtime set rather than listed, so it grows the moment a
+ * provider's runtime becomes launchable and cannot drift from that set.
+ */
+const LAUNCH_LADDER_PROVIDERS: ReadonlySet<AgentProvider> = new Set(
+  WORKFLOW_LAUNCHABLE_RUNTIMES.map((runtime) => providerForRuntime(runtime)),
+);
 
 // ---------------------------------------------------------------------------
 // WorkflowRegistry
@@ -1088,7 +1100,15 @@ export class WorkflowRegistry {
        */
       verifyDeliverable?: VerificationRequestInput | null;
       requestedAgentProvider?: AgentProvider;
-      requestedAgentRuntime?: WorkflowLaunchableRuntime;
+      /**
+       * STORABLE, not launchable. The `__quick__` sentinel run is created
+       * through this same method, and it must carry whatever runtime the quick
+       * SESSION resolved onto — the dispatch facade reads the row back to pick
+       * the owning manager, so narrowing this to the launchable set would drop
+       * the identity of a session-legal runtime and misroute it. A runtime that
+       * is storable but not launchable is refused below rather than resolved.
+       */
+      requestedAgentRuntime?: WorkflowRunStorableRuntime;
       /**
        * Defense-in-depth guard for Design Mode (design-mode.md "Session plumbing
        * — SDK-pinned, fail-closed"): design sessions MUST resolve to the SDK
@@ -1176,6 +1196,26 @@ export class WorkflowRegistry {
       requestedAgentRuntime,
       'WorkflowRegistry.createRun',
     );
+
+    // The stamp ladder below resolves only the providers whose runtimes are
+    // LAUNCHABLE. A request naming any other — today only OMP, which is declared
+    // but has no manager — matches none of its tests and would fall through to
+    // `claudeRuntimeFromSubstrate`, silently switching the run to a different
+    // vendor. That silent floor is the exact failure the provider registry
+    // exists to prevent, so refuse it where a developer sees it instead. The
+    // arms that stamp OMP land with its managers: the quick-session create path
+    // first, then the workflow launch path when omp-sdk joins
+    // WORKFLOW_LAUNCHABLE_RUNTIMES. Unreachable for Claude/Codex, whose every
+    // runtime the ladder handles.
+    const unstampable =
+      (requestedAgentRuntime !== undefined && !isWorkflowLaunchableRuntime(requestedAgentRuntime)) ||
+      (requestedAgentProvider !== undefined && !LAUNCH_LADDER_PROVIDERS.has(requestedAgentProvider));
+    if (unstampable) {
+      throw new Error(
+        `WorkflowRegistry.createRun: agentProvider ${requestedAgentProvider ?? '-'} / ` +
+          `agentRuntime ${requestedAgentRuntime ?? '-'} has no launch resolution yet`,
+      );
+    }
 
     // Provider-access gate — the authoritative enforcement of the Settings →
     // Integrations / onboarding Connect toggles. Sits BELOW demo mode (which

@@ -4,7 +4,11 @@ import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
-import type { AgentProvider, SessionAgentRuntime } from '../../../../shared/types/agentRuntime';
+import {
+  AGENT_PROVIDER_LABELS,
+  type AgentProvider,
+  type SessionAgentRuntime,
+} from '../../../../shared/types/agentRuntime';
 import { providerForRuntime } from '../cyboflow/agentRuntimeUi';
 import { Button } from '../ui/Button';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
@@ -24,7 +28,7 @@ function addChatSubstrateItems(
   runtime: SessionAgentRuntime | undefined,
 ): ReadonlyArray<{ id: string; label: string; description: string; substrate?: CliSubstrate }> {
   const provider: AgentProvider = runtime ? providerForRuntime(runtime) : 'claude';
-  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  const providerLabel = AGENT_PROVIDER_LABELS[provider];
 
   return [
     { id: 'inherit', label: 'Inherit session', description: 'Same substrate as the rest of this session (recommended)' },

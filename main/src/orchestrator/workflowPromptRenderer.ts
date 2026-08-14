@@ -55,6 +55,12 @@ Provider adaptation rules:
 export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   claude: null,
   codex: CODEX_WORKFLOW_ENVELOPE,
+  // `null` per this map's own rule: an envelope is authored deliberately for a
+  // provider that has been taught the orchestrator contract, never inherited
+  // from another vendor. OMP has not — it runs no workflow agents at all yet
+  // (it is absent from WORKFLOW_LAUNCHABLE_RUNTIMES), so there is no prompt to
+  // adapt. Authored when OMP gains programmatic per-step agents (Phase 2).
+  omp: null,
 };
 
 export function renderWorkflowPromptForRuntime(

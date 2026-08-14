@@ -41,6 +41,7 @@ import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import {
+  AGENT_PROVIDER_LABELS,
   claudeRuntimeFromSubstrate,
   formatProviderRuntimeConflict,
   isAgentProvider,
@@ -936,7 +937,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (explicitProvider !== undefined && !isAgentProviderEnabled(providerAccess, explicitProvider)) {
         return {
           success: false,
-          error: `The ${explicitProvider === 'codex' ? 'Codex' : 'Claude'} provider is turned off in Settings → Integrations. Enable it to start this session.`,
+          error: `The ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is turned off in Settings → Integrations. Enable it to start this session.`,
         };
       }
       // Unrequested launch under a Claude-off install: fall back to the provider

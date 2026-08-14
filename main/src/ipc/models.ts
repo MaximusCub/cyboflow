@@ -32,6 +32,15 @@ const PROVIDER_CATALOG_FETCHERS: { [P in AgentProvider]: ProviderCatalogFetcher<
   // Dynamic Claude catalog — the "Other models" section below the pinned four.
   claude: (services) => services.claudeModelCatalogService.getCatalog(),
   codex: (services) => services.codexSdkManager.getCodexModelCatalog(),
+  // OMP's real catalog comes from the RPC `get_available_models` call, which
+  // needs the `omp --mode rpc` child this build does not yet spawn — the fetcher
+  // is replaced when `OmpSdkManager` lands (Phase 1, §5.1). That replacement
+  // MUST compose each row's id as `${row.provider}/${row.id}`: the wire id is
+  // bare, and the canonical slashed form is the invariant the model-family
+  // predicate rests on (see OmpModelOption). An empty list is the honest answer
+  // meanwhile, and unreachable anyway — `models:get-catalog` is only called by a
+  // picker for a provider the user enabled, and OMP defaults to disabled.
+  omp: async () => ({ models: [] }),
 };
 
 async function fetchCatalog<P extends AgentProvider>(

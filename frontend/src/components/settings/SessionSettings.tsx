@@ -15,6 +15,7 @@ import {
   type AgentProviderAccess,
   type AgentRuntime,
 } from '../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import type { ExecutionModel } from '../../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { PermissionMode } from '../../../../shared/types/workflows';
@@ -90,12 +91,19 @@ export function SessionSettings({
   autoGradeVariantRuns,
   onAutoGradeVariantRunsChange,
 }: SessionSettingsProps): React.JSX.Element {
-  // A runtime on a switched-off provider is not offered. The CURRENT value is
-  // kept in the list even when its provider is off — otherwise a stored runtime
-  // would silently vanish from the UI while still being resolved at launch — but
-  // it renders disabled, so it cannot be (re)selected either way.
+  // Two independent reasons to omit a runtime. `selectableInPickers` is the
+  // capability answer to "may ANY picker offer this?" — false for a runtime with
+  // no manager and for one declared ahead of its managers — and it is absolute:
+  // unlike the provider toggle below it has no keep-the-current-value carve-out,
+  // because a value the surface can never legitimately hold should not be
+  // presented as a choice. Provider access is the per-user answer: a runtime on a
+  // switched-off provider is not offered either, EXCEPT when it is the stored
+  // value, which would otherwise vanish from the UI while still resolving at
+  // launch — it renders disabled instead, so it cannot be (re)selected.
   const runtimeOptions = SESSION_AGENT_RUNTIMES.filter(
-    (runtime) => isRuntimeProviderEnabled(agentProviderAccess, runtime) || runtime === defaultAgentRuntime,
+    (runtime) =>
+      isRuntimeSelectableInPickers(runtime) &&
+      (isRuntimeProviderEnabled(agentProviderAccess, runtime) || runtime === defaultAgentRuntime),
   );
   // The honest half of "one global runtime, coerced per surface": `codex-pty` is
   // a member of SessionAgentRuntime but NOT of WorkflowAgentRuntime, so a flow

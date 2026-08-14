@@ -84,6 +84,11 @@ export const PROVIDER_MODEL_CATALOG_SLICES: {
 } = {
   claude: createCatalogSlice('claude'),
   codex: createCatalogSlice('codex'),
+  // Generic by construction — the slice needs no per-provider code, so OMP gets a
+  // working store the moment its `models:get-catalog` fetcher returns real rows
+  // (Phase 1, §5.1). `ensureStarted(enabled)` means nothing is fetched until a
+  // picker actually shows OMP, which none does while the provider is off.
+  omp: createCatalogSlice('omp'),
 };
 
 export interface ProviderModelCatalogHook<P extends AgentProvider> {

@@ -18,12 +18,16 @@
  *      the four launch seams that report it differ only in HOW they report.
  *   5. WORKFLOW_RUN_STORABLE_RUNTIMES (what a run row may carry, incl. the
  *      `__quick__` sentinel) and WORKFLOW_LAUNCHABLE_RUNTIMES (what a picker
- *      offers) are separate sets. Identical membership TODAY — the point is
- *      that each seam names the one it means, so they can diverge.
+ *      offers) are separate sets — and now genuinely diverge, which is the case
+ *      the split was made for: `omp-sdk` must survive on a quick sentinel row
+ *      while no picker may offer it.
+ *   6. A provider declared ahead of its managers is UNREACHABLE: absent access
+ *      key ⇒ disabled, and no picker-facing set contains its runtimes.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   AGENT_PROVIDERS,
+  AGENT_PROVIDER_LABELS,
   AGENT_PROVIDER_REGISTRY,
   AGENT_PROVIDER_TABLE,
   ALL_AGENT_RUNTIMES,
@@ -31,8 +35,11 @@ import {
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_RUN_STORABLE_RUNTIMES,
   assertProviderRuntimeConsistent,
+  enabledAgentProviders,
   failUnresolvable,
   formatProviderRuntimeConflict,
+  isAgentProviderEnabled,
+  isRuntimeProviderEnabled,
   isWorkflowLaunchableRuntime,
   isWorkflowRunStorableRuntime,
   providerForRuntime,
@@ -41,8 +48,10 @@ import {
   providerRuntimeConflict,
   type AgentRuntime,
 } from '../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../shared/types/agentCapabilities';
 import {
   AGENT_MODEL_FAMILY_PREDICATES,
+  isOmpModelFamily,
   normalizeAgentModelSelection,
 } from '../../../shared/types/agentModels';
 
@@ -81,6 +90,8 @@ describe('providerForRuntime', () => {
     ['codex-sdk', 'codex'],
     ['codex-pty', 'codex'],
     ['codex-exec', 'codex'],
+    ['omp-sdk', 'omp'],
+    ['omp-pty', 'omp'],
   ] as const)('maps %s to %s', (runtime, provider) => {
     expect(providerForRuntime(runtime)).toBe(provider);
   });
@@ -168,6 +179,8 @@ describe('provider × runtime consistency', () => {
     ['claude', 'claude-interactive'],
     ['codex', 'codex-sdk'],
     ['codex', 'codex-pty'],
+    ['omp', 'omp-sdk'],
+    ['omp', 'omp-pty'],
   ] as const)('accepts the agreeing pair %s / %s', (provider, runtime) => {
     expect(providerRuntimeConflict(provider, runtime)).toBeNull();
     expect(() => assertProviderRuntimeConsistent(provider, runtime)).not.toThrow();
@@ -178,6 +191,8 @@ describe('provider × runtime consistency', () => {
     ['codex', 'claude-interactive', 'claude'],
     ['claude', 'codex-sdk', 'codex'],
     ['claude', 'codex-pty', 'codex'],
+    ['claude', 'omp-sdk', 'omp'],
+    ['omp', 'claude-sdk', 'claude'],
   ] as const)('rejects %s / %s and names the real owner', (provider, runtime, expected) => {
     expect(providerRuntimeConflict(provider, runtime)).toEqual({ provider, runtime, expected });
   });
@@ -204,16 +219,33 @@ describe('provider × runtime consistency', () => {
 });
 
 describe('storable vs launchable runtime sets', () => {
-  it('agree on membership today — the split is about MEANING, not current contents', () => {
-    expect([...WORKFLOW_RUN_STORABLE_RUNTIMES].sort()).toEqual(
-      [...WORKFLOW_LAUNCHABLE_RUNTIMES].sort(),
+  // The two used to agree on membership and the split was about MEANING alone.
+  // They diverge now that a provider ships quick-session support ahead of
+  // programmatic per-step support, which is the case the split was made for.
+  it('storable is a strict superset of launchable', () => {
+    for (const runtime of WORKFLOW_LAUNCHABLE_RUNTIMES) {
+      expect(WORKFLOW_RUN_STORABLE_RUNTIMES).toContain(runtime);
+    }
+    expect(WORKFLOW_RUN_STORABLE_RUNTIMES.length).toBeGreaterThan(
+      WORKFLOW_LAUNCHABLE_RUNTIMES.length,
     );
+  });
+
+  // The quick sentinel row must keep an omp-sdk session's identity (the dispatch
+  // facade reads the row back to pick a manager), while nothing may OFFER it as
+  // a workflow launch target until its programmatic support lands.
+  it('carries omp-sdk on a run row without offering it as a launch target', () => {
+    expect(isWorkflowRunStorableRuntime('omp-sdk')).toBe(true);
+    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(false);
   });
 
   it('both exclude the runtimes a workflow run cannot use', () => {
     for (const set of [WORKFLOW_RUN_STORABLE_RUNTIMES, WORKFLOW_LAUNCHABLE_RUNTIMES]) {
       expect(set).not.toContain('codex-pty');
       expect(set).not.toContain('codex-exec');
+      // Every PTY runtime is excluded for the same reason: a workflow needs
+      // structured events/usage/MCP, which a terminal transport cannot give it.
+      expect(set).not.toContain('omp-pty');
     }
   });
 
@@ -271,11 +303,99 @@ describe('normalizeAgentModelSelection', () => {
   });
 
   it('preserves an id no family claims — it belongs to whoever asked', () => {
-    expect(normalizeAgentModelSelection('codex', 'some-vendor/some-model')).toBe(
-      'some-vendor/some-model',
+    // NOT a slashed id: `provider/model` is OMP's family, so a slash is now a
+    // claim rather than the absence of one (see the OMP cases below).
+    expect(normalizeAgentModelSelection('codex', 'some-vendor-model')).toBe('some-vendor-model');
+    expect(normalizeAgentModelSelection('claude', 'some-vendor-model')).toBe('some-vendor-model');
+  });
+
+  it("treats a `provider/model` id as OMP's and drops it from the other two", () => {
+    expect(normalizeAgentModelSelection('omp', 'anthropic/claude-opus-5')).toBe(
+      'anthropic/claude-opus-5',
     );
-    expect(normalizeAgentModelSelection('claude', 'some-vendor/some-model')).toBe(
-      'some-vendor/some-model',
-    );
+    expect(normalizeAgentModelSelection('claude', 'anthropic/claude-opus-5')).toBeUndefined();
+    expect(normalizeAgentModelSelection('codex', 'openai/gpt-5.4')).toBeUndefined();
+  });
+
+  // The load-bearing consequence of persisting OMP selections in canonical
+  // `<provider>/<id>` form. OMP's catalog rows carry a BARE id — the same string
+  // Claude's own catalog uses — so if a projection ever wrote the bare form, the
+  // two selections would be identical and neither provider's normalization could
+  // tell a stale carry-over from a legitimate value. Composed, they separate.
+  it('separates an OMP row from the first-party id it wraps', () => {
+    const bare = 'claude-3-5-sonnet-20240620';
+    const canonical = `anthropic/${bare}`;
+
+    expect(isOmpModelFamily(bare)).toBe(false);
+    expect(normalizeAgentModelSelection('claude', bare)).toBe(bare);
+    expect(normalizeAgentModelSelection('omp', bare)).toBeUndefined();
+
+    expect(isOmpModelFamily(canonical)).toBe(true);
+    expect(normalizeAgentModelSelection('omp', canonical)).toBe(canonical);
+    expect(normalizeAgentModelSelection('claude', canonical)).toBeUndefined();
+  });
+
+  it("keeps the other providers' own ids off an OMP agent", () => {
+    expect(normalizeAgentModelSelection('omp', 'opus')).toBeUndefined();
+    expect(normalizeAgentModelSelection('omp', 'gpt-5.4')).toBeUndefined();
+  });
+
+  it('does not mistake a bare slash for a model id', () => {
+    // Both halves must be non-empty: `provider/` and `/model` name nothing, so
+    // they stay unclaimed rather than being routed to OMP.
+    expect(isOmpModelFamily('anthropic/')).toBe(false);
+    expect(isOmpModelFamily('/claude-opus-5')).toBe(false);
+    expect(isOmpModelFamily('anthropic/claude-opus-5')).toBe(true);
+  });
+});
+
+/**
+ * OMP is DECLARED but not yet REACHABLE — its managers land in a later step.
+ *
+ * "Declared" is easy to verify (the registries above already do). What this
+ * block pins is the second half: that declaring it changed nothing for a
+ * claude/codex user. Two independent mechanisms have to hold, because either
+ * alone would be one edit away from exposing a half-built provider — the access
+ * default (a user cannot switch it on, because no card offers it and the absent
+ * key resolves to false) and the picker capability (no launch surface lists its
+ * runtimes even if access were somehow granted).
+ */
+describe('omp is declared but unreachable', () => {
+  it('resolves to DISABLED from an absent access key, unlike the two legacy providers', () => {
+    expect(isAgentProviderEnabled(undefined, 'omp')).toBe(false);
+    expect(isAgentProviderEnabled({ claude: true, codex: true }, 'omp')).toBe(false);
+    expect(enabledAgentProviders(undefined)).not.toContain('omp');
+    // The registry entry is the reason, not a special case somewhere downstream.
+    expect(AGENT_PROVIDER_REGISTRY.omp.defaultEnabled).toBe(false);
+  });
+
+  it('keeps both runtimes out of every picker-facing set', () => {
+    for (const runtime of ['omp-sdk', 'omp-pty'] as const) {
+      expect(isRuntimeSelectableInPickers(runtime)).toBe(false);
+      expect(WORKFLOW_LAUNCHABLE_RUNTIMES).not.toContain(runtime);
+      // A disabled provider's runtimes are refused at the launch seams too.
+      expect(isRuntimeProviderEnabled(undefined, runtime)).toBe(false);
+    }
+  });
+
+  it('is still a first-class provider everywhere identity matters', () => {
+    // Unreachable must not mean unrecognized: a runtime that resolved to the
+    // Claude floor instead of its own provider is the misroute this registry
+    // exists to prevent, and the quick sentinel row depends on it.
+    expect(providerForRuntime('omp-sdk')).toBe('omp');
+    expect(providerForRuntime('omp-pty')).toBe('omp');
+    expect(isWorkflowRunStorableRuntime('omp-sdk')).toBe(true);
+    expect(isWorkflowLaunchableRuntime('omp-sdk')).toBe(false);
+    expect(SESSION_AGENT_RUNTIMES).toContain('omp-sdk');
+    expect(SESSION_AGENT_RUNTIMES).toContain('omp-pty');
+  });
+
+  it('names itself in user-facing copy rather than borrowing another vendor label', () => {
+    expect(AGENT_PROVIDER_LABELS.omp).toBe('OMP');
+    // Exhaustive: the label map is what six UI sites now read instead of a
+    // `=== 'codex' ? 'Codex' : 'Claude'` ternary that would have said "Claude".
+    for (const provider of AGENT_PROVIDERS) {
+      expect(AGENT_PROVIDER_LABELS[provider]).toBeTruthy();
+    }
   });
 });

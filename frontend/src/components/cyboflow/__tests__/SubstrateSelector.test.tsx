@@ -198,4 +198,30 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
     expect(offered).toEqual(runtimesWithCapability('selectableInPickers'));
   });
+
+  // The picker HAS rows for the OMP runtimes (label and order are decided with
+  // the row, not bolted on later) — the capability is the only thing keeping
+  // them off screen. Asserted explicitly because "an option list that already
+  // contains the thing it must not show" is the arrangement most likely to leak,
+  // and turning the provider on must not be enough to reveal it either.
+  it('hides a declared-but-unselectable runtime even with its provider switched on', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).not.toContain('omp-sdk');
+    expect(offered).not.toContain('omp-pty');
+    expect(screen.queryByRole('option', { name: /OMP/i })).not.toBeInTheDocument();
+  });
+
+  // The note reads "…are hidden" only when the PROVIDER TOGGLES removed
+  // something. Counting against the raw row list instead of the selectable one
+  // would make it fire permanently, telling every user a provider is switched
+  // off when none is.
+  it('does not claim runtimes are hidden when only unselectable ones are absent', () => {
+    setProviderAccess({ claude: true, codex: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+  });
 });

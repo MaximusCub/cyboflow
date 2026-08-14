@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppServices } from '../types';
 import { registerModelHandlers } from '../models';
+import { AGENT_PROVIDERS } from '../../../../shared/types/agentRuntime';
 
 function captureHandlers() {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -58,15 +59,32 @@ describe('registerModelHandlers', () => {
     expect(getCatalog).toHaveBeenCalledOnce();
   });
 
+  it('returns an empty catalog for a provider whose fetcher has not been built yet', async () => {
+    // OMP's real catalog comes from an RPC call this build cannot make (no
+    // manager yet). Empty is the honest degradation, and it must not throw — the
+    // registry being exhaustive is what guarantees SOME answer exists.
+    const { services } = servicesWith({});
+    const { handlers, ipcMain } = captureHandlers();
+    registerModelHandlers(ipcMain as never, services);
+
+    await expect(handlers.get('models:get-catalog')?.({}, 'omp')).resolves.toEqual({
+      success: true,
+      data: { models: [] },
+    });
+  });
+
   it('rejects an unknown provider rather than probing anything', async () => {
     const { services, getCodexModelCatalog, getCatalog } = servicesWith({});
     const { handlers, ipcMain } = captureHandlers();
     registerModelHandlers(ipcMain as never, services);
 
     const response = await handlers.get('models:get-catalog')?.({}, 'gemini');
+    // The accepted list is built from AGENT_PROVIDERS, so it is spelled from the
+    // registry here too rather than frozen — a provider added to the union
+    // should not fail this test for saying so.
     expect(response).toEqual({
       success: false,
-      error: 'Unknown agent provider "gemini" (expected one of claude, codex).',
+      error: `Unknown agent provider "gemini" (expected one of ${AGENT_PROVIDERS.join(', ')}).`,
     });
     expect(getCodexModelCatalog).not.toHaveBeenCalled();
     expect(getCatalog).not.toHaveBeenCalled();

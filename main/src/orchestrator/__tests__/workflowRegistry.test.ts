@@ -23,6 +23,7 @@ import { writeFileSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type WorkflowConfigProvider } from '../workflowRegistry';
 import { computeSpecHash } from '../specHash';
+import { WORKFLOW_LAUNCHABLE_RUNTIMES } from '../../../../shared/types/agentRuntime';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
@@ -1158,6 +1159,50 @@ describe('WorkflowRegistry', () => {
           }),
         ).toThrow(/substrate interactive conflicts with agentRuntime codex-sdk/);
       });
+    });
+
+    // ───── storable-but-not-launchable runtimes ─────
+    //
+    // createRun accepts the STORABLE set so the `__quick__` sentinel can carry a
+    // session's own runtime, but its stamp ladder only resolves Claude and Codex.
+    // Anything else matched none of the ladder's tests and fell through to the
+    // Claude floor — silently running a different vendor than was asked for,
+    // which is the whole class of bug the provider registry exists to stop. The
+    // arms that stamp OMP land with its managers; until then this must be loud.
+    it('refuses a runtime that is storable but has no launch resolution yet', () => {
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      expect(() =>
+        registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
+        }),
+      ).toThrow(/has no launch resolution yet/);
+    });
+
+    it('refuses a provider with no launch resolution even without a runtime', () => {
+      // The provider half has to be guarded independently: a variant row or an
+      // MCP-written config can name a provider with no runtime beside it, and
+      // the ladder's `codexExplicit`/`claudeExplicit` tests would both miss it.
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      expect(() =>
+        registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+        }),
+      ).toThrow(/has no launch resolution yet/);
+    });
+
+    it('still accepts every launchable runtime unchanged', () => {
+      const workflowId = registry.ensureQuickWorkflow(1);
+
+      for (const runtime of WORKFLOW_LAUNCHABLE_RUNTIMES) {
+        expect(() =>
+          registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentRuntime: runtime,
+          }),
+        ).not.toThrow();
+      }
     });
 
     // ───── requireSdkSubstrate guard (Design Mode belt, design-mode.md

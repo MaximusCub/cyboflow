@@ -55,13 +55,26 @@ export interface CodexAccountDetection {
 }
 
 /**
+ * OMP's probe evidence. Deliberately thinner than the other two: OMP owns its
+ * own provider credentials (`~/.omp`, env vars, its `/login` flow), so Cyboflow
+ * has no account to introspect and must not claim one. What it CAN observe is
+ * whether the user's `omp` binary is on this machine and what version it is —
+ * both null when the discovery ladder finds nothing.
+ */
+export interface OmpBinaryDetection {
+  binaryPath: string | null;
+  version: string | null;
+}
+
+/**
  * Every state ANY provider's probe may report. The per-provider narrowing lives
  * in {@link ProviderDetectionStates}; this union exists so a surface that treats
  * the states uniformly (a status dot, a telemetry field) has one type to name.
  * - 'detected'    — usable: credentials/account found.
  * - 'loggedOut'   — installed/available but not signed in.
  * - 'missing'     — nothing found on this machine (Claude).
- * - 'unavailable' — present but could not be verified (Codex).
+ * - 'unavailable' — not usable on this machine (Codex could not be verified; OMP
+ *                   has no binary, or one whose version probe failed).
  */
 export type ProviderDetectionState = 'detected' | 'loggedOut' | 'missing' | 'unavailable';
 
@@ -74,10 +87,17 @@ export type ProviderDetectionState = 'detected' | 'loggedOut' | 'missing' | 'una
  *                                              interactive-substrate readiness)
  *   !credentials.found && binary → 'loggedOut' (installed, not logged in)
  *   neither                      → 'missing'
+ *
+ * OMP's is binary: there is no login for Cyboflow to observe (OMP holds its own
+ * credentials), so the probe can only answer "is a usable binary here?" —
+ * 'detected' when the ladder found one and its version probe succeeded,
+ * 'unavailable' otherwise. No 'loggedOut': claiming it would assert something
+ * about the user's OMP credentials that nothing in main/ can see.
  */
 export interface ProviderDetectionStates {
   claude: 'detected' | 'loggedOut' | 'missing';
   codex: 'detected' | 'loggedOut' | 'unavailable';
+  omp: 'detected' | 'unavailable';
 }
 
 /** The evidence each provider's probe returns alongside its state. */
@@ -90,6 +110,7 @@ export interface ProviderDetectionPayloads {
     runtime: CodexRuntimeDetection;
     account: CodexAccountDetection;
   };
+  omp: OmpBinaryDetection;
 }
 
 /**

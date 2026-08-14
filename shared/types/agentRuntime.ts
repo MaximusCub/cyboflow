@@ -19,7 +19,7 @@ import type { CliSubstrate } from './substrate';
  * because `z.enum` needs a non-empty readonly tuple of string literals; the
  * `AgentProvider` union is derived FROM it so the two cannot drift.
  */
-export const AGENT_PROVIDERS = ['claude', 'codex'] as const;
+export const AGENT_PROVIDERS = ['claude', 'codex', 'omp'] as const;
 
 export type AgentProvider = (typeof AGENT_PROVIDERS)[number];
 
@@ -35,10 +35,19 @@ export const ALL_AGENT_RUNTIMES = [
   'codex-sdk',
   'codex-pty',
   'codex-exec',
+  'omp-sdk',
+  'omp-pty',
 ] as const;
 
 export type AgentRuntime = (typeof ALL_AGENT_RUNTIMES)[number];
 
+/**
+ * Every runtime a chat SESSION may run on. Stated as an exclusion because
+ * `codex-exec` is the sole runtime with no session manager behind it — both OMP
+ * runtimes belong here (they are declared unreachable through
+ * {@link AgentProviderDefinition.defaultEnabled} and the picker capability, not
+ * by being kept out of the union).
+ */
 export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
 
 /**
@@ -48,14 +57,18 @@ export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
  *
  * Deliberately distinct from {@link WORKFLOW_LAUNCHABLE_RUNTIMES}: a runtime can
  * be storable (so a quick session keeps its identity on the sentinel row)
- * without yet being offered as a workflow launch target. Identical membership
- * today; they diverge the moment a provider ships quick-session support ahead of
- * programmatic per-step support.
+ * without yet being offered as a workflow launch target. `omp-sdk` is exactly
+ * that divergence — quick sessions mint a `__quick__` sentinel run whose
+ * provider/runtime the dispatch facade reads back to pick a manager, so an
+ * omitted `omp-sdk` would lose the session's identity and misroute it to Claude,
+ * while adding it to the LAUNCHABLE set would advertise programmatic per-step
+ * support that does not exist yet.
  */
 export const WORKFLOW_RUN_STORABLE_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
   'codex-sdk',
+  'omp-sdk',
 ] as const;
 
 export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)[number];
@@ -63,7 +76,9 @@ export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)
 /**
  * What the workflow pickers offer and `WorkflowRegistry.createRun` accepts for a
  * real (non-sentinel) run — i.e. the runtimes a workflow agent may deploy on.
- * `codex-pty` is excluded because workflows need structured events/usage/MCP.
+ * `codex-pty` and `omp-pty` are excluded because workflows need structured
+ * events/usage/MCP; `omp-sdk` is excluded because its programmatic per-step
+ * support is a later phase (see WORKFLOW_RUN_STORABLE_RUNTIMES).
  */
 export const WORKFLOW_LAUNCHABLE_RUNTIMES = [
   'claude-sdk',
@@ -97,6 +112,8 @@ export const SESSION_AGENT_RUNTIMES = [
   'claude-interactive',
   'codex-sdk',
   'codex-pty',
+  'omp-sdk',
+  'omp-pty',
 ] as const;
 
 /** Human labels for the workflow-scoped runtime picker. Single source shared by
@@ -148,6 +165,25 @@ export interface AgentProviderTable<P extends string = AgentProvider> {
 export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProviderDefinition>> = {
   claude: { runtimePrefix: 'claude-', defaultEnabled: true },
   codex: { runtimePrefix: 'codex-', defaultEnabled: true },
+  // OMP (oh-my-pi) — the first provider introduced AFTER the access toggles, so
+  // it takes the absent⇒DISABLED policy this field exists for: every install
+  // that has never seen the OMP card in Settings → Integrations keeps OMP off,
+  // and nothing about a claude/codex user's app changes because the provider
+  // was declared. See `AgentProviderDefinition.defaultEnabled`.
+  omp: { runtimePrefix: 'omp-', defaultEnabled: false },
+};
+
+/**
+ * The vendor's own name, for anything a user reads — a panel tab, a run header,
+ * a refusal sentence. Exhaustive over {@link AgentProvider}, replacing the
+ * `provider === 'codex' ? 'Codex' : 'Claude'` ternaries that were copied across
+ * six UI sites and the guard: each of those silently labels a third provider
+ * "Claude", and a label is exactly the kind of miss no test notices.
+ */
+export const AGENT_PROVIDER_LABELS: Record<AgentProvider, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  omp: 'OMP',
 };
 
 export const AGENT_PROVIDER_TABLE: AgentProviderTable<AgentProvider> = {
@@ -283,8 +319,8 @@ export function providerForRuntimeValue(
 
 /**
  * The inverse of `claudeRuntimeFromSubstrate`: the substrate a runtime implies,
- * or `null` for a Codex runtime (which carries no sdk/interactive transport
- * distinction of its own).
+ * or `null` for a non-Claude runtime (Codex and OMP each name their transport in
+ * the runtime id itself and carry no sdk/interactive substrate distinction).
  *
  * A caller that resolves runtime and substrate INDEPENDENTLY can otherwise emit
  * a contradictory pair — e.g. `agentRuntime: 'claude-interactive'` alongside a

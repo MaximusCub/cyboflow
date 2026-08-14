@@ -25,7 +25,7 @@ import {
   isWorkflowRunStorableRuntime,
   type AgentProvider,
   type SessionAgentRuntime,
-  type WorkflowLaunchableRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
@@ -74,7 +74,8 @@ export interface CreateQuickSessionCoreDeps {
       opts?: {
         requestedModel?: string;
         requestedAgentProvider?: AgentProvider;
-        requestedAgentRuntime?: WorkflowLaunchableRuntime;
+        /** STORABLE: the sentinel carries the SESSION's runtime — see below. */
+        requestedAgentRuntime?: WorkflowRunStorableRuntime;
         requireSdkSubstrate?: boolean;
       },
     ): { runId: string; substrate: CliSubstrate };

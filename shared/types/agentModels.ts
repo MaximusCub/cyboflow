@@ -48,18 +48,53 @@ export interface ClaudeModelCatalog {
 }
 
 /**
+ * Renderer-safe projection of one entry returned by OMP's RPC
+ * `get_available_models`.
+ *
+ * The wire row keeps the two halves APART — `{ id: 'claude-3-5-sonnet-20240620',
+ * name: 'Claude Sonnet 3.5', provider: 'anthropic', … }` (verified against omp
+ * v17.3.2) — so its `id` alone is bare and indistinguishable from a first-party
+ * Claude or Codex id. The projection therefore COMPOSES the canonical
+ * `<provider>/<id>` form that OMP's own `--model` / `set_model` accepts, and
+ * that composed value is the only one Cyboflow ever persists. Everything
+ * downstream (the family predicate, the launch seams) rests on that invariant.
+ *
+ * `ompProvider` is kept alongside rather than re-split from the id, because the
+ * picker groups by vendor and the wire already answers that question.
+ */
+export interface OmpModelOption {
+  /** Canonical `<ompProvider>/<wire id>` — what gets persisted and spawned. */
+  id: string;
+  /** The row's own display name. */
+  label: string;
+  /** The row's `provider` field (e.g. 'anthropic'), for grouping. */
+  ompProvider: string;
+}
+
+/**
+ * No `defaultModel`: OMP's RPC advertises no default among the models it lists,
+ * and inventing one here would put a value in the picker that nothing on the
+ * spawn side honors.
+ */
+export interface OmpModelCatalog {
+  models: OmpModelOption[];
+}
+
+/**
  * Which catalog shape each provider advertises.
  *
- * The two are deliberately NOT flattened into one type: a Codex row carries the
- * runtime's own `isDefault` flag (there is no pinned alias list to compare it
- * against), while a Claude row carries `resolvedModel` so a dynamic entry can be
- * de-duped against the four pinned families. Keying them instead of merging them
- * keeps each provider's discovery honest while giving the catalog IPC + store
- * ONE provider-parameterized surface.
+ * The three are deliberately NOT flattened into one type: a Codex row carries
+ * the runtime's own `isDefault` flag (there is no pinned alias list to compare
+ * it against), a Claude row carries `resolvedModel` so a dynamic entry can be
+ * de-duped against the four pinned families, and an OMP row carries the vendor
+ * prefix its picker groups by. Keying them instead of merging them keeps each
+ * provider's discovery honest while giving the catalog IPC + store ONE
+ * provider-parameterized surface.
  */
 export interface ProviderModelCatalogs {
   claude: ClaudeModelCatalog;
   codex: CodexModelCatalog;
+  omp: OmpModelCatalog;
 }
 
 /**
@@ -85,6 +120,31 @@ export function isClaudeModelFamily(model: string): boolean {
 export function isCodexModelFamily(model: string): boolean {
   const key = model.toLowerCase().trim();
   return key.startsWith('gpt-') || key.startsWith('codex-') || /^o[1-9](?:-|$)/.test(key);
+}
+
+/**
+ * OMP fronts many vendors, so an OMP selection is a `provider/model` pair
+ * (`anthropic/claude-3-5-sonnet-20240620`, `openai/gpt-5.4`). The SLASH is the
+ * whole discriminator: no Claude id or alias contains one (`CLAUDE_MODEL_ALIASES`
+ * are bare words, wire ids are `claude-*`), and no Codex id does either (`gpt-*`,
+ * `codex-*`, `o1`..`o9`).
+ *
+ * THE INVARIANT THIS RESTS ON: Cyboflow persists OMP selections only in that
+ * canonical slashed form — `OmpModelOption` composes it from the catalog row's
+ * separate `provider` and `id` fields, because the wire `id` is BARE. A bare id
+ * off the wire is therefore never an OMP selection as far as this predicate is
+ * concerned, which is what it must mean: OMP's `anthropic/claude-3-5-sonnet-…`
+ * and Claude's own `claude-3-5-sonnet-…` would otherwise be the same string,
+ * and `normalizeAgentModelSelection` could not tell a stale cross-provider
+ * carry-over from a legitimate one. A projection that ever wrote the bare id
+ * would break both providers' normalization, not just OMP's.
+ *
+ * A bare `provider/` or `/model` names nothing, so both halves must be non-empty.
+ */
+export function isOmpModelFamily(model: string): boolean {
+  const key = model.toLowerCase().trim();
+  const slash = key.indexOf('/');
+  return slash > 0 && slash < key.length - 1;
 }
 
 export function isCodexModelSelection(model: string): boolean {
@@ -116,6 +176,7 @@ export const AGENT_MODEL_FAMILY_PREDICATES: Readonly<
 > = {
   claude: isClaudeModelFamily,
   codex: isCodexModelFamily,
+  omp: isOmpModelFamily,
 };
 
 /**

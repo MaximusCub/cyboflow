@@ -32,6 +32,12 @@ export type ProviderDetectionProbe<P extends AgentProvider> = (
 const PROVIDER_DETECTION_PROBES: { [P in AgentProvider]: ProviderDetectionProbe<P> } = {
   claude: probeClaudeDetection,
   codex: probeCodexDetection,
+  // The real probe is the `omp` binary discovery ladder plus a version check —
+  // it arrives with `OmpPtyManager`, which owns that ladder (Phase 1, §5.2).
+  // Reporting 'unavailable' until then is the truthful answer for a build that
+  // cannot run OMP at all, and it keeps the Integrations card honest rather than
+  // claiming a provider the app has no manager for.
+  omp: async () => ({ state: 'unavailable', binaryPath: null, version: null }),
 };
 
 type DetectionResponse =

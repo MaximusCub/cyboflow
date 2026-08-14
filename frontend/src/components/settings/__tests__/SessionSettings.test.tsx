@@ -15,6 +15,7 @@ import {
   SESSION_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIMES,
 } from '../../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../../shared/types/agentCapabilities';
 
 vi.mock('../../../utils/telemetry', () => ({
   trackEvent: vi.fn(),
@@ -352,15 +353,19 @@ describe('SessionSettings', () => {
   });
 
   describe('Default Agent Runtime', () => {
-    it('renders the built-in-default state and the full session runtime set', () => {
+    it('renders the built-in-default state and every OFFERABLE session runtime', () => {
       renderGroup();
 
       expect(screen.getByTestId('default-agent-runtime-unset')).toHaveAttribute('aria-pressed', 'true');
+      // Session membership is necessary but not sufficient: the control shows a
+      // session runtime only when a picker may offer it at all.
       for (const runtime of SESSION_AGENT_RUNTIMES) {
-        expect(screen.getByTestId(`default-agent-runtime-${runtime}`)).toHaveAttribute(
-          'aria-pressed',
-          'false',
-        );
+        const button = screen.queryByTestId(`default-agent-runtime-${runtime}`);
+        if (!isRuntimeSelectableInPickers(runtime)) {
+          expect(button).not.toBeInTheDocument();
+          continue;
+        }
+        expect(button).toHaveAttribute('aria-pressed', 'false');
       }
     });
 
@@ -370,6 +375,16 @@ describe('SessionSettings', () => {
       renderGroup();
 
       expect(screen.queryByTestId('default-agent-runtime-codex-exec')).not.toBeInTheDocument();
+    });
+
+    // The same rule, for a runtime that IS a session runtime but whose managers
+    // have not shipped: declaring OMP must not put it in a settings control that
+    // would then resolve at launch onto a manager that does not exist.
+    it('never offers a runtime declared ahead of its managers', () => {
+      renderGroup();
+
+      expect(screen.queryByTestId('default-agent-runtime-omp-sdk')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-agent-runtime-omp-pty')).not.toBeInTheDocument();
     });
 
     it('reports a pick, and clears to undefined (not null, not "")', () => {
