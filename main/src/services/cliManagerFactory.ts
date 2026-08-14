@@ -26,25 +26,101 @@ function isSqliteDatabase(value: unknown): value is Database.Database {
 }
 
 /**
- * Preserve startup's concrete Codex instanceof guards without invoking either
- * Codex constructor. The returned object owns DemoCliManager's state and
- * overrides, while the compatibility prototype supplies only the expected
- * nominal identity and inherited AbstractCliManager surface.
+ * The seams a Codex SDK manager must expose BEYOND AbstractCliManager — the
+ * runtime-specific methods boot injects into and the IPC layer calls.
+ *
+ * Derived with `Pick` from the concrete class rather than hand-written, so the
+ * signatures cannot drift from it and a change to (say) what
+ * `detectChatGptAccount` returns lands here automatically.
  */
-function createDemoCompatibilityAdapter<T extends AbstractCliManager>(
-  demoManager: DemoCliManager,
-  compatibilityPrototype: object,
-): T {
-  const adapter = Object.create(compatibilityPrototype) as T;
-  Object.defineProperties(adapter, Object.getOwnPropertyDescriptors(demoManager));
+type CodexSdkSeams = Pick<
+  CodexSdkManager,
+  | 'setCyboflowMcpRuntimeConfig'
+  | 'setApprovalRouterProvider'
+  | 'setQuestionRouterProvider'
+  | 'getCodexModelCatalog'
+  | 'detectChatGptAccount'
+>;
 
-  for (const propertyName of Object.getOwnPropertyNames(DemoCliManager.prototype)) {
-    if (propertyName === 'constructor') continue;
-    const descriptor = Object.getOwnPropertyDescriptor(DemoCliManager.prototype, propertyName);
-    if (descriptor) Object.defineProperty(adapter, propertyName, descriptor);
-  }
+/**
+ * The Codex PTY seams beyond AbstractCliManager: spawning a terminal panel and
+ * relaying a turn into a live one.
+ *
+ * Only what a caller reaches THROUGH `AppServices.codexPtyManager`. The manager
+ * also has `relayRawInput`, `resizePanel` and `getPtyBacklog`, but no production
+ * caller goes through this bag for them — the dispatch facade feature-detects
+ * `resizePanel` off a plain AbstractCliManager, and `getPtyBacklog` is served by
+ * the facade's own method — so listing them here would widen the contract past
+ * what anything asks of it.
+ */
+type CodexPtySeams = Pick<CodexPtyManager, 'startPanel' | 'relayUserTurn'>;
 
-  return adapter;
+/**
+ * What the app actually needs of a Codex SDK manager: the CLI base plus the
+ * seams above. STRUCTURAL on purpose — boot used to narrow the factory's
+ * `AbstractCliManager` return with `instanceof CodexSdkManager`, which forced
+ * demo mode to fabricate an object grafted onto the real class prototype just to
+ * satisfy the guard. That graft also let every un-stubbed Codex method resolve to
+ * the REAL implementation with demo state behind it, which is the opposite of
+ * what demo mode promises.
+ */
+export type CodexSdkManagerLike = AbstractCliManager & CodexSdkSeams;
+
+/** The Codex PTY twin of {@link CodexSdkManagerLike}. */
+export type CodexPtyManagerLike = AbstractCliManager & CodexPtySeams;
+
+/** Does this manager expose the Codex SDK seams? */
+export function isCodexSdkManagerLike(manager: AbstractCliManager): manager is CodexSdkManagerLike {
+  const seams = manager as Partial<CodexSdkSeams>;
+  return (
+    typeof seams.setCyboflowMcpRuntimeConfig === 'function' &&
+    typeof seams.setApprovalRouterProvider === 'function' &&
+    typeof seams.setQuestionRouterProvider === 'function' &&
+    typeof seams.getCodexModelCatalog === 'function' &&
+    typeof seams.detectChatGptAccount === 'function'
+  );
+}
+
+/** Does this manager expose the Codex PTY seams? */
+export function isCodexPtyManagerLike(manager: AbstractCliManager): manager is CodexPtyManagerLike {
+  const seams = manager as Partial<CodexPtySeams>;
+  return typeof seams.startPanel === 'function' && typeof seams.relayUserTurn === 'function';
+}
+
+/**
+ * A demo stand-in for an ASYNC seam that can only be answered by a real provider
+ * runtime (an account probe, a live model catalogue). Refusing is the point:
+ * demo mode must never reach the vendor's binary, and returning a plausible
+ * empty answer would hide that it tried.
+ *
+ * `async`, not a synchronous throw: the real seams return promises, and a caller
+ * that hands the promise to `.catch()` instead of awaiting it must see the same
+ * failure shape either way.
+ */
+function demoSeamUnavailable(seam: string): () => Promise<never> {
+  return async () => {
+    throw new Error(`[CliManagerFactory] ${seam} is unavailable in demo mode`);
+  };
+}
+
+/** The Codex SDK seams, demo-backed: injection accepted and dropped, probes refused. */
+function codexSdkDemoSeams(): CodexSdkSeams {
+  return {
+    setCyboflowMcpRuntimeConfig: () => {},
+    setApprovalRouterProvider: () => {},
+    setQuestionRouterProvider: () => {},
+    getCodexModelCatalog: demoSeamUnavailable('getCodexModelCatalog'),
+    detectChatGptAccount: demoSeamUnavailable('detectChatGptAccount'),
+  };
+}
+
+/**
+ * The Codex PTY seams, demo-backed. `startPanel` is NOT among them: DemoCliManager
+ * already implements it (scripted playback), and its narrower signature satisfies
+ * the Codex one.
+ */
+function codexPtyDemoSeams(): Omit<CodexPtySeams, 'startPanel'> {
+  return { relayUserTurn: () => {} };
 }
 
 /**
@@ -143,41 +219,15 @@ export class CliManagerFactory {
           db,
         );
 
-        // index.ts currently narrows these startup services with instanceof and
-        // calls their runtime-specific setup methods. Supply demo-backed
-        // compatibility objects so those guards remain true while no real Codex
-        // manager constructor or runtime can be reached.
+        // Boot narrows these startup services STRUCTURALLY (isCodexSdkManagerLike
+        // / isCodexPtyManagerLike) and calls their runtime-specific seams, so demo
+        // mode only has to supply those seams — no prototype graft, and nothing
+        // un-stubbed can resolve to a real Codex implementation.
         const manager: AbstractCliManager = toolId === 'codex-sdk'
-          ? createDemoCompatibilityAdapter<CodexSdkManager>(
-              demoManager,
-              CodexSdkManager.prototype,
-            )
+          ? Object.assign(demoManager, codexSdkDemoSeams())
           : toolId === 'codex-pty'
-            ? createDemoCompatibilityAdapter<CodexPtyManager>(
-                demoManager,
-                CodexPtyManager.prototype,
-              )
+            ? Object.assign(demoManager, codexPtyDemoSeams())
             : demoManager;
-
-        if (toolId === 'codex-sdk') {
-          Object.defineProperties(manager, {
-            setCyboflowMcpRuntimeConfig: {
-              configurable: true,
-              value: () => {},
-            },
-            setApprovalRouterProvider: {
-              configurable: true,
-              value: () => {},
-            },
-          });
-        } else if (toolId === 'codex-pty') {
-          Object.defineProperties(manager, {
-            relayUserTurn: { configurable: true, value: () => {} },
-            relayRawInput: { configurable: true, value: () => {} },
-            resizePanel: { configurable: true, value: () => {} },
-            getPtyBacklog: { configurable: true, value: () => '' },
-          });
-        }
 
         this.demoManagers.set(toolId, manager);
         this.logger?.info(`[CliManagerFactory] Demo mode — created DemoCliManager for tool '${toolId}'`);

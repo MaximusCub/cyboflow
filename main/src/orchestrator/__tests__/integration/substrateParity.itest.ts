@@ -213,7 +213,14 @@ async function driveRun(db: Database.Database, runId: string): Promise<StreamEnv
   const logger = makeSpyLogger();
   const sdk = new RecordingManager();
   const interactive = new RecordingManager();
-  const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, logger);
+  const facade = new SubstrateDispatchFacade({
+    managers: [
+      { lane: 'claude-sdk', manager: asManager(sdk) },
+      { lane: 'claude-interactive', manager: asManager(interactive) },
+    ],
+    registry,
+    logger,
+  });
 
   const envelopes: StreamEnvelope[] = [];
   const publisher: StreamEventPublisher = {

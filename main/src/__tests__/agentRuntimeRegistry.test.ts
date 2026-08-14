@@ -31,6 +31,7 @@ import {
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_RUN_STORABLE_RUNTIMES,
   assertProviderRuntimeConsistent,
+  failUnresolvable,
   formatProviderRuntimeConflict,
   isWorkflowLaunchableRuntime,
   isWorkflowRunStorableRuntime,
@@ -51,7 +52,10 @@ const UNREGISTERED_RUNTIME = 'someprovider-sdk';
 const originalNodeEnv = process.env.NODE_ENV;
 
 afterEach(() => {
-  process.env.NODE_ENV = originalNodeEnv;
+  // Assigning `undefined` would stringify to "undefined"; these tests delete the
+  // var outright, so the restore has to handle an originally-unset value too.
+  if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = originalNodeEnv;
   vi.restoreAllMocks();
 });
 
@@ -103,6 +107,32 @@ describe('providerForRuntime', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0][0])).toContain(UNREGISTERED_RUNTIME);
   });
+});
+
+/**
+ * Pinned directly, not only through providerForRuntime: the dispatch facade
+ * reuses this for an unregistered PanelLane → manager lookup, so the two arms
+ * are now a shared contract rather than one caller's internal detail.
+ */
+describe('failUnresolvable (the shared throw-here / floor-there policy)', () => {
+  it.each([['development'], ['test']])('throws under NODE_ENV=%s', (env) => {
+    process.env.NODE_ENV = env;
+    expect(() => failUnresolvable('no manager for lane', 'fallback')).toThrow(
+      'no manager for lane',
+    );
+  });
+
+  it.each([['production'], [undefined]])(
+    'logs and returns the fallback under NODE_ENV=%s',
+    (env) => {
+      if (env === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = env;
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      expect(failUnresolvable('no manager for lane', 'fallback')).toBe('fallback');
+      expect(spy).toHaveBeenCalledWith('no manager for lane');
+    },
+  );
 });
 
 describe('providerForRuntimeValue (untyped DB/IPC values)', () => {

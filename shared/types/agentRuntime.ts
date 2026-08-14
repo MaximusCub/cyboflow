@@ -227,30 +227,38 @@ export function providerForRuntimeIn<P extends string>(
 }
 
 /**
- * Whether an unresolvable runtime should throw rather than floor.
+ * The failure policy for an unresolvable lookup anywhere on the agent-routing
+ * path: throw where a developer or CI will see it, log and floor where the only
+ * alternative is crashing a user's app. Shared so each seam gets the SAME two
+ * arms — a runtime string with no registered prefix here, a PanelLane with no
+ * registered manager in the dispatch facade — rather than re-deriving them.
  *
- * The literal `process.env.NODE_ENV` token is what Vite statically replaces in
- * the renderer bundle, so it has to appear verbatim; the main process reads the
- * live value. The throw is opt-IN on the two environments that mean "developer
- * or CI" rather than a `!== 'production'` default, because a packaged Electron
- * app may leave NODE_ENV unset (index.ts pairs it with `app.isPackaged` for
- * exactly this reason) and a misrouted runtime must never take a user's app down.
+ * The discrimination is opt-IN on `development`/`test` rather than a
+ * `!== 'production'` default because a packaged Electron app may leave NODE_ENV
+ * unset (index.ts pairs it with `app.isPackaged` for exactly this reason), and a
+ * bad persisted value must never take a user's app down. The literal
+ * `process.env.NODE_ENV` token is what Vite statically replaces in the renderer
+ * bundle, so it has to appear verbatim; the main process reads the live value.
+ *
+ * `fallback` must be a genuinely safe degradation, not a guess that hides the
+ * miss — the logged message is the only signal production gets.
  */
-function throwsOnUnresolvableRuntime(): boolean {
+export function failUnresolvable<T>(message: string, fallback: T): T {
   const env = process.env.NODE_ENV;
-  return env === 'development' || env === 'test';
+  if (env === 'development' || env === 'test') throw new Error(message);
+  console.error(message);
+  return fallback;
 }
 
 function resolveRuntimeProvider(runtime: string, context: string): AgentProvider {
   const provider = providerForRuntimeIn(AGENT_PROVIDER_TABLE, runtime);
   if (provider !== null) return provider;
-  const message =
+  return failUnresolvable(
     `${context}: agent runtime "${runtime}" matches no registered provider prefix ` +
-    `(${AGENT_PROVIDERS.map((p) => AGENT_PROVIDER_REGISTRY[p].runtimePrefix).join(', ')}). ` +
-    `Register the provider in AGENT_PROVIDER_REGISTRY.`;
-  if (throwsOnUnresolvableRuntime()) throw new Error(message);
-  console.error(message);
-  return DEFAULT_AGENT_PROVIDER;
+      `(${AGENT_PROVIDERS.map((p) => AGENT_PROVIDER_REGISTRY[p].runtimePrefix).join(', ')}). ` +
+      `Register the provider in AGENT_PROVIDER_REGISTRY.`,
+    DEFAULT_AGENT_PROVIDER,
+  );
 }
 
 /** Derive the owning provider for an agent runtime. */

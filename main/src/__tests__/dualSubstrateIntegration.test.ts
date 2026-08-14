@@ -263,7 +263,14 @@ function driveRun(
 ): StreamEnvelope[] {
   const registry = makeRegistry(db);
   const logger = makeSpyLogger();
-  const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, logger);
+  const facade = new SubstrateDispatchFacade({
+    managers: [
+      { lane: 'claude-sdk', manager: asManager(sdk) },
+      { lane: 'claude-interactive', manager: asManager(interactive) },
+    ],
+    registry,
+    logger,
+  });
 
   const envelopes: StreamEnvelope[] = [];
   const publisher: StreamEventPublisher = {

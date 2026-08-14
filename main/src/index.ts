@@ -47,10 +47,15 @@ import {
 } from './services/designFrameWatchdog';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
-import { CliManagerFactory } from './services/cliManagerFactory';
+import {
+  CliManagerFactory,
+  isCodexPtyManagerLike,
+  isCodexSdkManagerLike,
+  type CodexPtyManagerLike,
+} from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
-import { resolvePanelLane } from './services/panelLane';
+import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
@@ -63,10 +68,12 @@ import {
   type SessionSummarySchedulerLike,
 } from './orchestrator/sessionSummary/sessionSummaryScheduler';
 import { wireSessionSummaryScheduler } from './orchestrator/sessionSummary/wireSessionSummaryScheduler';
-import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
-import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { ClaudeModelCatalogService } from './services/claudeModelCatalogService';
-import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
+import {
+  SubstrateDispatchFacade,
+  resolveLaneManager,
+  type ManagerRegistration,
+} from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
@@ -436,7 +443,7 @@ let sessionManager: SessionManager;
 let worktreeManager: WorktreeManager;
 let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
-let codexPtyManager: CodexPtyManager;
+let codexPtyManager: CodexPtyManagerLike;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -1432,8 +1439,11 @@ async function initializeServices(): Promise<boolean> {
     },
     skipValidation: true,
   });
-  if (!(createdCodexSdkManager instanceof CodexSdkManager)) {
-    throw new Error('[Main] cliManagerFactory returned a non-CodexSdkManager for codex-sdk');
+  // Structural, not `instanceof`: the demo factory returns a DemoCliManager
+  // carrying the same seams, and requiring the concrete class is what used to
+  // force it to fabricate a prototype-grafted stand-in.
+  if (!isCodexSdkManagerLike(createdCodexSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Codex SDK seams for codex-sdk');
   }
 
   const createdCodexPtyManager = await cliManagerFactory.createManager('codex-pty', {
@@ -1442,8 +1452,8 @@ async function initializeServices(): Promise<boolean> {
     configManager,
     skipValidation: true,
   });
-  if (!(createdCodexPtyManager instanceof CodexPtyManager)) {
-    throw new Error('[Main] cliManagerFactory returned a non-CodexPtyManager for codex-pty');
+  if (!isCodexPtyManagerLike(createdCodexPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Codex PTY seams for codex-pty');
   }
   codexPtyManager = createdCodexPtyManager;
   gitDiffManager = new GitDiffManager(logger);
@@ -2571,31 +2581,42 @@ async function initializeServices(): Promise<boolean> {
   // resolver (services/panelLane.ts), so the facade agrees with every dispatch
   // seam on both axes: the session fixes the provider, the panel's own override
   // fixes the substrate.
+  // THE lane→manager table for this process. Shared by the dispatch facade and
+  // the panel-owner lookup below so both answer "which manager owns this lane"
+  // from one registration list — a new provider is an added entry here and
+  // nothing else at this seam.
+  const laneManagers: ManagerRegistration[] = [
+    { lane: 'claude-sdk', manager: defaultCliManager },
+    { lane: 'claude-interactive', manager: interactiveCliManager },
+    { lane: 'codex-sdk', manager: createdCodexSdkManager },
+    { lane: 'codex-pty', manager: codexPtyManager },
+  ];
+  const managerByLane = new Map<PanelLane, AbstractCliManager>(
+    laneManagers.map(({ lane, manager }) => [lane, manager]),
+  );
+
   const resolvePanelOwner = (panelId: string): AbstractCliManager | undefined => {
     const panel = panelManager.getPanel(panelId);
     if (!panel || panel.type !== 'claude') return undefined;
     const dbSession = databaseService.getSession(panel.sessionId);
-    switch (resolvePanelLane(dbSession, panel)) {
-      case 'codex-pty':
-        return codexPtyManager;
-      case 'codex-sdk':
-        return createdCodexSdkManager;
-      case 'claude-interactive':
-        return interactiveCliManager;
-      default:
-        return defaultCliManager;
-    }
+    // A lane with no manager is a wiring bug, not a reason to run the panel on
+    // Claude: resolveLaneManager throws in dev/test and logs before flooring in
+    // production. The `default:`-to-Claude arm this replaces was silent, so a
+    // provider whose manager had not been registered ran as Claude unnoticed.
+    return resolveLaneManager(
+      resolvePanelLane(dbSession, panel),
+      managerByLane,
+      defaultCliManager,
+      `[Main] resolvePanelOwner(${panelId})`,
+    );
   };
 
-  substrateFacade = new SubstrateDispatchFacade(
-    defaultCliManager,
-    interactiveCliManager,
-    workflowRegistry,
-    cyboflowLogger,
-    [codexPtyManager],
-    createdCodexSdkManager,
-    resolvePanelOwner,
-  );
+  substrateFacade = new SubstrateDispatchFacade({
+    managers: laneManagers,
+    registry: workflowRegistry,
+    logger: cyboflowLogger,
+    panelOwnerLookup: resolvePanelOwner,
+  });
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
   // delegating to the transitionTo* helpers at the index.ts boundary.
