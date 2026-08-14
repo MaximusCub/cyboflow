@@ -1,6 +1,6 @@
 /**
- * Panel-scoped relay/spawn for a PTY-backed chat panel (interactive Claude or
- * Codex PTY).
+ * Panel-scoped relay/spawn for a PTY-backed chat panel (interactive Claude,
+ * Codex PTY, or OMP PTY).
  *
  * WHY THIS EXISTS — added ("Add chat") PTY panels. A quick session's PRIMARY
  * chat panel is eager-spawned server-side by sessions:create-quick, and the
@@ -24,10 +24,26 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
-import { isPtyLane, resolvePanelLane } from '../services/panelLane';
+import { isPtyLane, resolvePanelLane, type PanelLane } from '../services/panelLane';
 import { assertAgentProviderAllowed } from '../services/agentProviderGuard';
 import { providerForRuntime } from '../../../shared/types/agentRuntime';
-import { QUICK_PTY_BRIEFING, QUICK_CODEX_PTY_BRIEFING } from './quickSessionBriefings';
+import {
+  QUICK_PTY_BRIEFING,
+  QUICK_CODEX_PTY_BRIEFING,
+  QUICK_OMP_PTY_BRIEFING,
+} from './quickSessionBriefings';
+
+/**
+ * The first-turn context briefing an EAGER (promptless) spawn seeds each PTY
+ * lane with. A Partial record keyed by lane: `claude-interactive` is absent and
+ * falls back to {@link QUICK_PTY_BRIEFING}, which is also the floor for any
+ * future lane whose briefing has not been written yet.
+ */
+const PTY_LANE_BRIEFINGS: Readonly<Partial<Record<PanelLane, string>>> = {
+  'claude-interactive': QUICK_PTY_BRIEFING,
+  'codex-pty': QUICK_CODEX_PTY_BRIEFING,
+  'omp-pty': QUICK_OMP_PTY_BRIEFING,
+};
 
 /** Common live-REPL relay surface shared by both PTY managers. */
 interface PtyManagerLike {
@@ -65,6 +81,23 @@ interface CodexPtyManagerLike extends PtyManagerLike {
   ): Promise<void>;
 }
 
+/**
+ * OmpPtyManager's positional startPanel (OMP PTY). One parameter shorter than
+ * the Codex twin: OMP's TUI takes no per-turn thinking flag (the level is
+ * spawn-baked on the RPC lane only), so there is no reasoningEffort to pass.
+ */
+interface OmpPtyManagerLike extends PtyManagerLike {
+  startPanel(
+    panelId: string,
+    sessionId: string,
+    worktreePath: string,
+    prompt: string,
+    permissionMode?: 'approve' | 'ignore',
+    model?: string,
+    runId?: string,
+  ): Promise<void>;
+}
+
 interface DbSessionLike {
   agent_runtime?: string | null;
   substrate?: CliSubstrate | null;
@@ -98,16 +131,19 @@ export interface PtyPanelDispatchDeps {
   configManager: { isDemoMode(): boolean };
   interactiveCliManager: InteractivePtyManagerLike;
   codexPtyManager: CodexPtyManagerLike;
+  ompPtyManager: OmpPtyManagerLike;
   registerLivePanel(runId: string, panelId: string): void;
   registerCodexPtyPanel(runId: string, panelId: string): void;
+  registerOmpPtyPanel(runId: string, panelId: string): void;
   /**
-   * Chat-gate sentinel resolver. Only the CODEX branch needs it: the interactive
-   * manager resolves its own gate inside startPanel (resolveGateRunId), while
-   * codexPtyManager takes the runId from THIS caller. Resolving it here revives a
-   * `__quick__` sentinel that boot recovery force-failed on app restart —
-   * otherwise a resumed Codex terminal spawns bound to a terminal run and loses
-   * both its cyboflow_* MCP writes (`run_not_active`) and its approval gate.
-   * Optional: the stub-manager tests fall back to the raw `chat_run_id` read.
+   * Chat-gate sentinel resolver. Only the NON-CLAUDE branches need it: the
+   * interactive manager resolves its own gate inside startPanel
+   * (resolveGateRunId), while the Codex/OMP PTY managers take the runId from
+   * THIS caller. Resolving it here revives a `__quick__` sentinel that boot
+   * recovery force-failed on app restart — otherwise a resumed terminal spawns
+   * bound to a terminal run and loses both its cyboflow_* MCP writes
+   * (`run_not_active`) and its approval gate. Optional: the stub-manager tests
+   * fall back to the raw `chat_run_id` read.
    */
   chatSentinelProvider?: (sessionId: string) => string;
 }
@@ -143,10 +179,11 @@ export async function relayOrSpawnPtyPanel(
   // session's interactive override to the CLAUDE manager.
   const lane = resolvePanelLane(dbSession, panel);
   if (!isPtyLane(lane)) return false; // SDK lane — caller owns it.
-  const isCodexPty = lane === 'codex-pty';
+  const isClaudePty = lane === 'claude-interactive';
   // Demo interactive sessions never spawn a real REPL (DemoTerminalView paints a
-  // canned, client-side session) — leave them to the SDK/demo path.
-  if (!isCodexPty && deps.configManager.isDemoMode()) return false;
+  // canned, client-side session) — leave them to the SDK/demo path. Scoped to the
+  // CLAUDE terminal because that is the only one demo mode impersonates.
+  if (isClaudePty && deps.configManager.isDemoMode()) return false;
   // Provider-access gate (Settings → Integrations). The spawn path is already
   // guarded inside the managers, but a turn relayed into an ALREADY-LIVE REPL
   // never respawns — without this, switching a provider off would leave every
@@ -167,8 +204,8 @@ export async function relayOrSpawnPtyPanel(
 
   // Only flip the shared session status to 'running' when the turn-end rest
   // listener (index.ts) will actually flip it BACK: that listener rests only
-  // sessions whose substrate is 'interactive' (which includes codex-pty quick
-  // sessions — stamped 'interactive'). An interactive-OVERRIDE panel on an
+  // sessions whose substrate is 'interactive' (which includes codex-pty / omp-pty
+  // quick sessions — stamped 'interactive'). An interactive-OVERRIDE panel on an
   // otherwise-SDK session (session substrate 'sdk') has no such rester, so
   // flipping 'running' there would strand the session showing "working" forever.
   // The live terminal streams regardless of session status, so skipping the flip
@@ -178,7 +215,11 @@ export async function relayOrSpawnPtyPanel(
     if (restsViaSessionStatus) await deps.sessionManager.updateSession(panel.sessionId, { status: 'running' });
   };
 
-  const manager: PtyManagerLike = isCodexPty ? deps.codexPtyManager : deps.interactiveCliManager;
+  const manager: PtyManagerLike = isClaudePty
+    ? deps.interactiveCliManager
+    : lane === 'omp-pty'
+      ? deps.ompPtyManager
+      : deps.codexPtyManager;
   if (manager.isPanelRunning(panel.id)) {
     // Live REPL: relay the real user turn. A null (eager-spawn) probe for an
     // already-live panel has nothing to relay.
@@ -195,31 +236,46 @@ export async function relayOrSpawnPtyPanel(
   // than falling back to the session's shared chat sentinel (which another panel
   // may own). ⚠️ NEVER await startPanel: the persistent REPL's spawn promise
   // resolves only when the process EXITS.
-  const firstPrompt = input ?? (isCodexPty ? QUICK_CODEX_PTY_BRIEFING : QUICK_PTY_BRIEFING);
-  if (isCodexPty) {
-    deps.registerCodexPtyPanel(panel.id, panel.id);
-    // runId — align the Codex gate/MCP id with the session's chat sentinel
+  const firstPrompt = input ?? PTY_LANE_BRIEFINGS[lane] ?? QUICK_PTY_BRIEFING;
+  if (!isClaudePty) {
+    // runId — align the vendor's gate/MCP id with the session's chat sentinel
     // (matches the primary panel); the live channel is keyed by panelId. Resolve
     // it through the provider, NOT a raw `chat_run_id` read, so a sentinel parked
     // by app-restart boot recovery is revived to 'running' before the spawn bakes
     // it into CYBOFLOW_RUN_ID (see PtyPanelDispatchDeps.chatSentinelProvider).
-    const codexGateRunId = deps.chatSentinelProvider
+    const gateRunId = deps.chatSentinelProvider
       ? deps.chatSentinelProvider(panel.sessionId)
       : (dbSession?.chat_run_id ?? panel.id); // uninjected fallback (tests/boot)
-    void deps.codexPtyManager
-      .startPanel(
+    // OMP's TUI takes no per-turn thinking flag on this lane, so its startPanel
+    // is one parameter shorter — the only shape difference between the two.
+    let spawn: Promise<void>;
+    if (lane === 'omp-pty') {
+      deps.registerOmpPtyPanel(panel.id, panel.id);
+      spawn = deps.ompPtyManager.startPanel(
         panel.id,
         panel.sessionId,
         worktreePath,
         firstPrompt,
         session.permissionMode,
         model,
-        codexGateRunId,
+        gateRunId,
+      );
+    } else {
+      deps.registerCodexPtyPanel(panel.id, panel.id);
+      spawn = deps.codexPtyManager.startPanel(
+        panel.id,
+        panel.sessionId,
+        worktreePath,
+        firstPrompt,
+        session.permissionMode,
+        model,
+        gateRunId,
         reasoningEffort,
-      )
-      .catch((err: unknown) => {
-        console.error(`[ptyPanelDispatch] Codex PTY spawn failed for panel ${panel.id}:`, err);
-      });
+      );
+    }
+    void spawn.catch((err: unknown) => {
+      console.error(`[ptyPanelDispatch] ${lane} spawn failed for panel ${panel.id}:`, err);
+    });
   } else {
     deps.registerLivePanel(panel.id, panel.id);
     void deps.interactiveCliManager

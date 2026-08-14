@@ -7,6 +7,8 @@ import { ClaudeCodeManager } from './panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './panels/claude/interactiveClaudeManager';
 import { CodexPtyManager } from './panels/codex/codexPtyManager';
 import { CodexSdkManager } from './panels/codex/codexSdkManager';
+import { OmpPtyManager } from './panels/omp/ompPtyManager';
+import { OmpSdkManager } from './panels/omp/ompSdkManager';
 import {
   CliToolRegistry,
   CliToolDefinition,
@@ -88,6 +90,45 @@ export function isCodexPtyManagerLike(manager: AbstractCliManager): manager is C
 }
 
 /**
+ * The seams an OMP RPC manager must expose BEYOND AbstractCliManager.
+ *
+ * Shorter than {@link CodexSdkSeams} because OMP needs less injected: its
+ * approval dialogs are answered in-process by `OmpApprovalBridge` (there is no
+ * router provider to hand it), and it has no vendor-account probe. What remains
+ * is the MCP runtime config boot injects, plus the catalogue accessor — which
+ * the model picker does NOT route through (`ipc/models.ts` reads the shared
+ * probe directly, because the picker can be opened in Settings before any OMP
+ * session exists) but which belongs in the contract anyway: it is the one seam
+ * that must reach the vendor binary, so demo mode has to refuse it.
+ * Derived with `Pick` for the same anti-drift reason.
+ */
+type OmpSdkSeams = Pick<OmpSdkManager, 'setCyboflowMcpRuntimeConfig' | 'getOmpModelCatalog'>;
+
+/** The OMP PTY seams beyond AbstractCliManager — the Codex PTY pair exactly. */
+type OmpPtySeams = Pick<OmpPtyManager, 'startPanel' | 'relayUserTurn'>;
+
+/** What the app needs of an OMP RPC manager — the CLI base plus its seams. */
+export type OmpSdkManagerLike = AbstractCliManager & OmpSdkSeams;
+
+/** The OMP PTY twin of {@link OmpSdkManagerLike}. */
+export type OmpPtyManagerLike = AbstractCliManager & OmpPtySeams;
+
+/** Does this manager expose the OMP SDK seams? */
+export function isOmpSdkManagerLike(manager: AbstractCliManager): manager is OmpSdkManagerLike {
+  const seams = manager as Partial<OmpSdkSeams>;
+  return (
+    typeof seams.setCyboflowMcpRuntimeConfig === 'function' &&
+    typeof seams.getOmpModelCatalog === 'function'
+  );
+}
+
+/** Does this manager expose the OMP PTY seams? */
+export function isOmpPtyManagerLike(manager: AbstractCliManager): manager is OmpPtyManagerLike {
+  const seams = manager as Partial<OmpPtySeams>;
+  return typeof seams.startPanel === 'function' && typeof seams.relayUserTurn === 'function';
+}
+
+/**
  * A demo stand-in for an ASYNC seam that can only be answered by a real provider
  * runtime (an account probe, a live model catalogue). Refusing is the point:
  * demo mode must never reach the vendor's binary, and returning a plausible
@@ -122,6 +163,32 @@ function codexSdkDemoSeams(): CodexSdkSeams {
 function codexPtyDemoSeams(): Omit<CodexPtySeams, 'startPanel'> {
   return { relayUserTurn: () => {} };
 }
+
+/** The OMP SDK seams, demo-backed: injection accepted and dropped, probe refused. */
+function ompSdkDemoSeams(): OmpSdkSeams {
+  return {
+    setCyboflowMcpRuntimeConfig: () => {},
+    getOmpModelCatalog: demoSeamUnavailable('getOmpModelCatalog'),
+  };
+}
+
+/** The OMP PTY seams, demo-backed. `startPanel` comes from DemoCliManager — see {@link codexPtyDemoSeams}. */
+function ompPtyDemoSeams(): Omit<OmpPtySeams, 'startPanel'> {
+  return { relayUserTurn: () => {} };
+}
+
+/**
+ * The per-tool demo seam overlays, keyed by tool id. A Record rather than the
+ * ternary chain it replaces: each provider adds a row instead of another
+ * `: toolId === '…' ?` rung, and a tool with no runtime-specific seams (the
+ * Claude tools) is simply absent.
+ */
+const DEMO_SEAM_OVERLAYS: Readonly<Record<string, () => object>> = {
+  'codex-sdk': codexSdkDemoSeams,
+  'codex-pty': codexPtyDemoSeams,
+  'omp-sdk': ompSdkDemoSeams,
+  'omp-pty': ompPtyDemoSeams,
+};
 
 /**
  * Factory configuration for CLI manager creation
@@ -220,14 +287,13 @@ export class CliManagerFactory {
         );
 
         // Boot narrows these startup services STRUCTURALLY (isCodexSdkManagerLike
-        // / isCodexPtyManagerLike) and calls their runtime-specific seams, so demo
-        // mode only has to supply those seams — no prototype graft, and nothing
-        // un-stubbed can resolve to a real Codex implementation.
-        const manager: AbstractCliManager = toolId === 'codex-sdk'
-          ? Object.assign(demoManager, codexSdkDemoSeams())
-          : toolId === 'codex-pty'
-            ? Object.assign(demoManager, codexPtyDemoSeams())
-            : demoManager;
+        // / isOmpSdkManagerLike / the PTY twins) and calls their runtime-specific
+        // seams, so demo mode only has to supply those seams — no prototype graft,
+        // and nothing un-stubbed can resolve to a real vendor implementation.
+        const demoSeams = DEMO_SEAM_OVERLAYS[toolId];
+        const manager: AbstractCliManager = demoSeams
+          ? Object.assign(demoManager, demoSeams())
+          : demoManager;
 
         this.demoManagers.set(toolId, manager);
         this.logger?.info(`[CliManagerFactory] Demo mode — created DemoCliManager for tool '${toolId}'`);
@@ -328,6 +394,11 @@ export class CliManagerFactory {
     // Register Codex PTY quick-session runtime.
     this.registerCodexSdkTool();
     this.registerCodexPtyTool();
+
+    // Register the OMP (oh-my-pi) quick-session runtimes, priorities below
+    // Codex's so getDefaultTool() ordering is unchanged by their arrival.
+    this.registerOmpSdkTool();
+    this.registerOmpPtyTool();
 
     // Future tools can be registered here:
     // this.registerAiderTool();
@@ -620,9 +691,126 @@ export class CliManagerFactory {
     });
   }
 
+  private registerOmpPtyTool(): void {
+    const ompPtyManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+    ) => {
+      return new OmpPtyManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+      );
+    };
+
+    const ompPtyDefinition: CliToolDefinition = {
+      id: 'omp-pty',
+      name: 'OMP (PTY)',
+      description: 'oh-my-pi running as an interactive PTY quick-session runtime',
+      version: '1.0.0',
+      capabilities: {
+        // `--continue` is a REAL per-cwd session resume (unlike codex-pty, which
+        // restarts blank), so this lane genuinely supports resume.
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: true,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: false,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.TEXT,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: 'omp',
+        alternativeExecutables: ['omp'],
+        minimumVersion: undefined,
+      },
+      managerFactory: ompPtyManagerFactory,
+    };
+
+    this.registry.registerTool(ompPtyDefinition, {
+      priority: 30,
+      validateOnRegister: false,
+    });
+  }
+
+  private registerOmpSdkTool(): void {
+    const ompSdkManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+      additionalOptions?: unknown,
+    ) => {
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const dbCandidate = options?.db;
+      if (!dbCandidate) {
+        throw new TypeError('[CliManagerFactory] omp-sdk tool requires `db` in additionalOptions');
+      }
+      if (
+        typeof dbCandidate !== 'object' ||
+        typeof (dbCandidate as { prepare?: unknown }).prepare !== 'function'
+      ) {
+        throw new TypeError(
+          '[CliManagerFactory] omp-sdk tool: additionalOptions.db must be a better-sqlite3 Database instance (received a value lacking a .prepare() method)',
+        );
+      }
+      const db = dbCandidate as Database.Database;
+      return new OmpSdkManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+        db,
+      );
+    };
+
+    const ompSdkDefinition: CliToolDefinition = {
+      id: 'omp-sdk',
+      name: 'OMP',
+      description: 'oh-my-pi running as a persistent `omp --mode rpc-ui` child over NDJSON',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: true,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: true,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.JSON,
+          CLI_OUTPUT_FORMATS.STREAM_JSON,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: 'omp',
+        alternativeExecutables: ['omp'],
+        minimumVersion: undefined,
+      },
+      managerFactory: ompSdkManagerFactory,
+    };
+
+    this.registry.registerTool(ompSdkDefinition, {
+      priority: 35,
+      validateOnRegister: false,
+    });
+  }
+
   /**
    * Future: Register Aider CLI tool
-   * 
+   *
    * Example of how other tools would be registered:
    */
   private registerAiderTool(): void {

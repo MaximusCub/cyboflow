@@ -6,9 +6,9 @@
  *   - sessions.agent_permission_mode (migration 021): stamped ONLY when
  *     explicitly chosen (undefined keeps NULL = global default);
  *   - sessions.substrate + sessions.agent_runtime (migrations 027 + 059-064):
- *     ALWAYS stamped with the RESOLVED values (codex flags win over the
- *     substrate-derived Claude runtime; codex-pty forces substrate
- *     'interactive').
+ *     ALWAYS stamped with the RESOLVED values (an explicit non-Claude runtime
+ *     wins over the substrate-derived Claude one; a PTY-transport runtime
+ *     forces substrate 'interactive').
  */
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -58,8 +58,6 @@ describe('stampQuickSessionRuntimeConfig', () => {
   it("stamps a resolved 'sdk' substrate as claude-sdk and leaves the permission mode NULL when unchosen", () => {
     stampQuickSessionRuntimeConfig(db, SESSION_ID, {
       resolvedSubstrate: 'sdk',
-      useCodexSdk: false,
-      useCodexPty: false,
     });
 
     expect(readSession()).toEqual({
@@ -72,8 +70,6 @@ describe('stampQuickSessionRuntimeConfig', () => {
   it("stamps a resolved 'interactive' substrate as claude-interactive", () => {
     stampQuickSessionRuntimeConfig(db, SESSION_ID, {
       resolvedSubstrate: 'interactive',
-      useCodexSdk: false,
-      useCodexPty: false,
     });
 
     expect(readSession()).toEqual({
@@ -86,8 +82,7 @@ describe('stampQuickSessionRuntimeConfig', () => {
   it('codex-sdk wins over the substrate-derived Claude runtime', () => {
     stampQuickSessionRuntimeConfig(db, SESSION_ID, {
       resolvedSubstrate: 'sdk',
-      useCodexSdk: true,
-      useCodexPty: false,
+      sessionAgentRuntime: 'codex-sdk',
     });
 
     expect(readSession()).toEqual({
@@ -100,8 +95,7 @@ describe('stampQuickSessionRuntimeConfig', () => {
   it("codex-pty forces substrate 'interactive' regardless of the resolved value", () => {
     stampQuickSessionRuntimeConfig(db, SESSION_ID, {
       resolvedSubstrate: 'sdk',
-      useCodexSdk: false,
-      useCodexPty: true,
+      sessionAgentRuntime: 'codex-pty',
     });
 
     expect(readSession()).toEqual({
@@ -111,11 +105,39 @@ describe('stampQuickSessionRuntimeConfig', () => {
     });
   });
 
+  it('omp-sdk wins over the substrate-derived Claude runtime', () => {
+    stampQuickSessionRuntimeConfig(db, SESSION_ID, {
+      resolvedSubstrate: 'sdk',
+      sessionAgentRuntime: 'omp-sdk',
+    });
+
+    expect(readSession()).toEqual({
+      agent_permission_mode: null,
+      substrate: 'sdk',
+      agent_runtime: 'omp-sdk',
+    });
+  });
+
+  // The sentinel run cannot carry omp-pty (it is not a STORABLE runtime), so the
+  // SESSION row is the only place an OMP terminal's identity lands — and the
+  // substrate force is what keeps resolvePanelLane from resolving its panels
+  // into the SDK lane and losing the terminal.
+  it("omp-pty forces substrate 'interactive' regardless of the resolved value", () => {
+    stampQuickSessionRuntimeConfig(db, SESSION_ID, {
+      resolvedSubstrate: 'sdk',
+      sessionAgentRuntime: 'omp-pty',
+    });
+
+    expect(readSession()).toEqual({
+      agent_permission_mode: null,
+      substrate: 'interactive',
+      agent_runtime: 'omp-pty',
+    });
+  });
+
   it('stamps an explicitly chosen permission mode', () => {
     stampQuickSessionRuntimeConfig(db, SESSION_ID, {
       resolvedSubstrate: 'sdk',
-      useCodexSdk: false,
-      useCodexPty: false,
       requestedAgentMode: 'acceptEdits',
     });
 

@@ -1682,6 +1682,18 @@ describe('SubstrateDispatchFacade — registry dispatch from the run row', () =>
     expect(spawnedLane(managers)).toBe('omp-sdk');
   });
 
+  // An omp-pty session's sentinel carries NO runtime (omp-pty is not storable),
+  // so its run row resolves by the two axes instead — provider 'omp' plus the
+  // interactive substrate must land on the OMP terminal, not the Claude one.
+  it('routes an omp provider on the interactive substrate to the OMP PTY lane', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive', agent_provider: 'omp' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('omp-pty');
+  });
+
   it('fails LOUDLY when the run names a real lane that has no registered manager', async () => {
     const run = makeWorkflowRunRow({ agent_provider: 'codex', agent_runtime: 'codex-sdk' });
     const sdk = makeSpyManager();
@@ -1772,6 +1784,18 @@ describe('SubstrateDispatchFacade — construction', () => {
     managers['codex-pty'].emit('pty-output', { panelId: 'p', runId: 'p', data: 'x' });
 
     expect(seen).toEqual(['spawned', 'output', 'pty-output']);
+
+    // The OMP lanes take the row their TRANSPORT implies rather than copying
+    // either Codex asymmetry: the SDK lane forwards output AND spawned, and the
+    // PTY lane forwards output, pty-output and turn-end.
+    seen.length = 0;
+    managers['omp-sdk'].emit('spawned', { panelId: 'p' });
+    managers['omp-sdk'].emit('output', { panelId: 'p' });
+    managers['omp-pty'].emit('output', { panelId: 'p' });
+    managers['omp-pty'].emit('pty-output', { panelId: 'p', runId: 'p', data: 'x' });
+    managers['omp-pty'].emit('turn-end', { panelId: 'p', runId: 'p' });
+
+    expect(seen).toEqual(['spawned', 'output', 'output', 'pty-output', 'turn-end']);
 
     facade.dispose();
     seen.length = 0;

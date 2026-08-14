@@ -15,6 +15,8 @@ import type {
   CliManagerFactory,
   CodexPtyManagerLike,
   CodexSdkManagerLike,
+  OmpPtyManagerLike,
+  OmpSdkManagerLike,
 } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { Logger } from '../utils/logger';
@@ -49,6 +51,14 @@ export interface AppServices {
   codexSdkManager: CodexSdkManagerLike;
   /** Interactive Codex PTY runtime for quick sessions only. Seam-typed — see above. */
   codexPtyManager: CodexPtyManagerLike;
+  /**
+   * Structured OMP (oh-my-pi) RPC runtime for quick-session chat. Seam-typed for
+   * the same reason as its Codex twin — demo mode supplies a demo-backed manager
+   * carrying only the seams, never the concrete class.
+   */
+  ompSdkManager: OmpSdkManagerLike;
+  /** Interactive OMP PTY runtime for quick sessions only. Seam-typed — see above. */
+  ompPtyManager: OmpPtyManagerLike;
   /** Dynamic Claude model catalog (SDK `supportedModels()`), for the picker's "Other models" section. */
   claudeModelCatalogService: ClaudeModelCatalogService;
   /**
@@ -76,6 +86,8 @@ export interface AppServices {
   registerLivePanel: (runId: string, panelId: string) => void;
   /** Deterministic at-spawn registration for Codex PTY quick-session panels. */
   registerCodexPtyPanel: (runId: string, panelId: string) => void;
+  /** Deterministic at-spawn registration for OMP PTY quick-session panels. */
+  registerOmpPtyPanel: (runId: string, panelId: string) => void;
   /**
    * Idle-debounced quick-session summarizer (session-summary-plan.md §5). The
    * sessions:input handler calls `noteTurnStart` before dispatching a user turn

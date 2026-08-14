@@ -12,6 +12,7 @@ import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/a
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
+import { isPtyLane, resolvePanelLane } from './panelLane';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -729,13 +730,21 @@ export class SessionManager extends EventEmitter {
     
     this.db.addPanelOutput(panelId, output.type, dataToStore);
 
-    // Codex SDK quick sessions project app-server events directly into panel
-    // output and need a persisted-transcript refresh. Other panel runtimes
-    // already have their live output channel; broadcasting every PTY/Claude
-    // write here caused an app-wide refresh fanout on high-churn sessions.
+    // A STRUCTURED non-Claude lane (codex-sdk, omp-sdk) projects its provider's
+    // events directly into panel output and needs a persisted-transcript
+    // refresh. The other lanes already have their live output channel:
+    // claude-sdk pushes the full payload itself, and a PTY lane streams raw
+    // bytes — broadcasting every one of those writes here caused an app-wide
+    // refresh fanout on high-churn sessions.
+    //
+    // Resolved by LANE, not by the session's runtime: the old
+    // `agent_runtime === 'codex-sdk'` test left an sdk-override panel inside a
+    // PTY session (and every panel of any provider added later) rendering a
+    // stale transcript until something else happened to refresh it.
     const panelSessionId = panel?.sessionId;
     const panelSession = panelSessionId ? this.db.getSession(panelSessionId) : undefined;
-    if (panelSession?.agent_runtime === 'codex-sdk') {
+    const panelLane = resolvePanelLane(panelSession, panel ?? undefined);
+    if (panelSessionId && panelLane !== 'claude-sdk' && !isPtyLane(panelLane)) {
       this.emit('session-output-available', {
         sessionId: panelSessionId,
         panelId,

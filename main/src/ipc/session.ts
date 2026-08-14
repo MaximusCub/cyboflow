@@ -51,17 +51,20 @@ import {
   providerRuntimeConflict,
 } from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
+import type { SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
-import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
+import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import {
   QUICK_PTY_BRIEFING,
   QUICK_CODEX_PTY_BRIEFING,
   QUICK_CODEX_SDK_BRIEFING,
+  QUICK_OMP_PTY_BRIEFING,
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../services/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
-import { resolvePanelLane, type PanelLane } from '../services/panelLane';
+import { isPtyLane, resolvePanelLane, type PanelLane } from '../services/panelLane';
+import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { ToolPanel } from '../../../shared/types/panels';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
@@ -103,6 +106,22 @@ import { computeState as computeClaudeDetectionState } from './claudeDetection';
  * Fixed message + bounded `errorClass` per captureSeamError's payload rules —
  * the raw error text stays in the local console.error at the call site.
  */
+/**
+ * The STRUCTURED (non-PTY) runtime a quick launch resolves onto when it names a
+ * PROVIDER but no runtime — the wizard never sends a bare provider for a
+ * terminal launch, so the structured lane is the honest projection.
+ *
+ * An exhaustive Record so a provider added to the union cannot ship without
+ * someone naming its lane here; the `claude` row exists to satisfy that
+ * exhaustiveness and is deliberately NOT consulted (Claude keeps its substrate
+ * ladder — see the create-quick handler).
+ */
+const QUICK_PROVIDER_SDK_RUNTIME: Readonly<Record<AgentProvider, SessionAgentRuntime>> = {
+  claude: 'claude-sdk',
+  codex: 'codex-sdk',
+  omp: 'omp-sdk',
+};
+
 function reportEagerSpawnFailure(err: unknown, substrate: string, cliTool: string): void {
   const errorClass = classifyErrorPattern(err instanceof Error ? err.message : String(err));
   captureSeamError(
@@ -288,9 +307,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     interactiveCliManager, // PTY substrate sibling (quick-session relay/spawn)
     codexSdkManager, // Structured Codex app-server quick-session runtime
     codexPtyManager, // Codex PTY quick-session runtime
+    ompSdkManager, // Structured OMP RPC quick-session runtime
+    ompPtyManager, // OMP PTY quick-session runtime
     killLiveSession, // hard-kill seam for a dismissed PTY quick session's REPL
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
     registerCodexPtyPanel, // at-spawn runId→panelId seed for Codex PTY quick sessions
+    registerOmpPtyPanel, // the OMP twin of registerCodexPtyPanel
     gitStatusManager,
     gitDiffManager, // git-derived session file stats for sessions:get-statistics
     archiveProgressManager,
@@ -352,215 +374,408 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     return panel ? laneForPanel(panel) : undefined;
   };
 
-  interface QueuedCodexPanelInput {
+  interface QueuedPanelInput {
     id: string;
     text: string;
   }
-  const codexPanelInputQueues = new Map<string, QueuedCodexPanelInput[]>();
 
-  const startCodexSdkTurn = async (panelId: string, text: string): Promise<void> => {
-    // Refuse a switched-off provider BEFORE any side effect. The spawn below
-    // asserts too, but by then this function has already persisted the user turn
-    // and flipped the session to 'running' — and nothing rolls those back, so a
-    // refused send left the chat showing a phantom "Codex is thinking…" placeholder
-    // and a live Stop button with no turn behind them.
-    assertAgentProviderAllowed('codex', 'this chat turn');
-    if (!codexSdkManager) throw new Error('Codex SDK manager is not available');
-    const panel = panelManager.getPanel(panelId);
-    if (!panel || panel.type !== 'claude') throw new Error(`Codex panel ${panelId} not found`);
-    const dbSession = databaseService.getSession(panel.sessionId);
-    // Lane, not runtime: an sdk-override panel in a codex-PTY session belongs on
-    // the app-server too, and an interactive-override panel in a codex-SDK
-    // session must NOT be dragged onto it.
-    if (!dbSession || resolvePanelLane(dbSession, panel) !== 'codex-sdk') {
-      throw new Error(`Panel ${panelId} is not owned by a Codex SDK chat`);
-    }
-    const session = await sessionManager.getSession(panel.sessionId);
-    if (!session) throw new Error(`Session ${panel.sessionId} not found`);
-    // Resolve the gate vehicle through the chat-sentinel provider, NOT a raw
-    // `chat_run_id` read. The provider revives a `__quick__` sentinel that boot
-    // recovery force-failed on app restart; without it a RESUMED Codex chat is
-    // stamped with a terminal CYBOFLOW_RUN_ID, so every run-scoped cyboflow_*
-    // MCP write rejects with `run_not_active` and every approval-gate grab
-    // (`UPDATE … WHERE status='running'`) silently misses. The Claude lanes get
-    // this via resolveGateRunId inside their managers; Codex spawns from here
-    // with a caller-supplied runId, so it resolves at this seam instead.
-    // Called BEFORE the user turn is persisted and the session flips 'running',
-    // so a ChatDuringActiveFlowError refusal leaves no phantom turn behind.
-    const runId = chatSentinelProvider
-      ? chatSentinelProvider(panel.sessionId)
-      : (dbSession.chat_run_id ?? dbSession.run_id); // uninjected fallback (tests/boot)
-    if (!runId) throw new Error('Session is missing its chat run');
+  /**
+   * One STRUCTURED (non-PTY, non-Claude) chat lane.
+   *
+   * `codex-sdk` and `omp-sdk` are the same machine with a different vendor
+   * behind it: both ride a 'claude'-typed panel, both spawn from THIS layer with
+   * a caller-supplied gate runId, both refuse `continuePanel` (follow-up turns
+   * must re-enter through the turn-start path), and both need the same mid-turn
+   * queue + rest-boundary drain. Written once and instantiated per lane so a
+   * third provider is a row in {@link structuredChatLanes} rather than another
+   * copy of ~150 lines — and so the dispatch seams below switch on lane
+   * MEMBERSHIP instead of the binary `=== 'codex-sdk'` tests that would have
+   * silently routed an OMP panel to Claude.
+   */
+  interface StructuredChatLane {
+    readonly lane: PanelLane;
+    readonly provider: AgentProvider;
+    /** The vendor's own name, for anything the user reads. */
+    readonly label: string;
+    readonly manager: AbstractCliManager | undefined;
+    /** Start a turn now (resuming this panel's own thread when one exists). */
+    startTurn(panelId: string, text: string): Promise<void>;
+    /** Buffer a mid-turn message and try an immediate flush. */
+    enqueue(panelId: string, id: string, text: string): void;
+    listQueued(panelId: string): QueuedPanelInput[];
+    dequeue(panelId: string, id: string): boolean;
+  }
 
-    const settings = databaseService.getPanelSettings(panelId);
-    const model = typeof settings?.model === 'string' ? settings.model : undefined;
-    // Per-turn reasoning effort (IDEA-029), persisted on the panel by the wizard
-    // launch / composer EffortPill exactly like `model`. buildCodexAppServerTurnOptions
-    // maps it onto the app-server turn's `effort`, so a codex-sdk quick session
-    // honors it on the very NEXT turn with no warm-respawn — effort is a per-turn
-    // startTurn param here, not a spawn-baked option (contrast the Claude SDK seam,
-    // where it rides Options.effort and must sit in the warm fingerprint).
-    const rawEffort = settings?.reasoningEffort;
-    const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
-    // PER-PANEL resume target. `runId` here is the session's chat sentinel —
-    // shared by EVERY chat panel of the session — so the run-scoped lookup handed
-    // a second Codex chat the FIRST chat's thread and both panels then replayed
-    // one conversation (the "two chats share a history" bug). Resolve by panelId
-    // instead so each chat continues its OWN thread.
-    //
-    // Pre-087 rows carry panel_id NULL and belong to the panel that existed when
-    // they were written — the session's FIRST chat panel. Fall back to the
-    // run-scoped lookup for exactly that panel so an in-flight single-chat
-    // session keeps resuming across the upgrade; any other panel starts fresh,
-    // which is the correct answer for a chat that never had its own thread.
-    const invocationStore = new AgentInvocationStore(databaseService.getDb());
-    const isFirstChatPanel = panelId === resolveClaudePanelId(panel.sessionId);
-    const resumeTarget =
-      invocationStore.getLatestPanelResumeTarget(runId, panelId) ??
-      (isFirstChatPanel ? invocationStore.getLatestTopLevelResumeTarget(runId) : null);
-    const resumeSessionId =
-      resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
-        ? resumeTarget.externalSessionId
+  /** Per-lane construction input; everything else is derived. */
+  interface StructuredChatLaneConfig {
+    readonly lane: PanelLane;
+    readonly manager: AbstractCliManager | undefined;
+    /**
+     * `systemPromptAppend` for a vendor whose spawn accepts one. OMP has no
+     * such flag (its session context comes from the gating extension + MCP
+     * config), so its lane leaves this undefined rather than passing an option
+     * the manager would drop on the floor.
+     */
+    readonly briefing?: string;
+  }
+
+  const createStructuredChatLane = (config: StructuredChatLaneConfig): StructuredChatLane => {
+    const { lane, manager, briefing } = config;
+    const provider = providerForRuntime(lane);
+    const label = AGENT_PROVIDER_LABELS[provider];
+    const queues = new Map<string, QueuedPanelInput[]>();
+
+    const startTurn = async (panelId: string, text: string): Promise<void> => {
+      // Refuse a switched-off provider BEFORE any side effect. The spawn below
+      // asserts too, but by then this function has already persisted the user turn
+      // and flipped the session to 'running' — and nothing rolls those back, so a
+      // refused send left the chat showing a phantom "<vendor> is thinking…"
+      // placeholder and a live Stop button with no turn behind them.
+      assertAgentProviderAllowed(provider, 'this chat turn');
+      if (!manager) throw new Error(`${label} SDK manager is not available`);
+      const panel = panelManager.getPanel(panelId);
+      if (!panel || panel.type !== 'claude') throw new Error(`${label} panel ${panelId} not found`);
+      const dbSession = databaseService.getSession(panel.sessionId);
+      // Lane, not runtime: an sdk-override panel in a PTY session of the same
+      // vendor belongs on the structured transport too, and an interactive-override
+      // panel in a structured session must NOT be dragged onto it.
+      if (!dbSession || resolvePanelLane(dbSession, panel) !== lane) {
+        throw new Error(`Panel ${panelId} is not owned by a ${label} SDK chat`);
+      }
+      const session = await sessionManager.getSession(panel.sessionId);
+      if (!session) throw new Error(`Session ${panel.sessionId} not found`);
+      // Resolve the gate vehicle through the chat-sentinel provider, NOT a raw
+      // `chat_run_id` read. The provider revives a `__quick__` sentinel that boot
+      // recovery force-failed on app restart; without it a RESUMED chat is
+      // stamped with a terminal CYBOFLOW_RUN_ID, so every run-scoped cyboflow_*
+      // MCP write rejects with `run_not_active` and every approval-gate grab
+      // (`UPDATE … WHERE status='running'`) silently misses. The Claude lanes get
+      // this via resolveGateRunId inside their managers; these lanes spawn from
+      // here with a caller-supplied runId, so it resolves at this seam instead.
+      // Called BEFORE the user turn is persisted and the session flips 'running',
+      // so a ChatDuringActiveFlowError refusal leaves no phantom turn behind.
+      const runId = chatSentinelProvider
+        ? chatSentinelProvider(panel.sessionId)
+        : (dbSession.chat_run_id ?? dbSession.run_id); // uninjected fallback (tests/boot)
+      if (!runId) throw new Error('Session is missing its chat run');
+
+      const settings = databaseService.getPanelSettings(panelId);
+      const model = typeof settings?.model === 'string' ? settings.model : undefined;
+      // Per-turn reasoning effort (IDEA-029), persisted on the panel by the wizard
+      // launch / composer EffortPill exactly like `model`. Codex maps it onto the
+      // app-server turn's `effort` and OMP onto `--thinking`, so a structured quick
+      // session honors it on the very NEXT turn with no warm-respawn — contrast the
+      // Claude SDK seam, where it rides Options.effort and must sit in the warm
+      // fingerprint. (OMP re-guards the value against its own scale at the spawn.)
+      const rawEffort = settings?.reasoningEffort;
+      const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
+      // PER-PANEL resume target. `runId` here is the session's chat sentinel —
+      // shared by EVERY chat panel of the session — so the run-scoped lookup handed
+      // a second chat the FIRST chat's thread and both panels then replayed
+      // one conversation (the "two chats share a history" bug). Resolve by panelId
+      // instead so each chat continues its OWN thread.
+      //
+      // Pre-087 rows carry panel_id NULL and belong to the panel that existed when
+      // they were written — the session's FIRST chat panel. Fall back to the
+      // run-scoped lookup for exactly that panel so an in-flight single-chat
+      // session keeps resuming across the upgrade; any other panel starts fresh,
+      // which is the correct answer for a chat that never had its own thread.
+      //
+      // The target must match THIS lane's provider AND runtime: a panel whose
+      // session was switched between vendors would otherwise hand one vendor's
+      // opaque session handle to another.
+      const invocationStore = new AgentInvocationStore(databaseService.getDb());
+      const isFirstChatPanel = panelId === resolveClaudePanelId(panel.sessionId);
+      const resumeTarget =
+        invocationStore.getLatestPanelResumeTarget(runId, panelId) ??
+        (isFirstChatPanel ? invocationStore.getLatestTopLevelResumeTarget(runId) : null);
+      const resumeSessionId =
+        resumeTarget?.provider === provider && resumeTarget.runtime === lane
+          ? resumeTarget.externalSessionId
+          : undefined;
+      const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
+        ? dbSession.agent_permission_mode
         : undefined;
-    const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
-      ? dbSession.agent_permission_mode
-      : undefined;
 
-    const priorStatus = session.status;
-    sessionManager.addPanelConversationMessage(panelId, 'user', text);
-    await sessionManager.updateSession(panel.sessionId, { status: 'running' });
-    try {
-      await codexSdkManager.spawnCliProcess({
-        panelId,
-        sessionId: panel.sessionId,
-        runId,
-        worktreePath: session.worktreePath,
-        prompt: text,
-        systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
-        ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
-        ...(model !== undefined ? { model } : {}),
-        ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
-        ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-      });
-    } catch (error) {
-      // The turn never started, so nothing will ever flip 'running' back — the
-      // turn-end listeners key off events this spawn would have emitted. Leaving
-      // it stuck paints a "Codex is thinking…" placeholder and an un-stoppable
-      // Stop button over an idle chat. Restore the pre-turn status and re-throw
-      // so the caller still reports the failure.
+      const priorStatus = session.status;
+      sessionManager.addPanelConversationMessage(panelId, 'user', text);
+      await sessionManager.updateSession(panel.sessionId, { status: 'running' });
       try {
-        await sessionManager.updateSession(panel.sessionId, { status: priorStatus });
-      } catch (revertError: unknown) {
-        console.error(`[IPC] Failed to restore status after a Codex turn spawn failure on ${panelId}:`, revertError);
+        await manager.spawnCliProcess({
+          panelId,
+          sessionId: panel.sessionId,
+          runId,
+          worktreePath: session.worktreePath,
+          prompt: text,
+          ...(briefing !== undefined ? { systemPromptAppend: briefing } : {}),
+          ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+        });
+      } catch (error) {
+        // The turn never started, so nothing will ever flip 'running' back — the
+        // turn-end listeners key off events this spawn would have emitted. Leaving
+        // it stuck paints a "<vendor> is thinking…" placeholder and an un-stoppable
+        // Stop button over an idle chat. Restore the pre-turn status and re-throw
+        // so the caller still reports the failure.
+        try {
+          await sessionManager.updateSession(panel.sessionId, { status: priorStatus });
+        } catch (revertError: unknown) {
+          console.error(`[IPC] Failed to restore status after a ${label} turn spawn failure on ${panelId}:`, revertError);
+        }
+        throw error;
       }
-      throw error;
-    }
-  };
+    };
 
-  // Put un-delivered entries BACK at the front of the queue. A queued message is
-  // the user's, so it must never be silently dropped: if delivery cannot happen
-  // now it stays queued (still listed + dequeuable by click-to-reopen) and the
-  // next rest boundary retries it.
-  const requeueCodexPanelInput = (panelId: string, entries: QueuedCodexPanelInput[]): void => {
-    if (entries.length === 0) return;
-    const current = codexPanelInputQueues.get(panelId) ?? [];
-    codexPanelInputQueues.set(panelId, [...entries, ...current]);
-  };
+    // Put un-delivered entries BACK at the front of the queue. A queued message is
+    // the user's, so it must never be silently dropped: if delivery cannot happen
+    // now it stays queued (still listed + dequeuable by click-to-reopen) and the
+    // next rest boundary retries it.
+    const requeue = (panelId: string, entries: QueuedPanelInput[]): void => {
+      if (entries.length === 0) return;
+      const current = queues.get(panelId) ?? [];
+      queues.set(panelId, [...entries, ...current]);
+    };
 
-  const flushCodexPanelInputQueueIfIdle = (panelId: string): void => {
-    if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) return;
-    const queued = codexPanelInputQueues.get(panelId);
-    if (!queued?.length) return;
-    codexPanelInputQueues.delete(panelId);
-    // Deliver on a LATER macrotask, never inline. This flush normally runs inside
-    // the codex 'exit' emit, which fires from within spawnCliProcess's own try
-    // block — its `finally` has NOT yet released the spawnKey reservation, so
-    // spawning here synchronously always throws "Codex app-server process already
-    // running for spawn <panelId>" and would strand the message. setImmediate lets
-    // that reservation (and the awaited spawn promise) settle first; this mirrors
-    // ClaudeCodeManager's setImmediate quick-input drain for the same reason.
-    setImmediate(() => {
-      // A new turn may have started on the deferred tick — hand the messages back
-      // so they ride that turn's rest boundary instead of racing it.
-      if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) {
-        requeueCodexPanelInput(panelId, queued);
-        return;
-      }
-      const combined = queued.map((entry) => entry.text).join('\n\n');
-      void startCodexSdkTurn(panelId, combined).catch((error: unknown) => {
-        console.error(`[IPC] Codex panel-input queue delivery failed for ${panelId}:`, error);
-        requeueCodexPanelInput(panelId, queued);
+    const flushIfIdle = (panelId: string): void => {
+      if (!manager || manager.isPanelRunning(panelId)) return;
+      const queued = queues.get(panelId);
+      if (!queued?.length) return;
+      queues.delete(panelId);
+      // Deliver on a LATER macrotask, never inline. This flush normally runs inside
+      // the manager's 'exit' emit, which fires from within spawnCliProcess's own try
+      // block — its `finally` has NOT yet released the spawnKey reservation, so
+      // spawning here synchronously always throws "… already running for spawn
+      // <panelId>" and would strand the message. setImmediate lets that reservation
+      // (and the awaited spawn promise) settle first; this mirrors
+      // ClaudeCodeManager's setImmediate quick-input drain for the same reason.
+      setImmediate(() => {
+        // A new turn may have started on the deferred tick — hand the messages back
+        // so they ride that turn's rest boundary instead of racing it.
+        if (!manager || manager.isPanelRunning(panelId)) {
+          requeue(panelId, queued);
+          return;
+        }
+        const combined = queued.map((entry) => entry.text).join('\n\n');
+        void startTurn(panelId, combined).catch((error: unknown) => {
+          console.error(`[IPC] ${label} panel-input queue delivery failed for ${panelId}:`, error);
+          requeue(panelId, queued);
+        });
       });
+    };
+
+    manager?.on('output', (payload: {
+      panelId?: string;
+      sessionId?: string;
+      type?: string;
+      data?: unknown;
+      timestamp?: Date;
+    }) => {
+      if (typeof payload.panelId !== 'string' || typeof payload.sessionId !== 'string') return;
+      const panel = panelManager.getPanel(payload.panelId);
+      if (!panel || panel.sessionId !== payload.sessionId || panel.type !== 'claude') return;
+      try {
+        sessionManager.addPanelOutput(payload.panelId, {
+          type: payload.type === 'json' || payload.type === 'stderr' || payload.type === 'error'
+            ? payload.type
+            : 'stdout',
+          data: payload.data ?? '',
+          timestamp: payload.timestamp ?? new Date(),
+        });
+      } catch (error) {
+        console.error(`[IPC] Failed to store ${label} SDK panel output for ${payload.panelId}:`, error);
+      }
     });
+
+    manager?.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+      if (typeof payload.sessionId !== 'string') return;
+      // Lane, not session runtime: this manager also serves an sdk-override panel
+      // inside the same vendor's PTY session, whose runtime would fail a
+      // `=== '<lane>'` test and leave the session stuck showing "working" after
+      // the turn ended. With no panelId on the payload there is no lane to read —
+      // keep the session-level test rather than resting a session this manager
+      // may not own.
+      const exitLane = typeof payload.panelId === 'string' ? laneForPanelId(payload.panelId) : undefined;
+      const dbSession = databaseService.getSession(payload.sessionId);
+      if (exitLane ? exitLane !== lane : dbSession?.agent_runtime !== lane) return;
+      try {
+        sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
+      } catch (error) {
+        console.error(`[IPC] Failed to update ${label} SDK session status for ${payload.sessionId}:`, error);
+      }
+      if (typeof payload.panelId === 'string') {
+        flushIfIdle(payload.panelId);
+      }
+    });
+
+    return {
+      lane,
+      provider,
+      label,
+      manager,
+      startTurn,
+      // Buffer one mid-turn message and try an immediate flush (the turn may have
+      // ended between the caller's running-probe and here). `id` is the client
+      // pending-send id so panels:dequeue-input (click-to-reopen) targets this
+      // exact entry. Shared by panels:queue-input and the panels:continue branch.
+      enqueue: (panelId, id, text) => {
+        const queue = queues.get(panelId) ?? [];
+        queue.push({ id, text: text.trim() });
+        queues.set(panelId, queue);
+        flushIfIdle(panelId);
+      },
+      listQueued: (panelId) => [...(queues.get(panelId) ?? [])],
+      dequeue: (panelId, id) => {
+        const queue = queues.get(panelId) ?? [];
+        const next = queue.filter((entry) => entry.id !== id);
+        if (next.length === 0) queues.delete(panelId);
+        else queues.set(panelId, next);
+        return next.length !== queue.length;
+      },
+    };
   };
 
-  // Buffer one codex-sdk mid-turn message and try an immediate flush (the turn may
-  // have ended between the caller's running-probe and here). `id` is the client
-  // pending-send id so panels:dequeue-input (click-to-reopen) targets this exact
-  // entry. Shared by panels:queue-input and the panels:continue codex branch.
-  const enqueueCodexPanelInput = (panelId: string, id: string, text: string): void => {
-    const queue = codexPanelInputQueues.get(panelId) ?? [];
-    queue.push({ id, text: text.trim() });
-    codexPanelInputQueues.set(panelId, queue);
-    flushCodexPanelInputQueueIfIdle(panelId);
+  /** lane → its structured chat driver. THE dispatch table for these lanes. */
+  const structuredChatLanes = new Map<PanelLane, StructuredChatLane>(
+    [
+      createStructuredChatLane({
+        lane: 'codex-sdk',
+        manager: codexSdkManager,
+        briefing: QUICK_CODEX_SDK_BRIEFING,
+      }),
+      // No briefing: OMP's spawn has no `--append-system-prompt` equivalent, so
+      // passing one would be silently dropped rather than delivered.
+      createStructuredChatLane({ lane: 'omp-sdk', manager: ompSdkManager }),
+    ].map((entry) => [entry.lane, entry]),
+  );
+
+  /** The structured driver owning this panel, or undefined for a Claude/PTY lane. */
+  const structuredChatLaneForPanel = (panel: ToolPanel | undefined): StructuredChatLane | undefined =>
+    panel && panel.type === 'claude' ? structuredChatLanes.get(laneForPanel(panel)) : undefined;
+
+  /**
+   * The PTY-backed quick-session lanes cyboflow spawns from THIS layer (Codex
+   * and OMP; the Claude REPL resolves its own gate inside its manager and keeps
+   * its own branch below). Same shape reason as {@link structuredChatLanes}.
+   */
+  interface QuickPtyLane {
+    readonly label: string;
+    isPanelRunning(panelId: string): boolean;
+    relayUserTurn(panelId: string, input: string): void;
+    /** Deterministic at-spawn runId→panelId seed on the dispatch facade. */
+    registerPanel(runId: string, panelId: string): void;
+    startPanel(options: {
+      panelId: string;
+      sessionId: string;
+      worktreePath: string;
+      prompt: string;
+      permissionMode?: 'approve' | 'ignore';
+      model?: string;
+      runId?: string;
+      reasoningEffort?: ReasoningEffort;
+    }): Promise<void>;
+    /** First-turn context briefing for an eager (promptless) spawn. */
+    readonly briefing: string;
+  }
+
+  const quickPtyLanes = new Map<PanelLane, QuickPtyLane>([
+    [
+      'codex-pty',
+      {
+        label: AGENT_PROVIDER_LABELS.codex,
+        isPanelRunning: (panelId) => codexPtyManager.isPanelRunning(panelId),
+        relayUserTurn: (panelId, input) => codexPtyManager.relayUserTurn(panelId, input),
+        registerPanel: registerCodexPtyPanel,
+        startPanel: (o) =>
+          codexPtyManager.startPanel(
+            o.panelId,
+            o.sessionId,
+            o.worktreePath,
+            o.prompt,
+            o.permissionMode,
+            o.model,
+            o.runId,
+            o.reasoningEffort,
+          ),
+        briefing: QUICK_CODEX_PTY_BRIEFING,
+      },
+    ],
+    [
+      'omp-pty',
+      {
+        label: AGENT_PROVIDER_LABELS.omp,
+        isPanelRunning: (panelId) => ompPtyManager.isPanelRunning(panelId),
+        relayUserTurn: (panelId, input) => ompPtyManager.relayUserTurn(panelId, input),
+        registerPanel: registerOmpPtyPanel,
+        // OMP's TUI takes no per-turn thinking flag on this lane (the level is
+        // spawn-baked on the RPC lane only), so reasoningEffort is not forwarded.
+        startPanel: (o) =>
+          ompPtyManager.startPanel(
+            o.panelId,
+            o.sessionId,
+            o.worktreePath,
+            o.prompt,
+            o.permissionMode,
+            o.model,
+            o.runId,
+          ),
+        briefing: QUICK_OMP_PTY_BRIEFING,
+      },
+    ],
+  ]);
+
+  /**
+   * The manager that owns a lane's live process for Stop / Dismiss close-out, or
+   * undefined for the two CLAUDE lanes — those keep their own fallbacks (the
+   * interactive one degrades to `killLiveSession` when its manager is absent,
+   * and `claudeCodeManager.stopPanel` is the session-level Stop that predates
+   * the interactive split).
+   */
+  const laneStopOwner = (lane: PanelLane): AbstractCliManager | undefined => {
+    switch (lane) {
+      case 'codex-sdk':
+        return codexSdkManager;
+      case 'codex-pty':
+        return codexPtyManager;
+      case 'omp-sdk':
+        return ompSdkManager;
+      case 'omp-pty':
+        return ompPtyManager;
+      default:
+        return undefined;
+    }
   };
 
-  codexSdkManager?.on('output', (payload: {
-    panelId?: string;
-    sessionId?: string;
-    type?: string;
-    data?: unknown;
-    timestamp?: Date;
-  }) => {
-    if (typeof payload.panelId !== 'string' || typeof payload.sessionId !== 'string') return;
-    const panel = panelManager.getPanel(payload.panelId);
-    if (!panel || panel.sessionId !== payload.sessionId || panel.type !== 'claude') return;
-    try {
-      sessionManager.addPanelOutput(payload.panelId, {
-        type: payload.type === 'json' || payload.type === 'stderr' || payload.type === 'error'
-          ? payload.type
-          : 'stdout',
-        data: payload.data ?? '',
-        timestamp: payload.timestamp ?? new Date(),
-      });
-    } catch (error) {
-      console.error(`[IPC] Failed to store Codex SDK panel output for ${payload.panelId}:`, error);
-    }
-  });
-
-  codexSdkManager?.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+  /**
+   * Rest the session when a PTY lane's process exits. Lane, not session runtime:
+   * the manager also serves an interactive-override panel inside the same
+   * vendor's SDK session, whose runtime would fail a `=== '<lane>'` test and
+   * leave that session stuck showing "working".
+   */
+  const handlePtyLaneExit = (
+    lane: PanelLane,
+    payload: { panelId?: string; sessionId?: string; exitCode?: number },
+  ): void => {
     if (typeof payload.sessionId !== 'string') return;
-    // Lane, not session runtime: this manager also serves an sdk-override panel
-    // inside a codex-PTY session, whose runtime would fail a `=== 'codex-sdk'`
-    // test and leave the session stuck showing "working" after the turn ended.
-    // With no panelId on the payload there is no lane to read — keep the old
-    // session-level test rather than resting a session this manager may not own.
-    const exitLane = typeof payload.panelId === 'string' ? laneForPanelId(payload.panelId) : undefined;
-    const dbSession = databaseService.getSession(payload.sessionId);
-    if (exitLane ? exitLane !== 'codex-sdk' : dbSession?.agent_runtime !== 'codex-sdk') return;
-    try {
-      sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
-    } catch (error) {
-      console.error(`[IPC] Failed to update Codex SDK session status for ${payload.sessionId}:`, error);
-    }
-    if (typeof payload.panelId === 'string') {
-      flushCodexPanelInputQueueIfIdle(payload.panelId);
-    }
-  });
-
-  codexPtyManager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
-    if (typeof payload.sessionId !== 'string') return;
-    // Mirror of the codex-sdk listener above: this manager now also serves an
-    // interactive-override panel inside a codex-SDK session.
     const ptyExitLane = typeof payload.panelId === 'string' ? laneForPanelId(payload.panelId) : undefined;
     const dbSession = databaseService.getSession(payload.sessionId);
-    if (ptyExitLane ? ptyExitLane !== 'codex-pty' : dbSession?.agent_runtime !== 'codex-pty') return;
+    if (ptyExitLane ? ptyExitLane !== lane : dbSession?.agent_runtime !== lane) return;
     try {
       sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
     } catch (error) {
-      console.error(`[IPC] Failed to update Codex PTY session status for ${payload.sessionId}:`, error);
+      console.error(`[IPC] Failed to update ${lane} session status for ${payload.sessionId}:`, error);
     }
-  });
+  };
+
+  for (const [ptyLane, manager] of [
+    ['codex-pty', codexPtyManager],
+    ['omp-pty', ompPtyManager],
+  ] as const) {
+    manager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+      handlePtyLaneExit(ptyLane, payload);
+    });
+  }
 
   // Wire the panel-input-queue re-drive collaborator ("always allow messaging a
   // running quick session"). At a turn's rest boundary ClaudeCodeManager hands us
@@ -696,14 +911,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedAgentRuntime = isSessionAgentRuntime(request.agentRuntime)
         ? request.agentRuntime
         : undefined;
-      if (
-        requestedAgentProvider === 'codex' ||
-        requestedAgentRuntime === 'codex-sdk' ||
-        requestedAgentRuntime === 'codex-pty'
-      ) {
+      // Non-quick sessions are a Claude-only surface: TaskQueue.createSession's
+      // spawn path resolves the Claude managers directly, so naming any other
+      // vendor here would run as Claude. Derived from the provider registry
+      // rather than listing Codex's runtimes, so a third provider is refused the
+      // day it is declared instead of the day someone remembers this branch.
+      const nonClaudeRequest: AgentProvider | undefined =
+        requestedAgentProvider !== undefined && requestedAgentProvider !== 'claude'
+          ? requestedAgentProvider
+          : requestedAgentRuntime !== undefined && providerForRuntime(requestedAgentRuntime) !== 'claude'
+            ? providerForRuntime(requestedAgentRuntime)
+            : undefined;
+      if (nonClaudeRequest !== undefined) {
         return {
           success: false,
-          error: 'Codex runtimes are not wired yet. Use Claude for this build.',
+          error: `${AGENT_PROVIDER_LABELS[nonClaudeRequest]} runtimes are not wired yet. Use Claude for this build.`,
         };
       }
       const projectedAgentRuntime =
@@ -948,19 +1170,35 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         isAgentProviderEnabled(providerAccess, 'codex');
 
       // Design Mode (design-mode.md "Session plumbing — SDK-pinned,
-      // fail-closed"): neither Codex flag may ever resolve true for a design
+      // fail-closed"): no non-Claude runtime may ever resolve for a design
       // launch, regardless of what the request's own provider/runtime fields
-      // say — this is what keeps the eager-PTY-spawn blocks below (gated on
-      // `useCodexPty`, independently of the resolved substrate) from ever
-      // firing for a design session. isDesignSession is computed above from
+      // say — this is what keeps the eager-PTY-spawn block below (gated on the
+      // resolved runtime's lane, independently of the resolved substrate) from
+      // ever firing for a design session. isDesignSession is computed above from
       // designIdeaId, before this point.
-      const useCodexSdk =
-        !isDesignSession &&
-        (requestedAgentRuntime === 'codex-sdk' ||
-          ((requestedAgentProvider === 'codex' || fallbackToCodex) &&
-            requestedAgentRuntime === undefined));
-      const useCodexPty =
-        !isDesignSession && requestedAgentRuntime === 'codex-pty';
+      //
+      // ONE resolved runtime replaces the `useCodexSdk`/`useCodexPty` boolean
+      // pair: a third provider would otherwise need a third pair, and every
+      // downstream site would need to learn about it.
+      const quickProvider: AgentProvider | undefined =
+        requestedAgentProvider ?? (fallbackToCodex ? 'codex' : undefined);
+      const quickResolvedRuntime: SessionAgentRuntime | undefined = isDesignSession
+        ? undefined
+        : (requestedAgentRuntime ??
+          // A launch naming only a PROVIDER lands on that provider's STRUCTURED
+          // lane. Claude is deliberately excluded: it must stay `undefined` so
+          // the substrate ladder below (which defaults quick sessions to the
+          // PTY) still decides sdk-vs-interactive for it.
+          (quickProvider !== undefined && quickProvider !== 'claude'
+            ? QUICK_PROVIDER_SDK_RUNTIME[quickProvider]
+            : undefined));
+      const quickResolvedProvider: AgentProvider =
+        quickResolvedRuntime !== undefined ? providerForRuntime(quickResolvedRuntime) : 'claude';
+      /** A non-Claude runtime fixes the substrate outright; Claude's is a ladder. */
+      const nonClaudeQuickRuntime =
+        quickResolvedRuntime !== undefined && quickResolvedProvider !== 'claude'
+          ? quickResolvedRuntime
+          : undefined;
 
       const substrateFromAgentRuntime =
         requestedAgentRuntime === 'claude-interactive'
@@ -973,10 +1211,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // untyped IPC value; an absent/invalid value leaves the run + session on
       // the SDK default (byte-identical to before). During provider/runtime
       // migration, a Claude agentRuntime request projects back to substrate.
-      const requestedSubstrate = useCodexSdk
-        ? 'sdk'
-        : useCodexPty
-          ? 'interactive'
+      const requestedSubstrate = nonClaudeQuickRuntime !== undefined
+        ? (isPtyLane(nonClaudeQuickRuntime) ? 'interactive' : 'sdk')
         : isCliSubstrate(request.substrate)
           ? request.substrate
           : substrateFromAgentRuntime;
@@ -988,8 +1224,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
       // Per-launch model config for the quick session. Picker values are
-      // provider-scoped so a stale Claude alias cannot be stamped onto Codex.
-      const quickAgentProvider: AgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
+      // provider-scoped so a stale Claude alias cannot be stamped onto another vendor.
+      const quickAgentProvider: AgentProvider = quickResolvedProvider;
       const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
       const requestedModel = firstProviderModel(
         quickAgentProvider,
@@ -1020,15 +1256,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // requireSdkSubstrate threads WorkflowRegistry.createRun's
       // post-resolution belt-guard (step 3) for the same invariant. (Note:
       // isDesignSession itself is declared earlier, alongside designIdeaId,
-      // because it also gates useCodexSdk/useCodexPty above.)
+      // because it also gates quickResolvedRuntime above.)
       const quickAgentProviderForLaunch: AgentProvider = isDesignSession ? 'claude' : quickAgentProvider;
-      const quickAgentRuntimeForLaunch = isDesignSession
+      const quickAgentRuntimeForLaunch: SessionAgentRuntime | undefined = isDesignSession
         ? 'claude-sdk'
-        : useCodexSdk
-          ? 'codex-sdk'
-          : useCodexPty
-            ? 'codex-pty'
-            : requestedAgentRuntime;
+        : quickResolvedRuntime;
       const quickRequestedSubstrateForLaunch = isDesignSession ? 'sdk' : requestedSubstrate;
 
       // Create the session + wire the __quick__ sentinel run via the SHARED core
@@ -1142,8 +1374,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // so the two callers can never drift.
       stampQuickSessionRuntimeConfig(db, session.id, {
         resolvedSubstrate,
-        useCodexSdk,
-        useCodexPty,
+        ...(nonClaudeQuickRuntime !== undefined ? { sessionAgentRuntime: nonClaudeQuickRuntime } : {}),
         requestedAgentMode,
       });
       // Persist the per-session agent effort (migration 029) so the unified
@@ -1202,7 +1433,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // only when the REPL EXITS (persistent-session contract) — awaiting would
       // deadlock create-quick until the session ends.
       let claudePanelId: string | undefined;
-      if (useCodexPty) {
+      // A non-Claude PTY launch (codex-pty / omp-pty) eager-spawns through its
+      // lane record; the Claude REPL keeps its own branch below because it
+      // resolves its gate runId inside its own manager and carries the
+      // ultracode/fast-mode spawn options these lanes have no equivalent for.
+      const eagerPtyLane =
+        nonClaudeQuickRuntime !== undefined ? quickPtyLanes.get(nonClaudeQuickRuntime) : undefined;
+      if (eagerPtyLane) {
         try {
           const panel = await panelManager.createPanel({
             sessionId: session.id,
@@ -1216,25 +1453,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           if (requestedReasoningEffort !== undefined) {
             databaseService.updatePanelSettings(panel.id, { reasoningEffort: requestedReasoningEffort });
           }
-          registerCodexPtyPanel(runId, panel.id);
-          void codexPtyManager
-            .startPanel(
-              panel.id,
-              session.id,
-              session.worktreePath,
-              QUICK_CODEX_PTY_BRIEFING,
-              session.permissionMode,
-              requestedModel,
+          eagerPtyLane.registerPanel(runId, panel.id);
+          void eagerPtyLane
+            .startPanel({
+              panelId: panel.id,
+              sessionId: session.id,
+              worktreePath: session.worktreePath,
+              prompt: eagerPtyLane.briefing,
+              permissionMode: session.permissionMode,
+              model: requestedModel,
               runId,
-              requestedReasoningEffort,
-            )
+              reasoningEffort: requestedReasoningEffort,
+            })
             .catch((err: unknown) => {
-              console.error(`[IPC] Eager Codex PTY spawn failed for session ${session.id}:`, err);
-              reportEagerSpawnFailure(err, 'interactive', 'codex');
+              console.error(`[IPC] Eager ${eagerPtyLane.label} PTY spawn failed for session ${session.id}:`, err);
+              reportEagerSpawnFailure(err, 'interactive', quickResolvedProvider);
             });
           await sessionManager.updateSession(session.id, { status: 'running' });
         } catch (error) {
-          console.error(`[IPC] Failed to create Codex panel for quick session ${session.id}:`, error);
+          console.error(`[IPC] Failed to create ${eagerPtyLane.label} panel for quick session ${session.id}:`, error);
         }
       } else if (resolvedSubstrate === 'interactive' && configManager.isDemoMode()) {
         // Demo mode: the session is stamped 'interactive' (so ClaudePanel swaps
@@ -1441,22 +1678,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // Per-PANEL lane: a mixed session (an overridden chat next to inherited
           // ones) has panels on two different managers, so a session-level test
           // would leave the odd one out running.
-          switch (resolvePanelLane(dbSession, panel)) {
-            case 'codex-sdk':
-              await codexSdkManager.stopPanel(panel.id);
-              break;
-            case 'codex-pty':
-              await codexPtyManager.stopPanel(panel.id);
-              break;
-            case 'claude-interactive':
-              if (interactiveCliManager) {
-                await interactiveCliManager.stopPanel(panel.id);
-              } else if (dismissGateRunId) {
-                await killLiveSession(dismissGateRunId);
-              }
-              break;
-            default:
-              await claudeCodeManager.stopPanel(panel.id);
+          const dismissLane = resolvePanelLane(dbSession, panel);
+          const dismissOwner = laneStopOwner(dismissLane);
+          if (dismissOwner) {
+            await dismissOwner.stopPanel(panel.id);
+          } else if (dismissLane === 'claude-interactive') {
+            if (interactiveCliManager) {
+              await interactiveCliManager.stopPanel(panel.id);
+            } else if (dismissGateRunId) {
+              await killLiveSession(dismissGateRunId);
+            }
+          } else {
+            await claudeCodeManager.stopPanel(panel.id);
           }
         } catch (err) {
           console.warn(`[IPC:session] Failed to tear down live panel ${panel.id} for dismissed session ${sessionId}:`, err);
@@ -1737,45 +1970,53 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const rawPanelEffort = panelLaunchSettings?.reasoningEffort;
       const panelReasoningEffort = isAnyEffortLevel(rawPanelEffort) ? rawPanelEffort : undefined;
 
-      if (dbSession?.agent_runtime === 'codex-pty') {
-        if (codexPtyManager.isPanelRunning(claudePanel.id)) {
-          console.log(`[IPC] Relaying input into live Codex PTY for panel ${claudePanel.id}`);
-          codexPtyManager.relayUserTurn(claudePanel.id, finalInput);
+      // Lane, not session runtime: the two tests this replaces read the SESSION's
+      // runtime as if it also fixed the panel's substrate, so a per-panel
+      // override in a Codex session was answered by the wrong transport — and a
+      // binary `=== 'codex-*'` pair would have routed every OMP panel to Claude.
+      const inputLane = resolvePanelLane(dbSession, claudePanel);
+      const inputPtyLane = quickPtyLanes.get(inputLane);
+      if (inputPtyLane) {
+        if (inputPtyLane.isPanelRunning(claudePanel.id)) {
+          console.log(`[IPC] Relaying input into live ${inputPtyLane.label} PTY for panel ${claudePanel.id}`);
+          inputPtyLane.relayUserTurn(claudePanel.id, finalInput);
           await sessionManager.updateSession(sessionId, { status: 'running' });
         } else {
-          console.log(`[IPC] Codex PTY not running for panel ${claudePanel.id}, re-spawning fresh...`);
+          console.log(`[IPC] ${inputPtyLane.label} PTY not running for panel ${claudePanel.id}, re-spawning fresh...`);
           if (dbSession?.chat_run_id) {
-            registerCodexPtyPanel(dbSession.chat_run_id, claudePanel.id);
+            inputPtyLane.registerPanel(dbSession.chat_run_id, claudePanel.id);
           }
-          void codexPtyManager
-            .startPanel(
-              claudePanel.id,
+          void inputPtyLane
+            .startPanel({
+              panelId: claudePanel.id,
               sessionId,
-              session.worktreePath,
-              finalInput,
-              session.permissionMode,
-              panelModel,
-              dbSession?.chat_run_id ?? dbSession?.run_id ?? undefined,
-              panelReasoningEffort,
-            )
+              worktreePath: session.worktreePath,
+              prompt: finalInput,
+              permissionMode: session.permissionMode,
+              model: panelModel,
+              runId: dbSession?.chat_run_id ?? dbSession?.run_id ?? undefined,
+              reasoningEffort: panelReasoningEffort,
+            })
             .catch((err: unknown) => {
-              console.error(`[IPC] Codex PTY re-spawn failed for session ${sessionId}:`, err);
+              console.error(`[IPC] ${inputPtyLane.label} PTY re-spawn failed for session ${sessionId}:`, err);
             });
           await sessionManager.updateSession(sessionId, { status: 'running' });
         }
         return { success: true };
       }
 
-      if (dbSession?.agent_runtime === 'codex-sdk') {
-        if (!codexSdkManager) return { success: false, error: 'Codex SDK manager is not available' };
-        if (codexSdkManager.isPanelRunning(claudePanel.id)) {
+      const inputStructuredLane = structuredChatLanes.get(inputLane);
+      if (inputStructuredLane) {
+        const { manager, label } = inputStructuredLane;
+        if (!manager) return { success: false, error: `${label} SDK manager is not available` };
+        if (manager.isPanelRunning(claudePanel.id)) {
           return {
             success: false,
-            error: 'Codex is still processing the previous message.',
+            error: `${label} is still processing the previous message.`,
           };
         }
 
-        await startCodexSdkTurn(claudePanel.id, finalInput);
+        await inputStructuredLane.startTurn(claudePanel.id, finalInput);
         return { success: true };
       }
 
@@ -2755,54 +2996,61 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       switch (panel.type) {
         case 'claude':
           try {
-            // Codex-sdk quick sessions ride the SAME 'claude'-typed panel, but their
-            // turns run on the Codex app-server, not claudePanelManager. Give them
-            // the same mid-turn queue guard + Interrupt & send affordances Claude
-            // gets (this is the panel-scoped continue the composer routes codex
-            // continues through — see dispatchQuickSessionInput). isPanelRunning is
-            // exact for codex: warm-parked entries are NOT in `processes`, so there
-            // is no warm-idle false-positive (unlike Claude's isPanelTurnInFlight).
+            // Structured non-Claude quick sessions ride the SAME 'claude'-typed
+            // panel, but their turns run on that vendor's own transport, not
+            // claudePanelManager. Give them the same mid-turn queue guard +
+            // Interrupt & send affordances Claude gets (this is the panel-scoped
+            // continue the composer routes them through — see
+            // dispatchQuickSessionInput). isPanelRunning is exact for both: a
+            // warm-parked entry is NOT in `processes`, so there is no warm-idle
+            // false-positive (unlike Claude's isPanelTurnInFlight).
             const continueLane = laneForPanel(panel);
-            // The codex-pty lane relays a PANEL-SCOPED turn into this panel's own
-            // REPL. claudePanelManager below reaches only the two CLAUDE managers,
-            // so a Codex terminal panel — every panel of a codex-pty session, and
-            // an interactive override on a codex-sdk one — must be intercepted
-            // here or Claude would answer it. The claude-interactive lane is left
-            // on claudePanelManager.continuePanel, whose getCliManager already
-            // routes it correctly.
-            if (continueLane === 'codex-pty') {
+            // A non-Claude PTY lane relays a PANEL-SCOPED turn into this panel's
+            // own REPL. claudePanelManager below reaches only the two CLAUDE
+            // managers, so such a terminal panel — every panel of a codex-pty /
+            // omp-pty session, and an interactive override on a structured one —
+            // must be intercepted here or Claude would answer it. The
+            // claude-interactive lane is left on claudePanelManager.continuePanel,
+            // whose getCliManager already routes it correctly.
+            const continuePtyLane = quickPtyLanes.get(continueLane);
+            if (continuePtyLane) {
               const relayed = await relayOrSpawnPtyPanel(services, panel, input);
               if (relayed) return { success: true };
-              return { success: false, error: 'Could not reach the Codex terminal for this chat' };
+              return {
+                success: false,
+                error: `Could not reach the ${continuePtyLane.label} terminal for this chat`,
+              };
             }
-            if (continueLane === 'codex-sdk') {
-              if (!codexSdkManager) {
-                return { success: false, error: 'Codex SDK manager is not available' };
+            const continueStructuredLane = structuredChatLanes.get(continueLane);
+            if (continueStructuredLane) {
+              const { manager, label } = continueStructuredLane;
+              if (!manager) {
+                return { success: false, error: `${label} SDK manager is not available` };
               }
-              const codexRunning = codexSdkManager.isPanelRunning(panelId);
+              const laneRunning = manager.isPanelRunning(panelId);
               // Mid-turn (not interrupt): buffer + deliver at the turn's rest
-              // boundary (via the codex 'exit' → flushCodexPanelInputQueueIfIdle),
+              // boundary (via the manager's 'exit' → the lane's idle flush),
               // exactly like the Claude queue guard. Returns queued so the composer
               // flips its optimistic 'sending' row to the addressable 'queued' state
-              // instead of surfacing the old "Codex is still processing" failure.
-              if (codexRunning && !interrupt) {
-                console.log(`[IPC] panels:continue mid-turn (codex) for panel ${panelId} — queueing at the rest boundary`);
-                enqueueCodexPanelInput(panelId, pendingId ?? randomUUID(), input);
+              // instead of surfacing the old "still processing" failure.
+              if (laneRunning && !interrupt) {
+                console.log(`[IPC] panels:continue mid-turn (${continueLane}) for panel ${panelId} — queueing at the rest boundary`);
+                continueStructuredLane.enqueue(panelId, pendingId ?? randomUUID(), input);
                 return { success: true, data: { queued: true } };
               }
-              // Interrupt & send: abort the live app-server turn, then enqueue the
-              // message. The abort's 'exit' fires flushCodexPanelInputQueueIfIdle,
-              // which drives the queued message as a fresh (resumed) turn — so the
-              // deliver is race-free even if teardown outlives stopPanel here.
-              if (codexRunning && interrupt) {
-                console.log(`[IPC] panels:continue interrupt (codex) for panel ${panelId} — aborting the in-flight turn first`);
-                await codexSdkManager.stopPanel(panelId);
-                enqueueCodexPanelInput(panelId, pendingId ?? randomUUID(), input);
+              // Interrupt & send: abort the live turn, then enqueue the message.
+              // The abort's 'exit' fires the lane's idle flush, which drives the
+              // queued message as a fresh (resumed) turn — so the deliver is
+              // race-free even if teardown outlives stopPanel here.
+              if (laneRunning && interrupt) {
+                console.log(`[IPC] panels:continue interrupt (${continueLane}) for panel ${panelId} — aborting the in-flight turn first`);
+                await manager.stopPanel(panelId);
+                continueStructuredLane.enqueue(panelId, pendingId ?? randomUUID(), input);
                 return { success: true };
               }
-              // Idle: start the turn now (startCodexSdkTurn resumes the conversation
-              // via the persisted external session id).
-              await startCodexSdkTurn(panelId, input);
+              // Idle: start the turn now (startTurn resumes the conversation via
+              // the persisted external session id).
+              await continueStructuredLane.startTurn(panelId, input);
               return { success: true };
             }
 
@@ -2964,8 +3212,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Nothing to queue' };
       }
       const panel = panelManager.getPanel(panelId);
-      if (panel && laneForPanel(panel) === 'codex-sdk') {
-        enqueueCodexPanelInput(panelId, id, text);
+      const queueLane = structuredChatLaneForPanel(panel);
+      if (queueLane) {
+        queueLane.enqueue(panelId, id, text);
         return { success: true, data: { queued: true } };
       }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
@@ -2990,8 +3239,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
     try {
       const panel = panelManager.getPanel(panelId);
-      if (panel && laneForPanel(panel) === 'codex-sdk') {
-        return { success: true, data: [...(codexPanelInputQueues.get(panelId) ?? [])] };
+      const listLane = structuredChatLaneForPanel(panel);
+      if (listLane) {
+        return { success: true, data: listLane.listQueued(panelId) };
       }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: true, data: [] };
@@ -3006,12 +3256,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   ipcMain.handle('panels:dequeue-input', async (_event, panelId: string, id: string) => {
     try {
       const panel = panelManager.getPanel(panelId);
-      if (panel && laneForPanel(panel) === 'codex-sdk') {
-        const queue = codexPanelInputQueues.get(panelId) ?? [];
-        const next = queue.filter((entry) => entry.id !== id);
-        if (next.length === 0) codexPanelInputQueues.delete(panelId);
-        else codexPanelInputQueues.set(panelId, next);
-        return { success: true, data: { dequeued: next.length !== queue.length } };
+      const dequeueLane = structuredChatLaneForPanel(panel);
+      if (dequeueLane) {
+        return { success: true, data: { dequeued: dequeueLane.dequeue(panelId, id) } };
       }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: false, error: 'Queue not supported on this CLI manager' };
@@ -3193,16 +3440,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // Per-PANEL lane — see the dismiss teardown above. claudeCodeManager
           // covers both Claude lanes here (its stopPanel is the session-level
           // Stop that predates the interactive split).
-          switch (resolvePanelLane(dbSession, claudePanel)) {
-            case 'codex-sdk':
-              await codexSdkManager.stopPanel(claudePanel.id);
-              break;
-            case 'codex-pty':
-              await codexPtyManager.stopPanel(claudePanel.id);
-              break;
-            default:
-              await claudeCodeManager.stopPanel(claudePanel.id);
-          }
+          const stopOwner = laneStopOwner(resolvePanelLane(dbSession, claudePanel));
+          await (stopOwner ?? claudeCodeManager).stopPanel(claudePanel.id);
         }
       } else {
         // Fallback to session-based stop

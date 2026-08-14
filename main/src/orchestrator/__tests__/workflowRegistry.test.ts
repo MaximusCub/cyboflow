@@ -1164,33 +1164,104 @@ describe('WorkflowRegistry', () => {
     // ───── storable-but-not-launchable runtimes ─────
     //
     // createRun accepts the STORABLE set so the `__quick__` sentinel can carry a
-    // session's own runtime, but its stamp ladder only resolves Claude and Codex.
-    // Anything else matched none of the ladder's tests and fell through to the
-    // Claude floor — silently running a different vendor than was asked for,
-    // which is the whole class of bug the provider registry exists to stop. The
-    // arms that stamp OMP land with its managers; until then this must be loud.
-    it('refuses a runtime that is storable but has no launch resolution yet', () => {
-      const workflowId = registry.ensureQuickWorkflow(1);
+    // session's own runtime, but a real workflow LAUNCH is narrower: it may only
+    // name a runtime the flow machinery can deploy on. omp-sdk is storable and
+    // NOT launchable, so the sentinel accepts it (dropping it would misroute an
+    // OMP chat to Claude — the silent-floor bug the provider registry exists to
+    // stop) while a workflow launch must still refuse it loudly.
+    //
+    // These registries enable OMP explicitly: the provider is absent⇒DISABLED,
+    // so the access gate would otherwise answer first and prove nothing about
+    // the launch-resolution guard.
+    const ompEnabledRegistry = (): WorkflowRegistry =>
+      new WorkflowRegistry(dbAdapter(db), logger, {
+        ...makeConfig('default'),
+        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true }),
+      });
+
+    it('refuses a storable-but-not-launchable runtime on a real workflow launch', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-not-launchable.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+            requestedAgentRuntime: 'omp-sdk',
+          }),
+        ).toThrow(/has no launch resolution yet/);
+      });
+    });
+
+    it('refuses a provider with no launch resolution even without a runtime', async () => {
+      // The provider half has to be guarded independently: a variant row or an
+      // MCP-written config can name a provider with no runtime beside it.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-provider-only.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+          }),
+        ).toThrow(/has no launch resolution yet/);
+      });
+    });
+
+    it('STAMPS omp-sdk on the __quick__ sentinel (the storable-runtime relaxation)', () => {
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      const { runId, substrate } = gated.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
+        requestedAgentProvider: 'omp',
+        requestedAgentRuntime: 'omp-sdk',
+      });
+
+      expect(substrate).toBe('sdk');
+      const row = db
+        .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+        .get(runId) as { agent_provider: string; agent_runtime: string };
+      // NOT the Claude floor: the dispatch facade reads this row back to pick
+      // the owning manager, so a floored stamp is a misrouted chat.
+      expect(row).toEqual({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+    });
+
+    it('refuses an omp-sdk sentinel paired with the interactive substrate', () => {
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
 
       expect(() =>
-        registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+        gated.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
           requestedAgentProvider: 'omp',
           requestedAgentRuntime: 'omp-sdk',
         }),
-      ).toThrow(/has no launch resolution yet/);
+      ).toThrow(/substrate interactive conflicts with agentRuntime omp-sdk/);
     });
 
-    it('refuses a provider with no launch resolution even without a runtime', () => {
-      // The provider half has to be guarded independently: a variant row or an
-      // MCP-written config can name a provider with no runtime beside it, and
-      // the ladder's `codexExplicit`/`claudeExplicit` tests would both miss it.
-      const workflowId = registry.ensureQuickWorkflow(1);
+    // The access gate is the reason the relaxation is safe: OMP is the first
+    // provider whose ABSENT access key means DISABLED, so a sentinel create on
+    // an install that has never seen the OMP card fails closed.
+    it('rejects an OMP sentinel when the provider access map omits OMP entirely', () => {
+      const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+        ...makeConfig('default'),
+        getAgentProviderAccess: () => ({ claude: true, codex: true }),
+      });
+      const workflowId = gated.ensureQuickWorkflow(1);
 
       expect(() =>
-        registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+        gated.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
           requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
         }),
-      ).toThrow(/has no launch resolution yet/);
+      ).toThrow(/OMP provider is disabled/);
     });
 
     it('still accepts every launchable runtime unchanged', () => {

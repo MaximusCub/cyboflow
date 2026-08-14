@@ -29,6 +29,7 @@ import {
 } from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
+import { isPtyLane } from './panelLane';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -293,8 +294,15 @@ export async function createQuickSessionCore(
 export interface QuickSessionRuntimeStampInput {
   /** The RESOLVED substrate returned by the core's sentinel createRun. */
   resolvedSubstrate: CliSubstrate;
-  useCodexSdk: boolean;
-  useCodexPty: boolean;
+  /**
+   * The NON-Claude runtime this launch resolved onto, when it resolved onto one
+   * ('codex-sdk' | 'codex-pty' | 'omp-sdk' | 'omp-pty'). Undefined means Claude,
+   * whose runtime is derived from the resolved substrate instead.
+   *
+   * ONE field replaces the `useCodexSdk`/`useCodexPty` boolean pair: a third
+   * provider would otherwise need a third pair here and at both call sites.
+   */
+  sessionAgentRuntime?: SessionAgentRuntime;
   /** Only stamped when explicitly chosen — undefined keeps the global default (NULL). */
   requestedAgentMode?: PermissionMode;
 }
@@ -315,6 +323,11 @@ export interface QuickSessionRuntimeStampInput {
  *   CYBOFLOW_SUBSTRATE, and stamping only on explicit request would leave the
  *   run row saying interactive while the session behaved SDK. NULL remains the
  *   legacy/SDK meaning for pre-migration rows only.
+ *
+ * A PTY-transport runtime (codex-pty, omp-pty) also FORCES `substrate` to
+ * 'interactive': the sentinel run only carries the STORABLE runtimes, so a PTY
+ * launch reaches createRun with a substrate request and no runtime, and the
+ * session row is where its terminal identity has to land.
  */
 export function stampQuickSessionRuntimeConfig(
   db: Database.Database,
@@ -327,12 +340,11 @@ export function stampQuickSessionRuntimeConfig(
       sessionId,
     );
   }
-  const resolvedSessionAgentRuntime = input.useCodexSdk
-    ? 'codex-sdk'
-    : input.useCodexPty
-      ? 'codex-pty'
-      : claudeRuntimeFromSubstrate(input.resolvedSubstrate);
-  const resolvedSessionSubstrate = input.useCodexPty ? 'interactive' : input.resolvedSubstrate;
+  const resolvedSessionAgentRuntime =
+    input.sessionAgentRuntime ?? claudeRuntimeFromSubstrate(input.resolvedSubstrate);
+  const resolvedSessionSubstrate = isPtyLane(resolvedSessionAgentRuntime)
+    ? 'interactive'
+    : input.resolvedSubstrate;
   db.prepare(
     `UPDATE sessions
         SET substrate = ?,

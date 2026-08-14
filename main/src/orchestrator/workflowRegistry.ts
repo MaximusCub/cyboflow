@@ -29,6 +29,7 @@ import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
+  AGENT_PROVIDER_LABELS,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   assertProviderRuntimeConsistent,
   claudeRuntimeFromSubstrate,
@@ -1197,19 +1198,27 @@ export class WorkflowRegistry {
       'WorkflowRegistry.createRun',
     );
 
-    // The stamp ladder below resolves only the providers whose runtimes are
-    // LAUNCHABLE. A request naming any other — today only OMP, which is declared
-    // but has no manager — matches none of its tests and would fall through to
-    // `claudeRuntimeFromSubstrate`, silently switching the run to a different
-    // vendor. That silent floor is the exact failure the provider registry
-    // exists to prevent, so refuse it where a developer sees it instead. The
-    // arms that stamp OMP land with its managers: the quick-session create path
-    // first, then the workflow launch path when omp-sdk joins
-    // WORKFLOW_LAUNCHABLE_RUNTIMES. Unreachable for Claude/Codex, whose every
-    // runtime the ladder handles.
+    // The `__quick__` sentinel is a ROW, not a workflow LAUNCH: it exists to
+    // carry whatever runtime the quick SESSION resolved onto, and the dispatch
+    // facade reads it back to pick the owning manager. Hoisted above the
+    // launch-resolution guard below, which the sentinel is exempt from.
+    const isQuickSentinel = workflow.name === QUICK_WORKFLOW_NAME;
+
+    // The stamp ladder below resolves every provider whose runtime is STORABLE.
+    // A real workflow LAUNCH is narrower: it may only name a runtime the flow
+    // machinery can actually deploy on (WORKFLOW_LAUNCHABLE_RUNTIMES), and a
+    // request naming any other — today only omp-sdk, whose programmatic per-step
+    // support is a later phase — would advertise support that does not exist.
+    // Refuse it where a developer sees it rather than resolving it.
+    //
+    // The SENTINEL is exempt precisely because it is not advertising anything:
+    // dropping a quick session's own runtime there would fall through to
+    // `claudeRuntimeFromSubstrate` and misroute an OMP chat to Claude, which is
+    // the silent-floor failure the provider registry exists to prevent.
     const unstampable =
-      (requestedAgentRuntime !== undefined && !isWorkflowLaunchableRuntime(requestedAgentRuntime)) ||
-      (requestedAgentProvider !== undefined && !LAUNCH_LADDER_PROVIDERS.has(requestedAgentProvider));
+      !isQuickSentinel &&
+      ((requestedAgentRuntime !== undefined && !isWorkflowLaunchableRuntime(requestedAgentRuntime)) ||
+        (requestedAgentProvider !== undefined && !LAUNCH_LADDER_PROVIDERS.has(requestedAgentProvider)));
     if (unstampable) {
       throw new Error(
         `WorkflowRegistry.createRun: agentProvider ${requestedAgentProvider ?? '-'} / ` +
@@ -1231,27 +1240,38 @@ export class WorkflowRegistry {
     const providerAccess = demoMode ? undefined : this.config?.getAgentProviderAccess?.();
     const claudeEnabled = isAgentProviderEnabled(providerAccess, 'claude');
     const codexEnabled = isAgentProviderEnabled(providerAccess, 'codex');
-    const codexExplicit =
-      requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
-    const claudeExplicit =
-      requestedAgentProvider === 'claude' ||
-      requestedAgentRuntime === 'claude-sdk' ||
-      requestedAgentRuntime === 'claude-interactive';
-    if (codexExplicit && !codexEnabled) {
+    // The provider this request EXPLICITLY names, through either half of the
+    // pair (they are already known consistent — assertProviderRuntimeConsistent
+    // ran above). Derived from the registry rather than a per-provider pair of
+    // `=== 'codex'` tests, which each silently missed a third provider.
+    const explicitProvider: AgentProvider | undefined =
+      requestedAgentProvider ??
+      (requestedAgentRuntime !== undefined ? providerForRuntime(requestedAgentRuntime) : undefined);
+    if (explicitProvider !== undefined && !isAgentProviderEnabled(providerAccess, explicitProvider)) {
       throw new Error(
-        'WorkflowRegistry.createRun: the Codex provider is disabled in Settings → Integrations',
+        `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is disabled in Settings → Integrations`,
       );
     }
-    if (claudeExplicit && !claudeEnabled) {
-      throw new Error(
-        'WorkflowRegistry.createRun: the Claude provider is disabled in Settings → Integrations',
-      );
-    }
-    const codexSdkRequested = codexExplicit || (!claudeEnabled && codexEnabled);
+    // An UNREQUESTED run whose default route (Claude) is switched off reroutes to
+    // Codex. OMP is deliberately not a reroute target: it is absent⇒disabled, so
+    // reaching it always takes an explicit request.
+    const codexSdkRequested =
+      explicitProvider === 'codex' || (explicitProvider === undefined && !claudeEnabled && codexEnabled);
+    const ompSdkRequested = explicitProvider === 'omp';
+    /**
+     * The STRUCTURED non-Claude runtime this run resolves onto, or undefined for
+     * Claude. Non-undefined only for the sentinel outside the launchable set —
+     * the guard above already refused a real launch that named one.
+     */
+    const structuredSdkRuntime: WorkflowRunStorableRuntime | undefined = codexSdkRequested
+      ? 'codex-sdk'
+      : ompSdkRequested
+        ? 'omp-sdk'
+        : undefined;
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'
-        : requestedAgentRuntime === 'claude-sdk' || codexSdkRequested
+        : requestedAgentRuntime === 'claude-sdk' || structuredSdkRuntime !== undefined
           ? 'sdk'
           : undefined;
     if (
@@ -1285,7 +1305,6 @@ export class WorkflowRegistry {
     // DemoTerminalView paints a purely client-side scripted session. Scoped to
     // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
     // (which WOULD dispatch to the real interactive manager via the facade).
-    const isQuickSentinel = workflow.name === QUICK_WORKFLOW_NAME;
     const demoHonorsInteractive =
       demoMode &&
       isQuickSentinel &&
@@ -1306,9 +1325,9 @@ export class WorkflowRegistry {
           globalDefaultSubstrate,
           env: process.env,
         });
-    if (codexSdkRequested && substrate !== 'sdk') {
+    if (structuredSdkRuntime !== undefined && substrate !== 'sdk') {
       throw new Error(
-        `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
+        `WorkflowRegistry.createRun: ${structuredSdkRuntime} workflow runs require sdk substrate compatibility (got ${substrate})`,
       );
     }
     if (opts?.requireSdkSubstrate && substrate !== 'sdk') {
@@ -1316,14 +1335,12 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: design sessions require sdk substrate compatibility (got ${substrate})`,
       );
     }
-    const agentProvider: AgentProvider = demoMode
+    const agentProvider: AgentProvider = demoMode || structuredSdkRuntime === undefined
       ? 'claude'
-      : codexSdkRequested ? 'codex' : 'claude';
+      : providerForRuntime(structuredSdkRuntime);
     const agentRuntime: WorkflowRunStorableRuntime = demoMode
       ? 'claude-sdk'
-      : codexSdkRequested
-        ? 'codex-sdk'
-        : claudeRuntimeFromSubstrate(substrate);
+      : structuredSdkRuntime ?? claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive

@@ -51,7 +51,10 @@ import {
   CliManagerFactory,
   isCodexPtyManagerLike,
   isCodexSdkManagerLike,
+  isOmpPtyManagerLike,
+  isOmpSdkManagerLike,
   type CodexPtyManagerLike,
+  type OmpPtyManagerLike,
 } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
@@ -444,6 +447,7 @@ let worktreeManager: WorktreeManager;
 let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
 let codexPtyManager: CodexPtyManagerLike;
+let ompPtyManager: OmpPtyManagerLike;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -1456,6 +1460,32 @@ async function initializeServices(): Promise<boolean> {
     throw new Error('[Main] cliManagerFactory returned a manager without the Codex PTY seams for codex-pty');
   }
   codexPtyManager = createdCodexPtyManager;
+
+  const createdOmpSdkManager = await cliManagerFactory.createManager('omp-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
+    skipValidation: true,
+  });
+  // Structural, exactly like the Codex twins above — demo mode returns a
+  // DemoCliManager carrying the seams rather than an OmpSdkManager.
+  if (!isOmpSdkManagerLike(createdOmpSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the OMP SDK seams for omp-sdk');
+  }
+
+  const createdOmpPtyManager = await cliManagerFactory.createManager('omp-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isOmpPtyManagerLike(createdOmpPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the OMP PTY seams for omp-pty');
+  }
+  ompPtyManager = createdOmpPtyManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -2590,6 +2620,8 @@ async function initializeServices(): Promise<boolean> {
     { lane: 'claude-interactive', manager: interactiveCliManager },
     { lane: 'codex-sdk', manager: createdCodexSdkManager },
     { lane: 'codex-pty', manager: codexPtyManager },
+    { lane: 'omp-sdk', manager: createdOmpSdkManager },
+    { lane: 'omp-pty', manager: ompPtyManager },
   ];
   const managerByLane = new Map<PanelLane, AbstractCliManager>(
     laneManagers.map(({ lane, manager }) => [lane, manager]),
@@ -3375,6 +3407,15 @@ async function initializeServices(): Promise<boolean> {
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
+  // OMP takes the same MCP runtime config and nothing else: its approval dialogs
+  // are answered in-process by OmpApprovalBridge (the gating extension is the
+  // policy engine, so a prompt reaching the bridge was already allowed), so
+  // there is no router provider to inject here.
+  createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
+    orchSocketPath: socketPath,
+    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
+    nodeExecutablePath: await nodeResolver.getNodePath(),
+  });
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
@@ -3480,6 +3521,8 @@ async function initializeServices(): Promise<boolean> {
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
     codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
+    ompSdkManager: createdOmpSdkManager,
+    ompPtyManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
@@ -3498,6 +3541,8 @@ async function initializeServices(): Promise<boolean> {
       substrateFacade.registerInteractivePanel(runId, panelId),
     registerCodexPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
+    registerOmpPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, ompPtyManager),
     // The SAME provider the Claude managers were injected with above, handed to
     // the IPC layer for the CODEX lanes: those spawn from ipc/ with a
     // caller-supplied runId instead of resolving the gate inside the manager, so
@@ -4850,17 +4895,17 @@ app.whenReady().then(async () => {
         // agent_runtime. Without this the sub-form's substrate and permission
         // picks silently never applied: the arm ran as an SDK session on the
         // global permission default while its run row claimed otherwise. Infra
-        // arms (no quickConfig) keep their pre-existing NULL stamps. useCodexSdk
-        // mirrors the quick handler's derivation; codex-pty is excluded from the
-        // arm wire schema so useCodexPty is always false here.
+        // arms (no quickConfig) keep their pre-existing NULL stamps. The resolved
+        // runtime mirrors the quick handler's derivation; the arm wire schema
+        // offers only Claude and codex-sdk, so no PTY runtime can appear here.
         if (quickConfig) {
           try {
+            const armCodexSdk =
+              quickConfig.agentRuntime === 'codex-sdk' ||
+              (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined);
             stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
               resolvedSubstrate,
-              useCodexSdk:
-                quickConfig.agentRuntime === 'codex-sdk' ||
-                (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined),
-              useCodexPty: false,
+              ...(armCodexSdk ? { sessionAgentRuntime: 'codex-sdk' as const } : {}),
               requestedAgentMode: quickConfig.permissionMode,
             });
           } catch (err) {
