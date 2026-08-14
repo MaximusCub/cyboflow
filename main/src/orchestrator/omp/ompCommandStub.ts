@@ -3,7 +3,12 @@
  *
  * Every method fails closed with `unavailable`, echoing the request's
  * `operationId` verbatim so the audit trail and the returned result correlate
- * on one token. Real implementations are a separate ADR (Phase 3).
+ * on one token. There is no transport yet (Phase 3 ADR:
+ * `docs/proposals/omp-phase3-command-adr.md` records that decision as NO-GO),
+ * so no method can distinguish a real producer denial from a not-implemented
+ * gap — `unavailable` is the only honest failure class at this layer.
+ * `blocked`/`shadow` are producer verification outcomes, not transport states,
+ * and are only returned by a real adapter after an actual gate result.
  */
 import type {
   OmpApplyRequest,
@@ -23,7 +28,7 @@ export class OmpCommandStub implements OmpCommandAdapter {
       ok: false,
       operationId,
       error: 'unavailable',
-      detail: `omp:${verb} not implemented (Phase 3 ADR)`,
+      detail: `omp:${verb} not implemented (Phase 3 ADR: transport NO-GO)`,
     };
   }
 

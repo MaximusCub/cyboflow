@@ -46,8 +46,10 @@ function toViewSnapshot(result: OmpSnapshotResult): OmpFleetViewResult {
 export const ompRouter = router({
   /**
    * The latest fleet summary (redacted), or a discriminated failure.
-   * A missing/unreadable registry surfaces as `{ ok: false, error: 'unavailable' }`,
-   * never as a thrown error or an empty-success.
+   * An absent registry surfaces as `{ ok: false, error: 'missing' }`; an
+   * unreadable (permission-denied/IO) registry as `'unavailable'`; a parse or
+   * version failure as `'malformed'` / `'unsupported-version'`. Never a thrown
+   * error or an empty-success.
    */
   fleetSnapshot: protectedProcedure.query(async ({ ctx }): Promise<OmpFleetViewResult> => {
     const omp = ctx.omp;

@@ -210,28 +210,23 @@ is rejected FORBIDDEN, (b) audit records both events, (c) stubs return
 ## Phase 3 — command implementations (SEPARATE ADR; do not start from this doc)
 
 Goal: implement the real command surface behind `OmpCommandAdapter`. This is
-deliberately NOT scheduled here — it is its own ADR with its own go/no-go,
-because the unfalsifiable-authority fix and the transport choice must land
-first. This section is a placeholder that points to that ADR, not a plan to
-execute.
+deliberately NOT scheduled here — it is its own ADR with its own go/no-go.
+That ADR exists: `docs/proposals/omp-phase3-command-adr.md`.
 
-Prerequisites the ADR must settle before any code:
-1. **Deterministic control-plane transport** — one of (a) the OMP MCP
-   `fleet_*` tools over a persistent authenticated session, (b) `omp --mode rpc`
-   host-tools with `set_subagent_subscription`, or (c) one-shot `omp -p`
-   dispatch. Chosen once, not left as "MCP/RPC or omp -p".
-2. **Supervisor identity** — whether the `omp:supervise` capability is granted
-   to the Electron main process, or (better) to an out-of-process child over a
-   local authenticated socket, with main as a proxy. This is the council's
-   strongest de-risking recommendation and dissolves the "local app = worker
-   authority" risk.
-3. **PASS-bound apply** — apply/discard/verify mirror `fleet_verification_*` +
-   `fleet_proposal_apply`; a mutation path that reaches apply without
-   producer-enforced candidate-bound verification is a hard fail.
+**Current status (from the ADR): NO-GO.** There is no externally-callable,
+authenticated, structured control-plane transport in the producer today — the
+`fleet_*` tools are in-session only (`pi.registerTool`), the herdr socket is
+pane-lifecycle only, and `omp -p` is prompt-mediated spawn. The earlier "one of
+(a) MCP fleet_* / (b) `omp --mode rpc` / (c) `omp -p`" framing was wrong:
+`omp --mode rpc` and `set_subagent_subscription` do not exist, and neither
+herdr nor `omp -p` reaches apply/discard/verify. The ADR records the
+re-opening gate (a producer-owned authenticated endpoint) and the identity +
+gating rules that apply once it lands.
 
-Non-negotiables carried from the producer: workers never write the host repo;
-apply is privileged and separate; a PASS is candidate-bound; the builder cannot
-mint its own PASS; `proposal_ready` ≠ done; discard never requires PASS.
+Non-negotiables carried from the producer (unchanged): workers never write the
+host repo; apply is privileged and separate; a PASS is candidate-bound; the
+builder cannot mint its own PASS; `proposal_ready` ≠ done; **discard never
+requires PASS**; shadow is not enforcement.
 
 ## Phase 4 — auxiliary read sources + the coexistence decision
 
