@@ -1,0 +1,6 @@
+{
+  "type": "response",
+  "command": "definitely_not_a_command",
+  "success": false,
+  "error": "Unknown command: definitely_not_a_command"
+}

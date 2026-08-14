@@ -1,0 +1,149 @@
+{
+  "id": "state-1",
+  "type": "response",
+  "command": "get_state",
+  "success": true,
+  "data": {
+    "model": {
+      "id": "claude-haiku-4-5",
+      "name": "Claude Haiku 4.5",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25
+      },
+      "contextWindow": 200000,
+      "maxTokens": 64000,
+      "thinking": {
+        "mode": "budget",
+        "efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "compat": {
+        "officialEndpoint": true,
+        "signingEndpoint": true,
+        "disableStrictTools": false,
+        "disableAdaptiveThinking": false,
+        "allowAnthropicHeaderOverrides": false,
+        "supportsEagerToolInputStreaming": true,
+        "supportsLongCacheRetention": true,
+        "supportsMidConversationSystem": false,
+        "supportsForcedToolChoice": true,
+        "supportsSamplingParams": true,
+        "requiresToolResultId": false,
+        "requiresThinkingEnabled": false,
+        "replayUnsignedThinking": false,
+        "escapeBuiltinToolNames": false
+      },
+      "supportsComputerUse": false,
+      "compatConfig": {
+        "officialEndpoint": true,
+        "signingEndpoint": true,
+        "disableStrictTools": false,
+        "disableAdaptiveThinking": false,
+        "allowAnthropicHeaderOverrides": false,
+        "supportsEagerToolInputStreaming": true,
+        "supportsLongCacheRetention": true,
+        "supportsMidConversationSystem": false,
+        "supportsForcedToolChoice": true,
+        "supportsSamplingParams": true,
+        "requiresToolResultId": false,
+        "requiresThinkingEnabled": false,
+        "replayUnsignedThinking": false,
+        "escapeBuiltinToolNames": false
+      }
+    },
+    "thinkingLevel": "off",
+    "isStreaming": false,
+    "isCompacting": false,
+    "steeringMode": "one-at-a-time",
+    "followUpMode": "one-at-a-time",
+    "interruptMode": "immediate",
+    "sessionId": "01a00000-0000-7000-8000-000000000000",
+    "autoCompactionEnabled": true,
+    "queuedMessageCount": 0,
+    "todoPhases": [],
+    "fastModeEnabled": false,
+    "tokensPerSecond": null,
+    "fastModeActive": false,
+    "messageCount": 0,
+    "systemPrompt": [
+      "<omp system prompt elided for fixture>"
+    ],
+    "dumpTools": [
+      {
+        "name": "read",
+        "description": "Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via `path`.\n\n<instruction>\n- SHOULD parallelize independent reads.\n- SHOULD use `read` (not browser) for web content; browser only when `read` can't deliver.\n</instruction>\n\n## Selectors — append `:<sel>` to `path` (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`)\n- `:50` / `:50-` — from line 50 | `:50-200` — inclusive | `:50+150` — 150 lines from 50 | `:5-16,960-973` — multiple ranges\n- `:raw` — verbatim, no anchors/prefixes | `:2-4:raw` / `:raw:2-4` — range + verbatim\n- `:conflicts` — one line per unresolved git merge conflict block\n\n## Source kinds\n- Parseable code, no selector → structural summary (declarations only, body elided). Footer names recovery selector — re-issue ONLY those ranges.\n- File + selector → `[foo.ts#1A2B]` snapshot header + numbered lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag.\n- Directory → depth-limited dirent listing.\n- SQLite (`.sqlite`, `.sqlite3`, `.db`, `.db3`): `file.db` (tables), `file.db:table` (schema+rows), `file.db:table:key` (by PK), `?limit=`/`?where=`/`?q=SELECT`.\n- Archives (`.tar`, `.tar.gz`, `.tgz`, `.zip`, plus ZIP-based `.jar`/`.war`/`.ear`/`.apk`): `archive.ext:path/inside/archive` reads a member.\n- Documents → extracted text. Notebooks → editable cells. Images → decoded inline. `:raw` bypasses converters.\n- URLs → reader-mode clean text/markdown; `:raw` → untouched HTML. Bare `host:port` needs trailing slash.\n- Internal URIs — all schemes take selectors. `artifact://<id>` recovers spilled output; page with `:N-M`/`:raw:N-M`.\n- `ssh://host/<path>` reads remote file/dir (UTF-8, ≤1 MiB); bare `ssh://` lists hosts; also `write`/`search`-able.\n  Literal `:`, `?`, `#` → percent-encode (`%3A`/`%3F`/`%23`). Requires POSIX shell (else `ssh` tool).\n\n<critical>\nSummary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.\n</critical>",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "bash",
+        "description": "Runs commands in a persistent shell.\n\nUse ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort | uniq -c`, `diff`).\nInline scripts, heredocs, `$(…)`, complex control flow/quoting, and non-trivial pipelines → `eval`.\n\n<instruction>\n- Set `cwd` instead of `cd`; use `env: { NAME: \"…\" }` for multiline/quote-heavy values.\n- `pty: true` only for terminal interaction (`sudo`, `ssh`).\n- Order-dependent commands use `&&` in one call; independent calls may run concurrently.\n- Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.\n- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine, errno\n- `async: true` defers a finite command's result; it does not extend `timeout`.\n</instruction>\n\n<critical>\n- NEVER use shell `grep`/`rg`; use built-in `grep`.\n- List directories with `read` and find paths with `glob`; NEVER use `ls`/`find`.\n- Avoid `head`, `tail`, and redirection: output is captured, truncated, and linked as `artifact://<id>`.\n- Services, watchers, debuggers, and REPLs MUST use `hub` (`op:\"start\"`).\n</critical>\nNo truncation footer means the displayed output is complete.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "env": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "timeout": {
+              "type": "number",
+              "description": "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "pty": {
+              "type": "boolean"
+            },
+            "async": {
+              "type": "boolean",
+              "description": "run in background"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "contextUsage": {
+      "tokens": 17399,
+      "contextWindow": 200000,
+      "percent": 8.6995
+    }
+  }
+}
