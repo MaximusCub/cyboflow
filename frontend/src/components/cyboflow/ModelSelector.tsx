@@ -18,6 +18,7 @@ import { MODEL_OPTIONS, formatDynamicClaudeLabel } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../stores/claudeModelCatalogStore';
+import { providerForRuntime } from '../../../../shared/types/agentRuntime';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 /** The quick-session default model — Opus, per product direction. */
 export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
@@ -67,7 +68,7 @@ export function ModelSelector({
   agentRuntime = 'claude-sdk',
   allowDefaultOption,
 }: ModelSelectorProps): React.JSX.Element {
-  const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
+  const isCodexRuntime = agentProvider === 'codex' || providerForRuntime(agentRuntime) === 'codex';
   const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
   // Dynamic "Other models" the login can select, below the pinned four (Claude only).
   const { options: claudeCatalogOptions } = useClaudeModelCatalog(!isCodexRuntime);

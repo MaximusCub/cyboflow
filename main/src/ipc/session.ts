@@ -42,10 +42,12 @@ import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import {
   claudeRuntimeFromSubstrate,
+  formatProviderRuntimeConflict,
   isAgentProvider,
   isAgentProviderEnabled,
   isSessionAgentRuntime,
   providerForRuntime,
+  providerRuntimeConflict,
 } from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
@@ -909,24 +911,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentRuntime
         : undefined;
 
-      if (
-        requestedAgentProvider === 'codex' &&
-        requestedAgentRuntime !== undefined &&
-        requestedAgentRuntime !== 'codex-sdk' &&
-        requestedAgentRuntime !== 'codex-pty'
-      ) {
+      const providerConflict = providerRuntimeConflict(
+        requestedAgentProvider,
+        requestedAgentRuntime,
+      );
+      if (providerConflict) {
         return {
           success: false,
-          error: `agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
-        };
-      }
-      if (
-        requestedAgentProvider === 'claude' &&
-        (requestedAgentRuntime === 'codex-sdk' || requestedAgentRuntime === 'codex-pty')
-      ) {
-        return {
-          success: false,
-          error: `agentProvider claude conflicts with agentRuntime ${requestedAgentRuntime}`,
+          error: formatProviderRuntimeConflict(providerConflict.provider, providerConflict.runtime),
         };
       }
 

@@ -27,8 +27,14 @@ import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../sh
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
+  AGENT_PROVIDERS,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+  formatProviderRuntimeConflict,
+  isWorkflowLaunchableRuntime,
+  providerRuntimeConflict,
   type AgentProvider,
-  type WorkflowAgentRuntime,
+  type WorkflowLaunchableRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
@@ -359,7 +365,7 @@ export interface RunLauncherLike {
    * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
    * When omitted the run is not prompt-seeded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -1044,8 +1050,8 @@ export const runsRouter = router({
       // Provider/runtime are the forward-compatible agent selection surface.
       // Codex SDK routes through the SDK substrate compatibility path; Claude
       // runtimes project onto the legacy substrate.
-      agentProvider: z.enum(['claude', 'codex']).optional(),
-      agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
+      agentProvider: z.enum(AGENT_PROVIDERS).optional(),
+      agentRuntime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).optional(),
       // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
@@ -1180,16 +1186,11 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      if (input.agentProvider === 'codex' && input.agentRuntime !== undefined && input.agentRuntime !== 'codex-sdk') {
+      const providerConflict = providerRuntimeConflict(input.agentProvider, input.agentRuntime);
+      if (providerConflict) {
         throw new TRPCError({
           code: 'BAD_REQUEST',
-          message: `agentProvider codex conflicts with agentRuntime ${input.agentRuntime}`,
-        });
-      }
-      if (input.agentProvider === 'claude' && input.agentRuntime === 'codex-sdk') {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'agentProvider claude conflicts with agentRuntime codex-sdk',
+          message: formatProviderRuntimeConflict(providerConflict.provider, providerConflict.runtime),
         });
       }
       const codexSdkRequested =
@@ -1491,7 +1492,7 @@ export const runsRouter = router({
             variant_id: string | null;
             experiment_id: string | null;
             agent_provider: AgentProvider | null;
-            agent_runtime: WorkflowAgentRuntime | null;
+            agent_runtime: WorkflowRunStorableRuntime | null;
             execution_model: ExecutionModel | null;
           }
         | undefined;
@@ -1603,7 +1604,11 @@ export const runsRouter = router({
           ...(row.seed_prompt ? { seedPrompt: row.seed_prompt } : {}),
         },
         row.agent_provider ?? undefined,
-        row.agent_runtime ?? undefined,
+        // The column carries what a run row may STORE; a restart is a real
+        // launch, so only a launchable runtime is forwarded (anything else
+        // re-inherits the launch default rather than restarting onto a runtime
+        // createRun would refuse).
+        isWorkflowLaunchableRuntime(row.agent_runtime) ? row.agent_runtime : undefined,
       );
       return { runId, worktreePath, branchName };
     }),

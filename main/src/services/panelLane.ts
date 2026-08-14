@@ -24,6 +24,7 @@
  * on the lane instead of re-deriving it — a new dispatch seam that forgets one
  * axis is the bug this module exists to prevent.
  */
+import { providerForRuntimeValue, type AgentProvider } from '../../../shared/types/agentRuntime';
 import { type CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
 
@@ -41,9 +42,14 @@ export interface PanelLanePanel {
   substrate?: CliSubstrate | null;
 }
 
-/** Provider is session-wide: every codex runtime is prefixed `codex-`. */
-export function providerForSession(session: PanelLaneSession | undefined): 'claude' | 'codex' {
-  return session?.agent_runtime?.startsWith('codex-') ? 'codex' : 'claude';
+/**
+ * Provider is session-wide, derived from the runtime-id prefix registry rather
+ * than a local prefix test — a runtime this build does not know must not
+ * silently resolve into the Claude lane. An absent column is a row that predates
+ * the provider axis and keeps the Claude floor.
+ */
+export function providerForSession(session: PanelLaneSession | undefined): AgentProvider {
+  return providerForRuntimeValue(session?.agent_runtime, 'providerForSession');
 }
 
 /**

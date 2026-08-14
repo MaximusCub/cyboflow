@@ -28,7 +28,7 @@ import type {
 import { ARTIFACT_POLICIES } from '../../../shared/types/artifacts';
 import type { ArtifactType } from '../../../shared/types/artifacts';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
-import { WORKFLOW_AGENT_RUNTIMES } from '../../../shared/types/agentRuntime';
+import { WORKFLOW_LAUNCHABLE_RUNTIMES } from '../../../shared/types/agentRuntime';
 import { ALL_EFFORT_LEVELS } from '../../../shared/types/reasoningEffort';
 import { CLI_TOOLS } from '../../../shared/types/cliTools';
 import { validateAgentDraft, AgentOverrideError } from './agents/agentValidation';
@@ -136,7 +136,7 @@ const workflowAgentConfigSchema = z
   .object({
     model: z.enum(AGENT_MODEL_ALIASES).optional(),
     custom: workflowAgentCustomCopySchema.optional(),
-    runtime: z.enum(WORKFLOW_AGENT_RUNTIMES).optional(),
+    runtime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).optional(),
     codexModel: z.string().min(1).optional(),
     effort: z.enum(ALL_EFFORT_LEVELS).optional(),
   })

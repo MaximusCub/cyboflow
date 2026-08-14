@@ -11,7 +11,7 @@ import { trackEvent } from '../../utils/telemetry';
 import {
   SESSION_AGENT_RUNTIMES,
   isRuntimeProviderEnabled,
-  isWorkflowAgentRuntime,
+  isWorkflowLaunchableRuntime,
   type AgentProviderAccess,
   type AgentRuntime,
 } from '../../../../shared/types/agentRuntime';
@@ -102,7 +102,7 @@ export function SessionSettings({
   // launch drops it and falls back to the workflow floor. Decided from the shared
   // guard, never a hardcoded runtime id, so a future quick-only runtime is covered.
   const runtimeIsWorkflowCapable =
-    defaultAgentRuntime === undefined || isWorkflowAgentRuntime(defaultAgentRuntime);
+    defaultAgentRuntime === undefined || isWorkflowLaunchableRuntime(defaultAgentRuntime);
 
   /**
    * The two global launch defaults are ONE setting in two halves: a model from
@@ -270,7 +270,7 @@ export function SessionSettings({
                     <span className="text-xs text-text-tertiary">
                       {!enabled
                         ? 'Provider off'
-                        : isWorkflowAgentRuntime(runtime)
+                        : isWorkflowLaunchableRuntime(runtime)
                           ? 'Quick sessions and flow runs'
                           : 'Quick sessions only'}
                     </span>

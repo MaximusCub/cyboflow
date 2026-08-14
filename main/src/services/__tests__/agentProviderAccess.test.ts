@@ -4,9 +4,15 @@
  * and the main-side launch seams read through.
  *
  * The invariants worth locking:
- *   - ABSENT ⇒ enabled (so an install that never touched the toggles behaves
- *     exactly as it did before the feature existed).
- *   - The all-off map degrades to both-on rather than bricking every seam.
+ *   - ABSENT ⇒ the provider's own `defaultEnabled`. For claude/codex that is
+ *     ENABLED, so an install that never touched the toggles behaves exactly as
+ *     it did before the feature existed.
+ *   - A provider introduced LATER may declare absent ⇒ DISABLED, so shipping it
+ *     does not silently switch a new vendor on for every existing install. That
+ *     policy is exercised against a test-local provider table rather than by
+ *     adding a fake provider to the shipped registry.
+ *   - The all-off map degrades to the per-provider defaults rather than bricking
+ *     every seam.
  *   - The IPC validator accepts only `{claude?: boolean, codex?: boolean}` —
  *     an unknown provider key or a non-boolean member is rejected outright.
  */
@@ -14,14 +20,19 @@ import { describe, it, expect } from 'vitest';
 import {
   AGENT_PROVIDER_DISABLED_CODE,
   enabledAgentProviders,
+  enabledProvidersIn,
   firstEnabledRuntime,
   isAgentProviderAccess,
   isAgentProviderEnabled,
+  isProviderEnabledIn,
   isRuntimeProviderEnabled,
   formatAgentProviderDisabled,
   parseAgentProviderDisabled,
   providerForRuntime,
+  providerForRuntimeIn,
   resolveAgentProviderAccess,
+  resolveProviderAccessIn,
+  type AgentProviderTable,
 } from '../../../../shared/types/agentRuntime';
 
 describe('isAgentProviderEnabled', () => {
@@ -98,6 +109,90 @@ describe('firstEnabledRuntime', () => {
 
   it('returns null when no candidate is available', () => {
     expect(firstEnabledRuntime({ claude: false, codex: true }, ['claude-sdk'] as const)).toBeNull();
+  });
+});
+
+/**
+ * A table with a THIRD provider that opts in at absent⇒disabled — the shape the
+ * next provider will ship as. Kept local to the test so the app's own registry
+ * stays honest about which providers actually exist.
+ */
+type TestProvider = 'claude' | 'codex' | 'newcomer';
+
+const TEST_PROVIDER_TABLE: AgentProviderTable<TestProvider> = {
+  providers: ['claude', 'codex', 'newcomer'],
+  definitions: {
+    claude: { runtimePrefix: 'claude-', defaultEnabled: true },
+    codex: { runtimePrefix: 'codex-', defaultEnabled: true },
+    newcomer: { runtimePrefix: 'newcomer-', defaultEnabled: false },
+  },
+  fallbackProvider: 'claude',
+};
+
+describe('per-provider defaultEnabled policy', () => {
+  it('keeps the legacy absent⇒enabled floor for the providers that shipped with it', () => {
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, undefined, 'claude')).toBe(true);
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, {}, 'codex')).toBe(true);
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, { claude: false }, 'codex')).toBe(true);
+  });
+
+  it('leaves a newly introduced provider OFF until the user turns it on', () => {
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, undefined, 'newcomer')).toBe(false);
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, {}, 'newcomer')).toBe(false);
+    // A legacy partial map — written before the provider existed — is exactly
+    // the "absent key" case, and must not switch it on.
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, { claude: true, codex: false }, 'newcomer')).toBe(
+      false,
+    );
+    expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, { newcomer: true }, 'newcomer')).toBe(true);
+  });
+
+  it('omits the default-off provider from the enabled list and the resolved map', () => {
+    expect(enabledProvidersIn(TEST_PROVIDER_TABLE, undefined)).toEqual(['claude', 'codex']);
+    expect(resolveProviderAccessIn(TEST_PROVIDER_TABLE, undefined)).toEqual({
+      claude: true,
+      codex: true,
+      newcomer: false,
+    });
+  });
+
+  it('routes a runtime by its registered prefix, including the new provider', () => {
+    expect(providerForRuntimeIn(TEST_PROVIDER_TABLE, 'newcomer-sdk')).toBe('newcomer');
+    expect(providerForRuntimeIn(TEST_PROVIDER_TABLE, 'codex-pty')).toBe('codex');
+    expect(providerForRuntimeIn(TEST_PROVIDER_TABLE, 'nothing-sdk')).toBeNull();
+  });
+});
+
+describe('the never-all-disabled floor', () => {
+  it('does NOT fire while the one enabled provider is the newly introduced one', () => {
+    expect(
+      resolveProviderAccessIn(TEST_PROVIDER_TABLE, {
+        claude: false,
+        codex: false,
+        newcomer: true,
+      }),
+    ).toEqual({ claude: false, codex: false, newcomer: true });
+  });
+
+  it('degrades a genuinely all-off map to the per-provider defaults', () => {
+    expect(
+      resolveProviderAccessIn(TEST_PROVIDER_TABLE, { claude: false, codex: false }),
+    ).toEqual({ claude: true, codex: true, newcomer: false });
+  });
+
+  it('forces the fallback provider on when even the defaults would leave nothing enabled', () => {
+    const allOptIn: AgentProviderTable<'first' | 'second'> = {
+      providers: ['first', 'second'],
+      definitions: {
+        first: { runtimePrefix: 'first-', defaultEnabled: false },
+        second: { runtimePrefix: 'second-', defaultEnabled: false },
+      },
+      fallbackProvider: 'first',
+    };
+    expect(resolveProviderAccessIn(allOptIn, { first: false, second: false })).toEqual({
+      first: true,
+      second: false,
+    });
   });
 });
 

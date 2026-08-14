@@ -1,16 +1,22 @@
 import type {
-  AgentProvider,
   SessionAgentRuntime,
-  WorkflowAgentRuntime,
+  WorkflowLaunchableRuntime,
 } from '../../../../shared/types/agentRuntime';
-import { isWorkflowRuntimeSupported } from '../../../../shared/types/agentRuntime';
+import {
+  isWorkflowLaunchableRuntime,
+  providerForRuntime,
+} from '../../../../shared/types/agentRuntime';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
-export type LaunchAgentRuntime = SessionAgentRuntime | WorkflowAgentRuntime;
+export type LaunchAgentRuntime = SessionAgentRuntime | WorkflowLaunchableRuntime;
 
-export function providerForRuntime(runtime: LaunchAgentRuntime): AgentProvider {
-  return runtime.startsWith('codex-') ? 'codex' : 'claude';
-}
+/**
+ * Re-exported so the renderer's launch surfaces resolve a provider through the
+ * SAME prefix registry the main-side seams use — this module used to carry its
+ * own `startsWith('codex-')` copy, which would map an unregistered runtime into
+ * the Claude pickers with no error.
+ */
+export { providerForRuntime };
 
 export function substrateForRuntime(runtime: LaunchAgentRuntime): CliSubstrate | undefined {
   if (runtime === 'claude-interactive') return 'interactive';
@@ -18,9 +24,11 @@ export function substrateForRuntime(runtime: LaunchAgentRuntime): CliSubstrate |
   return undefined;
 }
 
-export function workflowRuntimeForLaunch(runtime: LaunchAgentRuntime): WorkflowAgentRuntime | null {
+export function workflowRuntimeForLaunch(
+  runtime: LaunchAgentRuntime,
+): WorkflowLaunchableRuntime | null {
   if (runtime === 'codex-pty') return null;
-  return isWorkflowRuntimeSupported(runtime) ? runtime : null;
+  return isWorkflowLaunchableRuntime(runtime) ? runtime : null;
 }
 
 export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime {

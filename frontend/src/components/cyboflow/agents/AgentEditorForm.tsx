@@ -29,7 +29,7 @@ import {
   type AgentModelAlias,
 } from '../../../../../shared/types/agents';
 import {
-  WORKFLOW_AGENT_RUNTIMES,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
   isRuntimeProviderEnabled,
@@ -85,7 +85,7 @@ export function AgentEditorForm({
   // won't take. An ALREADY-PINNED runtime that just lost its provider stays in
   // the list so the draft renders its own value honestly until the user repins.
   const providerAccess = useAgentProviderAccess();
-  const runtimeOptions = WORKFLOW_AGENT_RUNTIMES.filter(
+  const runtimeOptions = WORKFLOW_LAUNCHABLE_RUNTIMES.filter(
     (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === draft.runtime,
   );
   // The READ-ONLY name field shows the BARE key — strip the load-bearing

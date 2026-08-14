@@ -33,7 +33,7 @@ import {
   firstEnabledRuntime,
   isRuntimeProviderEnabled,
   isSessionAgentRuntime,
-  isWorkflowAgentRuntime,
+  isWorkflowLaunchableRuntime,
   type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
@@ -221,7 +221,7 @@ export function SubstrateSelector({
         onChange={(e) => {
           const next = e.target.value;
           if (
-            (isSessionAgentRuntime(next) || isWorkflowAgentRuntime(next)) &&
+            (isSessionAgentRuntime(next) || isWorkflowLaunchableRuntime(next)) &&
             !isRuntimeDisabled(next, runtimeScope) &&
             isRuntimeProviderEnabled(providerAccess, next)
           ) {

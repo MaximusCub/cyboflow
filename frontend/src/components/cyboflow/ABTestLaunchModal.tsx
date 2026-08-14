@@ -48,6 +48,10 @@ import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import type {
+  AgentProvider,
+  WorkflowRunStorableRuntime,
+} from '../../../../shared/types/agentRuntime';
 
 /**
  * Per-arm quick-session config, local to the modal. Mirrors the subset of the
@@ -77,9 +81,7 @@ const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
  * restriction despite the "workflow" name), so this is unreachable through the
  * UI; clamped here anyway as defense-in-depth + to satisfy the narrower type.
  */
-function quickArmAgentRuntime(
-  runtime: LaunchAgentRuntime,
-): 'claude-sdk' | 'claude-interactive' | 'codex-sdk' {
+function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowRunStorableRuntime {
   return runtime === 'codex-pty' ? 'codex-sdk' : runtime;
 }
 
@@ -461,8 +463,8 @@ export function ABTestLaunchModal({
 
   const buildQuickConfigPayload = (config: ArmQuickConfig): {
     substrate?: 'sdk' | 'interactive';
-    agentProvider: 'claude' | 'codex';
-    agentRuntime: 'claude-sdk' | 'claude-interactive' | 'codex-sdk';
+    agentProvider: AgentProvider;
+    agentRuntime: WorkflowRunStorableRuntime;
     model: string;
     reasoningEffort?: ReasoningEffort;
     permissionMode: PermissionMode;

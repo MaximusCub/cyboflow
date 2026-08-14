@@ -89,9 +89,9 @@ import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import {
   DEFAULT_WORKFLOW_AGENT_RUNTIME,
-  isWorkflowAgentRuntime,
+  isWorkflowRunStorableRuntime,
   providerForRuntime,
-  type WorkflowAgentRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { renderWorkflowPromptForRuntime } from './workflowPromptRenderer';
 
@@ -329,7 +329,7 @@ export async function handoverRunHandler(
   // Codex runtime adapter (which rewrites "AskUserQuestion" gate instructions to
   // `cyboflow_request_user_input`). Coerce defensively — a pre-runtime-column DB
   // or a bad value degrades to the Claude default (no adapter injected).
-  const runtime: WorkflowAgentRuntime = isWorkflowAgentRuntime(preflightRow.agent_runtime)
+  const runtime: WorkflowRunStorableRuntime = isWorkflowRunStorableRuntime(preflightRow.agent_runtime)
     ? preflightRow.agent_runtime
     : DEFAULT_WORKFLOW_AGENT_RUNTIME;
 

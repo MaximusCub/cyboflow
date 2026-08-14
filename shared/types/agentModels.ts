@@ -1,4 +1,4 @@
-import type { AgentProvider } from './agentRuntime';
+import { AGENT_PROVIDERS, type AgentProvider } from './agentRuntime';
 
 export const CLAUDE_MODEL_ALIASES = [
   'fable',
@@ -76,6 +76,21 @@ export function isCodexModelSelection(model: string): boolean {
 export const DEFAULT_CODEX_MODEL = 'auto';
 
 /**
+ * Which provider owns a model id, one predicate per provider. Adding a provider
+ * is one entry here (the Record is exhaustive over `AgentProvider`, so the
+ * compiler demands it) rather than another arm in a cross-provider if/else.
+ *
+ * Predicates take the already-lowercased, already-trimmed id; each is
+ * independently idempotent under lowercasing so they stay callable directly.
+ */
+export const AGENT_MODEL_FAMILY_PREDICATES: Readonly<
+  Record<AgentProvider, (key: string) => boolean>
+> = {
+  claude: isClaudeModelFamily,
+  codex: isCodexModelFamily,
+};
+
+/**
  * Normalize a persisted picker value against the provider that owns it.
  *
  * This preserves valid user-facing aliases such as `opus`, `sonnet`, and `gpt-*`
@@ -83,6 +98,10 @@ export const DEFAULT_CODEX_MODEL = 'auto';
  * session/workflow runtime. `default` is treated as no explicit selection; `auto`
  * is preserved because existing UI/read-model paths may display it even though
  * spawn seams omit the model flag for it.
+ *
+ * The rule is "drop a value another provider's family claims", not "keep only
+ * what this provider's family claims" — an id no predicate recognizes (a raw
+ * catalogue id, `auto`) belongs to whoever is asking and is preserved.
  */
 export function normalizeAgentModelSelection(
   provider: AgentProvider,
@@ -94,11 +113,9 @@ export function normalizeAgentModelSelection(
   const key = value.toLowerCase();
   if (key === 'default') return undefined;
 
-  if (provider === 'claude') {
-    if (isCodexModelFamily(key)) return undefined;
-    return value;
+  for (const other of AGENT_PROVIDERS) {
+    if (other === provider) continue;
+    if (AGENT_MODEL_FAMILY_PREDICATES[other](key)) return undefined;
   }
-
-  if (isClaudeModelFamily(key)) return undefined;
   return value;
 }

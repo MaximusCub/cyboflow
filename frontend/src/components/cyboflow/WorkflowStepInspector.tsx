@@ -28,7 +28,7 @@ import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/type
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import {
-  WORKFLOW_AGENT_RUNTIMES,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
   isRuntimeProviderEnabled,
@@ -1087,7 +1087,7 @@ function AgentConfigSection({
   // (resolveStepAgent) drops such a pin, so listing it would promise a route the
   // run won't take. An ALREADY-PINNED runtime stays listed so the select renders
   // its own value.
-  const runtimeOptions = WORKFLOW_AGENT_RUNTIMES.filter(
+  const runtimeOptions = WORKFLOW_LAUNCHABLE_RUNTIMES.filter(
     (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === selectedRuntime,
   );
   // The effort scale is provider-specific: Codex when the base agent is a Codex

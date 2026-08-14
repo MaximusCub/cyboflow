@@ -29,11 +29,13 @@ import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
+  assertProviderRuntimeConsistent,
   claudeRuntimeFromSubstrate,
   isAgentProviderEnabled,
   type AgentProvider,
   type AgentProviderAccess,
-  type WorkflowAgentRuntime,
+  type WorkflowLaunchableRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -535,7 +537,7 @@ export class WorkflowRegistry {
       model?: string | null;
       executionModel?: 'orchestrated' | 'programmatic' | null;
       agentProvider?: AgentProvider | null;
-      agentRuntime?: WorkflowAgentRuntime | null;
+      agentRuntime?: WorkflowLaunchableRuntime | null;
       weight?: number;
       label?: string;
     },
@@ -1040,7 +1042,7 @@ export class WorkflowRegistry {
       variantModel?: string;
       variantExecutionModel?: ExecutionModel;
       variantAgentProvider?: AgentProvider;
-      variantAgentRuntime?: WorkflowAgentRuntime;
+      variantAgentRuntime?: WorkflowLaunchableRuntime;
       experimentId?: string;
       experimentArm?: ExperimentArm;
       /**
@@ -1086,7 +1088,7 @@ export class WorkflowRegistry {
        */
       verifyDeliverable?: VerificationRequestInput | null;
       requestedAgentProvider?: AgentProvider;
-      requestedAgentRuntime?: WorkflowAgentRuntime;
+      requestedAgentRuntime?: WorkflowLaunchableRuntime;
       /**
        * Defense-in-depth guard for Design Mode (design-mode.md "Session plumbing
        * — SDK-pinned, fail-closed"): design sessions MUST resolve to the SDK
@@ -1169,20 +1171,11 @@ export class WorkflowRegistry {
     const requestedAgentRuntime = demoMode
       ? undefined
       : opts?.requestedAgentRuntime ?? opts?.variantAgentRuntime;
-    if (
-      requestedAgentProvider === 'codex' &&
-      requestedAgentRuntime !== undefined &&
-      requestedAgentRuntime !== 'codex-sdk'
-    ) {
-      throw new Error(
-        `WorkflowRegistry.createRun: agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
-      );
-    }
-    if (requestedAgentProvider === 'claude' && requestedAgentRuntime === 'codex-sdk') {
-      throw new Error(
-        'WorkflowRegistry.createRun: agentProvider claude conflicts with agentRuntime codex-sdk',
-      );
-    }
+    assertProviderRuntimeConsistent(
+      requestedAgentProvider,
+      requestedAgentRuntime,
+      'WorkflowRegistry.createRun',
+    );
 
     // Provider-access gate — the authoritative enforcement of the Settings →
     // Integrations / onboarding Connect toggles. Sits BELOW demo mode (which
@@ -1286,7 +1279,7 @@ export class WorkflowRegistry {
     const agentProvider: AgentProvider = demoMode
       ? 'claude'
       : codexSdkRequested ? 'codex' : 'claude';
-    const agentRuntime: WorkflowAgentRuntime = demoMode
+    const agentRuntime: WorkflowRunStorableRuntime = demoMode
       ? 'claude-sdk'
       : codexSdkRequested
         ? 'codex-sdk'

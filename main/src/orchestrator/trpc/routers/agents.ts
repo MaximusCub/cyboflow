@@ -43,7 +43,7 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
 import type { AgentOverrideRow } from '../../../database/models';
 import type { AgentEntry, AgentChangedEvent, AgentUsage } from '../../../../../shared/types/agents';
 import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
-import { WORKFLOW_AGENT_RUNTIMES } from '../../../../../shared/types/agentRuntime';
+import { WORKFLOW_LAUNCHABLE_RUNTIMES } from '../../../../../shared/types/agentRuntime';
 
 // ---------------------------------------------------------------------------
 // Context guard
@@ -185,7 +185,7 @@ const projectIdSchema = z.number().int().positive();
 /** Pinned model alias; null/omitted → inherit the run model. */
 const modelSchema = z.enum(AGENT_MODEL_ALIASES).nullable().optional();
 /** Pinned CLI runtime; null/omitted → inherit the run-level runtime. */
-const runtimeSchema = z.enum(WORKFLOW_AGENT_RUNTIMES).nullable().optional();
+const runtimeSchema = z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).nullable().optional();
 /** Codex model id used when runtime='codex-sdk'; null/omitted → Codex default. */
 const codexModelSchema = z.string().nullable().optional();
 

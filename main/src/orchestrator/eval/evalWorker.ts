@@ -24,6 +24,7 @@ import { existsSync } from 'node:fs';
 import PQueue from 'p-queue';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 // Type-only import (erased at compile) — keeps the worker free of the concrete
 // router while reusing its create-change shape for the findings write.
 import type { ReviewItemCreate } from '../reviewItemRouter';
@@ -98,14 +99,14 @@ export const MAX_FINDINGS_IN_EVAL_REPORT = 20;
 
 export interface JurySlot {
   slot: string;
-  provider: 'claude' | 'codex';
+  provider: AgentProvider;
   model: string | null;
   judge: JudgeClient;
 }
 
 export interface JurySlotProvenance {
   slot: string;
-  provider: 'claude' | 'codex';
+  provider: AgentProvider;
   model: string | null;
   status: 'ok' | 'unavailable' | 'failed';
   errorCode?: string;

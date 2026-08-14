@@ -23,7 +23,7 @@ import type {
 } from '../../../../shared/types/agents';
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
-import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { isWorkflowLaunchableRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../../shared/types/reasoningEffort';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
@@ -101,7 +101,7 @@ function parseAgentModel(value: string | null | undefined): AgentModelAlias | nu
  * `undefined` (inherit). An unrecognized value falls back to inherit.
  */
 function parseAgentRuntime(value: string | null | undefined): WorkflowAgentRuntime | undefined {
-  return isWorkflowAgentRuntime(value) ? value : undefined;
+  return isWorkflowLaunchableRuntime(value) ? value : undefined;
 }
 
 /** Narrow an override row's `codex_model` cell to a non-empty string, or `undefined`. */
@@ -263,7 +263,7 @@ export function applyVariantAgentDeltas(
  *     Agents-pane router's pre-persist normalization;
  *   - `model` (when a valid {@link isAgentModelAlias} alias) replaces the model; an
  *     unrecognized alias leaves the existing model unchanged;
- *   - `runtime` (when a valid {@link isWorkflowAgentRuntime} value) replaces the
+ *   - `runtime` (when a valid {@link isWorkflowLaunchableRuntime} value) replaces the
  *     runtime; an unrecognized value leaves the existing runtime unchanged. This
  *     slice is TYPES + RESOLUTION ONLY — nothing downstream reads `runtime` yet;
  *   - `codexModel` (when a non-empty string) replaces the Codex model id; anything
@@ -326,7 +326,7 @@ export function applyWorkflowAgentConfigs(
         : [];
     }
     const model = isAgentModelAlias(config.model) ? config.model : agent.model;
-    const runtime = isWorkflowAgentRuntime(config.runtime) ? config.runtime : agent.runtime;
+    const runtime = isWorkflowLaunchableRuntime(config.runtime) ? config.runtime : agent.runtime;
     const codexModel =
       typeof config.codexModel === 'string' && config.codexModel.length > 0
         ? config.codexModel

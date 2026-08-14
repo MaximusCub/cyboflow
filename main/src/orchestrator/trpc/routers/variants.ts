@@ -15,6 +15,10 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type { WorkflowVariantRow } from '../../../../../shared/types/experiments';
+import {
+  AGENT_PROVIDERS,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+} from '../../../../../shared/types/agentRuntime';
 
 /**
  * A per-agent variant delta map: `{ [agentKey]: { systemPrompt?, model? } }`.
@@ -92,8 +96,8 @@ export const variantsRouter = router({
         agentOverrides: variantAgentOverridesSchema.nullable().optional(),
         model: z.string().min(1).nullable().optional(),
         executionModel: z.enum(['orchestrated', 'programmatic']).nullable().optional(),
-        agentProvider: z.enum(['claude', 'codex']).nullable().optional(),
-        agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).nullable().optional(),
+        agentProvider: z.enum(AGENT_PROVIDERS).nullable().optional(),
+        agentRuntime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).nullable().optional(),
         weight: z.number().int().min(0).optional(),
         label: z.string().min(1).optional(),
       }),

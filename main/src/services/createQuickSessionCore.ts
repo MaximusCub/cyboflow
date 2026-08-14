@@ -22,10 +22,10 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import {
   claudeRuntimeFromSubstrate,
-  isWorkflowRuntimeSupported,
+  isWorkflowRunStorableRuntime,
   type AgentProvider,
   type SessionAgentRuntime,
-  type WorkflowAgentRuntime,
+  type WorkflowLaunchableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
@@ -74,7 +74,7 @@ export interface CreateQuickSessionCoreDeps {
       opts?: {
         requestedModel?: string;
         requestedAgentProvider?: AgentProvider;
-        requestedAgentRuntime?: WorkflowAgentRuntime;
+        requestedAgentRuntime?: WorkflowLaunchableRuntime;
         requireSdkSubstrate?: boolean;
       },
     ): { runId: string; substrate: CliSubstrate };
@@ -233,7 +233,12 @@ export async function createQuickSessionCore(
   try {
     // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
     const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
-    const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
+    // The sentinel is a workflow_runs ROW, not a workflow launch: it must carry
+    // whatever runtime the session actually resolved onto, because the dispatch
+    // facade reads this row back to pick the owning manager. Gating it on the
+    // LAUNCHABLE set instead would silently drop the identity of a runtime that
+    // is session-legal but not yet offered as a flow target, misrouting it.
+    const sentinelAgentRuntime = isWorkflowRunStorableRuntime(opts.agentRuntime)
       ? opts.agentRuntime
       : undefined;
     const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(

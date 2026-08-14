@@ -28,7 +28,7 @@ import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/ty
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
   SESSION_AGENT_RUNTIMES,
-  WORKFLOW_AGENT_RUNTIMES,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
   claudeRuntimeFromSubstrate,
   providerForRuntime,
   substrateForRuntime,
@@ -118,7 +118,7 @@ const AGENT_RUNTIME_LABELS: Record<AgentRuntime, string> = {
 
 /** The runtimes offerable for a key — quick sessions may also use Codex PTY. */
 export function agentRuntimeOptions(key: string): readonly AgentRuntime[] {
-  return isQuickRunTypeKey(key) ? SESSION_AGENT_RUNTIMES : WORKFLOW_AGENT_RUNTIMES;
+  return isQuickRunTypeKey(key) ? SESSION_AGENT_RUNTIMES : WORKFLOW_LAUNCHABLE_RUNTIMES;
 }
 
 /** The model aliases the picker offers (single-sourced with the composer pill). */

@@ -19,7 +19,10 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type {
+  AgentProvider,
+  WorkflowRunStorableRuntime,
+} from '../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
 import { AgentInvocationStore } from './agentInvocationStore';
@@ -214,7 +217,7 @@ export interface ClaudeSpawnerOptions {
    */
   agentProvider?: AgentProvider;
   /** Paired with {@link agentProvider} — the concrete runtime for this spawn. */
-  agentRuntime?: WorkflowAgentRuntime;
+  agentRuntime?: WorkflowRunStorableRuntime;
   /**
    * Per-spawn reasoning-effort override (IDEA-029), already normalized to this
    * spawn's provider by the caller (the step runner drops cross-provider/stale

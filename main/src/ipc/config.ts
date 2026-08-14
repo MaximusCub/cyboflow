@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppServices } from './types';
 import { validateInput } from './validateInput';
 import {
+  ALL_AGENT_RUNTIMES,
   isAgentProviderAccess,
   resolveAgentProviderAccess,
 } from '../../../shared/types/agentRuntime';
@@ -13,13 +14,10 @@ const runTypeDefaultsFields = {
   model: z.string().optional().nullable(),
   permissionMode: z.enum(PERMISSION_MODES).optional().nullable(),
   substrate: z.enum(['sdk', 'interactive']).optional().nullable(),
-  agentRuntime: z.enum([
-    'claude-sdk',
-    'claude-interactive',
-    'codex-sdk',
-    'codex-pty',
-    'codex-exec',
-  ]).optional().nullable(),
+  // The persisted run-type default is not scoped to one launch kind, so it
+  // validates against the FULL runtime union; each launch surface re-narrows to
+  // its own set.
+  agentRuntime: z.enum(ALL_AGENT_RUNTIMES).optional().nullable(),
   reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional().nullable(),
 };
 
@@ -35,13 +33,7 @@ const runTypeDefaultsOpSchema = z.discriminatedUnion('kind', [
       model: z.string().optional(),
       permissionMode: z.enum(PERMISSION_MODES).optional(),
       substrate: z.enum(['sdk', 'interactive']).optional(),
-      agentRuntime: z.enum([
-        'claude-sdk',
-        'claude-interactive',
-        'codex-sdk',
-        'codex-pty',
-        'codex-exec',
-      ]).optional(),
+      agentRuntime: z.enum(ALL_AGENT_RUNTIMES).optional(),
       reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
     }).strict().nullable(),
   }),

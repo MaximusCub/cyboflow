@@ -17,6 +17,7 @@ import {
   stampQuickSessionRuntimeConfig,
   _resetClaimedQuickSessionIdsForTesting,
   type CreateQuickSessionCoreDeps,
+  type CreateQuickSessionCoreOptions,
   type QuickSessionRow,
 } from '../createQuickSessionCore';
 
@@ -188,5 +189,79 @@ describe('createQuickSessionCore — half-created session sweep', () => {
     await expect(
       createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a' }),
     ).rejects.toThrow('invalid substrate/runtime combo');
+  });
+});
+
+/**
+ * The `__quick__` sentinel run carries the session's provider/runtime, and the
+ * dispatch facade reads that ROW back to pick the owning manager
+ * (`resolveManager(runId)`). So the gate on what gets forwarded is the
+ * run-STORABLE set, not the workflow-LAUNCHABLE one: gating on "may a workflow
+ * launch on this?" would silently drop the identity of a runtime that is
+ * session-legal but not yet offered as a flow target, and the session would
+ * misroute to Claude.
+ *
+ * Reuses the reject-on-createRun harness: the opts are captured before the
+ * throw, so the assertion needs no DB.
+ */
+describe('createQuickSessionCore — sentinel runtime uses the STORABLE set', () => {
+  beforeEach(() => {
+    _resetClaimedQuickSessionIdsForTesting();
+  });
+
+  type SentinelOpts = {
+    requestedModel?: string;
+    requestedAgentProvider?: string;
+    requestedAgentRuntime?: string;
+  };
+
+  async function captureSentinelOpts(agentRuntime: string): Promise<SentinelOpts> {
+    let captured: SentinelOpts = {};
+    const deps: CreateQuickSessionCoreDeps = {
+      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      sessionManager: {
+        on: (_event, listener: (s: QuickSessionRow) => void) => {
+          listener({ id: 'sess-storable', worktreePath: '/wt/arm-a' });
+        },
+        removeListener: () => {},
+      },
+      workflowRegistry: {
+        ensureQuickWorkflow: () => 'wf-quick',
+        createRun: (_workflowId, _substrate, _sessionId, _mode, opts) => {
+          captured = { ...opts };
+          throw new Error('stop after capture');
+        },
+      },
+      getDb: () => {
+        throw new Error('unreachable');
+      },
+      dismissHalfCreatedSession: async () => {},
+    };
+
+    await expect(
+      createQuickSessionCore(deps, {
+        projectId: 1,
+        nameHint: 'arm-a',
+        // Cast at the seam: the point of the test is what happens to a runtime
+        // string the STORABLE guard has to judge, including one it rejects.
+        agentRuntime: agentRuntime as CreateQuickSessionCoreOptions['agentRuntime'],
+        agentProvider: 'codex',
+        agentModel: 'gpt-5.4',
+      }),
+    ).rejects.toThrow('stop after capture');
+
+    return captured;
+  }
+
+  it('forwards runtime, provider, and model for a storable runtime', async () => {
+    expect(await captureSentinelOpts('codex-sdk')).toEqual({
+      requestedAgentRuntime: 'codex-sdk',
+      requestedAgentProvider: 'codex',
+      requestedModel: 'gpt-5.4',
+    });
+  });
+
+  it('drops the whole triple for a runtime a run row may not carry', async () => {
+    expect(await captureSentinelOpts('codex-pty')).toEqual({});
   });
 });

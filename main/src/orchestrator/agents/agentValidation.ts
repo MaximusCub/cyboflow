@@ -15,7 +15,7 @@ import { isCliTool } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import { isAgentModelAlias, referencesForbiddenWriterTool } from '../../../../shared/types/agents';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
-import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { isWorkflowLaunchableRuntime } from '../../../../shared/types/agentRuntime';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The discriminated set of validation/conflict failure codes. */
@@ -134,9 +134,9 @@ export function validateAgentDraft(draft: AgentDraft): void {
   }
 
   // runtime is optional: null/undefined inherits the run-level runtime; any other
-  // value must be a known WORKFLOW_AGENT_RUNTIMES value (defense-in-depth — the
-  // tRPC zod already constrains it).
-  if (draft.runtime != null && !isWorkflowAgentRuntime(draft.runtime)) {
+  // value must be a known WORKFLOW_LAUNCHABLE_RUNTIMES value (defense-in-depth —
+  // the tRPC zod already constrains it).
+  if (draft.runtime != null && !isWorkflowLaunchableRuntime(draft.runtime)) {
     throw new AgentOverrideError(
       'invalid_runtime',
       `Agent runtime "${String(draft.runtime)}" is not a permitted runtime.`,
