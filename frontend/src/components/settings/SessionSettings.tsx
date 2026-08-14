@@ -118,7 +118,19 @@ export function SessionSettings({
    * second hardcoded list, so Settings cannot offer a model a launch would not.
    */
   const usesCodex = globalRuntimeUsesCodex(defaultAgentRuntime);
-  const { options: codexModelOptions } = useCodexModelCatalog(usesCodex);
+  const {
+    options: codexModelOptions,
+    loading: codexCatalogLoading,
+    error: codexCatalogError,
+  } = useCodexModelCatalog(usesCodex);
+  /**
+   * The catalog is fetched from the Codex CLI, so under a Codex runtime the
+   * list is just the synthetic "Auto/default" entry until it arrives — and
+   * stays that way if the fetch fails or the CLI reports no models. Rendering
+   * that silently looks like the options simply do not follow the runtime, so
+   * each of those three states says which one it is.
+   */
+  const codexCatalogEmpty = usesCodex && !codexCatalogLoading && codexModelOptions.length <= 1;
   const modelOptions: readonly { id: string; label: string; hint: string }[] = usesCodex
     ? codexModelOptions.map((o) => ({ id: o.id, label: o.label, hint: o.description }))
     : MODEL_OPTIONS.map((o) => ({
@@ -210,60 +222,6 @@ export function SessionSettings({
             </p>
           </SettingsSection>
 
-          {/* The GLOBAL model rung. "Built-in default" is not a value — it CLEARS
-              the field, so the ladder falls through to the per-kind floor
-              (DEFAULT_RUN_TYPE_MODEL_FLOORS). Absent must stay distinguishable
-              from a set value, hence the explicit choice rather than preselecting
-              a model. Options come from the launch pickers' own lists — the
-              Claude aliases (MODEL_OPTIONS) or, under a Codex global runtime,
-              the Codex catalog — never a second hand-written list. */}
-          <SettingsSection
-            title="Default Launch Model"
-            description="Which model a new quick session or flow run starts on"
-            icon={<Cpu className="w-4 h-4" />}
-          >
-            <div className="flex flex-col gap-1.5">
-              <button
-                type="button"
-                data-testid="default-launch-model-unset"
-                onClick={() => handleLaunchModelPick('')}
-                aria-pressed={defaultLaunchModel === ''}
-                className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
-                  defaultLaunchModel === ''
-                    ? 'border-interactive bg-interactive-surface'
-                    : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
-                }`}
-              >
-                <span className="text-text-primary font-medium text-sm">Built-in default</span>
-                <span className="text-xs text-text-tertiary">Let each launch kind use its own floor</span>
-              </button>
-              {modelOptions.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  data-testid={`default-launch-model-${option.id}`}
-                  onClick={() => handleLaunchModelPick(option.id)}
-                  aria-pressed={defaultLaunchModel === option.id}
-                  className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
-                    defaultLaunchModel === option.id
-                      ? 'border-interactive bg-interactive-surface'
-                      : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
-                  }`}
-                >
-                  <span className="text-text-primary font-medium text-sm">{option.label}</span>
-                  <span className="text-xs text-text-tertiary">{option.hint}</span>
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-text-tertiary mt-2">
-              Seeds both quick sessions and flow runs. A per-session-type override (below) still wins,
-              and so does a model picked in the launch wizard. On "Built-in default" nothing is stored:
-              quick sessions and flow runs each fall back to their own built-in model. The list follows
-              the agent runtime below — switching to a Codex runtime offers Codex models and moves a
-              Claude model off, since a model can only start on its own provider.
-            </p>
-          </SettingsSection>
-
           {/* ONE global runtime for both launch surfaces, coerced per surface.
               SESSION_AGENT_RUNTIMES is the superset of the two launch kinds;
               `codex-exec` is deliberately absent (headless — it reaches no launch
@@ -338,6 +296,86 @@ export function SessionSettings({
               substrate — "Claude interactive" runs on the terminal and "Claude SDK" in-process — which
               outranks the "Quick Session Runtime" setting below. Leave this on "Built-in default" for
               that setting to decide the substrate.
+            </p>
+          </SettingsSection>
+
+          {/* The GLOBAL model rung. "Built-in default" is not a value — it CLEARS
+              the field, so the ladder falls through to the per-kind floor
+              (DEFAULT_RUN_TYPE_MODEL_FLOORS). Absent must stay distinguishable
+              from a set value, hence the explicit choice rather than preselecting
+              a model. Options come from the launch pickers' own lists — the
+              Claude aliases (MODEL_OPTIONS) or, under a Codex global runtime,
+              the Codex catalog — never a second hand-written list. */}
+          <SettingsSection
+            title="Default Launch Model"
+            description="Which model a new quick session or flow run starts on"
+            icon={<Cpu className="w-4 h-4" />}
+          >
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                data-testid="default-launch-model-unset"
+                onClick={() => handleLaunchModelPick('')}
+                aria-pressed={defaultLaunchModel === ''}
+                className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                  defaultLaunchModel === ''
+                    ? 'border-interactive bg-interactive-surface'
+                    : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                }`}
+              >
+                <span className="text-text-primary font-medium text-sm">Built-in default</span>
+                <span className="text-xs text-text-tertiary">Let each launch kind use its own floor</span>
+              </button>
+              {modelOptions.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  data-testid={`default-launch-model-${option.id}`}
+                  onClick={() => handleLaunchModelPick(option.id)}
+                  aria-pressed={defaultLaunchModel === option.id}
+                  className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                    defaultLaunchModel === option.id
+                      ? 'border-interactive bg-interactive-surface'
+                      : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                  }`}
+                >
+                  <span className="text-text-primary font-medium text-sm">{option.label}</span>
+                  <span className="text-xs text-text-tertiary">{option.hint}</span>
+                </button>
+              ))}
+              {usesCodex && codexCatalogLoading && (
+                <p
+                  className="text-xs text-text-tertiary px-3 py-2"
+                  data-testid="default-launch-model-codex-loading"
+                >
+                  Loading Codex models…
+                </p>
+              )}
+              {usesCodex && codexCatalogError !== null && (
+                <p
+                  className="text-xs text-status-warning px-3 py-2"
+                  data-testid="default-launch-model-codex-error"
+                  role="alert"
+                >
+                  Couldn't load the Codex model list ({codexCatalogError}). Only Auto/default is
+                  available until it loads.
+                </p>
+              )}
+              {codexCatalogEmpty && codexCatalogError === null && (
+                <p
+                  className="text-xs text-text-tertiary px-3 py-2"
+                  data-testid="default-launch-model-codex-empty"
+                >
+                  The Codex CLI reported no models, so only Auto/default is available.
+                </p>
+              )}
+            </div>
+            <p className="text-xs text-text-tertiary mt-2">
+              Seeds both quick sessions and flow runs. A per-session-type override (below) still wins,
+              and so does a model picked in the launch wizard. On "Built-in default" nothing is stored:
+              quick sessions and flow runs each fall back to their own built-in model. The list follows
+              the agent runtime above — switching to a Codex runtime offers Codex models and moves a
+              Claude model off, since a model can only start on its own provider.
             </p>
           </SettingsSection>
 

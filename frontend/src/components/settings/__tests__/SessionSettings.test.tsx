@@ -32,12 +32,30 @@ const CODEX_MODEL_OPTIONS = [
   { id: 'gpt-5', label: 'GPT-5', description: 'General purpose', isDefault: false },
 ];
 
+/**
+ * Mutable so the Codex-catalog states can be exercised. The catalog is fetched
+ * from the Codex CLI, so under a Codex runtime the list legitimately holds only
+ * the synthetic 'auto' entry while loading, on failure, or when the CLI reports
+ * nothing — each of which must read differently in the UI.
+ */
+const codexCatalogState: {
+  options: typeof CODEX_MODEL_OPTIONS;
+  loading: boolean;
+  error: string | null;
+} = { options: CODEX_MODEL_OPTIONS, loading: false, error: null };
+
+function setCodexCatalog(over: Partial<typeof codexCatalogState> = {}): void {
+  codexCatalogState.options = over.options ?? CODEX_MODEL_OPTIONS;
+  codexCatalogState.loading = over.loading ?? false;
+  codexCatalogState.error = over.error ?? null;
+}
+
 vi.mock('../../../stores/codexModelCatalogStore', () => ({
   useCodexModelCatalog: () => ({
-    options: CODEX_MODEL_OPTIONS,
+    options: codexCatalogState.options,
     defaultModel: 'gpt-5-codex',
-    loading: false,
-    error: null,
+    loading: codexCatalogState.loading,
+    error: codexCatalogState.error,
   }),
 }));
 
@@ -414,6 +432,71 @@ describe('SessionSettings', () => {
 
       fireEvent.click(button);
       expect(props.onDefaultAgentRuntimeChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('runtime precedes model, and the Codex catalog states are legible', () => {
+    // The model list is DERIVED from the runtime, so the runtime has to be the
+    // earlier choice. With model first a user picks it before the runtime that
+    // decides which options are even valid, and the help text has to point
+    // backwards to explain itself.
+    it('renders Default Agent Runtime BEFORE Default Launch Model', () => {
+      renderGroup();
+
+      const html = document.body.innerHTML;
+      expect(html.indexOf('Default Agent Runtime')).toBeGreaterThan(-1);
+      expect(html.indexOf('Default Launch Model')).toBeGreaterThan(-1);
+      expect(html.indexOf('Default Agent Runtime')).toBeLessThan(
+        html.indexOf('Default Launch Model'),
+      );
+    });
+
+    it('offers the Codex catalog under a Codex runtime and Claude aliases otherwise', () => {
+      setCodexCatalog();
+      renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+      expect(screen.getByTestId('default-launch-model-gpt-5-codex')).toBeInTheDocument();
+      expect(screen.queryByTestId('default-launch-model-opus')).not.toBeInTheDocument();
+
+      cleanup();
+      renderGroup({ defaultAgentRuntime: 'claude-sdk' });
+      expect(screen.getByTestId('default-launch-model-opus')).toBeInTheDocument();
+      expect(screen.queryByTestId('default-launch-model-gpt-5-codex')).not.toBeInTheDocument();
+    });
+
+    it('says it is loading rather than showing a bare Auto-only list', () => {
+      setCodexCatalog({ options: [CODEX_MODEL_OPTIONS[0]], loading: true });
+      renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+
+      expect(screen.getByTestId('default-launch-model-codex-loading')).toBeInTheDocument();
+      expect(screen.queryByTestId('default-launch-model-codex-empty')).not.toBeInTheDocument();
+      setCodexCatalog();
+    });
+
+    it('surfaces a catalog failure instead of silently offering only Auto', () => {
+      setCodexCatalog({ options: [CODEX_MODEL_OPTIONS[0]], error: 'codex CLI not found' });
+      renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+
+      const alert = screen.getByTestId('default-launch-model-codex-error');
+      expect(alert).toHaveTextContent(/codex CLI not found/);
+      // The failure explains itself; it must not ALSO claim the CLI reported none.
+      expect(screen.queryByTestId('default-launch-model-codex-empty')).not.toBeInTheDocument();
+      setCodexCatalog();
+    });
+
+    it('says so when the CLI genuinely reports no models', () => {
+      setCodexCatalog({ options: [CODEX_MODEL_OPTIONS[0]] });
+      renderGroup({ defaultAgentRuntime: 'codex-sdk' });
+
+      expect(screen.getByTestId('default-launch-model-codex-empty')).toBeInTheDocument();
+      setCodexCatalog();
+    });
+
+    it('shows none of those notes under a Claude runtime', () => {
+      renderGroup({ defaultAgentRuntime: 'claude-sdk' });
+
+      expect(screen.queryByTestId('default-launch-model-codex-loading')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-launch-model-codex-error')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-launch-model-codex-empty')).not.toBeInTheDocument();
     });
   });
 });
