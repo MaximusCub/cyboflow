@@ -1,6 +1,7 @@
 # OMP (oh-my-pi) as a third agent provider
 
-Status: PROPOSAL (2026-08-14). Not yet scheduled.
+Status: PROPOSAL (2026-08-14), revised same day after a Codex adversarial review (8 findings, all
+accepted; dispositions in §14). Not yet scheduled.
 Prior art: `docs/proposals/codex-provider-integration.md` (the second-provider integration this one
 deliberately mirrors and generalizes), `docs/ARCHITECTURE.md` §"Dual-substrate seam".
 
@@ -102,9 +103,20 @@ Using the orchestration-capability tiers (see §"capability registry" in the res
 | T3 eval juror / visual verifier | one-shot query | **Phase 3 / open** — RPC exposes no per-prompt JSON-schema output; see §9 |
 
 The hard rule from the codex retro applies: `workflow_runs.substrate` piggybacking on `'sdk'` makes
-a new runtime **silently eligible for programmatic mode**. Phase 1 must add an explicit
-tier-eligibility guard for `omp-sdk` in `workflowRegistry.createRun` (reject workflow runs until
-Phase 2 lands; quick `__quick__` sentinel only), rather than discovering T1 by accident.
+a new runtime **silently eligible for programmatic mode**. And a bare `createRun` guard is not
+enough (adversarial-review finding): `createQuickSessionCore.ts:234-252` forwards
+provider/runtime onto the `__quick__` sentinel run **only when `isWorkflowRuntimeSupported`
+passes** — and the facade's `resolveManager(runId)` reads the sentinel run row — so a Phase-1
+`omp-sdk` outside `WORKFLOW_AGENT_RUNTIMES` would lose its identity and misroute, while adding it
+early would advertise T1 everywhere. Phase 0 therefore **splits the two meanings** that
+`WORKFLOW_AGENT_RUNTIMES` conflates today:
+
+- `WORKFLOW_RUN_STORABLE_RUNTIMES` — what a `workflow_runs` row (incl. the quick sentinel) may
+  carry; `omp-sdk` joins in **Phase 1** (with the DB CHECK widened in Phase 0).
+- `WORKFLOW_LAUNCHABLE_RUNTIMES` — what workflow pickers offer and `workflowRegistry.createRun`
+  accepts for real (non-sentinel) runs; `omp-sdk` joins in **Phase 2**.
+
+`isWorkflowRuntimeSupported` callers are re-audited against whichever set they actually mean.
 
 ### 3.3 Distribution & auth: delegate to OMP (v1)
 
@@ -148,15 +160,25 @@ P0 (silent misrouting):
    `Map<PanelLane | AgentProvider, AbstractCliManager>` registry with explicit registration at boot;
    `resolvePanelOwner` (`main/src/index.ts:2542-2556`) loses its silent `default:`-to-Claude arm.
 3. DB CHECK constraints hardcode `('claude','codex')` on `sessions` (059/060), `workflow_runs`
-   (062/063), `agent_invocations` (065). SQLite cannot ALTER a CHECK → **table-rebuild migrations**
-   (create-new → copy → drop → rename, preserving indexes + the `agent_invocations` FK). We widen
-   to include `'omp'` in the same rebuild (one rebuild, not two). Schema parity: update
-   `scripts/verify-schema-parity.js` + `entitySchemaParity.test.ts`.
+   (062/063), `agent_invocations` (065), **and `workflow_variants` (068 — caught by the
+   adversarial review; `workflowRegistry.updateVariant` writes those columns directly, so a
+   Phase-2 OMP variant save would be rejected by SQLite)**. SQLite cannot ALTER a CHECK →
+   **table-rebuild migrations** (create-new → copy → drop → rename, preserving indexes + FKs,
+   `agent_invocations`→`workflow_runs` included). We widen to include `'omp'` in the same rebuild
+   (one rebuild, not two), and the migration test upgrades a populated legacy DB then saves an OMP
+   variant. Schema parity: update `scripts/verify-schema-parity.js` +
+   `entitySchemaParity.test.ts`. A final `grep -rn "('claude','codex')" main/src/database` sweep
+   is part of the phase's acceptance, so no fifth constraint is discovered in Phase 2.
 4. `normalizeAgentModelSelection`'s claude-else-codex binary (`shared/types/agentModels.ts:87-104`)
    → per-provider model-family predicate registry. OMP's discriminator is structural: its model ids
    contain a `/` (`provider/model`).
 5. `AGENT_PROVIDER_DISABLED_CODE` regex + `parseAgentProviderDisabled` coercion +
-   `resolveAgentProviderAccess` (`agentRuntime.ts:164-212`) → provider-list-driven.
+   `resolveAgentProviderAccess` (`agentRuntime.ts:164-212`) → provider-list-driven, **with a
+   per-provider default policy** (adversarial-review finding): today an *absent* access key floors
+   to enabled, which would switch OMP on for every existing install the moment the provider ships.
+   The registry carries `defaultEnabled` per provider — `claude`/`codex` keep the legacy
+   absent⇒enabled floor; any *newly introduced* provider is absent⇒**disabled** until the user
+   turns it on in Settings/onboarding. Tests cover legacy partial and absent access maps.
 
 P1 (shape, same pass):
 6. `WorkflowAgentConfig.codexModel` → generalized `providerModel?: string` (keyed by the resolved
@@ -201,11 +223,13 @@ Extends `AbstractCliManager`; the CodexSdkManager blueprint applies almost 1:1:
   first-class RPC call, not a process kill.
 - **Spawn flags** (explicit, never inherited defaults):
   `--mode rpc --approval-mode <mapped> --model <selection> --session-dir <cyboflowDataDir>/omp-sessions/<panelId>
-  --no-title -e <cyboflowGateExtension> [--resume <path>]`.
-  Explicit `--approval-mode` is **non-negotiable** (OMP defaults to yolo, fact §2.5).
-  Redirecting `--session-dir` keeps cyboflow-spawned OMP sessions out of the user's personal
-  `~/.omp` session list, sidesteps the encoded-cwd collision class, and makes cleanup a directory
-  delete; resume still works by path.
+  --no-title --no-extensions --no-skills -e <cyboflowGateExtension> [--resume <path>]`.
+  Explicit `--approval-mode` is **non-negotiable** (OMP defaults to yolo, fact §2.5), and
+  **ambient executable discovery is disabled on every cyboflow-managed spawn** (see §8.2 — this is
+  a trust-boundary requirement, not a hermeticity nicety; `-e` then loads exactly one extension:
+  ours). Redirecting `--session-dir` keeps cyboflow-spawned OMP sessions out of the user's
+  personal `~/.omp` session list, sidesteps the encoded-cwd collision class, and makes cleanup a
+  directory delete; resume still works by path.
 - **Turn contract**: `spawnCliProcess` sends `prompt` and resolves at the first `agent_end` with
   `isTerminal !== false` (per-logical-turn resolution, same contract the warm Claude SDK path
   keeps); rejects on `turn.error`-equivalents. `'spawned'`/session-info/`'exit'` are emitted per
@@ -219,15 +243,20 @@ Extends `AbstractCliManager`; the CodexSdkManager blueprint applies almost 1:1:
   `AgentSessionEvent` → `AgentStreamEvent[]`, stamped `{provider:'omp', runtime:'omp-sdk'}`.
   Mapping sketch: `message_start/end` (assistant) → `AgentAssistantMessageEvent` with
   text/thinking/tool-call blocks; `tool_execution_end` → tool-result blocks; `agent_end` →
-  `AgentResultEvent` carrying accumulated usage **and `total_cost_usd`** (OMP reports per-turn
-  dollar cost — unlike Codex, OMP runs will have real `run_usage.cost_usd`; stored verbatim per
-  the run-cost source-of-truth rule, flagged in UI as harness-estimated). `message_update`
-  `text_delta`s are **dropped in v1** (codex-parity refetch model; live-tail is a later nicety) —
-  same for the raw-notification audit sink (`event_type='omp_rpc_event'`, deltas excluded, the
-  `rawNotificationSink` lesson).
-- **Usage note**: OMP reports usage per assistant message (Claude-style), so the
-  `insightsQueries.ts:536-541` result-usage fallback heuristic is untouched — we emit usage on
-  projected assistant messages, and the result event carries the rollup from `get_session_stats`.
+  `AgentResultEvent`. `message_update` `text_delta`s are **dropped in v1** (codex-parity refetch
+  model; live-tail is a later nicety) — same for the raw-notification audit sink
+  (`event_type='omp_rpc_event'`, deltas excluded, the `rawNotificationSink` lesson).
+- **Usage/cost contract — per-turn deltas, never session rollups** (adversarial-review finding):
+  emitting `get_session_stats` (a *cumulative* rollup) on every `agent_end` would be re-summed
+  downstream (`insightsQueries.ts:609-613` adds each result's `total_cost_usd`), recording
+  A + (A+B) + (A+B+C) across a warm session. Instead the manager accumulates the
+  per-assistant-message `usage` blocks (tokens **and** `cost.total`) arriving **within the current
+  turn** and stamps exactly that turn's delta as the result event's usage + `total_cost_usd`
+  (stored verbatim per the run-cost source-of-truth rule; UI marks OMP cost "estimated (OMP)").
+  `get_session_stats` is a cross-check/log line only. OMP reports usage per assistant message
+  (Claude-style), so the `insightsQueries.ts:536-541` result-usage fallback heuristic is
+  untouched. A mandated test covers a three-turn warm session plus a restart-resume turn,
+  asserting recorded totals equal the sum of per-turn deltas.
 - **Approval gate**: see §5.3.
 - **Question gate**: v1 = none (OMP's `ask` tool is not bridged yet; quick sessions surface
   questions as plain assistant text). Phase 3 bridges it. This matches where claude-interactive
@@ -237,7 +266,10 @@ Extends `AbstractCliManager`; the CodexSdkManager blueprint applies almost 1:1:
 
 CodexPtyManager blueprint: discovery ladder (custom path → PATH), version probe via the shared
 `cliVersionProbe.ts` (its shebang/`usedNodeFallback` handling is reusable as-is),
-`buildCommandArgs` = `--approval-mode <mapped> [--model <selection>] [--continue]`, raw
+`buildCommandArgs` = `--approval-mode <mapped> --no-extensions --no-skills [--model <selection>]
+[--continue]` (PTY mapping: `dontAsk` → `yolo`, everything else → `always-ask` — with no gating
+hook on this lane, OMP's over-broad `write` tier is never enabled; the user answers prompts in the
+TUI they are already sitting in), raw
 `pty-output` with the 200 KB backlog cap, `relayUserTurn`/`relayRawInput`/`resizePanel`.
 Improvement over codex-pty: `continuePanel` respawns with `--continue` scoped to the worktree cwd
 (OMP's per-cwd breadcrumb makes this actually resume), instead of kill+fresh.
@@ -246,31 +278,47 @@ not enter the review queue). No MCP, no structured side-channel — T0 floor by 
 
 ### 5.3 Permission-mode mapping + the gating extension
 
-Two composed layers, one source of truth (`ompPermissionConfigForMode`, the
-`codexPermissionFlagsForMode` analogue, shared by both lanes):
+**Design rule (from the adversarial review): OMP's tool-tier classification is never cyboflow's
+trust boundary.** OMP's `write` approval mode auto-approves *every* write-tier tool — and OMP
+classifies **all MCP tools as write-tier** — which is far wider than cyboflow's `acceptEdits`
+allowance (Edit/Write/MultiEdit + proven-safe reads, `permissionModeMapper.ts:32-53, 90-104`).
+Mapping cyboflow modes onto OMP modes would therefore silently widen the boundary. Instead,
+**cyboflow's own predicate is the only policy engine**, applied in the gating extension; OMP's
+approval mode is set so that a missing/unloaded gate **fails closed**, never open:
 
-| Cyboflow mode | OMP `--approval-mode` | Gating extension behavior (`omp-sdk` only) |
+| Cyboflow mode | OMP `--approval-mode` | Gating extension (`omp-sdk`; the sole policy engine) |
 |---|---|---|
-| `default` | `always-ask` | `tool_call` → orch-socket ask → ApprovalRouter decision |
-| `acceptEdits` | `write` | gate exec-tier only |
-| `auto` | `write` | gate exec-tier; allowlist via merged permission rules |
-| `dontAsk` | `yolo` | log-only |
+| `default` | `always-ask` | apply cyboflow's predicate: auto-allow reads; everything else → orch-socket → ApprovalRouter |
+| `acceptEdits` | `always-ask` | as above, plus auto-allow exactly cyboflow's edit-tool set (never OMP's write tier) |
+| `auto` | `always-ask` | as above, plus the merged permission-rule allowlist |
+| `dontAsk` | `yolo` | log-only (+ `disallowedTools` still enforced) |
 
-The **gating extension** is a small cyboflow-authored OMP hook module (shipped inside our app
-resources, passed via `-e <path>`): on `tool_call` it connects to `CYBOFLOW_ORCH_SOCKET`, requests
-a decision keyed by `CYBOFLOW_RUN_ID`, and returns `{block, reason}` on deny. This is the
-**interactive-Claude shell-hook pattern** (`preToolUseShellHook.ts`) ported to OMP's hook API, and
-it fails closed (a hook throw blocks the call — OMP-documented semantics). It also enforces
-`disallowedTools` (env `CYBOFLOW_DISALLOWED_TOOLS`), which closes a real Codex gap
-(`spawnStepRunner.ts:62-64` deny-list is unenforced on codex-sdk).
-Open verification item: whether OMP fires `tool_call` hooks inside its **subagents** (its docs say
-subagents run forced-yolo; hook scope there is UNKNOWN). Until verified, the extension also denies
-OMP's `task` tool outside `dontAsk` mode, so gating cannot be escaped by delegation.
+Mechanics:
 
-In parallel, RPC `extension_ui_request` frames of kind `confirm` (OMP's own approval prompts, e.g.
-the bash safety-overrides that fire even in yolo) are answered by a thin
-`ompApprovalBridge` → ApprovalRouter — the codex `approvalBridge.ts` mirror, so nothing ever hangs
-waiting on a TUI that does not exist.
+- The **gating extension** is a small cyboflow-authored OMP hook module (shipped in app resources,
+  passed via `-e <path>`): on `tool_call` it evaluates cyboflow's predicate against the structured
+  `toolName`/`input`; undecidable → connect to `CYBOFLOW_ORCH_SOCKET`, request a decision keyed by
+  `CYBOFLOW_RUN_ID`, block on it, return `{block, reason}` on deny. This is the interactive-Claude
+  shell-hook pattern (`preToolUseShellHook.ts`) ported to OMP's hook API; a handler throw blocks
+  the call (OMP-documented fail-closed semantics). It also enforces `disallowedTools`
+  (env `CYBOFLOW_DISALLOWED_TOOLS`) — closing a real Codex gap (`spawnStepRunner.ts:62-64` is
+  unenforced on codex-sdk) — and denies OMP's `task` tool outside `dontAsk` until hook scope
+  inside OMP subagents is verified (docs say subagents run forced-yolo; hook scope UNKNOWN).
+- Because OMP runs `always-ask`, a call the hook allowed still raises OMP's own (now redundant)
+  approval prompt over RPC. The **`ompApprovalBridge`** auto-approves prompts whose tool call the
+  hook has already passed (correlate via toolCallId if present on the prompt payload; if
+  correlation proves unavailable, the bridge re-applies the same predicate to the prompt payload).
+  If the gate extension failed to load, no allow-record exists and the bridge **denies with a
+  surfaced reason** — the failure mode is a blocked session, never a silent yolo. A spawn-time
+  assertion + unit test lock the mode flags.
+- **Every blocking `extension_ui_request` kind is answered in Phase 1** (review finding: `select`,
+  `input`, and `editor` are blocking too, and an unanswered one hangs the turn with no
+  `agent_end`): `confirm` → the approval path above; `select`/`input`/`editor` → deterministic
+  cancellation with a surfaced panel error (until the Phase-3 question bridge exists);
+  `notify`/`setStatus`/`setWidget`/`setTitle`/`open_url` → acknowledged and logged. Each kind gets
+  a test that asserts the turn resolves without relying on a timeout.
+- MCP write-tier prompts for the `cyboflow` server itself are auto-approved (they are our own
+  tools, same stance as Codex's `default_tools_approval_mode: 'approve'`).
 
 ### 5.4 MCP (`cyboflow_*`) injection — worktree sessions only in v1
 
@@ -280,16 +328,19 @@ waiting on a TUI that does not exist.
   ```json
   { "mcpServers": { "cyboflow": {
       "command": "<node>", "args": ["<cyboflowMcpServer.js>"],
-      "env": { "CYBOFLOW_RUN_ID": "${CYBOFLOW_RUN_ID}",
-               "CYBOFLOW_ORCH_SOCKET": "${CYBOFLOW_ORCH_SOCKET}" },
+      "env": { "CYBOFLOW_RUN_ID": "CYBOFLOW_RUN_ID",
+               "CYBOFLOW_ORCH_SOCKET": "CYBOFLOW_ORCH_SOCKET" },
       "timeout": 0 } } }
   ```
 
-  `${VAR}` expansion pulls from the **omp process env**, which we inject per spawn — one static
-  file works for concurrent lanes sharing a worktree with different run ids. `timeout: 0` is
-  mandatory (OMP's 30s default would kill any blocking human gate — the Codex
-  `tool_timeout_sec: 7d` lesson). Implementation must verify expansion resolves from process env;
-  fallback is a wrapper script reading env.
+  The bare-name env values use OMP's documented pre-connect resolution (verified in
+  `docs/mcp-config.md` §"Secrets and variable resolution": a value that names a set environment
+  variable is copied from the **omp process env**, which we inject per spawn) — one static file
+  serves concurrent lanes sharing a worktree with different run ids; discovery-time `${VAR}`
+  expansion exists too but bare-name is the more robust of the two documented forms. A missing
+  variable resolves to the literal string, and `cyboflowMcpServer` exits 1 on a malformed run id —
+  loud, not silent. `timeout: 0` is mandatory (OMP's 30s default would kill any blocking human
+  gate — the Codex `tool_timeout_sec: 7d` lesson).
 - Process env per spawn: `CYBOFLOW_RUN_ID`, `CYBOFLOW_ORCH_SOCKET`, `CYBOFLOW_RUN_ARTIFACTS_DIR`
   (do **not** repeat the codex-sdk artifacts-dir omission), login-shell PATH merge,
   `electronRunAsNodeGuardEnv`, `managedTestConcurrencyEnv`.
@@ -311,6 +362,14 @@ waiting on a TUI that does not exist.
   below codex), manager-registry entries in the facade, `resolvePanelOwner` arms, exit/output
   listeners + `startOmpSdkTurn` mirror of `startCodexSdkTurn` in `ipc/session.ts`,
   `ptyPanelDispatch` arm, demo-mode entries via the Phase-0 interface (no instanceof grafts).
+- **Input/refresh dispatch inventory beyond the obvious** (adversarial-review finding — these are
+  live binary claude-vs-codex branches that would silently route OMP to Claude):
+  `frontend/src/hooks/useClaudePanel.ts:28-47` (first-turn vs follow-up routing recognizes only
+  codex-sdk), the `sessions:input` / queued mid-turn input handlers in `ipc/session.ts`
+  (~`2683-2706`, `2971-3025`), and `sessionManager.addPanelOutput`'s structured-refresh signal
+  (`sessionManager.ts:732-743`, emitted only for `agent_runtime==='codex-sdk'` — must become
+  lane-registry-driven or an OMP panel renders stale). Registry-driven tests cover four event
+  classes per lane: initial turn, queued mid-turn input, follow-up turn, refresh signal.
 - Quick-session create path: runtime validation, provider-access gate, substrate projection
   (`omp-sdk` ⇒ `substrate='sdk'`, `omp-pty` ⇒ eager PTY spawn) in `session.ts` +
   `createQuickSessionCore.ts`.
@@ -350,9 +409,9 @@ Lift the Phase-1 guard; add:
    needed).
 5. `disallowedTools` → gating extension env (already built in Phase 1).
 6. Effort → `set_thinking_level` / model `:suffix` from the normalized selection.
-7. Hermeticity knobs for lane spawns (decide during implementation, default conservative):
-   `--no-extensions --no-skills` to keep user-global OMP customization out of workflow lanes while
-   leaving project rules/context files on; quick sessions keep the user's full OMP environment.
+7. Hermeticity: nothing new to decide — the §8.2 discovery lockdown already applies to every
+   cyboflow-managed spawn (quick sessions and lanes alike); lanes additionally never honor the
+   trusted-repo opt-in.
 8. Decide `task.isolation` interplay: OMP subagent overlay/rcopy isolation inside a cyboflow git
    worktree is untested — v1 sets `task.isolation.mode: none` via config overlay for lane spawns.
 
@@ -378,10 +437,19 @@ Not required (host owns gates at T1): question bridge, subagent role mapping, pr
 
 1. **OMP's yolo default** — every cyboflow spawn passes an explicit approval mode; a missing flag
    is a bug class, so `buildCommandArgs` asserts it and a unit test locks it.
-2. **OMP extensions run arbitrary TS in-process with no isolation.** Cyboflow loads exactly one
-   extension it ships itself (the gating hook); lane spawns pass `--no-extensions` so user-global
-   extensions cannot inject into workflow agents. Quick sessions inherit the user's own extensions
-   knowingly (their machine, their OMP config).
+2. **OMP extensions/hooks/custom tools run arbitrary TS in-process with no isolation — and OMP
+   discovers them from the PROJECT tree** (`.omp/extensions`, `.omp/hooks`, `.omp/tools`,
+   `.omp/commands`, plus imported Claude/Codex tool dirs). Opening an OMP session in an untrusted
+   repo would execute repo-controlled code at startup, **before** any `tool_call` gate fires
+   (adversarial-review critical). Therefore: **every cyboflow-managed OMP spawn — quick sessions
+   included — disables ambient executable discovery** and loads only the cyboflow gate extension.
+   Implementation must enumerate every discovery channel OMP has (extensions, hooks, custom TS
+   commands, custom tools, skills, foreign tool-dir imports) and verify each has an off switch
+   (`--no-extensions`, `--no-skills`, …); a channel without one is upstreamed or the runtime ships
+   blocked on it. Re-enabling the user's own OMP customization is a per-project **trusted-repo
+   opt-in** setting, default off, with the settings copy naming the risk. Declarative config
+   (rules/context files, `models.yml`, MCP *definitions* — which still pass the tool gate at call
+   time) stays on.
 3. **`.env` auto-load**: OMP loads `<cwd>/.env` into provider-credential resolution. A worktree
    `.env` is the repo's own file — same exposure Claude/Codex tools already have via shell access,
    but note it feeds OMP's *credential* chain; no action beyond documentation.
@@ -397,8 +465,9 @@ Not required (host owns gates at T1): question bridge, subagent role mapping, pr
 
 ## 9. Cost/usage accounting
 
-- `run_usage.cost_usd` ← OMP's per-turn `cost.total`, summed and emitted as `total_cost_usd` on the
-  projected result event, stored verbatim (source-of-truth rule). It is OMP's catalog-priced
+- `run_usage.cost_usd` ← the sum of the turn's per-assistant-message `cost.total` values, emitted
+  as that result event's `total_cost_usd` (the per-turn-delta contract of §5.1 — never a
+  `get_session_stats` rollup), stored verbatim (source-of-truth rule). It is OMP's catalog-priced
   estimate, not a provider invoice — UI marks OMP cost rows "estimated (OMP)".
 - Tokens per assistant message (Claude-style cadence), so existing insights heuristics hold without
   the codex result-fallback path.
@@ -428,7 +497,7 @@ Not required (host owns gates at T1): question bridge, subagent role mapping, pr
 | # | Risk / unknown | Mitigation |
 |---|---|---|
 | 1 | OMP's release velocity breaks the RPC contract under us | min-version floor + tested-version banner + contract fixtures; we spawn the user's binary, so breakage is visible, not silent |
-| 2 | `${VAR}` mcp.json expansion source unverified (process env vs login env) | implementation-week probe; wrapper-script fallback |
+| 2 | mcp.json env injection semantics | RESOLVED — bare-name pre-connect copy from process env is documented (`docs/mcp-config.md`); contract-tested in `ompMcpConfigWriter.test.ts` |
 | 3 | Hook (`tool_call`) scope inside OMP subagents unknown | deny `task` tool outside `dontAsk` until proven; upstream question filed |
 | 4 | No RPC structured-output → T3 blocked | defer T3; consider upstreaming `output_schema` |
 | 5 | No `--mcp-config` path flag → in-place sessions lack `cyboflow_*` | v1 limitation; upstream PR candidate |
@@ -447,7 +516,25 @@ as the rest of the app).
 
 ## 13. Rollout order
 
-Phase 0 (generalization, behavior-neutral) → Phase 1 (T0 quick sessions, feature-flagged by the
-provider-access toggle defaulting **off** until smoked) → Phase 2 (T1 per-step agents) → Phase 3
-(T2/T3, each gated on its open questions). Each phase is independently landable, gate-green, and
-live-smoked before the next starts.
+Phase 0 (generalization, behavior-neutral) → Phase 1 (T0 quick sessions, gated by the
+provider-access toggle whose **absent-key default for OMP is disabled** — the Phase-0 item-5
+policy, so existing installs never see OMP until they opt in) → Phase 2 (T1 per-step agents) →
+Phase 3 (T2/T3, each gated on its open questions). Each phase is independently landable,
+gate-green, and live-smoked before the next starts.
+
+## 14. Adversarial-review dispositions (Codex, 2026-08-14)
+
+The first committed revision of this proposal was adversarially reviewed by Codex against the
+actual tree (verdict: needs-attention, 8 findings). All eight were verified and accepted; the
+sections above already incorporate them. For provenance:
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | `acceptEdits`/`auto` mapped to OMP `write` mode auto-approves every write-tier tool incl. all MCP tools | §5.3 rewritten: OMP tiers are never the trust boundary; `always-ask` + cyboflow's own predicate in the gate; fail-closed bridge |
+| 2 | critical | Project-local OMP discovery (`.omp/` extensions/hooks/tools) executes repo-controlled TS in-process before any gate | §8.2 rewritten: discovery lockdown on every managed spawn; trusted-repo opt-in |
+| 3 | high | Emitting `get_session_stats` rollups per turn double-bills warm sessions (A + A+B + A+B+C) | §5.1/§9: per-turn delta contract + three-turn accounting test |
+| 4 | high | `workflow_variants` (mig 068) CHECK constraints missing from the rebuild list | §4 item 3: added, plus upgrade-then-save-variant test and a constraint grep sweep |
+| 5 | high | Phase 1 needs `isWorkflowRuntimeSupported` membership the plan deferred to Phase 2 (quick-sentinel identity loss vs premature T1 advertising) | §3.2: `WORKFLOW_RUN_STORABLE_RUNTIMES` vs `WORKFLOW_LAUNCHABLE_RUNTIMES` split in Phase 0 |
+| 6 | high | Live T0 dispatch paths missing from the inventory (`useClaudePanel.ts:28-47`, `ipc/session.ts` queue handlers, `sessionManager.addPanelOutput` refresh signal) | §5.5: inventory extended + four-event-class registry tests |
+| 7 | high | Only `confirm` UI-request kind handled; blocking `select`/`input`/`editor` frames hang the turn | §5.3: every blocking kind answered deterministically, per-kind tests |
+| 8 | medium | Absent provider-access key floors to enabled → OMP defaults ON for existing installs | §4 item 5 + §13: per-provider `defaultEnabled`, new providers absent⇒disabled |
