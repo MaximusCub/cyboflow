@@ -3,6 +3,20 @@ import type { AppServices } from '../types';
 import { registerModelHandlers } from '../models';
 import { AGENT_PROVIDERS } from '../../../../shared/types/agentRuntime';
 
+// OMP's catalog is not a service field — it comes from a short-lived
+// `omp --mode rpc` probe behind a process-wide instance. Unmocked, this test
+// really would spawn the machine's `omp`.
+const getOmpCatalog = vi.fn(async () => OMP_CATALOG);
+vi.mock('../../services/panels/omp/ompModelCatalog', () => ({
+  getSharedOmpModelCatalogProbe: () => ({ getCatalog: getOmpCatalog }),
+}));
+
+const OMP_CATALOG = {
+  models: [
+    { id: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', ompProvider: 'anthropic' },
+  ],
+};
+
 function captureHandlers() {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipcMain = {
@@ -59,17 +73,31 @@ describe('registerModelHandlers', () => {
     expect(getCatalog).toHaveBeenCalledOnce();
   });
 
-  it('returns an empty catalog for a provider whose fetcher has not been built yet', async () => {
-    // OMP's real catalog comes from an RPC call this build cannot make (no
-    // manager yet). Empty is the honest degradation, and it must not throw — the
-    // registry being exhaustive is what guarantees SOME answer exists.
+  it('dispatches the omp catalog to the shared RPC probe, not to a service field', async () => {
+    // OMP's catalog is a property of the machine's `omp` install rather than of
+    // any session, so its fetcher reaches the process-wide probe instead of
+    // `services`. Rows arrive in the canonical `<provider>/<id>` form.
+    getOmpCatalog.mockClear();
     const { services } = servicesWith({});
     const { handlers, ipcMain } = captureHandlers();
     registerModelHandlers(ipcMain as never, services);
 
     await expect(handlers.get('models:get-catalog')?.({}, 'omp')).resolves.toEqual({
       success: true,
-      data: { models: [] },
+      data: OMP_CATALOG,
+    });
+    expect(getOmpCatalog).toHaveBeenCalledOnce();
+  });
+
+  it('wraps an omp probe failure in the error envelope rather than throwing', async () => {
+    getOmpCatalog.mockRejectedValueOnce(new Error('omp executable not found in PATH'));
+    const { services } = servicesWith({});
+    const { handlers, ipcMain } = captureHandlers();
+    registerModelHandlers(ipcMain as never, services);
+
+    await expect(handlers.get('models:get-catalog')?.({}, 'omp')).resolves.toEqual({
+      success: false,
+      error: 'omp executable not found in PATH',
     });
   });
 

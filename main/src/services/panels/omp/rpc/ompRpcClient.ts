@@ -39,6 +39,7 @@ import {
   isTerminalAgentEnd,
   normalizeOmpEvent,
   type OmpAgentEndEvent,
+  type OmpExtensionUiResponse,
   type OmpLastAssistantText,
   type OmpModel,
   type OmpPromptAck,
@@ -85,7 +86,14 @@ export type OmpRpcClientState = 'idle' | 'running' | 'stopping' | 'failed' | 'ex
 export interface OmpRpcClientOptions extends OmpRpcSpawnOptions {
   /** Path to the `omp` binary; the sibling availability module resolves it. */
   command?: string;
-  /** Extra argv AFTER `--mode rpc` (approval mode, model, session dir, …). */
+  /**
+   * The argv that selects the RPC mode. Defaults to {@link OMP_RPC_MODE_ARGS}
+   * (`--mode rpc`); a session that must answer OMP's own approval dialogs passes
+   * {@link OMP_RPC_UI_MODE_ARGS} — see that constant for why the distinction is
+   * load-bearing rather than cosmetic.
+   */
+  modeArgs?: readonly string[];
+  /** Extra argv AFTER the mode args (approval mode, model, session dir, …). */
   args?: readonly string[];
   spawn?: SpawnOmpRpcProcess;
   maxFrameBytes?: number;
@@ -235,7 +243,7 @@ export class OmpRpcClient {
 
   constructor(private readonly options: OmpRpcClientOptions = {}) {
     this.command = options.command ?? 'omp';
-    this.args = [...OMP_RPC_MODE_ARGS, ...(options.args ?? [])];
+    this.args = [...(options.modeArgs ?? OMP_RPC_MODE_ARGS), ...(options.args ?? [])];
     this.spawnProcess = options.spawn ?? defaultSpawn;
     this.maxFrameBytes = options.maxFrameBytes ?? OMP_MAX_FRAME_BYTES;
     this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
@@ -446,6 +454,22 @@ export class OmpRpcClient {
         },
       );
     });
+  }
+
+  /**
+   * Answer a blocking `extension_ui_request`.
+   *
+   * Deliberately NOT routed through {@link send}: an `extension_ui_response` is a
+   * side-channel control frame OMP consumes without replying
+   * (`dispatchRpcControlFrame`, rpc-mode.ts:278-284), so a pending-request entry
+   * registered for it would never settle. It also carries the id OMP minted for
+   * the REQUEST, which `send`'s own id generation would fight over.
+   *
+   * Fire-and-forget by design: an id OMP no longer has pending (a dialog it
+   * already abandoned) is simply dropped by that same dispatcher.
+   */
+  respondToExtensionUi(response: OmpExtensionUiResponse): void {
+    this.writeFrame(response);
   }
 
   steer(message: string): Promise<unknown> {

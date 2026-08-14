@@ -9,7 +9,7 @@ import {
   type OmpRpcProcess,
   type SpawnOmpRpcProcess,
 } from '../ompRpcClient';
-import { OMP_RPC_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
+import { OMP_RPC_MODE_ARGS, OMP_RPC_UI_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
 
 class FakeOmpProcess extends EventEmitter implements OmpRpcProcess {
   readonly stdin = new PassThrough();
@@ -98,6 +98,19 @@ describe('OmpRpcClient — spawn + handshake', () => {
       command: '/opt/bin/omp',
       args: [...OMP_RPC_MODE_ARGS, '--approval-mode', 'always-ask'],
     }]);
+  });
+
+  it('honors an explicit mode argv (the UI-bearing rpc-ui mode)', () => {
+    const { spawnCalls } = makeHarness({
+      command: '/opt/bin/omp',
+      modeArgs: OMP_RPC_UI_MODE_ARGS,
+      args: ['--approval-mode', 'always-ask'],
+    });
+    expect(spawnCalls[0].args).toEqual([
+      ...OMP_RPC_UI_MODE_ARGS,
+      '--approval-mode',
+      'always-ask',
+    ]);
   });
 
   it('resolves the handshake from the ready frame', async () => {
@@ -340,6 +353,21 @@ describe('OmpRpcClient — request correlation', () => {
       provider: 'anthropic',
       modelId: 'claude-haiku-4-5',
     });
+  });
+
+  it('writes an extension_ui_response verbatim, with no pending request behind it', async () => {
+    const { child, client, errors } = await readyHarness();
+    client.respondToExtensionUi({ type: 'extension_ui_response', id: 'ui-7', value: 'Approve' });
+    await flush();
+
+    // The frame carries the id OMP minted for the REQUEST — `send` would have
+    // stamped a generated one, which correlates to nothing (rpc-mode.ts:278-284)
+    // while leaving a pending entry OMP never answers.
+    expect(child.outboundFrames()).toEqual([
+      { type: 'extension_ui_response', id: 'ui-7', value: 'Approve' },
+    ]);
+    expect(client.state).toBe('running');
+    expect(errors).toEqual([]);
   });
 });
 

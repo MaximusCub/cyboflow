@@ -50,6 +50,26 @@ export const OMP_RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
 export const OMP_RPC_MODE_ARGS = ['--mode', 'rpc'] as const;
 
 /**
+ * The argv prefix for the UI-BEARING RPC mode — the same NDJSON protocol, plus
+ * OMP's own dialogs delivered as `extension_ui_request` frames the host answers
+ * (README.md:541).
+ *
+ * LOAD-BEARING for any session that runs tools under an approval mode below
+ * `yolo`, and the reason is not cosmetic. `--mode rpc` leaves the tool layer's
+ * UI context unset (`main.ts:1765` passes `setToolUIContext` only for `rpc-ui`)
+ * and `sessionOptions.hasUI = isInteractive || mode === "rpc-ui"` (`main.ts:1570`)
+ * therefore resolves FALSE. `always-ask` caps auto-approval at the `read` tier
+ * (`tools/approval.ts:36-40`, `APPROVAL_MODE_MAX_TIER`), so every write/exec-tier
+ * call resolves `policy: 'prompt'` — and with no UI the wrapper does not prompt,
+ * it THROWS `Tool "<name>" requires approval but no interactive UI available`
+ * (`extensibility/extensions/wrapper.ts:308-317`). A plain-`rpc` always-ask
+ * session can therefore only ever read. Under `rpc-ui` the same call raises
+ * `select("Allow tool: …", ["Approve","Deny"])` (`wrapper.ts:325`) over RPC,
+ * which is exactly what `ompApprovalBridge` answers.
+ */
+export const OMP_RPC_UI_MODE_ARGS = ['--mode', 'rpc-ui'] as const;
+
+/**
  * The sentinel discriminant for a frame/block/message shape this contract does
  * not model. Never produced by OMP itself, so it cannot collide.
  */
@@ -433,14 +453,42 @@ export interface OmpAvailableCommandsUpdateEvent {
 /**
  * rpc.md:589-594. Arrives even under `--no-extensions` (built-ins emit
  * `setWidget`), so it MUST be tolerated. Blocking kinds (`select`, `confirm`,
- * `input`, `editor`) expect an `extension_ui_response`; that bridge is the
- * gate extension's job, not this transport's.
+ * `input`, `editor`) expect an {@link OmpExtensionUiResponse}; answering them is
+ * `ompApprovalBridge`'s job, not this transport's.
+ *
+ * `title` / `message` / `options` are the three payload fields the bridge reads:
+ * `select` carries `title` + `options` (rpc-types.ts:373), `confirm` carries
+ * `title` + `message` (:374), `input`/`editor` carry `title` (:375-390). Every
+ * one is optional because the same discriminant also covers the fire-and-forget
+ * methods (`notify`, `setStatus`, `setWidget`, …) that carry none of them.
  */
 export interface OmpExtensionUiRequestEvent {
   readonly type: 'extension_ui_request';
   readonly id: string;
   readonly method: string;
+  readonly title?: string;
+  readonly message?: string;
+  readonly options?: readonly string[];
 }
+
+/**
+ * The host's answer to a BLOCKING `extension_ui_request` (rpc.md:617-621,
+ * rpc-types.ts:535-538).
+ *
+ * NOT a command: OMP dispatches this as a side-channel control frame
+ * (`dispatchRpcControlFrame`, rpc-mode.ts:278-284) and never writes a `response`
+ * frame back, which is why {@link OmpRpcClient.respondToExtensionUi} writes it
+ * directly instead of going through `send`.
+ */
+export type OmpExtensionUiResponse =
+  | { readonly type: 'extension_ui_response'; readonly id: string; readonly value: string }
+  | { readonly type: 'extension_ui_response'; readonly id: string; readonly confirmed: boolean }
+  | {
+      readonly type: 'extension_ui_response';
+      readonly id: string;
+      readonly cancelled: true;
+      readonly timedOut?: boolean;
+    };
 
 /** rpc.md:79, 491-498. */
 export interface OmpExtensionErrorEvent {
@@ -720,7 +768,18 @@ export function normalizeOmpEvent(frame: Record<string, unknown>): OmpRpcEvent {
       };
     case 'extension_ui_request':
       if (typeof frame.id === 'string' && typeof frame.method === 'string') {
-        return { type: 'extension_ui_request', id: frame.id, method: frame.method };
+        return {
+          type: 'extension_ui_request',
+          id: frame.id,
+          method: frame.method,
+          ...(optionalString(frame.title) !== undefined ? { title: optionalString(frame.title) } : {}),
+          ...(optionalString(frame.message) !== undefined
+            ? { message: optionalString(frame.message) }
+            : {}),
+          ...(Array.isArray(frame.options)
+            ? { options: frame.options.filter((option): option is string => typeof option === 'string') }
+            : {}),
+        };
       }
       break;
     case 'extension_error':
