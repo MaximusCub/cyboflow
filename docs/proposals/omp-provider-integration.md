@@ -627,24 +627,48 @@ is toggled off, and the jury degraded legibly); its advisory finding rendered in
 Defense-in-depth also showed up live: the gate's `denyTaskTool` blocked a lane agent's subagent
 delegation and the agent degraded gracefully to doing the analysis inline.
 
-Findings, worth fixing before real OMP workflow use (all evidenced in the run):
+Findings — **ALL FOUR FIXED** (commits `e52abbdc` / `4a85bef3` / `8688ea7c` / `251e3de4` /
+`342e25e7`; dispositions inline):
 
 1. **Lane agents cannot commit — sprint work lands uncommitted while lanes report
    `integrated`.** Under Allow edits, the OMP gate auto-allows `write`/`edit` but sends every
    `bash` (incl. `git status` / `git add … && git commit`) to the human gate, where it dies at
    the 25 s budget. The implement agent's own report: "git commit pending cyboflow approval
    gate." The merge gate then stamped 1/1 MERGED with zero commits — the engine trusts step
-   verdicts and never checks git. Fix candidates: carry the safe-git allowRules the permission
-   copy already promises ("safe reads & git") into the OMP gate config for allow-edits/auto, and
-   have the lane engine verify a commit exists before accepting `integrated`.
+   verdicts and never checks git.
+   **FIXED, both halves.** (a) `4a85bef3`: the gate gained an argument-aware `safe-bash` rung
+   (acceptEdits/auto, inside the URI narrowing): provably read-only segments (line-for-line
+   mirror of `safeCommandClassifier.ts`, drift-pinned by a parity test) OR local-only git writes
+   (`add`/`commit`/`restore`/`rm`/`mv`; no substitution/redirection/global-option/remote
+   subcommands), with an extra raw-newline refusal — mutation-verified. (b) `8688ea7c`: the
+   fan-out engine consults an optional fail-soft commit probe before stamping `integrated`; a
+   lane with HEAD unmoved AND a dirty tree is failed with a legible reason instead (the only
+   unambiguous case — sibling lanes share the worktree).
+   **Routed follow-up discovered during the fix:** the SHARED classifier's segment splitter
+   treats a raw newline as an ordinary character, so `Bash {command: "git status\nrm -rf ~"}`
+   auto-approves under acceptEdits on BOTH Claude substrates today. The OMP gate refuses it;
+   the parity test pins the shared classifier's current verdict so a fix there flips the pin
+   deliberately.
 2. **Per-lane gated approvals are invisible after the first.** The backend log shows five
    `shell-approval registered (held open)` entries but only ONE `Bridged approvalCreated`; the
-   Human-review badge stayed 0 while lane bashes timed out. The first approval (the flow
-   session's own) surfaced and auto-rejected at exactly the 25 s budget — the later, lane-spawn
-   ones never reached the UI, making them undecidable by design rather than by choice.
+   Human-review badge stayed 0 while lane bashes timed out.
+   **FIXED** (`e52abbdc`): root cause was `clearPendingForRun` — designed for run termination —
+   being reused by the socket-disconnect path without restoring `awaiting_review → running`, so
+   every later `requestApproval` waited forever and never inserted a row. The disconnect path
+   now calls `abandonPendingForRun`, which shares the settle body and adds the guarded restore
+   (never resurrecting a terminal run); negative-control-verified. This also repairs the same
+   latent wedge on the interactive Claude substrate (a hook subprocess dying mid-wait).
 3. **The workflow configure screen's LAUNCH SUMMARY shows "RUNTIME: Claude SDK" while the
    select's value is `omp-sdk`** (the quick-session summary shows the runtime correctly) —
    display-only, the run launches on OMP.
+   **FIXED** (`251e3de4`): the hand-rolled ternary was replaced by an exhaustive
+   `AGENT_RUNTIME_LABELS: Record<SessionAgentRuntime, string>` in `shared/types/agentRuntime.ts`
+   — an unlabeled future runtime now fails typecheck instead of misrendering.
 4. **Flow-run cost is blank for OMP** ("cost —" in the completion panel and Insights stats)
    while quick sessions do show a computed cost — the run-usage cost seam doesn't produce a
    figure for OMP flow runs.
+   **FIXED** (`342e25e7`): the rollup sums `result` raw_events' `total_cost_usd` (Claude's raw
+   key); OMP emitted `cost_usd` only. All THREE result-build sites — `projectAgentEnd` (the
+   normal terminal path the brief-level analysis initially missed) plus the local-completion
+   and failure builders — now emit both keys; the rollup reads one key once per row, so no
+   double-count.
