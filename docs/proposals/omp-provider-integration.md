@@ -672,3 +672,27 @@ Findings — **ALL FOUR FIXED** (commits `e52abbdc` / `4a85bef3` / `8688ea7c` / 
    normal terminal path the brief-level analysis initially missed) plus the local-completion
    and failure builders — now emit both keys; the rollup reads one key once per row, so no
    double-count.
+
+### 15.3 Fix-verification rerun — the same /sprint on omp-sdk (2026-08-15)
+
+The §15.2 smoke was rerun end-to-end on the fixed build (`45530fb4`): fresh data dir, fresh
+demo repo, same task (CONTRIBUTING.md), sprint on `omp-sdk` / `anthropic/claude-sonnet-4-5` /
+Allow edits / programmatic. Every §15.2 defect is observably gone:
+
+1. **The lane committed its own work.** Gate log: 6× `allowed \`bash\` (safe-bash)` (including
+   the `git add`/`git commit` pair), 1× `write (edit-tool)`, 9× `read (auto-allow-tool)`, 5×
+   `blocked \`task\`` (expected subagent denial), 1× socket round-trip approved. Session
+   worktree ended clean at `e0ee93a docs: add CONTRIBUTING.md`; merge gate 1/1; the commit
+   probe had nothing to veto.
+2. **Approvals stayed visible and the run never wedged.** Pending-approvals badge went
+   0 → 1 (sign-off gate) → 0 on approve; the one orchestrator-socket bash approval resolved
+   without parking the run.
+3. **LAUNCH SUMMARY showed `RUNTIME: OMP`** with the `omp-sdk` select value.
+4. **Cost rendered everywhere it was blank before:** completion panel `cost $1.90 · 8 turns ·
+   runtime 23m 35s`, Insights stats `sprint … runs 1 · cost $1.90`, session panel `$3.16`
+   cumulative.
+
+Whole run: 8 turns / ~24 min / 942k tokens; eval jury scored 100/100 with the Codex slot
+again failing correctly (`ERR_AGENT_PROVIDER_DISABLED`). Also incidentally re-confirmed the
+spawner-death reaping: killing the dev Electron took the warm `omp --mode rpc-ui` child and
+its MCP subprocesses with it.
