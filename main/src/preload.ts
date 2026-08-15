@@ -201,6 +201,103 @@ interface IPCResponse<T = unknown> {
   error?: string;
 }
 
+// ===========================================================================
+// GENERIC-INVOKE CHANNEL ALLOWLIST — SECURITY BOUNDARY. Edit deliberately.
+//
+// Both contextBridge surfaces expose a generic `invoke(channel, ...args)`
+// escape hatch (`window.electronAPI.invoke` and `window.electron.invoke`).
+// Unconstrained, that hatch hands ANY renderer-side script — including one
+// injected via XSS in rendered markdown, a diff, or a session name — the whole
+// ~194-channel `ipcMain.handle` surface, which includes arbitrary git execution
+// and project-scoped file writes. The typed wrapper methods elsewhere in this
+// file are unaffected; only the generic hatch is gated.
+//
+// The list is derived from the ACTUAL renderer call sites — every literal
+// channel matched by `grep -rn "\.invoke(" frontend/src` (excluding tRPC), plus
+// the two onboarding-detection channels the renderer passes as imported
+// constants. It is intentionally NOT prefix-based: a prefix rule (`file:*`)
+// would re-open every future channel in that domain by default.
+//
+// Adding an entry means "a compromised renderer may call this". Prefer adding a
+// TYPED wrapper method instead; only widen this list when a call site genuinely
+// needs the dynamic form.
+// ===========================================================================
+export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
+  // App / system
+  'openExternal',
+  'app:consume-open-update-settings',
+
+  // Onboarding detection (renderer passes these as imported constants —
+  // CLAUDE_DETECT_CHANNEL / CODEX_DETECT_CHANNEL from shared/types/onboarding).
+  CLAUDE_DETECT_CHANNEL,
+  CODEX_DETECT_CHANNEL,
+
+  // Preferences (onboarding gate snapshot)
+  'preferences:get',
+  'preferences:set',
+
+  // Sessions
+  'sessions:set-active-session',
+  'sessions:get-git-status',
+
+  // Projects
+  'projects:refresh-git-status',
+
+  // Archive progress polling
+  'archive:get-progress',
+
+  // Session-scoped file I/O (diff + editor panels)
+  'file:read',
+  'file:readAtRevision',
+  'file:write',
+  'file:list',
+  'file:delete',
+  'file:search',
+
+  // Session-scoped git actions (diff panel commit/revert/restore)
+  'git:commit',
+  'git:revert',
+  'git:restore',
+
+  // Tool panels
+  'panels:update',
+  'panels:initialize',
+  'panels:checkInitialized',
+  'panels:emitEvent',
+  'panels:clearUnviewedContent',
+
+  // Terminal panel PTY bridge
+  'terminal:getState',
+  'terminal:input',
+  'terminal:resize',
+
+  // Cyboflow run control
+  'cyboflow:approveRun',
+];
+
+const GENERIC_INVOKE_CHANNEL_SET = new Set<string>(GENERIC_INVOKE_CHANNELS);
+
+/**
+ * The gated body behind both generic `invoke` bridges. A non-allowlisted channel
+ * is REJECTED LOUDLY (never silently resolved/ignored) so a legitimate new call
+ * site fails visibly in development instead of degrading at runtime.
+ *
+ * Declared `async` so the rejection surfaces as a rejected Promise: the renderer
+ * has fire-and-forget call sites (e.g. `terminal:input`) where a synchronous
+ * throw would unwind unrelated caller code rather than showing up as an
+ * unhandled rejection.
+ */
+async function invokeAllowlistedChannel(channel: string, args: unknown[]): Promise<unknown> {
+  if (!GENERIC_INVOKE_CHANNEL_SET.has(channel)) {
+    throw new Error(
+      `[cyboflow] Blocked IPC channel "${channel}": not permitted through the generic invoke bridge. ` +
+        `Add a typed wrapper method, or add the channel to GENERIC_INVOKE_CHANNELS in main/src/preload.ts ` +
+        `if the dynamic form is genuinely required.`,
+    );
+  }
+  return ipcRenderer.invoke(channel, ...args);
+}
+
 // Forward the main-process perf-trace flag so a single `CYBOFLOW_PERF_TRACE=1`
 // at launch enables BOTH the main-process tracer and the renderer probe (which
 // reads this global in utils/perfProbe.ts). Preload runs in the Node context,
@@ -221,9 +318,10 @@ contextBridge.exposeInMainWorld('__CYBOFLOW_VERIFY__', {
 });
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Generic invoke method for direct IPC calls
-  invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
-  
+  // Generic invoke method for direct IPC calls. Gated by the
+  // GENERIC_INVOKE_CHANNELS allowlist above (security boundary).
+  invoke: (channel: string, ...args: unknown[]) => invokeAllowlistedChannel(channel, args),
+
   // Basic app info
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   isPackaged: () => ipcRenderer.invoke('is-packaged'),
@@ -792,7 +890,8 @@ const electronListenerWrappers = new Map<
 // Expose electron event listeners for the streaming/PTY/shell push channels
 contextBridge.exposeInMainWorld('electron', {
   openExternal: (url: string) => ipcRenderer.invoke('openExternal', url),
-  invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
+  // Gated by the GENERIC_INVOKE_CHANNELS allowlist above (security boundary).
+  invoke: (channel: string, ...args: unknown[]) => invokeAllowlistedChannel(channel, args),
   on: (channel: string, callback: (...args: unknown[]) => void): (() => void) | undefined => {
     const validChannels: string[] = [];
     if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
