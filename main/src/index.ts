@@ -76,7 +76,11 @@ import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
+import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
+import { OmpBridgeHttpClient } from './orchestrator/omp/ompBridgeClient';
+import { resolveOmpBridgeCommandConfig } from './orchestrator/omp/ompBridgeConfig';
 import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
+import type { OmpCommandAdapter } from '../../shared/types/ompCommand';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
@@ -335,6 +339,22 @@ let orchestrator: Orchestrator | null = null;
 // Read-only OMP fleet adapter — ONE module-scope instance shared by the
 // Orchestrator (dep bag) and the tRPC context, so both layers observe the same source.
 const fleetRegistryReader = new FleetRegistryReader();
+
+/**
+ * Build the privileged OMP command adapter: a real bridge client when the
+ * bridge is configured, else the fail-closed stub. Resolved per construction so
+ * tests and the standalone composition root can inject whichever they like; the
+ * Electron path uses the environment/pointer config.
+ */
+function buildOmpCommandAdapter(): OmpCommandAdapter {
+  const config = resolveOmpBridgeCommandConfig();
+  if (config === undefined) {
+    logger.info('omp:command adapter unconfigured — commands will return unavailable');
+    return new OmpCommandStub();
+  }
+  logger.info(`omp:command adapter configured for session ${config.sessionId}`);
+  return new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId));
+}
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
@@ -716,9 +736,10 @@ let verifyHostProbes: VerifyHostProbesLike | undefined;
  */
 function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const db = makeDatabaseLike(databaseService);
-  // Privileged OMP commands are a stub in Phase 2 (fail closed). The supervise
-  // capability is OFF for the v1 'local' principal, so every command is FORBIDDEN.
-  const ompCommand = new OmpCommandStub();
+  // Privileged OMP commands: a real bridge adapter when configured, else the
+  // fail-closed stub. The supervise capability is OFF for the v1 'local'
+  // principal either way, so every command is FORBIDDEN until v2 grants it.
+  const ompCommand = buildOmpCommandAdapter();
   const auditOmp = (entry: { verb: string; principal: string; outcome: string; operationId: string; detail: string }) => {
     logger.info(`omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`);
   };
