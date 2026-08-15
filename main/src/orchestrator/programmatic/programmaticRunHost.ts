@@ -342,8 +342,9 @@ export class ProgrammaticRunHost implements ControllerHost {
     return this.args.enqueueVisualVerification;
   }
 
-  log(level: 'info' | 'warn', message: string): void {
-    if (level === 'warn') this.args.logger?.warn(message);
+  log(level: 'info' | 'warn' | 'error', message: string): void {
+    if (level === 'error') this.args.logger?.error(message);
+    else if (level === 'warn') this.args.logger?.warn(message);
     else this.args.logger?.info(message);
   }
 }

@@ -275,6 +275,7 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
+import { runGitAsync } from './utils/runGit';
 
 export let mainWindow: BrowserWindow | null = null;
 
@@ -3089,6 +3090,33 @@ async function initializeServices(): Promise<boolean> {
             map.set(row.task_id, files);
           }
           return map;
+        },
+        // Commit-integrity backstop: 'integrated' means "complete AND committed
+        // in the session worktree", which inner-step verdicts alone cannot
+        // establish — a lane whose `git commit` was denied by a permission gate
+        // reported green with its changes left untracked on disk (observed live).
+        // Read the run's worktree HEAD at lane start and re-read it at lane end;
+        // the controller refuses to integrate a lane that moved HEAD nowhere and
+        // left the tree dirty. Every failure path (no worktree row, git error)
+        // degrades to "no probe" / a rethrow the controller swallows, so the
+        // backstop can only withhold a false integrate, never invent a failure.
+        beginCommitProbe: async (rid) => {
+          const row = rawDb
+            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
+            .get(rid) as { worktree_path?: unknown } | undefined;
+          const worktreePath =
+            row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
+              ? row.worktree_path
+              : null;
+          if (worktreePath === null) return undefined;
+          const readHead = async (): Promise<string> =>
+            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+          const startHead = await readHead();
+          return async () => {
+            const endHead = await readHead();
+            const porcelain = await runGitAsync(worktreePath, ['status', '--porcelain']);
+            return { headAdvanced: endHead !== startHead, dirty: porcelain.trim().length > 0 };
+          };
         },
         driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
           try {

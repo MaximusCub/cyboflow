@@ -189,6 +189,20 @@ export interface SupervisorEvent {
 }
 
 /**
+ * One lane-end commit-integrity reading (see `FanOutDriver.beginCommitProbe`).
+ * `headAdvanced` — the worktree's HEAD sha moved since the lane was dispatched.
+ * `dirty` — `git status --porcelain` is non-empty, i.e. tracked edits and/or
+ * untracked files are still sitting in the worktree uncommitted.
+ */
+export interface CommitIntegrityReading {
+  headAdvanced: boolean;
+  dirty: boolean;
+}
+
+/** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
+export type CommitIntegrityProbe = () => Promise<CommitIntegrityReading>;
+
+/**
  * Resolves the runtime item set + drives one lane per item for a `fanOut` step
  * (host-driven parallel fan-out on the PROGRAMMATIC plane). Injected on
  * `ControllerHost.fanOut` so the controller stays free of DB/IPC — the production
@@ -245,6 +259,22 @@ export interface FanOutDriver {
     attempt?: number;
     allowedStepIds: readonly string[];
   }): void;
+  /**
+   * Open a commit-integrity probe for a lane about to be dispatched. The OUTER
+   * call captures the worktree's lane-start state (its HEAD sha); the returned
+   * closure re-reads it at the lane's success end, right before the controller
+   * would stamp 'integrated'. A lane that ran every inner step green but left
+   * HEAD where it was AND the worktree dirty never committed its work — observed
+   * live when a `git commit` was denied by a permission gate and the lane still
+   * reported integrated with the changes untracked on disk.
+   *
+   * OPTIONAL and fail-soft at every seam, like `dependencies`/`expectedFiles`:
+   * absent, resolving undefined, or throwing (in either half) ⇒ no probe ⇒ the
+   * lane integrates on inner-step verdicts alone, byte-identical to the
+   * pre-backstop behavior. The backstop may only WITHHOLD a false 'integrated';
+   * it must never invent a failure of its own.
+   */
+  beginCommitProbe?(runId: string): Promise<CommitIntegrityProbe | undefined>;
 }
 
 /** Ship's per-lane loopback contract: initial pass plus at most two re-delegates. */
@@ -479,7 +509,7 @@ export interface ControllerHost {
   }): Promise<TaskEnqueueResult>;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
-  log?(level: 'info' | 'warn', message: string): void;
+  log?(level: 'info' | 'warn' | 'error', message: string): void;
 }
 
 /** Outcome of a whole controller run over a WorkflowDefinition. */
