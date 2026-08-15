@@ -909,6 +909,27 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockEnsureSession).toHaveBeenCalled();
   });
 
+  it('shows the OMP runtime label (not the Claude SDK default) in the launch summary', async () => {
+    // OMP is absent⇒disabled (AGENT_PROVIDER_REGISTRY.omp.defaultEnabled), so
+    // the picker only offers it once the access toggle is on.
+    act(() => {
+      useConfigStore.setState({
+        config: { agentProviderAccess: { omp: true } } as unknown as AppConfig,
+      });
+    });
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: /^OMP$/i })).not.toBeDisabled();
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'omp-sdk' } });
+    });
+
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('OMP');
+    expect(screen.getByTestId('wizard-launch-summary')).not.toHaveTextContent('Claude SDK');
+  });
+
   it('seeds the permission selector from the global default', async () => {
     act(() => {
       useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });

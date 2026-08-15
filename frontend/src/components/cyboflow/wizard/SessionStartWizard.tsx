@@ -126,6 +126,7 @@ import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
 import {
+  AGENT_RUNTIME_LABELS,
   DEFAULT_SESSION_AGENT_RUNTIME,
   claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
@@ -2158,18 +2159,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 }
               />
               <SummaryRow label="Permission" value={permissionLabel} />
-              <SummaryRow
-                label="Runtime"
-                value={
-                  effectiveRuntime === 'claude-interactive'
-                    ? 'Claude interactive (PTY)'
-                    : effectiveRuntime === 'codex-pty'
-                      ? 'Codex PTY'
-                      : effectiveRuntime === 'codex-sdk'
-                        ? 'Codex SDK'
-                        : 'Claude SDK'
-                }
-              />
+              <SummaryRow label="Runtime" value={AGENT_RUNTIME_LABELS[effectiveRuntime]} />
               <SummaryRow
                 label="Model"
                 value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}

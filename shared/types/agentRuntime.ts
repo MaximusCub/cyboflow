@@ -124,6 +124,27 @@ export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowLaunchableRuntime, st
   'omp-sdk': 'OMP',
 };
 
+/**
+ * Human labels for every SESSION runtime, matching what `SubstrateSelector`'s
+ * `RUNTIME_OPTIONS` renders (minus its scope-specific suffixes, e.g.
+ * "(default)" / "— quick sessions only"). Exhaustive over `SessionAgentRuntime`
+ * — unlike {@link WORKFLOW_AGENT_RUNTIME_LABELS}, which is scoped to the
+ * workflow-launchable subset and uses shorter labels for the agent-config
+ * editors — so the two terminal-only runtimes (`codex-pty`, `omp-pty`) and
+ * `claude-interactive`'s "(PTY)" suffix are covered too. Any summary echoing a
+ * launched runtime (e.g. the wizard's launch-summary Runtime row) should read
+ * this instead of hand-rolling a ternary that silently defaults an unhandled
+ * runtime to the wrong label.
+ */
+export const AGENT_RUNTIME_LABELS: Record<SessionAgentRuntime, string> = {
+  'claude-sdk': 'Claude SDK',
+  'claude-interactive': 'Claude interactive (PTY)',
+  'codex-sdk': 'Codex SDK',
+  'codex-pty': 'Codex PTY',
+  'omp-sdk': 'OMP',
+  'omp-pty': 'OMP terminal',
+};
+
 // ---------------------------------------------------------------------------
 // Provider registry
 // ---------------------------------------------------------------------------
