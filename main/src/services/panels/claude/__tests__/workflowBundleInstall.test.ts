@@ -60,7 +60,7 @@ vi.mock('child_process', async (importOriginal) => {
 import { installWorkflowBundle } from '../workflowBundleInstall';
 import { installAgentOverlay } from '../agentOverlayWriter';
 import { WorkflowBundleWriter } from '../workflowBundleWriter';
-import { fanOutStageWorkflowName } from '../../../../orchestrator/prompts/fanOutStageScript';
+import { fanOutBatchWorkflowName } from '../../../../orchestrator/prompts/fanOutStageScript';
 import type { WorkflowBundle } from '../../../../orchestrator/workflows/workflowBundle';
 import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 
@@ -320,11 +320,11 @@ describe('workflowBundleInstall — fan-out stage scripts', () => {
 
     installWorkflowBundle(db, new WorkflowBundleWriter(), 'run-1', worktree, undefined, 'workflow');
 
+    // ONE script for the whole non-gated run of stages (implement + write-tests),
+    // named for the batch's first stage. visual-verify is a firm gate, so it ends
+    // the batch and is never scripted.
     const written = fs.readdirSync(workflowsDir()).sort();
-    expect(written).toEqual([
-      'cyboflow-sprint-execute-tasks-implement.js',
-      'cyboflow-sprint-execute-tasks-write-tests.js',
-    ]);
+    expect(written).toEqual(['cyboflow-sprint-execute-tasks-implement.js']);
     expect(fs.readFileSync(excludePath(worktree), 'utf8')).toContain(SCRIPT_GLOB);
   });
 
@@ -333,7 +333,7 @@ describe('workflowBundleInstall — fan-out stage scripts', () => {
 
     installWorkflowBundle(db, new WorkflowBundleWriter(), 'run-1', worktree, undefined, 'workflow');
 
-    const invocable = fanOutStageWorkflowName('sprint', 'execute-tasks', 'implement');
+    const invocable = fanOutBatchWorkflowName('sprint', 'execute-tasks', 'implement');
     expect(invocable).not.toBeNull();
     expect(fs.existsSync(path.join(workflowsDir(), `${invocable as string}.js`))).toBe(true);
     // ...and the meta the tracker reads back agrees with both.

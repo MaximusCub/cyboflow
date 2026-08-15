@@ -45,7 +45,7 @@ import {
   DEFAULT_FAN_OUT_DISPATCH,
   type FanOutDispatch,
 } from '../../../../shared/types/fanOutDispatch';
-import { fanOutStageWorkflowName, isHostOwnedInnerStep } from './fanOutStageScript';
+import { fanOutBatchWorkflowName, segmentFanOutInner } from './fanOutStageScript';
 
 /** Options for {@link buildFanOutAppend}. Both default to today's prose behavior. */
 export interface FanOutAppendOptions {
@@ -277,36 +277,62 @@ function renderStageMajorChain(
   fanOut: FanOutSpec,
   ctx: ChainContext,
 ): string {
-  const entries = fanOut.inner.map((inner, i) => {
-    const scriptName = isHostOwnedInnerStep(inner)
-      ? null
-      : fanOutStageWorkflowName(workflowName, step.id, inner.id);
+  // Prose entries are numbered against the ORIGINAL chain so a gate's entry
+  // keeps its position in the sequence the reader sees.
+  const positionOf = new Map(fanOut.inner.map((s, i) => [s.id, i + 1] as [string, number]));
+  const entries: string[] = [];
 
-    // Host-owned or unnameable → the untouched prose entry (the visual gate's
-    // request/park protocol has no scripted equivalent).
-    if (scriptName === null) return renderChainEntry(inner, i + 1, ctx);
+  for (const segment of segmentFanOutInner(fanOut.inner)) {
+    if (segment.kind === 'gate') {
+      // Firm gate → the untouched prose entry. The visual gate's request/park
+      // protocol has no delegable equivalent.
+      entries.push(renderChainEntry(segment.step, positionOf.get(segment.step.id) ?? 0, ctx));
+      continue;
+    }
 
-    const label = inner.name !== undefined && inner.name.length > 0 ? inner.name : inner.id;
-    return [
-      `${i + 1}. **\`${inner.id}\`** (${label}) — move every wave member's \`current_step\` to`,
-      `   \`${inner.id}\` via \`cyboflow_update_sprint_task\`, then dispatch the WHOLE wave in one`,
-      `   call: \`Workflow({ name: '${scriptName}', args: [...] })\`. Each \`args\` entry is one`,
-      '   item: `{ id, ref, title, brief, expectedFiles, priorSummary }` — `brief` carries the',
-      '   task body + acceptance criteria, `priorSummary` the previous stage\'s `summary` for',
-      '   that item. Pass ONLY the members of the CURRENT wave.',
-      '   Wait for the workflow to finish, then read its `results` array and reconcile each item:',
-      '   - `outcome: "ok"` → advance that lane to the next stage.',
-      `   - \`outcome: "blocked"\` or \`"failed"\` → apply the loopback protocol below for that item`,
-      '     (bump `attempt`, move `current_step` back to the loopback target, re-dispatch it in a',
-      '     later wave with the blocking `summary` as its `priorSummary`).',
-      '   - `outcome: "not_applicable"` → treat as a skip and advance.',
-      '   - every `findings[]` entry → file it with `cyboflow_report_finding` (the subagents',
-      '     cannot; they only report). A `visualTask` string is the fence the visual gate needs —',
-      '     carry it forward verbatim.',
-      '   The script writes NO cyboflow state by design: every lane move, finding, and commit in',
-      '   this stage is YOURS to make from this session.',
-    ].join('\n');
-  });
+    const batch = segment.steps;
+    const scriptName = fanOutBatchWorkflowName(workflowName, step.id, batch[0].id);
+    if (scriptName === null) {
+      // Unnameable → fall back to per-stage prose for this batch.
+      for (const inner of batch) {
+        entries.push(renderChainEntry(inner, positionOf.get(inner.id) ?? 0, ctx));
+      }
+      continue;
+    }
+
+    const first = positionOf.get(batch[0].id) ?? 0;
+    const last = positionOf.get(batch[batch.length - 1].id) ?? 0;
+    const span = batch.length === 1 ? `${first}` : `${first}–${last}`;
+    const ids = batch.map((s) => `\`${s.id}\``).join(' → ');
+
+    entries.push(
+      [
+        `${span}. ${ids} — dispatched as ONE batch, no orchestrator gate between them.`,
+        `   Move every wave member's \`current_step\` to \`${batch[0].id}\` via`,
+        '   `cyboflow_update_sprint_task`, then use the **Workflow tool** (not Skill, not Bash):',
+        `   \`Workflow({ name: '${scriptName}', args: [...] })\`. Each \`args\` entry is one item:`,
+        '   `{ id, ref, title, brief, expectedFiles }` — `brief` carries the task body +',
+        '   acceptance criteria. Pass ONLY the members of the CURRENT wave.',
+        '   Each item walks the whole sub-chain inside the workflow, concurrently with the other',
+        '   items, retrying its own loopback up to 3 attempts. You are NOT consulted in between —',
+        `   that is the point: the next gate is ${
+          last === fanOut.inner.length ? 'the end of the chain' : `step ${last + 1}`
+        }.`,
+        '   When it returns, reconcile each entry of `results`:',
+        '   - `outcome: "ok"` → the item cleared every stage in the batch; advance its lane to the',
+        '     stage after this batch and backfill its `current_step` history from `trail`.',
+        '   - `outcome: "failed"` → the item exhausted its attempts at `failedStage`. Record',
+        '     `attempts`, mark the lane `failed` per the protocol below, and keep the other lanes',
+        '     running.',
+        '   - every `trail[].findings` entry → file it with `cyboflow_report_finding` (the',
+        '     subagents cannot; they only report). A `trail[].visualTask` is the fence the visual',
+        '     gate needs — carry it forward verbatim.',
+        '   The script writes NO cyboflow state by design: every lane move, finding, and commit is',
+        '   YOURS to make from this session.',
+      ].join('\n'),
+    );
+  }
+
   return entries.join('\n');
 }
 
@@ -344,11 +370,12 @@ function renderFanOutSection(
       ? [
           '### Per-stage chain (workflow dispatch)',
           '',
-          'Advance the wave through this chain ONE STAGE AT A TIME: every member of the wave',
-          'completes stage N before any member starts stage N+1. Move each lane’s `current_step`',
-          `with \`cyboflow_update_sprint_task\` as each stage begins, using the EXACT lane step ids`,
-          `below (${laneIds}) so the lane auto-advances. You remain the SOLE writer of cyboflow`,
-          'state — the dispatched workflows return structured results and write nothing:',
+          'Consecutive stages with no firm gate between them are dispatched as ONE batch: each',
+          'item walks that whole sub-chain inside the workflow, concurrently with the other items,',
+          'without returning to you in between. A firm gate ends a batch and is yours to drive.',
+          `The lane step ids are ${laneIds}. Inside a batch the lane's \`current_step\` does not`,
+          'tick per stage — backfill it from each result’s `trail` when the batch returns. You',
+          'remain the SOLE writer of cyboflow state; the dispatched workflows write nothing:',
         ]
       : [
           '### Per-task chain',

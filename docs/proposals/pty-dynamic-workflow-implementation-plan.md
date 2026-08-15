@@ -8,9 +8,11 @@ that invalidate its core design, and each found one the other missed. This v2
 records the outcome, states what was built, and states what must be redesigned
 before any of the rest is worth writing.
 
-Status: **Planks A–C (defect fixes) and D–G (the stage-major redesign) built and
-green, default OFF.** The three live CLI probes in "What is still unverified"
-remain outstanding — the feature must not be switched on until they pass.
+Status: **Planks A–C (defect fixes), D–G (the redesign), and H (firm gates +
+batching) built and green, default OFF. All three CLI assumptions VERIFIED
+against claude 2.1.231** — see "CLI assumptions" below, including a fourth
+finding (dispatch is permission-gated, and only `auto` works) that must be
+handled before the mode is switched on.
 
 ---
 
@@ -133,7 +135,35 @@ Tests: 2 added to `runExecutor.test.ts` (guarded arm; no-probe arm byte-identica
 
 ## The stage-major build (Planks D–G)
 
-### Plank D — the stage-script renderer
+### Plank H — firm gates and batching (the efficiency change)
+
+The first cut was strictly stage-major: one dispatch per stage, orchestrator
+re-entered between every one. That is maximally safe and needlessly slow — it
+reintroduces a barrier at every stage boundary, which is most of what the
+workflow path was supposed to remove.
+
+`FanOutInnerStep.firmGate` now marks the stages where the orchestrator genuinely
+must regain control. Everything else batches: a maximal run of consecutive
+non-gated stages is dispatched as ONE workflow, and each item walks that whole
+sub-chain (`implement → write-tests → code-review → task-verify`) inside it,
+concurrently with the other items, retrying its own loopback up to 3 attempts —
+with no return to the orchestrator in between. For the built-in sprint and ship
+chains that is one dispatch instead of four, and a fast item is never held at a
+barrier waiting for a slow sibling.
+
+**Only `visual-verify` carries `firmGate: true`,** and it is a gate for a
+structural reason rather than a cautious one: it has no subagent at all. The
+orchestrator fires `cyboflow_request_verification` and parks the lane while an
+async external verdict drives it. `ALWAYS_GATED_INNER_IDS` keeps that true even
+if an author clears the flag.
+
+**The trade, taken deliberately:** lane `current_step` no longer ticks per stage
+inside a batch. Each result carries the item's full `trail`, and the orchestrator
+backfills the stage history when the batch returns — so nothing is lost but live
+per-stage granularity, and the dynamic-workflow tracker still shows per-agent
+progress throughout. The prompt states this in as many words.
+
+### Plank D — the batch-script renderer
 
 `orchestrator/prompts/fanOutStageScript.ts`, a pure sibling of
 `fan-out-instructions.ts`. Renders ONE inner stage of a fan-out step into a
@@ -199,21 +229,56 @@ prompt composition — so a mid-run config flip can never leave a run whose prom
 cites scripts its worktree lacks.
 
 **Gate:** `pnpm typecheck`, `pnpm lint` (0 errors), `pnpm test:integration` (25),
-`pnpm test:unit` (8942 main + 3752 frontend, 0 failures). 53 new tests.
+`pnpm test:unit` (8947 main + 3752 frontend, 0 failures). 58 new tests.
 
-## What is still unverified
+## CLI assumptions — VERIFIED (claude 2.1.231, 2026-08-14)
 
-Three live CLI behaviours, none runnable headlessly, each fatal alone. **Do not
-switch `fanOutDispatch` to `workflow` before these pass:**
+Probed empirically against the real CLI in a scratch repo carrying one
+`.claude/workflows/cyboflow-probe-stage.js`. All three assumptions hold, and the
+probe surfaced a fourth fact that neither reviewer predicted.
 
-1. Is the `Workflow` tool available without the `ultracode` setting? The design
-   relies on the run prompt naming a saved workflow being sufficient opt-in.
-2. Does a worktree-local `.claude/workflows/` resolve by name? The string is in
-   the CLI bundle; project-scoped resolution was never exercised.
-3. Does a completion notification actually re-wake a yielded PTY REPL? If not,
-   the normal case is a run that never processes its stage results. Plank C's
-   guard keeps such a run from being falsely rested, but it will sit `running`.
+1. **The `Workflow` tool IS available without `ultracode`.** ✅ It was invoked in
+   every probe, including default settings — a user turn naming a saved workflow
+   is sufficient opt-in, as designed.
+2. **A worktree-local `.claude/workflows/` DOES resolve by name.** ✅
+   `Workflow({name: 'cyboflow-probe-stage'})` resolved and launched
+   (`wf_061286ce-20a`) with no path given.
+3. **A completion notification DOES re-wake a yielded agent.** ✅ Two distinct
+   assistant turns: *"running in the background… I'll report once it completes"*,
+   then *"The workflow completed… `PROBE_AGENT_OK`"*. That is exactly the
+   yield→re-wake cycle the whole design depends on, and it is why Plank C's rest
+   guard matters.
+4. **NEW — launching a dynamic workflow is PERMISSION-GATED**
+   (`"Review dynamic workflow before running"`), and the matrix is
+   counterintuitive:
 
-A fourth, cheaper to answer once the above pass: whether the ~15-agent workflow
-size guideline counts concurrent or cumulative agents, since a 5-lane wave is
-5 agents per stage.
+   | `--permission-mode` | Result |
+   | --- | --- |
+   | (default / `manual`) | **blocked** — needs interactive approval |
+   | `acceptEdits` | **blocked** |
+   | `auto` | **allowed** ✅ |
+   | `dontAsk` | **DENIED** ❌ |
+   | `bypassPermissions` | allowed |
+
+   Cyboflow's 4-mode `agentPermissionMode` is `default | acceptEdits | auto |
+   dontAsk`. **Only `auto` can dispatch.** The most permissive-sounding mode,
+   `dontAsk`, denies outright — it suppresses the prompt by refusing, not by
+   allowing. A run in `default`/`acceptEdits` will surface the gate through
+   cyboflow's approval queue (once per dispatch); a run in `dontAsk` will fail
+   every dispatch. This must be enforced or documented before enabling the mode.
+
+**Bonus verification:** the on-disk artifact contract the tracker depends on
+matches exactly — `<uuid>/workflows/scripts/<name>-wf_<id>.js` (and
+`WorkflowScriptWatcher`'s `SCRIPT_RE` extracts the right id from it),
+`<uuid>/subagents/workflows/<wf_id>/journal.jsonl` with `started`/`result` lines
+keyed by `agentId`, and `<uuid>/workflows/wf_<id>.json` carrying
+`status`/`summary`/`agentCount` **plus the script's return value under `result`**
+— so the orchestrator gets its structured results back through the completion
+record.
+
+One practical finding folded into the prompt: the agent's first instinct was to
+try `Skill(<name>)` and `Bash` before reaching for `Workflow`. The dispatch block
+now names the Workflow tool explicitly ("not Skill, not Bash").
+
+Still open, and cheap to answer next: whether the ~15-agent workflow size
+guideline counts concurrent or cumulative agents.

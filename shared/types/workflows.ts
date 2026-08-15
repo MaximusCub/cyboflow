@@ -429,6 +429,26 @@ export interface FanOutInnerStep {
   loopback?: string;
   /** Human-readable name for prompts/UI; falls back to id when absent. */
   name?: string;
+  /**
+   * When true this stage is a FIRM GATE: the orchestrator must regain control
+   * before the item may advance past it, so the stage can never be folded into a
+   * batch of stages delegated elsewhere.
+   *
+   * Only meaningful under `fanOutDispatch: 'workflow'`, where consecutive
+   * NON-gated stages are dispatched to a single dynamic workflow that runs each
+   * item's whole sub-chain (implement → tests → verify) without returning to the
+   * orchestrator between stages. That is the efficiency of the workflow path,
+   * and the deliberate trade is that lane `current_step` does not tick per stage
+   * inside a batch — the orchestrator backfills the stage trail from the
+   * returned results.
+   *
+   * A firm gate ENDS such a batch. `visual-verify` is the canonical one: it has
+   * no subagent at all (the orchestrator fires `cyboflow_request_verification`
+   * and parks the lane on an async external verdict), so it is both unscriptable
+   * and a real gate. Absent ⇒ not a gate ⇒ batchable, which is the default for
+   * ordinary implementation stages.
+   */
+  firmGate?: boolean;
 }
 
 /**
@@ -873,6 +893,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
                   name: 'Visual check',
                   optional: true,
                   loopback: 'implement',
+                  // The ONLY firm gate in the implementation chain: it has no
+                  // subagent (the orchestrator fires the verification request and
+                  // parks the lane on an async verdict), so it can never be folded
+                  // into a delegated batch. Every stage before it is batchable.
+                  firmGate: true,
                 },
               ],
             },
@@ -1167,6 +1192,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
                   name: 'Visual check',
                   optional: true,
                   loopback: 'implement',
+                  // The ONLY firm gate in the implementation chain: it has no
+                  // subagent (the orchestrator fires the verification request and
+                  // parks the lane on an async verdict), so it can never be folded
+                  // into a delegated batch. Every stage before it is batchable.
+                  firmGate: true,
                 },
               ],
             },

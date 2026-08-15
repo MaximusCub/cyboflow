@@ -27,7 +27,7 @@ import {
   DEFAULT_FAN_OUT_DISPATCH,
   type FanOutDispatch,
 } from '../../../../../shared/types/fanOutDispatch';
-import { renderFanOutStageScripts } from '../../../orchestrator/prompts/fanOutStageScript';
+import { renderFanOutBatchScripts } from '../../../orchestrator/prompts/fanOutStageScript';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import type { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installAgentOverlay } from './agentOverlayWriter';
@@ -198,7 +198,7 @@ function resolveStageScripts(
     if (def === null) return [];
 
     const steps = def.phases.flatMap((phase) => phase.steps);
-    return renderFanOutStageScripts(row.name, steps);
+    return renderFanOutBatchScripts(row.name, steps);
   } catch (err) {
     logger?.warn(
       `[WorkflowBundleInstall] stage-script render failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,

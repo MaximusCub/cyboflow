@@ -21,7 +21,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { buildFanOutAppend } from '../fan-out-instructions';
-import { fanOutStageWorkflowName } from '../fanOutStageScript';
+import { fanOutBatchWorkflowName } from '../fanOutStageScript';
 import { WORKFLOW_DEFINITIONS, type WorkflowDefinition } from '../../../../../shared/types/workflows';
 
 /**
@@ -239,31 +239,36 @@ describe('buildFanOutAppend — dispatch mode', () => {
   describe('workflow arm', () => {
     const block = buildFanOutAppend(def, { dispatch: 'workflow', workflowName: 'sprint' });
 
-    it('dispatches each agent-backed stage to its named script', () => {
-      // Names MUST match what the renderer/writer produce for the same inputs.
-      for (const inner of ['implement', 'write-tests', 'code-review', 'task-verify']) {
-        const expected = fanOutStageWorkflowName('sprint', 'execute-tasks', inner);
-        expect(expected).not.toBeNull();
-        expect(block).toContain(`Workflow({ name: '${expected as string}'`);
-      }
+    it('dispatches the whole non-gated sub-chain as ONE batch', () => {
+      const batchName = fanOutBatchWorkflowName('sprint', 'execute-tasks', 'implement');
+      expect(batchName).not.toBeNull();
+      expect(block).toContain(`Workflow({ name: '${batchName as string}'`);
+      // ONE dispatch, not one per stage.
+      expect(block.match(/Workflow\(\{ name:/g)).toHaveLength(1);
+      expect(block).toContain('dispatched as ONE batch, no orchestrator gate between them');
     });
 
-    it('keeps the host-owned visual merge-gate on the prose path', () => {
-      const visualScript = fanOutStageWorkflowName('sprint', 'execute-tasks', 'visual-verify');
-      expect(block).not.toContain(`name: '${visualScript as string}'`);
-      // Its original protocol survives verbatim.
+    it('names the Workflow tool explicitly so the agent does not try Skill first', () => {
+      expect(block).toContain('use the **Workflow tool** (not Skill, not Bash)');
+    });
+
+    it('keeps the firm visual gate on the prose path', () => {
+      const gateName = fanOutBatchWorkflowName('sprint', 'execute-tasks', 'visual-verify');
+      expect(block).not.toContain(`name: '${gateName as string}'`);
       expect(block).toContain('cyboflow_request_verification');
       expect(block).toContain('there is NO subagent to delegate');
     });
 
-    it('advances one stage at a time across the wave (stage-major, not item-major)', () => {
-      expect(block).toContain('ONE STAGE AT A TIME');
-      expect(block).toContain('Pass ONLY the members of the CURRENT wave');
+    it('states the lane-granularity trade explicitly', () => {
+      expect(block).toContain('does not');
+      expect(block).toContain('tick per stage');
+      expect(block).toContain('backfill');
     });
 
     it('reconciles domain outcomes rather than assuming success', () => {
-      expect(block).toContain('outcome: "blocked"');
-      expect(block).toContain('outcome: "not_applicable"');
+      expect(block).toContain('outcome: "ok"');
+      expect(block).toContain('outcome: "failed"');
+      expect(block).toContain('failedStage');
     });
 
     it('keeps every cyboflow write with the orchestrator', () => {
@@ -275,11 +280,10 @@ describe('buildFanOutAppend — dispatch mode', () => {
     it('retains the shared dispatch + loopback protocol', () => {
       expect(block).toContain('at most **5** concurrently');
       expect(block).toContain('Loopback + attempt protocol');
-      expect(block).toContain('make');
       expect(block).toContain('ONE git commit for that task');
     });
 
-    it('falls back to prose for a stage whose name cannot be slugged', () => {
+    it('falls back to prose for a batch whose name cannot be slugged', () => {
       const weird = buildFanOutAppend(def, { dispatch: 'workflow', workflowName: '***' });
       expect(weird).not.toContain('Workflow({');
       expect(weird).toContain('cyboflow-implement');
