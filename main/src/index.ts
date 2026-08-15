@@ -79,6 +79,7 @@ import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
 import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
 import { OmpBridgeHttpClient } from './orchestrator/omp/ompBridgeClient';
 import { resolveOmpBridgeCommandConfig } from './orchestrator/omp/ompBridgeConfig';
+import { resolveOmpPrincipal } from './orchestrator/omp/ompPrincipal';
 import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
 import type { OmpCommandAdapter } from '../../shared/types/ompCommand';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
@@ -755,6 +756,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
         omp: fleetRegistryReader,
         ompCommand,
+        principal: resolveOmpPrincipal(),
         auditOmp,
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
