@@ -611,3 +611,40 @@ a data dir deep under a worktree. Candidate fix: bind an additional short alias 
 `/tmp/cyboflow-<hash>.sock`) for the gate, or preflight the length at boot and warn loudly.
 Cosmetic nit from the same pass: the Integrations card renders the version as "omp omp/17.3.2"
 (binary name prepended to the already-prefixed version string).
+
+### 15.2 Real workflow smoke — a full /sprint on omp-sdk (dev build)
+
+A second CDP-driven smoke ran an actual **sprint** end-to-end on OMP: one backlog task
+("Add CONTRIBUTING.md"), whole-run `omp-sdk` + `anthropic/claude-sonnet-4-5`, execution model
+Programmatic, permission Allow edits. **The machinery works**: the run launched (panel header
+"OMP · SDK transport · flow run"), the DAG walked every step on OMP agents —
+dependency-analyzer → implement → write-tests → code-review → task-verify → visual-check (n/a) →
+lane `integrated`, merge gate 1/1 → sprint-verify → sprint-review → address-review → human
+sign-off gate → "Workflow complete" (8 turns, 21 min, 1.1M tokens incl. cache). resultText
+verdict parsing on OMP drove every transition; the eval jury ran on completion (Claude jurors
+scored; the Codex slot failed *correctly* with `ERR_AGENT_PROVIDER_DISABLED[codex]` since Codex
+is toggled off, and the jury degraded legibly); its advisory finding rendered in Insights.
+Defense-in-depth also showed up live: the gate's `denyTaskTool` blocked a lane agent's subagent
+delegation and the agent degraded gracefully to doing the analysis inline.
+
+Findings, worth fixing before real OMP workflow use (all evidenced in the run):
+
+1. **Lane agents cannot commit — sprint work lands uncommitted while lanes report
+   `integrated`.** Under Allow edits, the OMP gate auto-allows `write`/`edit` but sends every
+   `bash` (incl. `git status` / `git add … && git commit`) to the human gate, where it dies at
+   the 25 s budget. The implement agent's own report: "git commit pending cyboflow approval
+   gate." The merge gate then stamped 1/1 MERGED with zero commits — the engine trusts step
+   verdicts and never checks git. Fix candidates: carry the safe-git allowRules the permission
+   copy already promises ("safe reads & git") into the OMP gate config for allow-edits/auto, and
+   have the lane engine verify a commit exists before accepting `integrated`.
+2. **Per-lane gated approvals are invisible after the first.** The backend log shows five
+   `shell-approval registered (held open)` entries but only ONE `Bridged approvalCreated`; the
+   Human-review badge stayed 0 while lane bashes timed out. The first approval (the flow
+   session's own) surfaced and auto-rejected at exactly the 25 s budget — the later, lane-spawn
+   ones never reached the UI, making them undecidable by design rather than by choice.
+3. **The workflow configure screen's LAUNCH SUMMARY shows "RUNTIME: Claude SDK" while the
+   select's value is `omp-sdk`** (the quick-session summary shows the runtime correctly) —
+   display-only, the run launches on OMP.
+4. **Flow-run cost is blank for OMP** ("cost —" in the completion panel and Insights stats)
+   while quick sessions do show a computed cost — the run-usage cost seam doesn't produce a
+   figure for OMP flow runs.
