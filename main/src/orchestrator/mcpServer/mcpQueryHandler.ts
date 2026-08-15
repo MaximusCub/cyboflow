@@ -5676,12 +5676,18 @@ export class McpQueryHandler {
         { runId },
       );
       // Clear the pending approval so the run does not leak in awaiting_review.
-      // clearPendingForRun is a no-op socketReply path (correct here — the socket
-      // is already gone), and idempotently settles the DB row.
+      // ABANDONMENT, not termination: the run is still executing, only its
+      // requester went away (gate-extension decision budget expired, hook
+      // subprocess died). abandonPendingForRun therefore also restores
+      // awaiting_review → running — clearPendingForRun would settle the approval
+      // and leave the run wedged, making every later requestApproval loop in the
+      // 'wait' branch with no row inserted and no gate ever shown. It is a no-op
+      // socketReply path (correct here — the socket is already gone) and
+      // idempotently settles the DB row.
       try {
-        ApprovalRouter.getInstance().clearPendingForRun(runId);
+        ApprovalRouter.getInstance().abandonPendingForRun(runId);
       } catch (err) {
-        this.logger?.debug('[Cyboflow MCP Query] clearPendingForRun on disconnect failed', {
+        this.logger?.debug('[Cyboflow MCP Query] abandonPendingForRun on disconnect failed', {
           runId,
           error: err instanceof Error ? err.message : String(err),
         });

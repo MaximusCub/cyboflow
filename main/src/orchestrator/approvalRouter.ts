@@ -580,11 +580,64 @@ export class ApprovalRouter extends EventEmitter {
    *   idempotency with a concurrent respond() that may have already settled the row.
    * - DB errors during shutdown are swallowed with console.warn so they never
    *   surface as unhandled rejections during process teardown.
+   * - Deliberately leaves workflow_runs.status alone: the run is terminating,
+   *   so its status is the teardown path's to own. A run that is STILL ALIVE
+   *   when its requester vanishes needs abandonPendingForRun instead, or it
+   *   wedges in 'awaiting_review'.
    */
   clearPendingForRun(runId: string): void {
+    this.settlePendingForRun(runId, {
+      restoreRunning: false,
+      denyMessage: 'Run was terminated before approval could be processed',
+    });
+  }
+
+  /**
+   * Settle all pending approvals for `runId` because the REQUESTER went away
+   * mid-run — the run itself is still alive.
+   *
+   * Same settle semantics as {@link clearPendingForRun} PLUS a guarded
+   * `awaiting_review → running` restore. Without that restore the run stays
+   * wedged in 'awaiting_review' forever: every later requestApproval finds a
+   * non-'running' status, takes the 'wait' branch, and loops in
+   * waitForApprovalSlot — no approvals row is ever INSERTed, no
+   * 'approvalCreated' fires, and the requester times out invisibly on every
+   * subsequent tool call.
+   *
+   * Callers are the mid-run abandonment paths ONLY: the shell-approval socket
+   * dying before a verdict (the OMP gate extension's human-decision budget
+   * expiring, or a preToolUseShellHook subprocess dying mid-wait). Run
+   * TERMINATION keeps clearPendingForRun — resurrecting a torn-down run to
+   * 'running' would be wrong.
+   *
+   * The restore runs even when there was no in-memory entry to settle: the
+   * wedge outlives the entry (an entry already removed by a concurrent
+   * respond(), or a process that lost its pending map). It is guarded
+   * `WHERE status='awaiting_review'`, so a run that concurrently went
+   * canceled/completed/failed is never revived.
+   */
+  abandonPendingForRun(runId: string): void {
+    this.settlePendingForRun(runId, {
+      restoreRunning: true,
+      denyMessage: 'Approval requester disconnected before a decision was made',
+    });
+  }
+
+  /**
+   * Shared body of {@link clearPendingForRun} (termination) and
+   * {@link abandonPendingForRun} (mid-run abandonment). `restoreRunning` is the
+   * single discriminator between the two modes: it also selects the audit
+   * resolution stamped on the folded review item and the log label.
+   */
+  private settlePendingForRun(
+    runId: string,
+    opts: { restoreRunning: boolean; denyMessage: string },
+  ): void {
+    const label = opts.restoreRunning ? 'abandonPendingForRun' : 'clearPendingForRun';
+    const reviewResolution = opts.restoreRunning ? 'requester_disconnected' : 'run_terminated';
     const denyDecision: ApprovalDecision = {
       behavior: 'deny',
-      message: 'Run was terminated before approval could be processed',
+      message: opts.denyMessage,
     };
 
     // Collect entries first, then mutate the map to avoid iterating-while-deleting.
@@ -607,11 +660,11 @@ export class ApprovalRouter extends EventEmitter {
            WHERE id = ? AND status = 'pending'`,
         ).run(now, approvalId);
         // Resolve the folded permission review_item too (idempotent).
-        resolvePermissionReviewItem(this.db, approvalId, 'system', 'run_terminated', now, runId);
+        resolvePermissionReviewItem(this.db, approvalId, 'system', reviewResolution, now, runId);
       } catch (err) {
         // Swallow DB errors during shutdown — do not throw.
         console.warn(
-          `[ApprovalRouter] clearPendingForRun: DB update failed for approval ${approvalId} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`,
+          `[ApprovalRouter] ${label}: DB update failed for approval ${approvalId} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
@@ -634,12 +687,31 @@ export class ApprovalRouter extends EventEmitter {
           `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
            WHERE id = ? AND status = 'pending'`,
         ).run(now, id);
-        resolvePermissionReviewItem(this.db, id, 'system', 'run_terminated', now, runId);
+        resolvePermissionReviewItem(this.db, id, 'system', reviewResolution, now, runId);
         this.emit('approvalDecided', { approvalId: id, decision: 'rejected' });
       }
     } catch (err) {
       console.warn(
-        `[ApprovalRouter] clearPendingForRun: DB sweep failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        `[ApprovalRouter] ${label}: DB sweep failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (!opts.restoreRunning) return;
+
+    // Mid-run abandonment only: hand the gate back so the run keeps executing.
+    // Runs LAST — the approvals rows are already settled, so a requestApproval
+    // that grabs 'running' the instant this commits never races a row this call
+    // is still settling. Guarded `WHERE status='awaiting_review'` so a
+    // concurrent cancel/complete/fail wins. Fail-soft: a DB error here must not
+    // propagate into the socket-disconnect handler that called us.
+    try {
+      this.db.prepare(
+        `UPDATE workflow_runs SET status = 'running', updated_at = ?
+         WHERE id = ? AND status = 'awaiting_review'`,
+      ).run(new Date().toISOString(), runId);
+    } catch (err) {
+      console.warn(
+        `[ApprovalRouter] ${label}: run-status restore failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
