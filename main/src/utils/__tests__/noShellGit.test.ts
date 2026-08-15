@@ -49,11 +49,6 @@ const SRC_ROOT = locateSrcRoot();
  */
 const LEGACY_ALLOWLIST: ReadonlyMap<string, string> = new Map([
   [
-    'ipc/file.ts',
-    'Not migrated yet — includes the renderer-facing `git <args>` execute handler, ' +
-      'which needs a git-subcommand allowlist alongside the runGit migration.',
-  ],
-  [
     'services/demo/demoEnvironment.ts',
     'Demo-fixture builder: constructs a scripted repo from trusted literals, no repo-controlled input.',
   ],
