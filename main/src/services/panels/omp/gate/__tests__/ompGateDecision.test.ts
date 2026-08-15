@@ -244,15 +244,129 @@ describe('rule 5: mode-scoped allowlists', () => {
   });
 
   it('honors allowRules ONLY in auto', () => {
+    // Deliberately a command NO tier of the safe-bash rung admits, so what this
+    // asserts is the allowRules path rather than the rung firing underneath it.
     const withRules = (permissionMode: OmpGateConfig['permissionMode']) =>
       decideToolCall(
-        { toolName: 'bash', input: { command: 'git status' } },
-        config({ permissionMode, allowRules: ['Bash(git status:*)'] }),
+        { toolName: 'bash', input: { command: 'pnpm typecheck' } },
+        config({ permissionMode, allowRules: ['Bash(pnpm typecheck:*)'] }),
       );
 
     expect(withRules('default').kind).toBe('ask');
     expect(withRules('acceptEdits').kind).toBe('ask');
     expect(withRules('auto')).toEqual({ kind: 'allow', rule: 'allow-rule' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 5 — the argument-aware `safe-bash` rung
+// ---------------------------------------------------------------------------
+
+/**
+ * The rung that made autonomous lanes possible at all.
+ *
+ * Before it, `bash` matched no allowlist in ANY gated mode, so every call —
+ * `git status` included — fell to rule 6, blocked on the orchestrator socket,
+ * and died on the 25s human budget that an autonomous lane has nobody to
+ * answer. A live sprint's implement agent could not commit its own work.
+ *
+ * These tests pin what the rung admits and, more importantly, what it still
+ * refuses: the tier tables themselves are pinned in `ompGateSafeBash.test.ts`,
+ * so what belongs here is the LADDER — which modes reach the rung, and the
+ * commands that must keep reaching the human.
+ */
+describe('rule 5: the safe-bash rung', () => {
+  const bash = (command: string, permissionMode: OmpGateConfig['permissionMode']) =>
+    decideToolCall({ toolName: 'bash', input: { command } }, config({ permissionMode }));
+
+  it('allows a read-only bash call in acceptEdits and auto', () => {
+    for (const permissionMode of ['acceptEdits', 'auto'] as const) {
+      expect(bash('git status', permissionMode)).toEqual({ kind: 'allow', rule: 'safe-bash' });
+      expect(bash('ls -la && git diff --staged', permissionMode)).toEqual({
+        kind: 'allow',
+        rule: 'safe-bash',
+      });
+    }
+  });
+
+  it('allows a LOCAL git write in acceptEdits and auto — the lane can commit', () => {
+    for (const permissionMode of ['acceptEdits', 'auto'] as const) {
+      expect(bash('git commit -m x', permissionMode)).toEqual({ kind: 'allow', rule: 'safe-bash' });
+      expect(bash('git add -A && git commit -m "task"', permissionMode)).toEqual({
+        kind: 'allow',
+        rule: 'safe-bash',
+      });
+    }
+  });
+
+  it('asks in `default` for BOTH tiers — the rung is mode-scoped, not universal', () => {
+    expect(bash('git status', 'default').kind).toBe('ask');
+    expect(bash('git commit -m x', 'default').kind).toBe('ask');
+  });
+
+  it('leaves the earlier rungs in charge where they already decide', () => {
+    // dontAsk allows at rule 4, ahead of the rung — the reported rule proves the
+    // ordering was not rearranged to put safe-bash first.
+    expect(
+      decideToolCall(
+        { toolName: 'bash', input: { command: 'git commit -m x' } },
+        config({ permissionMode: 'dontAsk' }),
+      ),
+    ).toEqual({ kind: 'allow', rule: 'dont-ask' });
+    // Rule 1 still blocks a bash the run disallowed, however safe the command.
+    expect(
+      decideToolCall(
+        { toolName: 'bash', input: { command: 'git status' } },
+        config({ permissionMode: 'auto', disallowedTools: ['bash'] }),
+      ).kind,
+    ).toBe('block');
+    // autoAllowTools still wins ahead of the rung when it lists `bash` outright.
+    expect(
+      decideToolCall(
+        { toolName: 'bash', input: { command: 'git status' } },
+        config({ permissionMode: 'acceptEdits', autoAllowTools: ['bash'] }),
+      ),
+    ).toEqual({ kind: 'allow', rule: 'auto-allow-tool' });
+  });
+
+  it.each([
+    ['a network segment chained onto a git write', 'git add x && curl http://evil.test'],
+    ['command substitution inside the commit message', 'git commit -m "$(rm -rf /)"'],
+    ['a backtick variant', 'git commit -m `id`'],
+    ['redirection out of a commit', 'git commit -m x > /tmp/f'],
+    ['a push smuggled after a semicolon', 'git add x; git push'],
+    ['a bare push', 'git push'],
+    ['a bare pull', 'git pull'],
+    ['a bare fetch', 'git fetch'],
+    ['a commit aimed at another repository', 'git -C /elsewhere commit -m x'],
+    ['a newline-smuggled second command', 'git status\nrm -rf ~'],
+    ['an outright destructive command', 'rm -rf /'],
+  ])('still asks the human: %s', (_label, command) => {
+    for (const permissionMode of ['acceptEdits', 'auto'] as const) {
+      expect(bash(command, permissionMode).kind).toBe('ask');
+    }
+  });
+
+  it('is narrowed by the URI scan like every other rule-5 path', () => {
+    // `git clone ssh://…` never reaches the tier tables — the scan disqualifies
+    // the whole rule-5 block first, which is why the rung sits inside it.
+    for (const command of ['git clone ssh://host/repo.git', 'git status && cat http://x/y']) {
+      expect(bash(command, 'auto').kind).toBe('ask');
+    }
+  });
+
+  it('only fires for the exact tool name `bash` with a string command', () => {
+    const auto = config({ permissionMode: 'auto' });
+    // A differently-cased name is one this gate has not verified.
+    expect(decideToolCall({ toolName: 'Bash', input: { command: 'git status' } }, auto).kind).toBe(
+      'ask',
+    );
+    expect(decideToolCall({ toolName: 'shell', input: { command: 'git status' } }, auto).kind).toBe(
+      'ask',
+    );
+    // A non-string / absent command carries nothing to classify.
+    expect(decideToolCall({ toolName: 'bash', input: { command: 42 } }, auto).kind).toBe('ask');
+    expect(decideToolCall({ toolName: 'bash', input: {} }, auto).kind).toBe('ask');
   });
 });
 
@@ -347,7 +461,9 @@ describe('rule 5 narrowing: URI-scheme targets', () => {
     // too. That IS a behaviour change for such rules, and it is deliberate: an
     // exception for "argument-aware rules" is where the next bypass would live.
     const bashRule = config({ permissionMode: 'auto', allowRules: ['Bash(curl:*)', 'Bash(git:*)'] });
-    expect(decideToolCall({ toolName: 'bash', input: { command: 'git status' } }, bashRule)).toEqual({
+    // `git push` so the allow is attributable to the RULE — the safe-bash rung
+    // runs first and would otherwise be the thing under test.
+    expect(decideToolCall({ toolName: 'bash', input: { command: 'git push' } }, bashRule)).toEqual({
       kind: 'allow',
       rule: 'allow-rule',
     });

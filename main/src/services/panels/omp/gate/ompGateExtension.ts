@@ -404,6 +404,310 @@ export function matchesAllowRules(
 }
 
 // ---------------------------------------------------------------------------
+// Bash classification — the `safe-bash` rung
+// ---------------------------------------------------------------------------
+
+/**
+ * A DELIBERATE DUPLICATE of `main/src/orchestrator/safeCommandClassifier.ts`,
+ * tables and structural refusals mirrored line for line — NOT an import of it.
+ *
+ * WHY DUPLICATED: this module is loaded by OMP's Bun runtime from a single
+ * standalone file (`-e <path>`) and may import nothing from cyboflow's source
+ * tree; the classifier in turn imports `./permissionRules`, which is main-process
+ * code. Same precedent, same reasoning as the `UnreffableTimer` interface
+ * duplicated between `orchestrator/mcpServer/parentWatchdog.ts` and
+ * `services/mcpOrphanTripwire.ts`. Drift is pinned mechanically: the parity test
+ * (`__tests__/ompGateSafeBash.test.ts`) imports BOTH implementations — tests are
+ * not shipped to Bun, so they may reach across — and asserts the read-only tier
+ * agrees verdict-for-verdict on a shared fixture table.
+ *
+ * WHY THE RUNG EXISTS AT ALL: without it, every `bash` call under `acceptEdits`
+ * or `auto` fell to rule 6 and blocked on the orchestrator socket for a human.
+ * In an autonomous workflow lane there IS no human, so the 25s budget expired
+ * and even `git status` was denied — measured on a live sprint, whose implement
+ * agent could not commit its own work.
+ */
+
+/**
+ * git subcommands that are read-only in EVERY invocation regardless of flags or
+ * positionals. (Notably absent: branch/tag/remote/config/stash — dual-use,
+ * handled below — and every mutating subcommand.)
+ */
+const ALWAYS_READONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'blame',
+  'shortlog',
+  'reflog',
+  'rev-parse',
+  'rev-list',
+  'describe',
+  'ls-files',
+  'ls-tree',
+  'cat-file',
+  'grep',
+  'show-branch',
+  'whatchanged',
+  'name-rev',
+  'merge-base',
+  'count-objects',
+  'verify-commit',
+  'verify-tag',
+  'var',
+]);
+
+/**
+ * Mutating `git branch` flags. `git branch` with only NON-mutating flags (and no
+ * positional, which would name a new branch) lists branches → read-only.
+ */
+const MUTATING_BRANCH_FLAGS: ReadonlySet<string> = new Set([
+  '-d',
+  '-D',
+  '-m',
+  '-M',
+  '-c',
+  '-C',
+  '--delete',
+  '--move',
+  '--copy',
+  '--force',
+  '--edit-description',
+  '--set-upstream-to',
+  '-u',
+  '--unset-upstream',
+]);
+
+/**
+ * Read-only shell utilities. Deliberately excludes anything that can mutate or
+ * execute a sub-program without a shell metacharacter we already reject:
+ * `sed` (-i edits in place), `find` (-delete/-exec), `env`/`xargs`/`nohup`/
+ * `timeout` (run arbitrary programs), `awk` (system()/print-to-file).
+ */
+const SAFE_READONLY_SHELL_PROGRAMS: ReadonlySet<string> = new Set([
+  'ls',
+  'pwd',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'echo',
+  'printf',
+  'which',
+  'whoami',
+  'id',
+  'date',
+  'hostname',
+  'uname',
+  'basename',
+  'dirname',
+  'realpath',
+  'readlink',
+  'tree',
+  'stat',
+  'file',
+  'du',
+  'df',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'ag',
+  'sort',
+  'uniq',
+  'cut',
+  'column',
+  'nl',
+  'diff',
+  'cmp',
+  'comm',
+]);
+
+/**
+ * git subcommands that write ONLY inside the repository the agent is already
+ * working in — the index, the working tree, and local refs. This tier has NO
+ * counterpart in `safeCommandClassifier.ts`: it is a gate-only widening, and it
+ * is what lets an autonomous lane agent commit the work it just wrote.
+ *
+ * WHY IT IS THE SAME TRUST DOMAIN as the write/edit tools this mode already
+ * auto-allows:
+ *  - Nothing here reaches the network. Every subcommand that publishes or
+ *    fetches (push, pull, fetch, clone, remote add, submodule) is absent, so the
+ *    blast radius stays inside the worktree.
+ *  - `git commit` can run repo-local hooks — and the agent can already WRITE
+ *    those hook files with the auto-allowed `write` tool. Denying the commit
+ *    while allowing the hook to be authored buys nothing.
+ *  - Path escape is enforced by git, not by parsing: `git add`/`rm`/`mv`/
+ *    `restore` refuse a pathspec outside the repository, so this tier cannot be
+ *    steered at `/etc` the way a raw `rm` could.
+ *
+ * Deliberately NOT here: checkout/switch/reset/clean/stash/merge/rebase/
+ * cherry-pick/revert/apply — each can destroy uncommitted work that a human or
+ * a sibling lane owns, which is a different question from "may this agent
+ * record its own edits".
+ */
+const LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'add',
+  'commit',
+  'restore',
+  'rm',
+  'mv',
+]);
+
+/** Tokenize a single shell segment on whitespace (segments are pre-split). */
+function tokenizeSegment(segment: string): string[] {
+  return segment
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+}
+
+/** Strip a trailing `=value` so `--set-upstream-to=origin/x` matches its flag. */
+function flagName(token: string): string {
+  const eq = token.indexOf('=');
+  return eq === -1 ? token : token.slice(0, eq);
+}
+
+/**
+ * Structural refusals shared by BOTH tiers. Command substitution hides an
+ * unknowable command; redirection (`>`/`<`) writes or reads files the tables
+ * never vetted; `&` backgrounds or chains outside the segment model
+ * {@link splitShellSegments} gives us.
+ */
+function hasStructuralRefusal(segment: string): boolean {
+  return hasCommandSubstitution(segment) || /[<>&]/.test(segment);
+}
+
+/**
+ * True if a `git <args>` invocation (args = tokens AFTER `git`) is read-only.
+ * The subcommand must be the FIRST token — a leading global option (`-C path`,
+ * `-c k=v`, …) is refused rather than parsed, keeping the common
+ * `git <subcommand>` form fast and the exotic forms safely prompted.
+ */
+function isSafeReadOnlyGitInvocation(args: string[]): boolean {
+  const sub = args[0];
+  if (sub === undefined || sub.startsWith('-')) return false;
+  const subArgs = args.slice(1);
+
+  if (ALWAYS_READONLY_GIT_SUBCOMMANDS.has(sub)) return true;
+
+  switch (sub) {
+    case 'branch':
+      // List form only: no positional (would name a new branch) and no mutating
+      // flag. `git branch`, `git branch -a -v` pass; `git branch -d foo` refuses.
+      return (
+        subArgs.every((t) => t.startsWith('-')) &&
+        !subArgs.some((t) => MUTATING_BRANCH_FLAGS.has(flagName(t)))
+      );
+    case 'tag':
+      // List form only: any positional would create/delete a tag.
+      return subArgs.every((t) => t.startsWith('-'));
+    case 'remote':
+      // `git remote`, `git remote -v`, `git remote show [name]`,
+      // `git remote get-url [name]` read; add/remove/rename/prune/set-url mutate.
+      return (
+        subArgs.length === 0 || ['-v', '--verbose', 'show', 'get-url'].includes(subArgs[0]!)
+      );
+    case 'config':
+      // Read forms only; a bare `git config k v` writes.
+      return (
+        subArgs.length > 0 &&
+        ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(subArgs[0]!)
+      );
+    case 'stash':
+      // `git stash list` / `git stash show` read; bare `git stash` and
+      // pop/drop/apply/push/clear mutate the working tree or stash list.
+      return subArgs.length > 0 && ['list', 'show'].includes(subArgs[0]!);
+    default:
+      return false;
+  }
+}
+
+/** True if one shell segment is a provably read-only command. */
+function isSafeReadOnlySegment(segment: string): boolean {
+  if (hasStructuralRefusal(segment)) return false;
+
+  const tokens = tokenizeSegment(segment);
+  if (tokens.length === 0) return false;
+  const program = tokens[0]!;
+
+  if (program === 'git') return isSafeReadOnlyGitInvocation(tokens.slice(1));
+  return SAFE_READONLY_SHELL_PROGRAMS.has(program);
+}
+
+/**
+ * True if one shell segment is a local-only git write —
+ * {@link LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS} named as the FIRST token after `git`,
+ * under the same structural refusals as the read-only tier. A leading git global
+ * option (`git -C /elsewhere commit …`) is refused rather than parsed, which is
+ * also what keeps the tier from being pointed at another repository.
+ */
+function isLocalOnlyGitWriteSegment(segment: string): boolean {
+  if (hasStructuralRefusal(segment)) return false;
+
+  const tokens = tokenizeSegment(segment);
+  if (tokens.length < 2 || tokens[0] !== 'git') return false;
+  const sub = tokens[1]!;
+  if (sub.startsWith('-')) return false;
+  return LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS.has(sub);
+}
+
+/**
+ * True if a bash `command` string is a provably read-only invocation. EVERY
+ * quote-aware segment must classify safe, so `git status && rm -rf .` refuses.
+ *
+ * The mirrored half of the classifier — the parity test pins this against
+ * `isSafeReadOnlyBashCommand` in `main/src/orchestrator/safeCommandClassifier.ts`.
+ */
+export function isSafeReadOnlyBashCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(isSafeReadOnlySegment);
+}
+
+/**
+ * True if EVERY segment of a bash `command` is a local-only git write. Exported
+ * so the tier can be pinned on its own: it is the gate-only widening, so "which
+ * forms exactly" has to be assertable without going through the whole rung.
+ */
+export function isLocalOnlyGitWriteCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(isLocalOnlyGitWriteSegment);
+}
+
+/**
+ * The `safe-bash` rung's predicate: every quote-aware segment is EITHER provably
+ * read-only OR a local-only git write. Mixing the tiers within one command is
+ * fine — `git status && git add -A && git commit -m x` is the shape a lane agent
+ * actually runs.
+ *
+ * The raw-newline refusal is a NARROWING the mirrored classifier does not have.
+ * {@link splitShellSegments} treats only `&&`, `||`, `;` and `|` as separators
+ * (it must, to stay byte-identical to cyboflow's rule grammar in
+ * {@link matchesAllowRules}), so `git status\nrm -rf ~` arrives as ONE segment
+ * that whitespace-tokenizes to `git status` plus stray positionals — read-only
+ * by the table, catastrophic in fact. Teaching the splitter a new separator
+ * would desync the allow-rule matcher; refusing the character is the narrow fix,
+ * and a multi-line command simply reaches the human instead of being auto-run.
+ */
+export function isGateSafeBashCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  if (/[\r\n]/.test(command)) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(
+    (segment) => isSafeReadOnlySegment(segment) || isLocalOnlyGitWriteSegment(segment),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The decision
 // ---------------------------------------------------------------------------
 
@@ -413,6 +717,7 @@ export type OmpGateAllowRule =
   | 'dont-ask'
   | 'auto-allow-tool'
   | 'edit-tool'
+  | 'safe-bash'
   | 'allow-rule';
 
 export type OmpGateDecision =
@@ -481,7 +786,9 @@ function scanForUriScheme(value: unknown, seen: Set<object>): boolean {
  *  3. cyboflow's own MCP tools, by EXACT name — always allowed (our tools, our
  *     server, reached through our own socket).
  *  4. `dontAsk` — allow (log-only), rules 1-2 having already applied.
- *  5. the mode-scoped allowlists, each narrowed by {@link hasUriSchemeTarget}.
+ *  5. the mode-scoped allowlists — `autoAllowTools`, `editTools`, the
+ *     argument-aware `safe-bash` rung ({@link isGateSafeBashCommand}), and
+ *     `allowRules` — each narrowed by {@link hasUriSchemeTarget}.
  *  6. otherwise: ask the human.
  */
 export function decideToolCall(
@@ -553,6 +860,18 @@ export function decideToolCall(
     ) {
       return { kind: 'allow', rule: 'edit-tool' };
     }
+    // The argument-aware bash rung. Name matched EXACTLY ('bash' is OMP's
+    // canonical name, `tools/builtin-names.ts:1-31`): a differently-cased name is
+    // one this gate has not verified, and falling through to the human is the
+    // fail-closed direction for an auto-allow path.
+    if (
+      (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
+      toolName === 'bash' &&
+      typeof input['command'] === 'string' &&
+      isGateSafeBashCommand(input['command'])
+    ) {
+      return { kind: 'allow', rule: 'safe-bash' };
+    }
     if (config.permissionMode === 'auto' && matchesAllowRules(toolName, input, config.allowRules)) {
       return { kind: 'allow', rule: 'allow-rule' };
     }
@@ -579,6 +898,49 @@ export interface OmpGateSocketVerdict {
   reason?: string;
 }
 
+/**
+ * OMP's canonical tool names → Claude's, for the shell-approval frame ONLY.
+ *
+ * The server side of this socket is shared with the interactive-Claude shell
+ * hook and matches CLAUDE-CASED names: `handleShellApprovalRequest`
+ * (`main/src/orchestrator/mcpServer/mcpQueryHandler.ts`) feeds `msg.toolName`
+ * to `isAcceptEditsAutoApprovable` (`orchestrator/permissionModeMapper.ts`) and
+ * to `isToolAllowed` against the run's `permissions.allow` rules, both of which
+ * compare against `Bash` / `Read` / `Write` / … Sending OMP's lowercase `bash`
+ * means neither the acceptEdits fast-path nor any permission rule can EVER fire
+ * for an OMP call, so every such call lands on a human.
+ *
+ * `fetch`/`web_search`/`todo` map to the Claude names with the same semantics
+ * (`WebFetch`/`WebSearch`/`TodoWrite`) so a rule written once covers both
+ * providers.
+ */
+const OMP_TO_CLAUDE_TOOL_NAMES: ReadonlyMap<string, string> = new Map([
+  ['bash', 'Bash'],
+  ['read', 'Read'],
+  ['write', 'Write'],
+  ['edit', 'Edit'],
+  ['glob', 'Glob'],
+  ['grep', 'Grep'],
+  ['fetch', 'WebFetch'],
+  ['web_search', 'WebSearch'],
+  ['todo', 'TodoWrite'],
+]);
+
+/**
+ * Canonicalize an OMP tool name for the orchestrator frame.
+ *
+ * MCP names pass through untouched — `mcp__server_tool` is already the shared
+ * cross-provider spelling, and rewriting one would break the server's own
+ * matching. So does anything unmapped: an OMP-only tool has no Claude
+ * counterpart, and inventing a name would be policy nobody can cite. Both
+ * pass-throughs are conservative — an unrecognized name simply fails to match a
+ * fast-path or a rule and reaches the human, which is where it started.
+ */
+export function canonicalToolNameForOrchestrator(toolName: string): string {
+  if (toolName.startsWith('mcp__')) return toolName;
+  return OMP_TO_CLAUDE_TOOL_NAMES.get(toolName) ?? toolName;
+}
+
 /** Socket factory, injectable so tests can drive a stub. */
 export type OmpGateConnect = (socketPath: string) => net.Socket;
 
@@ -597,6 +959,10 @@ export interface OmpGateSocketOptions {
 
 /**
  * Ask the orchestrator and block until it answers.
+ *
+ * The frame carries the CLAUDE-CASED tool name
+ * ({@link canonicalToolNameForOrchestrator}); the server's acceptEdits fast-path
+ * and permission-rule matching are name-cased and would otherwise never fire.
  *
  * REJECTS (which OMP converts into a block — see this file's header, layer 1)
  * on every LIVENESS failure: connection error, close before a verdict, an
@@ -660,7 +1026,11 @@ export function requestSocketDecision(opts: OmpGateSocketOptions): Promise<OmpGa
           type: 'shell-approval-request',
           requestId,
           runId,
-          toolName,
+          // Claude-cased on the wire; the local logs keep OMP's own name so a
+          // stderr line still matches what the model asked for.
+          toolName: canonicalToolNameForOrchestrator(toolName),
+          // Unchanged: OMP's bash input is `{ command: string }` — the same key
+          // the server's classifiers and Bash(...) rules read.
           toolInput,
         }) + '\n',
       );

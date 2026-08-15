@@ -196,20 +196,30 @@ describe('buildOmpGateConfig', () => {
       kind: 'allow',
       rule: 'edit-tool',
     });
+    // Provably read-only bash is admitted by the argument-aware safe-bash rung
+    // (gate parity with cyboflow's own acceptEdits widening); a non-classifiable
+    // command still reaches the human.
     expect(decideToolCall({ toolName: 'bash', input: { command: 'ls' } }, acceptEdits)).toEqual({
-      kind: 'ask',
+      kind: 'allow',
+      rule: 'safe-bash',
     });
+    expect(
+      decideToolCall({ toolName: 'bash', input: { command: 'pnpm typecheck' } }, acceptEdits),
+    ).toEqual({ kind: 'ask' });
     // An ssh:// WRITE is the worse half of the same hole.
     expect(decideToolCall({ toolName: 'write', input: { path: 'ssh://h/x' } }, acceptEdits)).toEqual({
       kind: 'ask',
     });
 
+    // `git status` would be admitted by the safe-bash rung before allowRules are
+    // ever consulted, so proving the allow-rule path needs a command no tier
+    // admits on its own.
     const auto = buildOmpGateConfig({
       ...base,
       permissionMode: 'auto',
-      allowRules: ['Bash(git status:*)'],
+      allowRules: ['Bash(pnpm typecheck:*)'],
     });
-    expect(decideToolCall({ toolName: 'bash', input: { command: 'git status' } }, auto)).toEqual({
+    expect(decideToolCall({ toolName: 'bash', input: { command: 'pnpm typecheck' } }, auto)).toEqual({
       kind: 'allow',
       rule: 'allow-rule',
     });

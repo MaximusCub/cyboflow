@@ -22,6 +22,7 @@ import {
   ENV_ORCH_SOCKET,
   HUMAN_DECISION_BUDGET_MS,
   MOST_RESTRICTIVE_GATE_CONFIG,
+  canonicalToolNameForOrchestrator,
   createToolCallHandler,
   requestSocketDecision,
   writeGateSentinel,
@@ -153,7 +154,7 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('requestSocketDecision', () => {
-  it('sends the orchestrator wire shape verbatim', async () => {
+  it('sends the orchestrator wire shape verbatim, with a Claude-cased tool name', async () => {
     const orch = await startOrchestrator((req) =>
       verdictFrame(String(req['requestId']), 'allow'),
     );
@@ -170,9 +171,82 @@ describe('requestSocketDecision', () => {
     const req = orch.received[0]!;
     expect(req['type']).toBe('shell-approval-request');
     expect(req['runId']).toBe('run-42');
-    expect(req['toolName']).toBe('bash');
+    // NOT 'bash': the server's acceptEdits fast-path (isAcceptEditsAutoApprovable)
+    // and its permission-rule matching are both Claude-cased, so OMP's own
+    // spelling could never match either.
+    expect(req['toolName']).toBe('Bash');
+    // The input is NOT rewritten — `command` is the key both classifiers read.
     expect(req['toolInput']).toEqual({ command: 'ls -la' });
     expect(typeof req['requestId']).toBe('string');
+  });
+
+  /**
+   * The other half of the same defect: the frame is what the orchestrator sees,
+   * so a unit assertion on `canonicalToolNameForOrchestrator` alone would not
+   * prove the mapping is actually applied at the write. These read it back off a
+   * real socket.
+   */
+  it('canonicalizes every mapped OMP tool name on the wire', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+
+    const expected: ReadonlyArray<readonly [string, string]> = [
+      ['bash', 'Bash'],
+      ['read', 'Read'],
+      ['write', 'Write'],
+      ['edit', 'Edit'],
+      ['glob', 'Glob'],
+      ['grep', 'Grep'],
+      ['fetch', 'WebFetch'],
+      ['web_search', 'WebSearch'],
+      ['todo', 'TodoWrite'],
+    ];
+
+    for (const [ompName] of expected) {
+      await requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: ompName,
+        toolInput: {},
+        logger: silentLogger,
+      });
+    }
+
+    expect(orch.received.map((r) => r['toolName'])).toEqual(expected.map(([, claude]) => claude));
+  });
+
+  it('passes MCP and unmapped names through unchanged', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'allow'));
+
+    // `mcp__foo_bar` is already the shared cross-provider spelling — rewriting it
+    // would break the server's own matching. An OMP-only tool has no Claude
+    // counterpart, so inventing one would be policy nobody can cite.
+    for (const name of ['mcp__foo_bar', 'mcp__cyboflow_report_finding', 'task', 'browser']) {
+      await requestSocketDecision({
+        socketPath: orch.socketPath,
+        runId: 'r',
+        toolName: name,
+        toolInput: {},
+        logger: silentLogger,
+      });
+    }
+
+    expect(orch.received.map((r) => r['toolName'])).toEqual([
+      'mcp__foo_bar',
+      'mcp__cyboflow_report_finding',
+      'task',
+      'browser',
+    ]);
+  });
+
+  it('canonicalToolNameForOrchestrator is a total, case-exact function', () => {
+    expect(canonicalToolNameForOrchestrator('bash')).toBe('Bash');
+    expect(canonicalToolNameForOrchestrator('web_search')).toBe('WebSearch');
+    // Only OMP's canonical lowercase names map; anything else is passed through
+    // rather than guessed at, so an unrecognized name degrades to "ask a human".
+    expect(canonicalToolNameForOrchestrator('Bash')).toBe('Bash');
+    expect(canonicalToolNameForOrchestrator('BASH')).toBe('BASH');
+    expect(canonicalToolNameForOrchestrator('')).toBe('');
+    expect(canonicalToolNameForOrchestrator('mcp__bash')).toBe('mcp__bash');
   });
 
   it('resolves allow on an allow verdict', async () => {
@@ -583,10 +657,40 @@ describe('createToolCallHandler', () => {
     const result = await handler(toolCall('read', { path: 'ssh://user@host/etc/shadow' }));
 
     expect(orch.received).toHaveLength(1);
-    expect(orch.received[0]?.['toolName']).toBe('read');
+    expect(orch.received[0]?.['toolName']).toBe('Read');
     expect(orch.received[0]?.['toolInput']).toEqual({ path: 'ssh://user@host/etc/shadow' });
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain('no remote reads on this run');
+  });
+
+  /**
+   * The rung observed where the defect actually bit. `decideToolCall` returning
+   * `allow` is only half the claim — what broke the live sprint was that the
+   * call REACHED the socket, waited out the 25s budget nobody was there to
+   * answer, and came back blocked. So the assertion that matters is zero socket
+   * traffic, with the orchestrator stubbed to DENY so a leaked request could not
+   * pass silently.
+   */
+  it('runs a lane commit locally in acceptEdits — no socket round-trip at all', async () => {
+    const orch = await startOrchestrator((req) => verdictFrame(String(req['requestId']), 'deny'));
+    const handler = createToolCallHandler(
+      runtimeFor(orch.socketPath, {
+        config: { ...MOST_RESTRICTIVE_GATE_CONFIG, permissionMode: 'acceptEdits' },
+      }),
+    );
+
+    await expect(handler(toolCall('bash', { command: 'git status' }))).resolves.toBeUndefined();
+    await expect(
+      handler(toolCall('bash', { command: 'git add -A && git commit -m "task"' })),
+    ).resolves.toBeUndefined();
+    expect(orch.received).toHaveLength(0);
+
+    // …and a push still goes to the human, Claude-cased on the wire.
+    const pushed = await handler(toolCall('bash', { command: 'git push' }));
+    expect(orch.received).toHaveLength(1);
+    expect(orch.received[0]?.['toolName']).toBe('Bash');
+    expect(orch.received[0]?.['toolInput']).toEqual({ command: 'git push' });
+    expect(pushed?.block).toBe(true);
   });
 
   it('routes an ssh:// write to the human in acceptEdits mode', async () => {
