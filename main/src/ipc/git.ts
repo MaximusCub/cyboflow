@@ -1,9 +1,7 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
-import { execSync } from '../utils/commandExecutor';
-import { runGitAsync } from '../utils/runGit';
-import { buildGitCommitCommand, escapeShellArg } from '../utils/shellEscape';
-import { isCommitFooterEnabled } from '../utils/commitFooter';
+import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
+import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
 import { panelEventBus } from '../services/panelEventBus';
@@ -583,26 +581,22 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }
 
       // Check if there are any changes to commit
-      const status = execSync('git status --porcelain', { 
-        cwd: session.worktreePath,
-        encoding: 'utf-8'
-      }).trim();
+      const status = runGit(session.worktreePath, ['status', '--porcelain']).trim();
 
       if (!status) {
         return { success: false, error: 'No changes to commit' };
       }
 
       // Stage all changes
-      execSync('git add -A', { cwd: session.worktreePath });
+      runGit(session.worktreePath, ['add', '-A']);
 
-      // Create the commit with Cyboflow's signature using safe escaping
-      const commitCommand = buildGitCommitCommand(message, isCommitFooterEnabled(configManager));
+      // Create the commit with Cyboflow's signature. The message is a plain argv
+      // element, so it needs no shell escaping.
+      const commitMessage = appendCommitFooter(message, configManager);
 
       try {
-        execSync(commitCommand, { 
-          cwd: session.worktreePath
-        });
-        
+        runGit(session.worktreePath, ['commit', '-m', commitMessage]);
+
         // Refresh git status for this session after commit
         await refreshGitStatusForSession(sessionId);
         
@@ -1071,7 +1065,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // Check if we're actually in a rebase state (could have been pre-detected conflicts)
       // Try to abort any existing rebase, but don't fail if there isn't one
       try {
-        const statusOutput = execSync('git status --porcelain=v1', { cwd: session.worktreePath }).toString();
+        const statusOutput = runGit(session.worktreePath, ['status', '--porcelain=v1']);
         if (statusOutput.includes('rebase')) {
           await worktreeManager.abortRebase(session.worktreePath);
           
@@ -1687,10 +1681,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }
 
       const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-      const output = execSync(`git log --pretty=%s ${escapeShellArg(mainBranch)}..HEAD`, {
-        cwd: session.worktreePath,
-        encoding: 'utf8',
-      }).toString().trim();
+      const output = runGit(session.worktreePath, [
+        'log', '--pretty=%s', END_OF_OPTIONS, `${mainBranch}..HEAD`,
+      ]).trim();
       const subjects = output.length > 0 ? output.split('\n') : [];
       return { success: true, data: { subjects } };
     } catch (error) {
@@ -1783,10 +1776,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
 
       // Get current branch name
-      const currentBranch = execSync('git branch --show-current', { 
-        cwd: session.worktreePath,
-        encoding: 'utf8' 
-      }).trim();
+      const currentBranch = runGit(session.worktreePath, ['branch', '--show-current']).trim();
 
       const originBranch = session.isMainRepo
         ? await worktreeManager.getOriginBranch(session.worktreePath, mainBranch)
@@ -1824,15 +1814,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         return { success: false, error: 'Session or worktree path not found' };
       }
 
-      const remoteUrl = execSync('git remote get-url origin', {
-        cwd: session.worktreePath,
-        encoding: 'utf8',
-      }).trim();
+      const remoteUrl = runGit(session.worktreePath, ['remote', 'get-url', 'origin']).trim();
 
-      const branchName = execSync('git branch --show-current', {
-        cwd: session.worktreePath,
-        encoding: 'utf8',
-      }).trim();
+      const branchName = runGit(session.worktreePath, ['branch', '--show-current']).trim();
 
       return { success: true, data: { remoteUrl, branchName } };
     } catch (error) {

@@ -1,11 +1,8 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { mkdir } from 'fs/promises';
-import { getShellPath } from '../utils/shellPath';
 import { withLock } from '../utils/mutex';
 import { appendCommitFooter } from '../utils/commitFooter';
-import { escapeShellArg } from '../utils/shellEscape';
+import { runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
 import type { ConfigManager } from './configManager';
 
 // Interface for raw commit data
@@ -18,8 +15,6 @@ interface RawCommitData {
   deletions?: number;
   filesChanged?: number;
 }
-
-const execAsync = promisify(exec);
 
 /**
  * Machine-readable tag for "this branch has nothing left to merge — its work is
@@ -73,17 +68,17 @@ export function isMergeConflictError(err: unknown): err is MergeConflictError {
   return err instanceof MergeConflictError || (err instanceof Error && err.name === 'MergeConflictError');
 }
 
-// Wrapper for execAsync that includes enhanced PATH
-async function execWithShellPath(command: string, options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
-  const shellPath = getShellPath();
-  return execAsync(command, {
-    ...options,
-    env: {
-      ...process.env,
-      PATH: shellPath
-    }
-  });
-}
+/**
+ * Every git invocation below goes through runGitCapture (execFile, argv array,
+ * login-shell PATH) — never a shell string. Repo-controlled values reach nearly
+ * all of them: branch, remote and ref names arrive from the on-disk repository
+ * and are re-read on every dashboard refresh, so a shell string would make a
+ * branch named `$(…)` executable. `END_OF_OPTIONS` additionally stops a branch
+ * named `--upload-pack=…` from being parsed as a git option.
+ *
+ * runGitCapture returns both streams because several callers below surface git's
+ * progress output, which git writes to stderr.
+ */
 
 export class WorktreeManager {
   private projectsCache: Map<string, { baseDir: string }> = new Map();
@@ -158,37 +153,38 @@ export class WorktreeManager {
     try {
       // First check if this is a git repository
       try {
-        await execWithShellPath(`git rev-parse --is-inside-work-tree`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['rev-parse', '--is-inside-work-tree']);
       } catch {
         // Initialize git repository
-        await execWithShellPath(`git init`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['init']);
       }
 
       // Clean up any existing worktree directory first
       try {
-        await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['worktree', 'remove', '--force', END_OF_OPTIONS, worktreePath]);
       } catch {
         // Ignore cleanup errors
       }
 
       // Check if the repository has any commits
       try {
-        await execWithShellPath(`git rev-parse HEAD`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['rev-parse', 'HEAD']);
       } catch {
         // Repository has no commits yet, create initial commit
         try {
-          await execWithShellPath(`git add -A`, { cwd: projectPath });
+          await runGitCapture(projectPath, ['add', '-A']);
         } catch {
           // Ignore add errors (no files to add)
         }
-        await execWithShellPath(`git commit -m "Initial commit" --allow-empty`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['commit', '-m', 'Initial commit', '--allow-empty']);
       }
 
       // Check if branch already exists
-      const checkBranchCmd = `git show-ref --verify --quiet refs/heads/${branchName}`;
       let branchExists = false;
       try {
-        await execWithShellPath(checkBranchCmd, { cwd: projectPath });
+        await runGitCapture(projectPath, [
+          'show-ref', '--verify', '--quiet', END_OF_OPTIONS, `refs/heads/${branchName}`,
+        ]);
         branchExists = true;
       } catch {
         // Branch doesn't exist, will create it
@@ -209,10 +205,12 @@ export class WorktreeManager {
           );
         }
         // Use existing branch
-        await execWithShellPath(`git worktree add "${worktreePath}" ${branchName}`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['worktree', 'add', END_OF_OPTIONS, worktreePath, branchName]);
 
         // Get the commit this branch is based on
-        baseCommit = (await execWithShellPath(`git rev-parse ${branchName}`, { cwd: projectPath })).stdout.trim();
+        baseCommit = (
+          await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, branchName])
+        ).stdout.trim();
         actualBaseBranch = branchName;
       } else if (baseCommittish) {
         // A/B pin: cut the branch at an EXACT commit. Skip the refs/heads guard (a
@@ -221,8 +219,12 @@ export class WorktreeManager {
         actualBaseBranch = baseBranch || 'HEAD';
         // rev-parse both validates the SHA (a bad committish fails loudly) and
         // records the pinned base commit.
-        baseCommit = (await execWithShellPath(`git rev-parse ${baseCommittish}`, { cwd: projectPath })).stdout.trim();
-        await execWithShellPath(`git worktree add -b ${branchName} "${worktreePath}" ${baseCommittish}`, { cwd: projectPath });
+        baseCommit = (
+          await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseCommittish])
+        ).stdout.trim();
+        await runGitCapture(projectPath, [
+          'worktree', 'add', '-b', branchName, END_OF_OPTIONS, worktreePath, baseCommittish,
+        ]);
       } else {
         // Create new branch from specified base branch (or current HEAD if not specified)
         const baseRef = baseBranch || 'HEAD';
@@ -231,16 +233,22 @@ export class WorktreeManager {
         // Verify that the base branch exists if specified
         if (baseBranch) {
           try {
-            await execWithShellPath(`git show-ref --verify --quiet refs/heads/${baseBranch}`, { cwd: projectPath });
+            await runGitCapture(projectPath, [
+              'show-ref', '--verify', '--quiet', END_OF_OPTIONS, `refs/heads/${baseBranch}`,
+            ]);
           } catch {
             throw new Error(`Base branch '${baseBranch}' does not exist`);
           }
         }
 
         // Capture the base commit before creating the worktree
-        baseCommit = (await execWithShellPath(`git rev-parse ${baseRef}`, { cwd: projectPath })).stdout.trim();
+        baseCommit = (
+          await runGitCapture(projectPath, ['rev-parse', '--verify', END_OF_OPTIONS, baseRef])
+        ).stdout.trim();
 
-        await execWithShellPath(`git worktree add -b ${branchName} "${worktreePath}" ${baseRef}`, { cwd: projectPath });
+        await runGitCapture(projectPath, [
+          'worktree', 'add', '-b', branchName, END_OF_OPTIONS, worktreePath, baseRef,
+        ]);
       }
 
       console.log(`[WorktreeManager] Worktree created successfully at: ${worktreePath}`);
@@ -295,7 +303,7 @@ export class WorktreeManager {
       const worktreePath = join(baseDir, name);
 
       try {
-        await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['worktree', 'remove', '--force', END_OF_OPTIONS, worktreePath]);
       } catch (error: unknown) {
         const err = error as Error & { stderr?: string; stdout?: string };
         const errorMessage = err.stderr || err.stdout || err.message || String(err);
@@ -331,7 +339,7 @@ export class WorktreeManager {
   async removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void> {
     return await withLock(`worktree-remove-${worktreePath}`, async () => {
       try {
-        await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['worktree', 'remove', '--force', END_OF_OPTIONS, worktreePath]);
       } catch (error: unknown) {
         const err = error as Error & { stderr?: string; stdout?: string };
         const errorMessage = err.stderr || err.stdout || err.message || String(err);
@@ -370,7 +378,7 @@ export class WorktreeManager {
     return await withLock(`branch-delete-${projectPath}-${branch}`, async () => {
       const flag = opts?.force ? '-D' : '-d';
       try {
-        await execWithShellPath(`git branch ${flag} "${branch}"`, { cwd: projectPath });
+        await runGitCapture(projectPath, ['branch', flag, END_OF_OPTIONS, branch]);
       } catch (error: unknown) {
         const err = error as Error & { stderr?: string; stdout?: string };
         const errorMessage = err.stderr || err.stdout || err.message || String(err);
@@ -406,10 +414,7 @@ export class WorktreeManager {
     if (branch === '') throw new Error('createBranchRef: branchName is empty');
     return await withLock(`branch-create-${projectPath}-${branch}`, async () => {
       try {
-        await execWithShellPath(
-          `git branch ${escapeShellArg(branch)} ${escapeShellArg(baseBranch)}`,
-          { cwd: projectPath },
-        );
+        await runGitCapture(projectPath, ['branch', END_OF_OPTIONS, branch, baseBranch]);
       } catch (error: unknown) {
         const err = error as Error & { stderr?: string; stdout?: string };
         const errorMessage = err.stderr || err.stdout || err.message || String(err);
@@ -418,17 +423,16 @@ export class WorktreeManager {
           throw new Error(`Failed to create branch ${branch}: ${errorMessage}`);
         }
       }
-      const { stdout } = await execWithShellPath(
-        `git rev-parse ${escapeShellArg(branch)}`,
-        { cwd: projectPath },
-      );
+      const { stdout } = await runGitCapture(projectPath, [
+        'rev-parse', '--verify', END_OF_OPTIONS, branch,
+      ]);
       return { sha: stdout.trim() };
     });
   }
 
   async listWorktrees(projectPath: string): Promise<Array<{ path: string; branch: string }>> {
     try {
-      const { stdout } = await execWithShellPath(`git worktree list --porcelain`, { cwd: projectPath });
+      const { stdout } = await runGitCapture(projectPath, ['worktree', 'list', '--porcelain']);
       
       const worktrees: Array<{ path: string; branch: string }> = [];
       const lines = stdout.split('\n');
@@ -465,7 +469,7 @@ export class WorktreeManager {
   async listBranches(projectPath: string): Promise<Array<{ name: string; isCurrent: boolean; hasWorktree: boolean }>> {
     try {
       // Get all local branches
-      const { stdout: branchOutput } = await execWithShellPath(`git branch`, { cwd: projectPath });
+      const { stdout: branchOutput } = await runGitCapture(projectPath, ['branch']);
       
       // Get all worktrees to identify which branches have worktrees
       const worktrees = await this.listWorktrees(projectPath);
@@ -506,7 +510,7 @@ export class WorktreeManager {
     
     try {
       // ONLY check the current branch in the project root directory
-      const currentBranchResult = await execWithShellPath(`git branch --show-current`, { cwd: projectPath });
+      const currentBranchResult = await runGitCapture(projectPath, ['branch', '--show-current']);
       const currentBranch = currentBranchResult.stdout.trim();
       
       if (currentBranch) {
@@ -534,7 +538,7 @@ export class WorktreeManager {
    */
   async getHeadCommit(worktreePath: string): Promise<string> {
     try {
-      const { stdout } = await execWithShellPath('git rev-parse HEAD', { cwd: worktreePath });
+      const { stdout } = await runGitCapture(worktreePath, ['rev-parse', 'HEAD']);
       return stdout.trim();
     } catch (error) {
       throw new Error(
@@ -681,7 +685,9 @@ export class WorktreeManager {
       // Use cross-platform approach
       let stdout = '0';
       try {
-        const result = await execWithShellPath(`git rev-list --count HEAD..${mainBranch}`, { cwd: worktreePath });
+        const result = await runGitCapture(worktreePath, [
+          'rev-list', '--count', END_OF_OPTIONS, `HEAD..${mainBranch}`,
+        ]);
         stdout = result.stdout;
       } catch {
         // Error checking, assume no changes
@@ -710,51 +716,50 @@ export class WorktreeManager {
       }
 
       // Get the merge base
-      const { stdout: mergeBase } = await execWithShellPath(
-        `git merge-base HEAD ${mainBranch}`,
-        { cwd: worktreePath }
-      );
+      const { stdout: mergeBase } = await runGitCapture(worktreePath, [
+        'merge-base', END_OF_OPTIONS, 'HEAD', mainBranch,
+      ]);
       const base = mergeBase.trim();
 
       // Try a dry-run merge to detect conflicts
       // We use merge-tree to check for conflicts without modifying the working tree
       try {
-        const { stdout: mergeTreeOutput } = await execWithShellPath(
-          `git merge-tree ${base} HEAD ${mainBranch}`,
-          { cwd: worktreePath }
-        );
-        
+        // The trivial 3-arg `merge-tree` predates `--end-of-options`, so the ref
+        // guard is explicit here instead.
+        const { stdout: mergeTreeOutput } = await runGitCapture(worktreePath, [
+          'merge-tree',
+          assertNotOptionLike(base, 'merge base'),
+          'HEAD',
+          assertNotOptionLike(mainBranch, 'main branch'),
+        ]);
+
         // Parse merge-tree output for conflicts
         const conflictMarkers = mergeTreeOutput.match(/<<<<<<< /g);
         const hasConflicts = conflictMarkers && conflictMarkers.length > 0;
         
         if (hasConflicts) {
           // Get list of files that would conflict
-          const { stdout: diffOutput } = await execWithShellPath(
-            `git diff --name-only ${base}...HEAD`,
-            { cwd: worktreePath }
-          );
+          const { stdout: diffOutput } = await runGitCapture(worktreePath, [
+            'diff', '--name-only', END_OF_OPTIONS, `${base}...HEAD`,
+          ]);
           const ourFiles = diffOutput.trim().split('\n').filter(f => f);
-          
-          const { stdout: theirDiffOutput } = await execWithShellPath(
-            `git diff --name-only ${base}...${mainBranch}`,
-            { cwd: worktreePath }
-          );
+
+          const { stdout: theirDiffOutput } = await runGitCapture(worktreePath, [
+            'diff', '--name-only', END_OF_OPTIONS, `${base}...${mainBranch}`,
+          ]);
           const theirFiles = theirDiffOutput.trim().split('\n').filter(f => f);
-          
+
           // Find files modified in both branches
           const conflictingFiles = ourFiles.filter(f => theirFiles.includes(f));
-          
+
           // Get commit info for better error reporting
-          const { stdout: ourCommits } = await execWithShellPath(
-            `git log --oneline ${base}..HEAD`,
-            { cwd: worktreePath }
-          );
-          const { stdout: theirCommits } = await execWithShellPath(
-            `git log --oneline ${base}..${mainBranch}`,
-            { cwd: worktreePath }
-          );
-          
+          const { stdout: ourCommits } = await runGitCapture(worktreePath, [
+            'log', '--oneline', END_OF_OPTIONS, `${base}..HEAD`,
+          ]);
+          const { stdout: theirCommits } = await runGitCapture(worktreePath, [
+            'log', '--oneline', END_OF_OPTIONS, `${base}..${mainBranch}`,
+          ]);
+
           console.log(`[WorktreeManager] Found conflicts in files: ${conflictingFiles.join(', ')}`);
           
           return {
@@ -776,32 +781,28 @@ export class WorktreeManager {
         console.log(`[WorktreeManager] merge-tree not available, using fallback conflict detection`);
         
         // Get files changed in both branches
-        const { stdout: diffOutput } = await execWithShellPath(
-          `git diff --name-only ${base}...HEAD`,
-          { cwd: worktreePath }
-        );
+        const { stdout: diffOutput } = await runGitCapture(worktreePath, [
+          'diff', '--name-only', END_OF_OPTIONS, `${base}...HEAD`,
+        ]);
         const ourFiles = diffOutput.trim().split('\n').filter(f => f);
-        
-        const { stdout: theirDiffOutput } = await execWithShellPath(
-          `git diff --name-only ${base}...${mainBranch}`,
-          { cwd: worktreePath }
-        );
+
+        const { stdout: theirDiffOutput } = await runGitCapture(worktreePath, [
+          'diff', '--name-only', END_OF_OPTIONS, `${base}...${mainBranch}`,
+        ]);
         const theirFiles = theirDiffOutput.trim().split('\n').filter(f => f);
-        
+
         // Find files modified in both branches (potential conflicts)
         const conflictingFiles = ourFiles.filter(f => theirFiles.includes(f));
-        
+
         if (conflictingFiles.length > 0) {
           // Get commit info
-          const { stdout: ourCommits } = await execWithShellPath(
-            `git log --oneline ${base}..HEAD`,
-            { cwd: worktreePath }
-          );
-          const { stdout: theirCommits } = await execWithShellPath(
-            `git log --oneline ${base}..${mainBranch}`,
-            { cwd: worktreePath }
-          );
-          
+          const { stdout: ourCommits } = await runGitCapture(worktreePath, [
+            'log', '--oneline', END_OF_OPTIONS, `${base}..HEAD`,
+          ]);
+          const { stdout: theirCommits } = await runGitCapture(worktreePath, [
+            'log', '--oneline', END_OF_OPTIONS, `${base}..${mainBranch}`,
+          ]);
+
           console.log(`[WorktreeManager] Potential conflicts in files: ${conflictingFiles.join(', ')}`);
           
           return {
@@ -827,11 +828,6 @@ export class WorktreeManager {
     }
   }
 
-  // @cyboflow-hidden: The following methods (rebaseMainIntoWorktree, abortRebase,
-  // squashAndMergeWorktreeToMain, mergeWorktreeToMain) are intentionally preserved but
-  // not exposed in the v1 UI. The legacy renderer surface that wired them was
-  // retired (IDEA-017 / TASK-691). Re-enable by adding branch action entries to a
-  // future workflow-run / session UI in the cyboflow shell.
   async rebaseMainIntoWorktree(worktreePath: string, mainBranch: string): Promise<void> {
     return await withLock(`git-rebase-${worktreePath}`, async () => {
       const executedCommands: string[] = [];
@@ -839,9 +835,8 @@ export class WorktreeManager {
 
       try {
         // Rebase the current worktree branch onto local main branch
-        const command = `git rebase ${mainBranch}`;
-        executedCommands.push(`${command} (in ${worktreePath})`);
-        const rebaseResult = await execWithShellPath(command, { cwd: worktreePath });
+        executedCommands.push(`git rebase ${mainBranch} (in ${worktreePath})`);
+        const rebaseResult = await runGitCapture(worktreePath, ['rebase', END_OF_OPTIONS, mainBranch]);
         lastOutput = rebaseResult.stdout || rebaseResult.stderr || '';
       } catch (error: unknown) {
         const err = error as Error & { stderr?: string; stdout?: string };
@@ -867,13 +862,11 @@ export class WorktreeManager {
   async abortRebase(worktreePath: string): Promise<void> {
     try {
       // Check if we're in the middle of a rebase
-      const statusCommand = `git status --porcelain=v1`;
-      const { stdout: statusOut } = await execWithShellPath(statusCommand, { cwd: worktreePath });
-      
+      await runGitCapture(worktreePath, ['status', '--porcelain=v1']);
+
       // Abort the rebase
-      const command = `git rebase --abort`;
-      const { stdout, stderr } = await execWithShellPath(command, { cwd: worktreePath });
-      
+      const { stderr } = await runGitCapture(worktreePath, ['rebase', '--abort']);
+
       if (stderr && !stderr.includes('No rebase in progress')) {
         throw new Error(`Failed to abort rebase: ${stderr}`);
       }
@@ -893,9 +886,8 @@ export class WorktreeManager {
         console.log(`[WorktreeManager] Squashing and merging worktree to ${mainBranch}: ${worktreePath}`);
 
         // Get current branch name in worktree
-        let command = `git branch --show-current`;
         executedCommands.push(`git branch --show-current (in ${worktreePath})`);
-        const { stdout: currentBranch, stderr: stderr1 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: currentBranch, stderr: stderr1 } = await runGitCapture(worktreePath, ['branch', '--show-current']);
         lastOutput = currentBranch || stderr1 || '';
         const branchName = currentBranch.trim();
 
@@ -903,17 +895,16 @@ export class WorktreeManager {
         // replays the branch's commits directly atop main's CURRENT tip, so the
         // squash base computed below is main's tip — not the (possibly stale)
         // fork point.
-        command = `git rebase ${mainBranch}`;
         executedCommands.push(`git rebase ${mainBranch} (in ${worktreePath})`);
         try {
-          const rebaseWorktreeResult = await execWithShellPath(command, { cwd: worktreePath });
+          const rebaseWorktreeResult = await runGitCapture(worktreePath, ['rebase', END_OF_OPTIONS, mainBranch]);
           lastOutput = rebaseWorktreeResult.stdout || rebaseWorktreeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully rebased worktree onto ${mainBranch} before squashing`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
           // If rebase fails, abort it in the worktree
           try {
-            await execWithShellPath(`git rebase --abort`, { cwd: worktreePath });
+            await runGitCapture(worktreePath, ['rebase', '--abort']);
           } catch {
             // Ignore abort errors
           }
@@ -932,9 +923,10 @@ export class WorktreeManager {
         // non-conflicting commits. Using the stale fork point would drop main's
         // advanced commits from the squashed branch's ancestry and make ff-only
         // always refuse.
-        command = `git merge-base ${mainBranch} HEAD`;
         executedCommands.push(`git merge-base ${mainBranch} HEAD (in ${worktreePath})`);
-        const { stdout: baseCommit, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: baseCommit, stderr: stderr2 } = await runGitCapture(worktreePath, [
+          'merge-base', END_OF_OPTIONS, mainBranch, 'HEAD',
+        ]);
         lastOutput = baseCommit || stderr2 || '';
         const base = baseCommit.trim();
 
@@ -942,40 +934,36 @@ export class WorktreeManager {
         // branch adds nothing beyond main's tip — already merged, at the tip, or
         // its commits collapsed to nothing against main. Detected AFTER the rebase
         // so a now-redundant branch does not mint an empty squash commit.
-        command = `git log --oneline ${base}..HEAD`;
-        const { stdout: commits, stderr: stderr3 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: commits, stderr: stderr3 } = await runGitCapture(worktreePath, [
+          'log', '--oneline', END_OF_OPTIONS, `${base}..HEAD`,
+        ]);
         lastOutput = commits || stderr3 || '';
         if (!commits.trim()) {
           throw alreadyUpToDate(`No commits to squash. The branch is already up to date with ${mainBranch}.`);
         }
 
         // Now squash all commits since base (main's tip) into one
-        command = `git reset --soft ${base}`;
         executedCommands.push(`git reset --soft ${base} (in ${worktreePath})`);
-        const resetResult = await execWithShellPath(command, { cwd: worktreePath });
+        const resetResult = await runGitCapture(worktreePath, ['reset', '--soft', END_OF_OPTIONS, base]);
         lastOutput = resetResult.stdout || resetResult.stderr || '';
 
         // Add Cyboflow footer if enabled
         const fullMessage = appendCommitFooter(commitMessage, this.configManager);
 
-        // Use escapeShellArg to safely quote the commit message and prevent shell injection.
-        command = `git commit -m ${escapeShellArg(fullMessage)}`;
         executedCommands.push(`git commit -m "..." (in ${worktreePath})`);
-        const commitResult = await execWithShellPath(command, { cwd: worktreePath });
+        const commitResult = await runGitCapture(worktreePath, ['commit', '-m', fullMessage]);
         lastOutput = commitResult.stdout || commitResult.stderr || '';
 
         // Switch to main branch in the main repository
-        command = `git checkout ${mainBranch}`;
         executedCommands.push(`git checkout ${mainBranch} (in ${projectPath})`);
-        const checkoutResult = await execWithShellPath(command, { cwd: projectPath });
+        const checkoutResult = await runGitCapture(projectPath, ['checkout', END_OF_OPTIONS, mainBranch]);
         lastOutput = checkoutResult.stdout || checkoutResult.stderr || '';
 
         // SAFETY CHECK 2: Use --ff-only merge to prevent history rewriting
         // This will fail if local main has diverged from the worktree branch
-        command = `git merge --ff-only ${branchName}`;
         executedCommands.push(`git merge --ff-only ${branchName} (in ${projectPath})`);
         try {
-          const mergeResult = await execWithShellPath(command, { cwd: projectPath });
+          const mergeResult = await runGitCapture(projectPath, ['merge', '--ff-only', END_OF_OPTIONS, branchName]);
           lastOutput = mergeResult.stdout || mergeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
@@ -1028,32 +1016,31 @@ export class WorktreeManager {
         console.log(`[WorktreeManager] Merging worktree to ${mainBranch} (without squashing): ${worktreePath}`);
 
         // Get current branch name in worktree
-        let command = `git branch --show-current`;
         executedCommands.push(`git branch --show-current (in ${worktreePath})`);
-        const { stdout: currentBranch, stderr: stderr1 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: currentBranch, stderr: stderr1 } = await runGitCapture(worktreePath, ['branch', '--show-current']);
         lastOutput = currentBranch || stderr1 || '';
         const branchName = currentBranch.trim();
 
         // Check if there are any changes to merge
-        command = `git log --oneline ${mainBranch}..HEAD`;
-        const { stdout: commits, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: commits, stderr: stderr2 } = await runGitCapture(worktreePath, [
+          'log', '--oneline', END_OF_OPTIONS, `${mainBranch}..HEAD`,
+        ]);
         lastOutput = commits || stderr2 || '';
         if (!commits.trim()) {
           throw alreadyUpToDate(`No commits to merge. The branch is already up to date with ${mainBranch}.`);
         }
 
         // SAFETY CHECK 1: Rebase worktree onto main FIRST (resolves conflicts in worktree, not main)
-        command = `git rebase ${mainBranch}`;
         executedCommands.push(`git rebase ${mainBranch} (in ${worktreePath})`);
         try {
-          const rebaseWorktreeResult = await execWithShellPath(command, { cwd: worktreePath });
+          const rebaseWorktreeResult = await runGitCapture(worktreePath, ['rebase', END_OF_OPTIONS, mainBranch]);
           lastOutput = rebaseWorktreeResult.stdout || rebaseWorktreeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully rebased worktree onto ${mainBranch}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
           // If rebase fails, abort it in the worktree
           try {
-            await execWithShellPath(`git rebase --abort`, { cwd: worktreePath });
+            await runGitCapture(worktreePath, ['rebase', '--abort']);
           } catch {
             // Ignore abort errors
           }
@@ -1065,17 +1052,15 @@ export class WorktreeManager {
         }
 
         // Switch to main branch in the main repository
-        command = `git checkout ${mainBranch}`;
         executedCommands.push(`git checkout ${mainBranch} (in ${projectPath})`);
-        const checkoutResult = await execWithShellPath(command, { cwd: projectPath });
+        const checkoutResult = await runGitCapture(projectPath, ['checkout', END_OF_OPTIONS, mainBranch]);
         lastOutput = checkoutResult.stdout || checkoutResult.stderr || '';
 
         // SAFETY CHECK 2: Use --ff-only merge to prevent history rewriting
         // This will fail if local main has diverged from the worktree branch
-        command = `git merge --ff-only ${branchName}`;
         executedCommands.push(`git merge --ff-only ${branchName} (in ${projectPath})`);
         try {
-          const mergeResult = await execWithShellPath(command, { cwd: projectPath });
+          const mergeResult = await runGitCapture(projectPath, ['merge', '--ff-only', END_OF_OPTIONS, branchName]);
           lastOutput = mergeResult.stdout || mergeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
@@ -1152,17 +1137,17 @@ export class WorktreeManager {
       try {
         console.log(`[WorktreeManager] Merging worktree into branch ${targetBranch}: ${worktreePath}`);
 
-        let command = `git branch --show-current`;
         executedCommands.push(`git branch --show-current (in ${worktreePath})`);
-        const { stdout: currentBranch, stderr: stderr1 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: currentBranch, stderr: stderr1 } = await runGitCapture(worktreePath, ['branch', '--show-current']);
         lastOutput = currentBranch || stderr1 || '';
         branchName = currentBranch.trim();
 
         // Nothing to merge: the run made no commits beyond the integration tip
         // (e.g. a commit-less flow). Treat as a benign success — the integration
         // ref is already at-or-ahead of this branch, so there is nothing to do.
-        command = `git log --oneline ${escapeShellArg(targetBranch)}..HEAD`;
-        const { stdout: commits, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
+        const { stdout: commits, stderr: stderr2 } = await runGitCapture(worktreePath, [
+          'log', '--oneline', END_OF_OPTIONS, `${targetBranch}..HEAD`,
+        ]);
         lastOutput = commits || stderr2 || '';
         if (!commits.trim()) {
           console.log(`[WorktreeManager] No commits to merge into ${targetBranch}; benign no-op.`);
@@ -1171,17 +1156,16 @@ export class WorktreeManager {
 
         // SAFETY 1: rebase the worktree branch onto the integration tip. Conflicts
         // surface here and are resolved in the worktree, never on the shared ref.
-        command = `git rebase ${escapeShellArg(targetBranch)}`;
         executedCommands.push(`git rebase ${targetBranch} (in ${worktreePath})`);
         try {
-          const rebaseResult = await execWithShellPath(command, { cwd: worktreePath });
+          const rebaseResult = await runGitCapture(worktreePath, ['rebase', END_OF_OPTIONS, targetBranch]);
           lastOutput = rebaseResult.stdout || rebaseResult.stderr || '';
           console.log(`[WorktreeManager] Rebased worktree onto ${targetBranch}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
           // Abort so the worktree is left clean for inspection / a later retry.
           try {
-            await execWithShellPath(`git rebase --abort`, { cwd: worktreePath });
+            await runGitCapture(worktreePath, ['rebase', '--abort']);
           } catch {
             // ignore abort failures — best effort.
           }
@@ -1199,10 +1183,9 @@ export class WorktreeManager {
         // `git branch -f <target> HEAD` is a strict ff here (the rebased branch is
         // a descendant of the integration tip) and is rejected by git only if the
         // target is checked out — which the bare integration ref never is.
-        command = `git branch -f ${escapeShellArg(targetBranch)} HEAD`;
         executedCommands.push(`git branch -f ${targetBranch} HEAD (in ${worktreePath})`);
         try {
-          const ffResult = await execWithShellPath(command, { cwd: worktreePath });
+          const ffResult = await runGitCapture(worktreePath, ['branch', '-f', END_OF_OPTIONS, targetBranch, 'HEAD']);
           lastOutput = ffResult.stdout || ffResult.stderr || '';
           console.log(`[WorktreeManager] Fast-forwarded ${targetBranch} to ${branchName}`);
         } catch (error: unknown) {
@@ -1276,7 +1259,7 @@ export class WorktreeManager {
 
   async gitPull(worktreePath: string): Promise<{ output: string }> {
     try {
-      const { stdout, stderr } = await execWithShellPath('git pull', { cwd: worktreePath });
+      const { stdout, stderr } = await runGitCapture(worktreePath, ['pull']);
       const output = stdout || stderr || 'Pull completed successfully';
       
       return { output };
@@ -1300,7 +1283,7 @@ export class WorktreeManager {
       // branch … has no upstream branch". `-u origin HEAD` pushes the current
       // branch to origin/<same-name> and records the tracking ref; it is
       // idempotent for an already-tracked branch (re-affirms the same upstream).
-      const { stdout, stderr } = await execWithShellPath('git push -u origin HEAD', { cwd: worktreePath });
+      const { stdout, stderr } = await runGitCapture(worktreePath, ['push', '-u', 'origin', 'HEAD']);
       const output = stdout || stderr || 'Push completed successfully';
       
       return { output };
@@ -1323,18 +1306,24 @@ export class WorktreeManager {
    * `sessions:get-remote-url` IPC handler (which does the same two git reads).
    */
   async getRemoteUrlAndBranch(worktreePath: string): Promise<{ remoteUrl: string; branchName: string }> {
-    const { stdout: remoteOut } = await execWithShellPath('git remote get-url origin', { cwd: worktreePath });
-    const { stdout: branchOut } = await execWithShellPath('git branch --show-current', { cwd: worktreePath });
+    const { stdout: remoteOut } = await runGitCapture(worktreePath, ['remote', 'get-url', 'origin']);
+    const { stdout: branchOut } = await runGitCapture(worktreePath, ['branch', '--show-current']);
     return { remoteUrl: remoteOut.trim(), branchName: branchOut.trim() };
   }
 
   async getLastCommits(worktreePath: string, count: number = 20): Promise<RawCommitData[]> {
+    // `count` reaches here straight off an IPC channel, so it is coerced to a
+    // positive integer rather than trusted: an argv element like `-1 --foo`
+    // would otherwise land in git's option position.
+    const limit = Math.max(1, Math.floor(Number(count) || 20));
     try {
-      const { stdout } = await execWithShellPath(
-        `git log -${count} --pretty=format:'%H|%s|%ai|%an' --shortstat`,
-        { cwd: worktreePath }
-      );
-      
+      // The single quotes around the old --pretty format were SHELL quoting, so
+      // they must not survive into the argv form (they would become literal
+      // characters in every commit hash).
+      const { stdout } = await runGitCapture(worktreePath, [
+        'log', `-${limit}`, '--pretty=format:%H|%s|%ai|%an', '--shortstat',
+      ]);
+
       const commits: RawCommitData[] = [];
       const lines = stdout.split('\n');
       let i = 0;
@@ -1390,7 +1379,7 @@ export class WorktreeManager {
 
   async getOriginBranch(worktreePath: string, branch: string): Promise<string | null> {
     try {
-      await execWithShellPath(`git rev-parse --verify origin/${branch}`, { cwd: worktreePath });
+      await runGitCapture(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `origin/${branch}`]);
       return `origin/${branch}`;
     } catch {
       return null;
