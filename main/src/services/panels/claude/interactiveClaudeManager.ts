@@ -1032,7 +1032,15 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Passive dynamic-workflow detection: watch this run's normalized event
     // stream for Workflow-tool launches. Fail-soft when the tracker singleton
     // is not initialized (unit tests / early boot).
-    DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+    // worktreePath is passed EXPLICITLY: a flow run has no `sessions` row (see the
+    // gate-vehicle discriminator above — getDbSession is undefined for it), so the
+    // tracker's sessions-keyed fallback resolves nothing and its launch watcher
+    // would never start for this run.
+    DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, {
+      runId,
+      sessionId,
+      worktreePath: options.worktreePath,
+    });
 
     // The PreToolUse `'*'` shell-approval hook is delivered INLINE via the
     // `--settings '<json>'` flag assembled in buildCommandArgs (see the parity

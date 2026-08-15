@@ -1538,7 +1538,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const priorRefcount = this.trackerRefcountByRunId.get(runId) ?? 0;
       this.trackerRefcountByRunId.set(runId, priorRefcount + 1);
       if (priorRefcount === 0) {
-        DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+        // worktreePath explicitly (see the interactive sibling): a flow run has no
+        // `sessions` row, so the tracker's sessions-keyed fallback resolves nothing.
+        DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, {
+          runId,
+          sessionId,
+          worktreePath: options.worktreePath,
+        });
       }
 
       // Abort controller for cancellation.

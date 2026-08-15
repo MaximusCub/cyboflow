@@ -3099,6 +3099,12 @@ async function initializeServices(): Promise<boolean> {
     // §3c#1): the fallback resolveRunAgentPermissionMode uses when a run's owning
     // session has a NULL agent_permission_mode (inherit the global default).
     () => configManager.getDefaultAgentPermissionMode(),
+    // Dynamic-workflow liveness probe: the interactive rest seam consults this so
+    // a turn-end that merely yields to a background `Workflow` task does not park
+    // the run in awaiting_review while its subagents are still working. Read
+    // through tryGetInstance so boot ordering (tracker initialized above, but
+    // defensively) can never throw here.
+    (runId) => DynamicWorkflowTracker.tryGetInstance()?.hasRunningForRun(runId) === true,
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
@@ -3144,6 +3150,16 @@ async function initializeServices(): Promise<boolean> {
       // the chat session (and vice versa).
       if (!dbSession.chat_run_id || dbSession.chat_run_id !== evt.runId) return;
       if (dbSession.status !== 'running') return;
+      // A turn-end that lands while a dynamic workflow is still RUNNING for this
+      // run is the agent yielding to a background Workflow task, not the session
+      // finishing — the CLI re-invokes it when the workflow completes. Flipping
+      // to 'completed' here would strand the session in a terminal-looking state
+      // (and enable Merge) while its subagents are still writing the worktree.
+      // This is reachable today: the Ultracode wizard card launches quick PTY
+      // sessions with `--settings '{"ultracode":true}'`, which is exactly the
+      // setting that makes the agent fan work out as dynamic workflows.
+      // The session rests on the NEXT turn-end after the workflow goes terminal.
+      if (DynamicWorkflowTracker.tryGetInstance()?.hasRunningForRun(evt.runId) === true) return;
       // Direct DB write + manual session-updated emit — the same shape as the
       // SDK exit handler in events.ts (updateSession would re-map 'completed'
       // through mapSessionStatusToDbStatus and lose the completed_unviewed edge).

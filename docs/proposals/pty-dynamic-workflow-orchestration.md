@@ -190,13 +190,27 @@ by default. A sprint with 5 concurrent lanes × a 5-step inner chain is 25 agent
 calls over the run (concurrency-capped, not simultaneous), which reads as over the
 guideline. Worth confirming how the cap is counted before rendering large fan-outs.
 
-### 4.7 Detection already survives the interactive transcript regression
+### 4.7 Detection did NOT cover workflow runs — corrected
 
-Worth noting as a positive: `WorkflowScriptWatcher` exists because claude 2.1.177
-made the session `<uuid>` a directory, which broke stream-based detection on the
-interactive substrate. Launch detection is therefore filesystem-based and
-substrate-independent already — so tracking a workflow *we* launch needs no new
-detection work.
+**This section originally claimed tracking needs no new detection work. That was
+wrong, and the adversarial review caught it.** `WorkflowScriptWatcher` is indeed
+filesystem-based and substrate-independent (it exists because claude 2.1.177 made
+the session `<uuid>` a directory, breaking stream-based detection on the
+interactive substrate). But the tracker only *started* a watcher when it could
+resolve a worktree path, and it resolved that path exclusively through
+`SELECT worktree_path FROM sessions WHERE id = ?`.
+
+A **flow run has no `sessions` row** — the orchestrator invariant is
+`panelId === runId === sessionId`, and `getDbSession(sessionId)` is undefined for
+it (the gate-vehicle discriminator in `interactiveClaudeManager.spawnCliProcess`
+depends on exactly that). So the lookup returned null, no watcher started, and —
+with stream detection also inoperative on the interactive layout — a dynamic
+workflow launched inside a PTY **workflow run** was invisible to the tracker
+entirely. Only quick sessions (which do own a `sessions` row) were ever tracked.
+
+Fixed: `DynamicWorkflowRunContext` now carries the spawn's authoritative
+`worktreePath`, passed by both managers, with the `sessions` lookup retained as
+the quick-session fallback.
 
 ## 5. What is not verified
 
