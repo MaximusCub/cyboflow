@@ -42,6 +42,7 @@ import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/
 import {
   shouldBlockArtifactFrameNavigation,
   isExternallyOpenable,
+  isSafeExternalOpenTarget,
   shouldBlockScriptedFrameNavigationFromRegistry,
 } from './ipc/artifactFrameGuard';
 import { registerDesignPrototypeServerHandlers } from './ipc/designPrototypeServer';
@@ -1086,8 +1087,17 @@ async function createWindow() {
   // Set the app title based on development mode and worktree
   setAppTitle();
 
+  // Every `target=_blank` / `window.open` in the renderer is denied a popup and
+  // offered to the OS instead — so the url reaching `shell.openExternal` is
+  // whatever the renderer put in the link. Gate it on scheme: `shell.openExternal`
+  // is an OS launcher, not a browser, so `file:`/`javascript:`/custom schemes
+  // would otherwise be launchable from a renderer XSS. See artifactFrameGuard.ts.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isSafeExternalOpenTarget(url)) {
+      void shell.openExternal(url);
+    } else {
+      console.warn('[Main] Blocked window-open to non-web scheme:', url);
+    }
     return { action: 'deny' };
   });
 
