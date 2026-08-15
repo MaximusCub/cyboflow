@@ -325,6 +325,7 @@ describe('ompRpcContract — captured turn end to end', () => {
         duration_ms: 0,
         num_turns: 1,
         cost_usd: EXPECTED_TURN_COST_USD,
+        total_cost_usd: EXPECTED_TURN_COST_USD,
         usage: { ...EXPECTED_TURN_USAGE },
         external_session_id: 'session-1',
       },

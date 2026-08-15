@@ -162,7 +162,11 @@ describe('ompEventProjector — results', () => {
       is_error: false,
       duration_ms: 1_200,
       num_turns: 1,
+      // Both keys, same value: cost_usd for existing consumers, total_cost_usd
+      // because that is the only key insightsQueries' run-cost rollup scans —
+      // this event persists into raw_events verbatim.
       cost_usd: 0.5,
+      total_cost_usd: 0.5,
       usage,
       external_session_id: 'sess-1',
     }]);
@@ -201,9 +205,10 @@ describe('ompEventProjector — results', () => {
     expect(events[0]).toMatchObject({ is_error: true });
   });
 
-  it('omits cost_usd entirely when no cost was reported', () => {
+  it('omits cost_usd and total_cost_usd entirely when no cost was reported', () => {
     const [event] = project({ type: 'agent_end', messages: [], isTerminal: true });
     expect(Object.hasOwn(event, 'cost_usd')).toBe(false);
+    expect(Object.hasOwn(event, 'total_cost_usd')).toBe(false);
   });
 });
 
@@ -286,6 +291,7 @@ describe('OmpTurnProjector', () => {
     expect(result).toMatchObject({
       type: 'agent_result',
       cost_usd: 0.25,
+      total_cost_usd: 0.25,
       usage: {
         input_tokens: 1,
         output_tokens: 2,
@@ -315,7 +321,7 @@ describe('OmpTurnProjector', () => {
     expect(projector.project({ type: 'agent_end', messages: [], isTerminal: false })).toEqual([]);
     projector.project(assistantEnd('msg_2', 0.75));
     const [result] = projector.project({ type: 'agent_end', messages: [], isTerminal: true });
-    expect(result).toMatchObject({ cost_usd: 1 });
+    expect(result).toMatchObject({ cost_usd: 1, total_cost_usd: 1 });
   });
 
   it('measures duration from the turn start', () => {

@@ -253,6 +253,21 @@ function createDb(): Database.Database {
   return db;
 }
 
+/**
+ * The `agent_result` rows RawEventsSink persists verbatim — the exact payload
+ * insightsQueries' run-cost rollup scans for `total_cost_usd` (raw_events.ts:571).
+ * Distinct from `ResultRecord`/`results[]` below, which reads the
+ * adapter-converted 'output' stream instead (already `total_cost_usd`-shaped
+ * via agentStreamAdapter, so it can't catch a raw_events-only regression).
+ */
+function readPersistedAgentResults(db: Database.Database, runId: string): Array<Record<string, unknown>> {
+  return (
+    db
+      .prepare("SELECT payload_json FROM raw_events WHERE run_id = ? AND event_type = 'agent_result' ORDER BY id")
+      .all(runId) as Array<{ payload_json: string }>
+  ).map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
+}
+
 interface ResultRecord {
   total_cost_usd?: number;
   usage?: Record<string, number>;
@@ -572,6 +587,14 @@ describe('OmpSdkManager — the turn contract', () => {
       // rebuilt once the cold handshake resolves it.
       expect(results[0].session_id).toBe(SESSION_FILE);
 
+      // The raw_events row (not the adapter-converted `results[]` stream above)
+      // must carry BOTH keys: cost_usd for existing consumers, total_cost_usd
+      // because that is the only key insightsQueries' rollup scans.
+      const persisted = readPersistedAgentResults(db, 'run-1');
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0].cost_usd).toBeCloseTo(DEFAULT_USAGE.costTotal, 10);
+      expect(persisted[0].total_cost_usd).toBe(persisted[0].cost_usd);
+
       const invocation = db
         .prepare('SELECT agent_provider, agent_runtime, external_session_id, panel_id FROM agent_invocations')
         .get() as Record<string, string>;
@@ -645,6 +668,14 @@ describe('OmpSdkManager — the turn contract', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].is_error).toBe(false);
+
+      // A local completion never sees a message_end, so cost is unknown —
+      // neither key should appear (a stray total_cost_usd: 0 would corrupt
+      // insightsQueries' SUM as a real, if zero, data point).
+      const persisted = readPersistedAgentResults(db, 'run-1');
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0].cost_usd).toBeUndefined();
+      expect(persisted[0].total_cost_usd).toBeUndefined();
       await manager.killAllProcesses();
     } finally {
       db.close();

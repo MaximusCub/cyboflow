@@ -274,7 +274,12 @@ function projectAgentEnd(
     duration_ms: context.durationMs,
     num_turns: 1,
     ...(result !== undefined ? { result } : {}),
-    ...(context.costUsd !== undefined ? { cost_usd: context.costUsd } : {}),
+    // cost_usd for existing consumers; total_cost_usd is the SDK-raw key
+    // insightsQueries' run-cost rollup scans — this event persists into
+    // raw_events verbatim (see ompSdkManager's RawEventsSink<AgentStreamEvent>).
+    ...(context.costUsd !== undefined
+      ? { cost_usd: context.costUsd, total_cost_usd: context.costUsd }
+      : {}),
     ...(context.usage !== undefined ? { usage: context.usage } : {}),
   };
   return [withSession(event_, context)];

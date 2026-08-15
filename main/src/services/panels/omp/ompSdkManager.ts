@@ -1477,7 +1477,13 @@ export class OmpSdkManager extends AbstractCliManager {
       duration_ms: Date.now() - ctx.startedAt,
       num_turns: 1,
       ...(ctx.projector.turnUsage() !== undefined ? { usage: ctx.projector.turnUsage() } : {}),
-      ...(ctx.projector.turnCostUsd() !== undefined ? { cost_usd: ctx.projector.turnCostUsd() } : {}),
+      // cost_usd for existing consumers; total_cost_usd is the SDK-raw key
+      // insightsQueries' run-cost rollup scans (this event persists verbatim
+      // into raw_events, unlike Claude's manager which stores the native
+      // ClaudeStreamEvent that already carries total_cost_usd).
+      ...(ctx.projector.turnCostUsd() !== undefined
+        ? { cost_usd: ctx.projector.turnCostUsd(), total_cost_usd: ctx.projector.turnCostUsd() }
+        : {}),
       ...(entry.sessionFilePath ? { external_session_id: entry.sessionFilePath } : {}),
     };
   }
@@ -1498,7 +1504,11 @@ export class OmpSdkManager extends AbstractCliManager {
       num_turns: 1,
       result: message,
       ...(ctx.projector.turnUsage() !== undefined ? { usage: ctx.projector.turnUsage() } : {}),
-      ...(ctx.projector.turnCostUsd() !== undefined ? { cost_usd: ctx.projector.turnCostUsd() } : {}),
+      // See buildLocalResult: raw_events persists this event verbatim, so both
+      // keys must be set for the cost to reach insightsQueries' rollup.
+      ...(ctx.projector.turnCostUsd() !== undefined
+        ? { cost_usd: ctx.projector.turnCostUsd(), total_cost_usd: ctx.projector.turnCostUsd() }
+        : {}),
       ...(entry.sessionFilePath ? { external_session_id: entry.sessionFilePath } : {}),
     };
   }

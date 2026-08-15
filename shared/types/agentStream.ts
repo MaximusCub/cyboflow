@@ -105,6 +105,11 @@ export interface AgentResultEvent {
   num_turns: number;
   result?: string;
   cost_usd?: number;
+  // Same value as cost_usd, under the SDK's raw-event key name. Providers whose
+  // RawEventsSink persists this AgentResultEvent shape verbatim (not the
+  // ClaudeStreamEvent adapter output) must set both: insightsQueries' run-cost
+  // rollup scans raw_events payloads for `total_cost_usd` only.
+  total_cost_usd?: number;
   usage?: AgentUsage;
   external_session_id?: string;
 }
