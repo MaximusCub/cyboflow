@@ -25,6 +25,13 @@
  * `approve-learnings`, ship's gates). Removing them there would leave those gates
  * answerable only by Dismiss, which humanGate.ts maps to a REJECT verdict.
  *
+ * Two further carve-outs, both load-bearing:
+ *   - A RUN-LESS item (`run_id === null` — a manual / triage-minted row) keeps its
+ *     full action set on every surface: "Open in session" has no destination, and
+ *     collapsing anyway would leave Dismiss as the only exit.
+ *   - The default pair's discard half routes a DECISION through
+ *     resolve(outcome:'reject'), not dismiss — see defaultEscalationActions.
+ *
  * Branches that DO carry options — permission, the recovery gate's recovered
  * answers, the idea-size guard's two mutations, approve-ideas, the
  * experiment-comparison view, a question-sourced decision, and non-blocking
@@ -469,25 +476,39 @@ export function ReviewItemCard({
   // -- Kind-specific action row ---------------------------------------------
 
   /**
+   * Whether an option-less branch should collapse into {@link defaultEscalationActions}.
+   *
+   * Requires BOTH the queue surface and a run to open. `run_id` is genuinely
+   * nullable (a manual / triage-minted item — see ReviewItem.run_id), and for one
+   * of those "Open in session" has no destination: applying the default pair
+   * anyway would strip Resolve and Promote-to-task and leave Dismiss as the only
+   * exit, so legitimate manual work could be discarded but never completed or
+   * converted to backlog. A run-less item therefore keeps its full action set.
+   */
+  const usesDefaultActions = surface === 'queue' && item.run_id !== null;
+
+  /**
    * The DEFAULT actions for an escalation that provided no options of its own:
    * route to the run, or drop the item. Never a resolve — settling a gate nobody
-   * opened is exactly what these branches used to get wrong. "Open in session" is
-   * disabled for a run-less (manual / triage-minted) item, leaving Dismiss, which
-   * matches the question-sourced and approve-ideas branches.
+   * opened is exactly what these branches used to get wrong.
+   *
+   * The discard half is kind-sensitive. For a DECISION it must route through
+   * resolve(outcome:'reject'), NOT dismiss: a dismissed gate is already read as a
+   * rejection (humanGate.ts onChange), but ONLY the resolve path runs the
+   * gate-specific teardown — resolveReviewItemHandler fires
+   * deleteRunCreatedEntities for an approve-plan reject, and reviewItems.dismiss
+   * does not. Routing a gate through dismiss would reject the plan while leaving
+   * its pending draft epics/tasks orphaned on the board. A finding / human_task is
+   * not a gate, so it keeps the plain dismiss (aggregate-unblock resume).
    */
   function defaultEscalationActions(): React.ReactElement {
+    const discard = item.kind === 'decision' ? () => handleGateDecision('reject') : handleDismiss;
     return (
       <>
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={item.run_id === null}
-          onClick={openInSession}
-          data-testid="open-in-session"
-        >
+        <Button variant="primary" size="sm" onClick={openInSession} data-testid="open-in-session">
           Open in session →
         </Button>
-        <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={discard} data-testid="default-dismiss">
           Dismiss
         </Button>
       </>
@@ -680,7 +701,7 @@ export function ReviewItemCard({
         // own artifact tab (decomposed-stories' approve-plan, approve-designs' grid)
         // or the transcript. In-session the explicit pair below stays: it is the
         // terminal surface for the flows that have no artifact tab of their own.
-        if (surface === 'queue') return defaultEscalationActions();
+        if (usesDefaultActions) return defaultEscalationActions();
         // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
         // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
         // drafts and ends the run 'rejected' (no resume).
@@ -706,7 +727,7 @@ export function ReviewItemCard({
       case 'human_task':
         // A free-form action item states what to do but offers no options — the
         // queue routes to the run so the human can act, then resolve from there.
-        if (surface === 'queue') return defaultEscalationActions();
+        if (usesDefaultActions) return defaultEscalationActions();
         return (
           <>
             <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve}>
@@ -730,7 +751,7 @@ export function ReviewItemCard({
         // (resolve → aggregate-unblock resume) + Dismiss + Promote to task.
         // Non-blocking findings keep the accept-routing actions below on both surfaces.
         if (item.blocking) {
-          if (surface === 'queue') return defaultEscalationActions();
+          if (usesDefaultActions) return defaultEscalationActions();
           return (
             <>
               <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve} data-testid="finding-resolve">

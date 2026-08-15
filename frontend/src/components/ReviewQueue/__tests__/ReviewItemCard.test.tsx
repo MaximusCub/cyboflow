@@ -492,18 +492,59 @@ describe('ReviewItemCard', () => {
       }
     });
 
-    it('Dismiss still routes through reviewItems.dismiss (aggregate-unblock resume)', async () => {
+    it('a finding Dismiss routes through reviewItems.dismiss (aggregate-unblock resume)', async () => {
       render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_q_dis', blocking: true })} />);
-      fireEvent.click(screen.getByText('Dismiss'));
+      fireEvent.click(screen.getByTestId('default-dismiss'));
       await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_dis' }));
+      expect(mockResolve).not.toHaveBeenCalled();
     });
 
-    it('a run-less item disables Open in session, leaving Dismiss actionable', () => {
+    it('a human_task Dismiss routes through reviewItems.dismiss', async () => {
+      render(<ReviewItemCard item={makeItem('human_task', { id: 'rvw_q_htd', blocking: true })} />);
+      fireEvent.click(screen.getByTestId('default-dismiss'));
+      await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_htd' }));
+      expect(mockResolve).not.toHaveBeenCalled();
+    });
+
+    it('a DECISION Dismiss rejects via resolve — never dismiss — so gate teardown runs', async () => {
+      // A dismissed gate is read as a rejection either way (humanGate onChange),
+      // but ONLY resolve(outcome:'reject') runs deleteRunCreatedEntities for an
+      // approve-plan gate. Routing through dismiss would reject the plan and
+      // orphan its pending draft epics/tasks on the board.
+      const item = makeItem('decision', {
+        id: 'rvw_q_gate_dis',
+        blocking: true,
+        source: 'gate:human-step:approve-plan',
+      });
+      render(<ReviewItemCard item={item} />);
+      fireEvent.click(screen.getByTestId('default-dismiss'));
+      await waitFor(() =>
+        expect(mockResolve).toHaveBeenCalledWith({
+          projectId: 5,
+          reviewItemId: 'rvw_q_gate_dis',
+          outcome: 'reject',
+        }),
+      );
+      expect(mockDismiss).not.toHaveBeenCalled();
+    });
+
+    it('a RUN-LESS item keeps its full action set (Open in session has no destination)', () => {
       // `makeItem` defaults run_id via `??`, so a null must be applied after it.
       const item: ReviewItem = { ...makeItem('human_task', { id: 'rvw_q_norun' }), run_id: null };
       render(<ReviewItemCard item={item} />);
-      expect(screen.getByTestId('open-in-session')).toBeDisabled();
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      // Manual work must still be completable and promotable, not just discardable.
+      expect(screen.getByText('Resolve')).toBeInTheDocument();
+      expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
       expect(screen.getByText('Dismiss')).toBeEnabled();
+    });
+
+    it('a RUN-LESS blocking finding keeps resolve + promote too', () => {
+      const item: ReviewItem = { ...makeItem('finding', { id: 'rvw_q_nf', blocking: true }), run_id: null };
+      render(<ReviewItemCard item={item} />);
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      expect(screen.getByTestId('finding-resolve')).toBeInTheDocument();
+      expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
     });
 
     it('an option-CARRYING gate is unaffected on the queue surface', () => {
