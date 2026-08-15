@@ -41,6 +41,23 @@ import {
   type WorkflowStep,
 } from '../../../../shared/types/workflows';
 import { AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
+import {
+  DEFAULT_FAN_OUT_DISPATCH,
+  type FanOutDispatch,
+} from '../../../../shared/types/fanOutDispatch';
+import { fanOutStageWorkflowName, isHostOwnedInnerStep } from './fanOutStageScript';
+
+/** Options for {@link buildFanOutAppend}. Both default to today's prose behavior. */
+export interface FanOutAppendOptions {
+  /** How the inner chain is executed. Defaults to `prose`. */
+  dispatch?: FanOutDispatch;
+  /**
+   * The workflow NAME used to derive stage-script names — must be the same value
+   * the install seam rendered with (`workflows.name`), or the prompt will name
+   * scripts that are not on disk. Defaults to the definition's `id`.
+   */
+  workflowName?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Loopback resolution
@@ -240,8 +257,66 @@ function itemSource(fanOut: FanOutSpec): string {
     : `the resolved item set (\`${fanOut.over}\`) — **one lane per item**`;
 }
 
+/**
+ * Render the STAGE-MAJOR per-task chain: the same lane protocol, except each
+ * agent-backed inner step is executed by dispatching ONE dynamic-workflow script
+ * across the whole wave instead of issuing per-task Agent-tool calls by hand.
+ *
+ * Only the DELEGATION changes. The orchestrator still owns wave selection, every
+ * `cyboflow_*` write, the loopback/attempt protocol, the host-owned visual
+ * merge-gate, and the per-task commit — workflow subagents carry no cyboflow
+ * tools and must never be asked to write state.
+ *
+ * A host-owned inner step (the visual gate) keeps its ORIGINAL prose entry, and
+ * so does any step whose script could not be named — both fall back to the
+ * agent-driven path per step, so a partial render degrades gracefully.
+ */
+function renderStageMajorChain(
+  workflowName: string,
+  step: WorkflowStep,
+  fanOut: FanOutSpec,
+  ctx: ChainContext,
+): string {
+  const entries = fanOut.inner.map((inner, i) => {
+    const scriptName = isHostOwnedInnerStep(inner)
+      ? null
+      : fanOutStageWorkflowName(workflowName, step.id, inner.id);
+
+    // Host-owned or unnameable → the untouched prose entry (the visual gate's
+    // request/park protocol has no scripted equivalent).
+    if (scriptName === null) return renderChainEntry(inner, i + 1, ctx);
+
+    const label = inner.name !== undefined && inner.name.length > 0 ? inner.name : inner.id;
+    return [
+      `${i + 1}. **\`${inner.id}\`** (${label}) — move every wave member's \`current_step\` to`,
+      `   \`${inner.id}\` via \`cyboflow_update_sprint_task\`, then dispatch the WHOLE wave in one`,
+      `   call: \`Workflow({ name: '${scriptName}', args: [...] })\`. Each \`args\` entry is one`,
+      '   item: `{ id, ref, title, brief, expectedFiles, priorSummary }` — `brief` carries the',
+      '   task body + acceptance criteria, `priorSummary` the previous stage\'s `summary` for',
+      '   that item. Pass ONLY the members of the CURRENT wave.',
+      '   Wait for the workflow to finish, then read its `results` array and reconcile each item:',
+      '   - `outcome: "ok"` → advance that lane to the next stage.',
+      `   - \`outcome: "blocked"\` or \`"failed"\` → apply the loopback protocol below for that item`,
+      '     (bump `attempt`, move `current_step` back to the loopback target, re-dispatch it in a',
+      '     later wave with the blocking `summary` as its `priorSummary`).',
+      '   - `outcome: "not_applicable"` → treat as a skip and advance.',
+      '   - every `findings[]` entry → file it with `cyboflow_report_finding` (the subagents',
+      '     cannot; they only report). A `visualTask` string is the fence the visual gate needs —',
+      '     carry it forward verbatim.',
+      '   The script writes NO cyboflow state by design: every lane move, finding, and commit in',
+      '   this stage is YOURS to make from this session.',
+    ].join('\n');
+  });
+  return entries.join('\n');
+}
+
 /** Render the full instruction section for ONE fanOut-bearing outer step. */
-function renderFanOutSection(step: WorkflowStep, fanOut: FanOutSpec): string {
+function renderFanOutSection(
+  step: WorkflowStep,
+  fanOut: FanOutSpec,
+  dispatch: FanOutDispatch,
+  workflowName: string,
+): string {
   const cap = effectiveMaxConcurrency(fanOut);
   const firstId = fanOut.inner.length > 0 ? fanOut.inner[0].id : '';
   const innerById = new Map<string, FanOutInnerStep>(
@@ -250,7 +325,10 @@ function renderFanOutSection(step: WorkflowStep, fanOut: FanOutSpec): string {
   const ctx: ChainContext = { firstId, innerById };
   const laneIds = fanOut.inner.map((s) => `\`${s.id}\``).join(', ');
 
-  const chain = fanOut.inner.map((s, i) => renderChainEntry(s, i + 1, ctx)).join('\n');
+  const chain =
+    dispatch === 'workflow'
+      ? renderStageMajorChain(workflowName, step, fanOut, ctx)
+      : fanOut.inner.map((s, i) => renderChainEntry(s, i + 1, ctx)).join('\n');
 
   return [
     `## Fan-out execution — \`${step.id}\``,
@@ -262,11 +340,23 @@ function renderFanOutSection(step: WorkflowStep, fanOut: FanOutSpec): string {
     '',
     renderDispatch(cap),
     '',
-    '### Per-task chain',
-    '',
-    'Drive each task’s lane through this chain, in order. Move the lane’s `current_step`',
-    'with `cyboflow_update_sprint_task` as each stage begins, using the EXACT lane step ids and',
-    `\`cyboflow-<agent>\` subagent_type names below (${laneIds}) so the lane auto-advances:`,
+    ...(dispatch === 'workflow'
+      ? [
+          '### Per-stage chain (workflow dispatch)',
+          '',
+          'Advance the wave through this chain ONE STAGE AT A TIME: every member of the wave',
+          'completes stage N before any member starts stage N+1. Move each lane’s `current_step`',
+          `with \`cyboflow_update_sprint_task\` as each stage begins, using the EXACT lane step ids`,
+          `below (${laneIds}) so the lane auto-advances. You remain the SOLE writer of cyboflow`,
+          'state — the dispatched workflows return structured results and write nothing:',
+        ]
+      : [
+          '### Per-task chain',
+          '',
+          'Drive each task’s lane through this chain, in order. Move the lane’s `current_step`',
+          'with `cyboflow_update_sprint_task` as each stage begins, using the EXACT lane step ids and',
+          `\`cyboflow-<agent>\` subagent_type names below (${laneIds}) so the lane auto-advances:`,
+        ]),
     '',
     chain,
     '',
@@ -307,14 +397,22 @@ function renderFanOutSection(step: WorkflowStep, fanOut: FanOutSpec): string {
  *   workflow has no resolvable definition: the generator returns `''` (fail-soft).
  * @returns The append text, or `''` when `def` is null or has no fanOut steps.
  */
-export function buildFanOutAppend(def: WorkflowDefinition | null): string {
+export function buildFanOutAppend(
+  def: WorkflowDefinition | null,
+  opts?: FanOutAppendOptions,
+): string {
   if (def === null) return '';
+
+  // Defaulted so every existing caller — notably the SDK-only
+  // workflowPromptReaderAdapter — keeps emitting byte-identical prose.
+  const dispatch = opts?.dispatch ?? DEFAULT_FAN_OUT_DISPATCH;
+  const workflowName = opts?.workflowName ?? def.id;
 
   const sections: string[] = [];
   for (const phase of def.phases) {
     for (const step of phase.steps) {
       if (step.fanOut !== undefined) {
-        sections.push(renderFanOutSection(step, step.fanOut));
+        sections.push(renderFanOutSection(step, step.fanOut, dispatch, workflowName));
       }
     }
   }

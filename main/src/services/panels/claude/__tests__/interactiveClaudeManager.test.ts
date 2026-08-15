@@ -265,6 +265,8 @@ function createMockConfigManager(
     // Global 4-mode default consumed by resolveSessionAgentPermissionMode (the
     // quick/legacy-session seam mirrored from the SDK twin).
     getDefaultAgentPermissionMode: vi.fn(() => defaultAgentPermissionMode),
+    // Fan-out dispatch mode, read once per spawn (floors to 'prose').
+    getFanOutDispatch: vi.fn(() => 'prose'),
   } as unknown as ConfigManager;
 }
 

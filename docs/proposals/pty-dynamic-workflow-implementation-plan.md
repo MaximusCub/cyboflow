@@ -8,8 +8,9 @@ that invalidate its core design, and each found one the other missed. This v2
 records the outcome, states what was built, and states what must be redesigned
 before any of the rest is worth writing.
 
-Status: **Planks A–C built and green. Planks 2–4 (renderer / writer / prompt
-swap) NOT built — the design is wrong as specified.**
+Status: **Planks A–C (defect fixes) and D–G (the stage-major redesign) built and
+green, default OFF.** The three live CLI probes in "What is still unverified"
+remain outstanding — the feature must not be switched on until they pass.
 
 ---
 
@@ -130,33 +131,89 @@ Tests: 2 added to `runExecutor.test.ts` (guarded arm; no-probe arm byte-identica
 **Gate:** `pnpm typecheck`, `pnpm lint` (0 errors), `pnpm test:integration`
 (25), `pnpm test:unit` (8890 main + 3752 frontend, 0 failures).
 
-## What must happen before Planks 2–4
+## The stage-major build (Planks D–G)
 
-1. **Redesign to stage-major dispatch** (above). This is the real work and it
-   is not a renderer detail.
-2. **Three live probes**, none runnable headlessly, each fatal alone:
-   - Is the `Workflow` tool available without the `ultracode` setting? v1 asserted
-     yes from a reading of tool policy; it was never observed.
-   - Does a worktree-local `.claude/workflows/` resolve by name? The string is in
-     the CLI bundle; project-scoped resolution was never exercised.
-   - Does a completion notification actually re-wake a yielded PTY REPL? The whole
-     design assumes it. If not, the normal case is a run that never processes its
-     results.
-3. **Then** the renderer, with the constraints both reviewers added to v1's list:
-   structured per-stage output schemas with domain-outcome parsing;
-   `JSON.stringify` for every emitted literal and a filename-safe slug with path
-   containment (workflow names and step ids are free-form — slashes escape the
-   directory, quotes break the script); AST-level validation, since
-   `parseScriptMeta` is a fail-soft regex scanner that will happily accept
-   syntactically invalid JavaScript.
-4. **Writer caveats** found in review: `installWorkflowBundle` is substrate-shared
-   (the SDK calls it too, so "confined to interactive" holds only for the prompt);
-   `ensureBundleExcluded` runs unconditionally, so adding a glob mutates
-   `.git/info/exclude` even with the feature off; `write()` returns before
-   `remove()` on an empty bundle, so stale scripts survive an on→off transition;
-   and the writer's `cyboflow-` prefix would double up on a `fanOutScriptName`
-   that already carries it.
-5. **Config threading**: a global `AppConfig` flag read at three different times
-   is not enough — resolve a typed dispatch mode ONCE per run and thread that
-   snapshot to prompt composition, installation, and the rest guard. `AppConfig`
-   is declared separately in main and frontend and needs parity.
+### Plank D — the stage-script renderer
+
+`orchestrator/prompts/fanOutStageScript.ts`, a pure sibling of
+`fan-out-instructions.ts`. Renders ONE inner stage of a fan-out step into a
+`.claude/workflows/*.js` script that fans that stage across ONE already-chosen
+wave and returns schema-validated per-item results. Every review constraint is
+enforced and tested:
+
+- **Host-owned stages are never rendered.** `HOST_OWNED_INNER_IDS` (matched on
+  BOTH step id and agent id, since a custom flow may rename one) keeps
+  `visual-verify` on the prose path, with its request/park protocol verbatim.
+- **Domain outcome, not promise outcome.** Each agent returns
+  `{outcome: ok|blocked|failed|not_applicable, summary, filesTouched, findings,
+  visualTask}`. A blocking review is `blocked`, not a resolved promise. A null
+  agent slot becomes a `failed` item rather than a silently dropped one.
+- **Injection + traversal safety.** `slugSegment` reduces free-form
+  workflow/step/agent ids to `[a-z0-9-]`, and every emitted literal goes through
+  `JSON.stringify`. Tested against `../../etc/passwd`, quotes, backticks,
+  `${...}`, and newlines.
+- **Name drift is structurally impossible.** `fanOutStageLogicalName` (what the
+  writer prefixes) and `fanOutStageWorkflowName` (`meta.name`, the on-disk
+  basename, and the prompt's `Workflow({name})`) derive from one function.
+- No `isolation` (lanes share one worktree), no `Date.now`/`Math.random`.
+- **Real syntax validation.** Tests compile the emitted source with `vm.Script`
+  in the shape the runtime consumes it (meta lifted off, body in an async
+  function). `parseScriptMeta` is a fail-soft regex scanner and would accept
+  broken source, so it is used only for the tracker round-trip.
+
+### Plank E — the writer
+
+`.claude/workflows/cyboflow-*.js` as a third target. Extension is now a
+parameter, not a hardcoded `.md`, so a user's `.js` beside our `.md` is never
+touched and generated scripts are actually reclaimed. `write()` reconciles
+**before** the empty-bundle early return, so an on→off transition cannot strand a
+stale script the CLI would still resolve by name. Target paths are containment-
+checked and a name that would escape its directory is skipped, not written.
+
+### Plank F — the install seam
+
+Renders from `resolveRunFrozenSpec` — the run's frozen variant graph, the same
+source the prompt resolves — NOT the live `workflows.spec_json` join used for
+`workflow_path`; a variant run would otherwise install scripts for a different
+chain than its prompt walks. The scripts glob is added to `.git/info/exclude`
+only when scripts are actually installed, so dispatch-off leaves the exclude file
+byte-identical. Dispatch is a threaded ARGUMENT: the SDK manager passes `'prose'`
+explicitly, because this seam is substrate-shared and SDK worktrees consume no
+scripts.
+
+### Plank G — prompt + config
+
+`buildFanOutAppend(def, opts?)` gains a `workflow` arm that replaces per-task
+Agent-tool delegation with per-stage `Workflow({name, args})` dispatch and an
+explicit reconcile step (advance / loopback+attempt / file findings / carry
+`visualTask`). It changes only the DELEGATION — wave selection, every
+`cyboflow_*` write, the loopback protocol, the visual gate, and the per-task
+commit stay with the orchestrator, and the prompt says so. Defaulted to `prose`,
+with a test asserting the default arm is byte-identical to an explicit prose
+request. A stage whose name cannot be slugged falls back to prose per step.
+
+Config: `FanOutDispatch` lives in `shared/` (both `AppConfig` declarations carry
+the field, per the IPC type-parity rule), floors to `'prose'` on absent/invalid,
+and is **snapshotted once per spawn** and threaded to both installation and
+prompt composition — so a mid-run config flip can never leave a run whose prompt
+cites scripts its worktree lacks.
+
+**Gate:** `pnpm typecheck`, `pnpm lint` (0 errors), `pnpm test:integration` (25),
+`pnpm test:unit` (8942 main + 3752 frontend, 0 failures). 53 new tests.
+
+## What is still unverified
+
+Three live CLI behaviours, none runnable headlessly, each fatal alone. **Do not
+switch `fanOutDispatch` to `workflow` before these pass:**
+
+1. Is the `Workflow` tool available without the `ultracode` setting? The design
+   relies on the run prompt naming a saved workflow being sufficient opt-in.
+2. Does a worktree-local `.claude/workflows/` resolve by name? The string is in
+   the CLI bundle; project-scoped resolution was never exercised.
+3. Does a completion notification actually re-wake a yielded PTY REPL? If not,
+   the normal case is a run that never processes its stage results. Plank C's
+   guard keeps such a run from being falsely rested, but it will sit `running`.
+
+A fourth, cheaper to answer once the above pass: whether the ~15-agent workflow
+size guideline counts concurrent or cumulative agents, since a 5-lane wave is
+5 agents per stage.

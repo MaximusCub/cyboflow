@@ -138,7 +138,11 @@ function createMockSessionManager(): SessionManager {
 }
 
 function createMockConfigManager(): ConfigManager {
-  return { getConfig: vi.fn(() => ({})) } as unknown as ConfigManager;
+  return {
+    getConfig: vi.fn(() => ({})),
+    // Fan-out dispatch mode, read once per spawn (floors to 'prose').
+    getFanOutDispatch: vi.fn(() => 'prose'),
+  } as unknown as ConfigManager;
 }
 
 function createLogger(): import('../../../../utils/logger').Logger {

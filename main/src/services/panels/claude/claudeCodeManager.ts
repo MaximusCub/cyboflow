@@ -1500,7 +1500,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // lifetime), decremented once at process-death by removeBundleForSession — a
       // warm turn re-writes the bundle (driveWarmTurn) but does NOT re-bump.
       if (!dbSession?.in_place) {
-        installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
+        // 'prose' EXPLICITLY: this install seam is substrate-shared, but the SDK
+        // path composes its prompt through workflowPromptReaderAdapter (which
+        // never emits the workflow-dispatch chain), so stage scripts written
+        // here would be inert files in an SDK worktree. Pinned rather than
+        // defaulted so the intent survives a change to the default.
+        installWorkflowBundle(
+          this.db,
+          this.bundleWriter,
+          runId,
+          options.worktreePath,
+          makeLoggerLike(this.logger),
+          'prose',
+        );
         this.bundleWorktrees.set(sessionId, options.worktreePath);
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
       }

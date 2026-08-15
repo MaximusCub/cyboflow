@@ -22,6 +22,11 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../s
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { type ExecutionModel, isExecutionModel } from '../../../shared/types/executionModel';
 import {
+  DEFAULT_FAN_OUT_DISPATCH,
+  isFanOutDispatch,
+  type FanOutDispatch,
+} from '../../../shared/types/fanOutDispatch';
+import {
   type QuickSessionWorktreeMode,
   DEFAULT_QUICK_SESSION_WORKTREE_MODE,
   isQuickSessionWorktreeMode,
@@ -553,6 +558,23 @@ export class ConfigManager extends EventEmitter {
   getDefaultExecutionModel(): ExecutionModel {
     const value = this.config.defaultExecutionModel;
     return isExecutionModel(value) ? value : 'programmatic';
+  }
+
+  /**
+   * Global fan-out dispatch mode for orchestrated INTERACTIVE runs: whether a
+   * fan-out step's inner chain is driven by the agent as prose, or dispatched
+   * stage-by-stage to pre-installed dynamic-workflow scripts.
+   *
+   * Floors to the shared DEFAULT ('prose' — today's behavior) when unset OR when
+   * the persisted value is not a valid mode (config.json is user-editable). The
+   * resolved value is snapshotted ONCE per spawn and threaded to both prompt
+   * composition and bundle installation, so a mid-run config flip can never
+   * leave a run whose prompt and on-disk scripts disagree. NOT seeded into the
+   * constructor defaults, so existing config.json files stay byte-identical.
+   */
+  getFanOutDispatch(): FanOutDispatch {
+    const value = this.config.fanOutDispatch;
+    return isFanOutDispatch(value) ? value : DEFAULT_FAN_OUT_DISPATCH;
   }
 
   /**

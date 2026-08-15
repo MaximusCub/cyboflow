@@ -2,6 +2,7 @@ import type { AgentProviderAccess } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
@@ -58,6 +59,13 @@ export interface AppConfig {
   // default to the in-process host loop; the interactive substrate always
   // hard-pins 'orchestrated' regardless of this value.
   defaultExecutionModel?: ExecutionModel;
+  // Fan-out dispatch mode for orchestrated INTERACTIVE runs ('prose' | 'workflow').
+  // 'workflow' dispatches each inner stage of a wave to a pre-installed dynamic
+  // workflow script instead of the agent driving lanes by hand; the orchestrator
+  // stays the single writer either way. Floors to 'prose' when unset, and is NOT
+  // seeded into the constructor defaults so existing config.json files stay
+  // byte-identical.
+  fanOutDispatch?: FanOutDispatch;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Floors to 'worktree' when unset. The launch wizard's Advanced "Workspace"
   // tri-state overrides it per launch; workflow-host sessions always pin
