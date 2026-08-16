@@ -119,6 +119,14 @@ export const ENV_GATE_SENTINEL = 'CYBOFLOW_OMP_GATE_SENTINEL';
 export const OMP_TASK_TOOL_NAME = 'task';
 
 /**
+ * OMP's shell tool (`tools/builtin-names.ts:2`). Matched EXACTLY wherever a
+ * command is classified — a differently-cased name is one this gate has not
+ * verified, and falling through to the human is the fail-closed direction for
+ * every auto-allow path.
+ */
+export const OMP_BASH_TOOL_NAME = 'bash';
+
+/**
  * A URI scheme sitting at a token boundary inside a tool argument: `ssh://`,
  * `file://`, `http://`, `ftp://`, anything of that shape.
  *
@@ -708,6 +716,329 @@ export function isGateSafeBashCommand(rawCommand: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// `auto` mode — the allow-unless-hazardous tier
+// ---------------------------------------------------------------------------
+
+/**
+ * `auto` INVERTS the gate's default posture, and only `auto`.
+ *
+ * `default` and `acceptEdits` are prove-it-safe: a call is auto-allowed only if
+ * it matches a vetted name list or a provably-read-only command, and everything
+ * else reaches a human. `auto` is allow-unless-hazardous: a call is auto-allowed
+ * unless it trips one of the tables below.
+ *
+ * WHY THE ASYMMETRY IS THE POINT. On Claude, `auto` installs NO PreToolUse hook
+ * at all — the native classifier owns gating (`orchestrator/permissionModeMapper.ts`,
+ * the `case 'auto': return undefined` arm). OMP ships no such classifier, so the
+ * original mapping (proposal §5.3) defined OMP's `auto` as "acceptEdits plus the
+ * merged allow-rules". That is strictly NARROWER than what the same word means
+ * one runtime over: measured on a live session, `pnpm test`, `mkdir -p`, `node
+ * scripts/x.mjs` and every other ordinary build command fell through to rule 6
+ * and blocked on a human, which is not what a user selecting "Auto" is asking
+ * for. This tier is the classifier's stand-in: a hand-written hazard list rather
+ * than a model, but the same posture.
+ *
+ * THE TRUST BOUNDARY THIS DOES NOT CROSS. Rules 1-3 of {@link decideToolCall}
+ * still apply first and are untouched — `disallowedTools` still refuses, the
+ * `task` subagent tool is still denied, and the URI-scheme narrowing
+ * ({@link hasUriSchemeTarget}) still disqualifies EVERY shortcut below, so
+ * anything naming a remote target still reaches a human. This is a deliberate
+ * widening of `auto` alone, chosen by the user; `default` and `acceptEdits` are
+ * byte-identical to before.
+ *
+ * THE KNOWN COST. An OMP builtin this file has never heard of is auto-allowed
+ * in `auto` (it is absent from the hazard set). That is inherent to
+ * allow-unless-hazardous and is why the inversion is scoped to one mode. Foreign
+ * MCP tools are the deliberate exception — see {@link isAutoModeAllowedTool}.
+ */
+
+/**
+ * OMP builtins `auto` refuses to auto-allow. Each reaches outside the agent's
+ * own worktree-and-model loop:
+ *
+ *   computer  — native desktop capture AND INPUT (keystrokes/clicks on the
+ *               user's real machine, outside any sandbox this gate can reason about)
+ *   browser   — drives the user's own Chrome over the CDP relay, with their
+ *               live cookies and logged-in sessions
+ *   github    — authenticated writes to real repositories/issues/PRs
+ *   eval      — executes code the tables never vetted, which is the whole
+ *               premise of a hazard list
+ *   debug     — attaches a debugger to a live process
+ *
+ * `task` is absent because it is already refused unconditionally, in every mode,
+ * by rule 2 — listing it here would imply the deny is mode-scoped.
+ */
+const AUTO_MODE_HAZARD_TOOLS: readonly string[] = [
+  'computer',
+  'browser',
+  'github',
+  'eval',
+  'debug',
+];
+
+/** OMP's MCP tool-name prefix (`mcp/tool-bridge.ts` composes `mcp__<server>_<tool>`). */
+const OMP_MCP_TOOL_PREFIX = 'mcp__';
+
+/**
+ * Whether `auto` may auto-allow a NON-bash tool by name (bash has its own
+ * argument-aware rung — {@link isAutoModeAllowedBashCommand}).
+ *
+ * Foreign MCP tools are excluded even though they are not in the hazard list,
+ * and the reason is the same one {@link isCyboflowMcpTool} is exact-name
+ * matched: OMP auto-imports the user's own MCP configs, so `mcp__*` names an
+ * arbitrary third-party server whose semantics this gate cannot know. Allowing
+ * a whole category on the strength of "we have no reason to think it is
+ * dangerous" is precisely the reasoning that does not hold for code we have
+ * never seen. Cyboflow's own MCP tools never reach here — rule 3 allows them
+ * first, by exact composed name.
+ */
+export function isAutoModeAllowedTool(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+  if (name.startsWith(OMP_MCP_TOOL_PREFIX)) return false;
+  return !AUTO_MODE_HAZARD_TOOLS.includes(name);
+}
+
+/** Programs that run as, or become, another user. */
+const PRIVILEGE_ESCALATION_PROGRAMS: ReadonlySet<string> = new Set([
+  'sudo',
+  'su',
+  'doas',
+  'pkexec',
+]);
+
+/**
+ * Programs that execute code this classifier never sees — a shell, an inline
+ * evaluator, or a wrapper that runs whatever it is handed.
+ *
+ * The shells are what the tail of a `curl … | sh` tokenizes to:
+ * {@link splitShellSegments} splits on `|`, so that pipeline arrives here as a
+ * segment whose program is `sh`, and refusing the shells refuses the pipeline.
+ */
+const CODE_EXECUTING_PROGRAMS: ReadonlySet<string> = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'ksh',
+  'csh',
+  'tcsh',
+  'dash',
+  'eval',
+  'exec',
+  'source',
+  '.',
+  'env',
+  'xargs',
+  'nohup',
+  'osascript',
+]);
+
+/**
+ * Programs that destroy data outright. Always hazardous, with no path analysis:
+ * `rm -rf node_modules` asking for a confirmation is a small cost, and the
+ * alternative — deciding from a pathspec whether a delete stays inside the
+ * worktree — is exactly the kind of parse this file refuses to trust elsewhere.
+ */
+const DESTRUCTIVE_PROGRAMS: ReadonlySet<string> = new Set([
+  'rm',
+  'rmdir',
+  'shred',
+  'srm',
+  'dd',
+  'mkfs',
+  'fdisk',
+  'diskutil',
+  'mount',
+  'umount',
+  'chmod',
+  'chown',
+  'chgrp',
+  'chflags',
+  'kill',
+  'killall',
+  'pkill',
+  'reboot',
+  'shutdown',
+  'halt',
+  'launchctl',
+  'systemctl',
+  'crontab',
+  'defaults',
+  'csrutil',
+  'spctl',
+  'security',
+  'passwd',
+  'visudo',
+]);
+
+/**
+ * Programs that move bytes to, or execute on, another host. `curl`/`wget` are
+ * deliberately ABSENT: they are ubiquitous in a build loop, and the URI-scheme
+ * narrowing already forces any invocation carrying a `scheme://` target to a
+ * human before this classifier is consulted at all.
+ */
+const REMOTE_TRANSPORT_PROGRAMS: ReadonlySet<string> = new Set([
+  'ssh',
+  'scp',
+  'sftp',
+  'rsync',
+  'nc',
+  'ncat',
+  'netcat',
+  'telnet',
+  'ftp',
+  'tftp',
+]);
+
+/**
+ * Interpreters that are ordinary programs with a script argument (`node
+ * scripts/build.mjs`) but arbitrary-code evaluators with an inline flag. Keyed
+ * by program → the flags that make it the latter, so the common form stays
+ * auto-allowed and only the evaluator form asks.
+ */
+const INLINE_CODE_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['node', new Set(['-e', '--eval', '-p', '--print'])],
+  ['bun', new Set(['-e', '--eval', '-p', '--print'])],
+  ['deno', new Set(['eval'])],
+  ['python', new Set(['-c'])],
+  ['python3', new Set(['-c'])],
+  ['perl', new Set(['-e', '-E'])],
+  ['ruby', new Set(['-e'])],
+  ['php', new Set(['-r'])],
+]);
+
+/** `find` flags that turn a search into an execution or a delete. */
+const FIND_EXECUTING_FLAGS: ReadonlySet<string> = new Set([
+  '-exec',
+  '-execdir',
+  '-delete',
+  '-ok',
+  '-okdir',
+]);
+
+/**
+ * git subcommands `auto` refuses. Two groups, one rationale each:
+ *
+ *  - PUBLISHES OR FETCHES (push, pull, fetch, clone, remote, submodule): leaves
+ *    the machine, using the user's own credentials.
+ *  - DESTROYS UNCOMMITTED OR SHARED WORK (reset, checkout, switch, clean,
+ *    stash, rebase, merge, cherry-pick, revert, apply, am, filter-branch,
+ *    worktree, gc, prune, config): a human or a sibling sprint lane may own the
+ *    state being discarded. This is the same line
+ *    {@link LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS} already draws for `acceptEdits`,
+ *    kept in `auto` rather than relaxed — "may this agent record its own edits"
+ *    and "may it discard someone else's" stay different questions.
+ *
+ * `add`/`commit`/`restore`/`rm`/`mv` are absent, so they auto-allow — they
+ * already do under `acceptEdits` via the local-only-write tier.
+ */
+const AUTO_MODE_HAZARD_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'push',
+  'pull',
+  'fetch',
+  'clone',
+  'remote',
+  'submodule',
+  'reset',
+  'checkout',
+  'switch',
+  'clean',
+  'stash',
+  'rebase',
+  'merge',
+  'cherry-pick',
+  'revert',
+  'apply',
+  'am',
+  'filter-branch',
+  'worktree',
+  'gc',
+  'prune',
+  'config',
+]);
+
+/** Programs whose hazard depends on whether an argument escapes the worktree. */
+const PATH_ESCAPE_SENSITIVE_PROGRAMS: ReadonlySet<string> = new Set([
+  'cp',
+  'mv',
+  'ln',
+  'install',
+]);
+
+/**
+ * True if a token names a location outside the current directory tree — an
+ * absolute path, a `~` expansion, or any `..` component. Deliberately crude and
+ * over-eager: it is only consulted to REFUSE, so a false positive costs one
+ * human prompt while a false negative would let `cp .env /tmp/x` through.
+ */
+function escapesWorkingTree(token: string): boolean {
+  if (token.startsWith('-')) return false;
+  if (token.startsWith('/') || token.startsWith('~')) return true;
+  return token === '..' || token.startsWith('../') || token.includes('/../') || token.endsWith('/..');
+}
+
+/** True if ONE segment trips a hazard table. */
+function isAutoModeHazardousSegment(segment: string): boolean {
+  const tokens = tokenizeSegment(segment);
+  if (tokens.length === 0) return true;
+  const program = tokens[0]!;
+  const args = tokens.slice(1);
+
+  if (PRIVILEGE_ESCALATION_PROGRAMS.has(program)) return true;
+  if (CODE_EXECUTING_PROGRAMS.has(program)) return true;
+  if (DESTRUCTIVE_PROGRAMS.has(program)) return true;
+  if (REMOTE_TRANSPORT_PROGRAMS.has(program)) return true;
+
+  const inlineFlags = INLINE_CODE_FLAGS.get(program);
+  if (inlineFlags !== undefined && args.some((token) => inlineFlags.has(flagName(token)))) {
+    return true;
+  }
+
+  if (program === 'find' && args.some((token) => FIND_EXECUTING_FLAGS.has(token))) return true;
+
+  if (program === 'git') {
+    const sub = args[0];
+    // A leading global option (`git -C /elsewhere …`) is refused rather than
+    // parsed, exactly as the read-only tier refuses it — that is what keeps the
+    // tier from being pointed at another repository.
+    if (sub === undefined || sub.startsWith('-')) return true;
+    return AUTO_MODE_HAZARD_GIT_SUBCOMMANDS.has(sub);
+  }
+
+  if (PATH_ESCAPE_SENSITIVE_PROGRAMS.has(program) && args.some(escapesWorkingTree)) return true;
+
+  return false;
+}
+
+/**
+ * The `auto-bash` rung: a bash command every segment of which is free of the
+ * hazard tables above.
+ *
+ * The two STRUCTURAL refusals are carried over from the prove-it-safe tier
+ * verbatim, and both are load-bearing here rather than incidental:
+ *
+ *  - {@link hasStructuralRefusal} — command substitution hides a command no
+ *    table can see, and `<`/`>`/`&` read, write, or background outside the
+ *    segment model. A hazard list can only classify what it can read, so an
+ *    unreadable command is itself the hazard.
+ *  - The raw-newline refusal — `splitShellSegments` treats only `&&`, `||`, `;`
+ *    and `|` as separators, so `git status\nrm -rf ~` arrives as ONE segment
+ *    that tokenizes to a harmless-looking `git status` plus stray positionals.
+ *    Under a prove-it-safe tier that is merely a missed allow; under
+ *    allow-unless-hazardous it would be a full bypass of every table above.
+ */
+export function isAutoModeAllowedBashCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  if (/[\r\n]/.test(command)) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(
+    (segment) => !hasStructuralRefusal(segment) && !isAutoModeHazardousSegment(segment),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The decision
 // ---------------------------------------------------------------------------
 
@@ -718,7 +1049,11 @@ export type OmpGateAllowRule =
   | 'auto-allow-tool'
   | 'edit-tool'
   | 'safe-bash'
-  | 'allow-rule';
+  | 'allow-rule'
+  /** `auto` mode's allow-unless-hazardous tool tier. */
+  | 'auto-tool'
+  /** `auto` mode's allow-unless-hazardous bash tier. */
+  | 'auto-bash';
 
 export type OmpGateDecision =
   | { kind: 'allow'; rule: OmpGateAllowRule }
@@ -786,9 +1121,11 @@ function scanForUriScheme(value: unknown, seen: Set<object>): boolean {
  *  3. cyboflow's own MCP tools, by EXACT name — always allowed (our tools, our
  *     server, reached through our own socket).
  *  4. `dontAsk` — allow (log-only), rules 1-2 having already applied.
- *  5. the mode-scoped allowlists — `autoAllowTools`, `editTools`, the
- *     argument-aware `safe-bash` rung ({@link isGateSafeBashCommand}), and
- *     `allowRules` — each narrowed by {@link hasUriSchemeTarget}.
+ *  5. the mode-scoped allowlists, each narrowed by {@link hasUriSchemeTarget}:
+ *     `auto`'s allow-unless-hazardous tier ({@link isAutoModeAllowedTool} /
+ *     {@link isAutoModeAllowedBashCommand}), then `autoAllowTools`, `editTools`,
+ *     the argument-aware `safe-bash` rung ({@link isGateSafeBashCommand}), and
+ *     `allowRules`.
  *  6. otherwise: ask the human.
  */
 export function decideToolCall(
@@ -866,7 +1203,7 @@ export function decideToolCall(
     // fail-closed direction for an auto-allow path.
     if (
       (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
-      toolName === 'bash' &&
+      toolName === OMP_BASH_TOOL_NAME &&
       typeof input['command'] === 'string' &&
       isGateSafeBashCommand(input['command'])
     ) {
@@ -874,6 +1211,28 @@ export function decideToolCall(
     }
     if (config.permissionMode === 'auto' && matchesAllowRules(toolName, input, config.allowRules)) {
       return { kind: 'allow', rule: 'allow-rule' };
+    }
+    // `auto`'s allow-unless-hazardous tier, LAST among the allow paths so the
+    // narrower rungs above keep their own rule labels — a call they already
+    // vouch for should be logged as `safe-bash` or `edit-tool`, not as the
+    // catch-all. What this adds is everything they cannot vouch for and that is
+    // not on a hazard table: the ordinary build command (`pnpm test`, `mkdir -p`,
+    // `node scripts/x.mjs`) and the ordinary OMP builtin. See the tier's doc block.
+    if (config.permissionMode === 'auto') {
+      // A tool carrying a `command` string RUNS something, so it is classified
+      // as a command, never allowed by name. Only OMP's exact canonical `bash`
+      // is classified: a differently-cased or unfamiliar runner (`Bash`,
+      // `shell`) is one this gate has not verified — it may not even read
+      // `command` the same way — so it falls through to the human, matching the
+      // `safe-bash` rung's own exact-name discipline.
+      const carriesCommand = typeof input['command'] === 'string';
+      if (toolName === OMP_BASH_TOOL_NAME) {
+        if (carriesCommand && isAutoModeAllowedBashCommand(input['command'] as string)) {
+          return { kind: 'allow', rule: 'auto-bash' };
+        }
+      } else if (!carriesCommand && isAutoModeAllowedTool(toolName)) {
+        return { kind: 'allow', rule: 'auto-tool' };
+      }
     }
   }
 

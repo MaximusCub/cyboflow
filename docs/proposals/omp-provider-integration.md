@@ -297,7 +297,7 @@ approval mode is set so that a missing/unloaded gate **fails closed**, never ope
 |---|---|---|
 | `default` | `always-ask` | apply cyboflow's predicate: auto-allow reads; everything else → orch-socket → ApprovalRouter |
 | `acceptEdits` | `always-ask` | as above, plus auto-allow exactly cyboflow's edit-tool set (never OMP's write tier) |
-| `auto` | `always-ask` | as above, plus the merged permission-rule allowlist |
+| `auto` | `always-ask` | **INVERTED (revised 2026-08-16):** allow unless the call trips a hazard table — `gate/ompGateExtension.ts`'s `isAutoModeAllowedTool` / `isAutoModeAllowedBashCommand`, plus the merged permission-rule allowlist. As SHIPPED originally this row read "acceptEdits + allowlist", which made OMP's `auto` strictly narrower than the same word on Claude (whose `auto` installs no hook at all and lets the native classifier decide): every ordinary build command — `pnpm test`, `mkdir -p`, `node scripts/x.mjs` — still blocked on a human. The hazard tables are the classifier's stand-in. Rules 1-3 and the URI-scheme narrowing are unchanged, and `default`/`acceptEdits` keep the prove-it-safe posture. |
 | `dontAsk` | `yolo` | log-only (+ `disallowedTools` still enforced) |
 
 Mechanics:
