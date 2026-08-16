@@ -501,7 +501,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
       'from defaults · Interactive terminal',
     );
     expect(within(card).getByTestId('run-type-field-agentRuntime')).toHaveTextContent(
-      'from defaults · Claude interactive',
+      'from defaults · Claude Interactive (CLI)',
     );
 
     fireEvent.click(within(card).getByRole('switch'));
@@ -934,11 +934,11 @@ describe('RunTypeOverridesSection — detail screen', () => {
     ).toEqual([
       'Follow defaults',
       'Claude SDK',
-      'Claude interactive',
+      'Claude Interactive (CLI)',
       'Codex SDK',
-      'Codex terminal',
+      'Codex (CLI)',
       'OMP',
-      'OMP terminal',
+      'OMP (CLI)',
     ]);
   });
 
@@ -947,11 +947,11 @@ describe('RunTypeOverridesSection — detail screen', () => {
 
     const card = screen.getByTestId('knob-card-runtime');
     fireEvent.click(within(card).getByRole('switch'));
-    // 'OMP' is present, 'OMP terminal' is not: a workflow screen offers every
+    // 'OMP' is present, 'OMP (CLI)' is not: a workflow screen offers every
     // STRUCTURED runtime and no terminal one, which is the launchable set.
     expect(
       within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
-    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude interactive', 'Codex SDK', 'OMP']);
+    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude Interactive (CLI)', 'Codex SDK', 'OMP']);
   });
 
   // AC 5 + AC 6 — a stale key is not just VISIBLE, it is operable: being able to

@@ -26,6 +26,7 @@ import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector
 import { DEFAULT_CODEX_MODEL } from '../cyboflow/ModelSelector';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import {
+  AGENT_RUNTIME_LABELS as SESSION_AGENT_RUNTIME_LABELS,
   DEFAULT_SESSION_AGENT_RUNTIME,
   SESSION_AGENT_RUNTIMES,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
@@ -104,22 +105,20 @@ const SUBSTRATE_LABELS: Record<CliSubstrate, string> = {
 };
 
 /**
- * Local label map because `shared/types/agentRuntime` only exports
- * WORKFLOW_AGENT_RUNTIME_LABELS (the LAUNCHABLE subset) and the quick-session
- * key can legitimately store a PTY runtime. Kept in the same wording as that map
- * so the two read as one family.
+ * The runtime labels this screen renders. Every SESSION runtime comes straight
+ * from the shared {@link SESSION_AGENT_RUNTIME_LABELS} — the same map
+ * `SubstrateSelector` and the wizard's launch summary read — so a rename lands
+ * on every picker at once instead of drifting between Settings and the launch
+ * surfaces (this map used to be a hand-kept copy, and did drift).
+ *
+ * `codex-exec` is the one member the shared map cannot carry: it is headless, so
+ * it is not a `SessionAgentRuntime` at all and reaches no picker. It is named
+ * here only because this map is keyed over the FULL `AgentRuntime` union — a
+ * stored value read back off config.json could still name it.
  */
 const AGENT_RUNTIME_LABELS: Record<AgentRuntime, string> = {
-  'claude-sdk': 'Claude SDK',
-  'claude-interactive': 'Claude interactive',
-  'codex-sdk': 'Codex SDK',
-  'codex-pty': 'Codex terminal',
+  ...SESSION_AGENT_RUNTIME_LABELS,
   'codex-exec': 'Codex exec',
-  // `omp-sdk` is offerable on BOTH key kinds now that it is launchable;
-  // `omp-pty` stays quick-session-only, exactly as `codex-pty` does. The
-  // fallback for a missing key is the raw runtime id, so every member is named.
-  'omp-sdk': 'OMP',
-  'omp-pty': 'OMP terminal',
 };
 
 /**

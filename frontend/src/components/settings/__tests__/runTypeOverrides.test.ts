@@ -271,7 +271,7 @@ describe('resolveRunTypeBaseline', () => {
       })),
     ).toEqual([
       { field: 'model', baseline: 'Sonnet 5 · 1M' },
-      { field: 'agentRuntime', baseline: 'Claude interactive' },
+      { field: 'agentRuntime', baseline: 'Claude Interactive (CLI)' },
     ]);
   });
 
@@ -369,7 +369,7 @@ describe('agentRuntimeOptions', () => {
   // The quick key is the only one whose launch can reach the Codex TUI; a flow
   // run has no PTY seam, so offering it there would be a control that cannot
   // take effect (the same rule that keeps effort quick-only).
-  it('offers Codex terminal on the quick key and never on a flow key', () => {
+  it('offers the Codex CLI runtime on the quick key and never on a flow key', () => {
     expect(agentRuntimeOptions(QUICK_RUN_TYPE_KEY)).toContain('codex-pty');
     expect(agentRuntimeOptions('workflow:wf-1')).not.toContain('codex-pty');
     // Both share the three Claude/Codex-SDK runtimes.
@@ -395,7 +395,7 @@ describe('agentRuntimeOptions', () => {
     // The label map is deliberately wider than the option list — a value that
     // reaches the detail screen must read as a name either way.
     expect(runTypeValueLabel('agentRuntime', 'omp-sdk')).toBe('OMP');
-    expect(runTypeValueLabel('agentRuntime', 'omp-pty')).toBe('OMP terminal');
+    expect(runTypeValueLabel('agentRuntime', 'omp-pty')).toBe('OMP (CLI)');
   });
 });
 
@@ -403,7 +403,7 @@ describe('runTypeValueLabel', () => {
   it('labels every known value from the same maps the pickers use', () => {
     expect(runTypeValueLabel('model', 'sonnet')).toBe('Sonnet 5 · 1M');
     expect(runTypeValueLabel('substrate', 'interactive')).toBe('Interactive terminal');
-    expect(runTypeValueLabel('agentRuntime', 'codex-pty')).toBe('Codex terminal');
+    expect(runTypeValueLabel('agentRuntime', 'codex-pty')).toBe('Codex (CLI)');
     expect(runTypeValueLabel('permissionMode', 'dontAsk')).toBe("Don't ask");
     expect(runTypeValueLabel('reasoningEffort', 'xhigh')).toBe('Xhigh');
   });

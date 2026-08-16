@@ -70,7 +70,7 @@ const COACH: Record<number, CoachSpec> = {
     pointer: true,
     body: (
       <>
-        Choose the provider and how it runs. Claude and Codex both support structured SDK sessions; interactive PTY
+        Choose the provider and how it runs. Claude and Codex both support structured SDK sessions; interactive CLI
         mode is available for quick sessions. Runtime comes first because it determines which models are available.
       </>
     ),

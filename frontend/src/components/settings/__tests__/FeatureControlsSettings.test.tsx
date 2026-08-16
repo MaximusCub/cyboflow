@@ -76,7 +76,7 @@ describe('FeatureControlsSettings', () => {
 
     expect(screen.getByLabelText('Include Cyboflow footer in commits')).toBeChecked();
     expect(screen.getByRole('button', { name: /Allow SDK/ })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: /Interactive PTY only/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Interactive CLI only/ })).toBeInTheDocument();
     expect(screen.getByTestId('computed-run-cost-off')).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByTestId('computed-run-cost-on')).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByPlaceholderText('.cyboflow/artifacts')).toHaveValue('');
@@ -91,7 +91,7 @@ describe('FeatureControlsSettings', () => {
     fireEvent.click(screen.getByLabelText('Include Cyboflow footer in commits'));
     expect(props.onEnableCyboflowFooterChange).toHaveBeenCalledWith(false);
 
-    fireEvent.click(screen.getByRole('button', { name: /Interactive PTY only/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Interactive CLI only/ }));
     expect(props.onInteractivePtyOnlyChange).toHaveBeenCalledWith(true);
 
     fireEvent.click(screen.getByTestId('computed-run-cost-on'));

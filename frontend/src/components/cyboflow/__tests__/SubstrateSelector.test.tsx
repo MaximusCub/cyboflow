@@ -43,7 +43,7 @@ beforeEach(() => {
 });
 
 describe('SubstrateSelector — no forced pin', () => {
-  it('renders workflow runtimes with Codex SDK enabled and Codex PTY disabled', () => {
+  it('renders workflow runtimes with Codex SDK enabled and the Codex CLI runtime disabled', () => {
     const onChange = vi.fn();
     render(<SubstrateSelector value="claude-sdk" onChange={onChange} />);
 
@@ -51,7 +51,7 @@ describe('SubstrateSelector — no forced pin', () => {
     expect(screen.getByRole('option', { name: /Claude SDK/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Claude interactive/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).toBeDisabled();
     expect(screen.getByText(/Workflows run on any structured runtime/i)).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
@@ -61,7 +61,7 @@ describe('SubstrateSelector — no forced pin', () => {
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).not.toBeDisabled();
     expect(screen.getByText(/The structured runtimes run quick-session chat/i)).toBeInTheDocument();
   });
 
@@ -69,7 +69,7 @@ describe('SubstrateSelector — no forced pin', () => {
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).not.toBeDisabled();
     expect(screen.getByText(/A structured runtime can run workflows or quick sessions/i)).toBeInTheDocument();
   });
 
@@ -234,11 +234,11 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="workflow" />);
 
     expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: 'OMP terminal' })).toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP (CLI)' })).toBeDisabled();
     // The Codex split is unchanged — this promotion moved one runtime, not the
     // whole "PTY is quick-session-only" rule.
     expect(screen.getByRole('option', { name: /^Codex SDK$/ })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/ })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/ })).toBeDisabled();
   });
 
   it('leaves both OMP rows selectable on a quick session', () => {
@@ -246,7 +246,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: 'OMP terminal' })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP (CLI)' })).not.toBeDisabled();
   });
 
   // The note reads "…are hidden" only when the PROVIDER TOGGLES removed
@@ -280,8 +280,8 @@ describe('SubstrateSelector — OMP caveats copy (v1 limits)', () => {
     render(<SubstrateSelector value="omp-pty" onChange={vi.fn()} runtimeScope="session" />);
 
     const panel = screen.getByTestId('substrate-caveats');
-    expect(panel).toHaveTextContent('OMP terminal — v1 limits');
-    expect(panel).toHaveTextContent('Approvals stay in the OMP terminal');
+    expect(panel).toHaveTextContent('OMP (CLI) — v1 limits');
+    expect(panel).toHaveTextContent('Approvals stay in the OMP CLI');
     expect(panel).toHaveTextContent('no Cyboflow review-queue integration');
   });
 

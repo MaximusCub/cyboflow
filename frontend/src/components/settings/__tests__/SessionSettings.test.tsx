@@ -411,7 +411,7 @@ describe('SessionSettings', () => {
 
       const note = screen.getByTestId('default-agent-runtime-workflow-note');
       expect(note).toHaveTextContent(/quick sessions only/i);
-      expect(note).toHaveTextContent(/Codex terminal/);
+      expect(note).toHaveTextContent(/Codex \(CLI\)/);
     });
 
     it.each(WORKFLOW_AGENT_RUNTIMES)('renders no note for the workflow-valid runtime %s', (runtime) => {

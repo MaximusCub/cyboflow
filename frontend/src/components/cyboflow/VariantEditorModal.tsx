@@ -35,6 +35,7 @@ import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agent
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import {
   AGENT_PROVIDER_LABELS,
+  AGENT_RUNTIME_LABELS,
   isRuntimeProviderEnabled,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
 } from '../../../../shared/types/agentRuntime';
@@ -77,12 +78,16 @@ function parseAgentOverrides(json: string | null): WorkflowVariantAgentOverrides
 /** Sentinel for the "Inherit" (null) option of the model / execution-model selects. */
 const INHERIT = '';
 
-/** Runtime-pin labels for the variant picker (kept verbatim from the old inline options). */
+/**
+ * Runtime-pin labels for the variant picker. Projected from the shared
+ * {@link AGENT_RUNTIME_LABELS} — every workflow-launchable runtime is also a
+ * session runtime, so this is a narrowing, not a second wording to keep in sync.
+ */
 const VARIANT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
-  'claude-sdk': 'Claude SDK',
-  'claude-interactive': 'Claude interactive (PTY)',
-  'codex-sdk': 'Codex SDK',
-  'omp-sdk': 'OMP',
+  'claude-sdk': AGENT_RUNTIME_LABELS['claude-sdk'],
+  'claude-interactive': AGENT_RUNTIME_LABELS['claude-interactive'],
+  'codex-sdk': AGENT_RUNTIME_LABELS['codex-sdk'],
+  'omp-sdk': AGENT_RUNTIME_LABELS['omp-sdk'],
 };
 
 export function VariantEditorModal({

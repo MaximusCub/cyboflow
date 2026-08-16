@@ -301,7 +301,7 @@ export function SessionSettings({
             <p className="text-xs text-text-tertiary mt-2">
               Seeds both quick sessions and flow runs; a per-session-type override (below) or a runtime
               picked at launch still wins. Choosing a Claude runtime also decides that launch's
-              substrate — "Claude interactive" runs on the terminal and "Claude SDK" in-process — which
+              substrate — "Claude Interactive (CLI)" runs on the terminal and "Claude SDK" in-process — which
               outranks the "Quick Session Runtime" setting below. Leave this on "Built-in default" for
               that setting to decide the substrate.
             </p>
@@ -470,7 +470,7 @@ export function SessionSettings({
           >
             <div className="flex flex-col gap-1.5">
               {([
-                { substrate: 'interactive', label: 'Interactive terminal (default)', hint: 'Live PTY — full REPL' },
+                { substrate: 'interactive', label: 'Interactive terminal (default)', hint: 'Live CLI — full REPL' },
                 { substrate: 'sdk', label: 'SDK', hint: 'In-process Agent SDK' },
               ] as const).map(({ substrate, label, hint }) => (
                 <button
@@ -495,7 +495,7 @@ export function SessionSettings({
             <p className="text-xs text-text-tertiary mt-2">
               Sets which runtime a new quick session starts on. The interactive terminal is the default —
               a full live REPL. This seeds the launch wizard's substrate picker; you can still switch it
-              per session. The global "Interactive PTY only" lock and demo mode override this. Workflow
+              per session. The global "Interactive CLI only" lock and demo mode override this. Workflow
               runs use the separate default above and are unaffected.
             </p>
           </SettingsSection>
