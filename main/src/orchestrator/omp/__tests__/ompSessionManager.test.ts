@@ -140,6 +140,41 @@ describe('OmpSessionManager — spawn', () => {
     await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
     await expect(manager.spawn('panel-1', 'session-1', 'second', { model: 'm' })).rejects.toThrow(/already spawned/);
   });
+  it('replaces a terminal record: respawn after the worker reached a terminal state', async () => {
+    const { manager, spawn, state } = makeManager({
+      state: async () => okResult('state=done'),
+    });
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+    spawn.mockClear();
+
+    // Drive the worker to a terminal state.
+    await manager.tick('panel-1');
+    expect(manager.isPanelRunning('panel-1')).toBe(false);
+
+    // The respawn (ADR: "the first message spawns") must replace the dead
+    // record, not throw 'already spawned'.
+    await manager.spawn('panel-1', 'session-1', 'second message', { model: 'm' });
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0][0]).toMatchObject({ task: 'second message' });
+    expect(manager.isPanelRunning('panel-1')).toBe(true);
+    expect(manager.panelCount).toBe(1);
+  });
+
+  it('replaces a stopped record: respawn after stopPanel', async () => {
+    const { manager, spawn, kill } = makeManager();
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+    spawn.mockClear();
+
+    await manager.stopPanel('panel-1');
+    expect(manager.isPanelRunning('panel-1')).toBe(false);
+
+    await manager.spawn('panel-1', 'session-1', 'after stop', { model: 'm' });
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledTimes(1); // the respawn does not kill the new worker
+    expect(manager.isPanelRunning('panel-1')).toBe(true);
+  });
 });
 
 describe('OmpSessionManager — sendInput', () => {

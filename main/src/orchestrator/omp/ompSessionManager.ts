@@ -188,6 +188,12 @@ export class OmpSessionManager extends EventEmitter {
    * Spawn the panel's OMP worker (`fleet_spawn`). Emits `spawned` on success;
    * a failed result or an unparseable worker id emits `exit` (fail-closed) and
    * the panel is dropped.
+   *
+   * One panel ≙ one LIVE worker: when the panel's previous worker has reached
+   * a terminal state (or the record was never live), a new spawn REPLACES the
+   * dead record — this is the ADR's "the first message spawns" respawn path.
+   * Spawning a panel whose worker is still live is rejected: steering a live
+   * worker is `sendInput`'s job.
    */
   async spawn(panelId: string, sessionId: string, prompt: string, config: OmpSpawnConfig): Promise<void> {
     if (prompt.trim() === "") {
@@ -196,8 +202,14 @@ export class OmpSessionManager extends EventEmitter {
     if (config.model.trim() === "") {
       throw new TypeError("OmpSessionManager.spawn requires a model");
     }
-    if (this.records.has(panelId)) {
+    const existing = this.records.get(panelId);
+    if (existing !== undefined && !existing.terminal) {
       throw new Error(`OmpSessionManager: panel ${panelId} already spawned`);
+    }
+    if (existing !== undefined) {
+      // The previous worker is dead; replace its record. Clear any lingering
+      // poll timer (defensive — finishTerminal/stopPanel already did).
+      this.clearPolling(existing);
     }
 
     const result = await this.adapter.spawn({
