@@ -39,6 +39,7 @@ import { useEffect, useState } from 'react';
 import { ChevronLeft, RotateCcw } from 'lucide-react';
 import { useConfigStore } from '../../stores/configStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
+import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
 import {
   RUN_TYPE_EFFORT_OPTIONS,
   RUN_TYPE_MODEL_OPTIONS,
@@ -49,7 +50,7 @@ import {
   coerceDraftForRuntime,
   coerceDraftForSubstrate,
   draftFromStored,
-  draftUsesCodexRuntime,
+  draftRuntimeProvider,
   isQuickRunTypeKey,
   patchFromDraft,
   runTypeValueLabel,
@@ -57,8 +58,9 @@ import {
   type RunTypeDraft,
   type RunTypeFieldId,
 } from './runTypeOverrides';
-import type { AgentRuntime } from '../../../../shared/types/agentRuntime';
-import type { CodexModelOption } from '../../../../shared/types/agentModels';
+import { AGENT_PROVIDER_LABELS } from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { CodexModelOption, OmpModelOption } from '../../../../shared/types/agentModels';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import type { RunTypeDefaults } from '../../../../shared/types/sessionDefaults';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
@@ -136,12 +138,14 @@ export function RunTypeOverrideDetail({
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Every control is scoped to the runtime this key would ACTUALLY launch on
-  // (the draft's own override, else the baseline) — offering the other family's
+  // (the draft's own override, else the baseline) — offering another family's
   // options is what let a cross-family pair be assembled in the first place.
-  // Codex models come from the same catalog store the launch pickers read
-  // (`ModelSelector` / `ModelPill`), never from a second hardcoded list.
-  const usesCodex = draftUsesCodexRuntime(draft, baseline);
+  // Codex and OMP models come from the same catalog stores the launch pickers
+  // read (`ModelSelector` / `ModelPill`), never from a second hardcoded list.
+  const provider = draftRuntimeProvider(draft, baseline);
+  const usesCodex = provider === 'codex';
   const { options: codexModelOptions } = useCodexModelCatalog(usesCodex);
+  const { options: ompModelOptions } = useOmpModelCatalog(provider === 'omp');
 
   // Re-seed when the key changes (list → another type without unmounting).
   // `stored` is intentionally not a dependency: a config refetch mid-edit must
@@ -244,16 +248,18 @@ export function RunTypeOverrideDetail({
     const base = baselineValueFor(field, baseline);
     const changed = value !== null && value !== base;
     const selectId = `run-type-${field}`;
-    const options = fieldOptions(field, runTypeKey, usesCodex, codexModelOptions);
-    // "Follow defaults" is unavailable for a Codex model, exactly as on the
-    // launch pickers (`ModelSelector`'s `allowDefaultOption` is Claude-only):
-    // an omitted model member resolves to the always-Claude floor, so offering
-    // it here would BE the cross-family pair rather than an escape from it.
+    const options = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions);
+    // "Follow defaults" is unavailable for a CODEX model, exactly as on the
+    // launch pickers: an omitted model member resolves to the always-Claude
+    // floor, so offering it here would BE the cross-family pair rather than an
+    // escape from it. It stays available on OMP, whose spawn seam DROPS that
+    // Claude floor (`normalizeAgentModelSelection`) and starts on OMP's own
+    // default — see `coerceModelForRuntime`, which encodes the same split.
     const allowFollowDefaults = !(field === 'model' && usesCodex);
-    // A Codex runtime carries no sdk/interactive transport of its own, so there
-    // is no substrate to pick — the control states that instead of offering a
-    // value the resolved runtime would contradict.
-    const notApplicable = field === 'substrate' && usesCodex;
+    // A non-Claude runtime carries no sdk/interactive transport of its own, so
+    // there is no substrate to pick — the control states that instead of
+    // offering a value the resolved runtime would contradict.
+    const notApplicable = field === 'substrate' && provider !== 'claude';
     return (
       <div key={field} className="flex flex-col gap-1" data-testid={`run-type-field-${field}`}>
         <label htmlFor={selectId} className="text-xs font-medium text-text-secondary">
@@ -267,15 +273,11 @@ export function RunTypeOverrideDetail({
           className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary disabled:opacity-50"
         >
           {allowFollowDefaults && <option value="">Follow defaults</option>}
-          {options.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
+          {renderFieldOptions(options)}
         </select>
         {notApplicable && (
           <span className="text-xs text-text-tertiary" data-testid={`run-type-na-${field}`}>
-            Not applicable · the selected Codex runtime has no substrate
+            Not applicable · the selected {AGENT_PROVIDER_LABELS[provider]} runtime has no substrate
           </span>
         )}
         {changed && !notApplicable && (
@@ -409,6 +411,47 @@ export function RunTypeOverrideDetail({
 interface FieldOption {
   id: string;
   label: string;
+  /**
+   * Optional section heading. Only OMP sets it — its catalog fronts many
+   * vendors (495 rows across anthropic / openai-codex / openrouter on the
+   * author's host), so a flat list is unnavigable. Consecutive options sharing
+   * a group render inside one <optgroup>.
+   */
+  group?: string;
+}
+
+/** Options as <option>s, folding any consecutive same-`group` run into an <optgroup>. */
+function renderFieldOptions(options: readonly FieldOption[]): React.JSX.Element[] {
+  const nodes: React.JSX.Element[] = [];
+  let index = 0;
+  while (index < options.length) {
+    const group = options[index]!.group;
+    if (group === undefined) {
+      const option = options[index]!;
+      nodes.push(
+        <option key={option.id} value={option.id}>
+          {option.label}
+        </option>,
+      );
+      index += 1;
+      continue;
+    }
+    const run: FieldOption[] = [];
+    while (index < options.length && options[index]!.group === group) {
+      run.push(options[index]!);
+      index += 1;
+    }
+    nodes.push(
+      <optgroup key={group} label={group}>
+        {run.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </optgroup>,
+    );
+  }
+  return nodes;
 }
 
 /** Option ids labelled from the same maps the chips and pickers already use. */
@@ -417,33 +460,36 @@ function labelled(field: RunTypeFieldId, ids: readonly string[]): FieldOption[] 
 }
 
 /**
- * The options offered for one field on one key, scoped to the runtime the key
+ * The options offered for one field on one key, scoped to the PROVIDER the key
  * would actually launch on.
  *
- * `model` is the load-bearing one: an unconditional Claude list let a Codex
- * runtime be paired with a Claude alias no matter how carefully the runtime
- * pick coerced. The Codex list is the SAME `model/list` catalog the launch
- * pickers render (`ModelSelector` / `ModelPill` via `useCodexModelCatalog`),
- * so Settings cannot offer a model a launch would not.
+ * `model` is the load-bearing one: an unconditional Claude list let a Codex or
+ * OMP runtime be paired with a Claude alias no matter how carefully the runtime
+ * pick coerced. Each non-Claude list is the SAME catalog the launch pickers
+ * render (`ModelSelector` / `ModelPill` via `useCodexModelCatalog` /
+ * `useOmpModelCatalog`), so Settings cannot offer a model a launch would not.
  *
- * `substrate` collapses to nothing on a Codex runtime — that family has no
- * sdk/interactive transport, so every value would disagree with the runtime.
+ * `substrate` collapses to nothing on a non-Claude runtime — neither family has
+ * an sdk/interactive transport, so every value would disagree with the runtime.
  */
 function fieldOptions(
   field: RunTypeFieldId,
   runTypeKey: string,
-  usesCodex: boolean,
+  provider: AgentProvider,
   codexModels: readonly CodexModelOption[],
+  ompModels: readonly OmpModelOption[],
 ): readonly FieldOption[] {
   switch (field) {
     case 'model':
-      return usesCodex
-        ? codexModels.map((o) => ({ id: o.id, label: o.label }))
-        : labelled(field, RUN_TYPE_MODEL_OPTIONS.map((o) => o.id));
+      if (provider === 'codex') return codexModels.map((o) => ({ id: o.id, label: o.label }));
+      if (provider === 'omp') {
+        return ompModels.map((o) => ({ id: o.id, label: o.label, group: o.ompProvider }));
+      }
+      return labelled(field, RUN_TYPE_MODEL_OPTIONS.map((o) => o.id));
     case 'reasoningEffort':
       return labelled(field, RUN_TYPE_EFFORT_OPTIONS);
     case 'substrate':
-      return usesCodex ? [] : labelled(field, ['sdk', 'interactive']);
+      return provider === 'claude' ? labelled(field, ['sdk', 'interactive']) : [];
     case 'agentRuntime':
       return labelled(field, agentRuntimeOptions(runTypeKey));
     case 'permissionMode':

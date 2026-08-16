@@ -19,9 +19,9 @@ import {
   coerceDraftForSubstrate,
   coerceGlobalLaunchModel,
   draftFromStored,
-  draftUsesCodexRuntime,
+  draftRuntimeProvider,
   effectiveRuntimeForDraft,
-  globalRuntimeUsesCodex,
+  globalRuntimeProvider,
   isQuickRunTypeKey,
   patchFromDraft,
   resolveRunTypeBaseline,
@@ -41,6 +41,7 @@ import {
 import {
   isCodexModelFamily,
   isCodexModelSelection,
+  isOmpModelFamily,
 } from '../../../../../shared/types/agentModels';
 import {
   resolveRunTypeLaunchDefaults,
@@ -579,9 +580,10 @@ describe('runtime-family coercion — every edit order', () => {
   describe('effective runtime', () => {
     it('falls through to the baseline while the runtime card is off', () => {
       expect(effectiveRuntimeForDraft(draft(), flow)).toBe('claude-sdk');
-      expect(draftUsesCodexRuntime(draft(), flow)).toBe(false);
+      expect(draftRuntimeProvider(draft(), flow)).toBe('claude');
       expect(effectiveRuntimeForDraft(draft({ agentRuntime: 'codex-pty' }), flow)).toBe('codex-pty');
-      expect(draftUsesCodexRuntime(draft({ agentRuntime: 'codex-sdk' }), flow)).toBe(true);
+      expect(draftRuntimeProvider(draft({ agentRuntime: 'codex-sdk' }), flow)).toBe('codex');
+      expect(draftRuntimeProvider(draft({ agentRuntime: 'omp-sdk' }), flow)).toBe('omp');
     });
   });
 
@@ -739,15 +741,17 @@ describe('runtime-family coercion — every edit order', () => {
  * "Built-in default" has to stay reachable.
  */
 describe('global-rung runtime-family coercion (Default Launch Model / Agent Runtime)', () => {
-  describe('globalRuntimeUsesCodex', () => {
+  describe('globalRuntimeProvider', () => {
     it('reads the provider off the runtime, and treats an unset global as Claude', () => {
       // Unset ⇒ each launch kind falls through to its own floor, and every floor
       // is a Claude runtime — so the model controls stay Claude-scoped.
-      expect(globalRuntimeUsesCodex(undefined)).toBe(false);
-      expect(globalRuntimeUsesCodex('claude-sdk')).toBe(false);
-      expect(globalRuntimeUsesCodex('claude-interactive')).toBe(false);
-      expect(globalRuntimeUsesCodex('codex-sdk')).toBe(true);
-      expect(globalRuntimeUsesCodex('codex-pty')).toBe(true);
+      expect(globalRuntimeProvider(undefined)).toBe('claude');
+      expect(globalRuntimeProvider('claude-sdk')).toBe('claude');
+      expect(globalRuntimeProvider('claude-interactive')).toBe('claude');
+      expect(globalRuntimeProvider('codex-sdk')).toBe('codex');
+      expect(globalRuntimeProvider('codex-pty')).toBe('codex');
+      expect(globalRuntimeProvider('omp-sdk')).toBe('omp');
+      expect(globalRuntimeProvider('omp-pty')).toBe('omp');
     });
   });
 
@@ -795,15 +799,29 @@ describe('global-rung runtime-family coercion (Default Launch Model / Agent Runt
   // The property the two edit paths exist to guarantee: whatever is stored is
   // launchable on whatever runtime is stored beside it.
   it('leaves no cross-family pair reachable for any model × runtime combination', () => {
-    const models = ['fable', 'opus', 'sonnet', 'haiku', 'auto', 'gpt-5-codex', 'gpt-5', ''];
+    const models = [
+      'fable',
+      'opus',
+      'sonnet',
+      'haiku',
+      'auto',
+      'gpt-5-codex',
+      'gpt-5',
+      'anthropic/claude-opus-4-5',
+      'openrouter/qwen3-coder',
+      '',
+    ];
     for (const runtime of [undefined, ...SESSION_AGENT_RUNTIMES] as const) {
       for (const model of models) {
         const coerced = coerceGlobalLaunchModel(model, runtime);
         if (coerced === '') continue; // absent ⇒ the launch floor applies
+        const provider = globalRuntimeProvider(runtime);
         expect(
-          globalRuntimeUsesCodex(runtime)
+          provider === 'codex'
             ? isCodexModelSelection(coerced)
-            : !isCodexModelFamily(coerced),
+            : provider === 'omp'
+              ? isOmpModelFamily(coerced)
+              : !isCodexModelFamily(coerced) && !isOmpModelFamily(coerced),
         ).toBe(true);
         // Idempotent: re-coercing a coerced value changes nothing.
         expect(coerceGlobalLaunchModel(coerced, runtime)).toBe(coerced);

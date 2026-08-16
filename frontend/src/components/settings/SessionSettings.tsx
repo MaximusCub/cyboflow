@@ -4,8 +4,9 @@ import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from '../cyboflow/AgentPermissionModeSelector';
 import { MODEL_OPTIONS } from '../cyboflow/unified/ModelPill';
+import { ModelSelector } from '../cyboflow/ModelSelector';
 import { RunTypeOverridesSection } from './RunTypeOverridesSection';
-import { coerceGlobalLaunchModel, globalRuntimeUsesCodex, runTypeValueLabel } from './runTypeOverrides';
+import { coerceGlobalLaunchModel, globalRuntimeProvider, runTypeValueLabel } from './runTypeOverrides';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { trackEvent } from '../../utils/telemetry';
 import {
@@ -114,18 +115,20 @@ export function SessionSettings({
 
   /**
    * The two global launch defaults are ONE setting in two halves: a model from
-   * the other provider's family cannot launch on the chosen runtime, and this
-   * rung feeds every launch that has no per-run-type override. The per-type
-   * editor (`RunTypeOverrideDetail`) already refuses that pair the same two ways
-   * — scope the offered options to the effective runtime, AND coerce on every
-   * edit path so no edit ORDER can reassemble it — so the global rung does the
-   * same, through the same `coerceModelForRuntime`.
+   * another provider's family cannot launch on the chosen runtime, and this rung
+   * feeds every launch that has no per-run-type override. The per-type editor
+   * (`RunTypeOverrideDetail`) already refuses that pair the same two ways —
+   * scope the offered options to the effective runtime, AND coerce on every edit
+   * path so no edit ORDER can reassemble it — so the global rung does the same,
+   * through the same `coerceModelForRuntime`.
    *
-   * Codex options come from the same `model/list` catalog the launch pickers
-   * render (`ModelSelector` / `ModelPill` via `useCodexModelCatalog`), never a
-   * second hardcoded list, so Settings cannot offer a model a launch would not.
+   * Every provider's options come from the SAME catalog its launch pickers
+   * render (`ModelSelector` / `ModelPill`), never a second hardcoded list, so
+   * Settings cannot offer a model a launch would not.
    */
-  const usesCodex = globalRuntimeUsesCodex(defaultAgentRuntime);
+  const globalProvider = globalRuntimeProvider(defaultAgentRuntime);
+  const usesCodex = globalProvider === 'codex';
+  const usesOmp = globalProvider === 'omp';
   const {
     options: codexModelOptions,
     loading: codexCatalogLoading,
@@ -312,13 +315,33 @@ export function SessionSettings({
               (DEFAULT_RUN_TYPE_MODEL_FLOORS). Absent must stay distinguishable
               from a set value, hence the explicit choice rather than preselecting
               a model. Options come from the launch pickers' own lists — the
-              Claude aliases (MODEL_OPTIONS) or, under a Codex global runtime,
-              the Codex catalog — never a second hand-written list. */}
+              Claude aliases (MODEL_OPTIONS), the Codex catalog, or the OMP
+              catalog — never a second hand-written list.
+
+              OMP gets the shared grouped <ModelSelector> rather than this button
+              list because it is a fundamentally different SIZE of catalog: OMP
+              fronts many vendors (495 models on the author's host, across
+              anthropic / openai-codex / openrouter), so a button per model would
+              be an unusable wall. The button list stays for Claude (6 pinned
+              aliases) and Codex (~7). */}
           <SettingsSection
             title="Default Launch Model"
             description="Which model a new quick session or flow run starts on"
             icon={<Cpu className="w-4 h-4" />}
           >
+            {usesOmp ? (
+              <div data-testid="default-launch-model-omp">
+                <ModelSelector
+                  id="default-launch-model-omp-select"
+                  label="Model"
+                  value={defaultLaunchModel}
+                  onChange={handleLaunchModelPick}
+                  agentProvider="omp"
+                  {...(defaultAgentRuntime ? { agentRuntime: defaultAgentRuntime } : {})}
+                  allowDefaultOption={{ label: 'Built-in default — OMP picks' }}
+                />
+              </div>
+            ) : (
             <div className="flex flex-col gap-1.5">
               <button
                 type="button"
@@ -378,12 +401,14 @@ export function SessionSettings({
                 </p>
               )}
             </div>
+            )}
             <p className="text-xs text-text-tertiary mt-2">
               Seeds both quick sessions and flow runs. A per-session-type override (below) still wins,
               and so does a model picked in the launch wizard. On "Built-in default" nothing is stored:
-              quick sessions and flow runs each fall back to their own built-in model. The list follows
-              the agent runtime above — switching to a Codex runtime offers Codex models and moves a
-              Claude model off, since a model can only start on its own provider.
+              quick sessions and flow runs each fall back to their own built-in model
+              {usesOmp ? ', and OMP starts on its own default' : ''}. The list follows the agent
+              runtime above — switching to a Codex or OMP runtime offers that provider's models and
+              moves a Claude model off, since a model can only start on its own provider.
             </p>
           </SettingsSection>
 
