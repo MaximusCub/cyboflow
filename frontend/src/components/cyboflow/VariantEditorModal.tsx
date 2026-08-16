@@ -25,13 +25,13 @@ import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
 import { WorkflowStepInspector } from './WorkflowStepInspector';
 import { MODEL_OPTIONS } from './unified/ModelPill';
-import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import { providerForRuntime } from './agentRuntimeUi';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { isRuntimeProviderEnabled } from '../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 
@@ -125,8 +125,10 @@ export function VariantEditorModal({
   // unpinned (INHERIT) the launch default (Claude) drives the pickers. A Codex
   // variant swaps the Claude model list for the runtime-discovered catalog and
   // hides the per-agent overrides (a Codex run is single-model, no overlays).
-  const variantProvider: AgentProvider =
-    agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as LaunchAgentRuntime);
+  // The wire schema is 2-wide (`claude | codex`): a variant pin is a
+  // `WorkflowAgentRuntime` (never `omp-fleet` in v1), so the cast is total.
+  const variantProvider: 'claude' | 'codex' =
+    agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as WorkflowAgentRuntime);
   const isCodexVariant = variantProvider === 'codex';
   const { options: codexModelOptions } = useCodexModelCatalog(isCodexVariant);
   // Provider access (Settings → Integrations): a variant may not pin a runtime

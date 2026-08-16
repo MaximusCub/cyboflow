@@ -47,6 +47,7 @@ import {
 const PROVIDER_LABELS: Record<AgentProvider, string> = {
   claude: 'Claude',
   codex: 'Codex',
+  omp: 'OMP',
 };
 
 /**

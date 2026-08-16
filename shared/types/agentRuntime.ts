@@ -8,32 +8,33 @@
 
 import type { CliSubstrate } from './substrate';
 
-export type AgentProvider = 'claude' | 'codex';
+export type AgentProvider = 'claude' | 'codex' | 'omp';
 
 export type AgentRuntime =
   | 'claude-sdk'
   | 'claude-interactive'
   | 'codex-sdk'
   | 'codex-pty'
-  | 'codex-exec';
+  | 'codex-exec'
+  | 'omp-fleet';
 
 export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
 
-export type WorkflowAgentRuntime = Exclude<AgentRuntime, 'codex-pty' | 'codex-exec'>;
+export type WorkflowAgentRuntime = Exclude<AgentRuntime, 'codex-pty' | 'codex-exec' | 'omp-fleet'>;
 
 export const DEFAULT_AGENT_PROVIDER: AgentProvider = 'claude';
 export const DEFAULT_SESSION_AGENT_RUNTIME: SessionAgentRuntime = 'claude-sdk';
 export const DEFAULT_WORKFLOW_AGENT_RUNTIME: WorkflowAgentRuntime = 'claude-sdk';
 
-export const AGENT_PROVIDERS = ['claude', 'codex'] as const;
+export const AGENT_PROVIDERS = ['claude', 'codex', 'omp'] as const;
 
 export const SESSION_AGENT_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
   'codex-sdk',
   'codex-pty',
+  'omp-fleet',
 ] as const;
-
 export const WORKFLOW_AGENT_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
@@ -72,6 +73,7 @@ export function claudeRuntimeFromSubstrate(
 
 /** Derive the owning provider for an agent runtime. */
 export function providerForRuntime(runtime: AgentRuntime): AgentProvider {
+  if (runtime.startsWith('omp-')) return 'omp';
   return runtime.startsWith('codex-') ? 'codex' : 'claude';
 }
 
@@ -146,7 +148,7 @@ export function resolveAgentProviderAccess(
  */
 export const AGENT_PROVIDER_DISABLED_CODE = 'ERR_AGENT_PROVIDER_DISABLED';
 
-const DISABLED_PATTERN = new RegExp(`^${AGENT_PROVIDER_DISABLED_CODE}\\[(claude|codex)\\]:\\s*`);
+const DISABLED_PATTERN = new RegExp(`^${AGENT_PROVIDER_DISABLED_CODE}\\[(claude|codex|omp)\\]:\\s*`);
 
 /** Build the wire message: `ERR_AGENT_PROVIDER_DISABLED[claude]: <prose>`. */
 export function formatAgentProviderDisabled(provider: AgentProvider, message: string): string {

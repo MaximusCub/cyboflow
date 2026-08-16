@@ -37,6 +37,7 @@ import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { EpicTaskGroup } from './taskGrouping';
 import { flattenGroups, groupTasksByEpic } from './taskGrouping';
 import { EpicGroupedTaskList } from './EpicGroupedTaskList';
@@ -55,7 +56,7 @@ import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './a
  * (substrate/agentProvider are DERIVED from `runtime`, not stored separately).
  */
 interface ArmQuickConfig {
-  runtime: LaunchAgentRuntime;
+  runtime: WorkflowAgentRuntime;
   model: string;
   reasoningEffort: ReasoningEffort | null;
   permissionMode: PermissionMode;
@@ -69,21 +70,23 @@ const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
 };
 
 /**
- * The wire-schema `agentRuntime` enum for an experiment quick arm excludes
- * `codex-pty` (session-only elsewhere, not for an A/B arm) — see
+ * The wire-schema `agentRuntime` enum for an experiment quick arm is the
+ * workflow set `claude-sdk | claude-interactive | codex-sdk` — it excludes
+ * `codex-pty` (session-only elsewhere, not for an A/B arm) and `omp-fleet`
+ * (v1 offers OMP as a quick-session runtime only, not to A/B arms); see
  * `experimentArmQuickConfigSchema` in `experiments.ts`. `QuickArmConfigForm`'s
- * `SubstrateSelector` already disables `codex-pty` via `runtimeScope="workflow"`
- * (its `isRuntimeDisabled` disables exactly `codex-pty`, matching this
- * restriction despite the "workflow" name), so this is unreachable through the
- * UI; clamped here anyway as defense-in-depth + to satisfy the narrower type.
+ * `SubstrateSelector` uses `runtimeScope="workflow"`, so it never lists either
+ * value; this clamps any out-of-set value anyway — `codex-pty` to its
+ * `codex-sdk` SDK equivalent, `omp-fleet` to the `claude-sdk` launch default —
+ * as defense-in-depth and to satisfy the narrower type.
  */
-function quickArmAgentRuntime(
-  runtime: LaunchAgentRuntime,
-): 'claude-sdk' | 'claude-interactive' | 'codex-sdk' {
-  return runtime === 'codex-pty' ? 'codex-sdk' : runtime;
+function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowAgentRuntime {
+  if (runtime === 'codex-pty') return 'codex-sdk';
+  if (runtime === 'omp-fleet') return 'claude-sdk';
+  return runtime;
 }
 
-function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive' | undefined {
+function substrateForQuickArm(runtime: WorkflowAgentRuntime): 'sdk' | 'interactive' | undefined {
   if (runtime === 'claude-sdk') return 'sdk';
   if (runtime === 'claude-interactive') return 'interactive';
   return undefined;
@@ -103,14 +106,15 @@ function applyQuickArmRuntimeChange(
   config: ArmQuickConfig,
   runtime: LaunchAgentRuntime,
 ): ArmQuickConfig {
-  if (runtime === config.runtime) return config;
-  if (providerForRuntime(runtime) === providerForRuntime(config.runtime)) {
-    return { ...config, runtime };
+  const armRuntime = quickArmAgentRuntime(runtime);
+  if (armRuntime === config.runtime) return config;
+  if (providerForRuntime(armRuntime) === providerForRuntime(config.runtime)) {
+    return { ...config, runtime: armRuntime };
   }
   return {
     ...config,
-    runtime,
-    model: isCodexRuntime(runtime) ? DEFAULT_CODEX_MODEL : DEFAULT_QUICK_MODEL,
+    runtime: armRuntime,
+    model: isCodexRuntime(armRuntime) ? DEFAULT_CODEX_MODEL : DEFAULT_QUICK_MODEL,
     reasoningEffort: null,
   };
 }
@@ -146,39 +150,36 @@ function QuickArmConfigForm({
         agentProvider={provider}
         agentRuntime={config.runtime}
       />
-      {/* Reasoning-effort select — excluded for codex-pty (mirrors
-          SessionStartWizard), moot here since the runtime choice above already
-          disables codex-pty for a quick arm. */}
-      {config.runtime !== 'codex-pty' && (
-        <div className="flex flex-col gap-1">
-          <label
-            htmlFor={`${testIdPrefix}-effort`}
-            className="text-xs font-medium text-text-secondary"
-          >
-            Reasoning effort
-          </label>
-          <select
-            id={`${testIdPrefix}-effort`}
-            value={config.reasoningEffort ?? ''}
-            onChange={(e) =>
-              onChange({
-                ...config,
-                reasoningEffort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
-              })
-            }
-            className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-input-text"
-            aria-label={`Select reasoning effort for arm ${arm.toUpperCase()}`}
-            data-testid={`${testIdPrefix}-effort`}
-          >
-            <option value="">Default</option>
-            {effortLevelsForProvider(provider).map((level) => (
-              <option key={level} value={level}>
-                {level}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+      {/* Reasoning-effort select (always present: a quick arm's runtime is a
+          `WorkflowAgentRuntime`, which excludes codex-pty by type). */}
+      <div className="flex flex-col gap-1">
+        <label
+          htmlFor={`${testIdPrefix}-effort`}
+          className="text-xs font-medium text-text-secondary"
+        >
+          Reasoning effort
+        </label>
+        <select
+          id={`${testIdPrefix}-effort`}
+          value={config.reasoningEffort ?? ''}
+          onChange={(e) =>
+            onChange({
+              ...config,
+              reasoningEffort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
+            })
+          }
+          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-input-text"
+          aria-label={`Select reasoning effort for arm ${arm.toUpperCase()}`}
+          data-testid={`${testIdPrefix}-effort`}
+        >
+          <option value="">Default</option>
+          {effortLevelsForProvider(provider).map((level) => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+      </div>
       <AgentPermissionModeSelector
         value={config.permissionMode}
         onChange={(permissionMode) => onChange({ ...config, permissionMode })}
@@ -471,7 +472,7 @@ export function ABTestLaunchModal({
     return {
       ...(substrate ? { substrate } : {}),
       agentProvider: providerForRuntime(config.runtime),
-      agentRuntime: quickArmAgentRuntime(config.runtime),
+      agentRuntime: config.runtime,
       model: config.model,
       ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
       permissionMode: config.permissionMode,

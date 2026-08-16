@@ -43,6 +43,7 @@ describe('providerForRuntime / isRuntimeProviderEnabled', () => {
     expect(providerForRuntime('codex-sdk')).toBe('codex');
     expect(providerForRuntime('codex-pty')).toBe('codex');
     expect(providerForRuntime('codex-exec')).toBe('codex');
+    expect(providerForRuntime('omp-fleet')).toBe('omp');
   });
 
   it('gates a runtime on its provider', () => {
@@ -53,9 +54,9 @@ describe('providerForRuntime / isRuntimeProviderEnabled', () => {
 });
 
 describe('enabledAgentProviders', () => {
-  it('lists both by default and drops the switched-off one', () => {
-    expect(enabledAgentProviders(undefined)).toEqual(['claude', 'codex']);
-    expect(enabledAgentProviders({ claude: false, codex: true })).toEqual(['codex']);
+  it('lists every provider by default and drops the switched-off one', () => {
+    expect(enabledAgentProviders(undefined)).toEqual(['claude', 'codex', 'omp']);
+    expect(enabledAgentProviders({ claude: false, codex: true })).toEqual(['codex', 'omp']);
   });
 });
 
