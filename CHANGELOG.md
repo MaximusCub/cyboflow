@@ -6,6 +6,27 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-08-15
+
+### Added
+
+- **Third agent provider (OMP / oh-my-pi)**: OMP runtimes are now picker-selectable and launchable as a first-tier workflow runtime. The provider ships a fail-closed cyboflow gating extension as its sole policy engine (safe-bash rung, Claude-canonical approval names), an RPC transport with an event projector and per-turn usage accounting, a PTY manager with an availability probe and MCP-config writer, and frontend surfaces (integrations card, onboarding, pickers, panel routing). Provider/runtime handling is now driven from one registry table. Migrations 103 (widen the provider/runtime CHECK constraints) and 104 (agent override provider/model).
+- **Global launch defaults**: a global default launch model and agent runtime, configurable in Settings and resolved at every launch seam, plus a per-run-type overrides list and detail screen in Session settings and a "Save as default" CTA (with Undo) on the WorkflowPicker and the launch wizard.
+- **Quick-session visual verification**: quick sessions can queue visual verifications over MCP (`cyboflow_get_verifications`), and a run's pending verifications are cancelled on merge / createPr / dismiss close-out.
+- **Session action toast**: an actionable toast with pause-on-hover/focus and `role=status`; option-less escalation CTAs default to Open in session / Dismiss.
+- A reconnect banner for paused tracker connections, and an observe-only tripwire for orphaned `cyboflowMcpServer` processes.
+
+### Changed
+
+- Split the Settings AI tab into Feature controls and Session settings groups, and drive wizard model selection through a single seeded-selection hook (per-key seed/touched isolation).
+- Enforce runtime/model/substrate agreement at every launch and edit seam; coerce a quick session's model to its resolved runtime's family; surface Settings override failures and block unlaunchable combinations.
+
+### Fixed
+
+- **MCP orphan reaper**: `cyboflowMcpServer` now exits when its spawner dies rather than when the app does, with an `ELECTRON_RUN_AS_NODE` fork-bomb guard on both spawn paths and an observable, sound tripwire.
+- **Tracker sync hardening**: unwedge inbound behind held pushes; abort adapter requests after 30s; outbox supersession; auth holds keep rows unsettled and repair a half-import first; discard stale reconcile responses after a mid-wizard retarget; log pushed ideas as pushes rather than mirrored sub-issues.
+- Derive session file/diff stats from git rather than `execution_diffs`, and resolve the health panel's runbook status the way the gate does.
+
 ## [0.2.2] — 2026-08-13
 
 ### Added
