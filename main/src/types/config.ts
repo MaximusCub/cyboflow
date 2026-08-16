@@ -3,6 +3,7 @@ import type { AssistantContextRetention } from '../../../shared/types/agentThrea
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
@@ -121,6 +122,13 @@ export interface AppConfig {
   // (which hard-pins 'orchestrated'). NOT seeded into the constructor defaults, so existing
   // config.json files stay byte-identical.
   defaultExecutionModel?: ExecutionModel;
+  // Fan-out dispatch mode for orchestrated INTERACTIVE runs ('prose' | 'workflow').
+  // 'workflow' dispatches each inner stage of a wave to a pre-installed dynamic
+  // workflow script instead of the agent driving lanes by hand; the orchestrator
+  // stays the single writer either way. Floors to 'prose' when unset, and is NOT
+  // seeded into the constructor defaults so existing config.json files stay
+  // byte-identical.
+  fanOutDispatch?: FanOutDispatch;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Read via getQuickSessionWorktreeMode() (floor 'worktree') by the
   // sessions:create-quick handler when the request omits worktreeMode. NOT
@@ -277,6 +285,13 @@ export interface UpdateConfigRequest {
   defaultAgentRuntime?: AgentRuntime;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
   defaultExecutionModel?: ExecutionModel;
+  // Fan-out dispatch mode for orchestrated INTERACTIVE runs ('prose' | 'workflow').
+  // 'workflow' dispatches each inner stage of a wave to a pre-installed dynamic
+  // workflow script instead of the agent driving lanes by hand; the orchestrator
+  // stays the single writer either way. Floors to 'prose' when unset, and is NOT
+  // seeded into the constructor defaults so existing config.json files stay
+  // byte-identical.
+  fanOutDispatch?: FanOutDispatch;
   // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global default CLI substrate for new QUICK sessions (see AppConfig.quickSessionDefaultSubstrate).

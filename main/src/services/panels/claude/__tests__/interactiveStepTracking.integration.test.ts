@@ -217,6 +217,8 @@ function createMockSessionManager(
 function createMockConfigManager(): ConfigManager {
   return {
     getConfig: vi.fn(() => ({ claudeExecutablePath: undefined })),
+    // Fan-out dispatch mode, read once per spawn (floors to 'prose').
+    getFanOutDispatch: vi.fn(() => 'prose'),
   } as unknown as ConfigManager;
 }
 

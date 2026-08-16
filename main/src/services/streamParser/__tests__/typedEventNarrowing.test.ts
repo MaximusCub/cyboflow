@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TypedEventNarrowing } from '../typedEventNarrowing';
+import { claudeStreamEventSchema, claudeStreamEventSchemaByType } from '../schemas';
 import {
   systemInit,
   assistant,
@@ -244,5 +245,136 @@ describe('TypedEventNarrowing', () => {
       session_id: '9ac69ae6-7b4a-4007-b470-b6c9628dfb71',
     });
     expect('kind' in updated).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Union equivalence
+  //
+  // narrow() dispatches on the top-level `type` and parses ONE branch instead
+  // of walking the whole z.union, because Zod builds a ZodError for every
+  // non-matching branch and that dominated main-process CPU while runs streamed.
+  // These pin the two properties that make the swap safe: the dispatch map
+  // covers exactly the union's branches, and it accepts/rejects the same values.
+  // -------------------------------------------------------------------------
+
+  it('dispatch map covers exactly the top-level types the union accepts', () => {
+    expect(Object.keys(claudeStreamEventSchemaByType).sort()).toEqual([
+      'assistant',
+      'rate_limit_event',
+      'result',
+      'session_info',
+      'stream_event',
+      'system',
+      'user',
+    ]);
+  });
+
+  it('maps each key to the branch that actually pins that literal', () => {
+    // Key coverage alone is not enough: swapping two map values would keep both
+    // the key list and the compile-time output-union bridges satisfied while
+    // silently routing every event of those two types to the wrong schema.
+    // Read each branch's DECLARED `type` literal and require it to equal its key.
+    interface LiteralLike { value: unknown }
+    interface ObjectLike { shape: { type: LiteralLike } }
+    interface UnionLike { options: ObjectLike[] }
+
+    const declaredTypes = (branch: unknown): unknown[] => {
+      if (typeof branch !== 'object' || branch === null) return [];
+      if ('options' in branch) {
+        return (branch as UnionLike).options.map((option) => option.shape.type.value);
+      }
+      if ('shape' in branch) return [(branch as ObjectLike).shape.type.value];
+      return [];
+    };
+
+    for (const [key, branch] of Object.entries(claudeStreamEventSchemaByType)) {
+      const literals = declaredTypes(branch);
+      expect(literals.length).toBeGreaterThan(0);
+      // Every arm of a branch (a subtype-discriminated union has several) must
+      // pin the same top-level `type`, and it must be the key it is filed under.
+      for (const literal of literals) expect(literal).toBe(key);
+    }
+  });
+
+  it('returns __unknown__ (never throws) for prototype-named event types', () => {
+    // `'constructor' in obj` is true via Object.prototype, so an object-index
+    // guard would pass and then call `.safeParse` on Object itself — a TypeError
+    // out of a function documented to NEVER throw. Ordinary JSON can carry these.
+    for (const type of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      const event = JSON.parse(JSON.stringify({ type, anything: 1 })) as unknown;
+      let result: ReturnType<TypedEventNarrowing['narrow']> | undefined;
+      expect(() => { result = narrower.narrow(event); }).not.toThrow();
+      expect(result && 'kind' in result && result.kind).toBe('__unknown__');
+    }
+  });
+
+  it('narrows every content-block kind, and rejects an unknown or malformed one', () => {
+    // contentBlockSchema is a discriminatedUnion parsed once PER BLOCK, so this
+    // pins that all three arms still narrow and that a bad block still sinks the
+    // whole event to __unknown__ (rather than being silently dropped or kept).
+    const withBlocks = (content: unknown[]) => ({
+      type: 'assistant',
+      message: {
+        id: 'm1', type: 'message', role: 'assistant', model: 'claude',
+        content, stop_reason: null, stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      session_id: 'sess', uuid: 'u1',
+    });
+
+    const ok = narrower.narrow(withBlocks([
+      { type: 'text', text: 'hi' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } },
+      { type: 'thinking', thinking: 'hmm' },
+    ]));
+    expect('kind' in ok).toBe(false);
+
+    // Unknown discriminant.
+    const unknownBlock = narrower.narrow(withBlocks([{ type: 'image', source: {} }]));
+    expect('kind' in unknownBlock && unknownBlock.kind).toBe('__unknown__');
+
+    // Known discriminant, wrong payload — must NOT slip through.
+    const malformed = narrower.narrow(withBlocks([{ type: 'text', text: 42 }]));
+    expect('kind' in malformed && malformed.kind).toBe('__unknown__');
+  });
+
+  it('agrees with the full union on both accepted and rejected values', () => {
+    const corpus: unknown[] = [
+      systemInit(),
+      assistant(),
+      resultSuccess(),
+      streamEventSignatureDelta(),
+      streamEventThinkingDelta(),
+      // Rejected: unknown discriminant, missing discriminant, wrong shape for a
+      // KNOWN type, non-object, and a null/absent type.
+      { type: 'totally_unknown', foo: 1 },
+      { subtype: 'init' },
+      { type: 'assistant' },
+      { type: 'result', subtype: 'success' },
+      'not-an-object',
+      42,
+      null,
+      { type: null },
+      // Prototype-reachable names: the old union rejected these, and so must the
+      // dispatch path (rather than resolving to Object.prototype members).
+      { type: 'constructor' },
+      { type: 'toString' },
+      { type: 'valueOf' },
+      { type: 'hasOwnProperty' },
+      // Non-string discriminants.
+      { type: 1 },
+      { type: { toString: () => 'assistant' } },
+      [],
+    ];
+
+    for (const value of corpus) {
+      const viaUnion = claudeStreamEventSchema.safeParse(value);
+      const viaNarrow = narrower.narrow(value);
+      const narrowRejected = 'kind' in viaNarrow && viaNarrow.kind === '__unknown__';
+      expect(narrowRejected).toBe(!viaUnion.success);
+      if (viaUnion.success) {
+        expect(viaNarrow).toEqual(viaUnion.data);
+      }
+    }
   });
 });

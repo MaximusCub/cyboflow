@@ -1501,7 +1501,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // lifetime), decremented once at process-death by removeBundleForSession — a
       // warm turn re-writes the bundle (driveWarmTurn) but does NOT re-bump.
       if (!dbSession?.in_place) {
-        installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
+        // 'prose' EXPLICITLY: this install seam is substrate-shared, but the SDK
+        // path composes its prompt through workflowPromptReaderAdapter (which
+        // never emits the workflow-dispatch chain), so stage scripts written
+        // here would be inert files in an SDK worktree. Pinned rather than
+        // defaulted so the intent survives a change to the default.
+        installWorkflowBundle(
+          this.db,
+          this.bundleWriter,
+          runId,
+          options.worktreePath,
+          makeLoggerLike(this.logger),
+          'prose',
+        );
         this.bundleWorktrees.set(sessionId, options.worktreePath);
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
       }
@@ -1539,7 +1551,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const priorRefcount = this.trackerRefcountByRunId.get(runId) ?? 0;
       this.trackerRefcountByRunId.set(runId, priorRefcount + 1);
       if (priorRefcount === 0) {
-        DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+        // worktreePath explicitly (see the interactive sibling): a flow run has no
+        // `sessions` row, so the tracker's sessions-keyed fallback resolves nothing.
+        DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, {
+          runId,
+          sessionId,
+          worktreePath: options.worktreePath,
+        });
       }
 
       // Abort controller for cancellation.

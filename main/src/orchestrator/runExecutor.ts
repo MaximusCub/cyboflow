@@ -701,6 +701,16 @@ export class RunExecutor {
      * invariant. When absent the resolver floors to its own 'default'.
      */
     private readonly getDefaultAgentPermissionMode?: () => PermissionMode,
+    /**
+     * Optional dynamic-workflow liveness probe. When injected, the interactive
+     * event-driven REST seam skips resting a run whose agent is currently
+     * yielding to a BACKGROUND Claude Code dynamic workflow (the `Workflow`
+     * tool) — see registerTurnEndRest. A plain function type (no tracker import)
+     * keeps this module free of the dynamicWorkflows dependency and lets tests
+     * drive both arms without the singleton. When absent, rest behaviour is
+     * byte-identical to before this seam existed.
+     */
+    private readonly hasRunningDynamicWorkflow?: (runId: string) => boolean,
   ) {}
 
   /**
@@ -1266,6 +1276,32 @@ export class RunExecutor {
       if (typeof payload !== 'object' || payload === null || !('runId' in payload)) return;
       const evt = payload as { runId: string };
       if (evt.runId !== runId) return;
+      // A turn-end that lands while a dynamic workflow is still RUNNING for this
+      // run is the agent yielding to a background `Workflow` task, not the turn
+      // finishing its work — the CLI re-invokes it on the completion
+      // notification, and THAT turn's end rests the run. Resting here is not the
+      // benign no-op the drained comment describes: onLifecycleTransition runs
+      // its side effects (task-stage derivation, usage rollup, compound
+      // findings close-out) EVEN WHEN the status transition is rejected as a
+      // race (see the comment at its `catch`), and the compound close-out clears
+      // `selected` on still-pending seeded findings.
+      //
+      // Best-effort by construction, and deliberately NOT timer-deferred: the
+      // launch is observed by a 1s-poll filesystem watcher, so a turn-end
+      // arriving within that window still rests. Closing that window needs a
+      // deferred re-check, which needs a per-run execution epoch + turn
+      // generation to be safe (a naive timer can fire after the human answered a
+      // question gate and park a run that is mid-turn again — `restAwaitingReview`
+      // is guarded on status='running', which such a run once again satisfies).
+      // That machinery belongs with the change that makes workflow dispatch
+      // routine; until then this guard covers the ad-hoc case without adding a
+      // stale-timer hazard of its own.
+      if (this.hasRunningDynamicWorkflow?.(runId) === true) {
+        this.logger.debug('[RunExecutor] turn-end with a live dynamic workflow — deferring rest', {
+          runId,
+        });
+        return;
+      }
       // Rest the run in awaiting_review WITHOUT resolving the spawn promise.
       // Fire-and-forget: the transition is fail-soft (a rejected rest is
       // swallowed inside onLifecycleTransition), so a rejected promise here is
