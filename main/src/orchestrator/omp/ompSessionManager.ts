@@ -1,0 +1,444 @@
+/**
+ * OMP Phase-4 increment 3 — `OmpSessionManager`: a sibling of the four
+ * `AbstractCliManager` managers (ADR `omp-phase4-coexistence-adr.md` §3),
+ * NOT a subclass of `AbstractCliManager`. It has no child process, no PTY,
+ * no stdout stream: one panel ≙ one remote OMP worker, supervised over the
+ * Phase-3 bridge through the supervise-authorized `OmpCommandAdapter`.
+ *
+ * Chat-lifecycle mapping (ADR table, §3):
+ *
+ * | Chat lifecycle            | Fleet tool      | Implementation here |
+ * |---------------------------|-----------------|---------------------|
+ * | `spawn(panelId, …, prompt)` | `fleet_spawn` | worker id parsed from the detail, stored on the panel |
+ * | `sendInput(panelId, text)`  | `fleet_send`    | follow-up turns steer the same worker |
+ * | `output` (poll)             | `fleet_read`    | new output since last read, emitted as `output` events |
+ * | liveness / exit detection   | `fleet_state`   | leaves a live state ⇒ emit `exit` (terminal) |
+ * | `stop(panelId)`             | `fleet_kill`    | deliberate termination |
+ *
+ * The event payload shapes mirror the (module-private) shapes of
+ * `AbstractCliManager` — `output` `{ panelId, sessionId, type, data,
+ * timestamp }` and `exit` `{ panelId, sessionId, exitCode, signal }` — so the
+ * `AbstractAIPanelManager` forwarding layer can consume this manager unmodified
+ * once increment 4 wires it in. Increment 3 itself is standalone: it is not
+ * constructed by anything yet, and dispatch wiring is increment 4.
+ *
+ * `fleet_read` returns a *sliding* recent-lines window with no byte offset, so
+ * "new output since last read" is derived by comparing against the last-read
+ * transcript (`newOutputSince`): a strict extension emits the delta; a slid
+ * window emits only the non-overlapping tail.
+ *
+ * Fail-closed: the manager is only ever constructed with a RESOLVED adapter
+ * (ADR §5 — the wiring checks `resolveOmpBridgeCommandConfig()` first). A
+ * failed `spawn` result or an unparseable worker id terminates the panel with
+ * an `exit` event instead of leaving a half-spawned record.
+ *
+ * Standalone-typecheck invariant: node imports only (`node:crypto`,
+ * `node:events`); no electron / better-sqlite3 / services imports.
+ */
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import type {
+  OmpCommandAdapter,
+  OmpCommandResult,
+} from "../../../../shared/types/ompCommand";
+import type { LoggerLike } from "../types";
+
+/** Default poll cadence for `fleet_read`/`fleet_state` per live panel. */
+export const OMP_DEFAULT_POLL_MS = 1500;
+
+/**
+ * Cap for the sliding-window overlap search in `newOutputSince`. The recent
+ * window is bounded upstream; this cap keeps the O(k·n) comparison cheap even
+ * for an unbounded transcript. Mirrors the `LAST_OUTPUT_TAIL_BYTES` diagnostic
+ * cap on the CLI manager.
+ */
+const OUTPUT_OVERLAP_CAP = 8192;
+
+/**
+ * Terminal OMP worker states — matches the producer's own
+ * `isTerminalStatus` (OMP-fleet-management `extensions/fleet/controller.ts`):
+ * a worker in one of these will not produce more output on its own and is not
+ * accepting input. `idle` (turn done, awaiting input) is deliberately NOT
+ * terminal: it is the REPL equivalent.
+ */
+const OMP_TERMINAL_STATES: ReadonlySet<string> = new Set([
+  "done",
+  "failed",
+  "dead",
+  "evicted",
+]);
+
+/** Event shapes mirror `AbstractCliManager`'s module-private interfaces. */
+export interface OmpOutputEvent {
+  panelId: string;
+  sessionId: string;
+  type: "stdout" | "stderr";
+  data: string;
+  timestamp: Date;
+}
+
+export interface OmpExitEvent {
+  panelId: string;
+  sessionId: string;
+  exitCode: number | null;
+  signal: number | null;
+}
+
+export interface OmpSpawnedEvent {
+  panelId: string;
+  sessionId: string;
+}
+
+export interface OmpErrorEvent {
+  panelId: string;
+  sessionId: string;
+  error: string;
+}
+
+export interface OmpSpawnConfig {
+  /** Model id forwarded to `fleet_spawn` (required by the producer). */
+  model: string;
+  /** Workspace id for spawn serialization. */
+  workspace?: string;
+  /** Working directory for the spawned agent. */
+  cwd?: string;
+  /** Optional pane label. */
+  label?: string;
+}
+
+export interface OmpSessionManagerOptions {
+  /** Poll cadence in ms (default {@link OMP_DEFAULT_POLL_MS}). */
+  pollMs?: number;
+}
+
+interface OmpPanelRecord {
+  panelId: string;
+  sessionId: string;
+  workerId: string | null;
+  model: string;
+  /** Last `fleet_read` transcript (for sliding-window dedup, not storage). */
+  emitted: string;
+  terminal: boolean;
+  timer: NodeJS.Timeout | null;
+}
+
+/** `worker=<id>` as rendered by the producer's `fleet_spawn` success detail. */
+const WORKER_ID_PATTERN = /worker=([^\s\]]+)/;
+
+/** `state=<status>` as rendered by the producer's `fleet_state` detail lines. */
+const STATE_PATTERN = /state=([A-Za-z_]+)/;
+
+function exitCodeForTerminal(state: string): number {
+  return state === "done" ? 0 : 1;
+}
+
+/**
+ * Derive "new output since last read" from a sliding recent-lines window.
+ *
+ * - `fresh` empty (the producer renders an empty read as `"(empty)"`, which
+ *   callers normalize to `""` before arriving here) ⇒ nothing new.
+ * - identical ⇒ nothing new.
+ * - strict extension (window still contains everything read before) ⇒ the delta.
+ * - the window slid off the old head ⇒ only the non-overlapping tail, where the
+ *   overlap is the longest suffix of `last` that is also a prefix of `fresh`
+ *   (search capped at {@link OUTPUT_OVERLAP_CAP} characters).
+ * - no overlap at all (pathological) ⇒ the whole fresh window (one duplicate
+ *   edge accepted over silently dropping output).
+ */
+export function newOutputSince(last: string, fresh: string): string {
+  if (fresh.length === 0 || fresh === last) return "";
+  if (last.length === 0 || fresh.startsWith(last)) return fresh.slice(last.length);
+  const cap = Math.min(OUTPUT_OVERLAP_CAP, last.length, fresh.length);
+  for (let k = cap; k > 0; k--) {
+    if (fresh.startsWith(last.slice(last.length - k))) {
+      return fresh.slice(k);
+    }
+  }
+  return fresh;
+}
+
+export class OmpSessionManager extends EventEmitter {
+  private readonly records = new Map<string, OmpPanelRecord>();
+  private readonly adapter: OmpCommandAdapter;
+  private readonly logger?: LoggerLike;
+  private readonly pollMs: number;
+
+  constructor(adapter: OmpCommandAdapter, logger?: LoggerLike, options?: OmpSessionManagerOptions) {
+    super();
+    if (adapter === null || typeof adapter.spawn !== "function") {
+      throw new Error("OmpSessionManager requires a resolved OmpCommandAdapter");
+    }
+    this.adapter = adapter;
+    this.logger = logger;
+    this.pollMs = options?.pollMs ?? OMP_DEFAULT_POLL_MS;
+  }
+
+  /** Number of panels this manager is tracking (any state). */
+  get panelCount(): number {
+    return this.records.size;
+  }
+
+  /** True while the panel has a worker and has not reached a terminal state. */
+  isPanelRunning(panelId: string): boolean {
+    const record = this.records.get(panelId);
+    return record !== undefined && !record.terminal && record.workerId !== null;
+  }
+
+  /**
+   * Spawn the panel's OMP worker (`fleet_spawn`). Emits `spawned` on success;
+   * a failed result or an unparseable worker id emits `exit` (fail-closed) and
+   * the panel is dropped.
+   */
+  async spawn(panelId: string, sessionId: string, prompt: string, config: OmpSpawnConfig): Promise<void> {
+    if (prompt.trim() === "") {
+      throw new TypeError("OmpSessionManager.spawn requires a non-empty prompt");
+    }
+    if (config.model.trim() === "") {
+      throw new TypeError("OmpSessionManager.spawn requires a model");
+    }
+    if (this.records.has(panelId)) {
+      throw new Error(`OmpSessionManager: panel ${panelId} already spawned`);
+    }
+
+    const result = await this.adapter.spawn({
+      operationId: randomUUID(),
+      model: config.model,
+      task: prompt,
+      label: config.label,
+      workspace: config.workspace,
+      cwd: config.cwd,
+    });
+
+    if (!result.ok) {
+      this.logger?.error(`[OmpSessionManager] fleet_spawn failed for panel ${panelId}`, {
+        sessionId,
+        error: result.error,
+        detail: result.detail,
+      });
+      this.emitExit(panelId, sessionId, 1);
+      return;
+    }
+
+    const workerMatch = WORKER_ID_PATTERN.exec(result.detail);
+    const workerId = workerMatch ? workerMatch[1] : null;
+    if (workerId === null) {
+      this.logger?.error(`[OmpSessionManager] fleet_spawn returned no worker id for panel ${panelId}`, {
+        sessionId,
+        detail: result.detail,
+      });
+      this.emitExit(panelId, sessionId, 1);
+      return;
+    }
+
+    const record: OmpPanelRecord = {
+      panelId,
+      sessionId,
+      workerId,
+      model: config.model,
+      emitted: "",
+      terminal: false,
+      timer: null,
+    };
+    this.records.set(panelId, record);
+    this.emit("spawned", { panelId, sessionId } satisfies OmpSpawnedEvent);
+    this.startPolling(record);
+    this.logger?.info(`[OmpSessionManager] spawned ${workerId} for panel ${panelId}`, {
+      sessionId,
+      model: config.model,
+    });
+  }
+
+  /**
+   * Send a follow-up turn to the panel's worker (`fleet_send`). Returns `true`
+   * when the input was handed to a live worker (or the send reached the
+   * adapter), `false` when the panel has no live worker and a spawn is needed
+   * instead — mirroring the relay-or-spawn convention of the other runtimes.
+   */
+  async sendInput(panelId: string, text: string): Promise<boolean> {
+    const record = this.requireLiveRecord(panelId);
+    if (record === null) return false;
+    const result = await this.adapter.send({
+      operationId: randomUUID(),
+      workerId: record.workerId as string,
+      text,
+    });
+    if (!result.ok) {
+      this.logger?.error(`[OmpSessionManager] fleet_send failed for panel ${panelId}`, {
+        sessionId: record.sessionId,
+        workerId: record.workerId,
+        error: result.error,
+        detail: result.detail,
+      });
+      this.emitError(record, `fleet_send failed: ${result.detail}`);
+    }
+    return true;
+  }
+
+  /**
+   * Deliberate termination (`fleet_kill`). Emits `exit` exactly once and stops
+   * polling. A failed kill still terminates locally: the panel is unusable
+   * from Cyboflow's side either way.
+   */
+  async stopPanel(panelId: string): Promise<void> {
+    const record = this.records.get(panelId);
+    if (record === undefined || record.terminal) return;
+    this.clearPolling(record);
+    record.terminal = true;
+    if (record.workerId !== null) {
+      const result = await this.adapter.kill({
+        operationId: randomUUID(),
+        workerId: record.workerId,
+      });
+      if (!result.ok) {
+        this.logger?.warn(`[OmpSessionManager] fleet_kill failed for panel ${panelId} (terminating locally)`, {
+          sessionId: record.sessionId,
+          workerId: record.workerId,
+          detail: result.detail,
+        });
+      }
+    }
+    this.emitExit(panelId, record.sessionId, null);
+    this.logger?.info(`[OmpSessionManager] stopped panel ${panelId}`, {
+      sessionId: record.sessionId,
+      workerId: record.workerId,
+    });
+  }
+
+  /** Stop every tracked panel (best-effort `fleet_kill` on each live worker). */
+  async stopAll(): Promise<void> {
+    const records = [...this.records.values()];
+    this.records.clear();
+    await Promise.all(records.map((record) => this.stopRecord(record)));
+  }
+
+  /**
+   * One poll cycle for a panel: `fleet_read` (emit new output) then
+   * `fleet_state` (detect terminal). Exposed for tests and for incremental
+   * drivers; the internal timer is the production caller.
+   */
+  async tick(panelId: string): Promise<void> {
+    const record = this.records.get(panelId);
+    if (record === undefined || record.terminal || record.workerId === null) return;
+
+    const workerId = record.workerId;
+    let stateResult: OmpCommandResult;
+    try {
+      stateResult = await this.adapter.state({ operationId: randomUUID(), workerId });
+    } catch (err) {
+      this.emitError(record, `fleet_state failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const state = this.parseState(stateResult);
+    const workerGone = state !== null && !OMP_TERMINAL_STATES.has(state) && /not found/i.test(stateResult.detail);
+    if (state === null || workerGone) {
+      // Unparseable or vanished worker: terminal from this side.
+      this.finishTerminal(record, workerGone ? "evicted" : state ?? "failed");
+      return;
+    }
+    if (OMP_TERMINAL_STATES.has(state)) {
+      this.finishTerminal(record, state);
+      return;
+    }
+
+    // Live worker: surface any new output since the last read.
+    const readResult = await this.adapter.read({ operationId: randomUUID(), workerId });
+    if (!readResult.ok) {
+      // Transient read failure: keep the panel alive; the state above is the
+      // authority for terminal detection.
+      this.emitError(record, `fleet_read failed: ${readResult.detail}`);
+      return;
+    }
+    const fresh = readResult.detail === "(empty)" ? "" : readResult.detail;
+    const chunk = newOutputSince(record.emitted, fresh);
+    record.emitted = fresh;
+    if (chunk !== "") {
+      this.emitOutput(record, chunk);
+    }
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────
+
+  private requireLiveRecord(panelId: string): OmpPanelRecord | null {
+    const record = this.records.get(panelId);
+    if (record === undefined || record.terminal) return null;
+    if (record.workerId === null) return null;
+    return record;
+  }
+
+  private async stopRecord(record: OmpPanelRecord): Promise<void> {
+    if (record.terminal) return;
+    this.clearPolling(record);
+    record.terminal = true;
+    if (record.workerId !== null) {
+      const result = await this.adapter.kill({
+        operationId: randomUUID(),
+        workerId: record.workerId,
+      });
+      if (!result.ok) {
+        this.logger?.warn(`[OmpSessionManager] fleet_kill failed during stopAll for panel ${record.panelId}`, {
+          sessionId: record.sessionId,
+          workerId: record.workerId,
+          detail: result.detail,
+        });
+      }
+    }
+    this.emitExit(record.panelId, record.sessionId, null);
+  }
+
+  private finishTerminal(record: OmpPanelRecord, state: string): void {
+    if (record.terminal) return;
+    this.clearPolling(record);
+    record.terminal = true;
+    this.emitExit(record.panelId, record.sessionId, exitCodeForTerminal(state));
+    this.logger?.info(`[OmpSessionManager] worker ${record.workerId} terminal (${state}) for panel ${record.panelId}`, {
+      sessionId: record.sessionId,
+    });
+  }
+
+  private emitExit(panelId: string, sessionId: string, exitCode: number | null): void {
+    this.emit("exit", { panelId, sessionId, exitCode, signal: null } satisfies OmpExitEvent);
+  }
+
+  private emitOutput(record: OmpPanelRecord, data: string): void {
+    this.emit(
+      "output",
+      {
+        panelId: record.panelId,
+        sessionId: record.sessionId,
+        type: "stdout",
+        data,
+        timestamp: new Date(),
+      } satisfies OmpOutputEvent,
+    );
+  }
+
+  private emitError(record: OmpPanelRecord, error: string): void {
+    this.emit("error", {
+      panelId: record.panelId,
+      sessionId: record.sessionId,
+      error,
+    } satisfies OmpErrorEvent);
+  }
+
+  private parseState(result: OmpCommandResult): string | null {
+    if (!result.ok) return null;
+    const match = STATE_PATTERN.exec(result.detail);
+    return match ? match[1] : null;
+  }
+
+  private startPolling(record: OmpPanelRecord): void {
+    if (record.timer !== null) return;
+    record.timer = setInterval(() => {
+      void this.tick(record.panelId);
+    }, this.pollMs);
+    // A per-panel poll must not pin the main process open.
+    record.timer.unref?.();
+  }
+
+  private clearPolling(record: OmpPanelRecord): void {
+    if (record.timer !== null) {
+      clearInterval(record.timer);
+      record.timer = null;
+    }
+  }
+}
