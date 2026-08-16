@@ -110,6 +110,9 @@ the documented next step.
 
 ## 6. Consequences / increments
 
+**Status:** increment 1 (types) and increment 2 (adapter `send`/`read`/`state`) are
+landed and gate-green. Increments 3-5 are pending.
+
 - **Increment 1 (this ADR + types):** land `agentRuntime.ts` widening (provider `omp`,
   session runtime `omp-fleet`, label, `providerForRuntime`, disabled-pattern) *together*
   with this document. No behavior yet — pure types, so the full gate stays green.

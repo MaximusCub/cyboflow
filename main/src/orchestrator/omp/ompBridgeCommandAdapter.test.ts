@@ -150,4 +150,44 @@ describe('OmpBridgeCommandAdapter', () => {
     const call = (client.callTool as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as OmpBridgeToolCall;
     expect(call.arguments).toEqual({ model: 'm', task: 't' });
   });
+
+  it('maps send to fleet_send with { id, text } and includes keys only when set', async () => {
+    const { client } = fakeClient([
+      { call: { name: 'fleet_send', arguments: {} }, result: { ok: true, text: 'Sent to w1.' } },
+    ]);
+    const adapter = new OmpBridgeCommandAdapter(client);
+    const result = await adapter.send({ operationId: 'op-10', workerId: 'w1', text: 'continue' });
+    expect(result).toEqual({ ok: true, operationId: 'op-10', detail: 'Sent to w1.' });
+
+    await adapter.send({ operationId: 'op-10b', workerId: 'w1', text: 'ctrl+c', keys: true });
+    const calls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls.map((c) => c?.[0]) as OmpBridgeToolCall[];
+    expect(calls[0]).toEqual({ name: 'fleet_send', arguments: { id: 'w1', text: 'continue' } });
+    expect(calls[1]).toEqual({ name: 'fleet_send', arguments: { id: 'w1', text: 'ctrl+c', keys: true } });
+  });
+
+  it('maps read to fleet_read with { id } and includes lines/source only when set', async () => {
+    const { client } = fakeClient([
+      { call: { name: 'fleet_read', arguments: {} }, result: { ok: true, text: 'pane output' } },
+    ]);
+    const adapter = new OmpBridgeCommandAdapter(client);
+    await adapter.read({ operationId: 'op-11', workerId: 'w1' });
+    await adapter.read({ operationId: 'op-11b', workerId: 'w1', lines: 40, source: 'recent' });
+    const calls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls.map((c) => c?.[0]) as OmpBridgeToolCall[];
+    expect(calls[0]).toEqual({ name: 'fleet_read', arguments: { id: 'w1' } });
+    expect(calls[1]).toEqual({ name: 'fleet_read', arguments: { id: 'w1', lines: 40, source: 'recent' } });
+  });
+
+  it('maps state to fleet_state with { id }', async () => {
+    const { client } = fakeClient([
+      {
+        call: { name: 'fleet_state', arguments: {} },
+        result: { ok: true, text: 'w1 backend=herdr pane=p1 model=m state=working' },
+      },
+    ]);
+    const adapter = new OmpBridgeCommandAdapter(client);
+    const result = await adapter.state({ operationId: 'op-12', workerId: 'w1' });
+    expect(result).toEqual({ ok: true, operationId: 'op-12', detail: 'w1 backend=herdr pane=p1 model=m state=working' });
+    const call = (client.callTool as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as OmpBridgeToolCall;
+    expect(call).toEqual({ name: 'fleet_state', arguments: { id: 'w1' } });
+  });
 });

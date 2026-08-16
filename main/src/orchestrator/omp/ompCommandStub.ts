@@ -16,7 +16,10 @@ import type {
   OmpCommandResult,
   OmpDiscardRequest,
   OmpKillRequest,
+  OmpReadRequest,
+  OmpSendRequest,
   OmpSpawnRequest,
+  OmpStateRequest,
   OmpVerifyRequest,
 } from '../../../../shared/types/ompCommand';
 
@@ -50,5 +53,17 @@ export class OmpCommandStub implements OmpCommandAdapter {
 
   verifyRun(req: OmpVerifyRequest): Promise<OmpCommandResult> {
     return Promise.resolve(this.unavailable('verifyRun', req.operationId));
+  }
+
+  send(req: OmpSendRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('send', req.operationId));
+  }
+
+  read(req: OmpReadRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('read', req.operationId));
+  }
+
+  state(req: OmpStateRequest): Promise<OmpCommandResult> {
+    return Promise.resolve(this.unavailable('state', req.operationId));
   }
 }

@@ -24,7 +24,10 @@ import type {
   OmpCommandResult,
   OmpDiscardRequest,
   OmpKillRequest,
+  OmpReadRequest,
+  OmpSendRequest,
   OmpSpawnRequest,
+  OmpStateRequest,
   OmpVerifyRequest,
 } from "../../../../shared/types/ompCommand";
 import type { OmpBridgeClientLike } from "./ompBridgeClient";
@@ -117,6 +120,23 @@ export class OmpBridgeCommandAdapter implements OmpCommandAdapter {
 
   async verifyRun(req: OmpVerifyRequest): Promise<OmpCommandResult> {
     return this.invoke("fleet_verification_run", { proposal_id: req.proposalId }, req.operationId);
+  }
+
+  async send(req: OmpSendRequest): Promise<OmpCommandResult> {
+    const args: Record<string, unknown> = { id: req.workerId, text: req.text };
+    if (req.keys !== undefined) args.keys = req.keys;
+    return this.invoke("fleet_send", args, req.operationId);
+  }
+
+  async read(req: OmpReadRequest): Promise<OmpCommandResult> {
+    const args: Record<string, unknown> = { id: req.workerId };
+    if (req.lines !== undefined) args.lines = req.lines;
+    if (req.source !== undefined) args.source = req.source;
+    return this.invoke("fleet_read", args, req.operationId);
+  }
+
+  async state(req: OmpStateRequest): Promise<OmpCommandResult> {
+    return this.invoke("fleet_state", { id: req.workerId }, req.operationId);
   }
 
   private async invoke(

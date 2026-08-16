@@ -27,4 +27,22 @@ describe.skipIf(config === undefined)('live bridge smoke', () => {
     expect(typeof result.ok).toBe('boolean');
     if (!result.ok) expect(typeof result.detail).toBe('string');
   });
+
+  it.each([
+    ['read', 'op-live-smoke-2'],
+    ['state', 'op-live-smoke-3'],
+    ['send', 'op-live-smoke-4'],
+  ] as const)('%s on a nonexistent worker traverses the full path', async (verb, operationId) => {
+    const adapter = new OmpBridgeCommandAdapter(
+      new OmpBridgeHttpClient(config!.url, config!.token, config!.sessionId),
+    );
+    let result;
+    if (verb === 'read') result = await adapter.read({ operationId, workerId: 'cyboflow-smoke-nonexistent' });
+    else if (verb === 'state') result = await adapter.state({ operationId, workerId: 'cyboflow-smoke-nonexistent' });
+    else result = await adapter.send({ operationId, workerId: 'cyboflow-smoke-nonexistent', text: 'noop' });
+    // The command must correlate and return a structured result — not throw.
+    expect(result.operationId).toBe(operationId);
+    expect(typeof result.ok).toBe('boolean');
+    if (!result.ok) expect(typeof result.detail).toBe('string');
+  });
 });

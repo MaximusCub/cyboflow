@@ -67,6 +67,29 @@ export interface OmpKillRequest {
   timeoutMs?: number;
 }
 
+/** Producer `fleet_read` `source`, carried verbatim. */
+export type OmpReadSource = 'visible' | 'recent' | 'recent-unwrapped' | 'detection';
+
+export interface OmpReadRequest {
+  operationId: string;
+  workerId: string;
+  lines?: number;
+  source?: OmpReadSource;
+}
+
+export interface OmpSendRequest {
+  operationId: string;
+  workerId: string;
+  text: string;
+  /** When true, the producer treats `text` as space-separated key-combos. */
+  keys?: boolean;
+}
+
+export interface OmpStateRequest {
+  operationId: string;
+  workerId: string;
+}
+
 export interface OmpApplyRequest {
   operationId: string;
   proposalId: string;
@@ -112,4 +135,7 @@ export interface OmpCommandAdapter {
   apply(req: OmpApplyRequest): Promise<OmpCommandResult>;
   discard(req: OmpDiscardRequest): Promise<OmpCommandResult>;
   verifyRun(req: OmpVerifyRequest): Promise<OmpCommandResult>;
+  send(req: OmpSendRequest): Promise<OmpCommandResult>;
+  read(req: OmpReadRequest): Promise<OmpCommandResult>;
+  state(req: OmpStateRequest): Promise<OmpCommandResult>;
 }
