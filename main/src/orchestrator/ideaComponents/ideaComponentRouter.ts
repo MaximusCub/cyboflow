@@ -1,6 +1,6 @@
 /**
  * IdeaComponentRouter — the SINGLE write chokepoint for the `idea_components`
- * table (migration 098, `shared/types/ideaComponents.ts`,
+ * table (migration 101, `shared/types/ideaComponents.ts`,
  * `./resolveIdeaComponents.ts`). Mirrors `reviewItemRouter.ts`'s per-project
  * PQueue + emit-after-commit architecture in miniature, scaled to a table
  * with no `entity_events` audit trail of its own (nothing in this feature's
@@ -122,7 +122,7 @@ export interface IdeaComponentSetState {
  * read of the very thing that just changed — it would keep answering
  * 'complete' forever and the component most likely invalidated by a body edit
  * ('architecture', derived FROM the body) would be the one that never flags.
- * Every idea planned before migration 098 has zero rows, so an existing-rows-
+ * Every idea planned before migration 101 has zero rows, so an existing-rows-
  * only pass would be a no-op on the entire pre-existing backlog. See
  * `runMarkStale` for the materialization's ordering semantics.
  *
@@ -170,7 +170,7 @@ export interface IdeaComponentClearStale {
 
 /**
  * Remove every ledger row for an idea. Called by TaskChangeRouter.applyDelete's
- * post-commit cascade for each deleted entity of type 'idea' — migration 098
+ * post-commit cascade for each deleted entity of type 'idea' — migration 101
  * deliberately declares no foreign key, so nothing else would ever remove these
  * rows, and a surviving row WINS over derivation even with no `ideas` row
  * behind it (an orphan would resurrect onto a future id collision).

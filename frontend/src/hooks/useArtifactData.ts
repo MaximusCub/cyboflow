@@ -24,7 +24,7 @@
  *   - 'idea-summary'       -> the per-idea HUB: BOTH the originating idea
  *                             (`tasks.get`) AND the idea component ledger's
  *                             merged hybrid view (`cyboflow.ideaComponents.get`,
- *                             migration 098) — sourceRef-keyed like idea-spec/
+ *                             migration 101) — sourceRef-keyed like idea-spec/
  *                             arch-design, but needs a SECOND fetch, so it gets
  *                             its own resolution block below.
  *   - 'screenshots'        -> no entity source yet; the parsed `payload_json`

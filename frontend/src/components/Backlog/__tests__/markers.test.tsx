@@ -1,6 +1,6 @@
 /**
  * CategoryTag (migration 059) + FlowMarker (session-attribution seam) +
- * LedgerChip (idea component ledger, migration 098) unit tests. markers.tsx
+ * LedgerChip (idea component ledger, migration 101) unit tests. markers.tsx
  * otherwise has no direct test coverage — TaskCard/BacklogPane exercise the
  * other markers indirectly.
  */

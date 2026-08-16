@@ -216,7 +216,7 @@ export interface BacklogTaskItem {
    */
   readyToWork?: boolean;
   /**
-   * The idea component ledger (migration 098, shared/types/ideaComponents.ts)
+   * The idea component ledger (migration 101, shared/types/ideaComponents.ts)
    * — one entry per tracked component, hybrid-resolved: an authoritative
    * ledger row when one exists, else a derived 'complete'/'incomplete' entry
    * synthesized from the DB. Populated for type='idea' ONLY; optional for

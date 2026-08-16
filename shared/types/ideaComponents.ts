@@ -1,6 +1,6 @@
 /**
- * The idea component ledger — shared wire types (migration 098,
- * `main/src/database/migrations/098_idea_component_ledger.sql`).
+ * The idea component ledger — shared wire types (migration 101,
+ * `main/src/database/migrations/101_idea_component_ledger.sql`).
  *
  * Every idea tracks FIVE components (idea-spec, prototype, architecture,
  * epics, stories), each in one of THREE states (complete, incomplete,
@@ -25,7 +25,7 @@
  *     'skipped' is unfalsifiable from absence, so it is ONLY ever set
  *     explicitly by a flow or a user — never derived. This is why
  *     {@link IdeaComponentSource} carries a THIRD value, 'derived', that
- *     never persists to the `idea_components` table (see migration 098's
+ *     never persists to the `idea_components` table (see migration 101's
  *     header comment) — it exists purely as a read-time marker for "no row".
  *
  * STALENESS ("reset means re-verify, NOT discard") is the other decision that

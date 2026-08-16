@@ -1,4 +1,4 @@
--- Migration 098: Idea component ledger.
+-- Migration 101: Idea component ledger.
 --
 -- Tracks FIVE components per idea ('idea-spec' | 'prototype' | 'architecture' |
 -- 'epics' | 'stories'), each in one of THREE states ('complete' | 'incomplete' |

@@ -1,6 +1,6 @@
 /**
  * resolveIdeaComponents — the idea component ledger's HYBRID read model
- * (migration 098, `shared/types/ideaComponents.ts`). Always returns all FIVE
+ * (migration 101, `shared/types/ideaComponents.ts`). Always returns all FIVE
  * components (`IDEA_COMPONENT_KEYS` order), never a partial list.
  *
  * PRECEDENCE (the whole point of this module): for each of the five
@@ -17,7 +17,7 @@
  *
  * DERIVATION CAN ONLY EVER YIELD 'complete' OR 'incomplete' — never
  * 'skipped', because absence is not evidence of an explicit skip decision
- * (see migration 098 and shared/types/ideaComponents.ts headers). A derived
+ * (see migration 101 and shared/types/ideaComponents.ts headers). A derived
  * result always carries `source: 'derived'` and every source/staleness field
  * null.
  *

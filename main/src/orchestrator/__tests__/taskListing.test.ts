@@ -73,7 +73,7 @@ function buildDb(): Database.Database {
   // listRunOwnedOrBatchIdeaIds resolution (the run-owned-ideas fixtures below).
   db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
-  // Migration 098 adds the idea component ledger table that selectProjectBacklog/
+  // Migration 101 adds the idea component ledger table that selectProjectBacklog/
   // selectTaskById/selectIdeaDecomposition now resolve for every idea row. It is
   // self-contained (no dependency on other new tables), so the full file applies
   // cleanly. resolveIdeaComponentsBatch's 'prototype' derivation arm also reads
@@ -82,7 +82,7 @@ function buildDb(): Database.Database {
   // column ALTERs this fixture doesn't otherwise need, so — mirroring
   // resolveIdeaComponents.test.ts's own minimal ad-hoc schema — hand-roll just the
   // columns the resolver actually selects.
-  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
   db.exec(`
     CREATE TABLE approved_designs (
       id TEXT PRIMARY KEY,
@@ -987,10 +987,10 @@ describe('computeTaskOverlay — inFlow (direct + sprint-batch runs)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Idea component ledger overlay (migration 098) — components on IDEA items only
+// Idea component ledger overlay (migration 101) — components on IDEA items only
 // ---------------------------------------------------------------------------
 
-describe('taskListing — idea component ledger overlay (migration 098)', () => {
+describe('taskListing — idea component ledger overlay (migration 101)', () => {
   it('selectProjectBacklog stamps all FIVE components on an idea, batched in one resolveIdeaComponentsBatch call', () => {
     const db = buildDb();
     const { ideaId } = seedFixture(db);

@@ -13,7 +13,7 @@ import { IDEA_COMPONENT_KEYS } from '../../../../../shared/types/ideaComponents'
  * Column sets are pared to exactly what resolveIdeaComponents.ts reads.
  *
  * `idea_components` itself is the ONE exception: it is read straight from
- * migration 098 (the same way taskChangeRouter.test.ts's
+ * migration 101 (the same way taskChangeRouter.test.ts's
  * buildDbWithIdeaComponents does) rather than hand-rolled, so a future column
  * or CHECK-constraint change cannot silently miss this copy while the suite
  * stays green against a schema the app no longer has.
@@ -21,7 +21,7 @@ import { IDEA_COMPONENT_KEYS } from '../../../../../shared/types/ideaComponents'
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
-  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
   db.exec(`
     CREATE TABLE ideas (id TEXT PRIMARY KEY, body TEXT);
     CREATE TABLE approved_designs (

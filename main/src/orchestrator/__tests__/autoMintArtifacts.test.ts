@@ -122,7 +122,7 @@ function buildDb(): Database.Database {
   // 098 (idea_components ledger, standalone/no-FK) — resolveIdeaComponents'
   // ledger-row SELECT hits this table unconditionally (not fail-soft, unlike
   // its run-linkage arms), so idea-summary's content gate needs it to exist.
-  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
   // approved_designs (082's read model) feeds the 'prototype' component's
   // derivation, also queried unconditionally. Migration 082 itself ALTERs the
   // legacy Crystal `sessions` table (ADD COLUMN design_idea_id) which this
@@ -2334,7 +2334,7 @@ describe('autoMintArtifacts idea-summary', () => {
     taskChangeEvents.removeAllListeners();
   });
 
-  /** Seed one explicit idea_components ledger row (migration 098). */
+  /** Seed one explicit idea_components ledger row (migration 101). */
   function seedLedgerRow(
     db: Database.Database,
     ideaId: string,

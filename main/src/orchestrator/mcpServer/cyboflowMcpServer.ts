@@ -642,7 +642,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_set_idea_component',
         description:
-          "Set one idea's component ledger state (migration 098's idea component ledger — idea-spec/prototype/architecture/epics/stories, each complete|incomplete|skipped). Routes through the single IdeaComponentRouter write chokepoint with source:'flow'; sourceRunId and the idea's builtAgainstVersion are resolved by the tool itself from THIS run, never accepted as input. idea_id may be the opaque idea id OR its display ref (e.g. 'IDEA-009') — resolved the same way as cyboflow_get_task. Setting a state ALWAYS clears any prior staleness on that component (an explicit stamp is a reviewed judgment, even 'still incomplete'). Stamp AFTER the body write that completes a component, never before — see cyboflow_get_task's description for why order matters.",
+          "Set one idea's component ledger state (migration 101's idea component ledger — idea-spec/prototype/architecture/epics/stories, each complete|incomplete|skipped). Routes through the single IdeaComponentRouter write chokepoint with source:'flow'; sourceRunId and the idea's builtAgainstVersion are resolved by the tool itself from THIS run, never accepted as input. idea_id may be the opaque idea id OR its display ref (e.g. 'IDEA-009') — resolved the same way as cyboflow_get_task. Setting a state ALWAYS clears any prior staleness on that component (an explicit stamp is a reviewed judgment, even 'still incomplete'). Stamp AFTER the body write that completes a component, never before — see cyboflow_get_task's description for why order matters.",
         inputSchema: {
           type: 'object',
           properties: {

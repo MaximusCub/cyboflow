@@ -844,13 +844,13 @@ export interface ApprovedDesignRow {
 }
 
 /**
- * `idea_components` row (migration 098) — one row per (idea, component) pair
+ * `idea_components` row (migration 101) — one row per (idea, component) pair
  * tracking the idea component ledger's HYBRID truth model: when present, this
  * row is authoritative; a (idea, component) pair with NO row falls back to
  * derivation from the DB (body headings, approved_designs, child entities),
  * which can only ever yield 'complete'|'incomplete' — never 'skipped', since
  * that state is unfalsifiable from absence and only ever set explicitly (see
- * migration 098's header comment). `source` therefore only ever persists
+ * migration 101's header comment). `source` therefore only ever persists
  * 'flow'|'manual' here; 'derived' is a read-time-only marker for a component
  * with no row (shared/types/ideaComponents.ts `IdeaComponentSource`).
  * `stale_at` carries "reset means re-verify, NOT discard": non-NULL means

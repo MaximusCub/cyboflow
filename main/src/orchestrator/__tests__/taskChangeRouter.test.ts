@@ -36,7 +36,7 @@
  *    edit stales epics + stories (never the just-stamped prototype, the case
  *    that broke a fully successful planner run), an idea-spec edit stales all
  *    four downstream components, an unattributable edit keeps the conservative
- *    full set, and a pre-098 idea with zero ledger rows still flags its
+ *    full set, and a pre-101 idea with zero ledger rows still flags its
  *    DERIVED-complete architecture.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -201,7 +201,7 @@ function buildDbWithSeedIdeaColumns(): Database.Database {
 }
 
 /**
- * buildDb() variant carrying the idea component ledger table (migration 098)
+ * buildDb() variant carrying the idea component ledger table (migration 101)
  * plus the minimal `approved_designs`/`artifacts` columns
  * resolveIdeaComponentsBatch's 'prototype' derivation arm reads (mirrors
  * resolveIdeaComponents.test.ts's own ad-hoc schema, and taskListing.test.ts's
@@ -210,7 +210,7 @@ function buildDbWithSeedIdeaColumns(): Database.Database {
 function buildDbWithIdeaComponents(): Database.Database {
   const db = buildDb();
   const migDir = join(__dirname, '..', '..', 'database', 'migrations');
-  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
   // taskListing.selectTaskById's UNION also reads experiment_id (migration 049)
   // unconditionally; buildDb() above doesn't carry it (this file's own fixtures
   // never previously exercised taskListing's read side against this DB).
@@ -670,10 +670,10 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // idea component ledger (migration 098) — emit-path stamp parity
+  // idea component ledger (migration 101) — emit-path stamp parity
   // -------------------------------------------------------------------------
 
-  describe('idea component ledger (migration 098) — buildBacklogTaskItem emit-path parity', () => {
+  describe('idea component ledger (migration 101) — buildBacklogTaskItem emit-path parity', () => {
     it('the emitted event snapshot stamps all FIVE components for an idea, matching the seed-query path', async () => {
       const db = buildDbWithIdeaComponents();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
@@ -719,7 +719,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(events[1].task?.components).toBeUndefined();
     });
 
-    it('degrades to components: undefined (never throws) on a pre-098 schema lacking idea_components', async () => {
+    it('degrades to components: undefined (never throws) on a pre-101 schema lacking idea_components', async () => {
       // buildDb() (NOT the ...WithIdeaComponents variant) has no idea_components/
       // approved_designs tables — the fail-soft wrapper must degrade permissively
       // rather than throw 'no such table' on every idea create.
@@ -738,7 +738,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // idea component STALENESS hook (migration 098) — a real `body` delta on an
+  // idea component STALENESS hook (migration 101) — a real `body` delta on an
   // idea marks the four downstream components stale via IdeaComponentRouter's
   // mark-stale op, fired post-commit from applyChange (see the hook's own
   // comment there for the deadlock-safety rationale).
@@ -1096,7 +1096,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       }
     });
 
-    it('an idea with NO ledger rows (pre-098) still flags its DERIVED-complete architecture', async () => {
+    it('an idea with NO ledger rows (pre-101) still flags its DERIVED-complete architecture', async () => {
       // The hybrid model's whole premise: every idea planned before migration
       // 098 has zero rows. An existing-rows-only mark-stale was a no-op on all
       // of them, so 'architecture' — the component derived FROM the body that
@@ -2319,7 +2319,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number }).n;
     }
 
-    it('idea delete purges the idea component ledger (migration 098 has no FK to do it)', async () => {
+    it('idea delete purges the idea component ledger (migration 101 has no FK to do it)', async () => {
       const db = buildDbWithIdeaComponents();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const componentRouter = IdeaComponentRouter.initialize(dbAdapter(db));

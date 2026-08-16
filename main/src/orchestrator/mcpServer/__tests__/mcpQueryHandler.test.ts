@@ -1911,7 +1911,7 @@ describe('McpQueryHandler', () => {
         );
         CREATE INDEX idx_approved_designs_idea ON approved_designs(idea_id);
       `);
-      // Migration 098 (idea component ledger): handleGetTask now unconditionally
+      // Migration 101 (idea component ledger): handleGetTask now unconditionally
       // resolves cyboflow_get_task's 'components' for every idea via
       // resolveIdeaComponents — the table must exist even for tests that never
       // touch the ledger directly (same rationale as approved_designs above).
@@ -1921,7 +1921,7 @@ describe('McpQueryHandler', () => {
       // (run_id set), so resolveIdeaComponentsBatch's 'prototype' derivation
       // arm queries `artifacts` for that run id even when nothing was ever
       // minted against it.
-      db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
       db.exec(`
         CREATE TABLE artifacts (
           id TEXT PRIMARY KEY,
@@ -2527,12 +2527,12 @@ describe('McpQueryHandler', () => {
     });
 
     // -----------------------------------------------------------------------
-    // Idea component ledger (migration 098) exposure on cyboflow_get_task —
+    // Idea component ledger (migration 101) exposure on cyboflow_get_task —
     // see the sibling 'idea component staleness hook' coverage in
     // taskChangeRouter.test.ts for how a component actually GOES stale; this
     // block covers the read-side shape/gating only.
     // -----------------------------------------------------------------------
-    describe('mcp-get-task components (idea component ledger, migration 098)', () => {
+    describe('mcp-get-task components (idea component ledger, migration 101)', () => {
       it("surfaces all FIVE derived components for a fresh idea, and omits 'components' for an epic/task", async () => {
         listSeedRun(listDb, 'run-get-comp-1');
         const idea = await createEntity('run-get-comp-1', 'Fresh idea');
@@ -2616,7 +2616,7 @@ describe('McpQueryHandler', () => {
 
   // -------------------------------------------------------------------------
   // cyboflow_set_idea_component (mcp-set-idea-component) — the WRITE half of
-  // the idea component ledger (migration 098). Routes through
+  // the idea component ledger (migration 101). Routes through
   // IdeaComponentRouter.getInstance().applyChange with source:'flow';
   // sourceRunId + builtAgainstVersion are resolved by the handler itself.
   // -------------------------------------------------------------------------
@@ -2646,7 +2646,7 @@ describe('McpQueryHandler', () => {
       db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
       db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
       db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
-      db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
       // taskListing.selectTaskById's UNION (reached by mcp-set-idea-component's
       // id/ref resolution, same as mcp-get-task) also reads experiment_id
       // (migration 049) unconditionally — absent from this fixture's chain.

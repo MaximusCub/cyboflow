@@ -1,6 +1,6 @@
 /**
  * cyboflow.ideaComponents sub-router — the idea component ledger's tRPC
- * surface (migration 098, `shared/types/ideaComponents.ts`,
+ * surface (migration 101, `shared/types/ideaComponents.ts`,
  * `../../ideaComponents/ideaComponentRouter.ts`).
  *
  *   get                  : query        -> IdeaComponentState[] (merged hybrid view)

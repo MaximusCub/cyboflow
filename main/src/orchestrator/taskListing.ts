@@ -585,7 +585,7 @@ function applyDependencyOverlay(item: BacklogTaskItem, overlay: DependencyOverla
 }
 
 /**
- * Attach the idea component ledger overlay (migration 098) to a projected IDEA
+ * Attach the idea component ledger overlay (migration 101) to a projected IDEA
  * item. Same batch-overlay shape as {@link applyDependencyOverlay}: the caller
  * resolves the ledger for a whole batch of idea ids in ONE
  * `resolveIdeaComponentsBatch` call, then applies each idea's slice here —
@@ -958,7 +958,7 @@ export function selectProjectBacklog(
   // query and map them onto each task item as we project.
   const depOverlays = loadProjectDependencyOverlays(db, projectId);
 
-  // Idea component ledger (migration 098) is ideas-only — resolve the WHOLE
+  // Idea component ledger (migration 101) is ideas-only — resolve the WHOLE
   // batch's ledger in ONE resolveIdeaComponentsBatch call (mirroring the
   // dependency-overlay precedent above), never a per-item resolver call inside
   // projectTaskItem.

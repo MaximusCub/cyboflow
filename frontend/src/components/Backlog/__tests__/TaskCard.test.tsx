@@ -9,7 +9,7 @@
  * fires on a plain render.
  *
  * Also covers the idea component ledger surfaces (markers.tsx's LedgerChip +
- * TaskCard's `ledger-expand` block, migration 098): all five chips render for
+ * TaskCard's `ledger-expand` block, migration 101): all five chips render for
  * an idea, none for epics/tasks, the stale chip is visually distinct from the
  * not-started chip, the expand toggles aria-expanded, and the row-level
  * override calls `ideaComponents.setState`.

@@ -655,7 +655,7 @@ export class TaskChangeRouter {
       }
     }
 
-    // POST-COMMIT STALENESS HOOK (idea component ledger, migration 098 /
+    // POST-COMMIT STALENESS HOOK (idea component ledger, migration 101 /
     // shared/types/ideaComponents.ts): an idea UPDATE that actually changed
     // `body` marks the components that edit INVALIDATED stale — never
     // 'idea-spec' (the body IS the idea-spec, so an edit to it changes that
@@ -787,7 +787,7 @@ export class TaskChangeRouter {
     // rows/events vanished. Reap only after the delete transaction committed.
     await this.reapArtifactsForRunIds(projectId, result.artifactRunIds);
 
-    // POST-COMMIT LEDGER CASCADE (idea component ledger, migration 098): purge
+    // POST-COMMIT LEDGER CASCADE (idea component ledger, migration 101): purge
     // every deleted idea's `idea_components` rows. That table deliberately
     // carries NO foreign key (see the migration header — these rows must
     // outlive the runs/sessions that produced them), so nothing else removes
@@ -2113,7 +2113,7 @@ export class TaskChangeRouter {
       taskId: opts.taskId,
       deletedIds: cascade.map((e) => e.id),
       // The IDEAS in the cascade — their component-ledger rows are purged
-      // post-commit in applyDelete (migration 098 deliberately carries no FK).
+      // post-commit in applyDelete (migration 101 deliberately carries no FK).
       deletedIdeaIds: cascade.filter((e) => e.type === 'idea').map((e) => e.id),
       survivingParentEpicIds: [...survivingParentEpicIds],
       artifactRunIds: [...artifactRunIds],
@@ -3363,7 +3363,7 @@ export class TaskChangeRouter {
       // original while its arms run. Only a `tasks` row can be a seed, so this is
       // naturally false for ideas/epics.
       experimentSeed: type === 'task' ? this.isLiveExperimentSeed(taskId) : false,
-      // Idea component ledger (migration 098): stamped on the emit path for the
+      // Idea component ledger (migration 101): stamped on the emit path for the
       // SAME "emit-path stamp parity" reason as decomposed_at/approved_at above —
       // a field present on the seed-query path (taskListing.ts) but absent here
       // would make the card chips vanish the instant anything touches the card.

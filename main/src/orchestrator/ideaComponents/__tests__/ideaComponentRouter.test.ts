@@ -1,6 +1,6 @@
 /**
  * Unit tests for IdeaComponentRouter — the `idea_components` write
- * chokepoint (migration 098, `../ideaComponentRouter.ts`).
+ * chokepoint (migration 101, `../ideaComponentRouter.ts`).
  *
  * Covered:
  *  - setComponentState UPSERTs: first call inserts a row, a second call for
@@ -41,14 +41,14 @@ import type { IdeaComponentChangedEvent } from '../../../../../shared/types/idea
 // Test DB builder — the neighbouring resolveIdeaComponents.test.ts's ad-hoc
 // schema idiom (hand-rolled CREATE TABLEs pared to exactly what this feature
 // reads/writes) rather than the full migration chain, with `idea_components`
-// itself read straight from migration 098 so a future column or
+// itself read straight from migration 101 so a future column or
 // CHECK-constraint change cannot silently miss this copy.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
-  db.exec(readFileSync(join(migDir, '098_idea_component_ledger.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '101_idea_component_ledger.sql'), 'utf-8'));
   db.exec(`
     CREATE TABLE ideas (id TEXT PRIMARY KEY, body TEXT);
     CREATE TABLE approved_designs (id TEXT PRIMARY KEY, idea_id TEXT NOT NULL, superseded_at TEXT);
@@ -273,7 +273,7 @@ describe('IdeaComponentRouter', () => {
   // ledger row that derives 'complete' must be materialized into a stale row;
   // otherwise derivation (a live read of the very thing that just changed)
   // keeps answering 'complete' forever. Every idea planned before migration
-  // 098 has zero rows, so an existing-rows-only pass was a no-op on the whole
+  // 101 has zero rows, so an existing-rows-only pass was a no-op on the whole
   // pre-existing backlog.
   // -------------------------------------------------------------------------
 

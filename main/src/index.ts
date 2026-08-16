@@ -1587,7 +1587,7 @@ async function initializeServices(): Promise<boolean> {
   // standalone tRPC router) and read by sendFeedbackHandler via getRevisionLauncher.
   FeedbackRouter.initialize(cyboflowDb);
 
-  // Idea component ledger write chokepoint (migration 098) — the single
+  // Idea component ledger write chokepoint (migration 101) — the single
   // serialized writer for `idea_components`; the cyboflow.ideaComponents tRPC
   // router reaches it via getInstance() for the card's manual-override path.
   IdeaComponentRouter.initialize(cyboflowDb);

@@ -246,7 +246,7 @@ function codeFromError(error: string | null): DesignApproveCode {
 
 // ---------------------------------------------------------------------------
 // Post-commit idea-component ledger stamp (the two-prototype-pathway
-// convergence fix — migration 098 / shared/types/ideaComponents.ts)
+// convergence fix — migration 101 / shared/types/ideaComponents.ts)
 // ---------------------------------------------------------------------------
 
 /**

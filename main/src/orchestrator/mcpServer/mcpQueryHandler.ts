@@ -25,7 +25,7 @@
  *                                  snapshot — the zero-export handoff read path.
  *                                  An idea also gets `components` — the idea
  *                                  component ledger's full hybrid read model
- *                                  (migration 098, resolveIdeaComponents),
+ *                                  (migration 101, resolveIdeaComponents),
  *                                  always all five, carrying `staleAt` so
  *                                  "needs review" (prior work, re-verify) is
  *                                  never collapsed into "not started".)
@@ -2938,7 +2938,7 @@ export class McpQueryHandler {
         };
       }
 
-      // Idea component ledger (migration 098 / shared/types/ideaComponents.ts):
+      // Idea component ledger (migration 101 / shared/types/ideaComponents.ts):
       // the hybrid read model, resolved fresh on every get_task rather than
       // trusted from the listing-path overlay so a same-turn stamp is never
       // stale. Always all FIVE components — never omitted for an idea (unlike
