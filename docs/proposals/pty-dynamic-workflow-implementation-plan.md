@@ -260,12 +260,36 @@ probe surfaced a fourth fact that neither reviewer predicted.
    | `dontAsk` | **DENIED** ❌ |
    | `bypassPermissions` | allowed |
 
-   Cyboflow's 4-mode `agentPermissionMode` is `default | acceptEdits | auto |
-   dontAsk`. **Only `auto` can dispatch.** The most permissive-sounding mode,
-   `dontAsk`, denies outright — it suppresses the prompt by refusing, not by
-   allowing. A run in `default`/`acceptEdits` will surface the gate through
-   cyboflow's approval queue (once per dispatch); a run in `dontAsk` will fail
-   every dispatch. This must be enforced or documented before enabling the mode.
+   **Mapping that table onto cyboflow needs care — the flag names and
+   cyboflow's mode names collide without meaning the same thing.** The
+   interactive path emits exactly ONE permission flag: `--permission-mode auto`,
+   and only for `agentPermissionMode === 'auto'`
+   (`interactiveClaudeManager.ts:636-638`). Every other mode passes NO flag and
+   differs only in whether cyboflow's own wildcard PreToolUse hook is installed.
+   So:
+
+   | cyboflow mode | what the CLI sees | dispatch |
+   | --- | --- | --- |
+   | `auto` | `--permission-mode auto`, no cyboflow hook | **works** (verified) |
+   | `default` / `acceptEdits` | CLI default + cyboflow's PreToolUse hook | **unknown** — see below |
+   | `dontAsk` | CLI default, NO hook | CLI's own gate prompts **in the terminal** |
+
+   `dontAsk` is the trap: cyboflow documents it as "run unrestricted, equivalent
+   to `--dangerously-skip-permissions`" (`permissionModeMapper.ts:5`,
+   `shared/types/workflows.ts:37`), which is true of the SDK path (install no
+   hook, SDK runs unrestricted) but NOT of the CLI flag of the same name, which
+   denies. On the interactive substrate cyboflow does not pass that flag at all,
+   so the effect is neither: the CLI's own review gate fires with cyboflow's
+   approval plumbing switched off, i.e. a blocking prompt in a terminal nobody is
+   watching.
+
+   **Untested:** whether an `allow` from cyboflow's PreToolUse hook pre-empts the
+   CLI's dynamic-workflow review gate in `default`/`acceptEdits`. Hooks run first
+   in the CLI permission order, which suggests it might, but this was not probed.
+
+   **Recommendation: gate the feature to `agentPermissionMode === 'auto'`** — the
+   one combination verified end-to-end — until the `default`/`acceptEdits` case
+   is probed.
 
 **Bonus verification:** the on-disk artifact contract the tracker depends on
 matches exactly — `<uuid>/workflows/scripts/<name>-wf_<id>.js` (and
