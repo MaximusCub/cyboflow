@@ -302,11 +302,13 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const paneSession = panelStoreSession ?? sessionCtx?.session ?? activeSession;
   const isInteractive = interactiveRunId !== null;
   const agentName =
-    isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
-      ? 'Codex'
-      : isInteractive
-        ? 'Terminal'
-        : 'Claude';
+    paneSession?.agentRuntime === 'omp-fleet'
+      ? 'OMP Fleet'
+      : isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
+        ? 'Codex'
+        : isInteractive
+          ? 'Terminal'
+          : 'Claude';
 
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.

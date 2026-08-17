@@ -1457,21 +1457,26 @@ export default function SessionStartWizard(): React.JSX.Element {
                 (→ the claude panel / interactive eager spawn); workflow threads
                 it into runs.start ({ model }) → workflow_runs.model (migration
                 037). Ultracode defaults to Fable when available
-                (seedDefaultModelFor). Fast mode stays QUICK-only. */}
-            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
-              <ModelSelector
-                value={model}
-                onChange={(m) => {
-                  modelTouchedRef.current = true;
-                  setModel(m);
-                  // Fast mode is Opus-only; drop it when leaving Opus.
-                  if (!isOpusModel(m)) setFastMode(false);
-                }}
-                id="wizard-model"
-                agentProvider={effectiveProvider}
-                agentRuntime={effectiveRuntime}
-              />
-            </div>
+                (seedDefaultModelFor). Fast mode stays QUICK-only. OMP Fleet has
+                no model picker — it runs on the producer default
+                (DEFAULT_OMP_MODEL), so the Claude/Codex control is hidden rather
+                than shown as a lie. */}
+            {effectiveProvider !== 'omp' && (
+              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
+                <ModelSelector
+                  value={model}
+                  onChange={(m) => {
+                    modelTouchedRef.current = true;
+                    setModel(m);
+                    // Fast mode is Opus-only; drop it when leaving Opus.
+                    if (!isOpusModel(m)) setFastMode(false);
+                  }}
+                  id="wizard-model"
+                  agentProvider={effectiveProvider}
+                  agentRuntime={effectiveRuntime}
+                />
+              </div>
+            )}
             {/* Reasoning-effort select — QUICK, every effort-capable runtime.
                 Shown for Claude (SDK Options.effort / interactive --effort) AND
                 codex-sdk (startCodexSdkTurn → buildCodexAppServerTurnOptions maps
@@ -1480,7 +1485,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 a separate card (selection.kind==='ultracode'): its interactive
                 spawn pins xhigh and suppresses --effort, so no select there.
                 effortLevelsForProvider adapts the scale (Codex none..xhigh). */}
-            {selection.kind === 'quick' && effectiveRuntime !== 'codex-pty' && (
+            {selection.kind === 'quick' && effectiveRuntime !== 'codex-pty' && effectiveProvider !== 'omp' && (
               <div className="flex flex-col gap-1">
                 <label htmlFor="wizard-effort" className="text-xs font-medium text-text-secondary">
                   Reasoning effort
@@ -1838,13 +1843,17 @@ export default function SessionStartWizard(): React.JSX.Element {
                       ? 'Codex PTY'
                       : effectiveRuntime === 'codex-sdk'
                         ? 'Codex SDK'
-                        : 'Claude SDK'
+                        : effectiveRuntime === 'omp-fleet'
+                          ? 'OMP Fleet'
+                          : 'Claude SDK'
                 }
               />
-              <SummaryRow
-                label="Model"
-                value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
-              />
+              {effectiveProvider !== 'omp' && (
+                <SummaryRow
+                  label="Model"
+                  value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
+                />
+              )}
 
               {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
                 <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />

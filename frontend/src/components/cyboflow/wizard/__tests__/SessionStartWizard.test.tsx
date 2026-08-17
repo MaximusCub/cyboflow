@@ -22,6 +22,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // tRPC mock — the wizard fetches workflows.list + runs.list and launches via
 // runs.start.mutate.
 // ---------------------------------------------------------------------------
+const { mockUseOmpAvailability } = vi.hoisted(() => ({
+  mockUseOmpAvailability: vi.fn<() => boolean>(() => false),
+}));
+
+vi.mock('../../../../hooks/useOmpAvailability', () => ({
+  useOmpAvailability: mockUseOmpAvailability,
+}));
+
 vi.mock('../../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -336,6 +344,7 @@ beforeEach(() => {
     // across app restart, so tests start from the same "no active surface"
     // baseline the real app does.
     useDesignModeStore.setState({ activeDesignSessionId: null });
+    mockUseOmpAvailability.mockReturnValue(false);
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
@@ -471,6 +480,27 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     expect(screen.queryByText('MCP servers')).toBeNull();
     expect(screen.queryByText('Plugins')).toBeNull();
     expect(screen.getByText('Workspace')).toBeInTheDocument();
+  });
+});
+
+describe('SessionStartWizard — OMP Fleet runtime controls', () => {
+  it('hides the Claude model picker + reasoning-effort select when OMP Fleet is selected', async () => {
+    mockUseOmpAvailability.mockReturnValue(true);
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'omp-fleet' },
+      });
+    });
+
+    // The Claude model + reasoning-effort controls are Claude/Codex-scoped and
+    // must not render for OMP (which runs on the producer default model).
+    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+    expect(screen.queryByLabelText('Select reasoning effort')).toBeNull();
+    // The launch summary labels the runtime honestly.
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('OMP Fleet');
   });
 });
 
