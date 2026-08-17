@@ -9,7 +9,7 @@ import {
 } from './evalJury';
 import type { JudgeSample } from './scoring';
 
-export type CodexJurorUnavailableCode = 'runtime-missing' | 'logged-out';
+export type CodexJurorUnavailableCode = 'runtime-missing' | 'logged-out' | 'provider-disabled';
 
 export class CodexJurorUnavailableError extends Error {
   override readonly name = 'CodexJurorUnavailableError';
