@@ -1,7 +1,10 @@
 /**
  * LIVE smoke — runs Cyboflow's real config resolver, adapter, and HTTP client
- * against the real bridge. Requires OMP_BRIDGE_* env; run explicitly:
- *   OMP_BRIDGE_TOKEN_FILE=... OMP_BRIDGE_SESSION_ID=... npx vitest run <this>
+ * against the real bridge. Requires OMP_BRIDGE_* env AND an explicit
+ * OMP_BRIDGE_LIVE=1 opt-in (the skip gate is on by default, so a normal
+ * `pnpm test:unit` run never reaches a live bridge by accident); run explicitly:
+ *   OMP_BRIDGE_LIVE=1 OMP_BRIDGE_TOKEN_FILE=... OMP_BRIDGE_SESSION_ID=... \
+ *     npx vitest run <this>
  * Uses a nonexistent worker id so fleet_kill traverses the full path (auth →
  * session scope → tool gate → tool host → fleet controller) without side effects.
  */
@@ -11,8 +14,10 @@ import { OmpBridgeCommandAdapter } from './ompBridgeCommandAdapter';
 import { OmpBridgeHttpClient } from './ompBridgeClient';
 
 const config = resolveOmpBridgeCommandConfig();
+// Opt-in ONLY: a live smoke must never run in CI / a plain test:unit pass.
+const live = process.env.OMP_BRIDGE_LIVE === '1';
 
-describe.skipIf(config === undefined)('live bridge smoke', () => {
+describe.skipIf(!live || config === undefined)('live bridge smoke', () => {
   it('resolves real config', () => {
     expect(config).toBeDefined();
   });

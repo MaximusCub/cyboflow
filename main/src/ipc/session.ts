@@ -362,6 +362,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   ): Promise<{ success: boolean; error?: string } | null> => {
     const dbSession = databaseService.getSession(panelManager.getPanel(panelId)?.sessionId ?? '');
     if (!dbSession || dbSession.agent_runtime !== 'omp-fleet') return null;
+    // Refuse a switched-off provider BEFORE any side effect (persisted user
+    // turn, spawn, send) — the codex-pty branch does the same; the catch
+    // below already maps AgentProviderDisabledError to user-facing copy.
+    assertAgentProviderAllowed('omp', 'this chat turn');
     if (!ompSessionManager) {
       return { success: false, error: 'OMP fleet is not available — the bridge is not configured.' };
     }
@@ -374,7 +378,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       sessionManager.addPanelConversationMessage(panelId, 'user', input);
     }
     if (ompSessionManager.isPanelRunning(panelId)) {
-      await ompSessionManager.sendInput(panelId, input);
+      const handed = await ompSessionManager.sendInput(panelId, input);
+      if (!handed) {
+        return { success: false, error: 'Failed to deliver input to the OMP worker' };
+      }
     } else {
       await ompSessionManager.spawn(panelId, dbSession.id, input, {
         model: DEFAULT_OMP_MODEL,
@@ -1795,6 +1802,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelReasoningEffort = isAnyEffortLevel(rawPanelEffort) ? rawPanelEffort : undefined;
 
       if (dbSession?.agent_runtime === 'omp-fleet') {
+        // Same fail-closed provider guard as the codex branch below: a user
+        // who switched OMP off must not be able to steer OMP panels from the
+        // composer. The catch already maps the refusal to user-facing copy.
+        assertAgentProviderAllowed('omp', 'this chat turn');
         if (!ompSessionManager) {
           return { success: false, error: 'OMP fleet is not available — the bridge is not configured.' };
         }
@@ -1802,7 +1813,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           sessionManager.addPanelConversationMessage(claudePanel.id, 'user', finalInput);
         }
         if (ompSessionManager.isPanelRunning(claudePanel.id)) {
-          await ompSessionManager.sendInput(claudePanel.id, finalInput);
+          const handed = await ompSessionManager.sendInput(claudePanel.id, finalInput);
+          if (!handed) {
+            return { success: false, error: 'Failed to deliver input to the OMP worker' };
+          }
         } else {
           await ompSessionManager.spawn(claudePanel.id, sessionId, finalInput, {
             model: DEFAULT_OMP_MODEL,

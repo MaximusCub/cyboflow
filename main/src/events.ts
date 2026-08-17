@@ -1230,10 +1230,14 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         const panelStatusOnExit: PanelStatus = exitCode === 0 && !isActive ? 'completed_unviewed' : 'stopped';
         await updateAIPanelStatus(panelId, panelStatusOnExit, exitCode === 0 && !isActive);
         const dbSession = sessionManager.getDbSession(sessionId);
-        if (exitCode === 0 && dbSession && dbSession.status === 'running') {
-          sessionManager.db.updateSession(sessionId, { status: 'completed' });
-        } else if (dbSession && dbSession.status === 'running') {
-          sessionManager.db.updateSession(sessionId, { status: 'stopped' });
+        if (dbSession && dbSession.status === 'running') {
+          // Write the DB status raw, then re-fetch + emit 'session-updated' —
+          // the same shape as the SDK completion path. 'completed' has no
+          // app-level Session status: mapDbStatusToSessionStatus turns it into
+          // completed_unviewed when unviewed, so refreshSessionFromDatabase
+          // (convert + activeSessions.set + emit) surfaces the right status.
+          sessionManager.db.updateSession(sessionId, { status: exitCode === 0 ? 'completed' : 'stopped' });
+          sessionManager.refreshSessionFromDatabase(sessionId);
         }
       },
     );

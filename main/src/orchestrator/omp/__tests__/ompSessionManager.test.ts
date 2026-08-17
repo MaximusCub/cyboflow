@@ -140,6 +140,18 @@ describe('OmpSessionManager — spawn', () => {
     await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
     await expect(manager.spawn('panel-1', 'session-1', 'second', { model: 'm' })).rejects.toThrow(/already spawned/);
   });
+
+  it('reserves the panel while a spawn is in flight: a concurrent spawn is rejected', async () => {
+    const { manager } = makeManager();
+    const inFlight = manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+    // The sync prefix has run: a pending record is in the map before the first
+    // await. A concurrent spawn (double-click) sees it and rejects instead of
+    // orphaning a second remote worker.
+    await expect(manager.spawn('panel-1', 'session-1', 'second', { model: 'm' })).rejects.toThrow(/already spawned/);
+    await inFlight;
+    expect(manager.isPanelRunning('panel-1')).toBe(true);
+    expect(manager.panelCount).toBe(1);
+  });
   it('replaces a terminal record: respawn after the worker reached a terminal state', async () => {
     const { manager, spawn, state } = makeManager({
       state: async () => okResult('state=done'),
@@ -209,7 +221,7 @@ describe('OmpSessionManager — sendInput', () => {
 
     const handed = await manager.sendInput('panel-1', 'follow up');
 
-    expect(handed).toBe(true);
+    expect(handed).toBe(false);
     expect(errors).toHaveLength(1);
     expect(errors[0].error).toContain('fleet_send failed');
     expect(manager.isPanelRunning('panel-1')).toBe(true);
@@ -294,6 +306,21 @@ describe('OmpSessionManager — liveness and exit (fleet_state)', () => {
       expect(exits).toEqual([]);
       expect(manager.isPanelRunning('panel-1')).toBe(true);
     }
+  });
+
+  it('surfaces a failed fleet_state as an error event but keeps the panel alive', async () => {
+    const { manager, state } = makeManager();
+    state.mockImplementation(async () => failResult('herdr offline'));
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+    const errors = collect<{ error: string }>(manager, 'error');
+    const exits = collect<OmpExitEvent>(manager, 'exit');
+
+    await manager.tick('panel-1');
+
+    expect(exits).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].error).toContain('fleet_state failed');
+    expect(manager.isPanelRunning('panel-1')).toBe(true);
   });
 
   it.each([

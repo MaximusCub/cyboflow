@@ -202,6 +202,11 @@ export class OmpSessionManager extends EventEmitter {
     if (config.model.trim() === "") {
       throw new TypeError("OmpSessionManager.spawn requires a model");
     }
+    // Reserve the panel BEFORE the (awaited) adapter call: a double-click
+    // spawns two concurrent calls, and both would pass a pure "existing"
+    // guard before either sets `this.records` — orphaning a second remote
+    // worker. A pending record (workerId still null) makes the in-flight
+    // spawn visible to a concurrent spawn, which rejects.
     const existing = this.records.get(panelId);
     if (existing !== undefined && !existing.terminal) {
       throw new Error(`OmpSessionManager: panel ${panelId} already spawned`);
@@ -211,15 +216,36 @@ export class OmpSessionManager extends EventEmitter {
       // poll timer (defensive — finishTerminal/stopPanel already did).
       this.clearPolling(existing);
     }
-
-    const result = await this.adapter.spawn({
-      operationId: randomUUID(),
+    const pending: OmpPanelRecord = {
+      panelId,
+      sessionId,
+      workerId: null,
       model: config.model,
-      task: prompt,
-      label: config.label,
-      workspace: config.workspace,
-      cwd: config.cwd,
-    });
+      emitted: "",
+      terminal: false,
+      timer: null,
+    };
+    this.records.set(panelId, pending);
+
+    let result: OmpCommandResult;
+    try {
+      result = await this.adapter.spawn({
+        operationId: randomUUID(),
+        model: config.model,
+        task: prompt,
+        label: config.label,
+        workspace: config.workspace,
+        cwd: config.cwd,
+      });
+    } catch (err) {
+      this.logger?.error(`[OmpSessionManager] fleet_spawn threw for panel ${panelId}`, {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (this.records.get(panelId) === pending) this.records.delete(panelId);
+      this.emitExit(panelId, sessionId, 1);
+      return;
+    }
 
     if (!result.ok) {
       this.logger?.error(`[OmpSessionManager] fleet_spawn failed for panel ${panelId}`, {
@@ -227,6 +253,7 @@ export class OmpSessionManager extends EventEmitter {
         error: result.error,
         detail: result.detail,
       });
+      if (this.records.get(panelId) === pending) this.records.delete(panelId);
       this.emitExit(panelId, sessionId, 1);
       return;
     }
@@ -238,22 +265,25 @@ export class OmpSessionManager extends EventEmitter {
         sessionId,
         detail: result.detail,
       });
+      if (this.records.get(panelId) === pending) this.records.delete(panelId);
       this.emitExit(panelId, sessionId, 1);
       return;
     }
 
-    const record: OmpPanelRecord = {
-      panelId,
-      sessionId,
-      workerId,
-      model: config.model,
-      emitted: "",
-      terminal: false,
-      timer: null,
-    };
-    this.records.set(panelId, record);
+    // The pending reservation becomes the live record in place. stopPanel
+    // marks it terminal while spawn is still in flight; honor that instead of
+    // reviving the panel.
+    if (pending.terminal) {
+      this.logger?.info(`[OmpSessionManager] panel ${panelId} stopped while spawn was in flight; not tracking the worker`, {
+        sessionId,
+        workerId,
+      });
+      return;
+    }
+    pending.workerId = workerId;
+    this.records.set(panelId, pending);
     this.emit("spawned", { panelId, sessionId } satisfies OmpSpawnedEvent);
-    this.startPolling(record);
+    this.startPolling(pending);
     this.logger?.info(`[OmpSessionManager] spawned ${workerId} for panel ${panelId}`, {
       sessionId,
       model: config.model,
@@ -282,6 +312,10 @@ export class OmpSessionManager extends EventEmitter {
         detail: result.detail,
       });
       this.emitError(record, `fleet_send failed: ${result.detail}`);
+      // The turn did NOT reach the worker: report failure to the caller so
+      // the IPC layer can surface it instead of claiming success. The panel
+      // stays live (requireLiveRecord still passes) so the user can retry.
+      return false;
     }
     return true;
   }
@@ -340,11 +374,18 @@ export class OmpSessionManager extends EventEmitter {
       this.emitError(record, `fleet_state failed: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
+    // A transport-level state failure (`ok:false`) is TRANSIENT — a bridge
+    // blip, a herder offline. Surface it and keep the panel alive; only a
+    // genuinely unparseable live-state line or a vanished worker is terminal.
+    if (!stateResult.ok) {
+      this.emitError(record, `fleet_state failed: ${stateResult.detail}`);
+      return;
+    }
     const state = this.parseState(stateResult);
     const workerGone = state !== null && !OMP_TERMINAL_STATES.has(state) && /not found/i.test(stateResult.detail);
     if (state === null || workerGone) {
       // Unparseable or vanished worker: terminal from this side.
-      this.finishTerminal(record, workerGone ? "evicted" : state ?? "failed");
+      this.finishTerminal(record, workerGone ? "evicted" : "failed");
       return;
     }
     if (OMP_TERMINAL_STATES.has(state)) {
