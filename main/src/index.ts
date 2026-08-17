@@ -222,6 +222,7 @@ import { makeEvalJudgeQuery } from './orchestrator/eval/evalJudgeQuery';
 import { makeCodexEvalJudgeQuery } from './services/panels/codex/codexEvalJudgeQuery';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
 import { ClaudePairwiseJudge } from './orchestrator/eval/pairwiseJudge';
+import { CodexPairwiseJudge } from './orchestrator/eval/codexPairwiseJudge';
 import { makePairwiseJudgeQuery } from './orchestrator/eval/pairwiseJudgeQuery';
 import { handleTerminalStatusEvent } from './orchestrator/terminalEvalSubscriber';
 import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
@@ -2591,12 +2592,43 @@ async function initializeServices(): Promise<boolean> {
   // chokepoint are all closures so the worker imports no concrete service. Its
   // isEvalEnabled is COMPOSED — global code-review eval AND the auto-grade
   // sub-toggle — so turning either off captures the diffs but skips the judge.
+  //
+  // The panel mirrors EvalWorker's rubric jury: 2×Claude + 1×Codex, its LENGTH
+  // driving K. Both Claude slots share ONE ClaudePairwiseJudge instance (identical
+  // to claudeJudge above). The Codex slot gets a FRESH makeCodexEvalJudgeQuery — the
+  // factory's resolvedModel is per-closure state, so reusing the rubric juror's
+  // query fn would cross-contaminate the two panels' model provenance. No timeoutMs:
+  // the factory already defaults to CODEX_EVAL_JUDGE_TIMEOUT_MS.
+  const claudePairwiseJudge = new ClaudePairwiseJudge({
+    structuredQuery: makePairwiseJudgeQuery(cyboflowLogger),
+    logger: cyboflowLogger,
+  });
+  const codexPairwiseJudge = new CodexPairwiseJudge({
+    structuredQuery: makeCodexEvalJudgeQuery(cyboflowLogger),
+    logger: cyboflowLogger,
+  });
   PairwiseJudgeWorker.initialize(cyboflowDb, cyboflowLogger, {
     gitDiff: evalGitDiff,
-    judge: new ClaudePairwiseJudge({
-      structuredQuery: makePairwiseJudgeQuery(cyboflowLogger),
-      logger: cyboflowLogger,
-    }),
+    panel: [
+      {
+        slot: 'claude-1',
+        provider: 'claude',
+        model: claudePairwiseJudge.resolvedModel ?? null,
+        judge: claudePairwiseJudge,
+      },
+      {
+        slot: 'claude-2',
+        provider: 'claude',
+        model: claudePairwiseJudge.resolvedModel ?? null,
+        judge: claudePairwiseJudge,
+      },
+      {
+        slot: 'codex-1',
+        provider: 'codex',
+        model: codexPairwiseJudge.resolvedModel ?? null,
+        judge: codexPairwiseJudge,
+      },
+    ],
     reviewItemWriter: (projectId, change) =>
       ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     emitComparisonReady: (event) => experimentEvents.emit('comparisonReady', event),

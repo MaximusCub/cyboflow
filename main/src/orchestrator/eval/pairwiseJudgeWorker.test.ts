@@ -8,7 +8,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import { PairwiseJudgeWorker, type PairwiseJudgeWorkerDeps } from './pairwiseJudgeWorker';
+import {
+  PairwiseJudgeWorker,
+  type PairwiseJudgeWorkerDeps,
+  type PairwisePanelSlot,
+} from './pairwiseJudgeWorker';
 import type { PairwiseJudgeClient, PairwiseGradeInput, PairwiseRawResult } from './pairwiseJudge';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 
@@ -80,12 +84,47 @@ const diffFor = (path: string, text: string): RunGitDiff => ({
 });
 
 class FakeJudge implements PairwiseJudgeClient {
-  readonly name = 'fake';
-  readonly resolvedModel = 'fake-model';
-  constructor(private readonly impl: (input: PairwiseGradeInput) => Promise<PairwiseRawResult>) {}
+  readonly name: string;
+  readonly resolvedModel: string | undefined;
+  constructor(
+    private readonly impl: (input: PairwiseGradeInput) => Promise<PairwiseRawResult>,
+    opts: { name?: string; resolvedModel?: string } = {},
+  ) {
+    this.name = opts.name ?? 'fake';
+    this.resolvedModel = 'resolvedModel' in opts ? opts.resolvedModel : 'fake-model';
+  }
   grade(input: PairwiseGradeInput): Promise<PairwiseRawResult> {
     return this.impl(input);
   }
+}
+
+/**
+ * Codex-shaped judge: unlike the Claude one (which resolves its model in its
+ * constructor), it only learns its model once a grade has come back — so a per-sample
+ * stamp read BEFORE the await would lose it.
+ */
+class FakeCodexJudge implements PairwiseJudgeClient {
+  readonly name = 'codex-pairwise';
+  resolvedModel: string | undefined;
+  constructor(
+    private readonly impl: (input: PairwiseGradeInput) => Promise<PairwiseRawResult>,
+    private readonly lateModel: string,
+  ) {}
+  async grade(input: PairwiseGradeInput): Promise<PairwiseRawResult> {
+    const out = await this.impl(input);
+    this.resolvedModel = this.lateModel;
+    return out;
+  }
+}
+
+/** A homogeneous N-slot panel over ONE judge instance (the pre-panel default shape). */
+function panelOf(judge: PairwiseJudgeClient, size = 3): PairwisePanelSlot[] {
+  return Array.from({ length: size }, (_, i) => ({
+    slot: `claude-${i + 1}`,
+    provider: 'claude' as const,
+    model: judge.resolvedModel ?? null,
+    judge,
+  }));
 }
 
 function makeWorker(
@@ -105,7 +144,9 @@ function makeWorker(
   PairwiseJudgeWorker._resetForTesting();
   const worker = PairwiseJudgeWorker.initialize(dbAdapter(raw), undefined, {
     gitDiff,
-    judge: new FakeJudge(async () => ({ preference: '1', confidence: 0.8, rationale: 'A better' })),
+    panel: panelOf(
+      new FakeJudge(async () => ({ preference: '1', confidence: 0.8, rationale: 'A better' })),
+    ),
     reviewItemWriter,
     emitComparisonReady,
     appVersion: '0.1.15',
@@ -185,7 +226,9 @@ describe('maybeSnapshotAndEnqueue — short circuits', () => {
     const raw = buildDb();
     const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'failed' });
     const grade = vi.fn();
-    const { worker, reviewItemWriter } = makeWorker(raw, { judge: new FakeJudge(grade as never) });
+    const { worker, reviewItemWriter } = makeWorker(raw, {
+      panel: panelOf(new FakeJudge(grade as never)),
+    });
     expect(await worker.maybeSnapshotAndEnqueue(id)).toBe('failed');
     const row = raw
       .prepare('SELECT eval_status AS s, diff_a_text AS a, decision_review_item_id AS d FROM experiment_comparisons WHERE experiment_id = ?')
@@ -203,7 +246,7 @@ describe('maybeSnapshotAndEnqueue — short circuits', () => {
     const grade = vi.fn();
     const { worker } = makeWorker(raw, {
       isEvalEnabled: () => false,
-      judge: new FakeJudge(grade as never),
+      panel: panelOf(new FakeJudge(grade as never)),
     });
     expect(await worker.maybeSnapshotAndEnqueue(id)).toBe('skipped');
     const row = raw
@@ -220,7 +263,7 @@ describe('maybeSnapshotAndEnqueue — short circuits', () => {
     const grade = vi.fn();
     const { worker, emitComparisonReady } = makeWorker(raw, {
       gitDiff: vi.fn(async () => diffFor('x', '   ')),
-      judge: new FakeJudge(grade as never),
+      panel: panelOf(new FakeJudge(grade as never)),
     });
     expect(await worker.maybeSnapshotAndEnqueue(id)).toBe('complete');
     const row = raw
@@ -238,9 +281,30 @@ describe('process — sampling + persistence', () => {
   it('persists preference/counts/per_sample and mints the decision item', async () => {
     const raw = buildDb();
     const id = seedExperiment(raw, { armAStatus: 'awaiting_review', armBStatus: 'awaiting_review' });
+    // '1' with positionAFirst=true => arm A wins every sample. Three DISTINCT judge
+    // instances so per-slot attribution is observable in per_sample_json.
+    const aWins = async () => ({ preference: '1' as const, confidence: 0.9, rationale: 'A wins' });
     const { worker, reviewItemWriter, emitComparisonReady } = makeWorker(raw, {
-      // '1' with positionAFirst=true => arm A wins every sample.
-      judge: new FakeJudge(async () => ({ preference: '1', confidence: 0.9, rationale: 'A wins' })),
+      panel: [
+        {
+          slot: 'claude-1',
+          provider: 'claude',
+          model: null,
+          judge: new FakeJudge(aWins, { name: 'j1', resolvedModel: 'model-1' }),
+        },
+        {
+          slot: 'claude-2',
+          provider: 'claude',
+          model: null,
+          judge: new FakeJudge(aWins, { name: 'j2', resolvedModel: 'model-2' }),
+        },
+        {
+          slot: 'codex-1',
+          provider: 'codex',
+          model: null,
+          judge: new FakeJudge(aWins, { name: 'j3', resolvedModel: 'model-3' }),
+        },
+      ],
     });
     await worker.maybeSnapshotAndEnqueue(id);
     await worker._queue().onIdle();
@@ -257,9 +321,10 @@ describe('process — sampling + persistence', () => {
     expect(row.a).toBe(3);
     expect(row.b).toBe(0);
     expect(row.n).toBe(3);
-    expect(row.jm).toBe('fake-model');
+    expect(row.jm).toBe('model-1'); // first CLAUDE slot's resolved model
     expect(row.d).toBe('rvw_x');
     const perSample = JSON.parse(row.ps) as Array<{
+      sampleIndex: number;
       preference: string;
       positionAFirst: boolean;
       judgeName: string;
@@ -267,10 +332,10 @@ describe('process — sampling + persistence', () => {
     }>;
     expect(perSample).toHaveLength(3);
     expect(perSample.every((s) => s.preference === 'A')).toBe(true);
-    for (const sample of perSample) {
-      expect(sample.judgeName).toBe('fake');
-      expect(sample.judgeModel).toBe('fake-model');
-    }
+    // Per-SLOT attribution: sample i is stamped with slot i's judge, in panel order.
+    expect(perSample.map((s) => s.judgeName)).toEqual(['j1', 'j2', 'j3']);
+    expect(perSample.map((s) => s.judgeModel)).toEqual(['model-1', 'model-2', 'model-3']);
+    expect(perSample.map((s) => s.sampleIndex)).toEqual([0, 1, 2]);
 
     // decision review item minted with the experiment id payload.
     expect(reviewItemWriter).toHaveBeenCalledOnce();
@@ -293,7 +358,9 @@ describe('process — sampling + persistence', () => {
     // rng >= 0.5 => positionAFirst=false, so Solution 1 = arm B; raw '1' => arm B.
     const { worker } = makeWorker(raw, {
       rng: () => 0.9,
-      judge: new FakeJudge(async () => ({ preference: '1', confidence: 0.8, rationale: 'sol1' })),
+      panel: panelOf(
+        new FakeJudge(async () => ({ preference: '1', confidence: 0.8, rationale: 'sol1' })),
+      ),
     });
     await worker.maybeSnapshotAndEnqueue(id);
     await worker._queue().onIdle();
@@ -313,7 +380,7 @@ describe('process — sampling + persistence', () => {
       if (call <= 2) throw new Error('malformed');
       return { preference: '1' as const, confidence: 0.7, rationale: 'A' };
     });
-    const { worker } = makeWorker(raw, { judge: new FakeJudge(grade) });
+    const { worker } = makeWorker(raw, { panel: panelOf(new FakeJudge(grade)) });
     await worker.maybeSnapshotAndEnqueue(id);
     await worker._queue().onIdle();
     const row = raw
@@ -331,7 +398,7 @@ describe('process — sampling + persistence', () => {
       throw new Error('always malformed');
     });
     const { worker, reviewItemWriter } = makeWorker(raw, {
-      judge: new FakeJudge(grade as never),
+      panel: panelOf(new FakeJudge(grade as never)),
       maxRetries: 1,
     });
     await worker.maybeSnapshotAndEnqueue(id);
@@ -343,6 +410,100 @@ describe('process — sampling + persistence', () => {
     expect(row.e).toContain('no valid sample');
     // markFailed still mints a decision item for the human.
     expect(reviewItemWriter).toHaveBeenCalled();
+  });
+});
+
+describe('process — heterogeneous panel', () => {
+  const aWins = async (): Promise<PairwiseRawResult> => ({
+    preference: '1',
+    confidence: 0.9,
+    rationale: 'A',
+  });
+
+  /** A production-shaped mixed panel: two Claude slots sharing ONE judge + a Codex slot. */
+  function mixedPanel(): { panel: PairwisePanelSlot[]; codex: FakeCodexJudge } {
+    const claude = new FakeJudge(aWins, { name: 'claude-pairwise', resolvedModel: 'sonnet-x' });
+    const codex = new FakeCodexJudge(aWins, 'gpt-codex-y');
+    return {
+      panel: [
+        { slot: 'claude-1', provider: 'claude', model: claude.resolvedModel ?? null, judge: claude },
+        { slot: 'claude-2', provider: 'claude', model: claude.resolvedModel ?? null, judge: claude },
+        // The Codex judge has NOT resolved a model yet at wiring time (it only learns
+        // one after its first grade) — exactly like production.
+        { slot: 'codex-1', provider: 'codex', model: codex.resolvedModel ?? null, judge: codex },
+      ],
+      codex,
+    };
+  }
+
+  it('a mixed 2×Claude + 1×Codex panel persists three per-slot samples', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const { panel } = mixedPanel();
+    const { worker } = makeWorker(raw, { panel });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    const row = raw
+      .prepare(
+        'SELECT eval_status AS s, sample_count AS n, per_sample_json AS ps FROM experiment_comparisons WHERE experiment_id = ?',
+      )
+      .get(id) as { s: string; n: number; ps: string };
+    expect(row.s).toBe('complete');
+    expect(row.n).toBe(3);
+    const perSample = JSON.parse(row.ps) as Array<{
+      sampleIndex: number;
+      judgeName: string;
+      judgeModel: string | null;
+    }>;
+    expect(perSample).toHaveLength(3);
+    expect(perSample.filter((s) => s.judgeName === 'claude-pairwise')).toHaveLength(2);
+    expect(perSample.filter((s) => s.judgeName === 'codex-pairwise')).toHaveLength(1);
+    // Every slot contributes a non-empty model — including the Codex slot, whose model
+    // is only known AFTER the grade returns (the stamp must read it post-await).
+    for (const sample of perSample) {
+      expect(typeof sample.judgeModel).toBe('string');
+      expect(sample.judgeModel).not.toBe('');
+    }
+    expect(perSample.find((s) => s.judgeName === 'codex-pairwise')?.judgeModel).toBe('gpt-codex-y');
+    // Pairwise-distinct sample indices.
+    expect(new Set(perSample.map((s) => s.sampleIndex)).size).toBe(3);
+  });
+
+  it('panel LENGTH drives K (2 slots ⇒ 2 samples, 4 slots ⇒ 4)', async () => {
+    for (const size of [2, 4]) {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const { worker } = makeWorker(raw, { panel: panelOf(new FakeJudge(aWins), size) });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      const row = raw
+        .prepare('SELECT sample_count AS n, per_sample_json AS ps FROM experiment_comparisons WHERE experiment_id = ?')
+        .get(id) as { n: number; ps: string };
+      expect(row.n).toBe(size);
+      expect(JSON.parse(row.ps)).toHaveLength(size);
+    }
+  });
+
+  it("judge_model is the FIRST Claude slot's model, never the Codex slot's", async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const claude = new FakeJudge(aWins, { name: 'claude-pairwise', resolvedModel: 'sonnet-x' });
+    const codex = new FakeCodexJudge(aWins, 'gpt-codex-y');
+    // Codex leads the panel — the stamp must still pick the first CLAUDE slot.
+    const { worker } = makeWorker(raw, {
+      panel: [
+        { slot: 'codex-1', provider: 'codex', model: null, judge: codex },
+        { slot: 'claude-1', provider: 'claude', model: null, judge: claude },
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+    const row = raw
+      .prepare('SELECT judge_model AS jm FROM experiment_comparisons WHERE experiment_id = ?')
+      .get(id) as { jm: string | null };
+    expect(row.jm).toBe('sonnet-x');
+    expect(codex.resolvedModel).toBe('gpt-codex-y'); // the Codex slot DID resolve, and differs
   });
 });
 
@@ -358,7 +519,9 @@ describe('recoverInterrupted', () => {
       )
       .run(id);
     const { worker } = makeWorker(raw, {
-      judge: new FakeJudge(async () => ({ preference: '2', confidence: 0.6, rationale: 'B' })),
+      panel: panelOf(
+        new FakeJudge(async () => ({ preference: '2', confidence: 0.6, rationale: 'B' })),
+      ),
     });
     worker.recoverInterrupted();
     await worker._queue().onIdle();

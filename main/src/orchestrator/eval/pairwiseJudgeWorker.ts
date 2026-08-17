@@ -9,7 +9,8 @@
  *                                            into a pending experiment_comparisons
  *                                            row (or short-circuit), then enqueue
  *   enqueue(experimentId)   → queue.add(process)
- *   process(experimentId)   → pending→running, K position-randomized samples,
+ *   process(experimentId)   → pending→running, one position-randomized sample per
+ *                             panel slot (2×Claude + 1×Codex in production),
  *                             aggregate, persist verdict, mint the blocking
  *                             kind='decision' review item, emit ready
  *
@@ -24,7 +25,7 @@
  * one reconcileExperimentStatus uses) — an arm behind an open approval gate is not yet
  * gradable.
  *
- * Impurity lives HERE (SDK via the injected judge, DB writes, review-item
+ * Impurity lives HERE (SDK via the injected judge panel, DB writes, review-item
  * chokepoint); pairwiseScoring.ts stays pure. Every electron-touching
  * collaborator is injected as a closure at initialize() so the worker imports no
  * concrete service (mirrors EvalWorker's boot wiring).
@@ -60,11 +61,26 @@ export type PairwiseSnapshotOutcome =
   | 'complete'
   | 'enqueued';
 
+/**
+ * One ordered panel slot — mirrors EvalWorker's `JurySlot`. The panel is
+ * heterogeneous (2×Claude + 1×Codex in production) and its LENGTH is K: sample
+ * `i` is graded by slot `i`. Main-process-only; never crosses IPC/tRPC.
+ */
+export interface PairwisePanelSlot {
+  slot: string;
+  provider: 'claude' | 'codex';
+  model: string | null;
+  judge: PairwiseJudgeClient;
+}
+
 export interface PairwiseJudgeWorkerDeps {
   /** Diff capture closure (worktree, base ref) => unified diff + stats, or null. */
   gitDiff: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff | null>;
-  /** The pluggable pairwise judge (ClaudePairwiseJudge in production). */
-  judge: PairwiseJudgeClient;
+  /**
+   * The ordered heterogeneous judge panel (2×Claude + 1×Codex in production).
+   * Its length drives K — one sample per slot, graded in order.
+   */
+  panel: PairwisePanelSlot[];
   /** Review-item chokepoint — closure over ReviewItemRouter.getInstance().applyReviewItem. */
   reviewItemWriter: (
     projectId: number,
@@ -81,8 +97,6 @@ export interface PairwiseJudgeWorkerDeps {
    * judge call, so manual diff-compare + decide still works.
    */
   isEvalEnabled: () => boolean;
-  /** K samples; defaults to DEFAULT_PAIRWISE_SAMPLE_COUNT. */
-  sampleCount?: number;
   /** Whole-comparison retries; defaults to DEFAULT_PAIRWISE_MAX_RETRIES. */
   maxRetries?: number;
   /** Position-bias randomizer [0,1); defaults to Math.random. */
@@ -138,7 +152,7 @@ export class PairwiseJudgeWorker {
     private readonly logger: LoggerLike | undefined,
     private readonly deps: PairwiseJudgeWorkerDeps,
   ) {
-    this.sampleCount = deps.sampleCount ?? DEFAULT_PAIRWISE_SAMPLE_COUNT;
+    this.sampleCount = deps.panel.length > 0 ? deps.panel.length : DEFAULT_PAIRWISE_SAMPLE_COUNT;
     this.maxRetries = deps.maxRetries ?? DEFAULT_PAIRWISE_MAX_RETRIES;
     this.rng = deps.rng ?? Math.random;
     this.sleep = deps.sleep ?? defaultSleep;
@@ -391,7 +405,13 @@ export class PairwiseJudgeWorker {
     }
 
     const projectId = this.resolveProjectId(experimentId, row.run_id_a);
-    const judgeModel = this.deps.judge.resolvedModel ?? null;
+    // `judge_model` is a back-compat SCALAR (and the per-sample fallback for legacy
+    // rows), so it stamps the FIRST Claude slot's model — never a composite, never the
+    // Codex slot: a Claude judge resolves its model in its constructor, while the Codex
+    // judge only resolves after its first grade, which happens AFTER this write. The
+    // Codex slot's model reaches the DB via the per-sample stamp in collectSamples.
+    const primaryClaudeSlot = this.deps.panel.find((slot) => slot.provider === 'claude');
+    const judgeModel = primaryClaudeSlot ? this.resolveSlotModel(primaryClaudeSlot) : null;
 
     // pending → running (stamp the judge model now).
     this.db
@@ -427,7 +447,8 @@ export class PairwiseJudgeWorker {
   }
 
   /**
-   * Draw K samples. Per sample: randomize `positionAFirst`, one grade attempt +
+   * Draw one sample per panel slot, in order (slot i grades sample i). Per sample:
+   * randomize `positionAFirst` (exactly ONE rng draw per sample), one grade attempt +
    * one retry on malformed, then drop. Maps the raw '1'/'2'/'tie' back to arm
    * identity via `positionAFirst`. Returns whatever valid samples survived.
    */
@@ -438,8 +459,10 @@ export class PairwiseJudgeWorker {
   }): Promise<PairwiseSample[]> {
     const samples: PairwiseSample[] = [];
     for (let i = 0; i < this.sampleCount; i++) {
+      const slot = this.deps.panel[i];
+      if (!slot) continue;
       const positionAFirst = this.rng() < 0.5;
-      const raw = await this.gradeOnceWithRetry({ ...input, positionAFirst });
+      const raw = await this.gradeOnceWithRetry(slot, { ...input, positionAFirst });
       if (!raw) continue;
       // Map raw neutral label → arm identity.
       let preference: PairwisePreference;
@@ -453,19 +476,33 @@ export class PairwiseJudgeWorker {
         preference,
         confidence: raw.confidence,
         rationale: raw.rationale,
-        judgeName: this.deps.judge.name,
-        judgeModel: this.deps.judge.resolvedModel ?? null,
+        // Read AFTER the await: a Codex judge only learns its model once the first
+        // grade has come back, so stamping before would lose it.
+        judgeName: slot.judge.name,
+        judgeModel: this.resolveSlotModel(slot),
       });
     }
     return samples;
   }
 
-  private async gradeOnceWithRetry(input: {
-    diffA: string;
-    diffB: string;
-    seedContext?: string;
-    positionAFirst: boolean;
-  }): Promise<{ preference: '1' | '2' | 'tie'; confidence: number; rationale: string } | null> {
+  /** Prefer the judge's live resolved model; fall back to the slot's declared one. */
+  private resolveSlotModel(slot: PairwisePanelSlot): string | null {
+    if ('resolvedModel' in slot.judge) {
+      const resolvedModel = (slot.judge as { resolvedModel?: unknown }).resolvedModel;
+      if (typeof resolvedModel === 'string' && resolvedModel.length > 0) return resolvedModel;
+    }
+    return slot.model;
+  }
+
+  private async gradeOnceWithRetry(
+    slot: PairwisePanelSlot,
+    input: {
+      diffA: string;
+      diffB: string;
+      seedContext?: string;
+      positionAFirst: boolean;
+    },
+  ): Promise<{ preference: '1' | '2' | 'tie'; confidence: number; rationale: string } | null> {
     for (let tries = 0; tries < 2; tries++) {
       try {
         // Pairwise judging only exists for a side-by-side A/B experiment, so it
@@ -473,7 +510,7 @@ export class PairwiseJudgeWorker {
         // experiment arms' rubric evals so the settle spawns one judge at a time
         // (see judgeConcurrency).
         return await runJudgeGrade('ab', () =>
-          this.deps.judge.grade({
+          slot.judge.grade({
             diffA: input.diffA,
             diffB: input.diffB,
             positionAFirst: input.positionAFirst,
@@ -482,6 +519,7 @@ export class PairwiseJudgeWorker {
         );
       } catch (err) {
         this.logger?.warn('[pairwise] sample failed', {
+          slot: slot.slot,
           try: tries,
           error: err instanceof Error ? err.message : String(err),
         });
