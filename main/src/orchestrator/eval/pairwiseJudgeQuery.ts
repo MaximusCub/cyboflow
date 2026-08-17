@@ -32,11 +32,17 @@
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
+import { EvalJudgeTimeoutError } from './judgeErrors';
 
 /** Default per-sample deadline. A hung claude binary must not stall the worker. */
-// Deliberately NOT raised alongside EVAL_JUDGE_TIMEOUT_MS (300s): the pairwise
-// judge is diff-only with maxTurns 8 — no worktree exploration loop to budget
-// for — and its timer likewise starts only after lane admission. 180s is ample.
+// Deliberately NOT raised alongside EVAL_JUDGE_TIMEOUT_MS (600_000ms, i.e. 10 min —
+// see evalJudgeQuery.ts) or CODEX_EVAL_JUDGE_TIMEOUT_MS
+// (services/panels/codex/codexEvalJudgeQuery.ts:35, also 600_000ms): the Claude
+// pairwise judge is diff-only with maxTurns 8 — no worktree exploration loop to
+// budget for — and its timer likewise starts only after lane admission, so 180s
+// is ample. The Codex pairwise slot deliberately keeps inheriting the 600s
+// deadline instead, since its app-server juror is exposed to the same
+// host-contention risk the longer Claude/Codex eval-jury deadlines exist for.
 export const PAIRWISE_JUDGE_TIMEOUT_MS = 180_000;
 
 /** Read-only tools the judge may use (diff-only grading needs none, kept for parity). */
@@ -123,16 +129,22 @@ export function makePairwiseJudgeQuery(
           structured = msg.structured_output ?? null;
         }
       }
-      if (didTimeOut()) throw new Error(`pairwise judge query timed out after ${timeoutMs}ms`);
+      if (didTimeOut()) {
+        throw new EvalJudgeTimeoutError(`pairwise judge query timed out after ${timeoutMs}ms`);
+      }
       return structured;
     } catch (err) {
+      if (err instanceof EvalJudgeTimeoutError) {
+        logger?.warn('[pairwiseJudgeQuery] structured query failed', { error: err.message });
+        throw err; // keep the typed class — the worker's retry policy branches on it
+      }
       const message = didTimeOut()
         ? `pairwise judge query timed out after ${timeoutMs}ms`
         : err instanceof Error
           ? err.message
           : String(err);
       logger?.warn('[pairwiseJudgeQuery] structured query failed', { error: message });
-      throw new Error(message);
+      throw didTimeOut() ? new EvalJudgeTimeoutError(message) : new Error(message);
     } finally {
       cleanup();
     }
