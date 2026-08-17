@@ -835,12 +835,15 @@ describe('process — degraded panel: classification, backfill, degradation note
       expect(readRow(raw, id).s).toBe('failed');
     });
 
-    it(`never draws more than ${MAX_PAIRWISE_BACKFILL_DRAWS} per attempt, even on a wide panel`, async () => {
+    it('a WIDE panel repairs only to the v1 target (3), not to panel length', async () => {
       const raw = buildDb();
       const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
       const donorGrade = vi.fn(aWins);
       const rng = vi.fn(() => 0.1);
-      // 5 slots, only the first survives => an uncapped backfill would keep drawing.
+      // 5 slots, only the first survives. What bounds the repair here is the TARGET
+      // (min(3, panel.length) = 3), not MAX_PAIRWISE_BACKFILL_DRAWS — with one
+      // survivor the two bounds coincide, so this pins the target semantics: a wider
+      // panel does not license a wider backfill.
       const { worker } = makeWorker(raw, {
         rng,
         panel: [

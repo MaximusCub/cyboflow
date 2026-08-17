@@ -43,6 +43,7 @@ import { randomBytes } from 'node:crypto';
 import PQueue from 'p-queue';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { ReviewItemCreate } from '../reviewItemRouter';
 import type {
   ComparisonStatus,
@@ -134,7 +135,9 @@ export type PairwiseSnapshotOutcome =
  */
 export interface PairwisePanelSlot {
   slot: string;
-  provider: 'claude' | 'codex';
+  /** The shared provider union, matching EvalWorker's `JurySlot` — so adding a
+   *  third-provider juror is a wiring change, not a type-declaration change. */
+  provider: AgentProvider;
   model: string | null;
   judge: PairwiseJudgeClient;
 }
@@ -497,13 +500,19 @@ export class PairwiseJudgeWorker {
       seedContext: row.seed_context ?? undefined,
     });
     if (samples.length === 0) {
+      // Fold the degradation note into the THROWN message: on a total panel failure
+      // markFailed persists this string as the row's `error`, and it is the only
+      // durable record of WHICH slot died and why (the warns live in a
+      // per-launch-truncated log that is not retained beside the row). The partial-
+      // degradation path already persists the same note via markComplete.
+      const detail = degradation ? ` — ${degradation}` : '';
       const message = 'all pairwise samples were malformed/failed — no valid sample to aggregate';
       if (allFailuresNonRetryable) {
         throw new PairwiseNonRetryableError(
-          `${message} (every slot failed deterministically — timeout/max-turns/unavailable — so the comparison is not re-attempted)`,
+          `${message} (every slot failed deterministically — timeout/max-turns/unavailable — so the comparison is not re-attempted)${detail}`,
         );
       }
-      throw new Error(message);
+      throw new Error(`${message}${detail}`);
     }
 
     const verdict = aggregatePairwise(samples);
@@ -583,6 +592,11 @@ export class PairwiseJudgeWorker {
     // Bounded backfill. Target the v1 ballot size, but never ABOVE the configured
     // panel length — backfill repairs a lost slot, it does not inflate a
     // deliberately smaller panel (panel LENGTH still drives K on a clean pass).
+    //
+    // MAX_PAIRWISE_BACKFILL_DRAWS is REDUNDANT with today's target: the loop is only
+    // entered with >= 1 survivor and target <= 3, so `samples.length < target` alone
+    // caps it at two draws. The guard is what keeps a future larger (or configurable)
+    // target from turning one flaky donor into an unbounded judge fan-out.
     const target = Math.min(DEFAULT_PAIRWISE_SAMPLE_COUNT, this.sampleCount);
     let draws = 0;
     let backfilled = 0;

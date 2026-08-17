@@ -9,8 +9,11 @@
  * Deps are typed as `PairwiseStructuredQueryFn` (the Claude-tree query-fn shape),
  * NOT the Codex-specific `CodexEvalStructuredQueryFn`, so tests can inject a
  * plain fake with no Codex app-server machinery in scope. The real Codex query
- * fn (codexEvalJudgeQuery.ts) remains assignable here because its only extra
- * arg, `cwd`, is optional on both shapes.
+ * fn (codexEvalJudgeQuery.ts) remains assignable here because `cwd` is OPTIONAL
+ * on the Eval arg shape (evalJudgeQuery.ts) and simply ABSENT from the Pairwise
+ * one (pairwiseJudgeQuery.ts) — the narrower Pairwise arg is still assignable to
+ * the wider Eval param, by parameter contravariance. Making `cwd` required on the
+ * Eval shape would break that assignment.
  *
  * Invariants (deliberate, mirrored from pairwiseJudgeQuery.ts's header comment):
  *  - NO `cwd` is ever passed. `PairwiseGradeInput` carries none by design — the
@@ -65,10 +68,17 @@ function hasResolvedModel(
     && typeof (query as { getResolvedModel?: unknown }).getResolvedModel === 'function';
 }
 
-/** True when `err` is an `AgentProviderDisabledError`, matching across a possible module/prototype boundary. */
+/**
+ * True when `err` is a CODEX provider-disabled refusal. Scoped to `codex` on the
+ * typed branch so a refusal for a DIFFERENT provider is never rewrapped as a
+ * Codex-juror outage (this adapter only ever calls Codex, so that is defensive).
+ * The bare `name` match stays unscoped: an error that crossed a module/prototype
+ * boundary has lost both its prototype and its `provider` field, and the injected
+ * query fn is Codex's either way.
+ */
 function isAgentProviderDisabledError(err: unknown): boolean {
-  return err instanceof AgentProviderDisabledError
-    || (err instanceof Error && err.name === 'AgentProviderDisabledError');
+  if (err instanceof AgentProviderDisabledError) return err.provider === 'codex';
+  return err instanceof Error && err.name === 'AgentProviderDisabledError';
 }
 
 export interface CodexPairwiseJudgeDeps {

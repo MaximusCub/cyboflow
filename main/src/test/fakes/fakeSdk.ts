@@ -772,6 +772,31 @@ export function makeBlockUntilAbortQuery(onAbort?: () => void): FakeQueryFn {
   };
 }
 
+/**
+ * A `FakeQueryFn` that BLOCKS until its run's `options.abortController` fires and
+ * then REJECTS with `error` (default: a DOMException-shaped `AbortError`). This is
+ * the shape the real SDK produces when a deadline abort kills the subprocess: the
+ * `for await` loop throws rather than draining cleanly, so it exercises a query
+ * wrapper's CATCH-block timeout branch (which `makeBlockUntilAbortQuery`, which
+ * returns cleanly, never reaches). Purely event-driven: NO timers.
+ */
+export function makeRejectOnAbortQuery(error?: Error): FakeQueryFn {
+  const abortError = error ?? Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+  return function rejectOnAbortQuery(params: FakeQueryParams): AsyncGenerator<SDKMessage, void> {
+    return (async function* run() {
+      // Unreachable — satisfies the async-generator `require-yield` lint rule.
+      if (false as boolean) yield undefined as never;
+      const signal = params.options.abortController?.signal;
+      if (signal && !signal.aborted) {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      }
+      throw abortError;
+    })();
+  };
+}
+
 /** A runId → scenario map so one module mock serves concurrent runs. */
 export type ScenarioRegistry = ReadonlyMap<string, ScenarioSource> | Readonly<Record<string, ScenarioSource>>;
 

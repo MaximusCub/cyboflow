@@ -73,10 +73,15 @@ describe('CodexPairwiseJudge', () => {
   });
 
   it('resolves the model lazily via getResolvedModel(), only after the first grade()', async () => {
-    const structuredQuery = Object.assign(
-      vi.fn(async () => ({ preference: '1', confidence: 0.5, rationale: 'r' })),
-      { getResolvedModel: vi.fn(() => 'gpt-5.4-2026-08-01') },
-    ) as unknown as PairwiseStructuredQueryFn;
+    const structuredQuery: PairwiseStructuredQueryFn & { getResolvedModel: () => string } =
+      Object.assign(
+        vi.fn<PairwiseStructuredQueryFn>(async () => ({
+          preference: '1',
+          confidence: 0.5,
+          rationale: 'r',
+        })),
+        { getResolvedModel: vi.fn(() => 'gpt-5.4-2026-08-01') },
+      );
     const judge = new CodexPairwiseJudge({ structuredQuery });
 
     expect(judge.resolvedModel).toBeUndefined();

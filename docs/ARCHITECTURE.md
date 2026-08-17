@@ -891,9 +891,26 @@ is the manual post-merge-bug attribution link.
 
 **Pairwise grading (050).** `experiment_comparisons` (UNIQUE per experiment) is a
 self-contained verdict row: both arms' diffs are FROZEN onto it at capture (worktree-
-independent), K=3 position-randomized judge samples aggregate to a `preference A|B|tie`, and
+independent), position-randomized judge samples aggregate to a `preference A|B|tie`, and
 completion mints a blocking `kind='decision'` review item (gate `experiment-comparison`)
-resolved by `decide`. The trigger is a workflow-agnostic terminal-status subscriber
+resolved by `decide`. The judge is an **ordered heterogeneous panel** of
+`PairwisePanelSlot`s (mirroring `EvalWorker`'s rubric jury) — 2×Claude + 1×Codex in
+production, wired at `index.ts`; **K is the panel's LENGTH**, one sample per slot in order,
+and both Claude slots share ONE `ClaudePairwiseJudge` while the Codex slot gets its own
+`makeCodexEvalJudgeQuery` closure (no `timeoutMs` override, so it inherits the 600s Codex
+deadline against the Claude judge's 180s). The row-level `judge_model` scalar is stamped
+from the FIRST Claude slot (a Claude judge resolves its model in its constructor; the Codex
+one only after its first grade) — per-slot models live on each `per_sample_json` entry.
+A slot failure is classified like the rubric jury's (`unavailable` / deterministic
+`timeout`,`max-turns` / retryable `failed`) and the slot is dropped; if any sample survived,
+a **bounded backfill** (≤2 extra draws, from the first Claude slot that graded OK) repairs
+the ballot up to `min(3, panel.length)`, since an even 2-sample ballot turns a 1A/1B split
+into an artificial tie. Backfill samples take `sampleIndex = panel.length + ordinal` (panel
+survivors keep their gapped SLOT index — `sampleIndex` is a key, not a dense ordinal), and a
+one-line degradation note naming each dropped slot is persisted into the `error` column
+**on the complete row** (so `error IS NOT NULL` there is a healthy-but-degraded verdict, not
+a failure). If NO sample survived and every failure was non-retryable, the whole-comparison
+retry loop is skipped outright. The trigger is a workflow-agnostic terminal-status subscriber
 (`terminalEvalSubscriber.ts` on `runStatusEvents`, all four settled statuses) that also
 widens the run-eval snapshot to variant/experiment-tagged runs — gated by a run_evals
 row-existence pre-check plus a step-ownership predicate so `human_influenced` is never

@@ -15,6 +15,7 @@ import {
   makeFakeQuery,
   makeRejectingQuery,
   makeBlockUntilAbortQuery,
+  makeRejectOnAbortQuery,
   sdkResultSuccess,
   type FakeQueryFn,
   type FakeQueryParams,
@@ -23,11 +24,13 @@ import { EvalJudgeTimeoutError } from './judgeErrors';
 
 /**
  * A FakeQueryFn that ignores the deadline's AbortController entirely and simply
- * takes `delayMs` of real wall-clock time before completing with NO messages —
- * models an SDK stream that drains to completion on its OWN schedule (not because
- * it observed the abort), past the deadline. This exercises the post-drain
- * `if (didTimeOut())` check at pairwiseJudgeQuery.ts:132 directly, distinct from
- * `makeBlockUntilAbortQuery`'s abort-driven completion.
+ * takes `delayMs` of real wall-clock time before completing with NO messages.
+ *
+ * Mechanics only — it reaches the SAME post-drain `if (didTimeOut())` check at
+ * pairwiseJudgeQuery.ts:132 that `makeBlockUntilAbortQuery` does; it differs in
+ * WHAT ends the stream (its own timer, not the observed abort), not in which
+ * production branch runs. The catch-block timeout branch (:147) is a third path,
+ * covered by `makeRejectOnAbortQuery` below.
  */
 function makeSlowNaturalCompletionQuery(delayMs: number): FakeQueryFn {
   return function slowNaturalCompletionQuery(): AsyncGenerator<SDKMessage, void> {
@@ -79,6 +82,22 @@ describe('makePairwiseJudgeQuery', () => {
 
     const rejection = fn({ prompt: 'p', schema: {} });
     await expect(rejection).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
+    await expect(rejection).rejects.toThrow(/timed out after 5ms/);
+  });
+
+  it('a stream that REJECTS in response to the deadline abort (the real SDK shape) rejects with the TYPED EvalJudgeTimeoutError (catch-block branch)', async () => {
+    // The production timeout path: abortController.abort() kills the subprocess and
+    // the `for await` throws an AbortError, so the post-drain check at :132 is never
+    // reached and the typing is decided by `didTimeOut()` inside the CATCH at :147.
+    // That branch is what makes isDeterministicJudgeFailure() see a timeout (no
+    // slot retry) rather than a retryable generic Error.
+    install(makeRejectOnAbortQuery());
+    const fn = makePairwiseJudgeQuery(undefined, 5);
+
+    const rejection = fn({ prompt: 'p', schema: {} });
+    await expect(rejection).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
+    // The raw AbortError text is deliberately REPLACED by the deadline message —
+    // `didTimeOut()` wins over the SDK's own wording in that branch.
     await expect(rejection).rejects.toThrow(/timed out after 5ms/);
   });
 
