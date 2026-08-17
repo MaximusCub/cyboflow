@@ -9,11 +9,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
+  MAX_PAIRWISE_BACKFILL_DRAWS,
   PairwiseJudgeWorker,
   type PairwiseJudgeWorkerDeps,
   type PairwisePanelSlot,
 } from './pairwiseJudgeWorker';
 import type { PairwiseJudgeClient, PairwiseGradeInput, PairwiseRawResult } from './pairwiseJudge';
+import { CodexJurorUnavailableError } from './codexJudge';
+import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 
 function buildDb(): Database.Database {
@@ -370,7 +373,7 @@ describe('process — sampling + persistence', () => {
     expect(row.p).toBe('B');
   });
 
-  it('drops a malformed sample after one retry; survivors still aggregate', async () => {
+  it('drops a malformed sample after one retry; the short ballot is backfilled', async () => {
     const raw = buildDb();
     const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
     let call = 0;
@@ -387,7 +390,10 @@ describe('process — sampling + persistence', () => {
       .prepare('SELECT eval_status AS s, sample_count AS n, preference AS p FROM experiment_comparisons WHERE experiment_id = ?')
       .get(id) as { s: string; n: number; p: string };
     expect(row.s).toBe('complete');
-    expect(row.n).toBe(2); // first sample dropped, two survived
+    // Slot 1 dropped => two survivors => ONE backfill draw from the first healthy
+    // Claude slot lifts the ballot back to the full K=3 (a 2-sample ballot is the
+    // artificial-tie hazard pinned by pairwiseScoring.test "A==B even split => tie").
+    expect(row.n).toBe(3);
     expect(row.p).toBe('A');
   });
 
@@ -523,6 +529,424 @@ describe('process — rng contract', () => {
     await worker.maybeSnapshotAndEnqueue(id);
     await worker._queue().onIdle();
     expect(rng).toHaveBeenCalledTimes(4);
+  });
+});
+
+/**
+ * Degraded-panel handling: per-slot failure classification, the bounded backfill
+ * that repairs a short ballot, and the one-line degradation note on the complete
+ * row's `error` column.
+ *
+ * WHY a short ballot must be repaired: pairwiseScoring.test already pins the two
+ * failure modes — "A==B even split => tie, confidence 0" (a 1A/1B ballot at K=2 is
+ * an ARTIFICIAL tie, not a real one) and "single survivor decides the verdict"
+ * (K=1 hands one judge unilateral authority). Those cases are not duplicated here;
+ * this suite pins that the worker never REACHES them while a healthy Claude slot
+ * is available.
+ */
+describe('process — degraded panel: classification, backfill, degradation note', () => {
+  const aWins = async (): Promise<PairwiseRawResult> => ({
+    preference: '1',
+    confidence: 0.9,
+    rationale: 'A',
+  });
+  const bWins = async (): Promise<PairwiseRawResult> => ({
+    preference: '2',
+    confidence: 0.9,
+    rationale: 'B',
+  });
+
+  /** One panel slot backed by an explicit (usually counted) grade impl. */
+  function slotOf(
+    name: string,
+    provider: 'claude' | 'codex',
+    impl: (input: PairwiseGradeInput) => Promise<PairwiseRawResult>,
+  ): PairwisePanelSlot {
+    return {
+      slot: name,
+      provider,
+      model: `${name}-model`,
+      judge: new FakeJudge(impl, { name, resolvedModel: `${name}-model` }),
+    };
+  }
+
+  const readRow = (raw: Database.Database, id: string) =>
+    raw
+      .prepare(
+        'SELECT eval_status AS s, preference AS p, sample_count AS n, per_sample_json AS ps, error AS e FROM experiment_comparisons WHERE experiment_id = ?',
+      )
+      .get(id) as { s: string; p: string | null; n: number | null; ps: string | null; e: string | null };
+
+  const perSampleOf = (ps: string | null) =>
+    JSON.parse(ps ?? '[]') as Array<{ sampleIndex: number; judgeName: string }>;
+
+  it('an unavailable Codex slot is invoked ONCE and the ballot backfills to three Claude entries', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const codexGrade = vi.fn(async () => {
+      throw new CodexJurorUnavailableError('codex CLI is not installed', 'runtime-missing');
+    });
+    // Production shape: the two Claude slots share ONE judge instance.
+    const claudeGrade = vi.fn(aWins);
+    const claude = new FakeJudge(claudeGrade, { name: 'claude-pairwise', resolvedModel: 'sonnet-x' });
+    const { worker } = makeWorker(raw, {
+      panel: [
+        { slot: 'claude-1', provider: 'claude', model: 'sonnet-x', judge: claude },
+        { slot: 'claude-2', provider: 'claude', model: 'sonnet-x', judge: claude },
+        { slot: 'codex-1', provider: 'codex', model: null, judge: new FakeJudge(codexGrade as never) },
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    // No retry burned on an unavailable runtime.
+    expect(codexGrade).toHaveBeenCalledTimes(1);
+    const row = readRow(raw, id);
+    expect(row.s).toBe('complete');
+    expect(row.p).toBe('A'); // a normal majority verdict, not a degraded tie
+    expect(row.n).toBe(3);
+    const perSample = perSampleOf(row.ps);
+    expect(perSample).toHaveLength(3);
+    expect(perSample.every((s) => s.judgeName === 'claude-pairwise')).toBe(true);
+    expect(perSample.some((s) => s.judgeName === 'codex-pairwise')).toBe(false);
+    // Two panel-pass survivors (slot indices 0,1) + one backfill draw at panel.length.
+    expect(claudeGrade).toHaveBeenCalledTimes(3);
+    expect(perSample.map((s) => s.sampleIndex)).toEqual([0, 1, 3]);
+    // The note names the failed slot and its error code.
+    expect(row.e).toContain('codex-1');
+    expect(row.e).toContain('runtime-missing');
+  });
+
+  it("a clean run writes error = NULL, wiping a stale note from an earlier attempt", async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // A leftover row carrying a stale degradation note from a previous pass.
+    raw
+      .prepare(
+        `INSERT INTO experiment_comparisons (id, experiment_id, run_id_a, run_id_b, eval_status, base_sha, diff_a_text, diff_b_text, error)
+         VALUES ('cmp-stale', ?, 'run-a', 'run-b', 'pending', 'base-sha', 'DIFF-A', 'DIFF-B', 'pairwise panel degraded: codex-1 unavailable (logged-out)')`,
+      )
+      .run(id);
+    const { worker } = makeWorker(raw, { panel: panelOf(new FakeJudge(aWins)) });
+    worker.recoverInterrupted();
+    await worker._queue().onIdle();
+
+    const row = readRow(raw, id);
+    expect(row.s).toBe('complete');
+    expect(row.n).toBe(3);
+    expect(row.e).toBeNull();
+  });
+
+  it('a deterministic slot failure draws no second attempt; a plain failure is still retried once', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const timeoutGrade = vi.fn(async () => {
+      throw new EvalJudgeTimeoutError('deadline exceeded');
+    });
+    const maxTurnsGrade = vi.fn(async () => {
+      throw new EvalJudgeMaxTurnsError('turn budget exhausted');
+    });
+    const flakyGrade = vi.fn(async () => {
+      throw new Error('malformed JSON');
+    });
+    const healthyGrade = vi.fn(aWins);
+    const { worker } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', timeoutGrade as never),
+        slotOf('claude-2', 'claude', maxTurnsGrade as never),
+        slotOf('claude-3', 'claude', flakyGrade as never),
+        slotOf('claude-4', 'claude', healthyGrade),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    expect(timeoutGrade).toHaveBeenCalledTimes(1);
+    expect(maxTurnsGrade).toHaveBeenCalledTimes(1);
+    expect(flakyGrade).toHaveBeenCalledTimes(2); // non-deterministic => one retry
+    const row = readRow(raw, id);
+    expect(row.s).toBe('complete');
+    expect(row.e).toContain('timeout');
+    expect(row.e).toContain('max-turns');
+    // An unclassified failure has no error code, so the note carries a compacted
+    // slice of the raw message instead of a useless "failed (failed)".
+    expect(row.e).toContain('claude-3 failed (malformed JSON)');
+  });
+
+  it('zero survivors, all non-retryable => failed after ONE whole-comparison attempt', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const grade = vi.fn(async () => {
+      throw new EvalJudgeTimeoutError('deadline exceeded');
+    });
+    const { worker, reviewItemWriter } = makeWorker(raw, {
+      panel: panelOf(new FakeJudge(grade as never)),
+      maxRetries: 2,
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    // 3 slots × 1 try × 1 whole-comparison attempt. Anything more means the
+    // PairwiseNonRetryableError short-circuit did not fire.
+    expect(grade).toHaveBeenCalledTimes(3);
+    const row = readRow(raw, id);
+    expect(row.s).toBe('failed');
+    expect(row.e).toContain('not re-attempted');
+    // A human still has to decide — the blocking decision item is minted.
+    expect(reviewItemWriter).toHaveBeenCalled();
+    const [, change] = reviewItemWriter.mock.calls[0];
+    expect(change.kind).toBe('decision');
+    expect(change.blocking).toBe(true);
+  });
+
+  it('zero survivors, MIXED unavailable + timed-out => failed after ONE attempt', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const timeoutGrade = vi.fn(async () => {
+      throw new EvalJudgeTimeoutError('deadline exceeded');
+    });
+    const codexGrade = vi.fn(async () => {
+      throw new CodexJurorUnavailableError('codex provider disabled', 'provider-disabled');
+    });
+    const { worker, reviewItemWriter } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', timeoutGrade as never),
+        slotOf('claude-2', 'claude', timeoutGrade as never),
+        slotOf('codex-1', 'codex', codexGrade as never),
+      ],
+      maxRetries: 2,
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    expect(timeoutGrade).toHaveBeenCalledTimes(2);
+    expect(codexGrade).toHaveBeenCalledTimes(1);
+    expect(readRow(raw, id).s).toBe('failed');
+    expect(reviewItemWriter).toHaveBeenCalled();
+  });
+
+  it('zero survivors with a RETRYABLE failure still runs the whole-comparison retry loop', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const grade = vi.fn(async () => {
+      throw new Error('malformed');
+    });
+    const { worker } = makeWorker(raw, {
+      panel: panelOf(new FakeJudge(grade as never)),
+      maxRetries: 1,
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+    // 3 slots × 2 tries × 2 whole-comparison attempts — the contrast case that
+    // proves the short-circuit above is classification-driven, not blanket.
+    expect(grade).toHaveBeenCalledTimes(12);
+    expect(readRow(raw, id).s).toBe('failed');
+  });
+
+  describe('backfill bounds', () => {
+    const timeoutThrow = async (): Promise<PairwiseRawResult> => {
+      throw new EvalJudgeTimeoutError('deadline exceeded');
+    };
+
+    it('S=2 draws exactly one', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const donorGrade = vi.fn(aWins);
+      const rng = vi.fn(() => 0.1);
+      const { worker } = makeWorker(raw, {
+        rng,
+        panel: [
+          slotOf('claude-1', 'claude', donorGrade),
+          slotOf('claude-2', 'claude', aWins),
+          slotOf('codex-1', 'codex', timeoutThrow),
+        ],
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(donorGrade).toHaveBeenCalledTimes(2); // panel pass + 1 backfill
+      expect(rng).toHaveBeenCalledTimes(4); // 3 panel draws + 1 backfill draw
+      expect(readRow(raw, id).n).toBe(3);
+    });
+
+    it('S=1 draws two', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const donorGrade = vi.fn(aWins);
+      const rng = vi.fn(() => 0.1);
+      const { worker } = makeWorker(raw, {
+        rng,
+        panel: [
+          slotOf('claude-1', 'claude', donorGrade),
+          slotOf('claude-2', 'claude', timeoutThrow),
+          slotOf('codex-1', 'codex', timeoutThrow),
+        ],
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(donorGrade).toHaveBeenCalledTimes(3); // panel pass + 2 backfill
+      expect(rng).toHaveBeenCalledTimes(5);
+      const row = readRow(raw, id);
+      expect(row.n).toBe(3);
+      // Backfill indices start past the panel so they can never collide with a
+      // surviving slot index (the panel-pass survivor here is index 0).
+      expect(perSampleOf(row.ps).map((s) => s.sampleIndex)).toEqual([0, 3, 4]);
+    });
+
+    it('S=3 (clean) draws none', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const rng = vi.fn(() => 0.1);
+      const { worker } = makeWorker(raw, { rng, panel: panelOf(new FakeJudge(aWins)) });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(rng).toHaveBeenCalledTimes(3);
+      expect(readRow(raw, id).n).toBe(3);
+    });
+
+    it('S=0 draws none (stays on the markFailed path)', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const grade = vi.fn(timeoutThrow);
+      const rng = vi.fn(() => 0.1);
+      const { worker } = makeWorker(raw, {
+        rng,
+        panel: panelOf(new FakeJudge(grade as never)),
+        maxRetries: 2,
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(grade).toHaveBeenCalledTimes(3);
+      expect(rng).toHaveBeenCalledTimes(3);
+      expect(readRow(raw, id).s).toBe('failed');
+    });
+
+    it(`never draws more than ${MAX_PAIRWISE_BACKFILL_DRAWS} per attempt, even on a wide panel`, async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const donorGrade = vi.fn(aWins);
+      const rng = vi.fn(() => 0.1);
+      // 5 slots, only the first survives => an uncapped backfill would keep drawing.
+      const { worker } = makeWorker(raw, {
+        rng,
+        panel: [
+          slotOf('claude-1', 'claude', donorGrade),
+          slotOf('claude-2', 'claude', timeoutThrow),
+          slotOf('claude-3', 'claude', timeoutThrow),
+          slotOf('claude-4', 'claude', timeoutThrow),
+          slotOf('codex-1', 'codex', timeoutThrow),
+        ],
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(rng).toHaveBeenCalledTimes(5 + MAX_PAIRWISE_BACKFILL_DRAWS);
+      expect(donorGrade).toHaveBeenCalledTimes(1 + MAX_PAIRWISE_BACKFILL_DRAWS);
+      expect(readRow(raw, id).n).toBe(3);
+    });
+
+    it('a failed backfill draw stops rather than cascading', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      let call = 0;
+      // The donor grades once, then goes deterministically bad — the first backfill
+      // draw fails and must NOT be followed by the second.
+      const donorGrade = vi.fn(async (): Promise<PairwiseRawResult> => {
+        call += 1;
+        if (call === 1) return { preference: '1', confidence: 0.8, rationale: 'A' };
+        throw new EvalJudgeTimeoutError('deadline exceeded');
+      });
+      const { worker } = makeWorker(raw, {
+        panel: [
+          slotOf('claude-1', 'claude', donorGrade),
+          slotOf('claude-2', 'claude', timeoutThrow),
+          slotOf('codex-1', 'codex', timeoutThrow),
+        ],
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(donorGrade).toHaveBeenCalledTimes(2); // panel pass + ONE failed backfill
+      const row = readRow(raw, id);
+      expect(row.s).toBe('complete');
+      expect(row.n).toBe(1);
+      expect(row.e).toContain('backfill from claude-1');
+    });
+
+    it('no Claude survivor => no backfill; the short ballot completes with the note', async () => {
+      const raw = buildDb();
+      const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+      const codexGrade = vi.fn(aWins);
+      const rng = vi.fn(() => 0.1);
+      const { worker } = makeWorker(raw, {
+        rng,
+        panel: [
+          slotOf('claude-1', 'claude', timeoutThrow),
+          slotOf('claude-2', 'claude', timeoutThrow),
+          slotOf('codex-1', 'codex', codexGrade),
+        ],
+      });
+      await worker.maybeSnapshotAndEnqueue(id);
+      await worker._queue().onIdle();
+      expect(codexGrade).toHaveBeenCalledTimes(1);
+      expect(rng).toHaveBeenCalledTimes(3); // no backfill draw
+      const row = readRow(raw, id);
+      expect(row.s).toBe('complete');
+      expect(row.n).toBe(1);
+      expect(row.e).toContain('claude-1');
+      expect(row.e).not.toContain('backfilled');
+    });
+  });
+
+  it('a 1A/1B two-survivor split never reaches markComplete at K=2 while a Claude slot is healthy', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // Surviving panel pass = one A + one B: at K=2 aggregatePairwise returns an
+    // ARTIFICIAL tie (pinned in pairwiseScoring.test "A==B even split => tie").
+    const donorGrade = vi.fn(aWins);
+    const { worker } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', donorGrade),
+        slotOf('claude-2', 'claude', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+        slotOf('codex-1', 'codex', bWins),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    const row = raw
+      .prepare(
+        'SELECT sample_count AS n, preference AS p, a_count AS a, b_count AS b FROM experiment_comparisons WHERE experiment_id = ?',
+      )
+      .get(id) as { n: number; p: string; a: number; b: number };
+    expect(row.n).toBe(3);
+    expect(row.a).toBe(2);
+    expect(row.b).toBe(1);
+    expect(row.p).toBe('A'); // a real majority, not the K=2 artificial tie
+  });
+
+  it('every entry in a degraded/backfilled ballot has a pairwise-distinct sampleIndex', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // Slot 1 dies => survivors carry GAPPED slot indices (1, 2); the backfill must
+    // land past panel.length rather than reusing a taken index.
+    const { worker } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+        slotOf('claude-2', 'claude', aWins),
+        slotOf('codex-1', 'codex', aWins),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    const row = readRow(raw, id);
+    expect(row.n).toBe(3);
+    const indices = perSampleOf(row.ps).map((s) => s.sampleIndex);
+    expect(new Set(indices).size).toBe(indices.length);
+    expect(indices).toEqual([1, 2, 3]);
+    expect(indices.filter((i) => i >= 3)).toEqual([3]); // backfill at panel.length + 0
   });
 });
 
