@@ -507,6 +507,25 @@ describe('process — heterogeneous panel', () => {
   });
 });
 
+describe('process — rng contract', () => {
+  it('draws exactly ONE rng() sample per panel slot (call-counting rng, not a pinned constant)', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const aWins = async (): Promise<PairwiseRawResult> => ({
+      preference: '1',
+      confidence: 0.8,
+      rationale: 'A',
+    });
+    const rng = vi.fn(() => 0.1);
+    // 4-slot panel so a bug that draws once total (rather than once per sample) is
+    // distinguishable from the correct once-per-sample behavior.
+    const { worker } = makeWorker(raw, { panel: panelOf(new FakeJudge(aWins), 4), rng });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+    expect(rng).toHaveBeenCalledTimes(4);
+  });
+});
+
 describe('recoverInterrupted', () => {
   it('re-enqueues pending/running comparison rows on boot', async () => {
     const raw = buildDb();
