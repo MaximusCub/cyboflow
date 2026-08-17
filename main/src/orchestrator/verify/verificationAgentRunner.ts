@@ -696,13 +696,32 @@ export function verifyHarnessContract(provider: AgentProvider): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Normalize an INHERITED Claude run model exactly like the standard spawn seam
+ * (`resolveAgentModelAlias('claude', …)` in agentModelContext): the persisted
+ * picker sentinel `'auto'` (any case), `'default'`, blanks, and a cross-family id
+ * all mean "no explicit model".
+ *
+ * `'auto'` is a real stored value, not a defensive hypothetical — migration 037
+ * defines `workflow_runs.model` as "NULL/'auto' = SDK default" and the config
+ * default IS `'auto'`. Forwarding it verbatim fails the deployment outright
+ * ("There's an issue with the selected model (auto)"), which is exactly how it
+ * reached production. The Codex branch has guarded this since the adversarial
+ * review; the Claude branch had no equivalent.
+ */
+function normalizeClaudeModelSelection(value: string | null | undefined): string | undefined {
+  const normalized = normalizeAgentModelSelection('claude', value);
+  if (!normalized || normalized.toLowerCase() === 'auto') return undefined;
+  return normalized;
+}
+
+/**
  * The CLAUDE branch of the provider dispatch (§5.4 step 1): Claude-namespace-only
  * model resolution, reached when {@link resolveVerifyProvider} returns `claude`. A
  * pinned alias resolves through the injected alias→concrete mechanism; an unpinned
- * agent inherits the run model ONLY on a Claude-provider run; otherwise the
- * validated Claude default. The result is ALWAYS a Claude id — `agent.providerModel`
- * is never consulted and the run model is used only when the run is Claude, so a
- * `gpt-*` id cannot reach the Claude query.
+ * agent inherits the run model ONLY on a Claude-provider run, and only once that
+ * value survives {@link normalizeClaudeModelSelection}; otherwise the validated
+ * Claude default. The result is ALWAYS a concrete-or-alias Claude selection the
+ * SDK accepts — never a picker sentinel, and never a `gpt-*` id.
  */
 export function resolveVerifyModel(
   resolved: ResolvedVerifyAgent,
@@ -713,8 +732,9 @@ export function resolveVerifyModel(
   if (agent.model !== null) {
     return resolveClaudeAlias(agent.model) ?? claudeDefaultModel;
   }
-  if (runProvider === 'claude' && typeof runModel === 'string' && runModel.trim().length > 0) {
-    return runModel;
+  if (runProvider === 'claude') {
+    const inherited = normalizeClaudeModelSelection(runModel);
+    if (inherited) return inherited;
   }
   return claudeDefaultModel;
 }

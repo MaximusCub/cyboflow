@@ -273,6 +273,31 @@ describe('resolveVerifyModel', () => {
     };
     expect(resolveVerifyModel(r, () => null, CLAUDE_DEFAULT)).toBe(CLAUDE_DEFAULT);
   });
+
+  // The picker sentinel is a REAL stored run model (migration 037: "NULL/'auto'
+  // = SDK default"; the config default is 'auto'), and inheriting it verbatim
+  // killed every visual verification on such a run with "There's an issue with
+  // the selected model (auto)" — CYBOFLOW-APP-11.
+  it.each(['auto', 'AUTO', 'default', '   '])(
+    'falls back to the Claude default rather than inheriting the %j sentinel',
+    (sentinel) => {
+      const r: ResolvedVerifyAgent = {
+        agent: makeAgent({ model: null }),
+        runProvider: 'claude',
+        runModel: sentinel,
+      };
+      expect(resolveVerifyModel(r, alias, CLAUDE_DEFAULT)).toBe(CLAUDE_DEFAULT);
+    },
+  );
+
+  it('falls back to the Claude default when a Claude run carries a stale gpt model', () => {
+    const r: ResolvedVerifyAgent = {
+      agent: makeAgent({ model: null }),
+      runProvider: 'claude',
+      runModel: 'gpt-5.4',
+    };
+    expect(resolveVerifyModel(r, alias, CLAUDE_DEFAULT)).toBe(CLAUDE_DEFAULT);
+  });
 });
 
 // ---------------------------------------------------------------------------
