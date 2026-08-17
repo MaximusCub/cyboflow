@@ -291,6 +291,13 @@ export interface QuickSessionRuntimeStampInput {
   useCodexPty: boolean;
   /** Only stamped when explicitly chosen — undefined keeps the global default (NULL). */
   requestedAgentMode?: PermissionMode;
+  /**
+   * Explicit runtime override (OMP fleet). When present it wins over the
+   * substrate-derived Claude runtime — an omp-fleet session has no substrate
+   * axis, so the ordinary `claudeRuntimeFromSubstrate` derivation would stamp
+   * it back to 'claude-sdk' and the dispatch seams would never see omp-fleet.
+   */
+  agentRuntimeOverride?: SessionAgentRuntime;
 }
 
 /**
@@ -321,11 +328,12 @@ export function stampQuickSessionRuntimeConfig(
       sessionId,
     );
   }
-  const resolvedSessionAgentRuntime = input.useCodexSdk
-    ? 'codex-sdk'
-    : input.useCodexPty
-      ? 'codex-pty'
-      : claudeRuntimeFromSubstrate(input.resolvedSubstrate);
+  const resolvedSessionAgentRuntime = input.agentRuntimeOverride
+    ?? (input.useCodexSdk
+      ? 'codex-sdk'
+      : input.useCodexPty
+        ? 'codex-pty'
+        : claudeRuntimeFromSubstrate(input.resolvedSubstrate));
   const resolvedSessionSubstrate = input.useCodexPty ? 'interactive' : input.resolvedSubstrate;
   db.prepare(
     `UPDATE sessions

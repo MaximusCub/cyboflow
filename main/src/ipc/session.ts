@@ -46,6 +46,7 @@ import {
   isSessionAgentRuntime,
   providerForRuntime,
 } from '../../../shared/types/agentRuntime';
+import { DEFAULT_OMP_MODEL } from '../../../shared/types/omp';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
@@ -291,6 +292,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     archiveProgressManager,
     configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
     chatSentinelProvider, // chat-gate vehicle resolver (revives an app_restart-parked sentinel)
+    ompSessionManager, // OMP fleet runtime (remote worker; undefined when bridge unconfigured)
     cyboflow
   } = services;
 
@@ -345,6 +347,41 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   const laneForPanelId = (panelId: string): PanelLane | undefined => {
     const panel = panelManager.getPanel(panelId);
     return panel ? laneForPanel(panel) : undefined;
+  };
+
+  /**
+   * Route an OMP-fleet panel turn: relay into the live worker, or spawn it on
+   * the first message (the ADR's "first message spawns"). Returns null when the
+   * panel's session is NOT omp-fleet (the caller keeps its own lane), otherwise
+   * an IPC-shaped result. Fail-closed: an unconfigured bridge (no manager) is an
+   * `unavailable`, never a fallback to a local provider.
+   */
+  const routeOmpPanelTurn = async (
+    panelId: string,
+    input: string,
+  ): Promise<{ success: boolean; error?: string } | null> => {
+    const dbSession = databaseService.getSession(panelManager.getPanel(panelId)?.sessionId ?? '');
+    if (!dbSession || dbSession.agent_runtime !== 'omp-fleet') return null;
+    if (!ompSessionManager) {
+      return { success: false, error: 'OMP fleet is not available — the bridge is not configured.' };
+    }
+    // Persist the user turn BEFORE dispatch, exactly like the claude/codex
+    // lanes: useUnifiedPanelMessages renders user bubbles solely from
+    // panels:get-conversation-messages, and the composer reconciles its
+    // optimistic 'sending' row against that same source — without this the
+    // row sticks at 'sending' forever and the transcript never shows the user.
+    if (input) {
+      sessionManager.addPanelConversationMessage(panelId, 'user', input);
+    }
+    if (ompSessionManager.isPanelRunning(panelId)) {
+      await ompSessionManager.sendInput(panelId, input);
+    } else {
+      await ompSessionManager.spawn(panelId, dbSession.id, input, {
+        model: DEFAULT_OMP_MODEL,
+        cwd: dbSession.worktree_path ?? undefined,
+      });
+    }
+    return { success: true };
   };
 
   interface QueuedCodexPanelInput {
@@ -942,7 +979,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (explicitProvider !== undefined && !isAgentProviderEnabled(providerAccess, explicitProvider)) {
         return {
           success: false,
-          error: `The ${explicitProvider === 'codex' ? 'Codex' : 'Claude'} provider is turned off in Settings → Integrations. Enable it to start this session.`,
+          error: `The ${explicitProvider === 'codex' ? 'Codex' : explicitProvider === 'omp' ? 'OMP' : 'Claude'} provider is turned off in Settings → Integrations. Enable it to start this session.`,
         };
       }
       // Unrequested launch under a Claude-off install: fall back to the provider
@@ -966,6 +1003,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             requestedAgentRuntime === undefined));
       const useCodexPty =
         !isDesignSession && requestedAgentRuntime === 'codex-pty';
+      const useOmpFleet = !isDesignSession && requestedAgentRuntime === 'omp-fleet';
 
       const substrateFromAgentRuntime =
         requestedAgentRuntime === 'claude-interactive'
@@ -993,8 +1031,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
       // Per-launch model config for the quick session. Picker values are
-      // provider-scoped so a stale Claude alias cannot be stamped onto Codex.
-      const quickAgentProvider: AgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
+      const quickAgentProvider: AgentProvider = useOmpFleet ? 'omp' : useCodexSdk || useCodexPty ? 'codex' : 'claude';
       const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
       const requestedModel = firstProviderModel(
         quickAgentProvider,
@@ -1150,6 +1187,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         useCodexSdk,
         useCodexPty,
         requestedAgentMode,
+        ...(useOmpFleet ? { agentRuntimeOverride: 'omp-fleet' } : {}),
       });
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
@@ -1336,6 +1374,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         } catch (error) {
           console.error(`[IPC] Failed to create Claude panel for interactive quick session ${session.id}:`, error);
           // Continue without the eager spawn — sessions:input bootstraps on demand.
+        }
+      } else if (useOmpFleet) {
+        // OMP fleet: create the panel server-side (so the frontend skips a
+        // duplicate) but do NOT spawn — the ADR's "first message spawns". The
+        // remote worker boots on the first panels:send-input / panels:continue.
+        try {
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'claude',
+            title: 'Chat',
+          });
+          claudePanelId = panel.id;
+        } catch (error) {
+          console.error(`[IPC] Failed to create OMP panel for quick session ${session.id}:`, error);
         }
       }
 
@@ -1741,6 +1793,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelFastMode = panelLaunchSettings?.fastMode === true;
       const rawPanelEffort = panelLaunchSettings?.reasoningEffort;
       const panelReasoningEffort = isAnyEffortLevel(rawPanelEffort) ? rawPanelEffort : undefined;
+
+      if (dbSession?.agent_runtime === 'omp-fleet') {
+        if (!ompSessionManager) {
+          return { success: false, error: 'OMP fleet is not available — the bridge is not configured.' };
+        }
+        if (finalInput) {
+          sessionManager.addPanelConversationMessage(claudePanel.id, 'user', finalInput);
+        }
+        if (ompSessionManager.isPanelRunning(claudePanel.id)) {
+          await ompSessionManager.sendInput(claudePanel.id, finalInput);
+        } else {
+          await ompSessionManager.spawn(claudePanel.id, sessionId, finalInput, {
+            model: DEFAULT_OMP_MODEL,
+            cwd: session.worktreePath ?? undefined,
+          });
+        }
+        await sessionManager.updateSession(sessionId, { status: 'running' });
+        return { success: true };
+      }
 
       if (dbSession?.agent_runtime === 'codex-pty') {
         if (codexPtyManager.isPanelRunning(claudePanel.id)) {
@@ -2691,6 +2762,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // sessions:input always resolves the session's FIRST panel, which would
             // misroute an added panel's turn. relayOrSpawnPtyPanel returns false for
             // SDK / demo panels, which fall through to the structured SDK path.
+            const ompResult = await routeOmpPanelTurn(panelId, input);
+            if (ompResult !== null) return ompResult;
             const relayed = await relayOrSpawnPtyPanel(services, panel, input);
             if (relayed) return { success: true };
             // Save the user input as a conversation message for panel history
@@ -2768,6 +2841,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // exact for codex: warm-parked entries are NOT in `processes`, so there
             // is no warm-idle false-positive (unlike Claude's isPanelTurnInFlight).
             const continueLane = laneForPanel(panel);
+            const ompContinue = await routeOmpPanelTurn(panelId, input);
+            if (ompContinue !== null) return ompContinue;
             // The codex-pty lane relays a PANEL-SCOPED turn into this panel's own
             // REPL. claudePanelManager below reaches only the two CLAUDE managers,
             // so a Codex terminal panel — every panel of a codex-pty session, and
@@ -3195,6 +3270,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // Stop all Claude panels for this session
         console.log(`[IPC] Stopping ${stopClaudePanels.length} agent panel(s) for session ${sessionId}`);
         for (const claudePanel of stopClaudePanels) {
+          if (dbSession.agent_runtime === 'omp-fleet') {
+            // OMP panels are 'claude'-typed but owned by the remote-worker
+            // manager — resolvePanelLane would map them to the claude-sdk lane
+            // and claudeCodeManager.stopPanel would stop a non-existent child.
+            await ompSessionManager?.stopPanel(claudePanel.id);
+            continue;
+          }
           // Per-PANEL lane — see the dismiss teardown above. claudeCodeManager
           // covers both Claude lanes here (its stopPanel is the session-level
           // Stop that predates the interactive split).

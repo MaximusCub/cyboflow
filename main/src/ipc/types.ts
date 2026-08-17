@@ -13,6 +13,7 @@ import type { InteractiveClaudeManager } from '../services/panels/claude/interac
 import type { CodexSdkManager } from '../services/panels/codex/codexSdkManager';
 import type { ClaudeModelCatalogService } from '../services/claudeModelCatalogService';
 import type { CodexPtyManager } from '../services/panels/codex/codexPtyManager';
+import type { OmpSessionManager } from '../orchestrator/omp/ompSessionManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { Logger } from '../utils/logger';
@@ -42,6 +43,15 @@ export interface AppServices {
   codexSdkManager: CodexSdkManager;
   /** Interactive Codex PTY runtime for quick sessions only. */
   codexPtyManager: CodexPtyManager;
+  /**
+   * OMP fleet runtime (Phase 4 coexistence, omp-phase4-coexistence-adr.md). A
+   * SIBLING to the process managers — a remote worker supervised over the Prime
+   * bridge, no local child. Fail-closed: present ONLY when the bridge command
+   * config resolved at boot; `undefined` means OMP is not launchable and the
+   * dispatch + picker omit it entirely (never a silent fallback to a local
+   * provider).
+   */
+  ompSessionManager?: OmpSessionManager;
   /** Dynamic Claude model catalog (SDK `supportedModels()`), for the picker's "Other models" section. */
   claudeModelCatalogService: ClaudeModelCatalogService;
   /**

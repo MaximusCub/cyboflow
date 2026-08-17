@@ -23,6 +23,14 @@ vi.mock('../../../hooks/useForcedSubstrate', () => ({
   useForcedSubstrate: mockUseForcedSubstrate,
 }));
 
+const { mockUseOmpAvailability } = vi.hoisted(() => ({
+  mockUseOmpAvailability: vi.fn<() => boolean>(() => false),
+}));
+
+vi.mock('../../../hooks/useOmpAvailability', () => ({
+  useOmpAvailability: mockUseOmpAvailability,
+}));
+
 import { SubstrateSelector } from '../SubstrateSelector';
 import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
@@ -38,6 +46,8 @@ function setProviderAccess(access: AgentProviderAccess | undefined): void {
 beforeEach(() => {
   mockUseForcedSubstrate.mockReset();
   mockUseForcedSubstrate.mockReturnValue(null);
+  mockUseOmpAvailability.mockReset();
+  mockUseOmpAvailability.mockReturnValue(false);
   useConfigStore.setState({ config: null });
 });
 
@@ -148,11 +158,38 @@ describe('SubstrateSelector — provider access toggles', () => {
 
   it('offers everything when the toggles were never touched (absent config field)', () => {
     setProviderAccess(undefined);
+    mockUseOmpAvailability.mockReturnValue(true);
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Claude SDK/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /OMP Fleet/i })).toBeInTheDocument();
     expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+  });
+
+  it('hides OMP Fleet when the bridge is not configured (availability false)', () => {
+    setProviderAccess(undefined);
+    mockUseOmpAvailability.mockReturnValue(false);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.queryByRole('option', { name: /OMP Fleet/i })).not.toBeInTheDocument();
+  });
+
+  it('offers OMP Fleet when available and the omp provider is enabled', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    mockUseOmpAvailability.mockReturnValue(true);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.getByRole('option', { name: /OMP Fleet/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /OMP Fleet/i })).not.toBeDisabled();
+  });
+
+  it('hides OMP Fleet when the omp provider toggle is off even if the bridge is configured', () => {
+    setProviderAccess({ claude: true, codex: true, omp: false });
+    mockUseOmpAvailability.mockReturnValue(true);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.queryByRole('option', { name: /OMP Fleet/i })).not.toBeInTheDocument();
   });
 
   it('surfaces the PTY-only ⨯ Claude-off conflict instead of a picker with no options', () => {

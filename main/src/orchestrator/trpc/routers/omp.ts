@@ -19,6 +19,7 @@ import type {
   OmpFleetViewSnapshot,
   OmpSnapshotResult,
 } from '../../../../../shared/types/omp';
+import { resolveOmpBridgeCommandConfig } from '../../omp/ompBridgeConfig';
 
 /** Map a full snapshot to the renderer-safe view projection. */
 function toViewSnapshot(result: OmpSnapshotResult): OmpFleetViewResult {
@@ -44,6 +45,15 @@ function toViewSnapshot(result: OmpSnapshotResult): OmpFleetViewResult {
 }
 
 export const ompRouter = router({
+  /**
+   * Whether the OMP fleet runtime is launchable from this app: the bridge
+   * command config resolved at query time. The renderer picker ANDs this with
+   * the `omp` provider toggle (useIsAgentProviderEnabled) to decide whether to
+   * offer the entry — a read-only availability probe, never a command.
+   */
+  availability: protectedProcedure.query(() => ({
+    launchable: resolveOmpBridgeCommandConfig() !== undefined,
+  })),
   /**
    * The latest fleet summary (redacted), or a discriminated failure.
    * An absent registry surfaces as `{ ok: false, error: 'missing' }`; an

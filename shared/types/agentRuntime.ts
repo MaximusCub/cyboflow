@@ -131,8 +131,9 @@ export function resolveAgentProviderAccess(
   const resolved: AgentProviderAccess = {
     claude: isAgentProviderEnabled(access, 'claude'),
     codex: isAgentProviderEnabled(access, 'codex'),
+    omp: isAgentProviderEnabled(access, 'omp'),
   };
-  if (!resolved.claude && !resolved.codex) return { claude: true, codex: true };
+  if (!resolved.claude && !resolved.codex && !resolved.omp) return { claude: true, codex: true, omp: true };
   return resolved;
 }
 

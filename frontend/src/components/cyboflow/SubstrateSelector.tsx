@@ -38,6 +38,7 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
+import { useOmpAvailability } from '../../hooks/useOmpAvailability';
 import {
   workflowRuntimeForLaunch,
   type LaunchAgentRuntime,
@@ -74,6 +75,7 @@ const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[]
   { runtime: 'claude-interactive', label: 'Claude interactive (PTY)' },
   { runtime: 'codex-sdk', label: 'Codex SDK' },
   { runtime: 'codex-pty', label: 'Codex PTY — quick sessions only' },
+  { runtime: 'omp-fleet', label: 'OMP Fleet — quick sessions only' },
 ];
 
 /**
@@ -89,11 +91,15 @@ function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<Subst
   return false;
 }
 
-/** The options a picker may show, given the provider toggles. */
+/** The options a picker may show, given the provider toggles + OMP availability. */
 function enabledRuntimeOptions(
   access: AgentProviderAccess,
+  ompAvailable: boolean,
 ): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return RUNTIME_OPTIONS.filter((o) => isRuntimeProviderEnabled(access, o.runtime));
+  return RUNTIME_OPTIONS.filter((o) => {
+    if (o.runtime === 'omp-fleet' && !ompAvailable) return false;
+    return isRuntimeProviderEnabled(access, o.runtime);
+  });
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -133,12 +139,12 @@ export function SubstrateSelector({
 }: SubstrateSelectorProps): React.JSX.Element {
   // Global forced-substrate pin (see file header), mirroring the backend
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
-  // Reactive read so a config fetch resolving AFTER mount still locks the picker.
   const forced = useForcedSubstrate();
   // Provider toggles (Settings → Integrations / onboarding). A switched-off
   // provider's runtimes leave the picker entirely and can never be submitted.
   const providerAccess = useAgentProviderAccess();
-  const options = enabledRuntimeOptions(providerAccess);
+  const ompAvailable = useOmpAvailability();
+  const options = enabledRuntimeOptions(providerAccess, ompAvailable);
   const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
 
   // Under the interactive lock, keep the controlled value consistent so the

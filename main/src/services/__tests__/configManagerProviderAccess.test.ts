@@ -32,10 +32,10 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.agentProviderAccess', () => {
-  it('floors to both providers enabled on a fresh instance, without seeding the field', () => {
+  it('floors to all providers enabled on a fresh instance, without seeding the field', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     expect(mgr.getConfig().agentProviderAccess).toBeUndefined();
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true });
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: true });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
     expect(mgr.isAgentProviderEnabled('codex')).toBe(true);
   });
@@ -68,16 +68,16 @@ describe('ConfigManager.agentProviderAccess', () => {
     await mgr.initialize();
     await mgr.updateConfig({ agentProviderAccess: { codex: false } });
 
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: false });
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: false, omp: true });
   });
 
-  it('degrades an all-off map to both-enabled (never brick every launch seam)', async () => {
+  it('degrades an all-off map to all-enabled (never brick every launch seam)', async () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     await mgr.initialize();
     // Bypasses the IPC normalization (a hand-edited config.json can do this).
-    await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false } });
+    await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false, omp: false } });
 
-    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true });
+    expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: true });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
   });
 

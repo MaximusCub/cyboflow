@@ -21,6 +21,9 @@
  * mirror the producer's `extensions/fleet/backend.ts` exactly.
  */
 
+/** Producer-side default fleet model (OMP-fleet-management docs, default worker). */
+export const DEFAULT_OMP_MODEL = "zai/glm-5.2:high";
+
 export type OmpBackend = "subprocess" | "shepherd";
 
 export type WorkerStatus =

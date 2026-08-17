@@ -61,15 +61,16 @@ describe('enabledAgentProviders', () => {
 });
 
 describe('resolveAgentProviderAccess', () => {
-  it('materializes both members from an absent or partial map', () => {
-    expect(resolveAgentProviderAccess(undefined)).toEqual({ claude: true, codex: true });
-    expect(resolveAgentProviderAccess({ codex: false })).toEqual({ claude: true, codex: false });
+  it('materializes all members from an absent or partial map', () => {
+    expect(resolveAgentProviderAccess(undefined)).toEqual({ claude: true, codex: true, omp: true });
+    expect(resolveAgentProviderAccess({ codex: false })).toEqual({ claude: true, codex: false, omp: true });
   });
 
-  it('degrades an all-off map to both-on', () => {
-    expect(resolveAgentProviderAccess({ claude: false, codex: false })).toEqual({
+  it('degrades an all-off map to all-on', () => {
+    expect(resolveAgentProviderAccess({ claude: false, codex: false, omp: false })).toEqual({
       claude: true,
       codex: true,
+      omp: true,
     });
   });
 });

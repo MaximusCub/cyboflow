@@ -82,6 +82,7 @@ import { resolveOmpBridgeCommandConfig } from './orchestrator/omp/ompBridgeConfi
 import { resolveOmpPrincipal } from './orchestrator/omp/ompPrincipal';
 import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
 import type { OmpCommandAdapter } from '../../shared/types/ompCommand';
+import { OmpSessionManager } from './orchestrator/omp/ompSessionManager';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
@@ -356,6 +357,12 @@ function buildOmpCommandAdapter(): OmpCommandAdapter {
   logger.info(`omp:command adapter configured for session ${config.sessionId}`);
   return new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId));
 }
+// OMP fleet runtime manager (omp-phase4-coexistence-adr.md increment 4). Built
+// fail-closed in initializeServices(): present ONLY when the bridge command
+// config resolved at boot; `undefined` means OMP is not launchable and both the
+// dispatch seams and the picker omit it (never a fallback to a local provider).
+let ompSessionManager: OmpSessionManager | undefined;
+
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
@@ -1458,12 +1465,29 @@ async function initializeServices(): Promise<boolean> {
     getMainWindow: () => mainWindow
   });
 
+
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
   // singletons assembled with the rest of AppServices (not lazy on first IPC).
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
   const cyboflowDb = makeDatabaseLike(databaseService);
+  // OMP fleet runtime (omp-phase4-coexistence-adr.md §5): constructed ONLY when
+  // the bridge command config resolved at boot. Unresolved ⇒ undefined ⇒ the
+  // dispatch seams + picker omit OMP entirely — a half-configured bridge never
+  // silently authorizes a session.
+  {
+    const ompBridgeConfig = resolveOmpBridgeCommandConfig();
+    ompSessionManager = ompBridgeConfig
+      ? new OmpSessionManager(
+          new OmpBridgeCommandAdapter(
+            new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
+          ),
+          cyboflowLogger,
+        )
+      : undefined;
+  }
+
   // Inject the global-config provider so createRun resolves the global default
   // agent permission mode + CLI substrate via the resolvers (ConfigManager
   // satisfies WorkflowConfigProvider structurally).
@@ -3434,6 +3458,7 @@ async function initializeServices(): Promise<boolean> {
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
     codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
+    ompSessionManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
