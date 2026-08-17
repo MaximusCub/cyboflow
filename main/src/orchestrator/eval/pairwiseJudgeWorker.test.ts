@@ -17,6 +17,7 @@ import {
 import type { PairwiseJudgeClient, PairwiseGradeInput, PairwiseRawResult } from './pairwiseJudge';
 import { CodexJurorUnavailableError } from './codexJudge';
 import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
+import type { LoggerLike } from '../types';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 
 function buildDb(): Database.Database {
@@ -130,6 +131,11 @@ function panelOf(judge: PairwiseJudgeClient, size = 3): PairwisePanelSlot[] {
   }));
 }
 
+/** Spy logger — the degradation warns are part of the contract, so they must be observable. */
+type SpyLogger = {
+  [K in keyof LoggerLike]: ReturnType<typeof vi.fn>;
+};
+
 function makeWorker(
   raw: Database.Database,
   over: Partial<PairwiseJudgeWorkerDeps> = {},
@@ -138,14 +144,16 @@ function makeWorker(
   reviewItemWriter: ReturnType<typeof vi.fn>;
   emitComparisonReady: ReturnType<typeof vi.fn>;
   gitDiff: ReturnType<typeof vi.fn>;
+  logger: SpyLogger;
 } {
   const reviewItemWriter = vi.fn(async () => ({ reviewItemId: 'rvw_x' }));
   const emitComparisonReady = vi.fn();
   const gitDiff = vi.fn(async (worktreePath: string) =>
     worktreePath === '/wt/a' ? diffFor('a.ts', 'DIFF-A') : diffFor('b.ts', 'DIFF-B'),
   );
+  const logger: SpyLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   PairwiseJudgeWorker._resetForTesting();
-  const worker = PairwiseJudgeWorker.initialize(dbAdapter(raw), undefined, {
+  const worker = PairwiseJudgeWorker.initialize(dbAdapter(raw), logger, {
     gitDiff,
     panel: panelOf(
       new FakeJudge(async () => ({ preference: '1', confidence: 0.8, rationale: 'A better' })),
@@ -158,7 +166,7 @@ function makeWorker(
     sleep: async () => {},
     ...over,
   });
-  return { worker, reviewItemWriter, emitComparisonReady, gitDiff };
+  return { worker, reviewItemWriter, emitComparisonReady, gitDiff, logger };
 }
 
 beforeEach(() => PairwiseJudgeWorker._resetForTesting());
@@ -719,10 +727,17 @@ describe('process — degraded panel: classification, backfill, degradation note
     await worker.maybeSnapshotAndEnqueue(id);
     await worker._queue().onIdle();
 
+    // Two timed-out Claude slots (1 try each) + one unavailable Codex slot (1 try) —
+    // exactly ONE whole-comparison attempt. `unavailable` must count as
+    // non-retryable for the short-circuit predicate, or this becomes 9 calls.
     expect(timeoutGrade).toHaveBeenCalledTimes(2);
     expect(codexGrade).toHaveBeenCalledTimes(1);
     expect(readRow(raw, id).s).toBe('failed');
+    // The human still gets the blocking decision gate on the failed path.
     expect(reviewItemWriter).toHaveBeenCalled();
+    const [, change] = reviewItemWriter.mock.calls[0];
+    expect(change.kind).toBe('decision');
+    expect(change.blocking).toBe(true);
   });
 
   it('zero survivors with a RETRYABLE failure still runs the whole-comparison retry loop', async () => {
@@ -854,7 +869,7 @@ describe('process — degraded panel: classification, backfill, degradation note
         if (call === 1) return { preference: '1', confidence: 0.8, rationale: 'A' };
         throw new EvalJudgeTimeoutError('deadline exceeded');
       });
-      const { worker } = makeWorker(raw, {
+      const { worker, logger } = makeWorker(raw, {
         panel: [
           slotOf('claude-1', 'claude', donorGrade),
           slotOf('claude-2', 'claude', timeoutThrow),
@@ -868,6 +883,11 @@ describe('process — degraded panel: classification, backfill, degradation note
       expect(row.s).toBe('complete');
       expect(row.n).toBe(1);
       expect(row.e).toContain('backfill from claude-1');
+      // The dead donor is named in the log, not just the DB note.
+      expect(logger.warn).toHaveBeenCalledWith(
+        '[pairwise] backfill draw failed',
+        expect.objectContaining({ slot: 'claude-1', provider: 'claude', errorCode: 'timeout' }),
+      );
     });
 
     it('no Claude survivor => no backfill; the short ballot completes with the note', async () => {
@@ -947,6 +967,197 @@ describe('process — degraded panel: classification, backfill, degradation note
     expect(new Set(indices).size).toBe(indices.length);
     expect(indices).toEqual([1, 2, 3]);
     expect(indices.filter((i) => i >= 3)).toEqual([3]); // backfill at panel.length + 0
+  });
+
+  it('warns per degraded slot with { slot, provider, errorCode }', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    const { worker, logger } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+        slotOf('claude-2', 'claude', aWins),
+        slotOf('codex-1', 'codex', async () => {
+          throw new CodexJurorUnavailableError('codex CLI is not installed', 'runtime-missing');
+        }),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    // A degradation that is invisible in the logs is undiagnosable in production —
+    // the note lands in a DB column no renderer reads, so the warn IS the operator
+    // surface. Provider matters: it says whether to go look at the Codex runtime.
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[pairwise] panel slot degraded',
+      expect.objectContaining({ slot: 'claude-1', provider: 'claude', errorCode: 'timeout' }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[pairwise] panel slot degraded',
+      expect.objectContaining({
+        slot: 'codex-1',
+        provider: 'codex',
+        errorCode: 'runtime-missing',
+      }),
+    );
+    // The unavailable classification is logged at the point of classification too,
+    // BEFORE any retry could be spent.
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[pairwise] panel slot unavailable',
+      expect.objectContaining({
+        slot: 'codex-1',
+        provider: 'codex',
+        errorCode: 'runtime-missing',
+      }),
+    );
+    // The healthy slot is never reported degraded.
+    const degradedSlots = logger.warn.mock.calls
+      .filter(([msg]) => msg === '[pairwise] panel slot degraded')
+      .map(([, ctx]) => (ctx as { slot: string }).slot);
+    expect(degradedSlots).not.toContain('claude-2');
+  });
+
+  it('folds a sprawling multi-line failure into a ONE-LINE bounded note', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // A raw judge failure is routinely a multi-line dump (stack, echoed model
+    // output). The note shares a single-line `error` column with the failed-path
+    // message, so it must be collapsed AND bounded — an unbounded fold would push
+    // a whole transcript into the row.
+    const sprawling = `malformed judge output\n${'x'.repeat(400)}\n  trailing\tframe`;
+    const { worker, emitComparisonReady } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', async () => {
+          throw new Error(sprawling);
+        }),
+        slotOf('claude-2', 'claude', aWins),
+        slotOf('claude-3', 'claude', aWins),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    const row = readRow(raw, id);
+    expect(row.s).toBe('complete');
+    expect(row.n).toBe(3); // two survivors + one backfill
+    const note = row.e ?? '';
+    expect(note).toContain('claude-1 failed (malformed judge output');
+    expect(note).not.toContain('\n');
+    expect(note).not.toContain('\t');
+    expect(note.length).toBeLessThan(300);
+    // The note is DB + log only: the renderer-facing event carries no trace of it.
+    expect(emitComparisonReady).toHaveBeenCalledWith({
+      experimentId: id,
+      preference: 'A',
+      status: 'complete',
+    });
+  });
+
+  it('each backfill sample draws its OWN positionAFirst rather than reusing the panel-pass orientation', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // Panel draws orient A-first; both backfill draws orient B-first. The judge
+    // always answers raw '1' (= "Solution 1"), so the orientation is the ONLY thing
+    // deciding the arm: reusing the survivor's orientation would yield A/A/A.
+    const seq = [0.1, 0.1, 0.1, 0.9, 0.9];
+    let i = 0;
+    const rng = vi.fn(() => seq[i++] ?? 0.1);
+    const donorGrade = vi.fn(async (): Promise<PairwiseRawResult> => ({
+      preference: '1',
+      confidence: 0.8,
+      rationale: 'solution 1',
+    }));
+    const { worker } = makeWorker(raw, {
+      rng,
+      panel: [
+        slotOf('claude-1', 'claude', donorGrade),
+        slotOf('claude-2', 'claude', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+        slotOf('codex-1', 'codex', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    expect(rng).toHaveBeenCalledTimes(5); // 3 panel draws + 2 backfill draws
+    const row = raw
+      .prepare(
+        'SELECT preference AS p, a_count AS a, b_count AS b, per_sample_json AS ps FROM experiment_comparisons WHERE experiment_id = ?',
+      )
+      .get(id) as { p: string; a: number; b: number; ps: string };
+    const perSample = JSON.parse(row.ps) as Array<{
+      positionAFirst: boolean;
+      preference: string;
+      rawPreference: string;
+    }>;
+    expect(perSample.map((s) => s.positionAFirst)).toEqual([true, false, false]);
+    expect(perSample.every((s) => s.rawPreference === '1')).toBe(true);
+    expect(perSample.map((s) => s.preference)).toEqual(['A', 'B', 'B']);
+    expect(row.a).toBe(1);
+    expect(row.b).toBe(2);
+    expect(row.p).toBe('B');
+  });
+
+  it('backfills from the first SUCCESSFUL Claude slot, not blindly from panel[0]', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // claude-1 is dead; claude-2 is the only healthy Claude slot. Picking the donor
+    // positionally would re-invoke the dead slot and leave the ballot short.
+    const deadGrade = vi.fn(async (): Promise<PairwiseRawResult> => {
+      throw new EvalJudgeTimeoutError('deadline exceeded');
+    });
+    const donorGrade = vi.fn(aWins);
+    const { worker } = makeWorker(raw, {
+      panel: [
+        slotOf('claude-1', 'claude', deadGrade),
+        slotOf('claude-2', 'claude', donorGrade),
+        slotOf('codex-1', 'codex', aWins),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    expect(deadGrade).toHaveBeenCalledTimes(1); // never re-invoked as a donor
+    expect(donorGrade).toHaveBeenCalledTimes(2); // panel pass + 1 backfill
+    const row = readRow(raw, id);
+    expect(row.n).toBe(3);
+    const perSample = perSampleOf(row.ps);
+    expect(perSample.map((s) => s.sampleIndex)).toEqual([1, 2, 3]);
+    // The backfill entry is attributed to the surviving donor, not the dead slot.
+    expect(perSample.find((s) => s.sampleIndex === 3)?.judgeName).toBe('claude-2');
+  });
+
+  it('never backfills ABOVE the configured panel length (a 2-slot panel repairs to 2, not 3)', async () => {
+    const raw = buildDb();
+    const id = seedExperiment(raw, { armAStatus: 'completed', armBStatus: 'completed' });
+    // Panel LENGTH still drives K ("panel LENGTH drives K" above pins the clean
+    // case): backfill REPAIRS a lost slot, it must not inflate a deliberately
+    // smaller panel up to the v1 default of 3.
+    const donorGrade = vi.fn(aWins);
+    const rng = vi.fn(() => 0.1);
+    const { worker } = makeWorker(raw, {
+      rng,
+      panel: [
+        slotOf('claude-1', 'claude', donorGrade),
+        slotOf('claude-2', 'claude', async () => {
+          throw new EvalJudgeTimeoutError('deadline exceeded');
+        }),
+      ],
+    });
+    await worker.maybeSnapshotAndEnqueue(id);
+    await worker._queue().onIdle();
+
+    expect(donorGrade).toHaveBeenCalledTimes(2); // panel pass + exactly ONE backfill
+    expect(rng).toHaveBeenCalledTimes(3); // 2 panel draws + 1 backfill draw
+    const row = readRow(raw, id);
+    expect(row.s).toBe('complete');
+    expect(row.n).toBe(2);
+    // Backfill index is panel.length + 0 = 2, still past every slot index.
+    expect(perSampleOf(row.ps).map((s) => s.sampleIndex)).toEqual([0, 2]);
   });
 });
 
