@@ -10,6 +10,7 @@
  * mock/import paths are one level shallower than evalJudgeQuery.test.ts's.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   makeFakeQuery,
   makeRejectingQuery,
@@ -19,6 +20,24 @@ import {
   type FakeQueryParams,
 } from '../../test/fakes/fakeSdk';
 import { EvalJudgeTimeoutError } from './judgeErrors';
+
+/**
+ * A FakeQueryFn that ignores the deadline's AbortController entirely and simply
+ * takes `delayMs` of real wall-clock time before completing with NO messages —
+ * models an SDK stream that drains to completion on its OWN schedule (not because
+ * it observed the abort), past the deadline. This exercises the post-drain
+ * `if (didTimeOut())` check at pairwiseJudgeQuery.ts:132 directly, distinct from
+ * `makeBlockUntilAbortQuery`'s abort-driven completion.
+ */
+function makeSlowNaturalCompletionQuery(delayMs: number): FakeQueryFn {
+  return function slowNaturalCompletionQuery(): AsyncGenerator<SDKMessage, void> {
+    return (async function* run() {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      // Unreachable — satisfies the async-generator `require-yield` lint rule.
+      if (false as boolean) yield undefined as never;
+    })();
+  };
+}
 
 // The SDK `query` is mocked so the pairwiseJudgeQuery boundary is unit-testable
 // without a real claude binary.
@@ -52,6 +71,23 @@ describe('makePairwiseJudgeQuery', () => {
     install(makeBlockUntilAbortQuery());
     const fn = makePairwiseJudgeQuery(undefined, 5);
     await expect(fn({ prompt: 'p', schema: {} })).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
+  });
+
+  it('a query that drains to completion NORMALLY (no rejection) after the deadline already fired still rejects with the TYPED EvalJudgeTimeoutError (post-drain in-loop check)', async () => {
+    install(makeSlowNaturalCompletionQuery(30));
+    const fn = makePairwiseJudgeQuery(undefined, 5);
+
+    const rejection = fn({ prompt: 'p', schema: {} });
+    await expect(rejection).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
+    await expect(rejection).rejects.toThrow(/timed out after 5ms/);
+  });
+
+  it('an EvalJudgeTimeoutError thrown by the generator itself is rethrown BY IDENTITY (same object), not wrapped anew', async () => {
+    const original = new EvalJudgeTimeoutError('boom from generator');
+    install(makeRejectingQuery(original));
+    const fn = makePairwiseJudgeQuery();
+
+    await expect(fn({ prompt: 'p', schema: {} })).rejects.toBe(original);
   });
 
   it('a non-timeout SDK failure rejects with a plain Error, NOT the typed timeout class (retry-once contract)', async () => {
