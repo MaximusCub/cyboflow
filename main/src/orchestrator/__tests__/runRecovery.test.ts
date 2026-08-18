@@ -868,6 +868,117 @@ describe('archived-session review-item sweeps', () => {
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(activeId) as { status: string }).status).toBe('pending');
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(resolvedId) as { status: string }).status).toBe('resolved');
   });
+
+  // -------------------------------------------------------------------------
+  // Delivered-session finding carve-out. The archive sweeps run on BOTH a plain
+  // dismiss and the merge / create-PR close-outs (their dialogs delete the
+  // session once the work is away), so without this carve-out a merge destroyed
+  // every finding it produced ~5ms later and the Insights compounding surface
+  // could never be reached.
+  // -------------------------------------------------------------------------
+
+  function markDelivered(db: Database.Database, runId: string, outcome: string): void {
+    db.prepare('UPDATE workflow_runs SET outcome = ? WHERE id = ?').run(outcome, runId);
+  }
+
+  it('keeps a delivered session\'s findings while still dismissing its un-actionable gates', async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    const findingId = await createReviewItem(router, 'run-direct', 'Landed finding', 'code-review');
+    const permissionId = await createReviewItem(router, 'run-direct', 'Dead gate', 'approval', 'permission');
+    markDelivered(db, 'run-direct', 'merged');
+
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    // The gate goes (nothing can action it); the finding survives — its code is
+    // in the tree, so it is exactly what a compound run should be offered.
+    expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 0 });
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(permissionId) as { status: string }).status).toBe('dismissed');
+  });
+
+  it.each(['merged', 'integrated', 'completed', 'pr_open'])(
+    "treats outcome='%s' as delivered and preserves the finding",
+    async (outcome) => {
+      const db = buildReviewSweepDb();
+      const adapter = dbAdapter(db);
+      const router = ReviewItemRouter.initialize(adapter);
+      const findingId = await createReviewItem(router, 'run-direct', `Finding on ${outcome}`, 'code-review');
+      markDelivered(db, 'run-direct', outcome);
+
+      await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+      expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+    },
+  );
+
+  it.each(['dismissed', 'failed', 'canceled', 'interrupted'])(
+    "still dismisses the finding when the session's work was thrown away (outcome='%s')",
+    async (outcome) => {
+      const db = buildReviewSweepDb();
+      const adapter = dbAdapter(db);
+      const router = ReviewItemRouter.initialize(adapter);
+      const findingId = await createReviewItem(router, 'run-direct', `Finding on ${outcome}`, 'code-review');
+      markDelivered(db, 'run-direct', outcome);
+
+      await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+      expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('dismissed');
+    },
+  );
+
+  it('dismisses the finding of a run whose outcome is still NULL (SQL 3VL guard)', async () => {
+    // A bare `r.outcome IN (...)` yields NULL here, and NOT(TRUE AND NULL) is
+    // NULL — not TRUE — which silently drops the row from the sweep and
+    // preserves a finding on a session that delivered nothing. The COALESCE in
+    // DELIVERED_SESSION_FINDING_CARVE_OUT is what this pins.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    const findingId = await createReviewItem(router, 'run-direct', 'Undecided run', 'code-review');
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-direct') as { outcome: string | null })
+        .outcome,
+    ).toBeNull();
+
+    await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('dismissed');
+  });
+
+  it('reads delivery from a SIBLING run in the same session', async () => {
+    // The flow run carries the merge stamp; the quick run that filed the
+    // finding carries none. Both live under sess-archived.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, { id: 'run-sibling', workflowId: 'wf-review-sweep', workflowName: 'sprint', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-sibling'`).run();
+    markDelivered(db, 'run-sibling', 'merged');
+    const findingId = await createReviewItem(router, 'run-direct', 'Filed by the quick run', 'code-review');
+
+    await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+  });
+
+  it('boot backfill carries the same carve-out, so a restored finding survives the next launch', async () => {
+    // Without this the backfill re-dismisses at every boot exactly what the live
+    // sweep preserved — and would silently undo migration 106's restoration.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    const findingId = await createReviewItem(router, 'run-direct', 'Restored finding', 'code-review');
+    const gateId = await createReviewItem(router, 'run-direct', 'Stale gate', 'approval', 'permission');
+    markDelivered(db, 'run-direct', 'merged');
+
+    const result = await backfillArchivedSessionReviewItems(adapter);
+
+    expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 0 });
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(gateId) as { status: string }).status).toBe('dismissed');
+  });
 });
 
 // ---------------------------------------------------------------------------

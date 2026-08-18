@@ -142,9 +142,22 @@ export interface WorkflowRunRow {
    * it could not be auto-resumed — it pairs with `status='failed'` + the
    * `error_message='app_restart'` sentinel, and marks infrastructure interruption (NOT an
    * agent/logic bug) so insights + the assistant can exclude it from the real-failure rate.
+   * `'completed'` is the human's "this landed, but not through our merge path" stamp (the
+   * agent merged it in chat, or the branch was merged outside the app), set only by the
+   * explicit Mark-complete action and a member of DELIVERED_RUN_OUTCOMES so the session's
+   * findings survive its archive.
    * The plain TEXT column has no SQL CHECK, so this is a TypeScript-union-only addition.
    */
-  outcome?: 'merged' | 'integrated' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | 'interrupted' | null;
+  outcome?:
+    | 'merged'
+    | 'integrated'
+    | 'pr_open'
+    | 'completed'
+    | 'dismissed'
+    | 'failed'
+    | 'canceled'
+    | 'interrupted'
+    | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
   base_branch?: string | null;
   /** Base SHA captured at launch — future git triage only (migration 014). */

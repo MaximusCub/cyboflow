@@ -20,6 +20,7 @@ import { emitUsage } from './telemetrySink';
 import { AgentInvocationStore } from './agentInvocationStore';
 import { hasReviewItemsTable, resolveReviewItemById } from './reviewItemListing';
 import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter';
+import { DELIVERED_RUN_OUTCOMES_SQL_IN } from '../../../shared/types/cyboflow';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -32,6 +33,46 @@ export interface ReviewItemSweepResult {
   itemsDismissed: number;
   itemsFailed: number;
 }
+
+/**
+ * The carve-out that keeps a delivered session's FINDINGS out of both archive
+ * sweeps below. Correlated on `ri` + `r` (the review item and its owning run),
+ * so it drops straight into either sweep's WHERE clause.
+ *
+ * Archiving a session dismisses its pending review items because they can no
+ * longer be actioned — a permission prompt or a gate on a session that is gone
+ * has nothing to resume. A FINDING is different: it describes code, and when the
+ * session's work was DELIVERED (see DELIVERED_RUN_OUTCOMES) that code is now in
+ * the tree, so the finding still applies and is exactly the fuel the Insights
+ * compounding surface is meant to offer. Sweeping it was silently destroying
+ * every finding a merge produced — the merge dialog archives the session
+ * immediately after a successful merge, so the finding never outlived its run.
+ *
+ * Delivery is read from the run itself OR any sibling run in the same session:
+ * a session's flow run may carry the 'merged' stamp while the quick run that
+ * filed the finding carries none.
+ *
+ * SQL 3VL, twice, both load-bearing. `outcome` is NULL for every in-flight run,
+ * and a bare `r.outcome IN (...)` would yield NULL, making the enclosing
+ * `NOT (TRUE AND NULL)` evaluate to NULL — which is not TRUE, so the row falls
+ * out of the sweep and the finding is preserved on a session that delivered
+ * nothing. COALESCE to '' (never a member) forces the honest FALSE. The EXISTS
+ * needs no such guard: it is TRUE/FALSE by construction, and a NULL
+ * `r.session_id` simply matches nothing, correctly falling back to the run's
+ * own outcome.
+ */
+const DELIVERED_SESSION_FINDING_CARVE_OUT = `
+  AND NOT (
+    ri.kind = 'finding'
+    AND (
+      COALESCE(r.outcome, '') IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}
+      OR EXISTS (
+        SELECT 1 FROM workflow_runs wrm
+         WHERE wrm.session_id = r.session_id
+           AND wrm.outcome IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}
+      )
+    )
+  )`;
 
 async function dismissPendingReviewItemRows(
   rows: PendingReviewItemRow[],
@@ -64,12 +105,20 @@ async function dismissPendingReviewItemRows(
 }
 
 /**
- * Dismiss every pending review item attached to any run hosted by one session.
+ * Dismiss the pending review items attached to any run hosted by one session,
+ * EXCEPT the findings of a session whose work was delivered (see
+ * {@link DELIVERED_SESSION_FINDING_CARVE_OUT}).
  *
  * This is intentionally an archive-only sibling of
  * DynamicWorkflowTracker.resolveReviewItemsForSession. Merge keeps its existing,
  * dynamic-workflow-only resolve semantics; session dismiss owns this broader
- * all-source/all-kind dismissal exactly once at the sessions:delete seam.
+ * all-source dismissal exactly once at the sessions:delete seam.
+ *
+ * NOTE the seam this runs on: `sessions:delete` is reached by BOTH a plain
+ * dismiss AND the successful-merge / created-PR close-outs (their dialogs delete
+ * the session once the work is away). The carve-out is what separates them —
+ * delivery is already stamped on the runs by the time we get here, so a merged
+ * session keeps its findings while a genuinely abandoned one still loses them.
  */
 export async function dismissPendingReviewItemsForSession(
   db: DatabaseLike,
@@ -90,7 +139,8 @@ export async function dismissPendingReviewItemsForSession(
                 SELECT 1 FROM sessions s
                  WHERE s.id = ? AND s.run_id = r.id
               )
-            )`,
+            )
+            ${DELIVERED_SESSION_FINDING_CARVE_OUT}`,
       )
       .all(sessionId, sessionId) as PendingReviewItemRow[];
   } catch (err) {
@@ -108,6 +158,12 @@ export async function dismissPendingReviewItemsForSession(
  * Boot-time, idempotent backfill for stale pending review items whose owning
  * session was already archived. Every row is dismissed independently through
  * ReviewItemRouter so one malformed item cannot block the rest of boot.
+ *
+ * Carries the SAME {@link DELIVERED_SESSION_FINDING_CARVE_OUT} as the live
+ * sweep, and MUST keep carrying it: this runs over every archived session at
+ * every boot, so a divergence here would re-dismiss on the next launch exactly
+ * the findings the live sweep deliberately preserved (including the ones
+ * migration 106 restored).
  */
 export async function backfillArchivedSessionReviewItems(
   db: DatabaseLike,
@@ -130,7 +186,8 @@ export async function backfillArchivedSessionReviewItems(
                 SELECT 1 FROM sessions s2
                  WHERE s2.run_id = r.id AND s2.archived = 1
               )
-            )`,
+            )
+            ${DELIVERED_SESSION_FINDING_CARVE_OUT}`,
       )
       .all() as PendingReviewItemRow[];
   } catch (err) {
@@ -621,7 +678,7 @@ export function backfillTerminalOutcomes(db: DatabaseLike): OutcomeBackfillResul
 export function stampSessionRunsOutcome(
   db: DatabaseLike,
   sessionId: string,
-  outcome: 'merged' | 'dismissed',
+  outcome: 'merged' | 'dismissed' | 'completed',
   // A/B post-merge attribution (migration 049): the merge commit SHA where this
   // session's code landed. Stamped onto workflow_runs.merge_sha ONLY for a
   // 'merged' outcome AND only when provided (the caller computes it post-merge);
