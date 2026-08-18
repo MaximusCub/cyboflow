@@ -486,7 +486,7 @@ export type {
 export interface TrackerConnectionRow {
   id: string;
   project_id: number;
-  provider: 'linear' | 'plane';
+  provider: 'linear' | 'plane' | 'dart';
   status: 'active' | 'paused' | 'disconnected';
   workspace_id: string | null;
   workspace_name: string | null;
@@ -530,7 +530,7 @@ export interface EntityExternalLinkRow {
   connection_id: string;
   entity_type: 'idea' | 'epic' | 'task';
   entity_id: string;
-  provider: 'linear' | 'plane';
+  provider: 'linear' | 'plane' | 'dart';
   external_id: string;
   external_identifier: string | null;
   external_url: string | null;

@@ -118,6 +118,7 @@ import {
 } from './errors';
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
+import { DartAdapter } from './dartAdapter';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
   clearSecret,
@@ -350,21 +351,39 @@ export function defaultAdapterFactory(
   connection: TrackerConnectionRow,
   secret: string,
 ): TrackerAdapter {
-  if (connection.provider === 'linear') {
-    return new LinearAdapter({ apiKey: secret });
+  switch (connection.provider) {
+    case 'linear':
+      return new LinearAdapter({ apiKey: secret });
+    case 'dart':
+      // Dart is cloud-only and workspace-scoped by the token itself, so it needs
+      // neither a base URL nor a workspace slug — the key alone addresses
+      // everything.
+      return new DartAdapter({ apiKey: secret });
+    case 'plane': {
+      const workspaceSlug = (connection.workspace_id ?? '').trim();
+      if (workspaceSlug.length === 0) {
+        throw new TrackerCredentialsError(
+          `connection ${connection.id}: plane connections need a workspace slug in workspace_id`,
+        );
+      }
+      return new PlaneAdapter({
+        apiKey: secret,
+        workspaceSlug,
+        // undefined (not null) so PlaneAdapter's own `?? DEFAULT_BASE_URL` applies.
+        baseUrl: connection.base_url ?? undefined,
+      });
+    }
+    default: {
+      // Exhaustiveness guard: TrackerProvider gained a member and this factory
+      // did not. A `never` binding turns that into a COMPILE error, so the
+      // failure surfaces at the seam rather than as a connection silently
+      // adopting whichever adapter the old if/else fell through to.
+      const unreachable: never = connection.provider;
+      throw new TrackerCredentialsError(
+        `connection ${connection.id}: unsupported tracker provider ${String(unreachable)}`,
+      );
+    }
   }
-  const workspaceSlug = (connection.workspace_id ?? '').trim();
-  if (workspaceSlug.length === 0) {
-    throw new TrackerCredentialsError(
-      `connection ${connection.id}: plane connections need a workspace slug in workspace_id`,
-    );
-  }
-  return new PlaneAdapter({
-    apiKey: secret,
-    workspaceSlug,
-    // undefined (not null) so PlaneAdapter's own `?? DEFAULT_BASE_URL` applies.
-    baseUrl: connection.base_url ?? undefined,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2411,7 +2430,7 @@ function isLogEntry(value: unknown): value is TrackerSyncLogEntry {
 // ---------------------------------------------------------------------------
 
 /** Link lookup order for an entity whose provider we do not know up front. */
-const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane'];
+const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart'];
 
 /** The connected view's source label, read back off `source_json`. */
 function readSourceLabel(connection: TrackerConnectionRow): string {

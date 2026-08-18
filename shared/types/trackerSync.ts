@@ -12,7 +12,7 @@
  * key back to the renderer.
  */
 
-export type TrackerProvider = 'linear' | 'plane';
+export type TrackerProvider = 'linear' | 'plane' | 'dart';
 
 /** Renderer→main, connect-time only. */
 export interface TrackerCredentialsInput {

@@ -314,7 +314,11 @@ export const OVERLAP_WINDOW_MS = 10 * 60 * 1000;
 // Provenance footer
 // ---------------------------------------------------------------------------
 
-const PROVIDER_LABEL: Record<TrackerProvider, string> = { linear: 'Linear', plane: 'Plane' };
+const PROVIDER_LABEL: Record<TrackerProvider, string> = {
+  linear: 'Linear',
+  plane: 'Plane',
+  dart: 'Dart',
+};
 
 /** The markdown rule the footer block opens with. */
 const FOOTER_FENCE = '---\n';

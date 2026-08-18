@@ -183,17 +183,18 @@ export function updateConnectionSettings(
  * The base URL a provider addresses when `base_url` is NULL — i.e. what "no
  * base URL" actually means on the wire.
  *
- * Linear is cloud-only (its endpoint is baked into the adapter and the wizard
- * offers no field), so nothing can be equal to its default. Plane's wizard
- * PRE-FILLS the cloud origin, so one life of a cloud connection can store the
- * literal string while another stores NULL — the same instance, spelled two
- * ways. Mirrors planeAdapter.ts's own DEFAULT_BASE_URL; the two are the same
- * fact stated for two different purposes (addressing vs. identity), and a
- * self-hosted instance never collides with either.
+ * Linear and Dart are both cloud-only (each endpoint is baked into its adapter
+ * and the wizard offers no field), so nothing can be equal to their default.
+ * Plane's wizard PRE-FILLS the cloud origin, so one life of a cloud connection
+ * can store the literal string while another stores NULL — the same instance,
+ * spelled two ways. Mirrors planeAdapter.ts's own DEFAULT_BASE_URL; the two are
+ * the same fact stated for two different purposes (addressing vs. identity),
+ * and a self-hosted instance never collides with either.
  */
 const PROVIDER_DEFAULT_BASE_URL: Record<TrackerConnectionRow['provider'], string | null> = {
   linear: null,
   plane: 'https://api.plane.so',
+  dart: null,
 };
 
 /**

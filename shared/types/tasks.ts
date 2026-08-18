@@ -249,7 +249,13 @@ export type TaskChangeAction = 'created' | 'updated' | 'stageMoved' | 'decompose
  * main/src/orchestrator/taskChangeRouter.ts re-exports it so every existing
  * import site is unchanged.
  */
-export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear' | 'plane';
+export type TaskActor =
+  | 'user'
+  | 'orchestrator'
+  | `agent:${string}`
+  | 'linear'
+  | 'plane'
+  | 'dart';
 
 export interface TaskChangedEvent {
   projectId: number;
