@@ -86,8 +86,9 @@ describe('OmpSessionManager — spawn', () => {
     const { manager, spawn } = makeManager();
     const spawned = collect<OmpSpawnedEvent>(manager, 'spawned');
 
-    await manager.spawn('panel-1', 'session-1', 'do the thing', { model: 'zai/glm-5.2:high', workspace: 'ws-1', cwd: '/tmp/r' });
+    const started = await manager.spawn('panel-1', 'session-1', 'do the thing', { model: 'zai/glm-5.2:high', workspace: 'ws-1', cwd: '/tmp/r' });
 
+    expect(started).toBe(true);
     expect(spawn).toHaveBeenCalledWith({
       model: 'zai/glm-5.2:high',
       task: 'do the thing',
@@ -108,8 +109,12 @@ describe('OmpSessionManager — spawn', () => {
     const spawned = collect<OmpSpawnedEvent>(manager, 'spawned');
     const exits = collect<OmpExitEvent>(manager, 'exit');
 
-    await manager.spawn('panel-1', 'session-1', 'prompt', { model: 'm' });
+    const started = await manager.spawn('panel-1', 'session-1', 'prompt', { model: 'm' });
 
+    // The IPC seam answers the composer from this boolean: spawn fails CLOSED
+    // rather than throwing, so reporting `void` let a failed launch surface as
+    // a delivered turn.
+    expect(started).toBe(false);
     expect(spawned).toEqual([]);
     expect(exits).toEqual([{ panelId: 'panel-1', sessionId: 'session-1', exitCode: 1, signal: null }]);
     expect(manager.isPanelRunning('panel-1')).toBe(false);
@@ -122,8 +127,9 @@ describe('OmpSessionManager — spawn', () => {
     });
     const exits = collect<OmpExitEvent>(manager, 'exit');
 
-    await manager.spawn('panel-1', 'session-1', 'prompt', { model: 'm' });
+    const started = await manager.spawn('panel-1', 'session-1', 'prompt', { model: 'm' });
 
+    expect(started).toBe(false);
     expect(exits).toHaveLength(1);
     expect(exits[0].exitCode).toBe(1);
     expect(manager.isPanelRunning('panel-1')).toBe(false);
@@ -352,18 +358,77 @@ describe('OmpSessionManager — liveness and exit (fleet_state)', () => {
     expect(manager.isPanelRunning('panel-1')).toBe(false);
   });
 
-  it('stops polling once terminal', async () => {
+  it('stops polling once terminal, after one final drain', async () => {
     const { manager, state, read } = makeManager();
     state.mockImplementation(async () => okResult('w1 backend=pane pane=p1 model=m state=done'));
     await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
 
     await manager.tick('panel-1');
     expect(state).toHaveBeenCalledTimes(1);
+    // Exactly one read: the final drain. Everything the worker emitted between
+    // the previous poll and its exit lives only in the recent-lines window, and
+    // for a `done` worker that tail IS its answer — terminating without reading
+    // it would drop the one message the user is waiting for.
+    expect(read).toHaveBeenCalledTimes(1);
 
     await manager.tick('panel-1');
     await manager.tick('panel-1');
     expect(state).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits the worker's final output before the exit event", async () => {
+    const { manager, state, read } = makeManager();
+    state.mockImplementation(async () => okResult('w1 backend=pane pane=p1 model=m state=done'));
+    read.mockImplementation(async () => okResult('the final answer'));
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+    const outputs = collect<OmpOutputEvent>(manager, 'output');
+    const exits = collect<OmpExitEvent>(manager, 'exit');
+
+    await manager.tick('panel-1');
+
+    expect(outputs.map((o) => o.data)).toEqual(['the final answer']);
+    expect(exits).toEqual([{ panelId: 'panel-1', sessionId: 'session-1', exitCode: 0, signal: null }]);
+  });
+
+  it('does not read a worker that has vanished', async () => {
+    const { manager, state, read } = makeManager();
+    state.mockImplementation(async () => okResult('w1 backend=pane pane=- model=m state=working [not found]'));
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+
+    await manager.tick('panel-1');
+
+    // A worker that is gone has no transcript left to drain.
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('never overlaps two poll cycles for the same panel', async () => {
+    const { manager, state, read } = makeManager();
+    let releaseState: (() => void) | undefined;
+    const stateEntered = new Promise<void>((resolve) => {
+      state.mockImplementation(async () => {
+        resolve();
+        await new Promise<void>((r) => {
+          releaseState = r;
+        });
+        return okResult('w1 backend=pane pane=p1 model=m state=working');
+      });
+    });
+    await manager.spawn('panel-1', 'session-1', 'first', { model: 'm' });
+
+    const first = manager.tick('panel-1');
+    await stateEntered;
+    // The interval fires again while the first cycle is still awaiting the
+    // bridge. Without the in-flight guard both cycles would read the same
+    // sliding window and emit it twice (or interleave and drop a chunk).
+    await manager.tick('panel-1');
+    expect(state).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
+
+    releaseState?.();
+    await first;
+    expect(state).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });
 

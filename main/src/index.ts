@@ -93,6 +93,8 @@ import { resolveOmpPrincipal } from './orchestrator/omp/ompPrincipal';
 import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
 import type { OmpCommandAdapter } from '../../shared/types/ompCommand';
 import { OmpSessionManager } from './orchestrator/omp/ompSessionManager';
+import { OmpSupervisedAdapter, type OmpSupervisedAuditEntry } from './orchestrator/omp/ompSupervisedAdapter';
+import { hasSupervise } from '../../shared/types/ompCommand';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
@@ -359,10 +361,22 @@ let orchestrator: Orchestrator | null = null;
 const fleetRegistryReader = new FleetRegistryReader();
 
 /**
+ * The OMP command principal and audit sink, at module scope so the tRPC context
+ * and the fleet session manager share ONE identity and ONE trail. Resolved once
+ * at boot: the capability is an environment opt-in, not a per-request value.
+ */
+const ompPrincipal = resolveOmpPrincipal();
+const auditOmp = (entry: OmpSupervisedAuditEntry): void => {
+  logger.info(
+    `omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`,
+  );
+};
+
+/**
  * Build the privileged OMP command adapter: a real bridge client when the
- * bridge is configured, else the fail-closed stub. Resolved per construction so
- * tests and the standalone composition root can inject whichever they like; the
- * Electron path uses the environment/pointer config.
+ * bridge is configured, else the fail-closed stub. Always wrapped in
+ * `OmpSupervisedAdapter`, so the capability gate and the audit trail hold for
+ * every caller rather than only for the ones that remember to check.
  */
 function buildOmpCommandAdapter(): OmpCommandAdapter {
   const config = resolveOmpBridgeCommandConfig();
@@ -371,7 +385,11 @@ function buildOmpCommandAdapter(): OmpCommandAdapter {
     return new OmpCommandStub();
   }
   logger.info(`omp:command adapter configured for session ${config.sessionId}`);
-  return new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId));
+  return new OmpSupervisedAdapter(
+    new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId)),
+    ompPrincipal,
+    auditOmp,
+  );
 }
 // OMP fleet runtime manager (omp-phase4-coexistence-adr.md increment 4). Built
 // fail-closed in initializeServices(): present ONLY when the bridge command
@@ -789,12 +807,10 @@ let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
 function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const db = makeDatabaseLike(databaseService);
   // Privileged OMP commands: a real bridge adapter when configured, else the
-  // fail-closed stub. The supervise capability is OFF for the v1 'local'
-  // principal either way, so every command is FORBIDDEN until v2 grants it.
+  // fail-closed stub — supervise-gated and audited either way by the wrapper
+  // buildOmpCommandAdapter applies. The capability is OFF unless the operator
+  // set CYBOFLOW_OMP_SUPERVISE, so every command is FORBIDDEN by default.
   const ompCommand = buildOmpCommandAdapter();
-  const auditOmp = (entry: { verb: string; principal: string; outcome: string; operationId: string; detail: string }) => {
-    logger.info(`omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`);
-  };
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -807,7 +823,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
         omp: fleetRegistryReader,
         ompCommand,
-        principal: resolveOmpPrincipal(),
+        principal: ompPrincipal,
         auditOmp,
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
@@ -1562,14 +1578,31 @@ async function initializeServices(): Promise<boolean> {
   // silently authorizes a session.
   {
     const ompBridgeConfig = resolveOmpBridgeCommandConfig();
-    ompSessionManager = ompBridgeConfig
-      ? new OmpSessionManager(
-          new OmpBridgeCommandAdapter(
-            new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
-          ),
-          cyboflowLogger,
-        )
-      : undefined;
+    // TWO gates, both required. The bridge config says the fleet is REACHABLE;
+    // the supervise capability says this operator authorized Cyboflow to drive
+    // it. Spawning and killing remote workers is the same privileged surface
+    // the ompCommand router refuses without the capability, so the manager that
+    // drives it from the panel seams must refuse on the same terms — otherwise
+    // the product's actual path sits outside the authorization model.
+    if (ompBridgeConfig !== undefined && !hasSupervise(ompPrincipal)) {
+      logger.info(
+        'omp:fleet bridge is configured but the supervise capability is absent ' +
+          '(set CYBOFLOW_OMP_SUPERVISE to authorize this machine) — fleet sessions stay unavailable',
+      );
+    }
+    ompSessionManager =
+      ompBridgeConfig !== undefined && hasSupervise(ompPrincipal)
+        ? new OmpSessionManager(
+            new OmpSupervisedAdapter(
+              new OmpBridgeCommandAdapter(
+                new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
+              ),
+              ompPrincipal,
+              auditOmp,
+            ),
+            cyboflowLogger,
+          )
+        : undefined;
   }
 
   // Inject the global-config provider so createRun resolves the global default
@@ -5604,6 +5637,20 @@ app.on('before-quit', async (event) => {
   // exactly the crash its boot ambiguous-recovery already handles.
   if (trackerSyncService) {
     trackerSyncService.stop();
+  }
+
+  // Kill every live OMP fleet worker. Unlike the other managers' children these
+  // are REMOTE processes: nothing about this app exiting stops them, so without
+  // an explicit fleet_kill they outlive the quit, keep burning producer budget
+  // and keep mutating worktrees no one is watching. Best-effort and awaited —
+  // stopAll never rejects (a failed kill is logged and the panel terminated
+  // locally), so this cannot wedge the quit.
+  if (ompSessionManager) {
+    try {
+      await ompSessionManager.stopAll();
+    } catch (err) {
+      console.warn('[Main] OMP fleet teardown on quit failed (workers may survive):', err);
+    }
   }
 
   // Stop the vitest-orphan sweep timer. Its handle is unref'd so it could never

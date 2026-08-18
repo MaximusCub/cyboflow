@@ -120,6 +120,8 @@ interface OmpPanelRecord {
   emitted: string;
   terminal: boolean;
   timer: NodeJS.Timeout | null;
+  /** True while a tick is mid-flight; the poll loop skips rather than overlaps. */
+  polling: boolean;
 }
 
 /** `worker=<id>` as rendered by the producer's `fleet_spawn` success detail. */
@@ -189,13 +191,17 @@ export class OmpSessionManager extends EventEmitter {
    * a failed result or an unparseable worker id emits `exit` (fail-closed) and
    * the panel is dropped.
    *
+   * Returns whether a live worker is now tracked for the panel, so the IPC
+   * caller can report the turn honestly rather than answering `success: true`
+   * to a spawn that failed closed.
+   *
    * One panel ≙ one LIVE worker: when the panel's previous worker has reached
    * a terminal state (or the record was never live), a new spawn REPLACES the
    * dead record — this is the ADR's "the first message spawns" respawn path.
    * Spawning a panel whose worker is still live is rejected: steering a live
    * worker is `sendInput`'s job.
    */
-  async spawn(panelId: string, sessionId: string, prompt: string, config: OmpSpawnConfig): Promise<void> {
+  async spawn(panelId: string, sessionId: string, prompt: string, config: OmpSpawnConfig): Promise<boolean> {
     if (prompt.trim() === "") {
       throw new TypeError("OmpSessionManager.spawn requires a non-empty prompt");
     }
@@ -224,6 +230,7 @@ export class OmpSessionManager extends EventEmitter {
       emitted: "",
       terminal: false,
       timer: null,
+      polling: false,
     };
     this.records.set(panelId, pending);
 
@@ -244,7 +251,7 @@ export class OmpSessionManager extends EventEmitter {
       });
       if (this.records.get(panelId) === pending) this.records.delete(panelId);
       this.emitExit(panelId, sessionId, 1);
-      return;
+      return false;
     }
 
     if (!result.ok) {
@@ -255,7 +262,7 @@ export class OmpSessionManager extends EventEmitter {
       });
       if (this.records.get(panelId) === pending) this.records.delete(panelId);
       this.emitExit(panelId, sessionId, 1);
-      return;
+      return false;
     }
 
     const workerMatch = WORKER_ID_PATTERN.exec(result.detail);
@@ -267,7 +274,7 @@ export class OmpSessionManager extends EventEmitter {
       });
       if (this.records.get(panelId) === pending) this.records.delete(panelId);
       this.emitExit(panelId, sessionId, 1);
-      return;
+      return false;
     }
 
     // The pending reservation becomes the live record in place. stopPanel
@@ -278,7 +285,7 @@ export class OmpSessionManager extends EventEmitter {
         sessionId,
         workerId,
       });
-      return;
+      return false;
     }
     pending.workerId = workerId;
     this.records.set(panelId, pending);
@@ -288,6 +295,7 @@ export class OmpSessionManager extends EventEmitter {
       sessionId,
       model: config.model,
     });
+    return true;
   }
 
   /**
@@ -365,8 +373,25 @@ export class OmpSessionManager extends EventEmitter {
   async tick(panelId: string): Promise<void> {
     const record = this.records.get(panelId);
     if (record === undefined || record.terminal || record.workerId === null) return;
+    // One tick per panel at a time. Each cycle makes two awaited bridge round
+    // trips; when those outlast the poll interval the timer would start a
+    // second tick that races the first on `record.emitted` — the two would
+    // read the same window and both emit it, or interleave their writes and
+    // drop a chunk. Skipping a beat is the correct answer: the next tick sees
+    // the same sliding window and picks up whatever is new.
+    if (record.polling) return;
+    record.polling = true;
+    try {
+      await this.pollOnce(record);
+    } finally {
+      record.polling = false;
+    }
+  }
 
+  /** One poll cycle for a record already claimed by {@link tick}. */
+  private async pollOnce(record: OmpPanelRecord): Promise<void> {
     const workerId = record.workerId;
+    if (workerId === null) return;
     let stateResult: OmpCommandResult;
     try {
       stateResult = await this.adapter.state({ operationId: randomUUID(), workerId });
@@ -384,20 +409,39 @@ export class OmpSessionManager extends EventEmitter {
     const state = this.parseState(stateResult);
     const workerGone = state !== null && !OMP_TERMINAL_STATES.has(state) && /not found/i.test(stateResult.detail);
     if (state === null || workerGone) {
-      // Unparseable or vanished worker: terminal from this side.
+      // Unparseable or vanished worker: terminal from this side. No final drain
+      // — a worker that is gone has no transcript left to read.
       this.finishTerminal(record, workerGone ? "evicted" : "failed");
       return;
     }
     if (OMP_TERMINAL_STATES.has(state)) {
+      // Drain BEFORE terminating. Everything the worker emitted between the
+      // previous poll and its exit is still only in the recent-lines window,
+      // and terminating first would drop it — which for a `done` worker is
+      // precisely its final answer, the one message the user is waiting for.
+      await this.drainOutput(record, workerId);
       this.finishTerminal(record, state);
       return;
     }
 
     // Live worker: surface any new output since the last read.
-    const readResult = await this.adapter.read({ operationId: randomUUID(), workerId });
+    await this.drainOutput(record, workerId);
+  }
+
+  /**
+   * `fleet_read` once and emit whatever is new. A failed read is transient and
+   * non-fatal: `fleet_state` is the authority for terminal detection, so a read
+   * blip must not end the panel.
+   */
+  private async drainOutput(record: OmpPanelRecord, workerId: string): Promise<void> {
+    let readResult: OmpCommandResult;
+    try {
+      readResult = await this.adapter.read({ operationId: randomUUID(), workerId });
+    } catch (err) {
+      this.emitError(record, `fleet_read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     if (!readResult.ok) {
-      // Transient read failure: keep the panel alive; the state above is the
-      // authority for terminal detection.
       this.emitError(record, `fleet_read failed: ${readResult.detail}`);
       return;
     }

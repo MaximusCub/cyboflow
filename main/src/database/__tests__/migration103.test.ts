@@ -221,10 +221,8 @@ describe('Migration 103: widened provider/runtime CHECK constraints', () => {
   it('(d) accepts omp values on every table and still rejects a bogus one', () => {
     const { db, svc } = upgradeThrough103();
 
-    // sessions: all three OMP runtimes — the two OMP transports PLUS the fleet
-    // supervisor carried forward from 101 (a dropped 'omp-fleet' in 103's
-    // re-add would brick every upgraded fleet session).
-    for (const runtime of ['omp-sdk', 'omp-pty', 'omp-fleet']) {
+    // sessions: both OMP runtimes (quick sessions can run the OMP TUI).
+    for (const runtime of ['omp-sdk', 'omp-pty']) {
       expect(() =>
         db
           .prepare(
@@ -243,23 +241,13 @@ describe('Migration 103: widened provider/runtime CHECK constraints', () => {
         .run(),
     ).toThrow(/CHECK constraint failed/i);
 
-    // workflow_runs: omp-sdk only — PLUS 'omp-fleet', never a launch target but
-    // the storable identity of a fleet quick session's sentinel row.
+    // workflow_runs: omp-sdk only.
     expect(() =>
       db
         .prepare(
           `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot,
                                       agent_provider, agent_runtime)
            VALUES ('run-omp', 'wf-1', 1, 'running', 'default', 'omp', 'omp-sdk')`,
-        )
-        .run(),
-    ).not.toThrow();
-    expect(() =>
-      db
-        .prepare(
-          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot,
-                                     agent_provider, agent_runtime)
-           VALUES ('run-fleet', 'wf-1', 1, 'running', 'default', 'omp', 'omp-fleet')`,
         )
         .run(),
     ).not.toThrow();

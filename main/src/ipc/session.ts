@@ -403,11 +403,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Failed to deliver input to the OMP worker' };
       }
     } else {
-      await ompSessionManager.spawn(panelId, dbSession.id, input, {
+      // spawn() fails CLOSED (it emits `exit` and drops the panel) rather than
+      // throwing, so its result is the only honest signal — answering
+      // `success: true` here would leave the composer showing a delivered turn
+      // for a worker that never booted.
+      const spawned = await ompSessionManager.spawn(panelId, dbSession.id, input, {
         model: DEFAULT_OMP_MODEL,
         cwd: dbSession.worktree_path ?? undefined,
       });
+      if (!spawned) {
+        return { success: false, error: 'Failed to start the OMP worker' };
+      }
     }
+    // Mirror the other lanes: a delivered turn puts the session in 'running' so
+    // the sidebar and the session header stop showing it as idle.
+    await sessionManager.updateSession(dbSession.id, { status: 'running' });
     return { success: true };
   };
 
@@ -1736,6 +1746,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const dismissPanels = panelManager.getPanelsForSession(sessionId).filter((p) => p.type === 'claude');
       for (const panel of dismissPanels) {
         try {
+          // OMP fleet panels are 'claude'-typed but owned by the remote-worker
+          // manager, and omp-fleet is NOT a PanelLane — resolvePanelLane maps
+          // them onto the omp-sdk lane, whose manager never spawned them, so
+          // its stopPanel is a no-op and the REMOTE worker survives a dismiss
+          // that is about to delete the worktree out from under it.
+          if (dbSession.agent_runtime === 'omp-fleet') {
+            await ompSessionManager?.stopPanel(panel.id);
+            continue;
+          }
           // Per-PANEL lane: a mixed session (an overridden chat next to inherited
           // ones) has panels on two different managers, so a session-level test
           // would leave the odd one out running.
@@ -2049,10 +2068,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             return { success: false, error: 'Failed to deliver input to the OMP worker' };
           }
         } else {
-          await ompSessionManager.spawn(claudePanel.id, sessionId, finalInput, {
+          // See routeOmpPanelTurn: spawn fails closed, so its result is the
+          // only honest signal for this turn.
+          const spawned = await ompSessionManager.spawn(claudePanel.id, sessionId, finalInput, {
             model: DEFAULT_OMP_MODEL,
             cwd: session.worktreePath ?? undefined,
           });
+          if (!spawned) {
+            return { success: false, error: 'Failed to start the OMP worker' };
+          }
         }
         await sessionManager.updateSession(sessionId, { status: 'running' });
         return { success: true };
