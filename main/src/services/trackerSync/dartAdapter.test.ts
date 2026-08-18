@@ -394,6 +394,24 @@ describe('DartAdapter.listIssues', () => {
     expect(new URL(listCalls[1].url).searchParams.get('offset')).toBe('100');
   });
 
+  it('scopes BOTH list paths to the selected dartboard', async () => {
+    // Without this, deleting `dartboard: selection.containerId` from either
+    // list path still passes every other test in this file — while the live
+    // adapter imports the WHOLE space into the connection and hands the
+    // deletion sweep a superset id list.
+    const seen: string[] = [];
+    const rows = [concise({ id: 'scoped000000' })];
+    const routes = (): RouteHandler[] => [
+      configRoute(),
+      listRoute(rows, (params) => seen.push(String(params.get('dartboard')))),
+      makeDetailRoute({ scoped000000: task({ id: 'scoped000000' }) }),
+    ];
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl: scriptedFetch(routes()).fetchImpl });
+    await adapter.listIssues(SELECTION);
+    await adapter.listIssueIds(SELECTION);
+    expect(seen).toEqual([BOARD, BOARD]);
+  });
+
   it('keeps paging on `count` when `next` is ABSENT — the schema allows that page', async () => {
     // count and results are REQUIRED in PaginatedConciseTaskList; next is
     // optional AND nullable. A server that simply omits `next` while count says
