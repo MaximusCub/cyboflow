@@ -774,6 +774,35 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
   - **notification** — non-blocking FYI rows (migration 046; e.g. dynamic-workflow
     notifications formerly filed as `human_task`).
 
+##### Session close-out and the delivered-session invariant
+
+Archiving a session (`sessions:delete`) dismisses its pending review items —
+`dismissPendingReviewItemsForSession`, with `backfillArchivedSessionReviewItems` as the
+boot-time backstop. That seam is reached by a plain dismiss AND by the merge / create-PR
+close-outs, whose dialogs delete the session once the work is away.
+
+Gates are dismissed unconditionally: a permission prompt or human gate on an archived
+session has no live run to resume. **Findings are not**, when the session's work was
+DELIVERED — `workflow_runs.outcome IN DELIVERED_RUN_OUTCOMES`
+(`merged` | `integrated` | `completed` | `pr_open`, `shared/types/cyboflow.ts`). A finding
+describes code, and delivered code is in the tree, so the finding still applies. Before
+this carve-out existed, a merge destroyed the findings it had just produced milliseconds
+later, and the Insights compounding surface — which only offers findings from a delivered
+session — was unreachable by construction. Migration 106 restored the rows already lost.
+
+The invariant: `reviewItems.list({ requireDeliveredSession: true })` (what SHOWS findings)
+and `DELIVERED_SESSION_FINDING_CARVE_OUT` (what KEEPS them) read the SAME outcome set. If
+they drift, findings are either kept and never shown, or shown after being swept.
+
+`'completed'` is the human's Mark-complete stamp for work that landed by a path the app
+never observed (the agent merged it in chat). It is written only by
+`stampSessionRunsCompleted`, whose guard is "not already delivered" rather than the
+`outcome IS NULL` used elsewhere — the runs needing this correction have almost always
+already recorded `canceled` / `interrupted`. The close-out dialogs decide whether to offer
+it from `sessions:get-delivery-state`, which pairs that DB stamp with a git probe
+(`WorktreeManager.getBranchLandingState`) covering fast-forward, cherry-pick, and squash
+landings.
+
 #### Run artifacts (migration 029)
 
 - **`artifacts`** — run-scoped deliverables surfaced as center-pane tabs + a right-rail Artifacts
