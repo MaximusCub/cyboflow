@@ -2090,17 +2090,23 @@ async function initializeServices(): Promise<boolean> {
   });
 
   // ONE resolver, two consumers: the scheduler's §3.2 degrade gate (below) and
-  // the health panel's setup badge (via the tRPC context). Probed against the
-  // PROJECT path — both ask a project-level question ("has this project ever
-  // proven a runbook for this modality, and does that proof still hold here?"),
-  // while the enqueue-time injection (scheduler.resolveProvenRunbook) probes the
-  // requesting RUN's worktree, which is the tree whose commands would actually
-  // execute. No project path (a deleted/unresolvable project row) ⇒ 'absent',
-  // which skips with the setup CTA rather than guessing.
-  verifyRunbookStatus = async (projectId, modality) => {
-    const projectPath = databaseService.getProject(projectId)?.path;
-    if (!projectPath) return 'absent';
-    return verifyRunbookStore.status(projectId, projectPath, modality);
+  // the health panel's setup badge (via the tRPC context) — one implementation
+  // so a record's badge and its gate can never be computed two different ways.
+  //
+  // The CALLER chooses the tree. The gate passes the requesting run's worktree,
+  // because that is the tree whose commands would actually execute and the tree
+  // the enqueue-time injection (scheduler.resolveProvenRunbook) has always
+  // probed; before lane-runbook-bootstrap.md §3 this resolver forced the project
+  // root on both, so a runbook committed on a session branch was invisible to
+  // the gate until it merged. The health panel omits the path and gets the
+  // project root, which is the level its question is actually asked at.
+  //
+  // No path at all (a deleted/unresolvable project row and no caller-supplied
+  // one) ⇒ 'absent', which skips with the setup CTA rather than guessing.
+  verifyRunbookStatus = async (projectId, modality, probePath) => {
+    const probeDir = probePath ?? databaseService.getProject(projectId)?.path;
+    if (!probeDir) return 'absent';
+    return verifyRunbookStore.status(projectId, probeDir, modality);
   };
 
   const verificationAgentRunner = new VerificationAgentRunner({

@@ -1033,6 +1033,76 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
     expect(run).toHaveBeenCalledTimes(1);
     expect(requestRow(db).status).toBe('passed');
   });
+
+  /**
+   * WHICH TREE the gate asks about (lane-runbook-bootstrap.md §3, decision B).
+   *
+   * The gate used to pass no path at all, so index.ts probed the PROJECT ROOT —
+   * while `resolveProvenRunbook` had always probed the requesting run's
+   * worktree. Two seams, two trees, one question. A runbook a run commits to its
+   * own branch was therefore invisible to the gate until the branch merged, so
+   * every request in that run kept skipping even after a successful proof.
+   */
+  it("passes the requesting run's worktree as the probe path", async () => {
+    seedRun(db, 'run-probe', JSON.stringify(['agent'])); // worktree_path '/live/worktree'
+    const probed: Array<string | undefined> = [];
+    const { scheduler, run } = initWith({
+      runbookStatus: async (_projectId, _modality, probePath) => {
+        probed.push(probePath);
+        // Proven ONLY in the tree that would actually execute — the exact state
+        // a run that just committed its own runbook is in before merging.
+        return probePath === '/live/worktree' ? 'proven' : 'absent';
+      },
+    });
+    scheduler.enqueue({
+      runId: 'run-probe',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+
+    expect(probed).toEqual(['/live/worktree']);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(requestRow(db).status).toBe('passed');
+  });
+
+  it('passes undefined for a run with no worktree, leaving the project-root fallback intact', async () => {
+    db.prepare(
+      `INSERT INTO workflow_runs (id, project_id, verify_chain, worktree_path, agent_provider, model)
+       VALUES (?, 1, ?, NULL, 'claude', 'claude-sonnet-5')`,
+    ).run('run-no-worktree', JSON.stringify(['agent']));
+    const probed: Array<string | undefined> = [];
+    const { scheduler, run } = initWith({
+      runbookStatus: async (_projectId, _modality, probePath) => {
+        probed.push(probePath);
+        return 'proven';
+      },
+    });
+    scheduler.enqueue({
+      runId: 'run-no-worktree',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+
+    // `undefined`, not the project path and not a null the store would probe as
+    // a directory: resolving the fallback is the THUNK's job, and it is the one
+    // place that knows the project row.
+    expect(probed).toEqual([undefined]);
+    // The gate itself let this through — it skips further down, on the
+    // pre-existing "a deployment needs a worktree to snapshot" rule, which is
+    // exactly what should still happen and is not this gate's business.
+    const row = requestRow(db);
+    expect(row.error_message).toBe('run worktree path unavailable');
+    expect(row.error_message).not.toBe(VERIFY_NO_RUNBOOK_REASON);
+    expect(run).not.toHaveBeenCalled();
+  });
 });
 
 describe('VerificationScheduler — §3.6 budget accounting', () => {

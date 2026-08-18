@@ -387,10 +387,20 @@ export interface ContextDeps {
 /**
  * Resolve one (project, modality) runbook status. See
  * {@link ContextDeps.verifyRunbookStatus} for why this exists at all.
+ *
+ * `probePath` is the TREE whose portable half is checked, and it is optional
+ * because the two callers ask genuinely different questions. The health panel
+ * asks a PROJECT-level one ("has this project proven a runbook, and does that
+ * proof still hold?") and omits it, taking the project root. The scheduler's
+ * §3.2 degrade gate asks a REQUEST-level one ("can THIS request's tree be
+ * verified?") and passes the requesting run's worktree — because that is the
+ * tree whose commands would actually execute, and the tree the enqueue-time
+ * injection has always probed (lane-runbook-bootstrap.md §3).
  */
 export type VerifyRunbookStatusLike = (
   projectId: number,
   modality: VerificationModality,
+  probePath?: string,
 ) => Promise<VerifyRunbookStatus>;
 
 /**

@@ -968,12 +968,24 @@ export interface VerificationSchedulerDeps {
    * the host fingerprint (§5.3 "Any component changing demotes"). Two of those
    * three are filesystem work, so the thunk cannot be synchronous without either
    * blocking the drain on IO or answering from a cache that is exactly what
-   * drift detection must not rely on. index.ts wires it to
-   * {@link VerifyRunbookStore.status} against the PROJECT path; the enqueue-side
-   * seam (see {@link VerificationScheduler.resolveProvenRunbook}) probes the
-   * requesting run's worktree instead.
+   * drift detection must not rely on.
+   *
+   * `probePath` is the TREE to check, and the gate passes the REQUESTING RUN's
+   * worktree (lane-runbook-bootstrap.md §3). It used to pass nothing, and the
+   * thunk probed the project root — while the enqueue-side injection
+   * ({@link VerificationScheduler.resolveProvenRunbook}) had always probed the
+   * run's worktree. The two therefore described DIFFERENT TREES, and a runbook a
+   * run commits to its own branch stayed invisible to the gate until that branch
+   * merged: every request in that run kept skipping with a setup CTA even though
+   * the tree it would execute in carried a proven runbook. Omitting `probePath`
+   * still falls back to the project root, which is what the project-level health
+   * badge wants.
    */
-  runbookStatus?: (projectId: number, modality: VerificationModality) => Promise<RunbookStatus>;
+  runbookStatus?: (
+    projectId: number,
+    modality: VerificationModality,
+    probePath?: string,
+  ) => Promise<RunbookStatus>;
   /**
    * The machine-local runbook record store (§5.2 seam 1 + §5.3), injected as the
    * concrete class exactly like {@link VerificationSchedulerDeps.capabilityStore}
@@ -1314,6 +1326,7 @@ export class VerificationScheduler {
   private readonly runbookStatus: (
     projectId: number,
     modality: VerificationModality,
+    probePath?: string,
   ) => Promise<RunbookStatus>;
   private readonly runbookStore?: VerifyRunbookStore;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
@@ -2750,8 +2763,11 @@ export class VerificationScheduler {
    *     self-refreshed (TTL / host-generation — see VerifyCapabilityStore).
    *
    *  3. DEGRADE PATH (§3.2). The request needs an ENVIRONMENT derived for it —
-   *     it has a build step or a serve step — and this project has no PROVEN
-   *     runbook for the modality. This deliberately RETIRES per-run guessing for
+   *     it has a build step or a serve step — and there is no PROVEN runbook for
+   *     the modality IN THE TREE THIS REQUEST WOULD EXECUTE IN (the run's
+   *     worktree; see the probe-path note on
+   *     {@link VerificationSchedulerDeps.runbookStatus}). This deliberately
+   *     RETIRES per-run guessing for
    *     build/serve tasks: §1's whole diagnosis is that the agent engine "guesses
    *     per-run with no memory and guesses wrong every time" (0-for-5 in
    *     production; wrong serve form, colliding singletons, wrong ABI, blown
@@ -2801,7 +2817,14 @@ export class VerificationScheduler {
     if (setupProof || bootstrapProof) return null;
     const derivesEnvironment =
       (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
-    if (derivesEnvironment && (await this.runbookStatus(row.project_id, modality)) !== 'proven') {
+    if (!derivesEnvironment) return null;
+    // Probe the tree this request would actually execute in — the run's
+    // worktree, the SAME ladder resolveProvenRunbook uses, so the gate and the
+    // enqueue-time injection can no longer disagree about which tree they are
+    // describing. `undefined` (a run with no worktree row, or an unreadable one)
+    // lets the thunk fall back to the project root, which is the old behavior.
+    const probePath = this.worktreePathForRun(row.run_id) ?? undefined;
+    if ((await this.runbookStatus(row.project_id, modality, probePath)) !== 'proven') {
       return VERIFY_NO_RUNBOOK_REASON;
     }
     return null;
