@@ -705,7 +705,7 @@ export function backfillTerminalOutcomes(db: DatabaseLike): OutcomeBackfillResul
 export function stampSessionRunsOutcome(
   db: DatabaseLike,
   sessionId: string,
-  outcome: 'merged' | 'dismissed' | 'completed',
+  outcome: 'merged' | 'dismissed',
   // A/B post-merge attribution (migration 049): the merge commit SHA where this
   // session's code landed. Stamped onto workflow_runs.merge_sha ONLY for a
   // 'merged' outcome AND only when provided (the caller computes it post-merge);
@@ -731,6 +731,36 @@ export function stampSessionRunsOutcome(
         WHERE session_id = ? AND outcome IS NULL`,
     )
     .run(outcome, sessionId) as { changes: number };
+  return info.changes;
+}
+
+/**
+ * Stamp `outcome='completed'` on a session's runs — the human's explicit
+ * "this work landed, our merge path just never saw it" correction (the agent
+ * merged it in chat, or the branch was merged outside the app).
+ *
+ * Deliberately NOT stampSessionRunsOutcome: that guards on `outcome IS NULL`,
+ * and the runs this action exists for have almost always ALREADY recorded a
+ * non-delivery outcome — a sprint run reads 'canceled' after its worktree was
+ * torn down, a boot-recovered run reads 'interrupted'. Under the NULL guard the
+ * correction would silently no-op on exactly the sessions that need it, and the
+ * findings it was meant to save would be swept on the following archive.
+ *
+ * The guard here is instead "not already delivered": a run that recorded
+ * 'merged' / 'integrated' / 'pr_open' keeps its more specific stamp, because
+ * those describe HOW it landed and this one only asserts THAT it did.
+ *
+ * Returns the number of rows stamped. Pure over {@link DatabaseLike}.
+ */
+export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): number {
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET outcome = 'completed', updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ?
+          AND COALESCE(outcome, '') NOT IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}`,
+    )
+    .run(sessionId) as { changes: number };
   return info.changes;
 }
 

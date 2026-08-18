@@ -15,7 +15,12 @@ import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
-import { stampSessionRunsOutcome, stampSessionRunsPrOpen, sessionDeliveredWork } from '../orchestrator/runRecovery';
+import {
+  stampSessionRunsOutcome,
+  stampSessionRunsPrOpen,
+  stampSessionRunsCompleted,
+  sessionDeliveredWork,
+} from '../orchestrator/runRecovery';
 import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { ALREADY_UP_TO_DATE_CODE } from '../services/worktreeManager';
@@ -1650,7 +1655,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         return { success: false, error: 'Session not found' };
       }
 
-      const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'completed');
+      const stamped = stampSessionRunsCompleted(makeDatabaseLike(databaseService), sessionId);
       console.log(`[IPC:git] Marked session ${sessionId} complete (stamped ${stamped} run(s))`);
       trackUsage('session_resolved', { action: 'complete' });
       return { success: true, data: { stamped } };

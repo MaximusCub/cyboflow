@@ -31,6 +31,7 @@ import {
   dismissPendingReviewItemsForSession,
   backfillArchivedSessionReviewItems,
   sessionDeliveredWork,
+  stampSessionRunsCompleted,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
@@ -962,6 +963,27 @@ describe('archived-session review-item sweeps', () => {
     await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
 
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+  });
+
+  it('stampSessionRunsCompleted overwrites a non-delivery outcome but never a delivered one', async () => {
+    // The runs this correction exists for have already recorded 'canceled' /
+    // 'interrupted', so an `outcome IS NULL` guard would no-op on exactly the
+    // sessions that need it — and their findings would be swept on the archive.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    db.prepare(`UPDATE workflow_runs SET outcome = 'canceled' WHERE id = 'run-direct'`).run();
+    seedRun(db, { id: 'run-pr', workflowId: 'wf-review-sweep', workflowName: 'sprint', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived', outcome = 'pr_open' WHERE id = 'run-pr'`).run();
+
+    const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
+
+    expect(stamped).toBe(1);
+    const outcomeOf = (id: string): string | null =>
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(id) as { outcome: string | null }).outcome;
+    expect(outcomeOf('run-direct')).toBe('completed');
+    // Already delivered, and more specific — left alone.
+    expect(outcomeOf('run-pr')).toBe('pr_open');
+    expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(true);
   });
 
   it('sessionDeliveredWork answers for the session, not the individual run', async () => {
