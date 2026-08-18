@@ -7,8 +7,9 @@ judged v1 **not salvageable in its proposed shape**. Five of Codex's and two of
 Fable's were verified against the code by hand. v1's design is discarded; §16
 records what it got wrong, because those mistakes are the reason this version is
 shaped the way it is.
-**Two decisions in §15 are the user's to make** and implementation should not
-start before they are answered — one of them relaxes a constraint the user locked.
+**§15 records the two decisions the user made on 2026-08-18** after this rewrite:
+rung 1 is **kept** (the safety claim is correspondingly weakened, and §8 says how),
+and the gate probe-path change is **accepted**.
 
 **Related:** `verification-setup-flow.md` (runbook contract, §3.2 degrade gate,
 proof-by-running), `verification-agent-redesign.md` (§5.3 agentless visual-verify,
@@ -40,10 +41,22 @@ setup flow already contains what makes an attempt safe — derive, register, and
 and the engine rather than the agent doing the flipping. What is missing is an
 autonomous entry point.
 
-**The bar.** It must be impossible for this feature to make a verification *pass*
-that would not otherwise have passed. It may only convert "skipped" into "actually
-ran". v1 claimed this bar and did not meet it (§16). Everything below exists to
-meet it.
+**The bar, stated honestly.** The goal is that this feature may only convert
+"skipped" into "actually ran" — never manufacture a *pass*. For everything the
+bootstrap writes **except** a rung-1 config edit, that holds **structurally**: the
+drafting agent cannot write, the controller writes one schema-validated file, and
+only an engine-enforced proof promotes anything.
+
+For the rung-1 config edit it does **not** hold structurally, and this document will
+not pretend otherwise. A config file is executable, so a machine-authored change to
+one can in principle alter what gets built or what gets served, and no validator
+short of understanding the project can rule that out. The user's decision (§15A) is
+to keep rung 1 and accept a **review-backed** guarantee in that one case: the edit is
+narrowed to typed operations (§8), it is committed separately, it is surfaced
+prominently, and a human passes on it at the terminal merge gate. That makes the
+review surface load-bearing rather than decorative — it is the guarantee — and §8
+is written accordingly. v1 claimed the structural bar while permitting free-form
+config edits, which was the claim and the mechanism contradicting each other (§16).
 
 ---
 
@@ -68,7 +81,7 @@ read-only where v1 was late and write-capable**:
 | Trigger | react to the skip in the merge gate | **preflight before enqueue**, at the controller seam |
 | Who writes files | the drafting agent, into the shared worktree | **the controller**, one file, pathspec commit |
 | Drafting agent tools | Read/Grep/Glob/Bash/Write/Edit | **read-only** (no Write, no Edit, no git) |
-| Rung ceiling | 0/1, guarded by a committed-diff check | **rung 0 only** (see §15, decision A) |
+| Rung ceiling | 0/1, free-form edits guarded post-commit | **0/1, typed operations applied by the controller** (§8) |
 | Proof shape | lane's full task, then a probe on failure | **one attestation-only proof** |
 | Proof verdict path | the merge gate | **`awaitTerminal`, outside the merge gate entirely** |
 | Waiting lanes | park, then re-fire | **degrade to today's skip; next run verifies** |
@@ -253,6 +266,42 @@ The **controller** then validates and writes:
    temporary index) with `index.lock` retry — never a bare commit, which would
    sweep siblings' staged work.
 
+### 8.1 Rung 1: typed operations, not a diff
+
+The user kept rung 1 (§15A). The agent still writes nothing — it *proposes* the
+change as a **typed operation** in its fence, and the controller applies it. A
+free-form diff is not accepted, because "≤20 lines of config" is a size limit, not a
+semantic one, and size was never what made v1's guard unsound.
+
+There are exactly three operations, and a fourth is a validation error:
+
+| Operation | Parameters | Applied by the controller as |
+|---|---|---|
+| `add-script` | script name, command | a new key in `package.json` `scripts`; **addition only**, never overwriting an existing script |
+| `port-from-env` | file, the literal port, the env var name | replacing that **literal integer** with a read of the env var, at the single site where it occurs |
+| `relax-strict-port` | file, the setting | flipping a `strictPort`-style boolean literal `true` → `false` |
+
+Each is a structural edit the controller performs itself against a parsed or
+narrowly-matched target, so the blast radius is what the operation names and nothing
+else. Anything the agent cannot express in these three — a new plugin, an import, a
+changed build entry, a conditional — is `BOOTSTRAP: NOT-POSSIBLE`, and that project
+goes to Verify Setup where a human designs the change.
+
+Constraints that still bind: the hard denylist (lockfiles, `.github/`, `.claude/`,
+CI configs, `scripts/`) rejects the operation regardless of shape; `package.json`
+changes are confined to `scripts`; and the operation touches **exactly one** file.
+
+**The review surface is the guarantee.** Because this case is review-backed rather
+than structural (§1), the design owes the human a surface worth reviewing:
+
+- the rung-1 edit is committed **separately** from the runbook, so it is one
+  self-contained, revertible commit in the branch diff;
+- the `verify-runbook` artifact renders the operation, its parameters, and the exact
+  resulting diff;
+- and a **finding is filed naming the file that was auto-edited** — worded as
+  something to review, not as an FYI. A rung-1 bootstrap that produced no visible
+  review surface would be the failure mode this whole section exists to prevent.
+
 ---
 
 ## 9. Restart, cancellation, and the shared worktree
@@ -295,12 +344,16 @@ otherwise hid real costs. Honestly:
 | `NOT-POSSIBLE` / unparseable fence | nothing written; lane skips as today |
 | Validation or script-resolution failure | nothing written; lane skips as today |
 | `proven-file-absent-here` (§4) | nothing written; skip + "merge the branch carrying the runbook" |
-| Proof FAIL / timeout (≤2 draft rounds) | **one commit** (the honest unproven draft), a registered draft record, budget spent, the lane delayed by the bootstrap's wall-clock |
+| Rung-1 operation rejected (denylist, unparseable target, ambiguous match) | nothing written; lane skips as today |
+| Proof FAIL / timeout (≤2 draft rounds) | **one or two commits** (the honest unproven draft, plus any applied rung-1 edit), a registered draft record, budget spent, the lane delayed by the bootstrap's wall-clock |
 | Toggle off / kill switch | nothing; today's path, one branch deep |
 
-Only the fourth row differs from today, and it differs in three ways worth stating
-plainly rather than burying: a commit lands on the branch, verification budget is
-spent, and the owning lane waits. The lane still advances unverified with a
+Only the last row differs from today, and it differs in three ways worth stating
+plainly rather than burying: one or two commits land on the branch, verification
+budget is spent, and the owning lane waits. When a rung-1 edit was applied and the
+proof then failed, the branch carries a machine-authored config change that bought
+nothing — it stays, visibly, with its finding, rather than being auto-reverted in a
+shared worktree (§8). The lane still advances unverified with a
 non-blocking finding — now carrying the diagnosis instead of a bare CTA — and the
 unproven draft stays committed and registered, which is the same posture the setup
 flow takes on its own exhaustion.
@@ -326,8 +379,10 @@ stops paying.
 - **The sprint's own reviewers.** `code-review`, `sprint-review`, and
   `address-review` operate on the combined diff and will encounter a commit no lane
   owns; `address-review` "fixes in place", and any post-proof edit to the runbook
-  file demotes it by hash drift. The runbook path is denylisted from address-review
-  and the preflight is sequenced before sprint-review.
+  file demotes it by hash drift. The runbook path **and any rung-1 edited file** are denylisted
+  from address-review, and the preflight is sequenced before sprint-review — a
+  reviewer "fixing" the runbook in place would demote it by hash drift, and one
+  reverting the rung-1 edit would silently un-prove the environment.
 - **Input-hash instability (accepted, documented).** `status()` recomputes the
   project input hash (package.json scripts, lockfiles, node/electron ABI) and
   **demotes write-through on drift**. A sprint task that edits scripts or the
@@ -386,7 +441,8 @@ stops paying.
 - **Phase 2 — the preflight.** Shared exported predicate, persisted stamp, toggle +
   kill switch, degrade paths and findings. No agent yet; logs and falls through.
 - **Phase 3 — draft and prove.** The read-only agent, controller validation +
-  pathspec commit, `registerDraft`, the attestation-only proof via `awaitTerminal`,
+  pathspec commit, the three typed rung-1 operations (§8.1) with their denylist and
+  separate commit, `registerDraft`, the attestation-only proof via `awaitTerminal`,
   re-enqueue on proven, bootstrap suppression.
 - **Phase 4 — bookkeeping.** Eval-diff excision, commit-probe exclusion,
   address-review denylist, the artifact and the `origin` badge.
@@ -397,7 +453,10 @@ stops paying.
   (especially: `proven-file-absent-here` never bootstraps); kind-based lane-driving
   exclusion at **both** policy sites, including the single-lane
   `resolveLaneForVerdict` fallback; enqueue-key generation defeats the terminal
-  dedup; command-resolves-to-a-declared-script validation; stamp claim/resume;
+  dedup; command-resolves-to-a-declared-script validation; each of the three
+  typed rung-1 operations applied correctly and each rejection path (denylist,
+  unparseable target, ambiguous or multi-site match, `package.json` outside
+  `scripts`, script overwrite); stamp claim/resume;
   suppression keying actually matching the bucket the next request reads.
 - **Tripwire** — `bootstrap_proof` unreachable from `mcpQueryHandler`, in the style
   of the existing `setup_proof_not_authorized` tests.
@@ -413,27 +472,27 @@ stops paying.
 
 ---
 
-## 15. Two decisions for the user
+## 15. Decisions (resolved 2026-08-18)
 
-**A. Rung 0 only — this relaxes the constraint you locked.**
-You chose "autonomous, rung 0/1". Both reviews concluded independently that the
-rung-1 half cannot be made safe autonomously: the allowed files are **executable**,
-so a validated twenty-line config diff can change what gets built or serve a canned
-attested surface — which is the no-new-PASS invariant failing, not a guard needing
-tightening. Fable's judgment was explicit: if rung-1 config edits are
-non-negotiable, the safety bar cannot be met autonomously. v2 therefore proposes
-**rung 0 only**, with rung 1 remaining available through Verify Setup, where a human
-reviews the diff. This makes the bootstrap fail on projects with a hardcoded port or
-an unparameterized singleton — those still need Verify Setup. **Confirm, or tell me
-to keep rung 1 and accept that the safety claim weakens to "a human reviews the
-config diff at the terminal merge gate".**
+**A. Rung 1 is KEPT; the safety claim is weakened accordingly.**
+Both reviews concluded independently that rung 1 cannot be made *structurally* safe
+autonomously, because the allowed files are executable and no validator short of
+understanding the project can rule out a config change altering what is built or
+served. I raised that; the user's decision is to keep rung 1 and accept a
+**review-backed** guarantee in that one case. §8.1 narrows it as far as it can go
+without a human in the loop — three typed operations applied by the controller, one
+file, separate commit, rendered in the artifact, and a finding that names the edited
+file — and §1 states the resulting claim honestly rather than overclaiming. Rung 0
+retains the structural guarantee; only the rung-1 path trades it for review.
 
-**B. The gate probe-path change (§3).** Making the pre-lease gate probe the run
-worktree for lane requests is *required* for this feature to work, and it changes
-behavior for existing verify-setup users: a runbook committed on a branch would
-start satisfying that branch's lanes before merge. I believe that is more correct
-than today's disagreement between the gate and the injection — but it is a
-semantic change to shipped behavior and should be your call, not a side effect.
+**B. The gate probes the run worktree — ACCEPTED.**
+The pre-lease gate will probe the requesting run's worktree for lane requests,
+matching what the enqueue-time injection already does (§3). This is required for the
+feature to work at all, and it independently resolves a latent disagreement between
+the gate and the injection about which tree they describe. It changes shipped
+behavior — a runbook committed on a branch begins satisfying that branch's lanes
+before merge — so it lands in **phase 1**, on its own, with its own tests, rather
+than riding in silently on the bootstrap.
 
 ## 16. What v1 got wrong
 
