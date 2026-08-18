@@ -368,6 +368,12 @@ export class DartAdapter implements TrackerAdapter {
     draft: IssueDraft,
     clientKey: string
   ): Promise<TrackerIssue> {
+    // Same guard the read paths carry, for the same measured reason: a renamed
+    // dartboard is not an error to Dart, so an unguarded create would either be
+    // filed somewhere unintended or fail with an opaque 4xx that the outbox
+    // treats as terminal and DROPS the push. Failing here keeps the row
+    // retryable until the source selection is repaired.
+    await this.assertContainerExists(selection.containerId);
     return this.postTask({ dartboard: selection.containerId }, draft, clientKey);
   }
 
@@ -421,6 +427,16 @@ export class DartAdapter implements TrackerAdapter {
         PROVIDER,
         'client-key recovery needs either a parent task or a source dartboard'
       );
+    }
+    // THE DARTBOARD-SCOPED ARM MUST FAIL LOUD, NOT EMPTY. A renamed dartboard
+    // makes `/tasks/list` answer 200 with zero rows (measured), and in THIS
+    // method an empty result is not "no match" — it is read by the outbox as
+    // PROOF the create never landed, which requeues a create that may already
+    // have committed and duplicates it. Throwing leaves the row `ambiguous`,
+    // which is the correct unresolved state. The parent_id arm needs no such
+    // guard: it is addressed by id, which renames cannot invalidate.
+    if (scope.parentExternalId === null && scope.containerId !== null) {
+      await this.assertContainerExists(scope.containerId);
     }
 
     // Fast path: let Dart do the filtering if it can.

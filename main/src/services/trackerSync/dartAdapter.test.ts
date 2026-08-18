@@ -347,14 +347,39 @@ describe('DartAdapter.listIssues', () => {
     expect(issues.map((i) => i.externalId).sort()).toEqual(['newer0000000', 'onbound00000']);
   });
 
-  it('fails LOUD when the dartboard title no longer exists', async () => {
-    // A renamed dartboard makes GET /tasks/list return an EMPTY page, which
-    // listIssueIds would hand the deletion sweep as "everything was deleted".
+  it('fails LOUD on EVERY dartboard-scoped path when the title no longer exists', async () => {
+    // A renamed dartboard makes GET /tasks/list answer 200 with an EMPTY page
+    // (measured against a live space, not assumed). Each path below reads that
+    // emptiness as a different lie: listIssueIds hands the deletion sweep
+    // "everything was deleted", and findIssueByClientKey hands the outbox
+    // "the create never landed" — which requeues a create that may already
+    // have committed. No POST route is scripted, so a create that reached the
+    // network would fail as an unhandled request instead.
     const { fetchImpl } = scriptedFetch([configRoute(), listRoute([])]);
     const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
     const stale: TrackerSourceSelection = { containerId: 'Renamed/Board', narrowId: 'all', narrowKind: 'all' };
     await expect(adapter.listIssues(stale)).rejects.toThrow(/no longer exists/i);
     await expect(adapter.listIssueIds(stale)).rejects.toThrow(/no longer exists/i);
+    await expect(adapter.createIssue(stale, { title: 'T' }, CLIENT_KEY)).rejects.toThrow(/no longer exists/i);
+    await expect(
+      adapter.findIssueByClientKey({ containerId: 'Renamed/Board', parentExternalId: null }, CLIENT_KEY),
+    ).rejects.toThrow(/no longer exists/i);
+  });
+
+  it('does NOT guard the parent-scoped recovery arm — ids survive renames', async () => {
+    // parent_id addressing cannot be invalidated by a dartboard rename, so that
+    // arm must keep working without a /config round-trip.
+    const rows = [concise({ id: 'childchild00' })];
+    const { fetchImpl, calls } = scriptedFetch([
+      listRoute(rows),
+      makeDetailRoute({ childchild00: task({ id: 'childchild00', description: `x\n\ncyboflow-sync: ${CLIENT_KEY}` }) }),
+    ]);
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: null, parentExternalId: 'parentparent' },
+      CLIENT_KEY,
+    );
+    expect(found?.externalId).toBe('childchild00');
+    expect(calls.some((c) => new URL(c.url).pathname.endsWith('/config'))).toBe(false);
   });
 
   it('paginates to exhaustion via limit/offset', async () => {
@@ -388,6 +413,7 @@ describe('DartAdapter.getIssue', () => {
 describe('DartAdapter creates', () => {
   it('stamps the recovery marker into every create and enveloped as { item }', async () => {
     const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
       {
         test: (m, p) => m === 'POST' && p.endsWith('/tasks'),
         respond: (body) => {
@@ -401,7 +427,7 @@ describe('DartAdapter creates', () => {
       { title: 'New task', description: 'Do the work' },
       CLIENT_KEY,
     );
-    expect(calls[0].body).toEqual({
+    expect(postBody(calls)).toEqual({
       item: {
         dartboard: BOARD,
         title: 'New task',
@@ -473,6 +499,7 @@ describe('DartAdapter creates', () => {
 
   it('passes the initial state through as the status title', async () => {
     const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
       {
         test: (m, p) => m === 'POST' && p.endsWith('/tasks'),
         respond: (body) => ({
@@ -486,7 +513,7 @@ describe('DartAdapter creates', () => {
       { title: 'T', stateId: 'Doing' },
       CLIENT_KEY,
     );
-    expect((calls[0].body as { item: Record<string, unknown> }).item.status).toBe('Doing');
+    expect((postBody(calls) as { item: Record<string, unknown> }).item.status).toBe('Doing');
   });
 });
 
