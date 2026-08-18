@@ -11,7 +11,7 @@
  */
 import type { DatabaseLike } from '../types';
 import type { NativeGrantProbe, VerificationModality } from '../../../../shared/types/visualVerification';
-import type { VerifyRunbookStatus } from '../verify/runbookStore';
+import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
@@ -401,7 +401,7 @@ export type VerifyRunbookStatusLike = (
   projectId: number,
   modality: VerificationModality,
   probePath?: string,
-) => Promise<VerifyRunbookStatus>;
+) => Promise<VerifyRunbookStatusDetail>;
 
 /**
  * Creates the tRPC request context.

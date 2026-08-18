@@ -495,7 +495,11 @@ async function effectiveRunbookStatus(
 ): Promise<VerifyRunbookStatus> {
   if (resolveStatus === undefined) return 'unproven-draft';
   try {
-    return await resolveStatus(projectId, modality);
+    // The panel asks a PROJECT-level question, so no probe path is passed and
+    // the resolver falls back to the project root. The reason discriminant the
+    // resolver also carries is for a caller that WRITES (the runbook bootstrap);
+    // the badge only needs the three-valued answer.
+    return (await resolveStatus(projectId, modality)).status;
   } catch {
     return 'unproven-draft';
   }

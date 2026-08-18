@@ -28,7 +28,11 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createVerdictDelivery, createCapabilityBreakerFinding } from '../verify/verdictDelivery';
-import { VERIFY_NO_RUNBOOK_REASON } from '../verify/verificationScheduler';
+import {
+  VERIFY_NO_RUNBOOK_REASON,
+  VERIFY_RUNBOOK_DRIFTED_REASON,
+  VERIFY_RUNBOOK_ELSEWHERE_REASON,
+} from '../verify/verificationScheduler';
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { SprintLaneStore } from '../sprintLaneStore';
@@ -1480,6 +1484,55 @@ describe('verdictDelivery — §3.1 classification in the non-blocking finding b
 
     expect(bodyOf(db, 'run-c3')).toContain('Run verification setup for this project');
     expect(bodyOf(db, 'run-c4')).not.toContain('Run verification setup for this project');
+  });
+
+  it('a pre-merge skip is told to MERGE, and explicitly NOT to re-run setup', async () => {
+    // The default CTA is destructive here: this project HAS a proven runbook,
+    // and running setup on a branch that merely lacks the file would derive a
+    // fresh one over the singleton record every other branch depends on
+    // (lane-runbook-bootstrap.md §4). Same status, same failure class, opposite
+    // instruction — which is why the reason, not the status, picks the sentence.
+    seedRun(db, 'run-c6');
+    seedClassifiedRequest(db, {
+      id: 'vr_c6',
+      runId: 'run-c6',
+      status: 'skipped',
+      errorMessage: VERIFY_RUNBOOK_ELSEWHERE_REASON,
+      failureClass: 'env',
+    });
+    seedRun(db, 'run-c7');
+    seedClassifiedRequest(db, {
+      id: 'vr_c7',
+      runId: 'run-c7',
+      status: 'skipped',
+      errorMessage: VERIFY_RUNBOOK_DRIFTED_REASON,
+      failureClass: 'env',
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    for (const [requestId, runId] of [['vr_c6', 'run-c6'], ['vr_c7', 'run-c7']]) {
+      await deliver({
+        requestId,
+        runId,
+        projectId: 1,
+        type: 'static-render-snapshot',
+        status: 'skipped',
+        verdict: undefined,
+        fileNames: [],
+      });
+    }
+
+    const preMerge = bodyOf(db, 'run-c6');
+    expect(preMerge).toContain('Merge (or rebase onto) the branch that added it');
+    expect(preMerge).toContain('Do NOT re-run verification setup');
+    // And it must NOT also carry the generic CTA — one skip, one instruction.
+    expect(preMerge).not.toContain('Run verification setup for this project');
+
+    // Drift is the one case where re-running setup IS right, so it says so.
+    expect(bodyOf(db, 'run-c7')).toContain('needs to be re-proven');
   });
 
   it('a row with NO classification (legacy path / pre-095) renders the pre-phase-0 body unchanged', async () => {

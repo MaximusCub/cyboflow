@@ -15,6 +15,9 @@ import {
   AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
   AWAIT_TERMINAL_TIMEOUT_MESSAGE,
   VERIFY_NO_RUNBOOK_REASON,
+  VERIFY_RUNBOOK_DRIFTED_REASON,
+  VERIFY_RUNBOOK_ELSEWHERE_REASON,
+  VERIFY_RUNBOOK_UNREADABLE_REASON,
   VERIFY_UNPROVEN_SKIP_BLOCKED,
   type OnVerdict,
 } from '../verificationScheduler';
@@ -146,6 +149,7 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  autoBootstrapRunbook: false,
 };
 
 const PASS_VERDICT: VerdictV1 = {
@@ -229,7 +233,7 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
       // The composed task below has a serve step, so the §3.2 degrade gate would
       // skip it on the default 'absent' runbook status. This test is about the
       // dispatch path, so it stands in for a project phase 2 has already proven.
-      runbookStatus: async () => 'proven',
+      runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
     });
 
     scheduler.enqueue({
@@ -950,7 +954,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
 
   it("an 'unproven-draft' runbook is NOT a pass — a written config nobody proved is exactly what already failed", async () => {
     seedRun(db, 'run-draft', JSON.stringify(['agent']));
-    const { scheduler, run } = initWith({ runbookStatus: async () => 'unproven-draft' });
+    const { scheduler, run } = initWith({ runbookStatus: async () => ({ status: 'unproven-draft', reason: 'draft' }) });
     scheduler.enqueue({
       runId: 'run-draft',
       projectId: 1,
@@ -966,7 +970,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
 
   it('a PROVEN runbook lets the same task through', async () => {
     seedRun(db, 'run-proven', JSON.stringify(['agent']));
-    const { scheduler, run } = initWith({ runbookStatus: async () => 'proven' });
+    const { scheduler, run } = initWith({ runbookStatus: async () => ({ status: 'proven', reason: 'proven' }) });
     scheduler.enqueue({
       runId: 'run-proven',
       projectId: 1,
@@ -1035,6 +1039,46 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
   });
 
   /**
+   * The gate EXPLAINS ITSELF (lane-runbook-bootstrap.md §4).
+   *
+   * Every case below skips the request, and every case answers `'unproven-draft'`
+   * or `'absent'` — the collapsed status cannot tell them apart. The reason can,
+   * and it has to: the remedy for a branch that merely lacks the runbook file is
+   * to MERGE, and following the default "run verification setup" CTA there would
+   * derive a fresh runbook over the proven singleton record every other branch
+   * depends on.
+   */
+  it.each([
+    ['proven-file-absent-here', 'unproven-draft', VERIFY_RUNBOOK_ELSEWHERE_REASON],
+    ['drifted', 'unproven-draft', VERIFY_RUNBOOK_DRIFTED_REASON],
+    ['indeterminate', 'absent', VERIFY_RUNBOOK_UNREADABLE_REASON],
+    // The bootstrappable situations keep the ORIGINAL reason verbatim, so every
+    // existing consumer and CTA keeps matching what it always matched.
+    ['no-record', 'absent', VERIFY_NO_RUNBOOK_REASON],
+    ['draft', 'unproven-draft', VERIFY_NO_RUNBOOK_REASON],
+    ['file-only', 'unproven-draft', VERIFY_NO_RUNBOOK_REASON],
+  ] as const)('a %s runbook skips with its own reason', async (reason, status, expected) => {
+    seedRun(db, `run-reason-${reason}`, JSON.stringify(['agent']));
+    const { scheduler, run } = initWith({
+      runbookStatus: async () => ({ status, reason }),
+    });
+    scheduler.enqueue({
+      runId: `run-reason-${reason}`,
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+
+    expect(run).not.toHaveBeenCalled();
+    const row = requestRow(db);
+    expect(row.status).toBe('skipped');
+    expect(row.error_message).toBe(expected);
+  });
+
+  /**
    * WHICH TREE the gate asks about (lane-runbook-bootstrap.md §3, decision B).
    *
    * The gate used to pass no path at all, so index.ts probed the PROJECT ROOT —
@@ -1051,7 +1095,9 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
         probed.push(probePath);
         // Proven ONLY in the tree that would actually execute — the exact state
         // a run that just committed its own runbook is in before merging.
-        return probePath === '/live/worktree' ? 'proven' : 'absent';
+        return probePath === '/live/worktree'
+          ? { status: 'proven', reason: 'proven' }
+          : { status: 'absent', reason: 'no-record' };
       },
     });
     scheduler.enqueue({
@@ -1078,7 +1124,7 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
     const { scheduler, run } = initWith({
       runbookStatus: async (_projectId, _modality, probePath) => {
         probed.push(probePath);
-        return 'proven';
+        return { status: 'proven', reason: 'proven' };
       },
     });
     scheduler.enqueue({
@@ -1878,7 +1924,7 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
       runbookStore: store,
-      runbookStatus: async () => 'proven',
+      runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
     });
     scheduler.enqueue({
       runId: 'run-lane-pass',
@@ -1939,7 +1985,7 @@ describe('VerificationScheduler — §5.2 seam 3 pin threading + mismatch classi
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
-      runbookStatus: async () => 'proven',
+      runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
     });
     scheduler.enqueue({
       runId: 'run-pin-thread',
@@ -1975,7 +2021,7 @@ describe('VerificationScheduler — §5.2 seam 3 pin threading + mismatch classi
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
-      runbookStatus: async () => 'proven',
+      runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
     });
     scheduler.enqueue({
       runId: 'run-mismatch',
@@ -2018,7 +2064,7 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
       // sync `!== 'proven'` comparison and deploy an unproven project.
       runbookStatus: async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
-        return 'absent';
+        return { status: 'absent', reason: 'no-record' } as const;
       },
     });
     scheduler.enqueue({
@@ -2049,7 +2095,7 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
       agentRunner: runner,
       runbookStatus: async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
-        return 'proven';
+        return { status: 'proven', reason: 'proven' } as const;
       },
     });
     scheduler.enqueue({

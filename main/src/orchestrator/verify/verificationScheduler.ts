@@ -60,6 +60,7 @@ import {
   isVerificationModality,
   parseVerificationTaskV1,
   resolveTaskModality,
+  runbookBootstrapKillSwitchEngaged,
 } from '../../../../shared/types/visualVerification';
 import type {
   VerificationAgentRunnerLike,
@@ -69,7 +70,14 @@ import type {
 import type { AgentPreflightResult } from './preflight';
 import { classifyVerificationFailure } from './failureClassifier';
 import type { VerifyCapabilityStore } from './capabilityStore';
-import type { VerifyRunbookStore } from './runbookStore';
+import type { VerifyRunbookStore, VerifyRunbookStatusDetail } from './runbookStore';
+import {
+  declineForRunbookStatus,
+  taskDerivesEnvironment,
+  type BootstrapDecision,
+  type BootstrapDeclineReason,
+} from './bootstrapEligibility';
+import { runbookBootstrapPreflight } from './runbookBootstrapPreflight';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
@@ -177,6 +185,85 @@ const NATIVE_CAPTURE_UNAVAILABLE_DETAIL =
  */
 export const VERIFY_NO_RUNBOOK_REASON =
   'no proven verification runbook for this project (run verification setup)';
+
+/**
+ * The §3.2 skip reason for §4's PRE-MERGE case: a runbook IS proven for this
+ * project, this branch just does not carry the portable file yet.
+ *
+ * A separate string because the remedy is the opposite of the one above.
+ * `VERIFY_NO_RUNBOOK_REASON` tells a human to run verification setup; doing that
+ * HERE would derive a fresh runbook and UPSERT it over the proven singleton
+ * record every other branch depends on (runbookStore's `registerDraft`),
+ * breaking verification for the projects that configured it properly. The right
+ * action is to merge the branch that already carries it.
+ */
+export const VERIFY_RUNBOOK_ELSEWHERE_REASON =
+  'a proven verification runbook exists for this project but is not in this branch';
+
+/**
+ * The §3.2 skip reason for a runbook that WAS proven and has since drifted —
+ * its own content, the project inputs it builds through, or the host. The
+ * record was demoted write-through by the read that produced this; what it needs
+ * is re-proving, not re-deriving.
+ */
+export const VERIFY_RUNBOOK_DRIFTED_REASON =
+  "this project's proven verification runbook no longer matches its inputs";
+
+/**
+ * The §3.2 skip reason when the runbook record could not be READ at all (a
+ * pre-096 DB, a SQL error, an input hash that would not compute). Distinct from
+ * "none exists" on purpose: the store fails soft to `'absent'`, and reporting
+ * that as "never set up" would send a human to re-run a setup flow that already
+ * succeeded.
+ */
+export const VERIFY_RUNBOOK_UNREADABLE_REASON =
+  'the verification runbook record for this project could not be read';
+
+/**
+ * The skip reason for a runbook decline — the forward direction of
+ * {@link runbookDeclineForSkipReason}.
+ *
+ * `null` (the status is bootstrappable: nothing derived, a draft, or a file this
+ * host never proved) and `'already-proven'` both fall through to the ORIGINAL
+ * reason string, so every pre-existing consumer and every existing test keeps
+ * matching exactly what it matched before. Only the three genuinely different
+ * situations get their own text. `'already-proven'` is unreachable from the gate
+ * (a proven status returns before this) and is mapped rather than thrown on so a
+ * future caller cannot turn a classification into a crash.
+ */
+function skipReasonForRunbookDecline(decline: BootstrapDeclineReason | null): string {
+  switch (decline) {
+    case 'proof-belongs-elsewhere':
+      return VERIFY_RUNBOOK_ELSEWHERE_REASON;
+    case 'stale-proof':
+      return VERIFY_RUNBOOK_DRIFTED_REASON;
+    case 'unobservable':
+      return VERIFY_RUNBOOK_UNREADABLE_REASON;
+    default:
+      return VERIFY_NO_RUNBOOK_REASON;
+  }
+}
+
+/**
+ * Reverse-map a persisted `error_message` back to the situation that produced
+ * it, so a consumer holding only the string (verdictDelivery, building the
+ * human-facing finding) can attach the RIGHT remedy. `null` for anything that is
+ * not a runbook-shaped skip.
+ */
+export function runbookDeclineForSkipReason(
+  errorMessage: string | null,
+): BootstrapDeclineReason | null {
+  switch (errorMessage) {
+    case VERIFY_RUNBOOK_ELSEWHERE_REASON:
+      return 'proof-belongs-elsewhere';
+    case VERIFY_RUNBOOK_DRIFTED_REASON:
+      return 'stale-proof';
+    case VERIFY_RUNBOOK_UNREADABLE_REASON:
+      return 'unobservable';
+    default:
+      return null;
+  }
+}
 
 /**
  * The prefix stamped on a terminal the §3.1 GATE-INTEGRITY guard blocked — a
@@ -985,7 +1072,7 @@ export interface VerificationSchedulerDeps {
     projectId: number,
     modality: VerificationModality,
     probePath?: string,
-  ) => Promise<RunbookStatus>;
+  ) => Promise<VerifyRunbookStatusDetail>;
   /**
    * The machine-local runbook record store (§5.2 seam 1 + §5.3), injected as the
    * concrete class exactly like {@link VerificationSchedulerDeps.capabilityStore}
@@ -1327,7 +1414,7 @@ export class VerificationScheduler {
     projectId: number,
     modality: VerificationModality,
     probePath?: string,
-  ) => Promise<RunbookStatus>;
+  ) => Promise<VerifyRunbookStatusDetail>;
   private readonly runbookStore?: VerifyRunbookStore;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
   private readonly nativeCaptureProbe?: () => Promise<boolean>;
@@ -1401,7 +1488,10 @@ export class VerificationScheduler {
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
-    this.runbookStatus = deps.runbookStatus ?? (async (): Promise<RunbookStatus> => 'absent');
+    this.runbookStatus =
+      deps.runbookStatus ??
+      // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
+      (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
     this.capabilityFinding = deps.capabilityFinding;
     // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
@@ -2646,6 +2736,52 @@ export class VerificationScheduler {
   }
 
   /**
+   * §12 step 1 — the runbook-bootstrap PREFLIGHT, asked by the enqueue seam
+   * BEFORE a request row exists.
+   *
+   * Lives on the scheduler because the scheduler already holds all three inputs
+   * and nobody else holds any of them: the resolved `visualVerify` config (the
+   * toggle), the `runbookStatus` thunk (the SAME one the degrade gate consults,
+   * which is the point — the preflight must not be able to form a second opinion
+   * about a project's runbook), and the run→worktree ladder. The decision itself
+   * is a separate, dependency-free module so it can be tested without any of
+   * this; this method is only the wiring.
+   *
+   * NEVER THROWS, and the caller treats any failure as "do not bootstrap".
+   */
+  async evaluateRunbookBootstrap(args: {
+    projectId: number;
+    runId: string;
+    laneTaskRef: string;
+    modality: VerificationModality;
+    task: VerificationTaskV1;
+    /** The caller's own worktree, when it has one (skips the run-row lookup). */
+    probePath?: string;
+  }): Promise<BootstrapDecision> {
+    const probePath =
+      args.probePath ?? this.worktreePathForRun(args.runId) ?? undefined;
+    return runbookBootstrapPreflight(
+      {
+        projectId: args.projectId,
+        runId: args.runId,
+        laneTaskRef: args.laneTaskRef,
+        modality: args.modality,
+        task: args.task,
+        ...(probePath !== undefined ? { probePath } : {}),
+      },
+      {
+        // The project toggle AND the host kill switch, combined here so the
+        // decision module never reads the environment. Read at CALL time: a
+        // switch flipped after boot is meant to take effect.
+        enabled:
+          this.config.autoBootstrapRunbook === true && !runbookBootstrapKillSwitchEngaged(),
+        status: (projectId, modality, path) => this.runbookStatus(projectId, modality, path),
+        ...(this.logger ? { logger: this.logger } : {}),
+      },
+    );
+  }
+
+  /**
    * The composed task the agent runs: the persisted `task_json` when present + valid
    * (dual-format contract §5.2), else a DEGENERATE task synthesized from the legacy
    * input (a bare-intent request) — `summary = intent`, no build/behaviors, `target`
@@ -2815,19 +2951,22 @@ export class VerificationScheduler {
 
     // (3) The §3.2 degrade path.
     if (setupProof || bootstrapProof) return null;
-    const derivesEnvironment =
-      (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
-    if (!derivesEnvironment) return null;
+    // ONE definition of "derives an environment", shared with the bootstrap
+    // preflight — see bootstrapEligibility.ts for why they must not be two.
+    if (!taskDerivesEnvironment(task)) return null;
     // Probe the tree this request would actually execute in — the run's
     // worktree, the SAME ladder resolveProvenRunbook uses, so the gate and the
     // enqueue-time injection can no longer disagree about which tree they are
     // describing. `undefined` (a run with no worktree row, or an unreadable one)
     // lets the thunk fall back to the project root, which is the old behavior.
     const probePath = this.worktreePathForRun(row.run_id) ?? undefined;
-    if ((await this.runbookStatus(row.project_id, modality, probePath)) !== 'proven') {
-      return VERIFY_NO_RUNBOOK_REASON;
-    }
-    return null;
+    const runbook = await this.runbookStatus(row.project_id, modality, probePath);
+    if (runbook.status === 'proven') return null;
+    // NOT all "no proven runbook" are the same situation, and the remedies are
+    // mutually exclusive (§4): telling a human to run setup on a branch that is
+    // merely missing the file would overwrite the proven record every other
+    // branch shares. Classify with the SAME function the preflight declines by.
+    return skipReasonForRunbookDecline(declineForRunbookStatus(runbook));
   }
 
   /**

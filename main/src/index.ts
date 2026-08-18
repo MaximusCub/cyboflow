@@ -2105,8 +2105,11 @@ async function initializeServices(): Promise<boolean> {
   // one) ⇒ 'absent', which skips with the setup CTA rather than guessing.
   verifyRunbookStatus = async (projectId, modality, probePath) => {
     const probeDir = probePath ?? databaseService.getProject(projectId)?.path;
-    if (!probeDir) return 'absent';
-    return verifyRunbookStore.status(projectId, probeDir, modality);
+    // No tree to probe at all: 'absent' with the honest reason. NOT
+    // 'indeterminate' — an unresolvable project row is a missing project, not an
+    // unreadable record — and the gate skips with the setup CTA either way.
+    if (!probeDir) return { status: 'absent', reason: 'no-record' };
+    return verifyRunbookStore.statusDetail(projectId, probeDir, modality);
   };
 
   const verificationAgentRunner = new VerificationAgentRunner({
