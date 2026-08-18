@@ -197,6 +197,17 @@ step at all** — do not re-delegate, do not "just double-check". Report the ste
 the component `complete` again so the run leaves it settled, and move on. Redoing
 settled work is the exact failure this ledger exists to prevent.
 
+**The gates need their own guards — the ledger cannot reach them.** The five
+components map onto the *work* steps, so "skip what is already complete" says nothing
+about the human gates sitting between them. On a resume path `approve-idea` (step 2)
+is the one that goes stale: it re-asks a stub approval an earlier run already got —
+the spec exists *because* of it — so it carries its own guard below. `approve-design`
+(step 7) is already covered by its "only when `ui-prototype` or `architecture` ran"
+condition, and `approve-plan` / `decompose` gate the plan THIS run just drafted, so
+those always run. Re-asking a human to approve what they already approved is not a
+harmless extra confirmation; it is how a gate turns into something they click through
+without reading.
+
 **Above all, Resume means the spec does not get rewritten.** `idea-spec` `complete` ⇒
 step 3 `expand-spec` **does not run**. This is the single most expensive mistake on
 this path, because it is not confined to one step: rewriting the `## Idea spec` section
@@ -255,6 +266,15 @@ back an idea in worse shape than it received.
      backlog ideas (title + one-line `summary`, no stub/body) for a later run; do not
      elaborate them now.
 2. **approve-idea** → **human gate.**
+   - **Skip this gate entirely when `idea-spec` is already `complete`** and the
+     resume gate said Resume. The stub approval is settled — the spec only exists
+     because an earlier run's stub was approved — and the human just re-confirmed
+     that path at the resume gate itself. Report the step and go to step 3.
+     The guard is `idea-spec` `complete`, **not** "the user chose Resume". An idea
+     coming back from a design session carries `prototype` complete with no spec
+     yet, so step 1 produced a genuinely fresh stub: gate it normally. Same when the
+     human chose **Redo a piece** and named `idea-spec` — you stamped it `incomplete`
+     before starting, so this guard correctly does not fire.
    - **Single idea (≤1 surviving):** inline **AskUserQuestion** (header
      `Approve idea`, options Approve / Revise / Reject; put the full short stub and
      its scope/design flags in the option markdown preview). Do **not** proceed to
