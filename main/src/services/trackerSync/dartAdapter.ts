@@ -328,9 +328,31 @@ export class DartAdapter implements TrackerAdapter {
     // findIssueByClientKey's "no child carries it" answer conclusive.
     clientKey: string
   ): Promise<TrackerIssue> {
-    // No `dartboard` is sent: Dart files a task with a `parentId` onto its
-    // parent's dartboard, and naming one here could contradict that.
-    return this.postTask({ parentId: parentExternalId }, draft, clientKey);
+    // PLACEMENT IS NOT INHERITED — MEASURED, not assumed. Dart's POST /tasks
+    // documents the dartboard default as "the default dartboard", and a
+    // `parentId`-only create was observed against a live space (2026-08-18) to
+    // land the child on the API USER'S DEFAULT dartboard, NOT the parent's.
+    // That placement is invisible to this connection: `listIssues` and
+    // `listIssueIds` are both dartboard-scoped, so a mirror filed there would
+    // sync outbound once and then never be seen again — remote edits would
+    // never come back, and the deletion sweep would read it as out-of-scope on
+    // every pass. The same measurement confirmed that naming the board
+    // explicitly DOES honour the placement and still preserves `parentId`.
+    const parent = await this.fetchTaskWire(parentExternalId);
+    if (parent === null) {
+      // Terminal (4xx): the parent is gone for good, so retrying this mirror
+      // forever would just pin an outbox row that can never succeed.
+      throw new TrackerApiError(
+        PROVIDER,
+        `parent task ${parentExternalId} no longer exists — cannot mirror a sub-issue under it`,
+        404
+      );
+    }
+    return this.postTask(
+      { parentId: parentExternalId, dartboard: parent.dartboard ?? undefined },
+      draft,
+      clientKey
+    );
   }
 
   /**
@@ -443,7 +465,7 @@ export class DartAdapter implements TrackerAdapter {
 
   /** The shared create POST behind both create paths. */
   private async postTask(
-    placement: { dartboard: string } | { parentId: string },
+    placement: { dartboard?: string; parentId?: string },
     draft: IssueDraft,
     clientKey: string
   ): Promise<TrackerIssue> {

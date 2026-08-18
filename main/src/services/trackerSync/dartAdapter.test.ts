@@ -119,6 +119,13 @@ function makeDetailRoute(byId: Record<string, unknown | undefined>): RouteHandle
   };
 }
 
+/** The body of the one `POST /tasks` in a captured call list. */
+function postBody(calls: CapturedCall[]): unknown {
+  const post = calls.find((c) => c.method === 'POST' && new URL(c.url).pathname.endsWith('/tasks'));
+  if (post === undefined) throw new Error('no POST /tasks was made');
+  return post.body;
+}
+
 /** True for a `GET /tasks/{id}` detail call — NOT for `/tasks/list`. */
 function isDetailCall(call: CapturedCall): boolean {
   const { pathname } = new URL(call.url);
@@ -409,6 +416,7 @@ describe('DartAdapter creates', () => {
 
   it('stamps the marker even on an EMPTY body — the absence proof depends on it', async () => {
     const { fetchImpl, calls } = scriptedFetch([
+      makeDetailRoute({ parentparent: task({ id: 'parentparent', dartboard: BOARD }) }),
       {
         test: (m, p) => m === 'POST' && p.endsWith('/tasks'),
         respond: (body) => ({
@@ -422,13 +430,45 @@ describe('DartAdapter creates', () => {
       { title: 'Child' },
       CLIENT_KEY,
     );
-    const sent = (calls[0].body as { item: Record<string, unknown> }).item;
+    const sent = (postBody(calls) as { item: Record<string, unknown> }).item;
     expect(sent.description).toBe(`cyboflow-sync: ${CLIENT_KEY}`);
-    // A subtask is placed by parentId alone — naming a dartboard could contradict it.
     expect(sent.parentId).toBe('parentparent');
-    expect(sent.dartboard).toBeUndefined();
     // A body that is NOTHING but the marker reads as an empty description.
     expect(issue.description).toBeNull();
+  });
+
+  it('files a sub-issue on the PARENT\'s dartboard, not the account default', async () => {
+    // MEASURED against a live Dart space: a `parentId`-only create lands the
+    // child on the API user's DEFAULT dartboard, which this connection's
+    // dartboard-scoped listIssues/listIssueIds can never see. The parent's own
+    // board must therefore be read and named explicitly.
+    const { fetchImpl, calls } = scriptedFetch([
+      makeDetailRoute({ parentparent: task({ id: 'parentparent', dartboard: 'Design/Backlog' }) }),
+      {
+        test: (m, p) => m === 'POST' && p.endsWith('/tasks'),
+        respond: (body) => ({
+          status: 200,
+          body: { item: task({ ...(body as { item: object }).item, id: 'newnewnewnew' }) },
+        }),
+      },
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).createSubIssue(
+      'parentparent',
+      { title: 'Child' },
+      CLIENT_KEY,
+    );
+    const sent = (postBody(calls) as { item: Record<string, unknown> }).item;
+    expect(sent.dartboard).toBe('Design/Backlog');
+    expect(sent.parentId).toBe('parentparent');
+  });
+
+  it('refuses to mirror under a parent that no longer exists, TERMINALLY', async () => {
+    // 404 (not a null status) so the outbox drops the row instead of pinning it
+    // on a retry that can never succeed.
+    const { fetchImpl } = scriptedFetch([makeDetailRoute({})]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).createSubIssue('goneparentx0', { title: 'C' }, CLIENT_KEY),
+    ).rejects.toMatchObject({ name: 'TrackerApiError', status: 404 });
   });
 
   it('passes the initial state through as the status title', async () => {
