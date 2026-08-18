@@ -782,25 +782,31 @@ describe('enqueueTaskVerification — §5.2 seam 3 pinned runbook injection', ()
 });
 
 /**
- * The runbook-bootstrap PREFLIGHT at the enqueue seam
- * (lane-runbook-bootstrap.md §12 step 1, phase 2).
+ * The runbook BOOTSTRAP at the enqueue seam (lane-runbook-bootstrap.md §12).
  *
- * Phase 2 lands the preflight DARK: it computes and logs a decision, and nothing
- * acts on it. So the whole contract under test is that it changed nothing — the
- * request is still written, still pinned, still keyed the same way — while the
- * decision it computed is reachable and correct. A dark phase that quietly
- * altered the enqueue would be the worst possible outcome, since nobody would be
- * looking for it.
+ * Two contracts, and the second is the one that could break something silently:
+ *
+ *  1. WITH NO RUNNER WIRED — every unit test, and any deployment where the
+ *     toggle can never be on — the enqueue is byte-for-byte what it always was.
+ *     A feature that quietly altered the enqueue on projects that never opted
+ *     into it would be the worst possible outcome, because nobody would be
+ *     looking for it.
+ *  2. THE PROOF MUST NOT RE-ENTER. The bootstrap fires its own attestation-only
+ *     request through THIS SAME function; consulting the bootstrap for that
+ *     request would start a second one while the first is mid-flight, and the
+ *     run-scoped stamp would read the recursion as its own owner re-entering —
+ *     the one shape the single-flight cannot distinguish from a restart.
  */
-describe('enqueueTaskVerification — runbook-bootstrap preflight (phase 2, dark)', () => {
+describe('enqueueTaskVerification — the runbook bootstrap', () => {
   const serveTask: VerificationTaskV1 = {
     ...task,
     serve: { cmd: 'pnpm dev --port ${PORT}' },
   };
 
-  it('enqueues exactly as before when the toggle is ON and the project has no runbook', async () => {
-    // The bootstrap-eligible case — the one phase 3 will act on. Today it must
-    // be indistinguishable from the toggle being off.
+  it('enqueues exactly as before when the toggle is ON but no runner is wired', async () => {
+    // The bootstrap-eligible case with the acting half absent. Indistinguishable
+    // from the toggle being off, which is what makes every other test in this
+    // file — and every deployment that never opts in — unaffected.
     seedRun(db, { runId: 'run-pf1' });
     initScheduler(db, undefined, {
       config: { ...baseConfig, autoBootstrapRunbook: true },
@@ -850,6 +856,115 @@ describe('enqueueTaskVerification — runbook-bootstrap preflight (phase 2, dark
         probePath: gitRepo,
       }),
     ).resolves.toEqual({ proceed: false, reason: 'disabled' });
+  });
+
+  it('runs the bootstrap when a runner IS wired, and enqueues afterwards either way', async () => {
+    // The acting path. The lane's own request is still enqueued — the bootstrap
+    // has no channel to fail a lane and must not grow one — and on a decline the
+    // §3.2 gate is what speaks, exactly as it did before this feature existed.
+    const calls: Array<{ runId: string; laneTaskRef: string }> = [];
+    seedRun(db, { runId: 'run-pf5' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+      runbookBootstrap: async ({ runId, laneTaskRef }) => {
+        calls.push({ runId, laneTaskRef });
+        return { kind: 'declined', reason: 'not-possible', detail: 'no dev server' };
+      },
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-pf5',
+      task: serveTask,
+      laneTaskRef: 'TASK-1',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(calls).toEqual([{ runId: 'run-pf5', laneTaskRef: 'TASK-1' }]);
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    // Still the lane's ORDINARY key — the bootstrap generation belongs to the
+    // proof, never to the lane request that triggered it.
+    expect(readRow(result.requestId).enqueue_key).toBe('run-pf5:TASK-1:1');
+  });
+
+  it('does NOT consult the bootstrap for the bootstrap PROOF itself', async () => {
+    // The recursion guard. Without it, the proof's own enqueue would start a
+    // second bootstrap while the first is mid-flight — and because the stamp is
+    // keyed on (run, project, modality) with the SAME owner ref, that second
+    // claim reads as the owner resuming rather than as a collision.
+    const calls: string[] = [];
+    seedRun(db, { runId: 'run-pf6' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+      runbookBootstrap: async ({ laneTaskRef }) => {
+        calls.push(laneTaskRef);
+        return { kind: 'declined', reason: 'not-possible', detail: 'x' };
+      },
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-pf6',
+      task: serveTask,
+      laneTaskRef: 'TASK-1',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 1,
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(readRow(result.requestId).enqueue_key).toBe('run-pf6:TASK-1:1:bootstrap:1');
+  });
+
+  it('does NOT consult it for a SETUP proof either', async () => {
+    // The verify-setup flow is proving a draft a human already reviewed; a
+    // bootstrap there would derive a rival over the very record being proven.
+    const calls: string[] = [];
+    seedRun(db, { runId: 'run-pf7' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+      runbookBootstrap: async ({ laneTaskRef }) => {
+        calls.push(laneTaskRef);
+        return { kind: 'declined', reason: 'not-possible', detail: 'x' };
+      },
+    });
+
+    await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-pf7',
+      task: serveTask,
+      laneTaskRef: 'TASK-1',
+      attempt: 1,
+      worktreePath: gitRepo,
+      setupProof: true,
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  it('a THROWING bootstrap runner still enqueues — the seam never crashes a lane', async () => {
+    seedRun(db, { runId: 'run-pf8' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+      runbookBootstrap: async () => {
+        throw new Error('the bootstrap exploded');
+      },
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-pf8',
+      task: serveTask,
+      laneTaskRef: 'TASK-1',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('enqueued');
   });
 
   it('the kill switch overrides the toggle', async () => {
