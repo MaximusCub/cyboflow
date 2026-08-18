@@ -3439,15 +3439,14 @@ async function initializeServices(): Promise<boolean> {
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
-  // OMP takes the same MCP runtime config and nothing else: its approval dialogs
-  // are answered in-process by OmpApprovalBridge (the gating extension is the
-  // policy engine, so a prompt reaching the bridge was already allowed), so
-  // there is no router provider to inject here.
+  // OMP tool approvals are answered in-process after the gating extension vets
+  // them; content questions use the same durable QuestionRouter as Claude/Codex.
   createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
     bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
     nodeExecutablePath: await nodeResolver.getNodePath(),
   });
+  createdOmpSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer

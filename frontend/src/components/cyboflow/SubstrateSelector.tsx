@@ -61,7 +61,6 @@ export const INTERACTIVE_CAVEATS: readonly string[] = [
 
 /** The v1 limits of the OMP structured (omp-sdk) lane, mirroring INTERACTIVE_CAVEATS' style. */
 export const OMP_SDK_CAVEATS: readonly string[] = [
-  'No question gate yet — approvals land in the review queue.',
   'Slow approvals (over 25s) are blocked and can be retried.',
 ];
 

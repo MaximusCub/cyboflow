@@ -263,10 +263,8 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
 
 /**
  * The OMP caveats panels (added alongside the row's pre-existing capability
- * gate — see the block above). `value` is forced directly rather than
- * selected from the dropdown, since the picker still hides the OMP options
- * (selectableInPickers: false) — this only proves the caveats copy renders
- * correctly for the day the flag flips, without flipping it.
+ * gate — see the block above). `value` is forced directly so each runtime's
+ * copy is exercised independently of provider-access settings.
  */
 describe('SubstrateSelector — OMP caveats copy (v1 limits)', () => {
   it('shows the omp-sdk caveats when the value is forced to omp-sdk', () => {
@@ -274,8 +272,7 @@ describe('SubstrateSelector — OMP caveats copy (v1 limits)', () => {
 
     const panel = screen.getByTestId('substrate-caveats');
     expect(panel).toHaveTextContent('OMP — v1 limits');
-    expect(panel).toHaveTextContent('No question gate yet');
-    expect(panel).toHaveTextContent('approvals land in the review queue');
+    expect(panel).not.toHaveTextContent('No question gate yet');
     expect(panel).toHaveTextContent('Slow approvals (over 25s) are blocked and can be retried');
   });
 
