@@ -26,10 +26,18 @@ import type { DatabaseLike } from '../../types';
 
 const MIG_DIR = join(__dirname, '..', '..', '..', 'database', 'migrations');
 
-function buildDb(withMigration = true): Database.Database {
+/**
+ * `mig107` is a separate axis on purpose. Migration 107 adds the rung-1 columns
+ * this store now reads and writes, and a 106-only DB is a REAL deployment state
+ * — the one every binary is in between the two migrations landing. Both are
+ * exercised below: the store must degrade to "no rung-1 edit" rather than losing
+ * the whole stamp, because losing the stamp loses the resume cursor.
+ */
+function buildDb(withMigration = true, mig107 = true): Database.Database {
   const db = new Database(':memory:');
   if (withMigration) {
     db.exec(readFileSync(join(MIG_DIR, '106_runbook_bootstrap_stamp.sql'), 'utf-8'));
+    if (mig107) db.exec(readFileSync(join(MIG_DIR, '107_runbook_bootstrap_suppression.sql'), 'utf-8'));
   }
   return db;
 }
@@ -225,6 +233,80 @@ describe('RunbookBootstrapStampStore.commitShasForRun', () => {
   it('is empty (never throws) on a pre-106 DB — the probe as it shipped', () => {
     const db = buildDb(false);
     expect(makeStore(db).commitShasForRun('run-1')).toEqual([]);
+    db.close();
+  });
+
+  it('includes the RUNG-1 commit as well as the runbook commit', () => {
+    // §8.1 splits them so a human can revert the config change on its own. A
+    // probe that excluded only the runbook commit would still see the second one
+    // and reach exactly the wrong conclusion — that a lane which committed
+    // nothing had committed something.
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    store.advance({
+      ...KEY,
+      ownerTaskRef: 'TASK-1',
+      state: 'drafted',
+      commitSha: 'sha-runbook',
+      rung1Path: 'package.json',
+      rung1CommitSha: 'sha-config',
+    });
+    expect(store.commitShasForRun('run-1').sort()).toEqual(['sha-config', 'sha-runbook']);
+    db.close();
+  });
+});
+
+describe('RunbookBootstrapStampStore — the migration-107 rung-1 columns', () => {
+  it('round-trips the rung-1 path and its own commit', () => {
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    store.advance({
+      ...KEY,
+      ownerTaskRef: 'TASK-1',
+      state: 'drafted',
+      rung1Path: 'vite.config.ts',
+      rung1CommitSha: 'sha-config',
+    });
+    const stamp = store.read(KEY.runId, KEY.projectId, KEY.modality);
+    expect(stamp).toMatchObject({ rung1Path: 'vite.config.ts', rung1CommitSha: 'sha-config' });
+    db.close();
+  });
+
+  it('reads null for a bootstrap that applied no config change', () => {
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    expect(store.read(KEY.runId, KEY.projectId, KEY.modality)).toMatchObject({
+      rung1Path: null,
+      rung1CommitSha: null,
+    });
+    db.close();
+  });
+
+  it('on a 106-only DB the STATE still advances; only the provenance is lost', () => {
+    // The asymmetry that matters. A read that lost the whole row would lose the
+    // resume cursor and strand a bootstrap mid-sequence; a write that refused to
+    // advance would do the same. What a 106-only DB gives up is the record of an
+    // edit this build could not have applied through it anyway.
+    const db = buildDb(true, false);
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    expect(
+      store.advance({
+        ...KEY,
+        ownerTaskRef: 'TASK-1',
+        state: 'drafted',
+        commitSha: 'sha-runbook',
+        rung1Path: 'vite.config.ts',
+        rung1CommitSha: 'sha-config',
+      }),
+    ).toBe(true);
+
+    const stamp = store.read(KEY.runId, KEY.projectId, KEY.modality);
+    expect(stamp).toMatchObject({ state: 'drafted', commitSha: 'sha-runbook', rung1Path: null });
+    expect(store.commitShasForRun('run-1')).toEqual(['sha-runbook']);
     db.close();
   });
 });

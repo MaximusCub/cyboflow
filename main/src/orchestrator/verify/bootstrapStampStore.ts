@@ -58,6 +58,18 @@ export interface BootstrapStamp {
   runbookVersion: number | null;
   requestId: string | null;
   detail: string | null;
+  /**
+   * The rung-1 edit this bootstrap applied (migration 107), or null on the
+   * ordinary rung-0 path. The PATH is carried separately from the sha because
+   * the two consumers are path-scoped rather than commit-scoped: the eval diff
+   * drops that file's hunks (§11), and address-review is told not to touch it
+   * (a reviewer "fixing" it would silently un-prove the environment).
+   *
+   * Both read `null` on a pre-107 DB — the same answer as "no rung-1 edit",
+   * which is the honest degradation: such a DB has none.
+   */
+  rung1Path: string | null;
+  rung1CommitSha: string | null;
 }
 
 /**
@@ -95,6 +107,8 @@ interface StampRow {
   runbook_version: number | null;
   request_id: string | null;
   detail: string | null;
+  rung1_path?: string | null;
+  rung1_commit_sha?: string | null;
 }
 
 const TERMINAL: ReadonlySet<BootstrapStampState> = new Set<BootstrapStampState>(['proven', 'failed']);
@@ -178,14 +192,32 @@ export class RunbookBootstrapStampStore {
     modality: VerificationModality,
   ): BootstrapStamp | null {
     try {
-      const row = this.db
-        .prepare(
-          `SELECT run_id, project_id, modality, owner_task_ref, state, round,
-                  commit_sha, runbook_hash, runbook_version, request_id, detail
-           FROM verify_runbook_bootstrap
-           WHERE run_id = ? AND project_id = ? AND modality = ?`,
-        )
-        .get(runId, projectId, modality) as StampRow | undefined;
+      // The migration-107 rung-1 columns are read through the widen-then-fall-
+      // back ladder every other defensive read in verify/ uses: a pre-107 DB
+      // throws on `prepare` (before any read), and losing the WHOLE stamp to
+      // that throw would make the resume cursor unreadable on a binary that has
+      // one. The fallback drops only the two columns such a DB never had.
+      let row: StampRow | undefined;
+      try {
+        row = this.db
+          .prepare(
+            `SELECT run_id, project_id, modality, owner_task_ref, state, round,
+                    commit_sha, runbook_hash, runbook_version, request_id, detail,
+                    rung1_path, rung1_commit_sha
+             FROM verify_runbook_bootstrap
+             WHERE run_id = ? AND project_id = ? AND modality = ?`,
+          )
+          .get(runId, projectId, modality) as StampRow | undefined;
+      } catch {
+        row = this.db
+          .prepare(
+            `SELECT run_id, project_id, modality, owner_task_ref, state, round,
+                    commit_sha, runbook_hash, runbook_version, request_id, detail
+             FROM verify_runbook_bootstrap
+             WHERE run_id = ? AND project_id = ? AND modality = ?`,
+          )
+          .get(runId, projectId, modality) as StampRow | undefined;
+      }
       if (!row) return null;
       if (!isStampState(row.state)) {
         this.logger?.warn('[RunbookBootstrapStampStore] unrecognized stamp state', {
@@ -208,6 +240,8 @@ export class RunbookBootstrapStampStore {
         runbookVersion: row.runbook_version,
         requestId: row.request_id,
         detail: row.detail,
+        rung1Path: row.rung1_path ?? null,
+        rung1CommitSha: row.rung1_commit_sha ?? null,
       };
     } catch (err) {
       this.logger?.warn('[RunbookBootstrapStampStore] read failed (fail-soft)', {
@@ -247,35 +281,66 @@ export class RunbookBootstrapStampStore {
     runbookVersion?: number;
     requestId?: string;
     detail?: string;
+    /** The rung-1 edit's repo-relative path and its own commit (migration 107). */
+    rung1Path?: string;
+    rung1CommitSha?: string;
   }): boolean {
+    const tail = [
+      nowIso(),
+      args.runId,
+      args.projectId,
+      args.modality,
+      args.ownerTaskRef,
+    ] as const;
+    const head = [
+      args.state,
+      args.round ?? null,
+      args.commitSha ?? null,
+      args.runbookHash ?? null,
+      args.runbookVersion ?? null,
+      args.requestId ?? null,
+      args.detail ?? null,
+    ] as const;
     try {
-      const result = this.db
-        .prepare(
-          `UPDATE verify_runbook_bootstrap
-           SET state           = ?,
-               round           = COALESCE(?, round),
-               commit_sha      = COALESCE(?, commit_sha),
-               runbook_hash    = COALESCE(?, runbook_hash),
-               runbook_version = COALESCE(?, runbook_version),
-               request_id      = COALESCE(?, request_id),
-               detail          = COALESCE(?, detail),
-               updated_at      = ?
-           WHERE run_id = ? AND project_id = ? AND modality = ? AND owner_task_ref = ?`,
-        )
-        .run(
-          args.state,
-          args.round ?? null,
-          args.commitSha ?? null,
-          args.runbookHash ?? null,
-          args.runbookVersion ?? null,
-          args.requestId ?? null,
-          args.detail ?? null,
-          nowIso(),
-          args.runId,
-          args.projectId,
-          args.modality,
-          args.ownerTaskRef,
-        );
+      // Same widen-then-fall-back ladder as `read`. Note the asymmetry with a
+      // read: a pre-107 DB that cannot store the rung-1 columns STILL records
+      // the state transition, because losing the cursor move would strand the
+      // bootstrap mid-sequence. What such a DB loses is only the provenance of
+      // an edit it could not have applied through this build anyway.
+      let result: { changes: number };
+      try {
+        result = this.db
+          .prepare(
+            `UPDATE verify_runbook_bootstrap
+             SET state            = ?,
+                 round            = COALESCE(?, round),
+                 commit_sha       = COALESCE(?, commit_sha),
+                 runbook_hash     = COALESCE(?, runbook_hash),
+                 runbook_version  = COALESCE(?, runbook_version),
+                 request_id       = COALESCE(?, request_id),
+                 detail           = COALESCE(?, detail),
+                 rung1_path       = COALESCE(?, rung1_path),
+                 rung1_commit_sha = COALESCE(?, rung1_commit_sha),
+                 updated_at       = ?
+             WHERE run_id = ? AND project_id = ? AND modality = ? AND owner_task_ref = ?`,
+          )
+          .run(...head, args.rung1Path ?? null, args.rung1CommitSha ?? null, ...tail);
+      } catch {
+        result = this.db
+          .prepare(
+            `UPDATE verify_runbook_bootstrap
+             SET state           = ?,
+                 round           = COALESCE(?, round),
+                 commit_sha      = COALESCE(?, commit_sha),
+                 runbook_hash    = COALESCE(?, runbook_hash),
+                 runbook_version = COALESCE(?, runbook_version),
+                 request_id      = COALESCE(?, request_id),
+                 detail          = COALESCE(?, detail),
+                 updated_at      = ?
+             WHERE run_id = ? AND project_id = ? AND modality = ? AND owner_task_ref = ?`,
+          )
+          .run(...head, ...tail);
+      }
       return result.changes > 0;
     } catch (err) {
       this.logger?.warn('[RunbookBootstrapStampStore] advance failed (fail-soft)', {
@@ -300,13 +365,25 @@ export class RunbookBootstrapStampStore {
    */
   commitShasForRun(runId: string): string[] {
     try {
-      const rows = this.db
-        .prepare(
-          `SELECT commit_sha FROM verify_runbook_bootstrap
-           WHERE run_id = ? AND commit_sha IS NOT NULL`,
-        )
-        .all(runId) as Array<{ commit_sha: string }>;
-      return rows.map((r) => r.commit_sha).filter((sha) => sha.trim().length > 0);
+      // BOTH commits, because §8.1 splits them: the runbook lands in one commit
+      // and the rung-1 config edit in its own, so a human reviewing the branch
+      // can revert the config change on its own. A probe that excluded only the
+      // first would still see the second and reach the same wrong conclusion.
+      let rows: Array<{ commit_sha: string | null; rung1_commit_sha?: string | null }>;
+      try {
+        rows = this.db
+          .prepare(
+            `SELECT commit_sha, rung1_commit_sha FROM verify_runbook_bootstrap WHERE run_id = ?`,
+          )
+          .all(runId) as Array<{ commit_sha: string | null; rung1_commit_sha: string | null }>;
+      } catch {
+        rows = this.db
+          .prepare(`SELECT commit_sha FROM verify_runbook_bootstrap WHERE run_id = ?`)
+          .all(runId) as Array<{ commit_sha: string | null }>;
+      }
+      return rows
+        .flatMap((r) => [r.commit_sha, r.rung1_commit_sha ?? null])
+        .filter((sha): sha is string => typeof sha === 'string' && sha.trim().length > 0);
     } catch (err) {
       this.logger?.warn('[RunbookBootstrapStampStore] commit sha read failed (fail-soft)', {
         runId,
