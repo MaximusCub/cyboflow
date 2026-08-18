@@ -35,6 +35,7 @@
  */
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { VerificationModality } from '../../../../shared/types/visualVerification';
+import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
 
 /**
  * The resume cursor. Ordered as the sequence in §12 — a state implies every
@@ -351,6 +352,54 @@ export class RunbookBootstrapStampStore {
         error: err instanceof Error ? err.message : String(err),
       });
       return false;
+    }
+  }
+
+  /**
+   * Every repo path this run's bootstrap WROTE — the §11 excision list.
+   *
+   * PATH-scoped rather than commit-scoped, because its two consumers both work
+   * in paths: the eval diff drops these files' hunks so a sprint is not
+   * rubric-graded on machine-written JSON its agents did not author, and
+   * address-review is told not to touch them (a reviewer "fixing" the runbook
+   * demotes it by hash drift, and one reverting the rung-1 edit silently
+   * un-proves the environment).
+   *
+   * Gated on `commit_sha`, not on the stamp existing. A claimed-but-never-written
+   * bootstrap has changed nothing, and listing the runbook path for it would
+   * excise a file some OTHER actor wrote — the one way a path-scoped exclusion
+   * can remove work that is not the bootstrap's.
+   *
+   * Empty (never throws) when nothing was written or the table is unreadable,
+   * which is the pre-bootstrap behavior exactly.
+   */
+  writtenPathsForRun(runId: string): string[] {
+    try {
+      let rows: Array<{ commit_sha: string | null; rung1_path?: string | null }>;
+      try {
+        rows = this.db
+          .prepare('SELECT commit_sha, rung1_path FROM verify_runbook_bootstrap WHERE run_id = ?')
+          .all(runId) as Array<{ commit_sha: string | null; rung1_path: string | null }>;
+      } catch {
+        rows = this.db
+          .prepare('SELECT commit_sha FROM verify_runbook_bootstrap WHERE run_id = ?')
+          .all(runId) as Array<{ commit_sha: string | null }>;
+      }
+      const paths = new Set<string>();
+      for (const row of rows) {
+        if (typeof row.commit_sha !== 'string' || row.commit_sha.trim().length === 0) continue;
+        paths.add(VERIFY_RUNBOOK_RELATIVE_PATH);
+        if (typeof row.rung1_path === 'string' && row.rung1_path.trim().length > 0) {
+          paths.add(row.rung1_path);
+        }
+      }
+      return [...paths];
+    } catch (err) {
+      this.logger?.debug('[RunbookBootstrapStampStore] written-path read failed (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
     }
   }
 

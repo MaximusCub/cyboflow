@@ -2362,6 +2362,43 @@ async function initializeServices(): Promise<boolean> {
         VerificationScheduler.getInstance().awaitTerminal(requestId, timeoutMs),
       computeInputHash: verifyComputeInputHash,
       hostFingerprint: verifyHostFingerprint,
+      // §12 step 10 — the `verify-runbook` tab, through the artifact chokepoint.
+      // One artifact per (run, atype), so a second modality's bootstrap in the
+      // same run replaces this rather than minting a rival tab.
+      reportArtifact: async ({ projectId, runId, label, markdown }) => {
+        await ArtifactRouter.getInstance().apply(projectId, {
+          op: 'create',
+          runId,
+          atype: 'verify-runbook',
+          label,
+          payloadJson: JSON.stringify({ markdown }),
+          actor: 'orchestrator',
+        });
+      },
+      // §8.1 — the review-queue row naming an auto-edited config file. This is
+      // the REVIEW-BACKED half of §15A's trade: rung 1 is only as safe as the
+      // review it gets, so the finding is the guarantee rather than a courtesy.
+      // Non-blocking — it asks for eyes at the merge gate, it does not park the
+      // run.
+      reportFinding: async ({ projectId, runId, title, body, locations }) => {
+        await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+          op: 'create',
+          actor: 'orchestrator',
+          kind: 'finding',
+          title,
+          body,
+          blocking: false,
+          audience: 'human',
+          severity: 'warning',
+          source: 'runbook-bootstrap',
+          entityType: null,
+          entityId: null,
+          runId,
+          // `locations` rides on the finding PAYLOAD, not on the review item —
+          // that is where the queue's card reads file references from.
+          payload: { kind: 'finding', category: 'runbook-bootstrap', locations },
+        });
+      },
       ...(cyboflowLogger ? { logger: cyboflowLogger } : {}),
     });
 
@@ -2519,6 +2556,12 @@ async function initializeServices(): Promise<boolean> {
     // (default ON). Consulted by the snapshot ONLY for variant/experiment-tagged
     // runs (untagged built-in runs ignore it), on TOP of the global toggle above.
     isVariantAutoGradeEnabled: () => configManager.getAutoGradeVariantRuns(),
+    // §11 (lane-runbook-bootstrap): drop the runbook bootstrap's own files from
+    // the graded diff. verify-setup is exempt from auto-eval for exactly this
+    // reason — a runbook's acceptance test is its own proof run, not a rubric —
+    // and the bootstrap moves that diff class into sprint/ship runs, which ARE
+    // graded and A/B-compared.
+    bootstrapWrittenPaths: (runId) => runbookBootstrapStamps.writtenPathsForRun(runId),
   });
   // Crash-safe resume: re-enqueue any eval an app quit left 'pending'/'running'
   // (the frozen diff lives in the row, so a re-grade is self-contained) — otherwise
@@ -2991,6 +3034,12 @@ async function initializeServices(): Promise<boolean> {
     // raw-prompt path picks up the idea its context step creates before optional
     // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
     runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
+    // §11 (lane-runbook-bootstrap): the files this run's bootstrap committed,
+    // rendered as a do-not-touch list on address-review. That step "fixes in
+    // place", and both files are booby-trapped for a well-meant fix — the
+    // runbook's proof is content-addressed against the committed bytes, and the
+    // rung-1 config edit is what makes the environment stand up at all.
+    bootstrapProtectedPathsProvider: (runId) => runbookBootstrapStamps.writtenPathsForRun(runId),
     // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
     // FULL effective agent set (project overrides + workflow agentConfigs + variant
     // deltas — the same layering the agent overlay writes to disk) and looks up the
@@ -3305,7 +3354,41 @@ async function initializeServices(): Promise<boolean> {
           return async () => {
             const endHead = await readHead();
             const porcelain = await runGitAsync(worktreePath, ['status', '--porcelain']);
-            return { headAdvanced: endHead !== startHead, dirty: porcelain.trim().length > 0 };
+            // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
+            // same shared worktree, mid-lane. HEAD then moves for a reason that
+            // is not any lane's work — and since the only case that withholds
+            // 'integrated' is "HEAD did not move AND the tree is dirty", an
+            // advanced HEAD would let a lane that committed nothing integrate
+            // anyway. That is the exact failure this probe exists to catch, so
+            // the bootstrap's own commits are subtracted before the comparison.
+            //
+            // Fail-soft on purpose, in the direction that PRESERVES the probe: a
+            // rev-list that throws leaves headAdvanced as the plain sha
+            // comparison, which is what shipped.
+            let headAdvanced = endHead !== startHead;
+            if (headAdvanced) {
+              try {
+                const bootstrapShas = new Set(runbookBootstrapStamps.commitShasForRun(rid));
+                if (bootstrapShas.size > 0) {
+                  const between = (
+                    await runGitAsync(worktreePath, ['rev-list', `${startHead}..${endHead}`])
+                  )
+                    .split('\n')
+                    .map((line) => line.trim())
+                    .filter((line) => line.length > 0);
+                  // Compared by PREFIX in both directions: the stamp records
+                  // whatever `rev-parse HEAD` returned (full) but a hand-written
+                  // or abbreviated sha must still match.
+                  headAdvanced = between.some(
+                    (sha) =>
+                      ![...bootstrapShas].some((b) => sha.startsWith(b) || b.startsWith(sha)),
+                  );
+                }
+              } catch {
+                // Keep the plain comparison.
+              }
+            }
+            return { headAdvanced, dirty: porcelain.trim().length > 0 };
           };
         },
         driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {

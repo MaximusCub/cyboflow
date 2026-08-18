@@ -1741,6 +1741,21 @@ export interface VerificationRunbookState {
   version: number;
   /** Content hash of the committed portable half. */
   portableHash: string;
+  /**
+   * WHO derived this record (migration 105 `origin`), and it is not cosmetic.
+   *
+   * `'setup-flow'` means a human saw the proposal and every repo change it
+   * wanted before anything was touched. `'lane-bootstrap'` means a sprint lane
+   * derived it mid-run and the engine proved it with nobody watching
+   * (docs/proposals/lane-runbook-bootstrap.md). Both are PROVEN by the same
+   * engine-enforced run — the proof means exactly the same thing — but they did
+   * not earn the same amount of trust, and someone deciding whether to keep a
+   * machine-authored runbook has no other way to find out which happened.
+   *
+   * `null` for every record registered before the distinction existed. Honestly
+   * unknown, and a reader must not guess `'setup-flow'` for it.
+   */
+  origin: 'setup-flow' | 'lane-bootstrap' | null;
 }
 
 /** Per-modality health: outcome stats plus the capability ledger and runbook record for that modality. */
@@ -1810,6 +1825,17 @@ export interface VerifyProjectSetupRow {
   status: VerifyProjectSetupStatus;
   /** Modalities whose runbook is proven here, in {@link VERIFICATION_MODALITIES} order. */
   provenModalities: VerificationModality[];
+  /**
+   * True when at least one PROVEN runbook here was derived by a lane bootstrap
+   * rather than by the Verify Setup flow (migration 105 `origin`).
+   *
+   * A single boolean rather than a per-modality map because it drives one
+   * sentence in the setup list, and the question it answers is binary: is any
+   * part of this project's verification configured by something no human
+   * reviewed? Both origins are proven by the same engine-enforced run, so this
+   * never contradicts `status` — it qualifies it.
+   */
+  hasLaneDerivedRunbook: boolean;
 }
 
 /**

@@ -384,7 +384,8 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(custom.name).toBe('cyboflow-my-helper');
 
     const listed = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(listed).toHaveLength(20);
+    // The 20 builtins PLUS the custom one just created.
+    expect(listed).toHaveLength(21);
     expect(listed.find((e) => e.agentKey === 'my-helper')).toBeDefined();
 
     const deleted = await caller.cyboflow.agents.deleteCustom({

@@ -55,6 +55,7 @@ import type { BootstrapSuppressionStore } from './bootstrapSuppressionStore';
 import { parseRunbookDraftResult, type Rung1Operation } from './runbookDraft';
 import { applyRung1Operation, describeRung1Operation, validateRung1Target } from './rung1Operations';
 import { validateDraftedRunbook } from './runbookDraftValidation';
+import { renderBootstrapArtifact, renderRung1Finding } from './bootstrapArtifact';
 
 /**
  * The §12 step-7 draft-round cap. Two, not more: a second round re-drafts with
@@ -199,6 +200,28 @@ export interface RunbookBootstrapDeps {
   /** The §5.3 project input hash + host fingerprint, for suppression keying. */
   computeInputHash: (worktreePath: string) => Promise<string | null>;
   hostFingerprint: () => Promise<string | null>;
+  /**
+   * Publish the `verify-runbook` artifact (§12 step 10) — what was derived, what
+   * was proven, and what a human is being asked to look at.
+   *
+   * Optional so the sequence stays testable without an artifact router, and
+   * never awaited for its effect on the outcome: a reporting failure must not
+   * turn a proven runbook into an unproven one.
+   */
+  reportArtifact?: (args: { projectId: number; runId: string; label: string; markdown: string }) => Promise<void>;
+  /**
+   * File the §8.1 review-queue finding naming an auto-edited config file. This
+   * is the REVIEW-BACKED half of §15A's trade, so it is the one surface whose
+   * absence would make the rung-1 concession unearned.
+   */
+  reportFinding?: (args: {
+    projectId: number;
+    runId: string;
+    laneTaskRef: string;
+    title: string;
+    body: string;
+    locations: Array<{ path: string }>;
+  }) => Promise<void>;
   logger?: LoggerLike;
 }
 
@@ -251,6 +274,80 @@ export function composeBootstrapProofTask(
     ...(entry.build !== undefined ? { build: entry.build } : {}),
     ...(entry.serve !== undefined ? { serve: entry.serve } : {}),
   };
+}
+
+/**
+ * Publish the two human-facing surfaces for a terminal bootstrap (§8.1, §12
+ * step 10).
+ *
+ * BEST-EFFORT AND NEVER LOAD-BEARING. A reporting failure must not change the
+ * outcome: turning a proven runbook into an unproven one because an artifact
+ * write hiccuped would be strictly worse than a missing tab. Every call is
+ * caught individually so one failing surface does not take the other with it.
+ *
+ * The rung-1 finding is filed on BOTH terminal outcomes, including the failed
+ * one — arguably especially the failed one, where the branch is carrying a
+ * machine-authored config change that bought nothing and a human should be told
+ * so rather than discovering it in a diff.
+ */
+async function publishSurfaces(
+  args: RunbookBootstrapArgs & { modality: VerifyRunbookModality },
+  deps: RunbookBootstrapDeps,
+  input: {
+    proven: boolean;
+    runbookJson: string;
+    notes: string | null;
+    commitSha: string | null;
+    runbookHash: string | null;
+    runbookVersion: number | null;
+    rung1: AppliedRung1 | null;
+    failureDetail: string | null;
+    rounds: number;
+  },
+): Promise<void> {
+  if (deps.reportArtifact) {
+    try {
+      await deps.reportArtifact({
+        projectId: args.projectId,
+        runId: args.runId,
+        label: 'Verification runbook',
+        markdown: renderBootstrapArtifact({
+          modality: args.modality,
+          laneTaskRef: args.laneTaskRef,
+          ...input,
+        }),
+      });
+    } catch (err) {
+      deps.logger?.debug('[runbookBootstrap] artifact report failed (outcome unaffected)', {
+        runId: args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (input.rung1 !== null && deps.reportFinding) {
+    try {
+      const finding = renderRung1Finding({
+        laneTaskRef: args.laneTaskRef,
+        modality: args.modality,
+        proven: input.proven,
+        rung1: input.rung1,
+      });
+      await deps.reportFinding({
+        projectId: args.projectId,
+        runId: args.runId,
+        laneTaskRef: args.laneTaskRef,
+        title: finding.title,
+        body: finding.body,
+        locations: [{ path: input.rung1.path }],
+      });
+    } catch (err) {
+      deps.logger?.debug('[runbookBootstrap] rung-1 finding failed (outcome unaffected)', {
+        runId: args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /**
@@ -354,7 +451,25 @@ async function bootstrap(
       stamp.commitSha,
       rung1FromStamp(stamp),
     );
-    if ('settled' in resumed) return resumed.settled;
+    if ('settled' in resumed) {
+      // This call drafted nothing — the runbook it is reporting on was written by
+      // the pre-restart attempt, so it is read back off the tree rather than
+      // reconstructed. An unreadable file yields an empty body rather than no
+      // artifact: the outcome is still worth reporting.
+      const committed = (await deps.readFile(worktreePath, VERIFY_RUNBOOK_RELATIVE_PATH)) ?? '';
+      await publishSurfaces({ ...args, modality }, deps, {
+        proven: resumed.settled.kind === 'proven',
+        runbookJson: committed,
+        notes: null,
+        commitSha: stamp.commitSha,
+        runbookHash: stamp.runbookHash,
+        runbookVersion: stamp.runbookVersion,
+        rung1: rung1FromStamp(stamp),
+        failureDetail: resumed.settled.kind === 'unproven' ? resumed.settled.detail : null,
+        rounds: stamp.round,
+      });
+      return resumed.settled;
+    }
     // The proof failed and rounds remain: fall through into the draft loop,
     // which starts at the NEXT round, carrying this failure as feedback.
     resumeFeedback = resumed.retryWith;
@@ -647,7 +762,20 @@ async function bootstrap(
       lastCommitSha,
       lastRung1,
     );
-    if ('settled' in consumed) return consumed.settled;
+    if ('settled' in consumed) {
+      await publishSurfaces({ ...args, modality }, deps, {
+        proven: consumed.settled.kind === 'proven',
+        runbookJson: portableJson,
+        notes: draftResult.notes ?? null,
+        commitSha: lastCommitSha,
+        runbookHash: registered.hash,
+        runbookVersion: registered.version,
+        rung1: lastRung1,
+        failureDetail: consumed.settled.kind === 'unproven' ? consumed.settled.detail : null,
+        rounds: round,
+      });
+      return consumed.settled;
+    }
 
     // The proof failed and a round remains: re-draft, informed by why.
     feedback = consumed.retryWith;

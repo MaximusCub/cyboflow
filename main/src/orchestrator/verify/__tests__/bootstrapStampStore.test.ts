@@ -310,3 +310,66 @@ describe('RunbookBootstrapStampStore — the migration-107 rung-1 columns', () =
     db.close();
   });
 });
+
+describe('RunbookBootstrapStampStore.writtenPathsForRun', () => {
+  it('lists the runbook path once a bootstrap has actually COMMITTED', () => {
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    store.advance({ ...KEY, ownerTaskRef: 'TASK-1', state: 'drafted', commitSha: 'sha-1' });
+    expect(store.writtenPathsForRun('run-1')).toEqual(['.cyboflow/verify-runbook.json']);
+    db.close();
+  });
+
+  it('is EMPTY for a claimed-but-never-written bootstrap', () => {
+    // The one way a path-scoped exclusion can remove work that is not the
+    // bootstrap's: listing the runbook path for a run that never wrote it would
+    // excise a file some OTHER actor put there.
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    expect(store.writtenPathsForRun('run-1')).toEqual([]);
+    db.close();
+  });
+
+  it('includes the rung-1 file, which is the path-scoped consumers\' real target', () => {
+    // Both consumers work in paths, not commits: the eval diff drops these
+    // files\' hunks, and address-review is told not to touch them.
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, ownerTaskRef: 'TASK-1' });
+    store.advance({
+      ...KEY,
+      ownerTaskRef: 'TASK-1',
+      state: 'drafted',
+      commitSha: 'sha-1',
+      rung1Path: 'vite.config.ts',
+    });
+    expect(store.writtenPathsForRun('run-1').sort()).toEqual(['.cyboflow/verify-runbook.json', 'vite.config.ts']);
+    db.close();
+  });
+
+  it('does not duplicate the runbook path across modalities', () => {
+    const db = buildDb();
+    const store = makeStore(db);
+    for (const modality of ['web', 'cdp-app'] as const) {
+      store.claim({ ...KEY, modality, ownerTaskRef: 'TASK-1' });
+      store.advance({ ...KEY, modality, ownerTaskRef: 'TASK-1', state: 'drafted', commitSha: `sha-${modality}` });
+    }
+    expect(store.writtenPathsForRun('run-1')).toEqual(['.cyboflow/verify-runbook.json']);
+    db.close();
+  });
+
+  it('is scoped to the run, and empty (never throws) on a pre-106 DB', () => {
+    const db = buildDb();
+    const store = makeStore(db);
+    store.claim({ ...KEY, runId: 'run-2', ownerTaskRef: 'TASK-1' });
+    store.advance({ ...KEY, runId: 'run-2', ownerTaskRef: 'TASK-1', state: 'drafted', commitSha: 'sha-other' });
+    expect(store.writtenPathsForRun('run-1')).toEqual([]);
+    db.close();
+
+    const bare = buildDb(false);
+    expect(makeStore(bare).writtenPathsForRun('run-1')).toEqual([]);
+    bare.close();
+  });
+});

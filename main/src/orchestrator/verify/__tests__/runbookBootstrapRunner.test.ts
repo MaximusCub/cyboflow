@@ -37,6 +37,20 @@ import { BootstrapSuppressionStore } from '../bootstrapSuppressionStore';
 import type { DatabaseLike } from '../../types';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 
+/** Recorders for the two optional reporting seams, typed off the deps themselves. */
+type ArtifactReport = Parameters<NonNullable<RunbookBootstrapDeps['reportArtifact']>>[0];
+type FindingReport = Parameters<NonNullable<RunbookBootstrapDeps['reportFinding']>>[0];
+
+function recorder<T>(): { fn: (arg: T) => Promise<void>; calls: T[] } {
+  const calls: T[] = [];
+  return {
+    fn: async (arg: T) => {
+      calls.push(arg);
+    },
+    calls,
+  };
+}
+
 const MIG_DIR = join(__dirname, '..', '..', '..', 'database', 'migrations');
 
 const MANIFEST = JSON.stringify({ scripts: { build: 'vite build', preview: 'vite preview' } }, null, 2);
@@ -635,6 +649,91 @@ describe('runRunbookBootstrap — never throws', () => {
     if (outcome.kind !== 'declined') throw new Error('unreachable');
     expect(outcome.detail).toContain('cas-conflict');
     expect(h.suppression.read(1, 'web')).toBeNull();
+    h.db.close();
+  });
+});
+
+describe('runRunbookBootstrap — the human-facing surfaces', () => {
+  it('publishes the verify-runbook artifact on the PROVEN path', async () => {
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({ reportArtifact: artifact.fn });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(artifact.calls).toHaveLength(1);
+    expect(artifact.calls[0].runId).toBe('run-1');
+    expect(artifact.calls[0].markdown).toContain('PROVEN');
+    h.db.close();
+  });
+
+  it('publishes it on the FAILED path too — the branch is carrying real state', async () => {
+    // §10: a failed bootstrap leaves a committed unproven draft and a spent
+    // budget. v1 claimed failure was byte-identical to today; not reporting it
+    // would be the same overclaim in a different place.
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({ proofs: [FAIL, FAIL], reportArtifact: artifact.fn });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(artifact.calls).toHaveLength(1);
+    expect(artifact.calls[0].markdown).toContain('NOT PROVEN');
+    h.db.close();
+  });
+
+  it('files the §8.1 finding NAMING the auto-edited file', async () => {
+    // The review-backed half of §15A's trade. Without this the rung-1
+    // concession is unearned: a config change a machine made, that nobody was
+    // ever asked to look at.
+    const finding = recorder<FindingReport>();
+    const h = harness({
+      reportFinding: finding.fn,
+      draftResults: [
+        {
+          decision: 'runbook',
+          modality: 'web',
+          runbook: {
+            ...RUNBOOK,
+            modalities: {
+              web: { ...RUNBOOK.modalities.web, serve: { cmd: 'pnpm run verify:serve --port ${PORT}' } },
+            },
+          },
+          operation: { kind: 'add-script', scriptName: 'verify:serve', command: 'vite preview' },
+        },
+      ],
+    });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(finding.calls).toHaveLength(1);
+    expect(finding.calls[0].title).toContain('package.json');
+    expect(finding.calls[0].locations).toEqual([{ path: 'package.json' }]);
+    h.db.close();
+  });
+
+  it('files NO finding when no config change was made', async () => {
+    const finding = recorder<FindingReport>();
+    const h = harness({ reportFinding: finding.fn });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(finding.calls).toEqual([]);
+    h.db.close();
+  });
+
+  it('a THROWING reporter does not turn a proven runbook into an unproven one', async () => {
+    // Best-effort by contract. Losing a tab is not a reason to discard a proof
+    // the engine already recorded.
+    const h = harness({
+      reportArtifact: async () => {
+        throw new Error('artifact router is down');
+      },
+    });
+    await expect(runRunbookBootstrap(ARGS, h.deps)).resolves.toMatchObject({ kind: 'proven' });
+    h.db.close();
+  });
+
+  it('reports nothing for a decline that wrote nothing', async () => {
+    // A refused draft left no state to review, and an artifact tab about a
+    // non-event is noise in a pane a human opens to find real ones.
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({
+      reportArtifact: artifact.fn,
+      draftResults: [{ decision: 'not-possible', reason: 'no dev server' }],
+    });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(artifact.calls).toEqual([]);
     h.db.close();
   });
 });

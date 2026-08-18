@@ -468,12 +468,46 @@ stops paying.
   preflight sits in `enqueueTaskVerification`, before the shared preparation** —
   the last moment a decision exists, since a `skipped` terminal burns the enqueue
   key that step 8's re-enqueue needs.
-- **Phase 3 — draft and prove.** The read-only agent, controller validation +
-  pathspec commit, the three typed rung-1 operations (§8.1) with their denylist and
-  separate commit, `registerDraft`, the attestation-only proof via `awaitTerminal`,
-  re-enqueue on proven, bootstrap suppression.
-- **Phase 4 — bookkeeping.** Eval-diff excision, commit-probe exclusion,
-  address-review denylist, the artifact and the `origin` badge.
+- **Phase 3 — draft and prove.** ✅ *shipped.* The read-only agent
+  (`workflows/{sprint,ship}/agents/runbook-bootstrap.md`, deployed by the
+  controller rather than bound to a step — the first canonical agent key with no
+  step), controller validation + pathspec commit, the three typed rung-1
+  operations (§8.1) with their denylist and separate commit, `registerDraft` +
+  the `origin` stamp, the attestation-only proof via `awaitTerminal`, re-enqueue
+  on proven, bootstrap suppression (migration 107).
+
+  Three things the phase resolved beyond the list. **The drafting agent's Bash is
+  an ALLOWLIST, not a denylist.** §7.2's dependency guard can be a denylist
+  because a structural control sits underneath it — the provisioner clones
+  `node_modules`, so a contained write is discarded with the snapshot. This agent
+  surveys the LIVE run worktree and has no such backstop, so a denylist would be
+  the only control, which is the posture §8 rejects. **The proof re-enters the
+  same enqueue seam**, so that seam skips the bootstrap for a `bootstrapProof`
+  request — otherwise it would recurse into a second bootstrap while the first is
+  mid-flight, and the stamp would report the recursion as its own owner
+  re-entering. **A validation rejection does not suppress; only `NOT-POSSIBLE`
+  does.** An undeclared command is a claim about this DRAFT, and suppressing on it
+  would let one bad draft silence a project whose next draft would have been fine.
+
+  Also caught by its own tests before shipping: the rung-1 target check fenced
+  only the ROOT `package.json`, so `relax-strict-port` — which, unlike
+  `port-from-env`, has no extension rule of its own — would have flipped a boolean
+  inside `apps/web/package.json`. Now matched on the basename.
+- **Phase 4 — bookkeeping.** ✅ *shipped.* Eval-diff excision (by path, from the
+  frozen diff, with stats subtracted rather than recomputed so git's own counting
+  still governs every unaffected row), commit-probe exclusion (`rev-list` minus
+  the run's bootstrap shas — including the rung-1 commit, which §8.1 splits off,
+  so excluding only the runbook commit would have left the probe reaching the same
+  wrong conclusion), the address-review denylist (prompt section + a standing rule
+  in the agent, since the subagent cannot see the step prompt), the `verify-runbook`
+  artifact, the §8.1 finding naming the auto-edited file, and the `origin` badge on
+  the setup list.
+
+  The artifact is reported on the FAILED path too. v1 claimed failure was
+  "byte-identical to today"; it is not — a failed bootstrap leaves a committed
+  unproven draft, a spent budget, and possibly a config change that bought nothing
+  — and an artifact that only appeared on success would be the same overclaim in a
+  different place.
 
 ## 14. Test plan
 
