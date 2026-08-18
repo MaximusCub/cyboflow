@@ -150,7 +150,12 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
     hostFingerprint: async () => 'host-a',
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   };
-  const { draftResults: _d, proofs: _p, ...depsOver } = over;
+  // The two harness-only knobs are stripped rather than destructured-and-ignored:
+  // an unused binding is a lint warning, and the intent ("everything except
+  // these two is a deps override") reads the same either way.
+  const depsOver = { ...over };
+  delete depsOver.draftResults;
+  delete depsOver.proofs;
   const deps: RunbookBootstrapDeps = { ...base, ...depsOver };
   return {
     deps,

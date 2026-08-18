@@ -51,7 +51,7 @@ export type RunbookDraftValidation = { ok: true } | { ok: false; rejection: Runb
  * presence is the rejection itself — see the module header on why this does not
  * try to decompose them.
  */
-const SHELL_COMPOSITION_PATTERN = /(\&\&|\|\||[;|`]|\$\(|<\(|\n)/;
+const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|`]|\$\(|<\(|\n)/;
 
 /**
  * Package-manager prefixes whose next non-flag token names a script.
