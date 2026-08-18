@@ -8,9 +8,14 @@
  * `TrackerApiError`/`TrackerAuthError` (see errors.ts).
  *
  * Verified against Dart's published OpenAPI 3.1 spec
- * (https://app.dartai.com/api/v0/public/schema/, retrieved 2026-08-16). Three
- * properties of that API shape almost every decision below, and none of them
- * has a Linear or Plane analogue:
+ * (https://app.dartai.com/api/v0/public/schema/, retrieved 2026-08-16) and, for
+ * the behaviours the spec leaves open, against a LIVE Dart space on 2026-08-18.
+ * Comments below say "measured" where the fact came from that live run rather
+ * than from the spec — the two are not equally strong, and one of the spec's
+ * silences (sub-issue placement) turned out to contradict the obvious reading.
+ *
+ * Three properties of that API shape almost every decision below, and none of
+ * them has a Linear or Plane analogue:
  *
  * 1. DART ADDRESSES BY DISPLAY TITLE, NOT ID. `GET /config` — the ONLY
  *    discovery endpoint — returns `dartboards` and `statuses` as flat arrays of
@@ -286,11 +291,12 @@ export class DartAdapter implements TrackerAdapter {
     await this.assertContainerExists(selection.containerId);
     const params: Record<string, string> = { dartboard: selection.containerId };
     if (sinceIso !== undefined) {
-      // Dart's `updated_at_after` bound semantics (gt vs gte) are not stated in
-      // the spec, and the adapter contract REQUIRES an inclusive bound. Widening
-      // the server-side filter by a second and re-applying the exact bound
-      // client-side below satisfies the contract under EITHER semantic, at the
-      // cost of at most a second of overlap the sync core already tolerates.
+      // MEASURED: `updated_at_after` is INCLUSIVE (a task queried at exactly its
+      // own updatedAt comes back; one second later it does not), which is what
+      // the adapter contract requires. The one-second widening and the exact
+      // client-side re-filter below are kept anyway: they cost at most a second
+      // of overlap the sync core already tolerates, and they keep the contract
+      // satisfied if Dart ever tightens the bound to exclusive.
       params.updated_at_after = shiftIsoBySeconds(sinceIso, -1);
     }
     const concise = await this.paginate<DartConciseTaskWire>('/tasks/list', params);
@@ -401,11 +407,12 @@ export class DartAdapter implements TrackerAdapter {
    * COST, and why it is shaped this way. The marker lives in the description,
    * which list responses omit, so a candidate can only be judged after a detail
    * fetch. Dart does expose a `description` list filter, used FIRST as a fast
-   * path — but its matching semantics (exact vs contains) are unspecified, so a
-   * miss falls through to hydrating the candidate set rather than being trusted
-   * as proof of absence. That ordering is the whole point: an unexpectedly-exact
-   * filter then costs time, never correctness, whereas trusting it would risk
-   * duplicating a create that actually landed.
+   * path; it was MEASURED to be a CONTAINS match (a bare substring of the marker
+   * line matches, and a string present in no task returns zero rows), so the
+   * fast path does hit in practice. The full-scan fallback is kept regardless,
+   * because the cost of being wrong here is asymmetric: a miss that falls
+   * through only costs time, whereas trusting an unexpectedly-narrow filter as
+   * proof of absence would duplicate a create that actually landed.
    *
    * Not part of `TrackerAdapter`: the marker is stripped from every description
    * this adapter returns, so the match cannot be performed by the sync core over
@@ -668,8 +675,12 @@ export class DartAdapter implements TrackerAdapter {
       estimate: mapEstimate(raw.size),
       parentExternalId: raw.parentId ?? null,
       updatedAt: raw.updatedAt,
-      // Dart exposes no archive marker on a task (trashed tasks simply drop out
-      // of the default listing, which the deletion sweep already handles).
+      // Dart exposes no archive marker on a task, and needs none: trashing is
+      // MEASURED to be indistinguishable from deletion over this API — a trashed
+      // task 404s on `GET /tasks/{id}` and is absent from listings (including
+      // under `no_defaults=true`; only an explicit `in_trash=true` reveals it).
+      // So the sweep's own getIssue confirmation already classifies it as gone,
+      // and there is no archived-but-present state for this field to carry.
       archivedAt: null,
       // Read BEFORE mapDescription strips it — every path that maps a wire task
       // (hydrated list, detail, create response, client-key recovery) goes

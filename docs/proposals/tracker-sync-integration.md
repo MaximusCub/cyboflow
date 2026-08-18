@@ -129,8 +129,23 @@ Linear = GraphQL client; Plane = REST client (`X-API-Key`, configurable base URL
 - **Titles, not ids.** `GET /config` is the only discovery endpoint and returns dartboards and statuses as bare strings, so `TrackerSourceContainer.id` and `TrackerState.id` *are* those titles. A rename in Dart therefore invalidates a connection's stored source selection and state-mapping keys. Since `GET /tasks/list` answers a vanished dartboard with an empty page — which `listIssueIds` would hand the deletion sweep as "everything was deleted remotely" — the adapter guards every pass with `assertContainerExists` and fails loudly instead.
 - **List responses omit the description.** Dart's list shape (`ConciseTask`) drops `description`, which the three-way merge and the recovery marker both need, so `listIssues` hydrates every row through `GET /tasks/{id}` at bounded concurrency. `listIssueIds` deliberately does not, keeping the deletion sweep cheap.
 - **No state grouping.** Dart publishes no state type or category, so `inferStateGroup` guesses `TrackerStateGroup` from the status name. Low-stakes by construction: the group only seeds the wizard's mapping defaults, which the user then overrides.
+- **Sub-issue placement is not inherited.** A `parentId`-only create lands the child on the API user's *default* dartboard, not the parent's — where this connection's dartboard-scoped reads can never see it. `createSubIssue` therefore reads the parent's board and names it explicitly. This one contradicted the obvious reading of the spec and was only caught by running it.
 
-Dart also exposes no workspace identity (`/me` returns only the user), so `TrackerWorkspaceIdentity.workspaceId` binds to the *account*. The rotation guard (`TrackerIdentityMismatchError`) is correspondingly weaker there: it catches a token pasted from a different account, but not the same user's token for a different space.
+Dart also exposes no workspace identity (`/me` returns only the user, and `/config` carries no space id or name), so `TrackerWorkspaceIdentity.workspaceId` binds to the *account*. The rotation guard (`TrackerIdentityMismatchError`) is correspondingly weaker there: it catches a token pasted from a different account, but not the same user's token for a different space. **Open risk**: if Dart tokens are space-scoped, that gap lets a rotation retain links whose issues the new token cannot see, and the sweep's `getIssue` confirmation would then read them as genuinely deleted. Verifying it needs a second space on one account.
+
+**Measured against a live space (2026-08-18)**, since the spec leaves these open and each one is load-bearing:
+
+| Behaviour | Result |
+| --- | --- |
+| `updated_at_after` bound | **Inclusive** (gte) — the contract's requirement, met natively |
+| `description` list filter | **Contains** — the client-key fast path does hit |
+| Unknown dartboard title | **200 + empty page**, never an error — `assertContainerExists` is load-bearing |
+| Empty `dartboard=` | Filter dropped: returns the **whole space** |
+| Trashed task | **404s** on `GET /tasks/{id}`, absent from listings unless `in_trash=true` |
+| Default filters | `meta.defaultsApplied: false` on a fresh space; `no_defaults=true` changes nothing |
+| `ids` filter | **Silently ignored** in every serialization — a documented param that does nothing |
+
+That last row is the general lesson: Dart drops filters it does not honour rather than erroring, so a test that only asserts "the row I wanted came back" can pass against a filter that never ran. The adapter's own filters (`dartboard`, `parent_id`, `description`, `updated_at_after`) were each re-checked with a negative control.
 
 ## Implementation notes (v1 as landed)
 
