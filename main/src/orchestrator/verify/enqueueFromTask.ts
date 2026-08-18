@@ -403,7 +403,7 @@ export async function enqueueTaskVerification(
   // columns then carry the SAME ref regardless of what the composing agent wrote.
   const composedTask: VerificationTaskV1 = { ...opts.task, taskRef: laneTaskRef };
 
-  // (3a) The RUNBOOK-BOOTSTRAP PREFLIGHT (lane-runbook-bootstrap.md §12 step 1).
+  // (3a) The RUNBOOK BOOTSTRAP (lane-runbook-bootstrap.md §12 steps 1–8).
   //
   // Runs HERE — before the shared preparation, before any row — because that is
   // the last moment a decision still exists. Once the request is written and the
@@ -412,30 +412,49 @@ export async function enqueueTaskVerification(
   // a live dedup hit, so a bootstrap running afterwards could not re-fire this
   // lane's own request at all.
   //
-  // PHASE 2: the decision is computed and LOGGED, and nothing acts on it — the
-  // drafting agent, the commit, and the proof land in phase 3. The value of
-  // landing it dark is that turning the toggle on shows a user exactly what the
-  // bootstrap WOULD do on their project, and why it would decline, before any
-  // version of it can write to their branch.
+  // The bootstrap either PROVES a runbook (after which the shared preparation
+  // below resolves it, merges it, and pins it — so the lane verifies exactly as
+  // it would on a project a human had configured) or it does not, in which case
+  // this function carries on unchanged and the gate skips the request with a
+  // reason naming the situation. It has no channel to fail a lane, by design.
+  //
+  // THE PROOF ITSELF MUST NOT RE-ENTER HERE. The bootstrap fires its own
+  // attestation-only request through this same seam with `bootstrapProof: true`;
+  // consulting the bootstrap for that request would recurse into a second
+  // bootstrap while the first is mid-flight, and the stamp would report the
+  // recursion as its own owner re-entering. A proof request is by definition the
+  // thing a bootstrap already decided to do.
   //
   // Wrapped like every other collaborator call in this function: the seam's
   // contract is NEVER THROWS, and an unavailable scheduler here must degrade to
   // today's enqueue rather than crash a lane.
-  try {
-    await VerificationScheduler.getInstance().evaluateRunbookBootstrap({
-      projectId,
-      runId,
-      laneTaskRef,
-      modality: resolveTaskModality(type, composedTask),
-      task: composedTask,
-      probePath: worktreePath,
-    });
-  } catch (err) {
-    logger?.debug('[enqueueTaskVerification] runbook-bootstrap preflight unavailable', {
-      runId,
-      laneTaskRef,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  if (opts.bootstrapProof !== true && opts.setupProof !== true) {
+    try {
+      const outcome = await VerificationScheduler.getInstance().maybeBootstrapRunbook({
+        projectId,
+        runId,
+        laneTaskRef,
+        modality: resolveTaskModality(type, composedTask),
+        task: composedTask,
+        probePath: worktreePath,
+      });
+      if (outcome.kind !== 'not-attempted') {
+        logger?.info('[enqueueTaskVerification] runbook bootstrap finished', {
+          runId,
+          laneTaskRef,
+          outcome: outcome.kind,
+          ...(outcome.kind === 'proven'
+            ? { runbookHash: outcome.runbookHash, runbookLocalVersion: outcome.runbookVersion }
+            : { detail: outcome.kind === 'declined' ? outcome.detail : outcome.detail }),
+        });
+      }
+    } catch (err) {
+      logger?.debug('[enqueueTaskVerification] runbook bootstrap unavailable', {
+        runId,
+        laneTaskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // (3b) The SHARED enqueue-time rules (§7.2 guard + §5.2 seam-3 injection). Runs

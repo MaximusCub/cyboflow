@@ -476,6 +476,42 @@ export class VerifyRunbookStore {
   }
 
   /**
+   * Stamp migration 105's `origin` on a record — WHO derived it.
+   *
+   * WHY THIS IS NOT COSMETIC. Two things can produce a proven runbook: the
+   * Verify Setup flow, where a human sees the proposal and every repo change it
+   * wants before anything is touched, and the lane bootstrap
+   * (docs/proposals/lane-runbook-bootstrap.md), where an agent derives one
+   * mid-sprint and the engine proves it with nobody watching. Both are proven by
+   * the same engine-enforced run and they did NOT earn the same amount of trust.
+   * Collapsing them would erase the only durable record of which happened, and a
+   * human deciding whether to keep a machine-authored runbook has no other way to
+   * find out.
+   *
+   * Deliberately NOT a parameter of {@link VerifyRunbookStore.registerDraft}:
+   * that method's UPSERT is the CAS'd content write and adding a column to it
+   * would mean a pre-105 DB losing the REGISTRATION rather than just the
+   * provenance. Here, a pre-105 DB fails soft and loses only the badge.
+   *
+   * Never throws — a provenance stamp that failed must not undo a registration
+   * that succeeded.
+   */
+  setOrigin(projectId: number, modality: VerificationModality, origin: string): void {
+    try {
+      this.db
+        .prepare('UPDATE verify_runbook_local SET origin = ? WHERE project_id = ? AND modality = ?')
+        .run(origin, projectId, modality);
+    } catch (err) {
+      this.deps.logger?.debug('[VerifyRunbookStore] origin stamp failed (fail-soft)', {
+        projectId,
+        modality,
+        origin,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * Content-addressed fetch for the runner's §5.2 seam-3 pin validation: given
    * the `runbook_hash` + `runbook_local_version` stamped on the request row at
    * enqueue, resolve the EXACT revision to execute.

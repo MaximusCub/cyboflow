@@ -78,6 +78,7 @@ import {
   type BootstrapDeclineReason,
 } from './bootstrapEligibility';
 import { runbookBootstrapPreflight } from './runbookBootstrapPreflight';
+import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
@@ -1122,6 +1123,20 @@ export interface VerificationSchedulerDeps {
    * keeps the standalone-typecheck invariant and never imports a service.
    */
   nativeCaptureProbe?: () => Promise<boolean>;
+  /**
+   * The ACTING half of the lane runbook bootstrap
+   * (docs/proposals/lane-runbook-bootstrap.md §12 steps 3–8): derive, commit,
+   * register, and prove a runbook for a lane whose verification would otherwise
+   * be skipped.
+   *
+   * Injected as one closure rather than as its several collaborators because the
+   * scheduler has no business holding a git binary, an SDK query, or a
+   * filesystem — index.ts assembles those and hands down a single
+   * `(args) => outcome` seam. Absent (every unit test, and any deployment where
+   * the toggle can never be on) ⇒ the preflight still computes and logs its
+   * decision and nothing acts on it, which is byte-identical to phase 2.
+   */
+  runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 }
 
 /**
@@ -1418,6 +1433,7 @@ export class VerificationScheduler {
   private readonly runbookStore?: VerifyRunbookStore;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
   private readonly nativeCaptureProbe?: () => Promise<boolean>;
+  private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
    * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
@@ -1497,6 +1513,7 @@ export class VerificationScheduler {
     // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
     // probe ran", which the gate reads as unsupported (phase-0 behavior).
     this.nativeCaptureProbe = deps.nativeCaptureProbe;
+    this.runbookBootstrap = deps.runbookBootstrap;
   }
 
   // --------------------------------------------------------------------------
@@ -2779,6 +2796,80 @@ export class VerificationScheduler {
         ...(this.logger ? { logger: this.logger } : {}),
       },
     );
+  }
+
+  /**
+   * §12 steps 2–8 — DECIDE and, when the decision is yes, ACT.
+   *
+   * The one entry point `enqueueTaskVerification` calls. It is deliberately the
+   * whole thing rather than a decision the caller then acts on, because the two
+   * halves must not be able to drift: a caller that consulted the preflight and
+   * then applied its own idea of what "proceed" means is how a feature ends up
+   * bootstrapping the case §4 says never to bootstrap.
+   *
+   * WHAT THE CALLER DOES WITH THE RESULT IS THE SAME IN EVERY CASE: carry on to
+   * the ordinary enqueue. On `'proven'` that enqueue now resolves the freshly
+   * proven runbook, merges it, pins it, and passes the §3.2 gate — the lane
+   * verifies exactly as it would on a project a human had configured. On every
+   * other outcome the gate skips it with a reason that names the situation. The
+   * bootstrap has no channel to fail a lane and must not grow one.
+   *
+   * NEVER THROWS. `runRunbookBootstrap` has its own catch-all, and this method
+   * wraps the whole thing again because it is reached from the enqueue seam,
+   * whose contract is that it cannot crash a lane.
+   */
+  async maybeBootstrapRunbook(args: {
+    projectId: number;
+    runId: string;
+    laneTaskRef: string;
+    modality: VerificationModality;
+    task: VerificationTaskV1;
+    probePath?: string;
+  }): Promise<BootstrapRunOutcome | { kind: 'not-attempted'; reason: BootstrapDeclineReason }> {
+    const decision = await this.evaluateRunbookBootstrap(args);
+    if (!decision.proceed) return { kind: 'not-attempted', reason: decision.reason };
+    if (this.runbookBootstrap === undefined) {
+      // The phase-2 posture, preserved on purpose: the decision is computed and
+      // logged, and nothing acts on it.
+      this.logger?.debug('[VerificationScheduler] runbook bootstrap would fire but no runner is wired', {
+        runId: args.runId,
+        projectId: args.projectId,
+        laneTaskRef: args.laneTaskRef,
+        modality: args.modality,
+      });
+      return { kind: 'not-attempted', reason: 'disabled' };
+    }
+
+    const probePath = args.probePath ?? this.worktreePathForRun(args.runId) ?? undefined;
+    if (probePath === undefined) {
+      // Nothing to survey and nothing to commit into. This is the same tree the
+      // decision was made against, so a run with no worktree could not have been
+      // bootstrapped whatever the decision said.
+      this.logger?.debug('[VerificationScheduler] runbook bootstrap skipped: the run has no worktree', {
+        runId: args.runId,
+        laneTaskRef: args.laneTaskRef,
+      });
+      return { kind: 'not-attempted', reason: 'unobservable' };
+    }
+
+    try {
+      return await this.runbookBootstrap({
+        projectId: args.projectId,
+        runId: args.runId,
+        laneTaskRef: args.laneTaskRef,
+        modality: args.modality,
+        worktreePath: probePath,
+        adopt: decision.adopt,
+      });
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] runbook bootstrap threw (degrading to today\'s skip)', {
+        runId: args.runId,
+        projectId: args.projectId,
+        laneTaskRef: args.laneTaskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'not-attempted', reason: 'unobservable' };
+    }
   }
 
   /**

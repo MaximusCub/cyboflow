@@ -137,6 +137,13 @@ import {
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
 import { VerifyRunbookStore } from './orchestrator/verify/runbookStore';
+import { RunbookBootstrapStampStore } from './orchestrator/verify/bootstrapStampStore';
+import { BootstrapSuppressionStore } from './orchestrator/verify/bootstrapSuppressionStore';
+import { MAX_BOOTSTRAP_ROUNDS, runRunbookBootstrap } from './orchestrator/verify/runbookBootstrapRunner';
+import { makeRunbookDraftQuery } from './orchestrator/verify/runbookDraftAgentQuery';
+import { composeRunbookDraftPrompt } from './orchestrator/verify/runbookDraftPrompt';
+import { commitPathspec } from './orchestrator/verify/bootstrapCommit';
+import { enqueueTaskVerification } from './orchestrator/verify/enqueueFromTask';
 import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../shared/types/verifyRunbook';
 import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
@@ -2021,6 +2028,66 @@ async function initializeServices(): Promise<boolean> {
   // is "any component changing demotes", so both must be (a) stable across calls
   // on an unchanged host — they are compared for equality, not merely stored —
   // and (b) cheap, since `status()` recomputes them on every gated request.
+  // The §5.3 drift probes, hoisted OUT of the store literal so the runbook
+  // BOOTSTRAP keys its §10 suppression on the IDENTICAL hashes the store
+  // demotes a proof on. A suppression is honored only while both still match,
+  // so a second implementation of either would produce one that never expires
+  // or one that never holds.
+  // The §5.3 project INPUT hash: the things that change what "build and serve
+  // this project" MEANS — the package scripts the runbook's commands invoke,
+  // the lockfile (a dependency bump can break a dev server), and the two ABI
+  // facts §1's root cause (c) turned on. Deliberately NOT a hash of the whole
+  // tree: every commit would then demote the runbook, which would make the
+  // proof worthless by expiring it constantly.
+  const verifyComputeInputHash = async (dirPath: string): Promise<string | null> => {
+    try {
+      const raw = await fs.promises.readFile(path.join(dirPath, 'package.json'), 'utf8');
+      const parsed: unknown = JSON.parse(raw);
+      const pkg = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+      const hash = createHash('sha256');
+      hash.update(JSON.stringify(pkg.scripts ?? null));
+      hash.update(String(pkg.packageManager ?? ''));
+      for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb']) {
+        try {
+          hash.update(await fs.promises.readFile(path.join(dirPath, lockfile)));
+        } catch {
+          // absent lockfile — nothing to fold in.
+        }
+      }
+      hash.update(process.versions.node.split('.')[0]);
+      hash.update(process.versions.modules);
+      return hash.digest('hex');
+    } catch {
+      // Could not observe the inputs. The store treats null as "cannot tell",
+      // which fails soft to 'absent' WITHOUT demoting — an inability to look is
+      // not evidence that something changed.
+      return null;
+    }
+  };
+
+  // The §5.3 host fingerprint. The chromium path is the driver's OWN resolution
+  // (the same probe preflight uses), so a chromium that moved or vanished
+  // demotes the proof rather than surfacing ten minutes into a deploy. The TCC
+  // grant state is deliberately excluded: probing it shells the peekaboo binary
+  // on EVERY gated request, and the per-modality capability ledger (§3.3)
+  // already owns grant regressions.
+  const verifyHostFingerprint = async (): Promise<string> => {
+    let chromium: string | null = null;
+    try {
+      chromium = await probeChromiumExecutable();
+    } catch {
+      chromium = null;
+    }
+    return JSON.stringify({
+      chromium,
+      node: process.versions.node.split('.')[0],
+      electronAbi: process.versions.modules,
+      platform: process.platform,
+      arch: process.arch,
+      appPath: app.getPath('exe'),
+    });
+  };
+
   const verifyRunbookStore = new VerifyRunbookStore(cyboflowDb, {
     // ABSENT vs UNREADABLE both answer null: the store's contract is that null
     // means "this tree does not carry the file", which is the ordinary pre-merge
@@ -2033,59 +2100,8 @@ async function initializeServices(): Promise<boolean> {
         return null;
       }
     },
-    // The §5.3 project INPUT hash: the things that change what "build and serve
-    // this project" MEANS — the package scripts the runbook's commands invoke,
-    // the lockfile (a dependency bump can break a dev server), and the two ABI
-    // facts §1's root cause (c) turned on. Deliberately NOT a hash of the whole
-    // tree: every commit would then demote the runbook, which would make the
-    // proof worthless by expiring it constantly.
-    computeInputHash: async (dirPath: string): Promise<string | null> => {
-      try {
-        const raw = await fs.promises.readFile(path.join(dirPath, 'package.json'), 'utf8');
-        const parsed: unknown = JSON.parse(raw);
-        const pkg = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-        const hash = createHash('sha256');
-        hash.update(JSON.stringify(pkg.scripts ?? null));
-        hash.update(String(pkg.packageManager ?? ''));
-        for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb']) {
-          try {
-            hash.update(await fs.promises.readFile(path.join(dirPath, lockfile)));
-          } catch {
-            // absent lockfile — nothing to fold in.
-          }
-        }
-        hash.update(process.versions.node.split('.')[0]);
-        hash.update(process.versions.modules);
-        return hash.digest('hex');
-      } catch {
-        // Could not observe the inputs. The store treats null as "cannot tell",
-        // which fails soft to 'absent' WITHOUT demoting — an inability to look is
-        // not evidence that something changed.
-        return null;
-      }
-    },
-    // The §5.3 host fingerprint. The chromium path is the driver's OWN resolution
-    // (the same probe preflight uses), so a chromium that moved or vanished
-    // demotes the proof rather than surfacing ten minutes into a deploy. The TCC
-    // grant state is deliberately excluded: probing it shells the peekaboo binary
-    // on EVERY gated request, and the per-modality capability ledger (§3.3)
-    // already owns grant regressions.
-    hostFingerprint: async (): Promise<string> => {
-      let chromium: string | null = null;
-      try {
-        chromium = await probeChromiumExecutable();
-      } catch {
-        chromium = null;
-      }
-      return JSON.stringify({
-        chromium,
-        node: process.versions.node.split('.')[0],
-        electronAbi: process.versions.modules,
-        platform: process.platform,
-        arch: process.arch,
-        appPath: app.getPath('exe'),
-      });
-    },
+    computeInputHash: verifyComputeInputHash,
+    hostFingerprint: verifyHostFingerprint,
     logger: cyboflowLogger,
   });
 
@@ -2227,6 +2243,128 @@ async function initializeServices(): Promise<boolean> {
   // existence check observes exactly where the runner wrote the transcript.
   const verifyArtifactsDirResolver = (runId: string): string =>
     getCyboflowSubdirectory('artifacts', 'runs', runId);
+  // ------------------------------------------------------------------------
+  // The lane RUNBOOK BOOTSTRAP (docs/proposals/lane-runbook-bootstrap.md §12).
+  //
+  // Everything below is IO the sequence itself must not own: a git binary, a
+  // filesystem, an SDK query, the scheduler singleton. `runRunbookBootstrap` is
+  // a pure sequence over these closures, which is what lets the whole
+  // draft → validate → commit → register → prove path be unit-tested with no
+  // worktree and no subprocess.
+  //
+  // Gated twice before any of it runs — the project toggle and the kill switch
+  // (combined in `evaluateRunbookBootstrap`), then §4's runbook-situation check.
+  // Default OFF.
+  // ------------------------------------------------------------------------
+  const runbookBootstrapStamps = new RunbookBootstrapStampStore(cyboflowDb, cyboflowLogger);
+  const runbookBootstrapSuppression = new BootstrapSuppressionStore(cyboflowDb, cyboflowLogger);
+  const runbookDraftQuery = makeRunbookDraftQuery(cyboflowLogger);
+
+  const runbookBootstrapRunner = (
+    args: Parameters<typeof runRunbookBootstrap>[0],
+  ): ReturnType<typeof runRunbookBootstrap> =>
+    runRunbookBootstrap(args, {
+      stamps: runbookBootstrapStamps,
+      suppression: runbookBootstrapSuppression,
+      // The READ-ONLY drafting agent (§8). Resolved through the same effective-
+      // agent layering every other bundled agent uses, so its prompt and its
+      // model are overridable per project/workflow exactly like visual-verify's
+      // — this is a bundled agent that happens to be deployed by the controller
+      // rather than bound to a step, not a hardcoded prompt.
+      draft: async (request) => {
+        const effective = resolveRunEffectiveAgents(databaseService.getDb(), request.runId);
+        const agent = effective.find((e) => e.agentKey === 'runbook-bootstrap');
+        if (!agent) {
+          cyboflowLogger?.warn?.('[runbookBootstrap] the runbook-bootstrap agent is not resolvable for this run');
+          return null;
+        }
+        // Claude-only, deliberately: this deployment's whole output is a
+        // structured object validated against a JSON schema, and the query below
+        // is the Claude SDK boundary. A run pinned to another provider gets the
+        // Claude default rather than a deployment that cannot honor the contract.
+        const model =
+          agent.model !== null ? bareModelId(agent.model, isModelUsable) ?? DEFAULT_JUDGE_MODEL : DEFAULT_JUDGE_MODEL;
+        return runbookDraftQuery({
+          prompt: composeRunbookDraftPrompt({
+            modality: request.modality,
+            round: request.round,
+            maxRounds: MAX_BOOTSTRAP_ROUNDS,
+            adopt: request.adopt,
+            existingRunbookRaw: request.existingRunbookRaw,
+            feedback: request.feedback,
+            laneTaskRef: request.laneTaskRef,
+          }),
+          systemPrompt: agent.systemPrompt,
+          cwd: request.worktreePath,
+          model,
+        });
+      },
+      readFile: async (worktreePath, relativePath) => {
+        try {
+          return await fs.promises.readFile(path.join(worktreePath, relativePath), 'utf8');
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (worktreePath, relativePath, content) => {
+        const target = path.join(worktreePath, relativePath);
+        await fs.promises.mkdir(path.dirname(target), { recursive: true });
+        await fs.promises.writeFile(target, content, 'utf8');
+      },
+      // Pathspec commit with index-lock retry — NEVER a bare commit, which in a
+      // worktree five lanes are editing would sweep up whatever they had staged
+      // (§8 check 4).
+      commitPaths: (worktreePath, paths, message) =>
+        commitPathspec({
+          git: (gitArgs) => runGitAsync(worktreePath, gitArgs),
+          paths,
+          message,
+          ...(cyboflowLogger ? { logger: cyboflowLogger } : {}),
+        }),
+      registerDraft: (projectId, worktreePath, modality) =>
+        verifyRunbookStore.registerDraft(projectId, worktreePath, modality),
+      setOrigin: (projectId, modality, origin) => verifyRunbookStore.setOrigin(projectId, modality, origin),
+      // The proof rides the SAME enqueue seam as ordinary lane traffic, with the
+      // migration-105 kind set. `bootstrapProof` is not a wire field and this is
+      // its only writer, which makes it a strictly stronger guarantee than
+      // setup_proof's workflow-identity check (§5).
+      enqueueProof: async ({ runId, laneTaskRef, task, round, runbookHash, runbookLocalVersion }) => {
+        const worktree = rawDb
+          .prepare('SELECT worktree_path AS worktreePath FROM workflow_runs WHERE id = ?')
+          .get(runId) as { worktreePath?: unknown } | undefined;
+        const worktreePath =
+          typeof worktree?.worktreePath === 'string' && worktree.worktreePath.length > 0
+            ? worktree.worktreePath
+            : null;
+        if (worktreePath === null) return { error: 'the run has no worktree to snapshot' };
+        const result = await enqueueTaskVerification({
+          db: cyboflowDb,
+          runId,
+          task,
+          laneTaskRef,
+          // The lane's attempt is irrelevant to the proof's identity — the
+          // `:bootstrap:<round>` generation segment is what makes each round its
+          // own request, and it is appended to this number rather than replacing
+          // it. Pinned at 1 so a lane loopback cannot make round 1 look fresh.
+          attempt: 1,
+          worktreePath,
+          bootstrapProof: true,
+          bootstrapRound: round,
+          runbookHash,
+          runbookLocalVersion,
+          ...(cyboflowLogger ? { logger: cyboflowLogger } : {}),
+        });
+        return result.outcome === 'enqueued'
+          ? { requestId: result.requestId }
+          : { error: result.reason };
+      },
+      awaitProof: (requestId, timeoutMs) =>
+        VerificationScheduler.getInstance().awaitTerminal(requestId, timeoutMs),
+      computeInputHash: verifyComputeInputHash,
+      hostFingerprint: verifyHostFingerprint,
+      ...(cyboflowLogger ? { logger: cyboflowLogger } : {}),
+    });
+
   VerificationScheduler.initialize({
     db: cyboflowDb,
     backends: {
@@ -2294,6 +2432,11 @@ async function initializeServices(): Promise<boolean> {
     // SAME backend instance registered above, so the agent path and the legacy
     // capture path can never disagree about this host's screen capability.
     nativeCaptureProbe: () => peekabooBackend.healthCheck(),
+    // §12 steps 3–8: derive, commit, register and PROVE a runbook for a lane
+    // whose verification would otherwise be skipped. The scheduler owns the
+    // DECISION (it holds the toggle and the runbook status); this closure is the
+    // ACTING half, assembled above out of IO the scheduler must not hold.
+    runbookBootstrap: runbookBootstrapRunner,
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).

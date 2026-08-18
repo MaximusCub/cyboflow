@@ -149,11 +149,11 @@ const FAN_OUT_INNER_KEYS = ['implement', 'write-tests', 'code-review', 'task-ver
 describe('cyboflow.agents.list', () => {
   beforeEach(() => AgentOverrideRouter._resetForTesting());
 
-  it('returns the 19 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
+  it('returns the 20 builtins, all source "builtin", isOverridden:false, costUsd null', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
     const entries = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
 
-    expect(entries).toHaveLength(19);
+    expect(entries).toHaveLength(20);
     for (const e of entries) {
       expect(e.source).toBe('builtin');
       expect(e.isOverridden).toBe(false);
@@ -394,7 +394,7 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
     expect(deleted).toEqual({ ok: true });
 
     const afterDelete = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
-    expect(afterDelete).toHaveLength(19);
+    expect(afterDelete).toHaveLength(20);
   });
 
   it('createCustom CONFLICTs on a reserved builtin key', async () => {

@@ -5285,6 +5285,15 @@ export class McpQueryHandler {
         });
         return;
       }
+      // Migration-105 provenance: THIS registration came through the Verify
+      // Setup flow, where a human reviews the proposal and every repo change it
+      // wants before anything is touched. The lane bootstrap stamps
+      // 'lane-bootstrap' on its own registrations, and a human deciding whether
+      // to trust a proven runbook needs to be able to tell the two apart — both
+      // are proven by the same engine-enforced run, and they did not earn the
+      // same amount of trust. Fail-soft: a badge that could not be written must
+      // never undo a registration that succeeded.
+      store.setOrigin(ctx.projectId, msg.modality, 'setup-flow');
       // COMMITTED-AT-HEAD backstop. registerDraft reads the WORKING TREE, but
       // the proof runs against a detached snapshot at a commit — so a runbook
       // that never reached HEAD registers cleanly and then proves against a
