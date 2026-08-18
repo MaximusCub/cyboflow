@@ -313,6 +313,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getLastCommits: (sessionId: string, count: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-last-commits', sessionId, count),
     getBranchCommitSubjects: (sessionId: string): Promise<IPCResponse<{ subjects: string[] }>> =>
       ipcRenderer.invoke('sessions:get-branch-commit-subjects', sessionId),
+    getDeliveryState: (
+      sessionId: string,
+    ): Promise<IPCResponse<{ delivered: boolean; landed: boolean; ownCommits: number }>> =>
+      ipcRenderer.invoke('sessions:get-delivery-state', sessionId),
+    markComplete: (sessionId: string): Promise<IPCResponse<{ stamped: number }>> =>
+      ipcRenderer.invoke('sessions:mark-complete', sessionId),
     
     // Git operation helpers
     hasChangesToRebase: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:has-changes-to-rebase', sessionId),

@@ -30,6 +30,7 @@ import {
   recoverArchivedSessionRunOrphans,
   dismissPendingReviewItemsForSession,
   backfillArchivedSessionReviewItems,
+  sessionDeliveredWork,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
@@ -961,6 +962,17 @@ describe('archived-session review-item sweeps', () => {
     await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
 
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
+  });
+
+  it('sessionDeliveredWork answers for the session, not the individual run', async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+
+    expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(false);
+    db.prepare(`UPDATE workflow_runs SET outcome = 'completed' WHERE id = 'run-direct'`).run();
+    expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(true);
+    // A different session is unaffected.
+    expect(sessionDeliveredWork(adapter, 'sess-active')).toBe(false);
   });
 
   it('boot backfill carries the same carve-out, so a restored finding survives the next launch', async () => {

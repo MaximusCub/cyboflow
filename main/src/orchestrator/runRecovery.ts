@@ -105,6 +105,33 @@ async function dismissPendingReviewItemRows(
 }
 
 /**
+ * Whether any run this session hosted recorded a DELIVERED outcome — the
+ * db-side half of "did this session's work land?" (the git-side half is
+ * WorktreeManager.getBranchLandingState).
+ *
+ * Read by the session close-out UI to decide whether dismissing would throw
+ * away findings that still apply, and it is the same set the archive sweeps
+ * carve findings out on. Fail-soft: a query failure reports false, which only
+ * ever costs the operator an extra confirmation.
+ */
+export function sessionDeliveredWork(db: DatabaseLike, sessionId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 AS delivered
+           FROM workflow_runs
+          WHERE session_id = ?
+            AND outcome IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}
+          LIMIT 1`,
+      )
+      .get(sessionId) as { delivered: number } | undefined;
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Dismiss the pending review items attached to any run hosted by one session,
  * EXCEPT the findings of a session whose work was delivered (see
  * {@link DELIVERED_SESSION_FINDING_CARVE_OUT}).

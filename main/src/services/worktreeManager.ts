@@ -22,6 +22,21 @@ interface RawCommitData {
 const execAsync = promisify(exec);
 
 /**
+ * Machine-readable tag for "this branch has nothing left to merge — its work is
+ * already in the main branch". Both merge methods below throw it, and both merge
+ * IPC handlers translate it into an `alreadyUpToDate` result instead of a
+ * "Merge failed" toast: the usual cause is that the AGENT merged the work in
+ * chat, so the right next step is to mark the session complete, not to report a
+ * failure. Matched on this code, never on the message text.
+ */
+export const ALREADY_UP_TO_DATE_CODE = 'already_up_to_date';
+
+/** Tag an Error with {@link ALREADY_UP_TO_DATE_CODE} and return it. */
+function alreadyUpToDate(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: ALREADY_UP_TO_DATE_CODE });
+}
+
+/**
  * Narrow seam for the Codex-broker reaper (see {@link CodexBrokerReaper}). Worktree
  * removal is the single chokepoint every dismiss/merge/delete path funnels through,
  * so it is where we reap the detached `openai-codex` plugin broker daemons rooted in
@@ -540,6 +555,126 @@ export class WorktreeManager {
     return await this.getProjectMainBranch(project.path);
   }
 
+  /**
+   * Whether this worktree's branch appears to have ALREADY LANDED in the main
+   * branch — the "the agent merged it for me in chat" case, which our own merge
+   * path never observed and therefore never stamped.
+   *
+   * Answering this from git is unavoidably heuristic, because a landing can
+   * rewrite the commits: a squash produces one commit with different SHAs and a
+   * different shape, a cherry-pick or rebase produces equivalent patches with
+   * new SHAs. So we ask three questions and accept any yes:
+   *
+   *   1. `rev-list <main>..HEAD` is empty — every commit is literally in main
+   *      (a fast-forward or rebase landing).
+   *   2. `git cherry` reports no '+' commits — every commit has a patch
+   *      equivalent in main (cherry-pick / rebase-with-new-SHAs).
+   *   3. `git diff <main> HEAD` is empty — the two trees are identical, which is
+   *      what a squash landing leaves behind when main has not moved on.
+   *
+   * `ownCommits` (measured from git's own `--fork-point`, falling back to a
+   * plain merge-base) is what keeps an EMPTY session quiet: with no commits of
+   * its own, questions 1 and 3 are vacuously true, and prompting the operator to
+   * "mark complete" a session that did nothing would be pure noise. A session
+   * that never committed reports landed=false.
+   *
+   * False negatives are the safe direction and are expected — a squash landing
+   * followed by unrelated commits on main answers no to all three. The operator
+   * still reaches the same decision through the merge dialog's
+   * already-up-to-date path.
+   *
+   * Never throws: any git failure reports landed=false (fail-closed — a probe
+   * that cannot see the repo must not claim work landed).
+   */
+  async getBranchLandingState(
+    worktreePath: string,
+    mainBranch: string,
+  ): Promise<{ landed: boolean; ownCommits: number; commitsAhead: number }> {
+    const notLanded = { landed: false, ownCommits: 0, commitsAhead: 0 };
+    try {
+      const branch = escapeShellArg(mainBranch);
+
+      // git's own fork-point heuristic (it consults main's reflog, so it still
+      // answers after a fast-forward landing swallowed the branch); plain
+      // merge-base is the fallback when there is no reflog to consult.
+      let fork = '';
+      try {
+        const { stdout } = await execWithShellPath(`git merge-base --fork-point ${branch} HEAD`, { cwd: worktreePath });
+        fork = stdout.trim();
+      } catch {
+        fork = '';
+      }
+      if (fork === '') {
+        const { stdout } = await execWithShellPath(`git merge-base ${branch} HEAD`, { cwd: worktreePath });
+        fork = stdout.trim();
+      }
+      if (fork === '') return notLanded;
+
+      const { stdout: ownRaw } = await execWithShellPath(
+        `git rev-list --count ${escapeShellArg(fork)}..HEAD`,
+        { cwd: worktreePath },
+      );
+      let ownCommits = Number.parseInt(ownRaw.trim(), 10) || 0;
+
+      const { stdout: aheadRaw } = await execWithShellPath(`git rev-list --count ${branch}..HEAD`, { cwd: worktreePath });
+      const commitsAhead = Number.parseInt(aheadRaw.trim(), 10) || 0;
+
+      if (ownCommits === 0) {
+        // A FAST-FORWARD landing hides the fork: main now points AT our tip, so
+        // --fork-point answers HEAD and the branch looks like it did nothing.
+        // That is the same fingerprint an untouched session leaves (HEAD == main,
+        // nothing ahead) — and the two need opposite answers. The per-worktree
+        // HEAD reflog separates them: it records this branch's own commits
+        // regardless of what main later absorbed.
+        if (commitsAhead > 0) return notLanded; // behind main with nothing of ours
+        ownCommits = await this.countOwnCommitsFromReflog(worktreePath);
+        if (ownCommits === 0) return notLanded; // genuinely untouched session
+        return { landed: true, ownCommits, commitsAhead };
+      }
+
+      if (commitsAhead === 0) return { landed: true, ownCommits, commitsAhead };
+
+      // Patch-equivalence: '+' marks a commit with no equivalent in main.
+      const { stdout: cherry } = await execWithShellPath(`git cherry ${branch} HEAD`, { cwd: worktreePath });
+      const unapplied = cherry.split('\n').filter((line) => line.trim().startsWith('+'));
+      if (cherry.trim() !== '' && unapplied.length === 0) {
+        return { landed: true, ownCommits, commitsAhead };
+      }
+
+      // Identical trees — the shape a squash landing leaves behind.
+      try {
+        await execWithShellPath(`git diff --quiet ${branch} HEAD`, { cwd: worktreePath });
+        return { landed: true, ownCommits, commitsAhead };
+      } catch {
+        // Non-zero exit means the trees differ: real unmerged work.
+      }
+
+      return { landed: false, ownCommits, commitsAhead };
+    } catch (error) {
+      console.error(`[WorktreeManager] getBranchLandingState failed for ${worktreePath}:`, error);
+      return notLanded;
+    }
+  }
+
+  /**
+   * How many commits this worktree made on its own branch, read from the
+   * PER-WORKTREE HEAD reflog (`commit` / `commit (amend)` / `commit (initial)`
+   * entries). Only consulted when the commit graph has stopped being able to
+   * answer — see the fast-forward branch in {@link getBranchLandingState}.
+   *
+   * Reflogs are local and expirable, so this is best-effort by nature; it fails
+   * closed (0), which reports "not landed" and costs the operator nothing more
+   * than the plain dismiss confirmation.
+   */
+  private async countOwnCommitsFromReflog(worktreePath: string): Promise<number> {
+    try {
+      const { stdout } = await execWithShellPath('git reflog show --format=%gs HEAD', { cwd: worktreePath });
+      return stdout.split('\n').filter((line) => /^commit(\s|:)/.test(line.trim())).length;
+    } catch {
+      return 0;
+    }
+  }
+
   async hasChangesToRebase(worktreePath: string, mainBranch: string): Promise<boolean> {
     try {
       // Check if main branch has commits that the current branch doesn't have
@@ -811,7 +946,7 @@ export class WorktreeManager {
         const { stdout: commits, stderr: stderr3 } = await execWithShellPath(command, { cwd: worktreePath });
         lastOutput = commits || stderr3 || '';
         if (!commits.trim()) {
-          throw new Error(`No commits to squash. The branch is already up to date with ${mainBranch}.`);
+          throw alreadyUpToDate(`No commits to squash. The branch is already up to date with ${mainBranch}.`);
         }
 
         // Now squash all commits since base (main's tip) into one
@@ -872,6 +1007,12 @@ export class WorktreeManager {
         gitError.workingDirectory = worktreePath;
         gitError.projectPath = projectPath;
         gitError.originalError = err;
+        // Carry the machine-readable tag through the wrap: the caller decides
+        // between "merge failed" and "already landed" on the code, and the wrap
+        // replaces the message it would otherwise have to match on.
+        if ((err as { code?: string }).code === ALREADY_UP_TO_DATE_CODE) {
+          (gitError as { code?: string }).code = ALREADY_UP_TO_DATE_CODE;
+        }
 
         throw gitError;
       }
@@ -898,7 +1039,7 @@ export class WorktreeManager {
         const { stdout: commits, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
         lastOutput = commits || stderr2 || '';
         if (!commits.trim()) {
-          throw new Error(`No commits to merge. The branch is already up to date with ${mainBranch}.`);
+          throw alreadyUpToDate(`No commits to merge. The branch is already up to date with ${mainBranch}.`);
         }
 
         // SAFETY CHECK 1: Rebase worktree onto main FIRST (resolves conflicts in worktree, not main)
@@ -966,6 +1107,12 @@ export class WorktreeManager {
         gitError.workingDirectory = worktreePath;
         gitError.projectPath = projectPath;
         gitError.originalError = err;
+        // Carry the machine-readable tag through the wrap: the caller decides
+        // between "merge failed" and "already landed" on the code, and the wrap
+        // replaces the message it would otherwise have to match on.
+        if ((err as { code?: string }).code === ALREADY_UP_TO_DATE_CODE) {
+          (gitError as { code?: string }).code = ALREADY_UP_TO_DATE_CODE;
+        }
 
         throw gitError;
       }
