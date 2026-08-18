@@ -453,8 +453,21 @@ stops paying.
   the scheduler's gate passes `worktreePathForRun(row.run_id) ?? undefined` (the
   same ladder `resolveProvenRunbook` uses), and omitting it still resolves to the
   project root, which is the level the health badge's question is asked at.
-- **Phase 2 — the preflight.** Shared exported predicate, persisted stamp, toggle +
-  kill switch, degrade paths and findings. No agent yet; logs and falls through.
+- **Phase 2 — the preflight.** ✅ *shipped.* Shared exported predicate
+  (`bootstrapEligibility.ts`), persisted stamp (migration 106 +
+  `bootstrapStampStore.ts`), toggle + kill switch, degrade paths and findings.
+  No agent yet; logs and falls through.
+
+  Two things the phase resolved beyond the list. **The degrade paths landed as
+  real remedies, not logs**: the gate now emits its own skip reason for
+  `proven-file-absent-here`, `drifted`, and `indeterminate`, and verdictDelivery
+  attaches the matching guidance — the pre-merge case explicitly says *merge the
+  branch, do not re-run setup*, because the default CTA is the destructive
+  instruction there. The bootstrappable situations keep `VERIFY_NO_RUNBOOK_REASON`
+  verbatim, so every existing consumer matches what it always matched. **The
+  preflight sits in `enqueueTaskVerification`, before the shared preparation** —
+  the last moment a decision exists, since a `skipped` terminal burns the enqueue
+  key that step 8's re-enqueue needs.
 - **Phase 3 — draft and prove.** The read-only agent, controller validation +
   pathspec commit, the three typed rung-1 operations (§8.1) with their denylist and
   separate commit, `registerDraft`, the attestation-only proof via `awaitTerminal`,
