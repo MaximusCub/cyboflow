@@ -6,6 +6,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Findings no longer die with the session that produced them.** Archiving a session dismissed every pending review item it had filed — and the merge and create-PR dialogs archive the session the moment the work is away, so a successful merge destroyed its own findings milliseconds later. Since the Insights compounding surface only offers findings from a session that landed its work, and landing the work was exactly what deleted them, the surface was unreachable by construction. The archive sweeps (live and the boot backfill) now keep the findings of a session whose work was delivered, and migration 106 restores the rows already lost. Gates are still dismissed: a permission prompt on an archived session can never be actioned.
+
+### Added
+
+- **Mark complete**, for work that landed by a path the app never saw (the agent merged it in chat). Dismissing a session whose commits are already in the main branch now offers it instead of discarding the session outright, and a merge that finds nothing left to merge offers it in place of a "Merge failed" error. Creating a pull request no longer closes the session out on its own — it asks whether to mark it complete or keep it open.
+
 ## [0.2.3] — 2026-08-15
 
 ### Added
