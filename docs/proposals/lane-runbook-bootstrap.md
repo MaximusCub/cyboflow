@@ -147,11 +147,22 @@ branch predating the runbook merge would therefore derive a fresh runbook and
 verification precisely for the projects that set it up properly.
 
 **v2:** `VerifyRunbookStore` grows `statusDetail()`, returning the reason
-discriminant alongside the three-valued answer
-(`'no-record' | 'draft' | 'proven-file-absent-here' | 'drifted'`). The preflight
-fires only on `'no-record'` and `'draft'`. `'proven-file-absent-here'` degrades to
-today's skip with a finding that says so — the runbook exists, merge the branch
-that carries it.
+discriminant alongside the three-valued answer. The preflight never fires on
+`'proven-file-absent-here'`, which degrades to today's skip with a finding that
+says so — the runbook exists, merge the branch that carries it.
+
+*As implemented (phase 1),* the discriminant is a superset of the four named
+above: `status()` already distinguishes two more situations internally, and
+folding them in would reintroduce exactly the collapse this type exists to
+prevent. The full set is `'proven' | 'no-record' | 'file-only' | 'draft' |
+'proven-file-absent-here' | 'drifted' | 'indeterminate'`, where `'file-only'` is
+"no record, but this tree carries a parseable runbook a teammate committed"
+(adopt and prove it rather than author a competing one) and `'indeterminate'` is
+the fail-soft `'absent'` — a pre-096 DB, a SQL error, an input hash that would
+not compute. `'indeterminate'` is emphatically **not** `'no-record'`: "I could
+not look" is not "nothing is there", and a writing caller must treat it as *do
+not touch*. `status()` is now a projection of `statusDetail()` so the gate's
+view and a writer's view cannot be computed by two paths that drift.
 
 ---
 
@@ -430,14 +441,18 @@ stops paying.
 
 ## 13. Phasing
 
-- **Phase 0 — seam, dark.** Migration 107 (`verification_requests.bootstrap_proof`,
+- **Phase 0 — seam, dark.** ✅ *shipped.* Migration 107 (`verification_requests.bootstrap_proof`,
   `verify_runbook_local.origin`); `bootstrapProof` on `enqueueTaskVerification`;
   budget-counted + gate-exempt + promotion-eligible; **kind-based exclusion** from
   `applyMergeGateVerdict`, `verdictDelivery`, and `SchedulerVisualVerifyGate`;
   `:bootstrap:<round>` enqueue-key generation. Fully unit-testable.
-- **Phase 1 — honesty in the store.** `statusDetail()` (§4) and the gate probe-path
-  change (§3, decision B), each with its own tests — this phase is independently
-  valuable and lands the latent probe-path disagreement fix.
+- **Phase 1 — honesty in the store.** ✅ *shipped.* `statusDetail()` (§4) and the
+  gate probe-path change (§3, decision B), each with its own tests — this phase is
+  independently valuable and lands the latent probe-path disagreement fix. The
+  probe path threads as an OPTIONAL third argument on the `runbookStatus` thunk:
+  the scheduler's gate passes `worktreePathForRun(row.run_id) ?? undefined` (the
+  same ladder `resolveProvenRunbook` uses), and omitting it still resolves to the
+  project root, which is the level the health badge's question is asked at.
 - **Phase 2 — the preflight.** Shared exported predicate, persisted stamp, toggle +
   kill switch, degrade paths and findings. No agent yet; logs and falls through.
 - **Phase 3 — draft and prove.** The read-only agent, controller validation +
