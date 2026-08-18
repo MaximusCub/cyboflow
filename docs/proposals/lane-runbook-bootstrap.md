@@ -1,531 +1,460 @@
 # Lane runbook bootstrap — verification that sets itself up
 
-**Status:** proposal, pre-implementation
-**Scope decisions locked by the user (2026-08-17):** autonomous (no human gate) at
-**rung 0/1 only**; **sprint + ship lanes only** (the controller-owned `visual-verify`
-step), not the orchestrated MCP path.
-**Related:** `verification-setup-flow.md` (the runbook contract, the degrade gate,
-the proof-by-running rule), `verification-agent-redesign.md` (§5.3 the agentless
-visual-verify step, §5.4 the central scheduler, §7.2 the dependency guard).
+**Status:** proposal, v2 — rewritten after adversarial review
+**Review history:** v1 was reviewed independently by Codex and by a Fable agent.
+Codex returned 8 blocking defects; Fable returned 9 more that Codex missed and
+judged v1 **not salvageable in its proposed shape**. Five of Codex's and two of
+Fable's were verified against the code by hand. v1's design is discarded; §16
+records what it got wrong, because those mistakes are the reason this version is
+shaped the way it is.
+**Two decisions in §15 are the user's to make** and implementation should not
+start before they are answered — one of them relaxes a constraint the user locked.
+
+**Related:** `verification-setup-flow.md` (runbook contract, §3.2 degrade gate,
+proof-by-running), `verification-agent-redesign.md` (§5.3 agentless visual-verify,
+§7.2 dependency guard).
 
 ---
 
 ## 1. The problem
 
 A sprint lane composes a visual-verification task, the controller enqueues it, the
-lane parks at `awaiting-verify` — and then, on the overwhelming majority of
-projects, nothing is verified. The third pre-lease gate
-(`verificationScheduler.ts:2723`) asks two questions:
+lane parks at `awaiting-verify` — and on nearly every project, nothing is verified.
+The third pre-lease gate (`verificationScheduler.ts:2727`) skips any task that has
+to build or serve the deliverable unless the project already has a **proven**
+runbook. `verdictDelivery.ts:376` attaches a CTA pointing at the **Verify Setup**
+flow — a separate flow a human must launch, with two human gates of its own — and
+`mergeGateLaneAdvance` advances the lane to `integrated`. The sprint completes with
+a green lane no camera looked at.
 
-```ts
-const derivesEnvironment =
-  (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
-if (derivesEnvironment && (await this.runbookStatus(row.project_id, modality)) !== 'proven') {
-  return VERIFY_NO_RUNBOOK_REASON;
-}
-```
+We have direct evidence of the dead end from inside the product: an ad-hoc
+verification fired from a chat session comes back `skipped` for this reason, and
+`setup_proof` — the one request kind that could break the deadlock — is refused
+outside the verify-setup flow.
 
-Any task that has to build or serve the deliverable — i.e. every real one — is
-skipped unless the project already has a **proven** runbook.
-`verdictDelivery.ts:376` attaches a CTA ("run verification setup for this
-project"), `mergeGateLaneAdvance` advances the lane to `integrated`, and the sprint
-completes with a green lane that no camera ever looked at.
+That posture was the correct reaction to a real failure: the agent engine used to
+guess the environment per-run with no memory and guessed wrong every time (0-for-5
+in production). But **"stop guessing" and "stop trying" are different rules.** The
+setup flow already contains what makes an attempt safe — derive, register, and
+*prove by actually running it*, with only a passing run flipping a draft to proven,
+and the engine rather than the agent doing the flipping. What is missing is an
+autonomous entry point.
 
-The CTA points at the **Verify Setup** flow, which is a *separate flow a human must
-launch*, with two human gates of its own. So the default posture of centralized
-visual verification, on a project nobody has hand-configured, is: **do not verify,
-tell someone to go configure it.** In practice nobody does, and the skip is
-permanent. We have direct evidence of the dead end from inside the product: an
-ad-hoc verification fired from a chat session comes back `skipped` for exactly this
-reason, and `setup_proof` — the one request kind that *could* break the deadlock —
-is refused outside the verify-setup flow.
-
-That posture was a deliberate and correct reaction to §1 of the setup-flow
-proposal: the agent engine used to guess the environment per-run with no memory and
-guessed wrong every single time (0-for-5 in production — wrong serve form,
-colliding singletons, wrong native ABI, blown deadline). Guessing bought nothing
-but a burned deadline and a lane charged for someone else's occupied port.
-
-**But "stop guessing" and "stop trying" are not the same rule.** The setup flow
-already contains the machinery that makes an attempt safe: derive → register →
-**prove by actually running it** → and *only a passing run* flips a draft to
-proven. The engine, not the agent, does the flipping. What is missing is not
-safety; it is an *autonomous entry point*. Today the only thing that can pull that
-lever is a flow a human has to remember to run.
-
-**This proposal makes the no-runbook skip self-healing.** When a lane's
-verification is about to be skipped for want of a runbook, the lane instead drafts
-one, commits it, registers it, and proves it — using the very task it was trying to
-verify as the proof vehicle. A pass verifies the deliverable *and* leaves the
-project permanently verifiable. A failure lands exactly where we are today: an
-unproven draft, a skipped verification, an advanced lane, and an honest finding.
-
-**The bar this must clear:** it must be impossible for this feature to make a
-verification *pass* that would not otherwise have passed. It only ever converts
-"skipped" into "actually ran". Every mechanism below is in service of that.
+**The bar.** It must be impossible for this feature to make a verification *pass*
+that would not otherwise have passed. It may only convert "skipped" into "actually
+ran". v1 claimed this bar and did not meet it (§16). Everything below exists to
+meet it.
 
 ---
 
-## 2. Design in one page
+## 2. What the reviews changed
 
-Add one conditional step to the sprint/ship lane chain, `runbook-bootstrap`,
-entered **only** when the central verifier skipped a lane's request with
-`VERIFY_NO_RUNBOOK_REASON`.
+v1 tried to implement this by **adding a lane step**. That single decision put an
+autonomous, file-writing agent inside four seams that each already have a strong
+owner and a documented invariant:
 
-```
-implement → write-tests → code-review → task-verify → visual-verify → awaiting-verify
-                                                                            │
-                                              skip: no proven runbook ──────┤
-                                                                            ▼
-                                                                   runbook-bootstrap
-                                                                            │
-                                                    draft → commit → register → prove
-                                                                            │
-                                    ┌───────────────────────┬───────────────┴────────┐
-                                 PASS                     FAIL                  exhausted
-                                    │                        │                       │
-                       runbook PROVEN +          disambiguate (§6):          degrade to
-                       lane VERIFIED             runbook? or code?           today's behavior
-                       → integrated              → retry / loop back          (skip + CTA)
-```
+- the **shared lane worktree and its single git index**,
+- the **both-plane `fanOut.inner` contract**,
+- the **merge-gate verdict path**,
+- and an **idempotency scheme** that was never designed for a second request per
+  lane attempt.
 
-Five properties carry the design:
+It broke all four. The fix is not eight patches; it is to stop threading the
+bootstrap through machinery built for something else. v2 is **smaller, earlier, and
+read-only where v1 was late and write-capable**:
 
-1. **The proof is engine-enforced, unchanged.** The bootstrap never marks anything
-   proven. It registers a draft and fires a pinned proof request; the scheduler's
-   existing `recordRunbookProof` flips the record only on a PASS with a real
-   snapshot sha. A bootstrap that lies produces nothing.
-2. **The lane's own task is the proof vehicle** (§6), so the happy path costs one
-   deployment and simultaneously answers "does this project stand up" and "does
-   this lane's change look right".
-3. **One bootstrap per run per modality** (§7), so N parallel lanes cost one
-   attempt, not N.
-4. **The rung ceiling is mechanical, not prose** (§8) — a committed-diff guard,
-   not an instruction an agent may talk itself past.
-5. **Exhaustion is byte-identical to today** (§9). The feature can only add
-   outcomes above the current floor.
-
----
-
-## 3. Why not just widen `setup_proof`
-
-`setup_proof: true` is exactly the capability the bootstrap needs: exempt from the
-degrade gate, and a PASS flips the pinned record to proven. It is tempting to
-authorize sprint runs to set it.
-
-**Do not.** `setup_proof` carries three privileges bundled together
-(`verificationScheduler.ts:1623`): degrade-gate exemption, **lifetime-budget
-exemption**, and lower-priority draining. The budget exemption is safe for a flow a
-human explicitly launched once per project; it is not safe for a flag any lane can
-reach for on every sprint. The MCP handler's own comment names the exact hazard —
-"a compound lane reaching for `setup_proof: true` because it read the verify-setup
-workflow prompt once" — and the handler answers it by pinning authorization to the
-run's **frozen workflow identity** (`mcpQueryHandler.ts:4607`). Widening that check
-dissolves the guarantee for the case it was written to stop.
-
-Instead, introduce a **distinct, narrower kind**:
-
-| | `setup_proof` | `bootstrap_proof` (new) |
+| | v1 | v2 |
 |---|---|---|
-| Degrade gate (§3.2) | exempt | **exempt** |
-| Lifetime verify budget | exempt, never charged | **counted and charged** |
-| Drain priority | lower than lane traffic | ordinary lane priority |
-| Flips a pinned record to proven on PASS | yes | **yes** |
-| Settable over the MCP wire | yes, verify-setup runs only | **never — not a wire field at all** |
-| Set by | the verify-setup orchestrator agent | the programmatic controller seam only |
+| Trigger | react to the skip in the merge gate | **preflight before enqueue**, at the controller seam |
+| Who writes files | the drafting agent, into the shared worktree | **the controller**, one file, pathspec commit |
+| Drafting agent tools | Read/Grep/Glob/Bash/Write/Edit | **read-only** (no Write, no Edit, no git) |
+| Rung ceiling | 0/1, guarded by a committed-diff check | **rung 0 only** (see §15, decision A) |
+| Proof shape | lane's full task, then a probe on failure | **one attestation-only proof** |
+| Proof verdict path | the merge gate | **`awaitTerminal`, outside the merge gate entirely** |
+| Waiting lanes | park, then re-fire | **degrade to today's skip; next run verifies** |
+| Single-flight | in-memory mutex | **persisted run-scoped stamp** |
 
-The last row is the important one. `bootstrapProof` is a parameter of
-`enqueueTaskVerification` (the in-process controller capability), **not** a field
-`mcpQueryHandler` reads. No agent, in any flow, can request it — which is a
-strictly stronger guarantee than `setup_proof`'s workflow-identity check, and it
-means this proposal adds **zero** new surface an agent can talk its way past.
+Every row is a defect being deleted rather than fixed.
 
 ---
 
-## 4. Where the bootstrap is triggered
+## 3. The blocking discovery: the gate probes the wrong tree
 
-Two candidate hook points:
-
-- **(A) Enqueue-side pre-check** — before enqueuing, ask `runbookStatus` and
-  bootstrap if unproven.
-- **(B) Post-skip reaction** — enqueue normally, let the gate skip, react to the
-  skip reason.
-
-**Choose (B).** The gate predicate (`derivesEnvironment && status !== 'proven'`)
-must have exactly one home. `prepareVerificationEnqueue` already documents why the
-enqueue path deliberately refuses to re-implement the gate — "every unhappy path is
-UNPINNED, not FAILED … the §3.2 degrade gate then gives the honest answer
-downstream". Re-deriving it enqueue-side is precisely the duplication that
-`enqueueFromTask.ts`'s shared-preparation header exists to prevent, and a widened
-predicate on one side and not the other is a silent divergence.
-
-So: the request is enqueued, the gate skips it as it does today, and the reaction
-keys on the **already-exported** `VERIFY_NO_RUNBOOK_REASON` constant —
-`verdictDelivery` already matches on that exact string, so the string is already a
-load-bearing contract rather than a new one.
-
-Concretely, `decideMergeGate` gains one action:
+The finding that most shapes v2, and which v1 had no idea about
+(`main/src/index.ts:2055-2064`):
 
 ```ts
-| { kind: 'bootstrap-runbook'; modality: VerificationModality }
+// Probed against the PROJECT path — both ask a project-level question … while the
+// enqueue-time injection (scheduler.resolveProvenRunbook) probes the requesting
+// RUN's worktree, which is the tree whose commands would actually execute.
+verifyRunbookStatus = async (projectId, modality) => {
+  const projectPath = databaseService.getProject(projectId)?.path;
+  if (!projectPath) return 'absent';
+  return verifyRunbookStore.status(projectId, projectPath, modality);
+};
 ```
 
-returned in place of `advance-integrated` when **all** of:
+The degrade gate probes the **project root**. The enqueue-time runbook injection
+probes the **run worktree**. A runbook a lane commits to its session branch is
+therefore invisible to the gate until that branch merges — so even after a
+successful proof, every ordinary request in the same run still skips with
+`VERIFY_NO_RUNBOOK_REASON`. Combined with the singleton-record hazard (§4), each
+pre-merge run would re-bootstrap and re-demote the record: **steady-state thrash.**
 
-- `status === 'skipped'` and `error_message === VERIFY_NO_RUNBOOK_REASON`; and
-- the run is a programmatic sprint/ship fan-out with a live controller; and
-- auto-bootstrap is enabled (§11) and not suppressed for this (project, modality)
-  in the capability ledger; and
-- this run has not already spent its bootstrap attempt for this modality (§7).
+v1's entire §7 payoff — waiting lanes re-firing into a now-proven runbook — was
+unreachable in the current wiring, and no amount of care inside the lane would have
+revealed it.
 
-Any of those failing ⇒ `advance-integrated`, i.e. today's behavior, unchanged.
-
-`verdictDelivery` correspondingly suppresses the "run verification setup" CTA for a
-skip that is being bootstrapped — telling a human to go configure something we are
-in the middle of configuring is noise — and files an informational finding naming
-the bootstrap instead.
-
----
-
-## 5. The bootstrap step
-
-### 5.1 Lane vocabulary and chain placement
-
-`SPRINT_LANE_STEP_IDS` (`shared/types/sprintBatch.ts:136`) gains
-`'runbook-bootstrap'`, appended **last**, after `awaiting-verify`. It is a fan-out
-inner step in both `sprint` and `ship` definitions
-(`shared/types/workflows.ts:877` and `:1171`), marked `optional: true`:
-
-```ts
-{ id: 'runbook-bootstrap', agent: 'runbook-bootstrap', name: 'Verify setup', optional: true },
-```
-
-Ordering rationale: the array's order feeds the monotonic-forward guard in
-`deriveLaneFromTaskDispatch`, which infers lane position from *agent dispatches* on
-the orchestrated plane. Placing the new step last means an inferred lane can never
-regress into it. The programmatic controller drives it **explicitly** via
-`driveLane`, which is not subject to that guard (the visual FAIL loopback to
-`implement` already regresses this way), so an explicit entry from `awaiting-verify`
-is legal while an inferred one is impossible. This step is never entered on the
-orchestrated plane at all — the scope decision is programmatic lanes only.
-
-The controller's inner-step loop skips it unconditionally in normal flow (`continue`
-when no bootstrap is pending), exactly as `visual-verify` skips when nothing was
-composed.
-
-### 5.2 The agent
-
-New subagent `runbook-bootstrap`, installed into the sprint and ship bundles
-(`main/src/orchestrator/workflows/{sprint,ship}/agents/runbook-bootstrap.md`).
-Tools: `Read, Grep, Glob, Bash, Write, Edit`.
-
-Its prompt body is largely a **narrowed fork of the existing
-`cyboflow-verify-setup` agent** — the survey and derive halves — plus the write and
-commit that the setup flow keeps in its orchestrator. The narrowing is the point:
-
-- **One modality only** — the one the lane's task resolves to. No multi-modality
-  survey, no composition of an Electron + native-screen pair.
-- **Rung 0/1 only.** Rung 2 (source diffs) is not proposable. If the agent
-  concludes the project cannot be stood up without a rung-2 change, it returns
-  `BOOTSTRAP: NOT-POSSIBLE — <reason>` and the lane degrades (§9). Saying so is a
-  success for this agent, not a failure.
-- **Writes exactly two things**: `.cyboflow/verify-runbook.json`, and at most one
-  rung-1 config edit. It commits them itself (the lane's shared worktree; the
-  runbook must be committed before it can be proven, because the verifier runs a
-  detached checkout at a sha) using `git add -f`, since `.cyboflow/` is commonly
-  ignored and a plain `git add` there is a silent no-op that reports success.
-- **Never registers, never fires a verification, never marks anything proven.**
-  Subagents do not write cyboflow state — the controller does. It returns a fenced
-  machine-readable result:
-
-  ````
-  ## Runbook bootstrap
-  ```json
-  { "modality": "cdp-app", "committed": "<sha>", "bindings": { ... },
-    "rung": 1, "changedFiles": [".cyboflow/verify-runbook.json", "vite.config.ts"],
-    "attestation": "cdp-token", "risks": ["..."] }
-  ```
-  ````
-
-- The **same hard rules** as the setup agent carry over verbatim, because they are
-  what make a derived runbook trustworthy at all: attestation is required per
-  modality; request-scoped values (ports, temp dirs) are never persisted, only
-  `${PORT}`-style placeholders; **never an install or a rebuild** in `build`/`serve`
-  (already enforced independently by `findForbiddenTaskCommands`, which runs on the
-  merged runbook — a runbook that smuggles one through fails closed regardless of
-  the prompt); never guess a command that does not trace to a `package.json`
-  script, a documented invocation, or existing source.
-
-### 5.3 What the controller does around it
-
-The controller owns every cyboflow write, in this order:
-
-1. Drive the lane to `runbook-bootstrap`; spawn the agent.
-2. Parse the fence. `NOT-POSSIBLE`, an unparseable fence, or an empty commit ⇒
-   degrade (§9).
-3. **Run the diff guard** (§8) over what the agent actually committed. A violation
-   ⇒ revert the bootstrap commit and degrade. The guard reads the *committed diff*,
-   not the agent's self-report of it.
-4. `registerDraft(projectId, worktreePath, modality, bindingsJson)` → `{hash, version}`.
-   An error (invalid shape, modality not declared, CAS conflict) ⇒ degrade, with
-   the validation message in the finding — these messages name the exact failing
-   path (`modalities["web"].serve.cmd: expected non-empty string`).
-5. Fire the proof (§6) via `enqueueTaskVerification({ ..., bootstrapProof: true,
-   runbookHash: hash, runbookLocalVersion: version })`, re-park at
-   `awaiting-verify`, await the verdict.
-6. Report a `verify-runbook` artifact (the existing atype) carrying the draft, the
-   rung, the diff, and the proof outcome — so the human sees at the terminal
-   merge gate what was auto-derived on their behalf, even though nothing blocked
-   on it.
+**v2 requires an explicit, reviewed semantic change: for LANE requests, the
+pre-lease gate probes the requesting run's worktree** (`worktreePathForRun` already
+exists), matching what the injection already does and what actually executes. This
+is decision B in §15. Without it, this feature cannot work at all; with it, the
+gate and the injection stop disagreeing about which tree they are talking about,
+which is arguably a latent bug independent of this proposal.
 
 ---
 
-## 6. The proof: one stage, with a disambiguating second
+## 4. Never bootstrap over someone else's proof
 
-The user's instruction is that the lane should "use the task they're attempting to
-verify to validate it", and that is the default path. It has a real cost, though,
-which the design has to answer: **a FAIL is ambiguous.** The composed task carries
-both the runbook's `build`/`serve`/`attestation` and the lane's `behaviors`, so a
-failure could be a wrong serve command *or* broken lane code, and the two demand
-opposite responses.
+`status()` collapses three different situations into `'unproven-draft'`, and only
+two of them are safe to bootstrap:
 
-### Round 1 — the lane's task, as-is
-
-Fire the lane's composed task, merged with the freshly drafted runbook, as a
-`bootstrap_proof`. On **PASS**: the engine marks the record proven, the lane has a
-genuine verified verdict, and the lane advances to `integrated`. **One deployment,
-both questions answered.** This is the path we expect most of the time on projects
-whose lane code is fine, which is most lanes.
-
-### Round 2 — on FAIL, an attestation-only probe
-
-If round 1 fails, fire a second `bootstrap_proof` derived from the *same runbook*
-but with the lane's behaviors **stripped to nothing** — build, serve, and
-attestation only. This asks precisely one question: *does this project stand up and
-identify itself as this deliverable?* It is the minimal proof a runbook needs, and
-it cannot fail for a reason that lives in the lane's diff.
-
-| Round 1 | Round 2 (attestation-only) | Conclusion | Action |
-|---|---|---|---|
-| PASS | — | runbook good, lane good | mark proven (engine); lane → `integrated` |
-| FAIL | PASS | **runbook good, lane code is broken** | record proven; convert to a normal visual FAIL: loop the lane back to `implement` with round 1's feedback, charging the lane's attempt budget as an ordinary visual FAIL would |
-| FAIL | FAIL | **runbook wrong** | re-draft (≤3 rounds total), lane budget untouched |
-| FAIL | env/skipped | no information | re-draft, lane budget untouched |
-
-This is the mechanism that keeps the feature honest. **While the runbook is
-unproven, a failure never charges the lane's implement budget and never sends an
-agent to "fix" code.** That is the same asymmetry `classifyVerificationFailure`
-already encodes for `env`-class failures, and for the same stated reason: "a
-merge-gate FAIL charges the lane's implement-retry budget and sends an agent to
-'fix' working code because a port was taken" (`verificationScheduler.ts:3165`). An
-unproven runbook is that hazard's twin — the commands, not the code, are the
-untrusted variable — and the attestation probe is what promotes a guess about which
-one it was into an observation.
-
-Cost ceiling per run per modality: **3 draft rounds, ≤2 deployments each**, and the
-existing per-request deadline applies unchanged.
-
----
-
-## 7. Single-flight across parallel lanes
-
-A parallel sprint will have N lanes hit the gate within seconds of each other.
-Bootstrapping N times would be N drafting agents racing to write the same file into
-one shared worktree, N `registerDraft` calls whose CAS bumps invalidate each
-other's pins, and N charges against the budget.
-
-**One bootstrap attempt per (run, modality).** The controller holds the fan-out
-scope already, so this is an in-process mutex on the run's controller state, not a
-new distributed primitive:
-
-- First lane to receive a `bootstrap-runbook` action **acquires** it and runs §5.3.
-- Concurrent lanes **stay parked** at `awaiting-verify` and await the bootstrap's
-  outcome (the same `awaitVerdict` wait they are already in, extended to also
-  resolve on a bootstrap outcome).
-- On bootstrap success, each waiting lane **re-fires its own ordinary request** —
-  not a proof — which now finds a proven runbook and runs normally. The bootstrap
-  lane does not re-fire; its round-1 proof *was* its verification.
-- On bootstrap failure or exhaustion, every waiting lane degrades (§9). None of
-  them re-attempts.
-
-**Cross-run and cross-project races** are out of scope for the mutex: two sprint
-runs on the same project could bootstrap concurrently. The backstop is already
-present and correct — `registerDraft`'s CAS predicate means the second registration
-bumps the version, and the first run's in-flight proof is then refused promotion by
-`markProven`'s double CAS with `cas-conflict` ("the proof attests to content that is
-no longer what the record holds"). Both runs degrade honestly; nothing false is
-recorded. Accepted, and worth a log line rather than a lock.
-
----
-
-## 8. The rung ceiling, enforced mechanically
-
-The user's constraint is rung 0/1 — existing levers, plus at most a small
-reversible config change. "Config-only" is a judgment call, and a judgment call
-delegated to a prompt is not a ceiling. The ceiling is a **guard over the committed
-diff**, run by the controller before anything is registered:
-
-- **Path allowlist.** `.cyboflow/verify-runbook.json` always; beyond that, only
-  files matching a config allowlist (`*.config.{ts,js,mjs,cjs,json}`,
-  `package.json`, `.env.example`, `tsconfig*.json`, `electron-builder*`).
-- **Hard denylist**, overriding everything: lockfiles, anything under `.github/`,
-  anything under `.claude/`, CI configs, `scripts/`, and any file the run's own
-  sprint tasks touch (an auto-edit inside a lane's own diff is indistinguishable
-  from the lane's work at review time).
-- **Size cap.** The non-runbook portion of the diff is ≤20 changed lines across ≤1
-  file. Rung 1 is "read a port from an env var that is currently hardcoded"; it is
-  not a refactor.
-- **`package.json` narrowing.** Only the `scripts` object may change, and only by
-  addition. A dependency edit is a rung-2 change wearing a rung-1 costume, and it
-  is also the exact class of change the whole `findForbiddenTaskCommands` guard
-  exists to keep out of verification snapshots.
-
-A violation is not a negotiation: the controller reverts the bootstrap commit
-(`git revert --no-edit` on the lane worktree, keeping the history honest) and
-degrades, filing a finding that names the offending paths. The guard also gives the
-human at the merge gate a bounded thing to review — one file plus, at most, twenty
-lines of config.
-
----
-
-## 9. Exhaustion is today's behavior, exactly
-
-Every failure path — `NOT-POSSIBLE`, an unparseable fence, a diff-guard violation,
-a registration error, three failed draft rounds, a disabled toggle, a suppressed
-modality — resolves to the **current** outcome:
-
-- the lane advances to `integrated` unverified,
-- a **non-blocking** finding is filed, now carrying the bootstrap diagnosis (what
-  was drafted, what came back, `failureClass` and feedback) instead of a bare CTA,
-- the unproven draft **stays committed and registered**, behaving exactly like
-  "unconfigured", which is the same posture the setup flow takes on its own
-  exhaustion ("an honest unproven draft is not [the failure this flow exists to
-  prevent]"),
-- and the (project, modality) pair gets a **ledger suppression with a TTL** via the
-  existing `VerifyCapabilityStore`, so the next run short-circuits at gate 2
-  instead of re-bootstrapping. Reusing the capability ledger means the existing
-  host-generation and TTL self-refresh semantics decide when it is worth trying
-  again — a new chromium, a new host, a changed project input hash all reopen the
-  question without anyone clearing a flag.
-
-There is no path on which this feature makes a lane's outcome *worse* than the
-skip it replaces. The strongest claim it makes on failure is "we tried, here is
-what happened".
-
----
-
-## 10. Data model
-
-**Migration 105** (next free — 101/102 and 103/104 are claimed by unmerged
-branches; renumber on rebase, per the standing collision hazard):
-
-```sql
-ALTER TABLE verification_requests ADD COLUMN bootstrap_proof INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE verify_runbook_local  ADD COLUMN origin TEXT;  -- 'setup-flow' | 'lane-bootstrap'
-```
-
-`origin` is provenance, and it is not cosmetic: a human deciding whether to trust a
-proven runbook should be able to see that it was auto-derived by a lane rather than
-reviewed at a human gate. It surfaces in `VerifyHealthPanel` / `verifyHealthModel`
-as a badge, and in the `verify-runbook` artifact.
-
-Both columns are read through the existing defensive ladders
-(`runbookPinForRow` / `agentGateColumnsForRow`), so a pre-105 DB degrades to
-`bootstrap_proof = 0` / `origin = null` rather than throwing.
-
----
-
-## 11. Settings and kill switches
-
-- **Project setting** `visualVerify.autoBootstrapRunbook`, default **on** — this is
-  the requested default posture, and the floor it degrades to is what happens
-  today, so "on" cannot regress a project.
-- **Env kill switch** `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1`, matching the
-  `CYBOFLOW_DISABLE_WARM_SDK` idiom, for a host where the drafting agent itself is
-  the problem.
-- Off ⇒ the merge gate returns `advance-integrated` and no code path below §4 is
-  reachable. The whole feature is one branch deep.
-
----
-
-## 12. Relationship to the Verify Setup flow
-
-Verify Setup is **not** superseded and should not be. It remains the path for:
-multi-modality projects, **rung 2** source changes, human review of what gets
-committed, and deliberate re-derivation after drift.
-
-The bootstrap is its zero-friction subset: one modality, rung 0/1, no gates. The
-two compose cleanly through machinery that already exists — a bootstrap-proven
-record is an ordinary proven record, and a later Verify Setup run over the same
-project calls `registerDraft`, which bumps the version and demotes to
-`unproven-draft` by design ("new portable content is by definition unproven
-content"), then re-proves under human review. A human upgrading an auto-derived
-runbook needs no new code path.
-
----
-
-## 13. Risks
-
-| Risk | Mitigation |
+| Situation | Safe to bootstrap? |
 |---|---|
-| **Re-introduces per-run guessing** — the 0-for-5 failure | A guess is only ever *executed* after it passes an engine-enforced proof. A wrong guess produces an unproven draft and today's skip. The historical failure was guessing and then *trusting*; nothing here trusts an unproven draft. |
-| **A lane commits to the repo unreviewed** | Bounded to one JSON file + ≤20 config lines by a mechanical diff guard (§8), committed separately, visible in the branch diff at the existing terminal human-review gate, and revertible. |
-| **Wall-clock cost inside a lane** | One bootstrap per run per modality; ≤3 draft rounds; ≤2 deployments per round; existing per-request deadline unchanged. Waiting lanes stay parked rather than each paying. |
-| **A broken lane deliverable burns bootstrap rounds** | The attestation-only probe (§6) detects exactly this after round 1 and converts to a normal lane loopback, rather than blaming the runbook three times. |
-| **Auto-derived runbook is lower quality than a reviewed one** | `origin` provenance (§10) makes that visible; the runbook is proven-by-running either way; a human can re-derive through Verify Setup at any time. |
-| **Budget drain on an unbootstrappable project** | Bootstrap proofs are budget-*counted* (unlike `setup_proof`), and exhaustion writes a TTL'd ledger suppression so later runs short-circuit before spending anything. |
-| **The runbook only exists on the session branch** | Already-correct semantics: `status()` answers `unproven-draft` for a probe path lacking the file **without demoting the record** — the documented pre-merge case. Dismissing the session leaves no false proof anywhere. |
-| **`bootstrap_proof` becomes a new agent-reachable privilege** | It is not a wire field. Only the in-process controller seam sets it; a parity test pins that `mcpQueryHandler` never reads it. |
+| No record, no file — nothing was ever derived | **yes** |
+| A record exists, marked `unproven-draft` | **yes** |
+| A record is **proven**, but *this tree* lacks the portable file | **NO** |
+
+The third is the documented pre-merge case (`runbookStore.ts:195`) — the file is
+absent, and the store deliberately answers `unproven-draft` **without demoting**,
+because "this tree lacks it" and "this runbook changed" are different facts. But
+`registerDraft` UPSERTs a **singleton** `(project_id, modality)` row. A lane on a
+branch predating the runbook merge would therefore derive a fresh runbook and
+**overwrite the proven record every other branch depends on** — breaking
+verification precisely for the projects that set it up properly.
+
+**v2:** `VerifyRunbookStore` grows `statusDetail()`, returning the reason
+discriminant alongside the three-valued answer
+(`'no-record' | 'draft' | 'proven-file-absent-here' | 'drifted'`). The preflight
+fires only on `'no-record'` and `'draft'`. `'proven-file-absent-here'` degrades to
+today's skip with a finding that says so — the runbook exists, merge the branch
+that carries it.
 
 ---
 
-## 14. Phasing
+## 5. `bootstrap_proof`: a kind, not a privilege
 
-- **Phase 0 — seam.** Migration 105; `bootstrapProof` on `enqueueTaskVerification`;
-  scheduler treats it as degrade-gate-exempt + budget-counted; `recordRunbookProof`
-  accepts it. No trigger wired. Fully unit-testable, ships dark.
-- **Phase 1 — the decision.** `decideMergeGate` gains `bootstrap-runbook`;
-  `verdictDelivery` CTA suppression; the settings toggle + kill switch. Still no
-  agent — the action is logged and falls through to `advance-integrated`.
-- **Phase 2 — the step.** Lane vocabulary, both workflow definitions, the
-  `runbook-bootstrap` agent, the controller's step handling, the diff guard, the
-  single-flight mutex.
-- **Phase 3 — the loop.** Round-2 attestation probe, the §6 disambiguation table,
-  retry/exhaustion, ledger suppression, the `verify-runbook` artifact and the
-  `origin` badge.
+`setup_proof` bundles three privileges (`verificationScheduler.ts:1623`):
+degrade-gate exemption, **lifetime-budget exemption**, and lower-priority draining.
+The budget exemption is safe for a flow a human launches once per project and
+unsafe as something any lane can reach. The MCP handler names the exact hazard — "a
+compound lane reaching for `setup_proof: true` because it read the verify-setup
+workflow prompt once" — and answers it by pinning authorization to the run's frozen
+workflow identity (`mcpQueryHandler.ts:4607`). Widening that dissolves the
+guarantee for the case it was written to stop.
 
-## 15. Test plan
+| | `setup_proof` | `bootstrap_proof` |
+|---|---|---|
+| Degrade gate | exempt | **exempt** |
+| Lifetime budget | exempt, never charged | **counted and charged** |
+| Drain priority | lower than lane traffic | ordinary |
+| Flips a pinned record on PASS | yes | **yes** |
+| Settable over the MCP wire | verify-setup runs only | **never — not a wire field** |
+| Drives a sprint lane | no | **no — excluded by KIND (§6)** |
 
-- **Unit** — `decideMergeGate` decision table (every §4 precondition, each
-  independently falsified); the §6 four-row disambiguation matrix; the §8 diff
-  guard (allowlist, denylist, size cap, `package.json` narrowing, overlap with lane
-  task files); single-flight (N concurrent lanes ⇒ 1 bootstrap, N−1 waiters, both
-  outcomes); exhaustion ⇒ byte-identical to the current skip path.
-- **Tripwire** — `bootstrap_proof` is unreachable from `mcpQueryHandler`, in the
-  same style as the existing `setup_proof_not_authorized` tests.
-- **Migration** — `migration105.test.ts`, plus pre-105 defensive-read degradation.
-- **Integration** (`*.itest.ts`, mocked SDK, blocking CI job) — the controller lane
-  path end-to-end: skip → bootstrap → register → prove → integrated, and the
-  failure fork back to `implement`.
-- **Existing suites to update** — `acceptanceMatrix.test.ts`,
-  `mergeGateLaneAdvance.test.ts`, `verdictDelivery.test.ts`,
-  `builtInWorkflows.test.ts` / `workflowBundle.builtins.test.ts` (both hardcode
-  built-in step and agent counts), `enqueueFromTask.test.ts`.
+`bootstrapProof` is a parameter of `enqueueTaskVerification`, the in-process
+controller capability. No agent in any flow can request it, which is strictly
+stronger than a workflow-identity check.
 
-## 16. Open questions for review
+---
 
-1. **Round-1 shape.** Is firing the lane's *full* task as round 1 right, or should
-   the attestation-only probe come **first** (cheaper to diagnose, but costs a
-   second deployment on the happy path — which is the common path)? The proposal
-   picks full-task-first deliberately; it is the closest reading of the request and
-   optimizes the case we expect to dominate.
-2. **Waiting lanes re-firing.** Should lanes that waited out a successful bootstrap
-   re-fire immediately, or is it better to let them advance and rely on the
-   *next* run being verified? Re-firing is more correct and costs N deployments in
-   a burst.
-3. **Ship flow.** Ship's `execute-tasks` mirrors sprint's fan-out byte-for-byte.
-   Confirmed in scope — but ship runs closer to a release, and there may be an
-   argument for requiring the runbook to already be proven there.
-4. **Suppression TTL.** What is the right re-try horizon for a project where the
-   bootstrap failed — the capability ledger's existing default, or something
-   longer?
+## 6. The proof must not touch the lane
+
+v1 assumed a proof verdict could double as a lane verdict. It cannot, for two
+independently fatal reasons:
+
+1. **`applyMergeGateVerdict` runs for every terminal carrying a taskRef**, and
+   `recordRunbookProof` runs *after* it (`verificationScheduler.ts:3266-3289`). A
+   FAIL charges the lane's implement budget immediately; a PASS integrates the lane
+   before the record is ever promoted, and a CAS-failed promotion still leaves a
+   passed verdict standing.
+2. **The programmatic plane has a second, independent policy site.**
+   `SchedulerVisualVerifyGate.outcomeForTerminalStatus`
+   (`visualVerifyGate.ts:304-312`) returns `{kind:'advance'}` for *any* status that
+   is not `'failed'`, reading no `error_message` and — by documented design —
+   never consulting lane rows for non-failed outcomes. On the only plane in scope,
+   a decision written into a lane row is **actuation-dead**.
+
+**v2:** a `bootstrap_proof` request is excluded from lane driving **by kind**, at
+both sites. Keying on kind rather than on an absent `taskRef` is required:
+`resolveLaneForVerdict` falls back to `if (lanes.length === 1) return lanes[0]`, so
+a ref-less proof in a single-lane run would still be attributed to that lane.
+
+The controller consumes the proof through the scheduler's existing **`awaitTerminal`**
+seam (verification-setup-flow §5.2 seam 2) — the synchronous primitive built for
+exactly this "prove → read outcome → adjust → re-prove in one turn" shape. The
+merge gate never sees the request.
+
+---
+
+## 7. One attestation-only proof
+
+v1 fired the lane's full task as the proof, then a probe to disambiguate failures.
+Both reviews independently destroyed the disambiguation: the probe **builds and
+serves the same lane snapshot**, so a lane edit that breaks compilation, startup,
+routing, or the marker breaks the probe too; and identity attestation does not
+prove the runbook adequate for the behaviors. The table inferred causality it could
+not observe, in both directions.
+
+**v2 proves the runbook with an attestation-only task** — `build`, `serve`,
+`attestation`, `behaviors: []` (legal per `visualVerification.ts:551`). This asks
+exactly one question: *does this project stand up and identify itself as this
+deliverable?* That is the minimal claim a runbook needs, and it is the only claim
+this proof is allowed to make.
+
+The lane's own task is **not** the proof vehicle. It is enqueued afterward, as an
+ordinary request, exactly as it would be on a project that already had a runbook.
+This inverts v1's answer to its own open question 1, and deletes the entire
+disambiguation apparatus rather than repairing it. The cost is one extra deployment
+on the happy path; the gain is that no failure is ever attributed to the wrong
+thing, and the lane's attempt budget is never charged for a runbook defect.
+
+---
+
+## 8. The drafting agent writes nothing
+
+v1 gave the agent `Bash/Write/Edit` in the shared worktree and validated the diff
+*after* it committed. That cannot enforce a rung ceiling — the guard sees only the
+committed diff, not deletions, ignored files, or sibling edits — and the allowed
+files are **executable**: twenty lines of Vite or Electron config can change the
+build entry or serve a canned attested surface, manufacturing a PASS. `git revert`
+is not a rollback primitive in a shared dirty worktree either. Worse, `git add -f`
+plus a bare `git commit` **sweeps whatever sibling implement agents have staged**
+into the bootstrap commit, and the guard would then "safely" revert other lanes'
+uncommitted work.
+
+**v2 inverts the trust direction.** The agent (`runbook-bootstrap`, installed in
+the sprint and ship bundles) has **Read/Grep/Glob and read-only Bash** — no Write,
+no Edit, no git. It surveys and returns the portable runbook JSON in a fence, for
+one modality, rung 0 only. If the project cannot be stood up with levers it already
+honors, it returns `BOOTSTRAP: NOT-POSSIBLE — <reason>`, which is a success for
+this agent.
+
+The **controller** then validates and writes:
+
+1. `parseVerifyRunbookV1` — strict schema, rejects on the first structural problem.
+2. `findForbiddenTaskCommands` — the §7.2 dependency guard, unchanged.
+3. **New mechanical rule:** every `build`/`serve` command must resolve to a
+   **declared `package.json` script invocation**. This converts the setup agent's
+   prose rule ("never guess a command") into a check, and is the single highest-value
+   guard in this proposal — it is what makes "the agent proposed a command" and "the
+   project documents that command" the same statement.
+4. Writes the one file and commits it **by pathspec** (`git commit -- <path>`, or a
+   temporary index) with `index.lock` retry — never a bare commit, which would
+   sweep siblings' staged work.
+
+---
+
+## 9. Restart, cancellation, and the shared worktree
+
+v1's single-flight was an in-memory mutex in the controller closure. The controller
+reconstructs state on resume and restarts lanes at inner step zero, so a crash after
+commit, registration, or enqueue would re-run agents and race stale rows.
+
+**v2 persists a run-scoped bootstrap stamp** keyed `(runId, projectId, modality)`
+carrying: owner lane, commit sha, runbook pin (hash + version), request id, round,
+and terminal outcome. Every sub-step below it is independently idempotent —
+`registerDraft` is CAS'd, the proof's enqueue key is unique, the file write is
+content-addressed — so recovery is "read the stamp, resume at the first incomplete
+step", not a bespoke state machine.
+
+Two shared-worktree interactions v1 missed:
+
+- **The commit-integrity probe.** `beginCommitProbe` (`index.ts:3103-3120`) reports
+  `headAdvanced = endHead !== startHead` on the shared worktree, built to catch a
+  lane that "reported green with its changes left untracked on disk (observed
+  live)". A machine commit landing mid-lane makes that true for every in-flight
+  lane, so a lane that committed nothing would integrate anyway. The bootstrap commit
+  sha is recorded on the stamp and **excluded** from the probe's comparison.
+- **Enqueue keys.** `findLiveRequestByEnqueueKey` treats *any* non-canceled terminal
+  — `skipped` included — as a dedup hit, and the key is
+  `${runId}:${laneTaskRef}:${attempt}`. The proof therefore carries an explicit
+  `:bootstrap:<round>` generation segment; without it the proof would silently
+  return the original skipped request and deploy nothing, which is exactly what v1
+  would have done.
+
+---
+
+## 10. Failure, and what it actually costs
+
+v1 claimed failure was "byte-identical to today". It is not, and pretending
+otherwise hid real costs. Honestly:
+
+| Failure | State left behind |
+|---|---|
+| `NOT-POSSIBLE` / unparseable fence | nothing written; lane skips as today |
+| Validation or script-resolution failure | nothing written; lane skips as today |
+| `proven-file-absent-here` (§4) | nothing written; skip + "merge the branch carrying the runbook" |
+| Proof FAIL / timeout (≤2 draft rounds) | **one commit** (the honest unproven draft), a registered draft record, budget spent, the lane delayed by the bootstrap's wall-clock |
+| Toggle off / kill switch | nothing; today's path, one branch deep |
+
+Only the fourth row differs from today, and it differs in three ways worth stating
+plainly rather than burying: a commit lands on the branch, verification budget is
+spent, and the owning lane waits. The lane still advances unverified with a
+non-blocking finding — now carrying the diagnosis instead of a bare CTA — and the
+unproven draft stays committed and registered, which is the same posture the setup
+flow takes on its own exhaustion.
+
+**Suppression.** v1 wrote the suppression under the draft's hash. The capability
+ledger is keyed `(project, modality, runbook_hash)` and unpinned no-runbook requests
+use the `''` bucket (`verificationScheduler.ts:2492`), so that suppression would
+never have fired. v2 writes a **dedicated bootstrap-suppression record** keyed by
+project, modality, project-input hash, and host fingerprint, invalidated when either
+hash changes — so a real change reopens the question immediately and a dead project
+stops paying.
+
+---
+
+## 11. Bookkeeping the reviews surfaced
+
+- **Eval contamination.** `snapshotRunForEval.ts:17-21` exempts verify-setup from
+  auto-eval *precisely because* "its diff is a verification runbook plus isolation
+  levers whose real acceptance test is its own proof run". The bootstrap moves that
+  diff class into sprint/ship runs, which **are** auto-eval'd and A/B-compared. The
+  bootstrap commit is excised from the captured diff, or the row is flagged;
+  otherwise a run gets rubric-graded on machine-written JSON its agents did not author.
+- **The sprint's own reviewers.** `code-review`, `sprint-review`, and
+  `address-review` operate on the combined diff and will encounter a commit no lane
+  owns; `address-review` "fixes in place", and any post-proof edit to the runbook
+  file demotes it by hash drift. The runbook path is denylisted from address-review
+  and the preflight is sequenced before sprint-review.
+- **Input-hash instability (accepted, documented).** `status()` recomputes the
+  project input hash (package.json scripts, lockfiles, node/electron ABI) and
+  **demotes write-through on drift**. A sprint task that edits scripts or the
+  lockfile therefore demotes the freshly-proven record. This is pre-existing
+  behavior for setup-proven runbooks too, and the demotion is semantically correct —
+  but the bootstrap makes proving and script-editing concurrent *by construction*.
+  Accepted; documented; the next run re-bootstraps.
+- **`expectedFiles` is optional.** v1's strongest denylist rule ("any file the run's
+  own tasks touch") rested on metadata that is legitimately absent, and would have
+  silently enforced nothing. Moot in v2 — the agent writes nothing.
+- **Stale comment, unrelated to this work.** `enqueueFromTask.ts`'s
+  `forbiddenCommandError` still tells agents a snapshot's `node_modules` is
+  "symlinked from the live worktree"; `snapshotProvisioner.cloneDependencyDirs`
+  **clones** (`cp -Rc`) precisely to kill write-through. The guard is still right;
+  its stated reason is out of date. Worth a one-line fix on its own.
+
+---
+
+## 12. The flow, end to end
+
+1. Lane reaches `visual-verify`; task-verify composed a task that derives an
+   environment. **Before enqueue**, the controller evaluates the shared exported
+   predicate (`derivesEnvironment && statusDetail(runWorktree)`).
+2. Not bootstrap-eligible (§4) or toggle off ⇒ enqueue as today. Done.
+3. Eligible ⇒ claim the persisted stamp. Another lane holds it ⇒ **skip as today**;
+   the finding says a bootstrap is in flight and the next run will verify.
+4. Spawn the read-only drafting agent. `NOT-POSSIBLE` ⇒ degrade.
+5. Controller validates (§8), writes and pathspec-commits the runbook,
+   `registerDraft` → `{hash, version}`.
+6. Fire ONE attestation-only `bootstrap_proof`, uniquely keyed, pinned; consume via
+   `awaitTerminal`. The merge gate never sees it.
+7. PASS ⇒ the engine flips the record proven. FAIL ⇒ re-draft once (≤2 rounds), then
+   degrade.
+8. On proven: enqueue the lane's **ordinary** request, which now merges and pins the
+   runbook and passes the gate (given decision B). The lane parks and proceeds
+   exactly as on a configured project.
+9. Sibling lanes arriving later: ordinary path, now proven. Lanes that already
+   skipped during the bootstrap are **not** resurrected — `mergeGateLaneAdvance`
+   never resurrects a terminal lane, and pretending otherwise was v1's §7.
+10. Report a `verify-runbook` artifact carrying the draft, the proof outcome, and
+    the commit, so the human sees at the terminal merge gate what was derived on
+    their behalf.
+
+---
+
+## 13. Phasing
+
+- **Phase 0 — seam, dark.** Migration 105 (`verification_requests.bootstrap_proof`,
+  `verify_runbook_local.origin`); `bootstrapProof` on `enqueueTaskVerification`;
+  budget-counted + gate-exempt + promotion-eligible; **kind-based exclusion** from
+  `applyMergeGateVerdict`, `verdictDelivery`, and `SchedulerVisualVerifyGate`;
+  `:bootstrap:<round>` enqueue-key generation. Fully unit-testable.
+- **Phase 1 — honesty in the store.** `statusDetail()` (§4) and the gate probe-path
+  change (§3, decision B), each with its own tests — this phase is independently
+  valuable and lands the latent probe-path disagreement fix.
+- **Phase 2 — the preflight.** Shared exported predicate, persisted stamp, toggle +
+  kill switch, degrade paths and findings. No agent yet; logs and falls through.
+- **Phase 3 — draft and prove.** The read-only agent, controller validation +
+  pathspec commit, `registerDraft`, the attestation-only proof via `awaitTerminal`,
+  re-enqueue on proven, bootstrap suppression.
+- **Phase 4 — bookkeeping.** Eval-diff excision, commit-probe exclusion,
+  address-review denylist, the artifact and the `origin` badge.
+
+## 14. Test plan
+
+- **Unit** — the eligibility predicate over all four `statusDetail` discriminants
+  (especially: `proven-file-absent-here` never bootstraps); kind-based lane-driving
+  exclusion at **both** policy sites, including the single-lane
+  `resolveLaneForVerdict` fallback; enqueue-key generation defeats the terminal
+  dedup; command-resolves-to-a-declared-script validation; stamp claim/resume;
+  suppression keying actually matching the bucket the next request reads.
+- **Tripwire** — `bootstrap_proof` unreachable from `mcpQueryHandler`, in the style
+  of the existing `setup_proof_not_authorized` tests.
+- **Migration** — `migration105.test.ts` plus pre-105 defensive-read degradation.
+- **Integration** (`*.itest.ts`, mocked SDK) — preflight → draft → commit → prove →
+  ordinary enqueue → lane verified; and every degrade path leaving the lane exactly
+  where today's skip leaves it.
+- **Regression the reviews imply** — a proven-elsewhere project is never demoted by
+  a bootstrap; a bootstrap commit does not satisfy another lane's commit probe.
+- **Existing suites to update** — `acceptanceMatrix`, `mergeGateLaneAdvance`,
+  `verdictDelivery`, `visualVerifyGate`, `enqueueFromTask`, `runbookStore`,
+  `builtInWorkflows` / `workflowBundle.builtins`.
+
+---
+
+## 15. Two decisions for the user
+
+**A. Rung 0 only — this relaxes the constraint you locked.**
+You chose "autonomous, rung 0/1". Both reviews concluded independently that the
+rung-1 half cannot be made safe autonomously: the allowed files are **executable**,
+so a validated twenty-line config diff can change what gets built or serve a canned
+attested surface — which is the no-new-PASS invariant failing, not a guard needing
+tightening. Fable's judgment was explicit: if rung-1 config edits are
+non-negotiable, the safety bar cannot be met autonomously. v2 therefore proposes
+**rung 0 only**, with rung 1 remaining available through Verify Setup, where a human
+reviews the diff. This makes the bootstrap fail on projects with a hardcoded port or
+an unparameterized singleton — those still need Verify Setup. **Confirm, or tell me
+to keep rung 1 and accept that the safety claim weakens to "a human reviews the
+config diff at the terminal merge gate".**
+
+**B. The gate probe-path change (§3).** Making the pre-lease gate probe the run
+worktree for lane requests is *required* for this feature to work, and it changes
+behavior for existing verify-setup users: a runbook committed on a branch would
+start satisfying that branch's lanes before merge. I believe that is more correct
+than today's disagreement between the gate and the injection — but it is a
+semantic change to shipped behavior and should be your call, not a side effect.
+
+## 16. What v1 got wrong
+
+Recorded because the mistakes are load-bearing, not to be thorough:
+
+1. **Claimed a safety invariant its own guard could not enforce** — the ≤20-line
+   config allowlist permits edits to executable files, which is the invariant
+   failing outright.
+2. **Assumed the proof could double as the lane verdict** — two independent policy
+   sites drive lanes off terminals, and promotion runs after delivery.
+3. **Assumed a second request per lane attempt would deploy** — the enqueue key
+   dedups against terminals, so the happy path was a no-op.
+4. **Assumed a lane step could be programmatic-only** — `fanOut.inner` is an
+   explicitly both-plane contract with a generic fallback renderer.
+5. **Assumed `status() !== 'proven'` meant "no runbook"** — it also means "proven,
+   just not in this tree", where bootstrapping destroys another branch's proof.
+6. **Never checked which tree the gate probes** (§3) — the payoff was unreachable.
+7. **Claimed failure was byte-identical to today** while proposing paths that
+   commit, register, spend budget, and delay lanes.
+8. **Wrote a suppression into a bucket nothing would read.**
+
+The through-line: v1 reasoned about the feature it wanted and asserted the
+properties it needed from seams it had not read closely enough. Every correction
+above came from reading the seam.
