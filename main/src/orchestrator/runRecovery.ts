@@ -111,20 +111,28 @@ async function dismissPendingReviewItemRows(
  *
  * Read by the session close-out UI to decide whether dismissing would throw
  * away findings that still apply, and it is the same set the archive sweeps
- * carve findings out on. Fail-soft: a query failure reports false, which only
- * ever costs the operator an extra confirmation.
+ * carve findings out on. It also matches the sweep's LEGACY session shape (a
+ * run reached through `sessions.run_id` rather than `workflow_runs.session_id`),
+ * because a probe that disagreed with the sweep would hide the Mark-complete
+ * choice on exactly the sessions whose findings the sweep goes on to keep.
+ *
+ * Fail-soft: a query failure reports false, which only ever costs the operator
+ * an extra confirmation.
  */
 export function sessionDeliveredWork(db: DatabaseLike, sessionId: string): boolean {
   try {
     const row = db
       .prepare(
         `SELECT 1 AS delivered
-           FROM workflow_runs
-          WHERE session_id = ?
-            AND outcome IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}
+           FROM workflow_runs r
+          WHERE (
+                  r.session_id = ?
+                  OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = r.id)
+                )
+            AND r.outcome IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}
           LIMIT 1`,
       )
-      .get(sessionId) as { delivered: number } | undefined;
+      .get(sessionId, sessionId) as { delivered: number } | undefined;
     return row !== undefined;
   } catch {
     return false;

@@ -965,6 +965,23 @@ describe('archived-session review-item sweeps', () => {
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
   });
 
+  it('sessionDeliveredWork also sees the LEGACY shape (session.run_id, no run.session_id)', async () => {
+    // sess-archived reaches run-legacy only through sessions.run_id — the same
+    // shape the sweep's second OR branch handles. A probe that missed it would
+    // hide the Mark-complete choice on a session whose findings the sweep keeps.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    expect(
+      (db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get('run-legacy') as {
+        session_id: string | null;
+      }).session_id,
+    ).toBeNull();
+
+    db.prepare(`UPDATE workflow_runs SET outcome = 'merged' WHERE id = 'run-legacy'`).run();
+
+    expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(true);
+  });
+
   it('stampSessionRunsCompleted overwrites a non-delivery outcome but never a delivered one', async () => {
     // The runs this correction exists for have already recorded 'canceled' /
     // 'interrupted', so an `outcome IS NULL` guard would no-op on exactly the
