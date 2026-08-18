@@ -612,9 +612,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             isOpen={isDismissOpen}
             onClose={() => setIsDismissOpen(false)}
             sessionId={lifecycleTarget.session.id}
-            onSuccess={() => {
+            onSuccess={(completed) => {
               setIsDismissOpen(false);
-              handleActionSuccess('Session dismissed');
+              handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
             }}
           />
         </>
