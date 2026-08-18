@@ -1,6 +1,6 @@
 /**
  * trackerSync — wire shapes for the external issue-tracker sync feature
- * (Settings → Integrations: Linear + Plane). Design: docs/proposals/
+ * (Settings → Integrations: Linear, Plane, Dart). Design: docs/proposals/
  * tracker-sync-integration.md.
  *
  * These types cross the IPC boundary (wizard/connected-view tRPC surface), so
