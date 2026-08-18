@@ -79,7 +79,6 @@ export const INTERACTIVE_CAVEATS: readonly string[] = [
 export const OMP_SDK_CAVEATS: readonly string[] = [
   'Slow approvals (over 25s) are blocked and can be retried.',
   'Subagents are unavailable — OMP’s task tool is refused, so the agent cannot delegate.',
-  'The agent cannot ask you questions — its ask tool is cancelled, which ends the turn.',
 ];
 
 /** The v1 limits of the OMP CLI (omp-pty) lane. */
