@@ -86,7 +86,10 @@ function buildDb(): Database.Database {
       setup_proof      INTEGER NOT NULL DEFAULT 0,
       -- migration 096 (§5.2 seam 3): the content-addressed runbook PIN.
       runbook_hash          TEXT,
-      runbook_local_version INTEGER
+      runbook_local_version INTEGER,
+      -- migration 107 (docs/proposals/lane-runbook-bootstrap.md §5): the
+      -- lane-driven bootstrap proof kind.
+      bootstrap_proof       INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE verify_runbook_local (
       project_id            INTEGER NOT NULL,
@@ -649,5 +652,125 @@ describe('enqueueTaskVerification — §5.2 seam 3 pinned runbook injection', ()
     expect(reason).toContain(FORBIDDEN_DEP_COMMAND_ERROR);
     expect(reason).toContain("committed verification runbook");
     expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Migration 107 — the LANE-DRIVEN bootstrap proof
+  // (docs/proposals/lane-runbook-bootstrap.md §5 + §9)
+  // ---------------------------------------------------------------------------
+
+  it('gives a bootstrap proof its own enqueue generation, so a prior SKIPPED row cannot dedup it', async () => {
+    // THE DEFECT THIS PINS. `findLiveRequestByEnqueueKey` counts ANY non-canceled
+    // row — terminals included, and 'skipped' explicitly — as a live dedup hit.
+    // A lane that was just skipped for want of a runbook therefore already owns
+    // `${runId}:${ref}:${attempt}`. Firing the proof under that same key would
+    // hand back the SKIPPED row's id and deploy nothing at all, while every
+    // caller read it as an enqueued request: a silent, total no-op.
+    seedRun(db, { runId: 'run_bs' });
+    initScheduler(db);
+
+    const ordinary = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs',
+      task,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(ordinary.outcome).toBe('enqueued');
+    const skippedId = ordinary.outcome === 'enqueued' ? ordinary.requestId : '';
+    // Terminalize it exactly as the §3.2 degrade gate does.
+    db.prepare("UPDATE verification_requests SET status = 'skipped', error_message = ? WHERE id = ?").run(
+      'no proven verification runbook for this project (run verification setup)',
+      skippedId,
+    );
+
+    const proof = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs',
+      task,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 1,
+    });
+
+    expect(proof.outcome).toBe('enqueued');
+    const proofId = proof.outcome === 'enqueued' ? proof.requestId : '';
+    expect(proofId).not.toBe(skippedId);
+
+    const row = db
+      .prepare('SELECT enqueue_key AS key, bootstrap_proof AS flag FROM verification_requests WHERE id = ?')
+      .get(proofId) as { key: string; flag: number };
+    expect(row.key).toBe('run_bs:TASK-001:1:bootstrap:1');
+    expect(row.flag).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 2 });
+  });
+
+  it('still dedups a re-fired bootstrap round, so crash recovery re-runs nothing', async () => {
+    // The generation must be UNIQUE PER ROUND, not per call: "resume at the first
+    // incomplete step" after a restart depends on re-firing round N returning the
+    // same request rather than a duplicate deployment.
+    seedRun(db, { runId: 'run_bs2' });
+    initScheduler(db);
+
+    const first = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs2',
+      task,
+      laneTaskRef: 'TASK-002',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 1,
+    });
+    const again = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs2',
+      task,
+      laneTaskRef: 'TASK-002',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 1,
+    });
+    expect(first.outcome).toBe('enqueued');
+    expect(again).toEqual(first);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 1 });
+
+    // …but a SECOND draft round is a genuinely different proof and must deploy.
+    const round2 = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs2',
+      task,
+      laneTaskRef: 'TASK-002',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 2,
+    });
+    expect(round2.outcome).toBe('enqueued');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 2 });
+  });
+
+  it('leaves an ordinary request unflagged and on the plain key', async () => {
+    seedRun(db, { runId: 'run_bs3' });
+    initScheduler(db);
+
+    const res = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run_bs3',
+      task,
+      laneTaskRef: 'TASK-003',
+      attempt: 2,
+      worktreePath: gitRepo,
+    });
+    const id = res.outcome === 'enqueued' ? res.requestId : '';
+    const row = db
+      .prepare('SELECT enqueue_key AS key, bootstrap_proof AS flag FROM verification_requests WHERE id = ?')
+      .get(id) as { key: string; flag: number };
+    expect(row.key).toBe('run_bs3:TASK-003:2');
+    expect(row.flag).toBe(0);
   });
 });

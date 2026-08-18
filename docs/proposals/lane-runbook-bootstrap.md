@@ -430,7 +430,7 @@ stops paying.
 
 ## 13. Phasing
 
-- **Phase 0 — seam, dark.** Migration 105 (`verification_requests.bootstrap_proof`,
+- **Phase 0 — seam, dark.** Migration 107 (`verification_requests.bootstrap_proof`,
   `verify_runbook_local.origin`); `bootstrapProof` on `enqueueTaskVerification`;
   budget-counted + gate-exempt + promotion-eligible; **kind-based exclusion** from
   `applyMergeGateVerdict`, `verdictDelivery`, and `SchedulerVisualVerifyGate`;

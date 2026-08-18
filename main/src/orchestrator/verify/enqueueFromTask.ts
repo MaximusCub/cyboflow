@@ -292,6 +292,24 @@ export interface EnqueueTaskVerificationOptions {
    */
   setupProof?: boolean;
   /**
+   * Migration 107 — mark this as the LANE-DRIVEN bootstrap proof
+   * (docs/proposals/lane-runbook-bootstrap.md §5): exempt from the §3.2 degrade
+   * gate (it exists to prove the runbook whose absence the gate is complaining
+   * about) but COUNTED against the project budget and drained at ordinary
+   * priority, unlike `setupProof`. Never settable over the MCP wire — this
+   * in-process option is its only writer.
+   *
+   * Must be paired with {@link bootstrapRound}, which makes the enqueue key
+   * unique; see the key derivation below for why that is load-bearing rather
+   * than cosmetic.
+   */
+  bootstrapProof?: boolean;
+  /**
+   * 1-based bootstrap draft round, part of the enqueue key. Ignored unless
+   * {@link bootstrapProof} is set.
+   */
+  bootstrapRound?: number;
+  /**
    * §5.2 seam 3 — a caller-supplied PIN, stamped verbatim onto the request row.
    * The phase-2 setup flow's proof run is the caller: it is trying to PROVE a
    * specific derived revision, so it pins that revision's own hash + CAS version
@@ -424,7 +442,24 @@ export async function enqueueTaskVerification(
   }
   const task: VerificationTaskV1 = prepared.task ?? composedTask;
   const input = deriveLegacyInputFromTask(task, laneTaskRef);
-  const enqueueKey = `${runId}:${laneTaskRef}:${attempt}`;
+  // THE KEY MUST CARRY A GENERATION FOR A BOOTSTRAP PROOF (mig 105).
+  //
+  // `findLiveRequestByEnqueueKey` treats ANY non-canceled row sharing the key as
+  // a live dedup hit — terminals included, and explicitly including 'skipped'.
+  // A lane that just got skipped for want of a runbook therefore already OWNS
+  // `${runId}:${laneTaskRef}:${attempt}`, so firing the proof under that same key
+  // would hand back the skipped row's id and deploy NOTHING, while every caller
+  // read it as an enqueued request. Silent, total, and indistinguishable from
+  // success from the outside.
+  //
+  // The `:bootstrap:<round>` segment is what makes each proof its own request,
+  // and re-firing round N after a crash still dedups correctly — which is the
+  // property that lets the bootstrap's recovery be "resume at the first
+  // incomplete step" rather than a bespoke state machine.
+  const enqueueKey =
+    opts.bootstrapProof === true
+      ? `${runId}:${laneTaskRef}:${attempt}:bootstrap:${opts.bootstrapRound ?? 1}`
+      : `${runId}:${laneTaskRef}:${attempt}`;
 
   // (4) Enqueue on the singleton. Guard getInstance (+ the enqueue itself) so an
   // uninitialized scheduler or a transient enqueue error is a fail-open SKIP, never
@@ -444,6 +479,7 @@ export async function enqueueTaskVerification(
       snapshotSha,
       enqueueKey,
       ...(opts.setupProof === true ? { setupProof: true } : {}),
+      ...(opts.bootstrapProof === true ? { bootstrapProof: true } : {}),
       ...(prepared.pin
         ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
         : {}),
@@ -456,6 +492,7 @@ export async function enqueueTaskVerification(
       enqueueKey,
       hasSnapshot: snapshotSha !== null,
       runbookHash: prepared.pin?.hash ?? null,
+      bootstrapProof: opts.bootstrapProof === true,
     });
     return { outcome: 'enqueued', requestId };
   } catch (err) {

@@ -1577,4 +1577,101 @@ describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () =>
     ).resolves.toBeUndefined();
     expect(errors.length).toBeGreaterThan(0);
   });
+
+
+// ---------------------------------------------------------------------------
+// Migration 107 — a bootstrap proof is evidence, never a lane verdict
+// (docs/proposals/lane-runbook-bootstrap.md §6)
+// ---------------------------------------------------------------------------
+describe('bootstrap-proof exclusion', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = buildDb();
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    ArtifactRouter.initialize(dbAdapter(db));
+    ReviewItemRouter.initialize(dbAdapter(db));
+    SprintLaneStore.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    db.close();
+  });
+
+  /** Layer 096 + 105 onto this suite's pre-096 chain so `bootstrap_proof` exists. */
+  function upgradeTo105(): void {
+    for (const f of ['096_verify_runbook_local.sql', '107_bootstrap_proof.sql']) {
+      db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+    }
+  }
+
+  it('files NO finding for a failed bootstrap proof, but still merges its evidence', async () => {
+    // A bootstrap proof carries the RUNBOOK's build/serve and no lane behaviors,
+    // so a finding attributed to the lane would be a defect report about code
+    // the proof never looked at. The screenshots still land — they are what
+    // makes a failed bootstrap diagnosable by the controller that fired it.
+    upgradeTo105();
+    seedRun(db, 'run-1', 'tsk_abc');
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, bootstrap_proof)
+       VALUES ('vr_boot', 'run-1', 1, 'failed', 'static-render-snapshot', '{}', 1)`,
+    ).run();
+
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_boot',
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['boot.png'],
+    });
+
+    expect(findingRows(db, 'run-1')).toHaveLength(0);
+    const arts = screenshotsRows(db, 'run-1');
+    expect(arts).toHaveLength(1);
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(payload.fileNames).toEqual(['boot.png']);
+  });
+
+  it('files a finding as usual for an ORDINARY request on the same 105 schema', async () => {
+    // Guards against the exclusion being read as "always on" once the column
+    // exists — it must key on the row, not on the schema version.
+    upgradeTo105();
+    seedRun(db, 'run-2', 'tsk_abc');
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, bootstrap_proof)
+       VALUES ('vr_lane', 'run-2', 1, 'failed', 'static-render-snapshot', '{}', 0)`,
+    ).run();
+
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_lane',
+      runId: 'run-2',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['home.png'],
+    });
+
+    expect(findingRows(db, 'run-2')).toHaveLength(1);
+  });
+});
 });

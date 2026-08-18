@@ -143,6 +143,40 @@ function readRequestColumns(db: DatabaseLike, requestId: string, logger?: Logger
   }
 }
 
+/**
+ * Is this request a LANE-DRIVEN bootstrap proof (migration 107)?
+ *
+ * WHY THE DELIVERY HAS TO ASK. A bootstrap proof is fired by the controller to
+ * prove a freshly-derived runbook, and it carries the RUNBOOK's build/serve with
+ * NO lane behaviors — it is not a judgment about any lane's diff. Letting it
+ * reach the merge gate would therefore charge a lane's implement-retry budget for
+ * a runbook defect, or integrate a lane on a verdict that never looked at its
+ * acceptance criteria. Neither is recoverable after the fact, so the exclusion
+ * lives here, in the ONE place every terminal passes through.
+ *
+ * KEYED ON THE COLUMN, NEVER ON AN ABSENT taskRef. `resolveLaneForVerdict` falls
+ * back to the sole lane of a single-lane run, so a ref-less proof would still be
+ * attributed to that lane — which is exactly the common case (a one-task sprint
+ * bootstrapping its project).
+ *
+ * Fail-soft to `false` on a pre-105 DB or a read error: such a DB cannot contain
+ * a bootstrap row, so `false` is the truth rather than a guess.
+ */
+function readBootstrapProof(db: DatabaseLike, requestId: string, logger?: LoggerLike): boolean {
+  try {
+    const row = db
+      .prepare('SELECT bootstrap_proof AS bootstrapProof FROM verification_requests WHERE id = ?')
+      .get(requestId) as { bootstrapProof?: unknown } | undefined;
+    return row?.bootstrapProof === 1 || row?.bootstrapProof === true;
+  } catch (err) {
+    logger?.debug('[verdictDelivery] bootstrap_proof unavailable (fail-soft: ordinary request)', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 /** The §3.1 classification a terminal row carries (migration 095), as the finding body renders it. */
 interface DeliveredClassification {
   failureClass: VerificationFailureClass | null;
@@ -708,6 +742,22 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+
+    // ---- 1b. BOOTSTRAP PROOF: evidence only, never a lane verdict (mig 105) ----
+    // Everything above this point is EVIDENCE (screenshots + the report entry), and
+    // a bootstrap proof earns that like any other run — its captures are exactly
+    // what makes a failed bootstrap diagnosable. Everything BELOW is lane POLICY:
+    // driving the lane off awaiting-verify, superseding that lane's prior findings,
+    // and filing a finding attributed to it. None of that is this request's to do;
+    // the controller that fired it owns its outcome, synchronously, via awaitTerminal.
+    if (readBootstrapProof(db, requestId, logger)) {
+      logger?.debug('[verdictDelivery] bootstrap proof terminal — evidence merged, lane untouched', {
+        runId,
+        requestId,
+        status,
+      });
+      return allOk;
     }
 
     // ---- 2. MERGE-GATE: drive the sprint lane off `awaiting-verify` ----

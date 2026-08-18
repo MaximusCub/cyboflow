@@ -83,6 +83,8 @@ function buildDb(): Database.Database {
       modality              TEXT,
       preflight_json        TEXT,
       setup_proof           INTEGER NOT NULL DEFAULT 0,
+      -- migration 107 (docs/proposals/lane-runbook-bootstrap.md §5)
+      bootstrap_proof       INTEGER NOT NULL DEFAULT 0,
       -- migration 096 (§5.2 seam 3): the content-addressed runbook PIN.
       runbook_hash          TEXT,
       runbook_local_version INTEGER
@@ -994,6 +996,27 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
     expect(requestRow(db).status).toBe('passed');
   });
 
+  it('a bootstrap_proof row ALSO bypasses the gate — same deadlock, narrower privilege', async () => {
+    // The lane bootstrap exists to produce the runbook the gate is complaining
+    // about, so gating it is the identical deadlock §3.6 exempts setup_proof for.
+    // It buys NOTHING else: the budget still charges it (asserted separately) and
+    // it drains at ordinary priority.
+    seedRun(db, 'run-bootstrap-proof', JSON.stringify(['agent']));
+    const { scheduler, run } = initWith(); // runbookStatus defaults to 'absent'
+    scheduler.enqueue({
+      runId: 'run-bootstrap-proof',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+      bootstrapProof: true,
+    });
+    await flushDrain();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(requestRow(db).status).toBe('passed');
+  });
+
   it('a setup_proof row bypasses the gate (proving the runbook is how a project stops being unproven)', async () => {
     seedRun(db, 'run-setup-proof', JSON.stringify(['agent']));
     const { scheduler, run } = initWith();
@@ -1070,6 +1093,38 @@ describe('VerificationScheduler — §3.6 budget accounting', () => {
     expect(row.status).toBe('skipped');
     // The preflight is persisted for the phase-3 health panel either way.
     expect(JSON.parse(row.preflight_json ?? 'null')).toMatchObject({ ok: false });
+  });
+
+  it('a bootstrap_proof row is NOT budget-exempt — an exhausted budget still skips it', async () => {
+    // THE LINE BETWEEN THE TWO PROOF KINDS. A budget exemption is defensible for a
+    // flow a human launches once per project; it is not defensible for something a
+    // lane reaches on every sprint, which is exactly the runaway `setup_proof`'s
+    // workflow-identity check exists to prevent. So the bootstrap takes the gate
+    // exemption and NOT this one.
+    seedRun(db, 'run-budget-boot', JSON.stringify(['agent']));
+    db.prepare('UPDATE projects SET visual_verify_budget_calls = 1 WHERE id = 1').run();
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, judge_calls_used)
+       VALUES ('vr_spent_boot', 'run-budget-boot', 1, 'passed', 'static-render-snapshot', '{}', 1)`,
+    ).run();
+
+    const { scheduler, run } = initWith({ status: 'passed', fileNames: [], deployed: true });
+    const requestId = scheduler.enqueue({
+      runId: 'run-budget-boot',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'x' },
+      chain: [],
+      bootstrapProof: true,
+    });
+    await flushDrain();
+
+    expect(run).not.toHaveBeenCalled();
+    const row = db
+      .prepare('SELECT status, error_message AS err FROM verification_requests WHERE id = ?')
+      .get(requestId) as { status: string; err: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.err).toContain('budget exhausted');
   });
 
   it('a setup_proof row BYPASSES an exhausted budget and is never counted against it', async () => {

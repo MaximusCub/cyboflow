@@ -7002,3 +7002,39 @@ describe('mcp-run-eval', () => {
     expect(writes).toHaveLength(1);
   });
 });
+
+describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
+  /**
+   * THE INVARIANT. `setup_proof` is agent-settable and defends itself with a
+   * workflow-identity check. `bootstrap_proof` (docs/proposals/lane-runbook-bootstrap.md
+   * §5) defends itself more simply and more strongly: the MCP handler does not
+   * read it AT ALL, so there is no request an agent can compose — in any flow,
+   * with any argument — that sets it. Only the in-process controller seam
+   * (enqueueTaskVerification) can.
+   *
+   * This is a SOURCE tripwire rather than a behavioral one on purpose: the
+   * property being protected is the ABSENCE of a code path, and the way that
+   * property dies is someone helpfully threading the flag through the wire
+   * schema "for symmetry with setup_proof". A behavioral test would pass right
+   * up until that happens and then start testing the new path instead.
+   */
+  it('the MCP query handler never references the bootstrap-proof flag', () => {
+    const source = readFileSync(join(__dirname, '..', 'mcpQueryHandler.ts'), 'utf-8');
+    // Comments are allowed to NAME it (explaining why it is absent is useful);
+    // strip line comments and block comments before scanning for real references.
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(code).not.toMatch(/bootstrap_proof/);
+    expect(code).not.toMatch(/bootstrapProof/);
+  });
+
+  it('the MCP server tool schema never exposes a bootstrap-proof input', () => {
+    const source = readFileSync(join(__dirname, '..', 'cyboflowMcpServer.ts'), 'utf-8');
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(code).not.toMatch(/bootstrap_proof/);
+    expect(code).not.toMatch(/bootstrapProof/);
+  });
+});

@@ -1630,6 +1630,32 @@ export class VerificationScheduler {
      */
     setupProof?: boolean;
     /**
+     * The LANE-DRIVEN bootstrap proof (docs/proposals/lane-runbook-bootstrap.md
+     * §5). Stamped to migration 107's `bootstrap_proof`, and deliberately NOT a
+     * synonym for {@link setupProof} — it claims exactly ONE of that flag's three
+     * privileges:
+     *
+     *   - EXEMPT from the §3.2 degrade gate, for the identical bootstrap-deadlock
+     *     reason (you cannot prove a runbook if being unproven blocks the proof);
+     *   - but COUNTED against the project's lifetime budget and charged like any
+     *     lane request, because a budget exemption is safe for a flow a human
+     *     launches once per project and unsafe for something a lane reaches on
+     *     every sprint;
+     *   - and drained at ORDINARY priority, because it BLOCKS a live lane and so
+     *     has no business queueing behind one.
+     *
+     * It is also not a wire field: `mcpQueryHandler` never reads it, so the only
+     * writer is the in-process controller seam. That makes it strictly narrower
+     * than `setupProof`, whose workflow-identity check exists to stop a lane from
+     * claiming the budget exemption.
+     *
+     * A bootstrap proof must NEVER drive a sprint lane — it carries the runbook's
+     * build/serve, not the lane's acceptance criteria — so both lane-driving
+     * policy sites exclude on this flag; see verdictDelivery and
+     * SchedulerVisualVerifyGate.
+     */
+    bootstrapProof?: boolean;
+    /**
      * §5.2 seam 3 — the PIN. `runbookHash` content-addresses the portable half
      * the composed `task` was merged from; `runbookLocalVersion` is the
      * machine-local record's CAS version at enqueue. Both are resolved by the
@@ -1688,39 +1714,59 @@ export class VerificationScheduler {
       req.runbookHash ?? null,
       req.runbookLocalVersion ?? null,
     ];
+    const bootstrapValue: [number] = [req.bootstrapProof === true ? 1 : 0];
     try {
       this.db
         .prepare(
           `INSERT INTO verification_requests
-             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof, runbook_hash, runbook_local_version)
-           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof, runbook_hash, runbook_local_version, bootstrap_proof)
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(...values, ...gateValues, ...pinValues);
-    } catch (pinErr) {
-      this.logger?.debug('[VerificationScheduler] runbook pin columns unavailable; enqueuing without a pin', {
+        .run(...values, ...gateValues, ...pinValues, ...bootstrapValue);
+    } catch (bootstrapErr) {
+      // A pre-105 DB has no `bootstrap_proof`. Falling back DROPS the flag, which
+      // is the only safe direction: an unstamped row is read back as an ordinary
+      // request, so it is gated and budgeted normally and can never promote a
+      // runbook. The bootstrap simply cannot run on such a DB, which is correct —
+      // the feature is younger than the column.
+      this.logger?.debug('[VerificationScheduler] bootstrap_proof column unavailable; enqueuing without it', {
         requestId: id,
-        error: pinErr instanceof Error ? pinErr.message : String(pinErr),
+        error: bootstrapErr instanceof Error ? bootstrapErr.message : String(bootstrapErr),
       });
       try {
         this.db
           .prepare(
             `INSERT INTO verification_requests
-               (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof)
-             VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+               (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof, runbook_hash, runbook_local_version)
+             VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(...values, ...gateValues);
-      } catch (err) {
-        this.logger?.debug('[VerificationScheduler] modality/setup_proof columns unavailable; legacy enqueue', {
+          .run(...values, ...gateValues, ...pinValues);
+      } catch (pinErr) {
+        this.logger?.debug('[VerificationScheduler] runbook pin columns unavailable; enqueuing without a pin', {
           requestId: id,
-          error: err instanceof Error ? err.message : String(err),
+          error: pinErr instanceof Error ? pinErr.message : String(pinErr),
         });
-        this.db
-          .prepare(
-            `INSERT INTO verification_requests
-               (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
-             VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
-          )
-          .run(...values);
+        try {
+          this.db
+            .prepare(
+              `INSERT INTO verification_requests
+                 (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key, modality, setup_proof)
+               VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+            )
+            .run(...values, ...gateValues);
+        } catch (err) {
+          this.logger?.debug('[VerificationScheduler] modality/setup_proof columns unavailable; legacy enqueue', {
+            requestId: id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          this.db
+            .prepare(
+              `INSERT INTO verification_requests
+                 (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
+               VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
+            )
+            .run(...values);
+        }
       }
     }
     this.logger?.debug('[VerificationScheduler] enqueued request', {
@@ -1730,6 +1776,7 @@ export class VerificationScheduler {
       chain: req.chain,
       modality,
       setupProof: req.setupProof === true,
+      bootstrapProof: req.bootstrapProof === true,
       hasTask: req.task !== undefined,
       hasEnqueueKey: req.enqueueKey !== undefined,
       runbookHash: req.runbookHash ?? null,
@@ -2425,22 +2472,42 @@ export class VerificationScheduler {
    * SELECT throws, and losing `task_json` to that throw would silently degrade
    * every agent row to the synthesized bare-intent task. Fail-soft answers are
    * the pre-phase-0 posture — no stamped modality (the caller re-derives it) and
-   * not a setup-proof run (counted, gated, exactly as today).
+   * neither kind of proof run (counted, gated, exactly as today).
+   *
+   * TWO RUNGS, for the same reason this method exists at all: migration 107's
+   * `bootstrap_proof` is younger than 095's `setup_proof`, so a DB at 095/096
+   * throws on the widened SELECT. Falling back to the narrower one keeps the
+   * modality and the setup flag rather than losing all three, and reports
+   * `bootstrapProof: false` — which is not a guess but the truth for every row
+   * such a DB can contain.
    */
   private agentGateColumnsForRow(id: string): {
     modality: VerificationModality | null;
     setupProof: boolean;
+    bootstrapProof: boolean;
   } {
     try {
       const row = this.db
-        .prepare('SELECT modality, setup_proof FROM verification_requests WHERE id = ?')
-        .get(id) as { modality: unknown; setup_proof: unknown } | undefined;
+        .prepare('SELECT modality, setup_proof, bootstrap_proof FROM verification_requests WHERE id = ?')
+        .get(id) as { modality: unknown; setup_proof: unknown; bootstrap_proof: unknown } | undefined;
       return {
         modality: isVerificationModality(row?.modality) ? row.modality : null,
         setupProof: row?.setup_proof === 1 || row?.setup_proof === true,
+        bootstrapProof: row?.bootstrap_proof === 1 || row?.bootstrap_proof === true,
       };
     } catch {
-      return { modality: null, setupProof: false };
+      try {
+        const row = this.db
+          .prepare('SELECT modality, setup_proof FROM verification_requests WHERE id = ?')
+          .get(id) as { modality: unknown; setup_proof: unknown } | undefined;
+        return {
+          modality: isVerificationModality(row?.modality) ? row.modality : null,
+          setupProof: row?.setup_proof === 1 || row?.setup_proof === true,
+          bootstrapProof: false,
+        };
+      } catch {
+        return { modality: null, setupProof: false, bootstrapProof: false };
+      }
     }
   }
 
@@ -2703,6 +2770,16 @@ export class VerificationScheduler {
     setupProof: boolean,
     /** This row's ledger key — see {@link capabilityRunbookKey}. */
     runbookHash: string,
+    /**
+     * Migration 107 — a LANE-DRIVEN bootstrap proof. Exempt from gate (3) on the
+     * identical §3.6 reasoning that exempts `setupProof`: this request exists to
+     * PROVE the runbook whose absence gate (3) is complaining about, so gating it
+     * is a bootstrap deadlock. It is exempt from NOTHING ELSE — gates (1) and (2)
+     * still bind (an unsupported modality and an active suppression are facts
+     * about the host and the ledger, not about whether a runbook exists), and the
+     * budget still charges it.
+     */
+    bootstrapProof: boolean,
   ): Promise<string | null> {
     // (1) Modalities with no executable path on the agent engine (§3.3), plus the
     // probe-conditional native-screen lane (§4).
@@ -2721,7 +2798,7 @@ export class VerificationScheduler {
     }
 
     // (3) The §3.2 degrade path.
-    if (setupProof) return null;
+    if (setupProof || bootstrapProof) return null;
     const derivesEnvironment =
       (Array.isArray(task.build) && task.build.length > 0) || task.serve !== undefined;
     if (derivesEnvironment && (await this.runbookStatus(row.project_id, modality)) !== 'proven') {
@@ -2789,6 +2866,7 @@ export class VerificationScheduler {
       modality,
       gate.setupProof,
       this.capabilityRunbookKey(row.id),
+      gate.bootstrapProof,
     );
     if (gateSkip !== null) {
       await this.markTerminalAndDeliver(
@@ -2889,6 +2967,7 @@ export class VerificationScheduler {
         snapshotSha,
         modality,
         gate.setupProof,
+        gate.bootstrapProof,
       ),
     };
   }
@@ -2963,6 +3042,15 @@ export class VerificationScheduler {
     snapshotSha: string | null,
     modality: VerificationModality,
     setupProof: boolean,
+    /**
+     * Migration 107 — a lane-driven bootstrap proof. Kept SEPARATE from
+     * `setupProof` rather than folded into one "isProof" boolean, because the two
+     * differ on exactly the axes this method spends: `setupProof` bypasses the
+     * project budget and the judge-call charge, and `bootstrapProof` does NOT.
+     * They agree only on the runner's pin expectations (both legitimately execute
+     * an unproven draft) and on proof eligibility at settle time.
+     */
+    bootstrapProof: boolean,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
@@ -3048,9 +3136,14 @@ export class VerificationScheduler {
         // legitimately execute an 'unproven-draft' record (proving it is the
         // point) but must pin to the EXACT version it was enqueued against;
         // ordinary traffic is the mirror image. Only the scheduler holds this
-        // bit (the `setup_proof` column), so it must be handed over rather than
-        // guessed from the task.
-        ...(setupProof ? { setupProof: true } : {}),
+        // bit (the `setup_proof` / `bootstrap_proof` columns), so it must be
+        // handed over rather than guessed from the task.
+        //
+        // A BOOTSTRAP proof takes the same half: it was composed from a draft the
+        // controller registered moments earlier, so demanding a 'proven' record
+        // would reject the very thing it exists to prove. The runner's flag is
+        // therefore "is this a proof run", not "is this the setup flow".
+        ...(setupProof || bootstrapProof ? { setupProof: true } : {}),
         artifactsDir: this.artifactsDirResolver(row.run_id),
         verifyPort: servesPort ? leasedPort : null,
         verifyDriverPort: leasedPort + 1,
@@ -3108,7 +3201,15 @@ export class VerificationScheduler {
         return;
       }
 
-      await this.settleAgentTerminal(row, input, result, modality, setupProof, snapshotSha);
+      await this.settleAgentTerminal(
+        row,
+        input,
+        result,
+        modality,
+        setupProof,
+        snapshotSha,
+        bootstrapProof,
+      );
     } catch (err) {
       const aborted = controller.signal.aborted;
       controller.abort();
@@ -3204,6 +3305,8 @@ export class VerificationScheduler {
     modality: VerificationModality,
     setupProof: boolean,
     snapshotSha: string | null,
+    /** Migration 107 — see {@link VerificationScheduler.processAgentRow}. */
+    bootstrapProof: boolean = false,
   ): Promise<void> {
     const isTerminalFailure =
       result.status === 'failed' || result.status === 'timeout' || result.status === 'skipped';
@@ -3285,7 +3388,11 @@ export class VerificationScheduler {
     // ledger feedback below and for the same reason: the verdict is the
     // load-bearing act, and a proof-recording failure must never be able to
     // change one that is already committed.
-    if (setupProof && status === 'passed') {
+    // A BOOTSTRAP proof promotes on exactly the same terms (and through the same
+    // engine-enforced path, with the same dirty-worktree refusal and the same
+    // double CAS): the whole point of the lane bootstrap is that it cannot assert
+    // its own success any more than the setup flow can.
+    if ((setupProof || bootstrapProof) && status === 'passed') {
       this.recordRunbookProof(row, modality, result, snapshotSha);
     }
 
