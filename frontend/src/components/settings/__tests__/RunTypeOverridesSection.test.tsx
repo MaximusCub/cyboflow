@@ -155,6 +155,15 @@ vi.mock('../../../stores/codexModelCatalogStore', () => ({
   }),
 }));
 
+const OMP_MODEL_OPTIONS = [
+  { id: 'anthropic/claude-opus-4-5', label: 'Claude Opus 4.5', ompProvider: 'anthropic' },
+  { id: 'openrouter/meta-llama-4', label: 'Llama 4', ompProvider: 'openrouter' },
+];
+
+vi.mock('../../../stores/ompModelCatalogStore', () => ({
+  useOmpModelCatalog: () => ({ options: OMP_MODEL_OPTIONS, loading: false, error: null }),
+}));
+
 vi.mock('../../../utils/api', () => ({
   API: {
     projects: { getAll: vi.fn() },
@@ -567,6 +576,37 @@ describe('RunTypeOverridesSection — detail screen', () => {
     expect(within(card).getByTestId('run-type-changed-permissionMode')).toHaveTextContent(
       'overridden · default is Ask before edits',
     );
+  });
+
+  /**
+   * Regression: the model baseline is the always-Claude floor, which OMP
+   * legitimately refuses (absence there means "OMP picks"). Seeding that
+   * refusal made the card UNOPENABLE, because `cardIsOn` is derived from "some
+   * field is non-null" — the switch flipped straight back off and the model
+   * control could never be reached at all under an OMP runtime.
+   */
+  it('opens the model card under an OMP runtime, seeding a model OMP can launch', async () => {
+    await openDetail('Quick session', { defaultAgentRuntime: 'omp-sdk' });
+
+    const card = await screen.findByTestId('knob-card-model');
+    const toggle = within(card).getByRole('switch');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    // The seed comes from the offered list, so it is launchable by construction
+    // — never the Claude floor the baseline actually held.
+    expect(within(card).getByLabelText('Model')).toHaveValue('anthropic/claude-opus-4-5');
+  });
+
+  it('still seeds the model card from the baseline under a Claude runtime', async () => {
+    await openDetail('Quick session');
+
+    const card = await screen.findByTestId('knob-card-model');
+    fireEvent.click(within(card).getByRole('switch'));
+
+    expect(within(card).getByLabelText('Model')).toHaveValue('opus');
   });
 
   // AC 2 — Save goes through applyRunTypeDefault, never API.config.update or the parent form.

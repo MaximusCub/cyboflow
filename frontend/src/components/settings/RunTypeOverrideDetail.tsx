@@ -195,14 +195,43 @@ export function RunTypeOverrideDetail({
   const cardIsOn = (card: KnobCard): boolean => card.fields.some((f) => draftValue(f) !== null);
 
   /**
-   * Flipping a card ON seeds each of its fields from the baseline so the control
-   * starts at the value the launch would have used; effort has no baseline, so
-   * it stays unset ("Follow defaults") until the user picks a level. Flipping
-   * OFF clears every field in the card back to "follow defaults".
+   * The value a field starts at when its card is switched ON: normally the
+   * baseline, so the control opens showing what the launch would have used.
+   *
+   * `model` needs a second rung because its baseline is the always-Claude floor
+   * (`DEFAULT_RUN_TYPE_MODEL_FLOORS`), which a non-Claude provider legitimately
+   * refuses — `coerceModelForRuntime` returns `null` for it under OMP, since
+   * absence there means "OMP picks its own default". Seeding that `null` would
+   * make the card UNOPENABLE rather than merely unset: `cardIsOn` is DERIVED
+   * from "some field is non-null", so the switch flips straight back off and no
+   * amount of clicking can ever reveal the control. Falling back to the first
+   * option the control will actually offer keeps the seed launchable by
+   * construction — it comes from the same `fieldOptions` list that renders.
+   *
+   * Residual: a provider whose catalog is still loading (or failed) offers
+   * nothing, so the card stays closed until it arrives. That is honest — there
+   * is no model to pick yet — but it is indistinguishable from the switch being
+   * broken, which is why the catalog is fetched eagerly for the draft provider.
+   */
+  const seedValueFor = (field: RunTypeFieldId): string | null => {
+    const fromBaseline = baselineValueFor(field, baseline);
+    if (field !== 'model') return fromBaseline;
+    const coerced = coerceDraftForModel(draft, fromBaseline, baseline).model;
+    if (coerced !== null) return coerced;
+    const offered = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions);
+    return offered[0]?.id ?? null;
+  };
+
+  /**
+   * Flipping a card ON seeds each of its fields from {@link seedValueFor} so the
+   * control starts at the value the launch would have used; effort has no
+   * baseline, so it stays unset ("Follow defaults") until the user picks a
+   * level. Flipping OFF clears every field in the card back to "follow
+   * defaults".
    */
   const toggleCard = (card: KnobCard, next: boolean): void => {
     for (const field of card.fields) {
-      setField(field, next ? baselineValueFor(field, baseline) : null);
+      setField(field, next ? seedValueFor(field) : null);
     }
   };
 
