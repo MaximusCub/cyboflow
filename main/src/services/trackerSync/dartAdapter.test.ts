@@ -394,6 +394,46 @@ describe('DartAdapter.listIssues', () => {
     expect(new URL(listCalls[1].url).searchParams.get('offset')).toBe('100');
   });
 
+  it('keeps paging on `count` when `next` is ABSENT — the schema allows that page', async () => {
+    // count and results are REQUIRED in PaginatedConciseTaskList; next is
+    // optional AND nullable. A server that simply omits `next` while count says
+    // more rows exist is therefore schema-valid, and stopping there would hand
+    // the deletion sweep a truncated id set.
+    const rows = Array.from({ length: 250 }, (_, i) => concise({ id: `id${String(i).padStart(10, '0')}` }));
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/tasks/list'),
+        respond: (_b, params) => {
+          const offset = Number(params.get('offset') ?? '0');
+          const limit = Number(params.get('limit') ?? '100');
+          // NOTE: no `next` key at all, on any page.
+          return { status: 200, body: { count: rows.length, results: rows.slice(offset, offset + limit) } };
+        },
+      },
+    ]);
+    const ids = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssueIds(SELECTION);
+    expect(ids).toHaveLength(250);
+  });
+
+  it('stops on an over-reported `count` instead of spinning', async () => {
+    // The empty-page guard is what keeps a lying count from looping forever.
+    const rows = [concise({ id: 'onlyoneofthm' })];
+    const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/tasks/list'),
+        respond: (_b, params) => {
+          const offset = Number(params.get('offset') ?? '0');
+          return { status: 200, body: { count: 9999, results: rows.slice(offset, offset + 100) } };
+        },
+      },
+    ]);
+    const ids = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssueIds(SELECTION);
+    expect(ids).toEqual(['onlyoneofthm']);
+    expect(calls.filter((c) => new URL(c.url).pathname.endsWith('/tasks/list'))).toHaveLength(2);
+  });
+
   it('does NOT hydrate for listIssueIds — the sweep only needs ids', async () => {
     const rows = [concise({ id: 'aaaaaaaaaaaa' }), concise({ id: 'bbbbbbbbbbbb' })];
     const { fetchImpl, calls } = scriptedFetch([configRoute(), listRoute(rows)]);

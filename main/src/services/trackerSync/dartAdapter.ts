@@ -563,9 +563,17 @@ export class DartAdapter implements TrackerAdapter {
   }
 
   /**
-   * Walks Dart's limit/offset pager to exhaustion. `count` is the authority on
-   * when to stop; `next` is only consulted as a secondary signal, since an
-   * absolute next-URL would have to be re-signed to follow.
+   * Walks Dart's limit/offset pager to exhaustion.
+   *
+   * `count` is the AUTHORITY and is consulted first; `next` is only a fallback
+   * for a response that omits `count` entirely. That ordering is load-bearing,
+   * not stylistic: in `PaginatedConciseTaskList` the spec marks `count` and
+   * `results` REQUIRED but `next` optional AND nullable, so a page carrying
+   * `count: 250`, a hundred rows, and no `next` at all is schema-valid. Letting
+   * a missing `next` win there would stop the walk two thirds short — which
+   * `listIssueIds` would hand the deletion sweep as a shrunken id set, and
+   * which `findIssueByClientKey` would read as a marker that is not there,
+   * duplicating a create that already landed.
    */
   private async paginate<T>(
     path: string,
@@ -591,7 +599,13 @@ export class DartAdapter implements TrackerAdapter {
       // An empty page terminates regardless of what `count` claims, so a
       // miscounted endpoint cannot spin here.
       if (batch.length === 0) break;
-      if (typeof body.count === 'number' && results.length >= body.count) break;
+      if (typeof body.count === 'number') {
+        if (results.length >= body.count) break;
+        // `count` says there is more; an absent or null `next` does not get to
+        // override it (see the doc comment). The empty-page guard above still
+        // terminates a server that over-reports.
+        continue;
+      }
       if (body.next === null || body.next === undefined) break;
     }
     return results;
