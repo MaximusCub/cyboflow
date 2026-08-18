@@ -27,8 +27,15 @@ import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../sh
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
+  AGENT_PROVIDERS,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+  formatProviderRuntimeConflict,
+  isWorkflowLaunchableRuntime,
+  providerForRuntime,
+  providerRuntimeConflict,
   type AgentProvider,
-  type WorkflowAgentRuntime,
+  type WorkflowLaunchableRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
@@ -359,7 +366,7 @@ export interface RunLauncherLike {
    * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
    * When omitted the run is not prompt-seeded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -649,6 +656,26 @@ export interface RunCloseoutDeps {
    */
   reapPrototypeServers?: (runId: string) => void | Promise<unknown>;
   /**
+   * Cancel the run's outstanding visual-verification requests at terminal
+   * close-out: abort anything in flight and mark non-terminal
+   * `verification_requests` rows 'timeout'.
+   *
+   * WHY CLOSE-OUT NEEDS THIS TOO. Session dismiss/cancel already does it
+   * (`cancelRunHandler.ts`), but merge / createPr complete the run down THIS
+   * path instead, which had no equivalent — so a verification still draining
+   * when the user hit Merge would keep running and later deliver a review-queue
+   * finding + screenshots artifact onto an already-closed-out run. It also holds
+   * a snapshot worktree cut from the run worktree this close-out is about to
+   * remove. Both are exactly what dismiss cancels for.
+   *
+   * Called BEFORE the worktree mutation, alongside the other live-process
+   * teardown, for that second reason. Optional + fail-soft: a missing dep
+   * (verification disabled) or a throw never blocks close-out — the verification
+   * queue is strictly downstream of the run's terminal state. Backed by
+   * VerificationScheduler.cancelForRun; a no-op for a run that never verified.
+   */
+  cancelVerificationsForRun?: (runId: string) => void;
+  /**
    * Optional native-task stage deriver (migration 014). When wired, the merge /
    * createPr / dismiss mutations stamp workflow_runs.outcome and recompute the
    * linked task's derived execution stage through the chokepoint. The run's
@@ -681,6 +708,25 @@ async function reapPrototypeServersSafe(deps: RunCloseoutDeps, runId: string): P
     await deps.reapPrototypeServers?.(runId);
   } catch (err: unknown) {
     console.error('[runs.closeout] reapPrototypeServers failed — proceeding', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Fail-soft cancel of a run's outstanding visual verifications at close-out —
+ * the merge / createPr counterpart to what `cancelRunHandler` already does on
+ * dismiss/cancel. A missing dep (verification disabled) or a throw is swallowed
+ * for the same reason every other close-out collaborator is: the verification
+ * queue is downstream of the run's terminal state and must never block the user
+ * from merging. Synchronous, matching the cancel path's own signature.
+ */
+function cancelVerificationsForRunSafe(deps: RunCloseoutDeps, runId: string): void {
+  try {
+    deps.cancelVerificationsForRun?.(runId);
+  } catch (err: unknown) {
+    console.error('[runs.closeout] cancelVerificationsForRun failed — proceeding', {
       runId,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -1005,8 +1051,8 @@ export const runsRouter = router({
       // Provider/runtime are the forward-compatible agent selection surface.
       // Codex SDK routes through the SDK substrate compatibility path; Claude
       // runtimes project onto the legacy substrate.
-      agentProvider: z.enum(['claude', 'codex']).optional(),
-      agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
+      agentProvider: z.enum(AGENT_PROVIDERS).optional(),
+      agentRuntime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).optional(),
       // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
@@ -1141,24 +1187,28 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      if (input.agentProvider === 'codex' && input.agentRuntime !== undefined && input.agentRuntime !== 'codex-sdk') {
+      const providerConflict = providerRuntimeConflict(input.agentProvider, input.agentRuntime);
+      if (providerConflict) {
         throw new TRPCError({
           code: 'BAD_REQUEST',
-          message: `agentProvider codex conflicts with agentRuntime ${input.agentRuntime}`,
+          message: formatProviderRuntimeConflict(providerConflict.provider, providerConflict.runtime),
         });
       }
-      if (input.agentProvider === 'claude' && input.agentRuntime === 'codex-sdk') {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'agentProvider claude conflicts with agentRuntime codex-sdk',
-        });
-      }
-      const codexSdkRequested =
-        input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk';
+      // The substrate this request IMPLIES — the same projection
+      // WorkflowRegistry.createRun applies, restated here only so a conflicting
+      // pair fails as a 400 at the wire instead of a 500 from the registry. The
+      // Claude runtimes carry the real sdk/interactive axis; every STRUCTURED
+      // non-Claude runtime piggybacks 'sdk'. Read through the provider registry,
+      // not a `=== 'codex-sdk'` test: a launchable runtime this pre-check does
+      // not recognize projects NO substrate, so the conflict slips past here and
+      // the sprint cap below is keyed on the wrong substrate.
+      const nonClaudeSdkRequested =
+        (input.agentProvider !== undefined && input.agentProvider !== 'claude') ||
+        (input.agentRuntime !== undefined && providerForRuntime(input.agentRuntime) !== 'claude');
       const substrateFromRuntime =
         input.agentRuntime === 'claude-interactive'
           ? 'interactive'
-          : input.agentRuntime === 'claude-sdk' || codexSdkRequested
+          : input.agentRuntime === 'claude-sdk' || nonClaudeSdkRequested
             ? 'sdk'
             : undefined;
       if (input.substrate && substrateFromRuntime && input.substrate !== substrateFromRuntime) {
@@ -1452,7 +1502,7 @@ export const runsRouter = router({
             variant_id: string | null;
             experiment_id: string | null;
             agent_provider: AgentProvider | null;
-            agent_runtime: WorkflowAgentRuntime | null;
+            agent_runtime: WorkflowRunStorableRuntime | null;
             execution_model: ExecutionModel | null;
           }
         | undefined;
@@ -1564,7 +1614,11 @@ export const runsRouter = router({
           ...(row.seed_prompt ? { seedPrompt: row.seed_prompt } : {}),
         },
         row.agent_provider ?? undefined,
-        row.agent_runtime ?? undefined,
+        // The column carries what a run row may STORE; a restart is a real
+        // launch, so only a launchable runtime is forwarded (anything else
+        // re-inherits the launch default rather than restarting onto a runtime
+        // createRun would refuse).
+        isWorkflowLaunchableRuntime(row.agent_runtime) ? row.agent_runtime : undefined,
       );
       return { runId, worktreePath, branchName };
     }),
@@ -2750,6 +2804,10 @@ export const runsRouter = router({
       // promise resolves; a warm SDK query() is killed. NO-OP when the relay bag
       // is unwired.
       await endLiveInteractiveSession(input.runId);
+      // Same reason, same moment: cancel any still-draining visual verification
+      // so it neither delivers a finding onto the run we are closing out nor
+      // holds a snapshot worktree cut from the worktree removed below.
+      cancelVerificationsForRunSafe(deps!, input.runId);
 
       const mainBranch = await wm.getProjectMainBranch(projectPath);
       // Commit-less runs (e.g. Planner) persist their output to the DB via MCP
@@ -2854,6 +2912,10 @@ export const runsRouter = router({
       // so close-out never orphans it (interactive REPL or warm SDK query()).
       // NO-OP when the relay bag is unwired.
       await endLiveInteractiveSession(input.runId);
+      // Same reason, same moment: cancel any still-draining visual verification
+      // so it neither delivers a finding onto the run we are closing out nor
+      // holds a snapshot worktree cut from the worktree removed below.
+      cancelVerificationsForRunSafe(deps!, input.runId);
 
       await wm.gitPush(worktreePath);
       const { remoteUrl, branchName } = await wm.getRemoteUrlAndBranch(worktreePath);
@@ -2918,6 +2980,12 @@ export const runsRouter = router({
       // spawn-promise settle on kill is the designed RunExecutor close path. NO-OP
       // for the SDK substrate and when the relay bag is unwired.
       await killLiveInteractiveSession(input.runId);
+      // Same reason, same moment: cancel any still-draining visual verification so
+      // it neither delivers a finding onto the run being discarded nor holds a
+      // snapshot worktree cut from the worktree removed below. (The SESSION-level
+      // dismiss reaches this through cancelRunHandler; this is the RUN-level
+      // dismiss from the rail, a separate entry point that needs it too.)
+      cancelVerificationsForRunSafe(deps!, input.runId);
       // Tear down the run's user shell (and any dev server it launched) BEFORE
       // removing the worktree dir, so no shell process holds it open.
       closeRunShell(input.runId);

@@ -69,7 +69,13 @@ export interface AgentUpsertChange {
   model?: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
   runtime?: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when `runtime`
+   * names a non-Claude provider (e.g. `'codex-sdk'`); `null`/omitted = that
+   * provider's default.
+   */
+  providerModel?: string | null;
+  /** @deprecated Alias of {@link providerModel}; `providerModel` wins when both are set. */
   codexModel?: string | null;
   /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
@@ -90,7 +96,13 @@ export interface AgentCreateCustomChange {
   model?: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
   runtime?: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when `runtime`
+   * names a non-Claude provider (e.g. `'codex-sdk'`); `null`/omitted = that
+   * provider's default.
+   */
+  providerModel?: string | null;
+  /** @deprecated Alias of {@link providerModel}; `providerModel` wins when both are set. */
   codexModel?: string | null;
   /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
@@ -116,7 +128,13 @@ export interface AgentUpdateCustomChange {
   model?: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
   runtime?: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when `runtime`
+   * names a non-Claude provider (e.g. `'codex-sdk'`); `null`/omitted = that
+   * provider's default.
+   */
+  providerModel?: string | null;
+  /** @deprecated Alias of {@link providerModel}; `providerModel` wins when both are set. */
   codexModel?: string | null;
 }
 
@@ -144,31 +162,43 @@ export type AgentOverrideChange =
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize a change's runtime/model/codexModel triple for persistence, enforcing
- * the runtime-gated invariant the editor's picker imposes — for ALL write callers,
- * not just the UI:
+ * Normalize a change's runtime/model/providerModel triple for persistence,
+ * enforcing the runtime-gated invariant the editor's picker imposes — for ALL
+ * write callers, not just the UI:
  *   - an inherited (null/undefined) runtime stores NULL;
- *   - `codex_model` is retained ONLY when the runtime is 'codex-sdk' — a Claude
- *     runtime never persists a Codex model, so a later switch can't leave a stale id;
+ *   - `providerModel` is retained ONLY under a pinned NON-Claude runtime — a
+ *     Claude runtime never persists a provider model, so a later switch can't
+ *     leave a stale id. Keyed on `!isClaudeRuntime` (today the only non-Claude
+ *     WORKFLOW_LAUNCHABLE_RUNTIMES member is `'codex-sdk'`) rather than a
+ *     literal `'codex-sdk'` check, so a future non-Claude runtime gets this
+ *     behavior for free;
  *   - the Claude `model` alias is retained ONLY under a pinned CLAUDE runtime. Under
  *     an inherited runtime a model pin is non-deterministic (it depends on the run
- *     provider) and under Codex it is meaningless, so it stores NULL. This mirrors
- *     the editor reducer (which clears `model` off a non-Claude runtime) and keeps a
- *     non-editor caller from persisting the orphan states the picker forbids. The
- *     editor never sends null-runtime + model (it seeds a legacy model-only row to
- *     claude-sdk), so this only ever clears an out-of-band or explicitly-inherited pin.
+ *     provider) and under a non-Claude runtime it is meaningless, so it stores NULL.
+ *     This mirrors the editor reducer (which clears `model` off a non-Claude runtime)
+ *     and keeps a non-editor caller from persisting the orphan states the picker
+ *     forbids. The editor never sends null-runtime + model (it seeds a legacy
+ *     model-only row to claude-sdk), so this only ever clears an out-of-band or
+ *     explicitly-inherited pin.
+ *
+ * `providerModel` INPUT is the caller's already-normalized (`providerModel ??
+ * codexModel`) value — see each call site. The RETURNED `providerModel` is what
+ * both `provider_model` and `codex_model` columns persist verbatim (mirrored,
+ * per migration 104's rollback-compat contract).
  */
 function normalizeRuntime(
   runtime: WorkflowAgentRuntime | null | undefined,
-  codexModel: string | null | undefined,
+  providerModel: string | null | undefined,
   model: AgentModelAlias | null | undefined,
-): { runtime: string | null; codexModel: string | null; model: AgentModelAlias | null } {
+): { runtime: string | null; providerModel: string | null; model: AgentModelAlias | null } {
   const r = runtime ?? null;
   const isClaudeRuntime = r === 'claude-sdk' || r === 'claude-interactive';
-  const cm =
-    r === 'codex-sdk' && typeof codexModel === 'string' && codexModel.length > 0 ? codexModel : null;
+  const pm =
+    r !== null && !isClaudeRuntime && typeof providerModel === 'string' && providerModel.length > 0
+      ? providerModel
+      : null;
   const m = isClaudeRuntime ? (model ?? null) : null;
-  return { runtime: r, codexModel: cm, model: m };
+  return { runtime: r, providerModel: pm, model: m };
 }
 
 /** Slugify a display name to a canonical kebab key. */
@@ -307,7 +337,7 @@ export class AgentOverrideRouter {
       tools: change.tools,
       model: change.model ?? null,
       runtime: change.runtime ?? null,
-      codexModel: change.codexModel ?? null,
+      providerModel: change.providerModel ?? change.codexModel ?? null,
       enabledMcps: change.enabledMcps,
       isCustom: false,
     };
@@ -317,9 +347,9 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
-    const { runtime, codexModel, model } = normalizeRuntime(
+    const { runtime, providerModel, model } = normalizeRuntime(
       change.runtime,
-      change.codexModel,
+      change.providerModel ?? change.codexModel,
       change.model,
     );
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
@@ -343,8 +373,8 @@ export class AgentOverrideRouter {
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
               system_prompt, tools_json, enabled_mcps_json, is_custom, version, model,
-              runtime, codex_model, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?)
+              runtime, codex_model, provider_model, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, agent_key) DO UPDATE SET
              name = excluded.name,
              role = excluded.role,
@@ -355,6 +385,7 @@ export class AgentOverrideRouter {
              model = excluded.model,
              runtime = excluded.runtime,
              codex_model = excluded.codex_model,
+             provider_model = excluded.provider_model,
              version = agent_overrides.version + 1,
              updated_at = excluded.updated_at`,
         )
@@ -371,7 +402,10 @@ export class AgentOverrideRouter {
           enabledMcpsJson,
           model,
           runtime,
-          codexModel,
+          // codex_model + provider_model are written with the SAME normalized
+          // value (migration 104 rollback-compat contract) — never independently.
+          providerModel,
+          providerModel,
           now,
           now,
         );
@@ -398,7 +432,7 @@ export class AgentOverrideRouter {
       tools: change.tools,
       model: change.model ?? null,
       runtime: change.runtime ?? null,
-      codexModel: change.codexModel ?? null,
+      providerModel: change.providerModel ?? change.codexModel ?? null,
       enabledMcps: change.enabledMcps,
       isCustom: true,
     };
@@ -417,9 +451,9 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
-    const { runtime, codexModel, model } = normalizeRuntime(
+    const { runtime, providerModel, model } = normalizeRuntime(
       change.runtime,
-      change.codexModel,
+      change.providerModel ?? change.codexModel,
       change.model,
     );
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
@@ -437,8 +471,8 @@ export class AgentOverrideRouter {
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
               system_prompt, tools_json, enabled_mcps_json, is_custom, version, model,
-              runtime, codex_model, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?)`,
+              runtime, codex_model, provider_model, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -452,7 +486,10 @@ export class AgentOverrideRouter {
           enabledMcpsJson,
           model,
           runtime,
-          codexModel,
+          // codex_model + provider_model are written with the SAME normalized
+          // value (migration 104 rollback-compat contract) — never independently.
+          providerModel,
+          providerModel,
           now,
           now,
         );
@@ -482,7 +519,7 @@ export class AgentOverrideRouter {
       enabledMcps: change.enabledMcps,
       model: change.model ?? null,
       runtime: change.runtime ?? null,
-      codexModel: change.codexModel ?? null,
+      providerModel: change.providerModel ?? change.codexModel ?? null,
       isCustom: true,
     };
     // Kebab/forbidden/tool/description/MCP/model/runtime shape checks (mirrors createCustom).
@@ -492,9 +529,9 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const toolsJson = JSON.stringify(change.tools);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
-    const { runtime, codexModel, model } = normalizeRuntime(
+    const { runtime, providerModel, model } = normalizeRuntime(
       change.runtime,
-      change.codexModel,
+      change.providerModel ?? change.codexModel,
       change.model,
     );
 
@@ -524,6 +561,7 @@ export class AgentOverrideRouter {
              model = ?,
              runtime = ?,
              codex_model = ?,
+             provider_model = ?,
              version = version + 1,
              updated_at = ?
            WHERE project_id = ? AND agent_key = ?`,
@@ -536,7 +574,10 @@ export class AgentOverrideRouter {
           enabledMcpsJson,
           model,
           runtime,
-          codexModel,
+          // codex_model + provider_model are written with the SAME normalized
+          // value (migration 104 rollback-compat contract) — never independently.
+          providerModel,
+          providerModel,
           now,
           projectId,
           agentKey,

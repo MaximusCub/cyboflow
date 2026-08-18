@@ -10,6 +10,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { probeCliVersion } from '../cli/cliVersionProbe';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
@@ -796,6 +797,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
           env: {
             CYBOFLOW_RUN_ID: runId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
+            // CRITICAL fork-bomb guard: nodeCmd may resolve to the Electron app
+            // binary (packaged app, no node on PATH) — spawning it plainly boots
+            // a whole new Cyboflow app in an unkillable loop. See electronNodeGuard.
+            ...electronRunAsNodeGuardEnv(nodeCmd),
           },
           // Parity with the SDK substrate: CLI ≥2.1.142 made MCP startup
           // non-blocking by default; block startup until the socket server is

@@ -1,0 +1,148 @@
+{
+  "id": "models-1",
+  "type": "response",
+  "command": "get_available_models",
+  "success": true,
+  "data": {
+    "models": [
+      {
+        "id": "claude-3-5-sonnet-20240620",
+        "name": "Claude Sonnet 3.5",
+        "api": "anthropic-messages",
+        "provider": "anthropic",
+        "baseUrl": "https://api.anthropic.com",
+        "reasoning": false,
+        "input": [
+          "text",
+          "image"
+        ],
+        "cost": {
+          "input": 3,
+          "output": 15,
+          "cacheRead": 0.3,
+          "cacheWrite": 3.75
+        },
+        "contextWindow": 200000,
+        "maxTokens": 8192,
+        "supportsComputerUse": false,
+        "supportsComputerUseConfig": false,
+        "compat": {
+          "officialEndpoint": true,
+          "signingEndpoint": true,
+          "disableStrictTools": false,
+          "disableAdaptiveThinking": false,
+          "allowAnthropicHeaderOverrides": false,
+          "supportsEagerToolInputStreaming": true,
+          "supportsLongCacheRetention": true,
+          "supportsMidConversationSystem": false,
+          "supportsForcedToolChoice": true,
+          "supportsSamplingParams": true,
+          "requiresToolResultId": false,
+          "requiresThinkingEnabled": false,
+          "replayUnsignedThinking": false,
+          "escapeBuiltinToolNames": false
+        }
+      },
+      {
+        "id": "claude-3-5-sonnet-20241022",
+        "name": "Claude Sonnet 3.5 v2",
+        "api": "anthropic-messages",
+        "provider": "anthropic",
+        "baseUrl": "https://api.anthropic.com",
+        "reasoning": false,
+        "input": [
+          "text",
+          "image"
+        ],
+        "cost": {
+          "input": 3,
+          "output": 15,
+          "cacheRead": 0.3,
+          "cacheWrite": 3.75
+        },
+        "contextWindow": 200000,
+        "maxTokens": 8192,
+        "supportsComputerUse": false,
+        "supportsComputerUseConfig": false,
+        "compat": {
+          "officialEndpoint": true,
+          "signingEndpoint": true,
+          "disableStrictTools": false,
+          "disableAdaptiveThinking": false,
+          "allowAnthropicHeaderOverrides": false,
+          "supportsEagerToolInputStreaming": true,
+          "supportsLongCacheRetention": true,
+          "supportsMidConversationSystem": false,
+          "supportsForcedToolChoice": true,
+          "supportsSamplingParams": true,
+          "requiresToolResultId": false,
+          "requiresThinkingEnabled": false,
+          "replayUnsignedThinking": false,
+          "escapeBuiltinToolNames": false
+        }
+      },
+      {
+        "id": "claude-3-7-sonnet-20250219",
+        "name": "Claude Sonnet 3.7",
+        "api": "anthropic-messages",
+        "provider": "anthropic",
+        "baseUrl": "https://api.anthropic.com/v1",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "cost": {
+          "input": 3,
+          "output": 15,
+          "cacheRead": 0.3,
+          "cacheWrite": 3.75
+        },
+        "contextWindow": 200000,
+        "maxTokens": 64000,
+        "thinking": {
+          "mode": "budget",
+          "efforts": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        "supportsComputerUse": false,
+        "compat": {
+          "officialEndpoint": true,
+          "signingEndpoint": true,
+          "disableStrictTools": false,
+          "disableAdaptiveThinking": false,
+          "allowAnthropicHeaderOverrides": false,
+          "supportsEagerToolInputStreaming": true,
+          "supportsLongCacheRetention": true,
+          "supportsMidConversationSystem": false,
+          "supportsForcedToolChoice": true,
+          "supportsSamplingParams": true,
+          "requiresToolResultId": false,
+          "requiresThinkingEnabled": false,
+          "replayUnsignedThinking": false,
+          "escapeBuiltinToolNames": false
+        },
+        "supportsComputerUseConfig": false,
+        "compatConfig": {
+          "officialEndpoint": true,
+          "signingEndpoint": true,
+          "disableAdaptiveThinking": false,
+          "supportsEagerToolInputStreaming": true,
+          "supportsLongCacheRetention": true,
+          "supportsMidConversationSystem": false,
+          "supportsForcedToolChoice": true,
+          "supportsSamplingParams": true,
+          "requiresToolResultId": false,
+          "requiresThinkingEnabled": false,
+          "replayUnsignedThinking": false,
+          "escapeBuiltinToolNames": false
+        }
+      }
+    ]
+  }
+}

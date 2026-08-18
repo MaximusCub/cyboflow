@@ -58,3 +58,48 @@ export class MixedProviderOrchestratedError extends Error {
 export function isMixedProviderOrchestratedError(err: unknown): boolean {
   return err instanceof Error && err.message.includes(MIXED_PROVIDER_ORCHESTRATED_CODE);
 }
+
+/**
+ * The sibling guard for a WHOLE-RUN provider that has no orchestrated contract
+ * at all.
+ *
+ * {@link MixedProviderOrchestratedError} above is about a MIX: the run's base
+ * provider is Claude and a per-agent pin points somewhere else. A whole-run
+ * non-Claude request is deliberately exempt from it — every step targets the
+ * same provider, so nothing is mixed. That exemption is right for Codex, which
+ * has the orchestrated pieces (prompt envelope, question bridge), and wrong for
+ * a provider that only ever shipped the programmatic lane: the run would launch
+ * a main orchestrator outside the contract that exists for it.
+ *
+ * Which providers those are is a capability question, not a name — see
+ * `main/src/orchestrator/providerExecutionSupport.ts`.
+ *
+ * DISTINCT from the mixed-provider code on purpose. The launch wizard's
+ * mixed-provider prompt renders HARDCODED copy ("This flow runs one or more
+ * steps on Codex…"), which would be actively misleading here, so this error is
+ * left to surface through the ordinary `setLaunchError` path where its own
+ * message is shown verbatim. It carries the same machine prefix convention so a
+ * later surface can branch on it — see the tRPC boundary note above for why the
+ * code lives in the MESSAGE rather than only on `.code`.
+ */
+export const PROVIDER_ORCHESTRATED_UNSUPPORTED_CODE = 'PROVIDER_REQUIRES_PROGRAMMATIC';
+
+export class ProviderOrchestratedUnsupportedError extends Error {
+  readonly code = PROVIDER_ORCHESTRATED_UNSUPPORTED_CODE;
+
+  constructor(
+    /** The provider label as a user reads it (e.g. 'OMP'). */
+    readonly providerLabel: string,
+  ) {
+    super(
+      `[${PROVIDER_ORCHESTRATED_UNSUPPORTED_CODE}] ${providerLabel} workflow runs are ` +
+        'programmatic-only in this build — switch the run/variant to programmatic execution.',
+    );
+    this.name = 'ProviderOrchestratedUnsupportedError';
+  }
+}
+
+/** {@link isMixedProviderOrchestratedError} for the whole-run guard. */
+export function isProviderOrchestratedUnsupportedError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(PROVIDER_ORCHESTRATED_UNSUPPORTED_CODE);
+}

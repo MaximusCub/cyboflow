@@ -39,6 +39,7 @@ import type { VerificationTaskV1 } from '../../../../shared/types/visualVerifica
 // the standalone-typecheck invariant (heavy imports only).
 import { parseVisualTaskSection } from '../verify/visualTaskSection';
 import type {
+  CommitIntegrityProbe,
   ControllerHost,
   ControllerResult,
   ControllerStepContext,
@@ -710,7 +711,9 @@ export class WorkflowController {
      *  - optional inner failure → skip that inner step, continue the lane;
      *  - SYSTEMIC inner failure (env-level) → do NOT fail/skip the lane; capture the
      *    error and return 'systemic' so the wave loop parks the whole fan-out;
-     *  - all inner steps ok → mark the lane 'integrated'.
+     *  - all inner steps ok → mark the lane 'integrated', UNLESS the driver's
+     *    optional commit-integrity probe shows the lane committed nothing and left
+     *    the worktree dirty, in which case the lane is failed instead.
      * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
      */
     /** Resolve a declared inner-chain loopback target; invalid data fails the lane. */
@@ -728,6 +731,20 @@ export class WorkflowController {
         currentStepId: inner[0].id,
         allowedStepIds,
       });
+
+      // Commit-integrity backstop: capture the worktree's lane-start state now so
+      // the success end can refuse to stamp 'integrated' on a lane that never
+      // committed. Fail-soft — an absent/throwing probe leaves the lane on the
+      // pre-backstop path (step verdicts alone).
+      let commitProbe: CommitIntegrityProbe | undefined;
+      try {
+        commitProbe = await driver.beginCommitProbe?.(runId);
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': could not open the commit-integrity probe (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
+        );
+      }
 
       // The lane's current implement attempt (1-based). Bumped by a visual
       // merge-gate loopback so the re-dispatched implement (and the steps after it)
@@ -1114,6 +1131,36 @@ export class WorkflowController {
               }
             }
           }
+        }
+      }
+
+      // Every inner step returned ok — but 'integrated' claims "complete AND
+      // committed in the session worktree" (sprintLaneStore.ts), which step
+      // verdicts alone cannot establish: a lane whose `git commit` was denied by
+      // a permission gate reported green with its changes untracked on disk
+      // (observed live). Consult the probe before making that claim.
+      if (commitProbe !== undefined) {
+        try {
+          const reading = await commitProbe();
+          // Deliberately conservative: sibling lanes commit into the SAME
+          // worktree, so an advanced HEAD is not proof THIS lane committed, and a
+          // clean tree may mean a sibling committed our work along with its own.
+          // Only the unambiguous case — nothing committed at all AND changes still
+          // sitting uncommitted — withholds 'integrated'. Per-lane attribution
+          // would need per-lane commit ranges the fan-out does not have.
+          if (!reading.headAdvanced && reading.dirty) {
+            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+            this.host.log?.(
+              'error',
+              `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
+            );
+            return 'failed';
+          }
+        } catch (err) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
+          );
         }
       }
 

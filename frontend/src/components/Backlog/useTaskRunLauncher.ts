@@ -21,11 +21,60 @@
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
+import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
-import { DEFAULT_WORKFLOW_MODEL } from '../cyboflow/ModelSelector';
+import {
+  resolveRunTypeLaunchDefaults,
+  workflowRunTypeKey,
+} from '../../../../shared/types/sessionDefaults';
+import { launchRuntimeForPickers, workflowRuntimeForLaunch } from '../cyboflow/agentRuntimeUi';
 import type { TaskType } from '../../../../shared/types/tasks';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 import { notifyWorkflowRunStarted } from '../../utils/onboarding';
+
+/**
+ * The launch settings for a resolved workflow: the saved `workflow:<id>`
+ * defaults, then the global config default, then the floor. Reads the store's
+ * LIVE state because `workflowId` is only known after the async workflows.list
+ * lookup — a hook-level selector would be keyed wrong.
+ */
+function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
+  const config = useConfigStore.getState().config;
+  const resolved = resolveRunTypeLaunchDefaults(
+    workflowRunTypeKey(workflowId),
+    config?.runTypeDefaults,
+    {
+      permissionMode: globalPermissionMode,
+      // The GLOBAL launch model — the middle rung, below a stored
+      // `workflow:<id>` model and above DEFAULT_WORKFLOW_MODEL. Trimmed, blank
+      // ⇒ unset, matching main's configManager.getDefaultLaunchModel.
+      model: config?.defaultLaunchModel?.trim() || undefined,
+      // The GLOBAL agent runtime rides the `agentRuntime` rung VERBATIM — that
+      // rung is for a genuine user-set runtime and nothing else (a resolved
+      // runtime OWNS its implied substrate, so anything synthesized from a
+      // substrate preference would outrank a stored substrate). A
+      // workflow-invalid value is dropped below, like a stored one.
+      agentRuntime: config?.defaultAgentRuntime,
+    },
+  );
+  // A runtime a workflow cannot run on (codex-pty, and anything
+  // RUNTIME_CAPABILITIES marks unofferable — 'codex-exec', which never reaches a
+  // launch surface) is dropped rather than sent; the launch still proceeds on
+  // the backend's default. One coercion point for BOTH the stored and the
+  // global rung.
+  const offerableRuntime = launchRuntimeForPickers(resolved.agentRuntime);
+  const agentRuntime =
+    offerableRuntime !== undefined
+      ? (workflowRuntimeForLaunch(offerableRuntime) ?? undefined)
+      : undefined;
+  return {
+    model: resolved.model,
+    permissionMode: resolved.permissionMode,
+    substrate: resolved.substrate,
+    ...(agentRuntime !== undefined ? { agentRuntime } : {}),
+  };
+}
 
 export interface TaskRunLaunchState {
   /** Task id currently being launched, or null when idle. */
@@ -46,6 +95,11 @@ export interface TaskRunLaunchState {
 export function useTaskRunLauncher(): TaskRunLaunchState {
   const [launchingTaskId, setLaunchingTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // This launcher has no Configure screen, so every launch setting comes from
+  // resolveLaunchDefaults: a saved per-workflow default, else this global
+  // Agent-Permission-Mode default (permission only), else the floor.
+  const globalPermissionMode =
+    useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
 
   const launch = useCallback(
     async (taskId: string, projectId: number, type: TaskType): Promise<string | null> => {
@@ -81,10 +135,9 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           workflowId,
           projectId,
           sessionId,
-          // Backlog launches have no model UI — pin the same default the wizard /
-          // picker surfaces use (Opus → workflow_runs.model), so the run's
-          // read-only model pill renders instead of a NULL no-pin.
-          model: DEFAULT_WORKFLOW_MODEL,
+          // Pinning `model` (rather than omitting it) is what makes the run's
+          // read-only model pill render instead of a NULL no-pin.
+          ...resolveLaunchDefaults(workflowId, globalPermissionMode),
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
@@ -97,7 +150,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         setLaunchingTaskId(null);
       }
     },
-    [],
+    [globalPermissionMode],
   );
 
   const launchSprintBatch = useCallback(
@@ -122,8 +175,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           projectId,
           sessionId,
           taskIds,
-          // Same default pin as the single-entity launch above (no model UI here).
-          model: DEFAULT_WORKFLOW_MODEL,
+          ...resolveLaunchDefaults(workflowId, globalPermissionMode),
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
@@ -135,7 +187,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         setLaunchingTaskId(null);
       }
     },
-    [],
+    [globalPermissionMode],
   );
 
   return { launchingTaskId, error, launch, launchSprintBatch };

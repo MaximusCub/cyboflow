@@ -7,7 +7,11 @@
  */
 
 import type { CliSubstrate } from './substrate';
-import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
+import type {
+  AgentProvider,
+  WorkflowLaunchableRuntime,
+  WorkflowRunStorableRuntime,
+} from './agentRuntime';
 import type { ExecutionModel } from './executionModel';
 import type { VerificationType } from './visualVerification';
 import type { WorkflowRunStatus } from './cyboflow';
@@ -155,7 +159,7 @@ export interface WorkflowRunRow {
    * compatibility projection during migration.
    */
   agent_provider?: AgentProvider;
-  agent_runtime?: WorkflowAgentRuntime;
+  agent_runtime?: WorkflowRunStorableRuntime;
   /**
    * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
    * sibling immutable stamp to `substrate` (migration 032). Decides WHO walks the
@@ -262,7 +266,7 @@ export interface WorkflowRunListRow {
   substrate?: CliSubstrate;
   /** Provider/runtime stamps surfaced additively for migrations 051-052. */
   agent_provider?: AgentProvider;
-  agent_runtime?: WorkflowAgentRuntime;
+  agent_runtime?: WorkflowRunStorableRuntime;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
@@ -584,9 +588,9 @@ export interface WorkflowAgentCustomCopy {
  * this workflow's `agentConfigs` -> an A/B variant's agent delta. So this
  * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
  *
- * An empty `{}` config (none of `model`, `custom`, `runtime`, `codexModel`, nor
- * `effort` set) carries no signal and must NEVER be persisted — the workflow
- * editor prunes it before write.
+ * An empty `{}` config (none of `model`, `custom`, `runtime`, `providerModel`
+ * (nor its deprecated alias `codexModel`), nor `effort` set) carries no signal
+ * and must NEVER be persisted — the workflow editor prunes it before write.
  */
 export interface WorkflowAgentConfig {
   /**
@@ -604,13 +608,23 @@ export interface WorkflowAgentConfig {
    * substrate this agent runs on. Absent -> inherit the run-level
    * provider/runtime; `'codex-sdk'` runs this agent on Codex instead of Claude.
    */
-  runtime?: WorkflowAgentRuntime;
+  runtime?: WorkflowLaunchableRuntime;
   /**
-   * Codex model id (e.g. `'gpt-5.2-codex'`) used when `runtime === 'codex-sdk'`.
-   * Free-form string rather than an enum: Codex model ids are discovered
-   * dynamically from the Codex catalogue, not a fixed union like
-   * {@link AgentModelAlias}. Ignored for Claude runtimes, which keep using
-   * `model`.
+   * The model id for this agent's resolved NON-CLAUDE provider (e.g.
+   * `'gpt-5.2-codex'` when `runtime === 'codex-sdk'`). Free-form string rather
+   * than an enum: a non-Claude provider's model ids are discovered dynamically
+   * from its own catalogue, not a fixed union like {@link AgentModelAlias}.
+   * Ignored for Claude runtimes, which keep using `model`. A future provider
+   * reuses this same field — it is keyed by "resolved non-Claude provider",
+   * not by any one provider's name.
+   */
+  providerModel?: string;
+  /**
+   * @deprecated Read-compat alias of {@link providerModel}. Persisted workflow
+   * definitions and the MCP `cyboflow_update_workflow`/`cyboflow_create_variant`
+   * writers may still write this key; every read seam normalizes via
+   * `providerModel ?? codexModel` (an explicit `providerModel` wins). New
+   * writers should set `providerModel` instead.
    */
   codexModel?: string;
   /**

@@ -22,8 +22,7 @@ import { registerCyboflowHandlers } from './cyboflow';
 import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 import { registerTelemetryHandlers } from './telemetry';
 import { registerModelHandlers } from './models';
-import { registerClaudeDetectionHandlers } from './claudeDetection';
-import { registerCodexDetectionHandlers } from './codexDetection';
+import { registerProviderDetectionHandlers } from './providerDetection';
 import { registerBugReportHandlers } from './bugReport';
 
 
@@ -51,6 +50,5 @@ export function registerIpcHandlers(services: AppServices): void {
   registerTelemetryHandlers(ipcMain, services);
   registerBugReportHandlers(ipcMain, services);
   registerModelHandlers(ipcMain, services);
-  registerClaudeDetectionHandlers(ipcMain, services);
-  registerCodexDetectionHandlers(ipcMain, services);
+  registerProviderDetectionHandlers(ipcMain, services);
 }

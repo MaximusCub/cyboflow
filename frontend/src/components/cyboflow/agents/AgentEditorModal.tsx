@@ -179,7 +179,7 @@ export function AgentEditorModal({
           role: state.draft.role,
           model: state.draft.model,
           runtime: state.draft.runtime,
-          codexModel: state.draft.codexModel,
+          providerModel: state.draft.providerModel,
         });
         trackEvent('agent_saved', { custom: true });
         onSaved(created.agentKey);
@@ -202,7 +202,7 @@ export function AgentEditorModal({
             role: state.draft.role,
             model: state.draft.model,
             runtime: state.draft.runtime,
-            codexModel: state.draft.codexModel,
+            providerModel: state.draft.providerModel,
           })
         : await trpc.cyboflow.agents.upsertOverride.mutate({
             projectId,
@@ -215,7 +215,7 @@ export function AgentEditorModal({
             role: state.draft.role,
             model: state.draft.model,
             runtime: state.draft.runtime,
-            codexModel: state.draft.codexModel,
+            providerModel: state.draft.providerModel,
           });
       trackEvent('agent_saved', { custom: isCustom });
       setEntry(saved);

@@ -13,9 +13,12 @@
  * column, so these tests run the REAL chain (schema.sql + every migration via
  * DatabaseService.initialize()) against temp DBs — one through 100 (pre-state)
  * and one through 101 — and verify:
- *   1. Triple column parity: pre-101 live table === post-101 live table ===
- *      the column list 101 itself declares (order-sensitive). 101 may change
- *      CHECKs, nothing else.
+ *   1. Triple column parity at 101's own boundary (chain through 101 only):
+ *      pre-101 live table === post-101 live table === the column list 101
+ *      itself declares (order-sensitive). 101 may change CHECKs, nothing else.
+ *      The later merged-chain steps (103/104) re-derive these two columns via
+ *      DROP/ADD and get their own test file; the full-chain assertions in test
+ *      1 verify nothing is lost or silently UN-widened downstream of 101.
  *   2. The new pair is insertable: agent_provider='omp' with
  *      agent_runtime='omp-fleet' (the Phase-4 quick-session stamp), alongside
  *      legacy values; bogus values are still rejected.
@@ -43,7 +46,10 @@ const MIG_101 = '101_sessions_agent_runtime_omp_fleet.sql';
 function buildDb(dbPath: string, excludeAtOrAbove?: number): DatabaseService {
   let dir = MIG_DIR;
   if (excludeAtOrAbove !== undefined) {
-    const scratch = join(tmpdir(), `cyboflow-m101-scratch-${process.pid}`);
+    // Keyed per threshold: the scratch is never cleared, so a buildDb(_, 102)
+    // call (which copies 101) would otherwise leak 101 into a LATER
+    // buildDb(_, 101) "pre-state" in the same process, defeating the exclusion.
+    const scratch = join(tmpdir(), `cyboflow-m101-scratch-${process.pid}-${excludeAtOrAbove}`);
     mkdirSync(scratch, { recursive: true });
     for (const name of readdirSync(MIG_DIR)) {
       const m = /^(\d{3})_/.exec(name);
@@ -125,7 +131,11 @@ afterEach(() => {
 describe('Migration 101: sessions agent_runtime/agent_provider OMP widening', () => {
   it('changes only the two CHECKs: pre-101, post-101 and declared column sets are identical', () => {
     const pre = buildDb(join(tmpDir, 'pre.db'), 101);
-    const post = buildDb(join(tmpDir, 'post.db'));
+    // Through 101 ONLY. The merged chain continues into 103/104, which re-derive
+    // the same two columns via DROP/ADD (position-shifting them to the end) and
+    // widen the CHECK further (103's superset) — 101's own rebuild contract can
+    // only be measured at its own boundary.
+    const post = buildDb(join(tmpDir, 'post.db'), 102);
     const declared = declaredRebuildColumns();
 
     expect(declared).toContain('agent_provider');
@@ -148,6 +158,18 @@ describe('Migration 101: sessions agent_runtime/agent_provider OMP widening', ()
     expect(sessionsSql(pre.getDb())).toContain(
       "CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty'))",
     );
+
+    // Full merged chain (101 → 103 → 104): 103 re-ADDs the two columns at the
+    // end (order shifts, set does not) and carries 101's pair forward into its
+    // superset CHECK — a dropped 'omp-fleet' there would brick fleet sessions on
+    // every upgraded install.
+    const full = buildDb(join(tmpDir, 'full.db'));
+    expect([...columnNames(full.getDb())].sort()).toEqual([...declared].sort());
+    expect(sessionsSql(full.getDb())).toContain("CHECK (agent_provider IN ('claude','codex','omp'))");
+    expect(sessionsSql(full.getDb())).toContain(
+      "CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty','omp-sdk','omp-pty','omp-fleet'))",
+    );
+    full.close();
 
     pre.close();
     post.close();

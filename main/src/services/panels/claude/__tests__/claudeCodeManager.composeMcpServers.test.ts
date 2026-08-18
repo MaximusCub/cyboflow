@@ -274,6 +274,40 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
     const cyboflow = result['cyboflow'] as { env: Record<string, string> };
     expect(cyboflow.env.CYBOFLOW_MCP_SCOPE).toBeUndefined();
   });
+
+  // ---------------------------------------------------------------------------
+  // Test 8+9: ELECTRON_RUN_AS_NODE fork-bomb guard (electronNodeGuard.ts).
+  // findNodeExecutable() may resolve to process.execPath in a packaged app with
+  // no standalone `node` on PATH — spawning that path plainly boots a whole new
+  // Cyboflow app in an unkillable loop. electronRunAsNodeGuardEnv(nodeCmd) folds
+  // ELECTRON_RUN_AS_NODE='1' into the env ONLY when nodeCmd === process.execPath;
+  // a real node path must stay byte-identical (no key at all).
+  // ---------------------------------------------------------------------------
+  it("stamps ELECTRON_RUN_AS_NODE='1' into the cyboflow env when findNodeExecutable resolves to process.execPath", async () => {
+    findNodeExecutableMock.mockResolvedValue(process.execPath);
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-execpath');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { command: string; env: Record<string, string> };
+    expect(cyboflow.command).toBe(process.execPath);
+    expect(cyboflow.env.ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+
+  it('omits ELECTRON_RUN_AS_NODE entirely from the cyboflow env when findNodeExecutable resolves to a real node path', async () => {
+    findNodeExecutableMock.mockResolvedValue('/usr/bin/node');
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-realnode');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { command: string; env: Record<string, string> };
+    expect(cyboflow.command).toBe('/usr/bin/node');
+    expect(cyboflow.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -344,6 +344,19 @@ describe('RunChatView — substrate branch', () => {
     expect(screen.getByTestId('chat-mode-identity')).not.toHaveTextContent('Claude');
   });
 
+  // Registry-driven (AGENT_PROVIDER_LABELS), same as the Codex case above —
+  // proves a third provider needs no arm of its own here.
+  it('labels an OMP SDK workflow as OMP', async () => {
+    seedRun('run-omp', 'sdk', 'omp');
+
+    render(<RunChatView runId="run-omp" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-mode-identity')).toHaveTextContent('OMP');
+    });
+    expect(screen.getByTestId('chat-mode-identity')).not.toHaveTextContent('Claude');
+  });
+
   it("undefined substrate falls back to the sdk surface (ChatTranscript + rail)", async () => {
     seedRun('run-undef', undefined);
 

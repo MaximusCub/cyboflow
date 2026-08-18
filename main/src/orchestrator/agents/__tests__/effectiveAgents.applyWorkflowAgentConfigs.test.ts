@@ -281,8 +281,43 @@ describe('applyWorkflowAgentConfigs', () => {
     const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { model: 'opus' } });
     expect(result.model).toBe('opus');
     expect(result.runtime).toBeUndefined();
+    expect(result.providerModel).toBeUndefined();
     expect(result.codexModel).toBeUndefined();
     expect(result.source).toBe('builtin-override');
+  });
+
+  // ── providerModel (migration 104 generalization of codexModel) ──────────────
+
+  it('a providerModel-only config is signal: sets BOTH providerModel and the mirrored codexModel', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { providerModel: 'gpt-5.2-codex' },
+    });
+    expect(result.providerModel).toBe('gpt-5.2-codex');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+    expect(result.source).toBe('builtin-override');
+    expect(result.rawContent).toBeUndefined();
+  });
+
+  it('an explicit providerModel wins over a stale codexModel on the SAME config', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex', codexModel: 'gpt-5-stale' },
+    });
+    expect(result.providerModel).toBe('gpt-5.2-codex');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('a config carrying ONLY the deprecated codexModel key still resolves providerModel (old-key data still works)', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { codexModel: 'gpt-5.2-codex' },
+    });
+    expect(result.providerModel).toBe('gpt-5.2-codex');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('an empty-string providerModel is ignored (no throw, leaves existing value unchanged)', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { providerModel: '' } });
+    expect(result.providerModel).toBeUndefined();
+    expect(result.source).toBe('builtin'); // no valid signal → untouched
   });
 
   it('an effort-only config is signal — carries the effort through (IDEA-029)', () => {

@@ -43,7 +43,7 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
 import type { AgentOverrideRow } from '../../../database/models';
 import type { AgentEntry, AgentChangedEvent, AgentUsage } from '../../../../../shared/types/agents';
 import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
-import { WORKFLOW_AGENT_RUNTIMES } from '../../../../../shared/types/agentRuntime';
+import { WORKFLOW_LAUNCHABLE_RUNTIMES } from '../../../../../shared/types/agentRuntime';
 
 // ---------------------------------------------------------------------------
 // Context guard
@@ -185,8 +185,14 @@ const projectIdSchema = z.number().int().positive();
 /** Pinned model alias; null/omitted → inherit the run model. */
 const modelSchema = z.enum(AGENT_MODEL_ALIASES).nullable().optional();
 /** Pinned CLI runtime; null/omitted → inherit the run-level runtime. */
-const runtimeSchema = z.enum(WORKFLOW_AGENT_RUNTIMES).nullable().optional();
-/** Codex model id used when runtime='codex-sdk'; null/omitted → Codex default. */
+const runtimeSchema = z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).nullable().optional();
+/**
+ * Model id for this agent's resolved non-Claude provider, used when a
+ * non-Claude runtime is pinned (e.g. `runtime='codex-sdk'`); null/omitted →
+ * that provider's default.
+ */
+const providerModelSchema = z.string().nullable().optional();
+/** @deprecated Alias of {@link providerModelSchema}; providerModel wins when both are sent. */
 const codexModelSchema = z.string().nullable().optional();
 
 // ---------------------------------------------------------------------------
@@ -243,6 +249,7 @@ export const agentsRouter = router({
         role: z.string().nullable().optional(),
         model: modelSchema,
         runtime: runtimeSchema,
+        providerModel: providerModelSchema,
         codexModel: codexModelSchema,
       }),
     )
@@ -258,6 +265,7 @@ export const agentsRouter = router({
           tools: input.tools,
           model: input.model ?? null,
           runtime: input.runtime ?? null,
+          providerModel: input.providerModel ?? null,
           codexModel: input.codexModel ?? null,
           enabledMcps: input.enabledMcps,
         });
@@ -332,6 +340,7 @@ export const agentsRouter = router({
         role: z.string().nullable().optional(),
         model: modelSchema,
         runtime: runtimeSchema,
+        providerModel: providerModelSchema,
         codexModel: codexModelSchema,
       }),
     )
@@ -348,6 +357,7 @@ export const agentsRouter = router({
           tools: input.tools,
           model: input.model ?? null,
           runtime: input.runtime ?? null,
+          providerModel: input.providerModel ?? null,
           codexModel: input.codexModel ?? null,
           enabledMcps: input.enabledMcps,
         }));
@@ -384,6 +394,7 @@ export const agentsRouter = router({
         role: z.string().nullable().optional(),
         model: modelSchema,
         runtime: runtimeSchema,
+        providerModel: providerModelSchema,
         codexModel: codexModelSchema,
       }),
     )
@@ -407,6 +418,7 @@ export const agentsRouter = router({
           enabledMcps: input.enabledMcps,
           model: input.model ?? null,
           runtime: input.runtime ?? null,
+          providerModel: input.providerModel ?? null,
           codexModel: input.codexModel ?? null,
         });
       } catch (err) {
@@ -456,7 +468,8 @@ export const agentsRouter = router({
           tools: source.tools,
           model: source.model,
           runtime: source.runtime ?? null,
-          codexModel: source.codexModel ?? null,
+          providerModel: source.providerModel ?? source.codexModel ?? null,
+          codexModel: source.codexModel ?? source.providerModel ?? null,
           enabledMcps: source.enabledMcps,
         }));
       } catch (err) {

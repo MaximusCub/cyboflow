@@ -18,6 +18,9 @@ import { MODEL_OPTIONS, formatDynamicClaudeLabel } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useClaudeModelCatalog } from '../../stores/claudeModelCatalogStore';
+import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
+import { groupOmpOptionsByProvider } from './unified/ompModelGrouping';
+import { providerForRuntime } from '../../../../shared/types/agentRuntime';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 /** The quick-session default model — Opus, per product direction. */
 export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
@@ -35,7 +38,9 @@ export { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults
  */
 export const ULTRACODE_DEFAULT_MODEL = 'fable';
 
-export const DEFAULT_CODEX_MODEL = 'auto';
+/** Re-exported from shared so the launch seams can reach it without importing
+ *  a component; this stays the canonical import site for UI code. */
+export { DEFAULT_CODEX_MODEL } from '../../../../shared/types/agentModels';
 
 interface ModelSelectorProps {
   value: string;
@@ -65,13 +70,17 @@ export function ModelSelector({
   agentRuntime = 'claude-sdk',
   allowDefaultOption,
 }: ModelSelectorProps): React.JSX.Element {
-  const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
+  const isCodexRuntime = agentProvider === 'codex' || providerForRuntime(agentRuntime) === 'codex';
+  const isOmpRuntime = agentProvider === 'omp' || providerForRuntime(agentRuntime) === 'omp';
   const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
   // Dynamic "Other models" the login can select, below the pinned four (Claude only).
-  const { options: claudeCatalogOptions } = useClaudeModelCatalog(!isCodexRuntime);
+  const { options: claudeCatalogOptions } = useClaudeModelCatalog(!isCodexRuntime && !isOmpRuntime);
+  const { options: ompOptions, loading: ompLoading, error: ompError } = useOmpModelCatalog(isOmpRuntime);
+  const ompGroups = groupOmpOptionsByProvider(ompOptions);
   const codexActive = codexOptions.find((o) => o.id === value);
   const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
   const claudeDynamicActive = claudeCatalogOptions.find((o) => o.id === value);
+  const ompActive = ompOptions.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const activeReason = value ? unavailableReason(value) : undefined;
 
@@ -85,9 +94,25 @@ export function ModelSelector({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-        aria-label={isCodexRuntime ? 'Select Codex model' : 'Select Claude model'}
+        aria-label={isOmpRuntime ? 'Select OMP model' : isCodexRuntime ? 'Select Codex model' : 'Select Claude model'}
       >
-        {isCodexRuntime ? (
+        {isOmpRuntime ? (
+          ompGroups.length === 0 ? (
+            <option value="" disabled>
+              {ompLoading ? 'Loading OMP models…' : ompError ? 'Could not load OMP models' : 'No OMP models available'}
+            </option>
+          ) : (
+            ompGroups.map(([ompProvider, options]) => (
+              <optgroup key={ompProvider} label={ompProvider}>
+                {options.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))
+          )
+        ) : isCodexRuntime ? (
           codexOptions.map((o) => (
             <option key={o.id} value={o.id}>
               {o.label} — {o.description}
@@ -120,7 +145,11 @@ export function ModelSelector({
           </>
         )}
       </select>
-      {isCodexRuntime ? (
+      {isOmpRuntime ? (
+        <p className="text-xs text-text-tertiary">
+          {ompActive ? `${ompActive.label} (${ompActive.ompProvider})` : 'Choose an OMP model for this runtime.'}
+        </p>
+      ) : isCodexRuntime ? (
         <p className="text-xs text-text-tertiary">
           {codexActive?.description ?? 'Choose a Codex model for this runtime.'}
         </p>

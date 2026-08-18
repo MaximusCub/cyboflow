@@ -506,6 +506,40 @@ describe('VerificationAgentRunner.run', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('an omp-sdk runtime pin fails open to skipped — never a silent Claude run', async () => {
+    // OMP became workflow-launchable in Phase 2, so `visual-verify` can now carry
+    // an `omp-sdk` pin; its T3 verify tier is deliberately a later phase. The
+    // dispatch is keyed on "not Claude", so this lands in the loud skip rather
+    // than the Claude branch, which would have run the verifier on the wrong
+    // provider AND with a Claude model.
+    const { runner, query, codexQuery } = makeRunner({
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: 'omp-sdk' }),
+        runProvider: 'claude',
+        runModel: 'claude-run',
+      }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.errorMessage).toBe('omp verify runtime not wired');
+    expect(query).not.toHaveBeenCalled();
+    expect(codexQuery).not.toHaveBeenCalled();
+  });
+
+  it('an unpinned agent on an OMP-provider run also fails open to skipped', async () => {
+    const { runner, query } = makeRunner({
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: undefined }),
+        runProvider: 'omp',
+        runModel: 'anthropic/claude-haiku-4-5',
+      }),
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.errorMessage).toBe('omp verify runtime not wired');
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('an unpinned agent inherits a Codex-provider run — codexQuery with the run model', async () => {
     const { runner, query, codexQuery } = makeRunner({
       resolveVerifyAgent: () => ({

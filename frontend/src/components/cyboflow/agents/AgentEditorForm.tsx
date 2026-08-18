@@ -29,16 +29,19 @@ import {
   type AgentModelAlias,
 } from '../../../../../shared/types/agents';
 import {
-  WORKFLOW_AGENT_RUNTIMES,
+  AGENT_PROVIDER_LABELS,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   isClaudeOnlyAgentKey,
   isRuntimeProviderEnabled,
+  providerForRuntime,
   type WorkflowAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../../hooks/useAgentProviderAccess';
 import type { McpEntry } from '../../../../../shared/types/integrations';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
+import { useOmpModelCatalog } from '../../../stores/ompModelCatalogStore';
 
 export interface AgentEditorFormProps {
   draft: AgentDraft;
@@ -74,18 +77,25 @@ export function AgentEditorForm({
   const nameEditable = mode === 'create' && isCustom;
   // Guarded-model availability (Fable 5): grey out a pinnable model that's pulled.
   const { isAliasUsable } = useModelAvailability();
-  // Codex model catalogue — fetched lazily, only while the Codex runtime is pinned
-  // (the `enabled` gate keeps the hook call unconditional per Rules of Hooks while
-  // deferring the network fetch until a Codex model picker is actually shown).
-  const isCodexRuntime = draft.runtime === 'codex-sdk';
-  const { options: codexModelOptions } = useCodexModelCatalog(isCodexRuntime);
+  // The provider a PINNED runtime deploys on, or null while the runtime is
+  // inherited. Derived through the runtime registry rather than a
+  // `=== 'codex-sdk'` test, so every non-Claude provider gets the provider model
+  // picker instead of silently falling through to the Claude alias list.
+  const pinnedProvider = draft.runtime === null ? null : providerForRuntime(draft.runtime);
+  const isNonClaudeRuntime = pinnedProvider !== null && pinnedProvider !== 'claude';
+  // Provider model catalogues — fetched lazily, only while that provider's
+  // runtime is pinned (the `enabled` gate keeps each hook call unconditional per
+  // Rules of Hooks while deferring the probe until its picker is actually shown).
+  const { options: codexModelOptions } = useCodexModelCatalog(pinnedProvider === 'codex');
+  const { options: ompModelOptions } = useOmpModelCatalog(pinnedProvider === 'omp');
+  const providerModelOptions = pinnedProvider === 'omp' ? ompModelOptions : codexModelOptions;
   // Provider access (Settings → Integrations): a runtime whose provider is
   // switched off is not offerable — the deploy seam drops such a pin anyway
   // (resolveStepAgent), so showing it here would only promise a route the run
   // won't take. An ALREADY-PINNED runtime that just lost its provider stays in
   // the list so the draft renders its own value honestly until the user repins.
   const providerAccess = useAgentProviderAccess();
-  const runtimeOptions = WORKFLOW_AGENT_RUNTIMES.filter(
+  const runtimeOptions = WORKFLOW_LAUNCHABLE_RUNTIMES.filter(
     (runtime) => isRuntimeProviderEnabled(providerAccess, runtime) || runtime === draft.runtime,
   );
   // The READ-ONLY name field shows the BARE key — strip the load-bearing
@@ -204,7 +214,7 @@ export function AgentEditorForm({
           // unreachable — kept for a future key that genuinely can't run on Codex.
           <p className="text-[10px] text-text-tertiary" data-testid="agent-runtime-claude-only">
             <b className="font-semibold text-text-primary">Always runs on Claude.</b>{' '}
-            A Codex runtime isn&apos;t available for this agent.
+            Another provider&apos;s runtime isn&apos;t available for this agent.
           </p>
         ) : (
           <>
@@ -233,15 +243,16 @@ export function AgentEditorForm({
                 ? 'This agent runs on whatever provider/runtime the run uses. Pin a runtime to choose a model.'
                 : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}.`}
             </p>
-            {draft.runtime === 'codex-sdk' && (
+            {isNonClaudeRuntime && (
               <p
                 className="mt-1.5 text-[10px] text-text-tertiary"
                 data-testid="agent-runtime-plane-note"
               >
-                A per-agent <b className="font-semibold">Codex</b> runtime applies to{' '}
-                <b className="font-semibold">programmatic</b> runs, which spawn each step as its
-                own process. An orchestrated run shares one runtime for the whole flow, so a
-                Codex pin there is blocked at launch — switch the run to programmatic to use it.
+                A per-agent <b className="font-semibold">{AGENT_PROVIDER_LABELS[pinnedProvider]}</b>{' '}
+                runtime applies to <b className="font-semibold">programmatic</b> runs, which spawn
+                each step as its own process. An orchestrated run shares one runtime for the whole
+                flow, so such a pin there is blocked at launch — switch the run to programmatic to
+                use it.
               </p>
             )}
           </>
@@ -301,32 +312,37 @@ export function AgentEditorForm({
             This agent inherits the run model. Pin a runtime above to choose a specific model.
           </p>
         </div>
-      ) : isCodexRuntime ? (
+      ) : isNonClaudeRuntime ? (
         <div className="mt-6">
           <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
-            <span>Codex model</span>
+            <span>{AGENT_PROVIDER_LABELS[pinnedProvider]} model</span>
             <span className="flex-1 h-px bg-border-subtle" />
           </div>
           <select
-            value={draft.codexModel ?? ''}
+            value={draft.providerModel ?? ''}
             onChange={(e) =>
               dispatch({
-                type: 'SET_CODEX_MODEL',
-                codexModel: e.target.value === '' ? null : e.target.value,
+                type: 'SET_PROVIDER_MODEL',
+                providerModel: e.target.value === '' ? null : e.target.value,
               })
             }
-            aria-label="Agent Codex model"
+            aria-label={`Agent ${AGENT_PROVIDER_LABELS[pinnedProvider]} model`}
             className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
             data-testid="agent-codex-model-select"
           >
-            {codexModelOptions.map((opt) => (
+            {/* OMP's catalogue has no synthesized "let the runtime pick" row the
+                way Codex's does, so the empty option carries that meaning for
+                every provider whose list is concrete ids only. */}
+            {pinnedProvider === 'omp' && <option value="">(provider default)</option>}
+            {providerModelOptions.map((opt) => (
               <option key={opt.id} value={opt.id}>
                 {opt.label}
               </option>
             ))}
           </select>
           <p className="mt-1.5 text-[10px] text-text-tertiary">
-            Codex runs use a single model per run; this pins the model for this agent.
+            {AGENT_PROVIDER_LABELS[pinnedProvider]} runs use a single model per run; this pins the
+            model for this agent.
           </p>
         </div>
       ) : (

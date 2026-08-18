@@ -1,6 +1,6 @@
 {
   "name": "cyboflow",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Cyboflow - Multi-session AI code assistant manager",
   "author": {
@@ -132,6 +132,12 @@
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
       "main/dist/main/src/orchestrator/shellHooks/**/*.js",
       "main/dist/main/src/orchestrator/verify/driver/**/*.js"
+    ],
+    "extraResources": [
+      {
+        "from": "main/src/services/panels/omp/gate/ompGateExtension.ts",
+        "to": "omp-gate/ompGateExtension.ts"
+      }
     ],
     "afterSign": "build/afterSign.js",
     "mac": {

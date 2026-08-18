@@ -6,6 +6,7 @@ import * as net from 'net';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { REPORTABLE_ARTIFACT_ATYPES } from '../../../../shared/types/artifacts';
 import { ASSISTANT_REFERENCE } from '../agentThread/assistantReference';
+import { startParentWatchdog, resolveWatchdogIntervalMs } from './parentWatchdog';
 
 // ---------------------------------------------------------------------------
 // Env-var bootstrap — must happen before anything else
@@ -129,7 +130,20 @@ function connectToOrchestrator(): net.Socket {
     rejectAllPending(err);
   });
 
-  socket.on('close', () => { console.error('[Cyboflow MCP] IPC socket closed — exiting'); process.exit(0); });
+  // The orchestrator went away (app quit / crash). This is a SECOND, coarser
+  // tether than the spawner-death path below: this socket is APP-GLOBAL, so it
+  // closes when the Electron main process dies, not when this server's `claude`
+  // spawner does. It is kept because it is still correct — a server with no
+  // orchestrator can do nothing useful — but it must never again be mistaken
+  // for a per-run lifetime bound. See PLAN-mcp-orphan-reaper.md §2.
+  //
+  // LOAD-BEARING INVARIANT: a server whose spawner has died is provably useless
+  // because MCP requests arrive ONLY via stdin — this socket carries only
+  // server-initiated request/reply traffic (see sendQuery), never unsolicited
+  // orchestrator-pushed messages. If anyone adds a push channel here
+  // (cancellation, config reload, a question-gate answer path), that invariant
+  // breaks and the shutdown policy below has to be revisited.
+  socket.on('close', () => { shutdown('IPC socket closed'); });
 
   return socket;
 }
@@ -146,8 +160,14 @@ function sendQuery(
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
 
-    // timeoutMs null = wait forever. Safe because a pending entry cannot
-    // outlive the run: the IPC socket closing exits this whole process.
+    // timeoutMs null = wait forever. Safe only because this process exits when
+    // its SPAWNER dies (stdin EOF / the ppid watchdog — see the shutdown block
+    // near the bottom of this file), which bounds a pending entry by the run.
+    //
+    // It is NOT made safe by the IPC socket closing, which is what this comment
+    // used to claim. CYBOFLOW_ORCH_SOCKET is app-global: it outlives every run
+    // in the app's lifetime, so tethering to it is exactly what leaked 40
+    // orphaned servers in a single uptime. Do not restore that reasoning.
     const timer = timeoutMs === null
       ? undefined
       : setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, timeoutMs);
@@ -809,7 +829,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_request_verification',
         description:
-          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler deploys the verification agent and delivers the verdict asynchronously (to the screenshots artifact + the review queue). The PREFERRED form is `task`: a composed verification task (the `## Visual verification task` fence object task-verify emits — version/summary/build/serve/target/behaviors, matching VerificationTaskV1) that the agent independently builds, drives, and judges. `intent` + `url`/`html_path` remain the LEGACY degenerate form (a bare acceptance sentence and a pre-live target, no build/behaviors) — still accepted for backward compatibility and simple checks. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks.',
+          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId, type, snapshotSha, dirtyWorktree } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler deploys the verification agent and delivers the verdict asynchronously (to the screenshots artifact + the review queue). The PREFERRED form is `task`: a composed verification task (the `## Visual verification task` fence object task-verify emits — version/summary/build/serve/target/behaviors, matching VerificationTaskV1) that the agent independently builds, drives, and judges. `intent` + `url`/`html_path` remain the LEGACY degenerate form (a bare acceptance sentence and a pre-live target, no build/behaviors) — still accepted for backward compatibility and simple checks. When the request is not enqueued this is a no-op that returns { skipped: true, reason } (never an error). RELAY `reason` VERBATIM and NEVER INFER A CAUSE IT DOES NOT STATE: several unrelated conditions skip a request — the master switch being off, an immutable run stamp, no proven runbook, a capability suppression — they have different fixes, and a guess reads to the user as a diagnosis. `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks. QUICK CHAT SESSIONS may fire this too, not just sprint/ship flow lanes — it returns immediately and the chat continues; cyboflow_await_verification is the opt-in in-turn wait, cyboflow_get_verifications is the later-turn cold read once the request_id is gone. COST: firing this spends real per-project verification budget and deploys an SDK agent that runs the project\'s build/serve commands in an isolated snapshot worktree — treat it as a costly action, not a free read. DIRTY-TREE CONTRACT (load-bearing): the verification runs against a DETACHED checkout at `snapshotSha`, so UNCOMMITTED WORK IS INVISIBLE to it — prefer committing before verifying. When `dirtyWorktree` is true you MUST state both the verified sha and the dirty flag alongside ANY verdict you relay: a PASS on a dirty tree certifies the commit, not what the user is looking at, and must never be reported as unqualified. When — and only when — the returned `reason` is "no proven verification runbook for this project (run verification setup)", that is ACTIONABLE rather than a dead end: offer to run the verify-setup flow. Do not volunteer that diagnosis for any other reason string.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -904,6 +924,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_get_verifications',
+        description:
+          "Lists THIS run's verification requests and their outcomes, newest first — a NON-BLOCKING cold read, never a wait. Each row: id, status, verifyType, attempt, failureClass, feedback, errorMessage, enqueuedAt, endedAt, snapshotSha, screenshotFiles. WHY IT EXISTS: cyboflow_await_verification can only answer for a request_id you are still holding; after a context compaction those ids are gone, and this is how you find out what happened to verifications you already fired. `screenshotFiles` is PER-REQUEST and may be `null` — that means this engine persisted no exact per-request file list (the legacy capture path), NOT that no screenshots exist; distinguish it from `[]`, which means the agent ran and captured nothing. SCOPE CAVEAT: the scope is THIS run — in a quick chat session that means the session's own quick sentinel, so it will NOT list verifications fired by structured flow runs the session hosted, even though the artifacts pane does show those; reading an empty list as \"no verifications exist\" is a mistake without this caveat in mind. `snapshotSha` is what the verdict actually certifies — pair it with `dirtyWorktree` from the enqueue reply before relaying any verdict.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            request_id: {
+              type: 'string',
+              description: 'Optional verification request id to narrow the listing to a single row; omit to list every request for this run.',
+            },
+          },
+          required: [],
+        },
+      },
+      {
         name: 'cyboflow_register_verify_runbook',
         description:
           "Register (or refresh) the MACHINE-LOCAL half of THIS project's verification runbook and return { hash, version, committed, warning? } — the content-addressed hash of the committed portable half and the CAS version of the local record. Meaningful for the verify-setup flow. It reads `.cyboflow/verify-runbook.json` from THIS run's worktree itself (there is no content argument — COMMIT the file first, then register: the returned hash addresses what you actually committed, which is what a later request is pinned to). `committed: false` means the file is NOT present at HEAD, so the proof's detached snapshot will not contain it — the usual cause is a project that ignores or locally-excludes `.cyboflow/`, which makes a plain `git add` a silent no-op; re-add with `git add -f`, commit, and register again. Registering always produces an 'unproven-draft': new content is by definition unproven, and only a PASSING setup_proof verification promotes it. Re-register after every edit — the hash changes, so the old record no longer describes what you are proving. Errors come back verbatim and name the offending file or key (e.g. \"portable runbook is not valid JSON: …\", \"portable runbook declares no \\\"cdp-app\\\" modality\") so you can fix the file and retry.",
@@ -940,7 +975,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_get_workflow',
         description:
-          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. Per-agent config lives in an optional `agentConfigs` overlay on the definition — `{ [agentKey]: { model?, runtime?, codexModel?, effort? } }`, keyed by a step's `agent` value — which pins a per-agent model, routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`), or sets a per-agent reasoning `effort` (Claude `low..max` / Codex `none..xhigh`; a value outside the resolved provider's scale is dropped at spawn); it is absent on unedited built-ins. NOT_FOUND (error 'not_found') when the id is unknown.",
+          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json — including whichever of `providerModel`/`codexModel` it already carries; this call does NOT rewrite the persisted keys for you. Per-agent config lives in an optional `agentConfigs` overlay on the definition — `{ [agentKey]: { model?, runtime?, providerModel?, effort? } }`, keyed by a step's `agent` value — which pins a per-agent model, routes an agent onto a non-Claude provider (`runtime: 'codex-sdk'` + `providerModel` — the model id for that provider, e.g. a Codex model), or sets a per-agent reasoning `effort` (Claude `low..max` / Codex `none..xhigh`; a value outside the resolved provider's scale is dropped at spawn); it is absent on unedited built-ins. `codexModel` is a deprecated alias of `providerModel` still accepted on write (an explicit `providerModel` wins when both are set), for a definition an older writer already saved. NOT_FOUND (error 'not_found') when the id is unknown.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -952,7 +987,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_workflow',
         description:
-          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). Per-agent model pins and Codex routing live in the definition's optional `agentConfigs` overlay (`{ [agentKey]: { model?, runtime?, codexModel?, effort? } }`). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
+          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). Per-agent model pins and non-Claude-provider routing live in the definition's optional `agentConfigs` overlay (`{ [agentKey]: { model?, runtime?, providerModel?, effort? } }`; the deprecated `codexModel` key is still accepted — `providerModel` wins when both are set). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -1043,7 +1078,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_variant',
         description:
-          "Patch a variant in place. All fields optional: `definition_json` (JSON-encoded WorkflowDefinition, re-snapshots + validated like update_workflow), `agent_overrides_json` (a JSON string of `{ [agentKey]: { systemPrompt?, model? } }`, or null to clear), `model` (alias or null), `execution_model` ('orchestrated'|'programmatic'|null), `weight` (non-negative integer rotation share), `label`. Past runs are unaffected. Unknown id → 'not_found'. PER-AGENT CODEX ROUTING does NOT go in `agent_overrides_json` (that carries Claude prompt/model-alias tweaks only) — to run specific agents on Codex, put an `agentConfigs` overlay in `definition_json`: `{ ..., \"agentConfigs\": { \"<agentKey>\": { \"runtime\": \"codex-sdk\", \"codexModel\": \"<Codex model id>\" } } }`, where agentKey = the step's `agent` value (e.g. implement / write-tests / code-review). A mixed Claude+Codex flow only routes those Codex steps under `execution_model: 'programmatic'` — set it too. There is no per-agent reasoning-effort field; Codex agents inherit the Codex CLI default effort.",
+          "Patch a variant in place. All fields optional: `definition_json` (JSON-encoded WorkflowDefinition, re-snapshots + validated like update_workflow), `agent_overrides_json` (a JSON string of `{ [agentKey]: { systemPrompt?, model? } }`, or null to clear), `model` (alias or null), `execution_model` ('orchestrated'|'programmatic'|null), `weight` (non-negative integer rotation share), `label`. Past runs are unaffected. Unknown id → 'not_found'. PER-AGENT NON-CLAUDE-PROVIDER ROUTING does NOT go in `agent_overrides_json` (that carries Claude prompt/model-alias tweaks only) — to run specific agents on Codex (or a future non-Claude provider), put an `agentConfigs` overlay in `definition_json`: `{ ..., \"agentConfigs\": { \"<agentKey>\": { \"runtime\": \"codex-sdk\", \"providerModel\": \"<that provider's model id>\" } } }`, where agentKey = the step's `agent` value (e.g. implement / write-tests / code-review). The deprecated `codexModel` key is still accepted in place of `providerModel`. A mixed Claude+Codex flow only routes those Codex steps under `execution_model: 'programmatic'` — set it too. There is no per-agent reasoning-effort field; Codex agents inherit the Codex CLI default effort.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -1051,7 +1086,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             definition_json: {
               type: 'string',
               description:
-                "Optional JSON-encoded WorkflowDefinition to re-snapshot. This is where per-agent config lives: an `agentConfigs` overlay `{ [agentKey]: { model?, runtime?, codexModel?, effort? } }` pins a Claude model per agent OR routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`). Get the current definition from cyboflow_get_workflow, add/edit `agentConfigs`, pass it back.",
+                "Optional JSON-encoded WorkflowDefinition to re-snapshot. This is where per-agent config lives: an `agentConfigs` overlay `{ [agentKey]: { model?, runtime?, providerModel?, effort? } }` pins a Claude model per agent OR routes an agent onto a non-Claude provider (`runtime: 'codex-sdk'` + `providerModel` — the deprecated `codexModel` key is still accepted). Get the current definition from cyboflow_get_workflow, add/edit `agentConfigs`, pass it back.",
             },
             agent_overrides_json: {
               type: ['string', 'null'],
@@ -2543,6 +2578,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return executeMcpQuery('mcp-await-verification', queryParams, AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS);
     }
 
+    case 'cyboflow_get_verifications': {
+      const args = (request.params.arguments ?? {}) as { request_id?: unknown };
+      const { request_id } = args;
+      if (request_id !== undefined && (typeof request_id !== 'string' || request_id.length === 0)) {
+        return invalidArgs('request_id: string (optional; the id cyboflow_request_verification returned)');
+      }
+      // `request_id` is renamed to `verificationRequestId` on the wire: every
+      // message on this socket already carries its OWN `requestId` correlation
+      // id, and colliding the two would make the handler answer the wrong call.
+      const queryParams: Record<string, unknown> = {};
+      if (request_id !== undefined) queryParams['verificationRequestId'] = request_id;
+      // NON-BLOCKING cold read — no custom transport timeout. The extended
+      // AWAIT_VERIFICATION_TRANSPORT_TIMEOUT_MS budget exists only for the
+      // BLOCKING await tool above; this handler answers from the DB immediately.
+      return executeMcpQuery('mcp-get-verifications', queryParams);
+    }
+
     case 'cyboflow_register_verify_runbook': {
       const args = (request.params.arguments ?? {}) as { modality?: unknown; bindings_json?: unknown };
       const { modality, bindings_json } = args;
@@ -2767,17 +2819,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // ---------------------------------------------------------------------------
-// Signal handlers (must reference ipcClient, installed after bootstrap)
+// Shutdown + spawner-death detection
+//
+// INSTALLED AT MODULE SCOPE ON PURPOSE — never inside main(). 'end' is emitted
+// exactly once; a listener attached after `await server.connect()` misses an
+// already-emitted 'end' forever, which recreates the very orphan class this
+// exists to prevent. Module scope is always safe because no I/O event is
+// delivered before the event loop starts, so nothing can be missed here.
+// See PLAN-mcp-orphan-reaper.md §5.
 // ---------------------------------------------------------------------------
 
-process.on('SIGTERM', () => {
-  if (ipcClient) ipcClient.end();
-  process.exit(0);
-});
+let shuttingDown = false;
 
-process.on('SIGINT', () => {
+/**
+ * Idempotent shutdown. 'close' follows 'end' on a readable stream, so this
+ * double-fires by construction; `process.exit` on the first call preempts the
+ * second today, but the guard is what keeps that true if any async cleanup
+ * (buffer flush, socket end-wait) is ever added below.
+ */
+function shutdown(reason: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`[Cyboflow MCP] ${reason} — exiting`);
   if (ipcClient) ipcClient.end();
   process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// FAST PATH: the spawner closing its end of the pipe. Fires in milliseconds
+// rather than up to one watchdog interval, but is not a guarantee — the MCP
+// SDK's StdioServerTransport.close() pauses stdin when it was the sole 'data'
+// listener, after which EOF is never observed, and 'end' only fires at all once
+// something has put stdin in flowing mode (the transport's own 'data' listener
+// does this, so the pre-connect window is covered by the watchdog below, not by
+// this). Attaching 'end'/'close' neither resumes nor consumes the stream, so it
+// cannot perturb the transport's own reads.
+process.stdin.on('end', () => shutdown('stdin EOF'));
+process.stdin.on('close', () => shutdown('stdin closed'));
+
+// GUARANTEE: poll for reparent-to-launchd. See parentWatchdog.ts for why ppid is
+// the primary signal and stdin EOF the optimization, not the reverse.
+startParentWatchdog({
+  intervalMs: resolveWatchdogIntervalMs(),
+  onOrphaned: (reason) => shutdown(reason),
 });
 
 // ---------------------------------------------------------------------------

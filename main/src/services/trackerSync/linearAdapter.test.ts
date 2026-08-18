@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { LinearAdapter } from './linearAdapter';
 import { TrackerAuthError } from './errors';
 import type { FetchLike, IssueDraft } from './adapterTypes';
+import type { TrackerSourceSelection } from '../../../../shared/types/trackerSync';
 
 interface RecordedCall {
   url: string;
@@ -330,5 +331,78 @@ describe('LinearAdapter.updateIssueState', () => {
     const body = parseBody(calls[0]);
     expect(body.query).toContain('mutation UpdateIssueState');
     expect(body.variables).toEqual({ id: 'issue-99', input: { stateId: 'state-done' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request timeouts
+// ---------------------------------------------------------------------------
+
+/**
+ * A fetch that never settles on its own and resolves only when the request's
+ * abort signal fires — i.e. what a hung socket looks like from here. `reason`
+ * is what Node's `AbortSignal.timeout` aborts with (a `TimeoutError`
+ * DOMException), so the rejection this produces is the real one.
+ */
+function hangingFetch(): { fetchImpl: FetchLike; signals: Array<AbortSignal | undefined> } {
+  const signals: Array<AbortSignal | undefined> = [];
+  const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const signal = init?.signal ?? undefined;
+    signals.push(signal ?? undefined);
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal === undefined || signal === null) return;
+      signal.addEventListener('abort', () => {
+        reject((signal as AbortSignal).reason as Error);
+      });
+    });
+  }) as FetchLike;
+  return { fetchImpl, signals };
+}
+
+describe('LinearAdapter request timeouts', () => {
+  it('aborts a hung request and reports it as a RETRYABLE transport failure', async () => {
+    // Without this the request never returns, and the sync engine's
+    // per-connection lock is held for the life of the process — the connection
+    // simply stops syncing, silently and permanently.
+    const { fetchImpl, signals } = hangingFetch();
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl, requestTimeoutMs: 5 });
+
+    await expect(adapter.validateCredentials()).rejects.toMatchObject({
+      // Status NULL is the load-bearing part: outboxWorker only terminalizes a
+      // 4xx, so a null-status failure takes the backoff-retry path. A timeout
+      // says nothing about whether the write was valid.
+      name: 'TrackerApiError',
+      status: null,
+      message: '[linear] request timed out after 5ms',
+    });
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('carries an abort signal on every request path, not just the first', async () => {
+    const { fetchImpl, signals } = hangingFetch();
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl, requestTimeoutMs: 5 });
+
+    const selection: TrackerSourceSelection = {
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    };
+    await expect(adapter.listIssues(selection)).rejects.toThrow('timed out');
+    await expect(adapter.getIssue('issue-1')).rejects.toThrow('timed out');
+    await expect(adapter.updateIssueState('issue-1', 'state-done')).rejects.toThrow('timed out');
+
+    expect(signals).toHaveLength(3);
+    for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('still reports an ordinary network failure as itself', async () => {
+    const fetchImpl = (() => Promise.reject(new Error('ECONNREFUSED'))) as FetchLike;
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(adapter.validateCredentials()).rejects.toMatchObject({
+      name: 'TrackerApiError',
+      status: null,
+      message: '[linear] network request failed: ECONNREFUSED',
+    });
   });
 });

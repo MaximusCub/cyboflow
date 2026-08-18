@@ -11,7 +11,11 @@
  */
 
 import type { CliTool } from './cliTools';
-import { WORKFLOW_AGENT_RUNTIME_LABELS, type WorkflowAgentRuntime } from './agentRuntime';
+import {
+  providerForRuntime,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+  type WorkflowAgentRuntime,
+} from './agentRuntime';
 
 /**
  * The ONE cyboflow MCP tool a subagent may reference/call: the request-only,
@@ -77,24 +81,32 @@ export function agentModelLabel(model: AgentModelAlias | null): string {
  * Compact "what will this agent run as" label for the Agents-catalogue card chip.
  * Folds the agent's pinned runtime + model into ONE deterministic string, so a
  * Codex-pinned agent no longer reads as "inherits run model" (the old chip looked
- * only at the Claude `model` alias and ignored `runtime`/`codexModel`):
+ * only at the Claude `model` alias and ignored `runtime`/`providerModel`):
  *   - inherit runtime (null): the pinned Claude model label, else the inherit
  *     sentinel (a legacy row with a model but no runtime still shows the model);
- *   - Codex runtime: the pinned Codex model id, else the runtime label ("Codex SDK");
+ *   - a NON-CLAUDE runtime: the pinned provider model id, else the runtime label
+ *     ("Codex SDK", "OMP");
  *   - a Claude runtime: the pinned Claude model label, else the runtime label.
+ *
+ * `providerModel` is the caller's already-normalized (`providerModel ??
+ * codexModel`) value for this agent's resolved non-Claude provider. The
+ * non-Claude arm is selected through the runtime→provider registry, not a
+ * `=== 'codex-sdk'` test: an OMP-pinned agent otherwise fell through to the
+ * Claude arm and read as "inherits run model" — the exact bug this function was
+ * written to fix, one provider later.
  */
 export function agentRunTargetLabel(cfg: {
   runtime: WorkflowAgentRuntime | null;
   model: AgentModelAlias | null;
-  codexModel: string | null;
+  providerModel: string | null;
 }): string {
-  const { runtime, model, codexModel } = cfg;
+  const { runtime, model, providerModel } = cfg;
   if (runtime === null) {
     return model === null ? INHERIT_RUN_MODEL_LABEL : AGENT_MODEL_LABELS[model];
   }
-  if (runtime === 'codex-sdk') {
-    return codexModel !== null && codexModel !== ''
-      ? codexModel
+  if (providerForRuntime(runtime) !== 'claude') {
+    return providerModel !== null && providerModel !== ''
+      ? providerModel
       : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
   }
   return model === null ? WORKFLOW_AGENT_RUNTIME_LABELS[runtime] : AGENT_MODEL_LABELS[model];
@@ -156,9 +168,13 @@ export interface AgentEntry {
    */
   runtime: WorkflowAgentRuntime | null;
   /**
-   * The Codex model id used when `runtime === 'codex-sdk'`, or `null` for the
-   * Codex runtime default. Ignored for Claude runtimes.
+   * The model id for this agent's resolved non-Claude provider (e.g. used when
+   * `runtime === 'codex-sdk'`), or `null` for that provider's default. Ignored
+   * for Claude runtimes. Already normalized (`providerModel ?? codexModel`) by
+   * the server, so this and {@link codexModel} always carry the same value.
    */
+  providerModel: string | null;
+  /** @deprecated Mirrors {@link providerModel} for callers that have not migrated. */
   codexModel: string | null;
   /** MCP server names this agent may call; rendered as `mcp__<server>__*` on the tools line. */
   enabledMcps: string[];

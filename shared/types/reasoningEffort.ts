@@ -3,12 +3,13 @@ import type { AgentProvider } from './agentRuntime';
 /**
  * Reasoning-effort vocabulary, per provider.
  *
- * The two providers expose DIFFERENT scales (IDEA-029): Claude's `--effort`
- * flag / Messages-API `output_config.effort` accepts `low..max`, while Codex's
- * `reasoning_effort` accepts `none..xhigh`. The overlap is `low..xhigh`; only
- * Claude has `max` and only Codex has `none`/`minimal`. A control that offers
- * effort must therefore key its option list to the agent's provider — see
- * {@link effortLevelsForProvider}.
+ * The providers expose DIFFERENT scales (IDEA-029): Claude's `--effort` flag /
+ * Messages-API `output_config.effort` accepts `low..max`, Codex's
+ * `reasoning_effort` accepts `none..xhigh`, and OMP's thinking level accepts
+ * `off..max`. The overlap is `low..xhigh`; Codex alone has `none`, OMP alone has
+ * `off`, and OMP is the only provider whose scale spans both ends. A control
+ * that offers effort must therefore key its option list to the agent's provider
+ * — see {@link effortLevelsForProvider}.
  *
  * This is intentionally PROVIDER-scoped, not per-model. Per-model narrowing
  * (e.g. a Codex "Luna" tier that tops out below `xhigh`) is a later refinement:
@@ -17,24 +18,73 @@ import type { AgentProvider } from './agentRuntime';
  */
 export const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export const CODEX_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+/**
+ * OMP's `--thinking` also accepts `auto`, deliberately NOT modelled here.
+ * `auto` means "let OMP decide", which is what the ABSENCE of a selection
+ * already means everywhere in this module — `normalizeEffortSelection` returns
+ * `undefined` for no selection and the spawn seams then omit the flag. Adding it
+ * as a value would give the picker two different spellings of the same outcome,
+ * and would make `undefined` and `'auto'` indistinguishable in persisted state.
+ * (Verified against omp v17.3.2: off|minimal|low|medium|high|xhigh|max|auto.)
+ */
+export const OMP_EFFORT_LEVELS = [
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
 
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 export type CodexEffortLevel = (typeof CODEX_EFFORT_LEVELS)[number];
+export type OmpEffortLevel = (typeof OMP_EFFORT_LEVELS)[number];
 
-/** The union of every effort value either provider accepts. */
-export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel;
+/** The union of every effort value any provider accepts. */
+export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel | OmpEffortLevel;
 
 /**
- * Every effort value across both providers, de-duplicated, for the wire schema.
+ * Every effort value across every provider, de-duplicated, for the wire schema.
  * Persistence is provider-agnostic (the resolved provider isn't known when a
  * `WorkflowAgentConfig` is validated), so the Zod enum accepts the whole union;
  * provider-specific validity is enforced later by {@link normalizeEffortSelection}.
+ *
+ * OMP's `off` is the one net-new member (its `minimal` is already Codex's).
+ * Placed next to `none` because the two are the same rung on different scales
+ * and the tuple reads low-to-high; the existing members keep their relative
+ * order, and nothing keys off the index — every consumer is a `z.enum` or a Set
+ * membership test, so widening only ADDS an accepted value and cannot change
+ * what an already-persisted one means.
  */
-export const ALL_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export const ALL_EFFORT_LEVELS = [
+  'none',
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
 
 const CLAUDE_EFFORT_SET = new Set<string>(CLAUDE_EFFORT_LEVELS);
 const CODEX_EFFORT_SET = new Set<string>(CODEX_EFFORT_LEVELS);
+const OMP_EFFORT_SET = new Set<string>(OMP_EFFORT_LEVELS);
 const ALL_EFFORT_SET = new Set<string>(ALL_EFFORT_LEVELS);
+
+/** Each provider's own ordered scale, low-to-high. Exhaustive by construction. */
+const EFFORT_LEVELS_BY_PROVIDER: Readonly<Record<AgentProvider, readonly ReasoningEffort[]>> = {
+  claude: CLAUDE_EFFORT_LEVELS,
+  codex: CODEX_EFFORT_LEVELS,
+  omp: OMP_EFFORT_LEVELS,
+};
+
+const EFFORT_SETS_BY_PROVIDER: Readonly<Record<AgentProvider, ReadonlySet<string>>> = {
+  claude: CLAUDE_EFFORT_SET,
+  codex: CODEX_EFFORT_SET,
+  omp: OMP_EFFORT_SET,
+};
 
 /** Narrow an arbitrary value to a known effort level (provider-agnostic). */
 export function isAnyEffortLevel(value: unknown): value is ReasoningEffort {
@@ -52,13 +102,12 @@ export function isClaudeEffortLevel(value: unknown): value is ClaudeEffortLevel 
 
 /** The ordered effort options valid for `provider`, for UI pickers. */
 export function effortLevelsForProvider(provider: AgentProvider): readonly ReasoningEffort[] {
-  return provider === 'codex' ? CODEX_EFFORT_LEVELS : CLAUDE_EFFORT_LEVELS;
+  return EFFORT_LEVELS_BY_PROVIDER[provider];
 }
 
 /** True when `effort` is an accepted value for `provider`'s effort scale. */
 export function isValidEffortForProvider(provider: AgentProvider, effort: string): boolean {
-  const key = effort.toLowerCase().trim();
-  return (provider === 'codex' ? CODEX_EFFORT_SET : CLAUDE_EFFORT_SET).has(key);
+  return EFFORT_SETS_BY_PROVIDER[provider].has(effort.toLowerCase().trim());
 }
 
 /**

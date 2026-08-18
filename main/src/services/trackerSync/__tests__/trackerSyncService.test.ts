@@ -688,6 +688,88 @@ describe('TrackerSyncService inbound ordering backstop', () => {
     expect(ideas()).toHaveLength(0);
   });
 
+  it('runs inbound while a NEVER-ATTEMPTED push sits queued behind a manual push direction', async () => {
+    // THE WEDGE this backstop used to be. `push_mode: 'manual'` is the backfill
+    // default for every pre-094 connection, so a Plane user who files an idea
+    // gets a `create_issue` row that is never claimed until they drain push by
+    // hand. Gating inbound on "an unsettled create exists" then disabled
+    // automatic pull AND linked-status sync for as long as that row sat there —
+    // which, being manual, is indefinitely.
+    //
+    // A never-claimed row has a KNOWN outcome: no request was sent, so there is
+    // no remote issue to re-import and nothing to be careful about.
+    makeConnection({
+      provider: 'plane',
+      workspace_id: 'acme',
+      push_mode: 'manual',
+      pull_mode: 'auto',
+      status_sync_mode: 'auto',
+    });
+    plane = new PlaneLikeAdapter();
+    service = new TrackerSyncService({
+      db: raw,
+      router,
+      nowIso: () => now,
+      adapterFactory: () => plane,
+    });
+    const push = enqueueOutbox(raw, {
+      connection_id: CONN_ID,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: 'ide-1',
+      client_key: 'ck-push',
+      payload_json: '{}',
+    });
+    plane.issues = [makeIssue({ externalId: 'proj1/remote', identifier: 'PROJ-9' })];
+    service.start();
+
+    const result = await service.syncConnection(CONN_ID);
+
+    expect(result.error).toBeNull();
+    expect(plane.calls).toContain('listIssues');
+    expect(renderedLog()).not.toContain('⚠ inbound deferred · unresolved create recovery');
+    // The remote issue imported, so the whole inbound half genuinely ran.
+    expect(ideas()).toHaveLength(1);
+    // ...and the held push is exactly where it was: pending, unattempted, in
+    // order, waiting for a "Sync now".
+    const held = outboxRows().find((row) => row.id === push.id);
+    expect(held?.state).toBe('pending');
+    expect(held?.attempts).toBe(0);
+    expect(plane.calls).not.toContain('createIssue');
+  });
+
+  it('still defers inbound for an ATTEMPTED create that was returned to the queue', async () => {
+    // The other side of the same predicate: `attempts > 0` on a pending row
+    // means a request DID go out at some point, so the remote outcome is not
+    // ours to assume. This must keep gating, or the wedge fix becomes a hole.
+    usePlane();
+    raw
+      .prepare("UPDATE tracker_outbox SET state = 'pending', attempts = 1 WHERE connection_id = ?")
+      .run(CONN_ID);
+    plane.failRecovery = true;
+    service.start();
+
+    const result = await service.syncConnection(CONN_ID);
+
+    expect(result.error).toBeNull();
+    expect(plane.calls).not.toContain('listIssues');
+    expect(renderedLog()).toContain('⚠ inbound deferred · unresolved create recovery');
+  });
+
+  it('still defers inbound for an AMBIGUOUS create', async () => {
+    usePlane();
+    raw
+      .prepare("UPDATE tracker_outbox SET state = 'ambiguous' WHERE connection_id = ?")
+      .run(CONN_ID);
+    plane.failRecovery = true;
+    service.start();
+
+    await service.syncConnection(CONN_ID);
+
+    expect(plane.calls).not.toContain('listIssues');
+    expect(renderedLog()).toContain('⚠ inbound deferred · unresolved create recovery');
+  });
+
   it('runs inbound in the SAME pass when the extra reconcile round settles the create', async () => {
     usePlane();
     // The create is lost, but the recovery lookup works — the backstop's one
@@ -1262,12 +1344,16 @@ describe('TrackerSyncService direction modes', () => {
       entityType: 'idea',
       fields: { title: 'A locally-filed idea' },
     });
-    await service.syncConnection(CONN_ID);
+    const pass = await service.syncConnection(CONN_ID);
 
     expect(adapter.createIssueCalls).toHaveLength(1);
     const link = getLinkByEntity(raw, 'idea', created.taskId, 'linear');
     expect(link?.external_id).toBe(adapter.createIssueCalls[0].clientKey);
     expect(link?.orphaned_at).toBeNull();
+    // A pushed idea is logged as a push, not mislabeled a mirrored sub-issue.
+    const lines = pass.entries.map((e) => e.line);
+    expect(lines).toContain('pushed 1 idea');
+    expect(lines).not.toContain('mirrored 1 sub-issue');
   });
 
   it('holds every direction at once, and a single Sync now runs all three', async () => {

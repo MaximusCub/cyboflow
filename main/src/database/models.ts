@@ -737,6 +737,10 @@ export type { ExperimentComparisonRow } from '../../../shared/types/experiments'
  * value; NULL means inherit the run-level provider/runtime. `codex_model`
  * (migration 070, nullable) is the free-form Codex model id used only when
  * `runtime === 'codex-sdk'`; NULL means the Codex runtime default.
+ * `provider_model` (migration 104, nullable) generalizes `codex_model` to any
+ * resolved non-Claude provider; `codex_model` stays as a read-compat column —
+ * code writes BOTH on every save, and reads COALESCE(provider_model,
+ * codex_model) (an explicit `provider_model` wins).
  * Validation lives in code (mirrors migrations 016/026), not CHECK constraints.
  */
 export interface AgentOverrideRow {
@@ -755,6 +759,7 @@ export interface AgentOverrideRow {
   model: string | null; // migration 036: AGENT_MODEL_ALIASES value, or NULL = inherit run model
   runtime: string | null; // migration 070: WORKFLOW_AGENT_RUNTIMES value, or NULL = inherit run runtime
   codex_model: string | null; // migration 070: free-form Codex model id (runtime='codex-sdk'), or NULL = Codex default
+  provider_model: string | null; // migration 104: free-form model id for the resolved non-Claude provider, or NULL = default
   created_at: string;
   updated_at: string;
 }

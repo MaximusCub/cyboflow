@@ -27,7 +27,7 @@
  * The API key lives in this component's state and leaves only inside the
  * `credentials` field of the calls above — nothing ever reads it back.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import { trpc } from '../../../trpc/client';
 import { Modal } from '../../ui/Modal';
@@ -178,6 +178,14 @@ export function TrackerWizardModal({
   const [reconcileLoaded, setReconcileLoaded] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, ReconcileAction>>({});
   const [linkTargets, setLinkTargets] = useState<Record<string, string>>({});
+  /**
+   * Monotonic version for the reconcile probe. Bumped whenever an in-flight
+   * request is superseded (a new ensureReconcile call, or any invalidation
+   * below that drops `reconcileLoaded`) so a response that arrives after its
+   * request was superseded is discarded instead of installed for the wrong
+   * project/source/selection.
+   */
+  const reconcileRequestIdRef = useRef(0);
 
   // ── Step 6 · submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -332,14 +340,18 @@ export function TrackerWizardModal({
       .catch(() => setProjects([]));
   }, [isOpen]);
 
-  // Reconcile previews the CHOSEN project's backlog, so a retarget drops it.
+  // Reconcile previews the CHOSEN project's backlog, so a retarget drops it —
+  // and supersedes any reconcile request already in flight for the old target,
+  // so its late response cannot install itself under the new one.
   useEffect(() => {
+    reconcileRequestIdRef.current += 1;
     setReconcileLoaded(false);
     setMaxStep((m) => Math.min(m, 4));
   }, [targetProjectId]);
 
   // A different source means different issues, states and reconcile matches.
   useEffect(() => {
+    reconcileRequestIdRef.current += 1;
     setIssues([]);
     setIssuesLoaded(false);
     setAssignees({});
@@ -357,6 +369,7 @@ export function TrackerWizardModal({
   // The reconcile suggestions are computed against the INCLUDED issue set, so a
   // changed Step-3 answer invalidates Step 5 (but nothing else).
   useEffect(() => {
+    reconcileRequestIdRef.current += 1;
     setReconcileLoaded(false);
     setMaxStep((m) => Math.min(m, 4));
   }, [mode, assignees, manual]);
@@ -408,10 +421,18 @@ export function TrackerWizardModal({
 
   const ensureReconcile = async (): Promise<void> => {
     if (reconcileLoaded) return;
+    // Claim this request's version before the await so a later call (a fresh
+    // ensureReconcile, or an invalidation effect below) can supersede it.
+    const requestId = (reconcileRequestIdRef.current += 1);
     const rows = await trpc.cyboflow.tracker.reconcilePreview.mutate({
       projectId: targetProjectId,
       issues: includedIssues,
     });
+    // The target project, source, or selection changed while this request was
+    // in flight — its response no longer describes current state, so drop it.
+    // Whatever superseded us already reset `reconcileLoaded`, and the next
+    // visit to this step will re-fetch for the current state.
+    if (reconcileRequestIdRef.current !== requestId) return;
     setReconcileItems(rows);
     // A row with a suggested match defaults to Link (pre-filled with that
     // suggestion); everything else defaults to Keep.

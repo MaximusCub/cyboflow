@@ -20,14 +20,15 @@
  *
  * Grouped into four sections mirroring the four tables:
  *   - Connections: insertConnection / getConnection / listConnections /
- *     updateConnectionSettings / findDisconnectedConnection /
- *     reactivateConnection / advanceCursor / storeSecret / readSecret /
- *     clearSecret.
+ *     updateConnectionSettings / connectionMatchesIdentity /
+ *     findDisconnectedConnection / reactivateConnection / advanceCursor /
+ *     storeSecret / readSecret / clearSecret.
  *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
  *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal /
  *     listActiveLinksWithoutEntity / hasActiveLinkedDescendant.
- *   - Outbox: enqueueOutbox / claimNextPending / resolveOutbox /
- *     listUnresolvedOutbox / findOutboxByClientKey / requeueInFlightAsAmbiguous.
+ *   - Outbox: enqueueOutbox / supersedeQueuedStateWrites / claimNextPending /
+ *     resolveOutbox / listUnresolvedOutbox / findOutboxByClientKey /
+ *     requeueInFlightAsAmbiguous.
  *   - Conflicts: insertConflict / getConflict / listOpenConflicts /
  *     resolveConflict / hasOpenConflictForLink.
  */
@@ -230,6 +231,40 @@ function canonicalizeUrl(raw: string | null): string | null {
 }
 
 /**
+ * Does `connection` name the SAME tracker workspace a live credential probe
+ * just reported — "the same workspace, on the same tracker INSTANCE"?
+ *
+ * The identity half of {@link findDisconnectedConnection}, factored out because
+ * a CREDENTIAL ROTATION asks the identical question from the other end: given a
+ * connection, may this new key take it over? Both answers must agree, or a
+ * rotation could bind a connection to a workspace the re-connect path would
+ * have refused to revive it for — and every retained link would then point at
+ * issue ids belonging to somebody else's workspace.
+ *
+ * `workspaceId` is what makes this honest: it comes from the LIVE
+ * `validateCredentials()` probe (Linear's organization id, Plane's workspace
+ * slug), never from anything the user typed, and it is exactly the fact that
+ * survives a key rotation. A connection whose `workspace_id` was never recorded
+ * matches NOTHING — an identity we never learned cannot be claimed BY identity.
+ *
+ * `baseUrl` participates because a Plane workspace slug is unique only within
+ * one deployment (see {@link findDisconnectedConnection}); comparison is on the
+ * NORMALIZED value, so a trailing slash or the provider's own default origin
+ * never forks the identity.
+ */
+export function connectionMatchesIdentity(
+  connection: TrackerConnectionRow,
+  workspaceId: string,
+  baseUrl: string | null,
+): boolean {
+  if (connection.workspace_id === null || connection.workspace_id !== workspaceId) return false;
+  return (
+    normalizeBaseUrl(connection.provider, connection.base_url) ===
+    normalizeBaseUrl(connection.provider, baseUrl)
+  );
+}
+
+/**
  * The DISCONNECTED connection a re-connect should REVIVE, or null.
  *
  * IDENTITY IS `(project_id, provider, workspace_id, base_url)` — "the same
@@ -271,7 +306,6 @@ export function findDisconnectedConnection(
   workspaceId: string,
   baseUrl: string | null,
 ): TrackerConnectionRow | null {
-  const wanted = normalizeBaseUrl(provider, baseUrl);
   const rows = db
     .prepare(
       `SELECT * FROM tracker_connections
@@ -279,7 +313,7 @@ export function findDisconnectedConnection(
         ORDER BY updated_at DESC, id DESC`,
     )
     .all(projectId, provider, workspaceId) as TrackerConnectionRow[];
-  return rows.find((row) => normalizeBaseUrl(provider, row.base_url) === wanted) ?? null;
+  return rows.find((row) => connectionMatchesIdentity(row, workspaceId, baseUrl)) ?? null;
 }
 
 /**
@@ -655,6 +689,61 @@ export function enqueueOutbox(db: Database.Database, input: EnqueueOutboxInput):
 }
 
 /**
+ * Settle every still-QUEUED status write for `externalId` that `newRowId`
+ * replaces, so a stale one can never reach the tracker after it.
+ *
+ * WHY IT IS NEEDED AT ENQUEUE TIME. The drain is serial, so two writes are
+ * never in flight at once — but they still land out of ORDER when the older one
+ * is carrying a backoff: 'started' fails and waits two minutes, 'completed' is
+ * enqueued and drains immediately, then the backoff expires and 'started' goes
+ * out last, silently dragging a Done issue back to In Progress. By the time the
+ * stale row is claimed the newer one is `done` — settled, invisible to any
+ * check the drain can make about "is something newer still queued". The only
+ * moment both rows are knowable is when the newer one is written, which is
+ * here.
+ *
+ * SCOPE, and what each exclusion buys:
+ *   - `pending` ONLY. An `in_flight` row has a request out that no local write
+ *     can recall, and settling it would be a lie about an outcome we do not
+ *     know; it needs no handling anyway, since the claim is serial — the newer
+ *     row is claimed only after it finishes, so the newer value lands last. An
+ *     `ambiguous` state write is returned to `pending` by the reconcile and then
+ *     drained in id order ahead of the newer row, which is again the right
+ *     order.
+ *   - `id < newRowId`, so this only ever settles rows the caller's own insert
+ *     supersedes.
+ *   - BOTH status kinds, deliberately not `kind` alone: `update_state` and
+ *     `close_parent` move the SAME issue's state, so a later one of either kind
+ *     states the truth the earlier one is now wrong about. Same key the enqueue
+ *     dedupe uses.
+ *
+ * `done` rather than `failed`: nothing went wrong and nothing is left to
+ * attempt — the instruction was replaced. The reason is recorded on the row.
+ *
+ * Returns how many rows were settled.
+ */
+export function supersedeQueuedStateWrites(
+  db: Database.Database,
+  connectionId: string,
+  externalId: string,
+  newRowId: number,
+): number {
+  const result = db
+    .prepare(
+      `UPDATE tracker_outbox
+          SET state = 'done',
+              last_error = 'superseded by a newer state write for the same issue',
+              next_attempt_at = NULL,
+              updated_at = datetime('now')
+        WHERE connection_id = ? AND external_id = ? AND id < ?
+          AND state = 'pending'
+          AND kind IN ('update_state', 'close_parent')`,
+    )
+    .run(connectionId, externalId, newRowId);
+  return result.changes;
+}
+
+/**
  * Atomically claim the oldest eligible pending row for a connection: the
  * oldest (by `created_at`, then `id` as a tiebreaker for same-second
  * inserts) `state = 'pending'` row whose `next_attempt_at` is NULL or
@@ -831,8 +920,28 @@ export function resolveConflict(db: Database.Database, id: number, resolution: s
   ).run(resolution, id);
 }
 
-/** True when `linkId` has at least one open conflict (used to gate per-item sync pausing in Manual mode). */
-export function hasOpenConflictForLink(db: Database.Database, linkId: number): boolean {
-  const row = db.prepare('SELECT 1 FROM tracker_conflicts WHERE link_id = ? AND state = ?').get(linkId, 'open');
+/**
+ * True when `linkId` has at least one open conflict (used to gate per-item sync
+ * pausing in Manual mode).
+ *
+ * `field` narrows the question to one conflicting field ('title' /
+ * 'description' / 'stage'). inboundSync asks that narrower question when a
+ * parked item still carries an unapplied remote STAGE change: an open STAGE
+ * conflict already RECORDS that remote state and applies it on resolution, so
+ * the cursor may move past the item — whereas the same stage change parked
+ * behind a mere TITLE conflict is recorded nowhere and would be lost if the
+ * cursor advanced.
+ */
+export function hasOpenConflictForLink(
+  db: Database.Database,
+  linkId: number,
+  field?: string,
+): boolean {
+  const row =
+    field === undefined
+      ? db.prepare('SELECT 1 FROM tracker_conflicts WHERE link_id = ? AND state = ?').get(linkId, 'open')
+      : db
+          .prepare('SELECT 1 FROM tracker_conflicts WHERE link_id = ? AND state = ? AND field = ?')
+          .get(linkId, 'open', field);
   return row !== undefined;
 }

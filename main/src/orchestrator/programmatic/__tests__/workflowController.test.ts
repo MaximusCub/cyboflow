@@ -2168,6 +2168,117 @@ describe('WorkflowController', () => {
         expect(counts.get('t2')).toBe(1);
       });
     });
+
+    // ── commit-integrity backstop before the 'integrated' stamp ───────────────
+    describe('commit-integrity backstop', () => {
+      /** makeFanHost plus a recording log sink (the backstop's only other output). */
+      function makeLoggingFanHost(driver: FanOutDriver): {
+        host: ControllerHost;
+        logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }>;
+      } {
+        const host = makeFanHost(driver);
+        const logs: Array<{ level: 'info' | 'warn' | 'error'; message: string }> = [];
+        host.log = (level, message) => {
+          logs.push({ level, message });
+        };
+        return { host, logs };
+      }
+
+      it('integrates as before when the driver exposes no commit probe', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        expect(driver.beginCommitProbe).toBeUndefined();
+
+        const result = await new WorkflowController(makeRunner(), makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
+      });
+
+      it('integrates when the probe reports HEAD advanced', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        driver.beginCommitProbe = async () => async () => ({ headAdvanced: true, dirty: true });
+
+        const result = await new WorkflowController(makeRunner(), makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
+      });
+
+      it('integrates when the probe reports a clean tree even with HEAD unmoved', async () => {
+        // Nothing to commit is not a defect (e.g. a docs-only task the agent
+        // resolved as already-satisfied, or a sibling that committed our work).
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        driver.beginCommitProbe = async () => async () => ({ headAdvanced: false, dirty: false });
+
+        const result = await new WorkflowController(makeRunner(), makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
+      });
+
+      it('FAILS a green lane that made no commit and left the worktree dirty', async () => {
+        // The live defect: every inner step returned ok but `git commit` was
+        // denied, so the changes sat untracked and the lane still showed merged.
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+        const driver = makeFanOutDriver(['t1', 't2']);
+        driver.beginCommitProbe = async () =>
+          async () => ({ headAdvanced: false, dirty: true });
+        const { host, logs } = makeLoggingFanHost(driver);
+
+        const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+        // The outer step still settles (a lane failure is not terminal), but no
+        // lane is integrated — both are failed.
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
+        for (const item of ['t1', 't2']) {
+          expect(driver.lanes.filter((l) => l.itemId === item).at(-1)).toMatchObject({
+            status: 'failed',
+          });
+        }
+        const errors = logs.filter((l) => l.level === 'error');
+        expect(errors.length).toBe(2);
+        expect(errors[0].message).toContain('made no git commit');
+        expect(errors[0].message).toContain('refusing to mark integrated');
+      });
+
+      it('integrates (with a warning) when opening the probe throws', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        driver.beginCommitProbe = async () => {
+          throw new Error('no worktree');
+        };
+        const { host, logs } = makeLoggingFanHost(driver);
+
+        const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
+        expect(logs.some((l) => l.level === 'warn' && l.message.includes('no worktree'))).toBe(true);
+        expect(logs.some((l) => l.level === 'error')).toBe(false);
+      });
+
+      it('integrates (with a warning) when the probe closure throws at lane end', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        driver.beginCommitProbe = async () => async () => {
+          throw new Error('git rev-parse exploded');
+        };
+        const { host, logs } = makeLoggingFanHost(driver);
+
+        const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
+        expect(
+          logs.some((l) => l.level === 'warn' && l.message.includes('git rev-parse exploded')),
+        ).toBe(true);
+        expect(logs.some((l) => l.level === 'error')).toBe(false);
+      });
+    });
   });
 });
 

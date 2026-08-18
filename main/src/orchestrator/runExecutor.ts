@@ -19,7 +19,12 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import {
+  providerForRuntimeValue,
+  type AgentProvider,
+  type WorkflowRunStorableRuntime,
+} from '../../../shared/types/agentRuntime';
+import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
 import { AgentInvocationStore } from './agentInvocationStore';
@@ -214,7 +219,7 @@ export interface ClaudeSpawnerOptions {
    */
   agentProvider?: AgentProvider;
   /** Paired with {@link agentProvider} — the concrete runtime for this spawn. */
-  agentRuntime?: WorkflowAgentRuntime;
+  agentRuntime?: WorkflowRunStorableRuntime;
   /**
    * Per-spawn reasoning-effort override (IDEA-029), already normalized to this
    * spawn's provider by the caller (the step runner drops cross-provider/stale
@@ -445,6 +450,15 @@ export type ExecutionPhase = 'pre_spawn' | 'post_spawn' | 'sdk_initialized' | 'd
  * re-sending it.
  */
 export const RESUME_CONTINUE_PROMPT = 'Continue.';
+
+/**
+ * The provider a stamped run belongs to. `agent_provider` is the authority when
+ * present; a row predating the provider axis carries neither column and floors
+ * to Claude, which is exactly what it ran as.
+ */
+function runAgentProvider(run: WorkflowRunRow): AgentProvider {
+  return run.agent_provider ?? providerForRuntimeValue(run.agent_runtime, 'RunExecutor');
+}
 
 export class RunExecutor {
   /**
@@ -768,18 +782,46 @@ export class RunExecutor {
     // the orchestrated path below stays byte-identical; if a programmatic run is
     // somehow stamped with no runner wired, fall through to orchestrated (the
     // agent can always read+walk the same DAG) rather than dead-ending the run.
+    //
+    // That fallback is only sound for a provider that HAS an orchestrated
+    // integration. A programmatic-only provider (see providerExecutionSupport)
+    // would be handed the whole DAG as a single orchestrator turn with no prompt
+    // envelope and no question bridge — the run the createRun guard refuses to
+    // stamp in the first place, reached the back way. Refuse it here too, and
+    // throw INSIDE the try below so the run transitions to `failed` with this
+    // message rather than dying outside the lifecycle handling (RunLauncher only
+    // logs what escapes execute()).
+    let refuseOrchestratedFallback: string | null = null;
     if (run.execution_model === 'programmatic') {
       if (this.programmaticRunner) {
         await this.executeProgrammatic(runId, run, workflow, panelId, sessionId);
         return;
       }
-      this.logger.warn(
-        '[RunExecutor] run stamped execution_model=programmatic but no programmatic runner is injected; falling through to orchestrated',
-        { runId },
-      );
+      const provider = runAgentProvider(run);
+      if (providerSupportsOrchestrated(provider)) {
+        this.logger.warn(
+          '[RunExecutor] run stamped execution_model=programmatic but no programmatic runner is injected; falling through to orchestrated',
+          { runId },
+        );
+      } else {
+        refuseOrchestratedFallback =
+          `RunExecutor.execute: run is stamped execution_model=programmatic on the ` +
+          `${providerLabel(provider)} provider and no programmatic runner is injected. ` +
+          `${providerLabel(provider)} has no orchestrated integration in this build, so the ` +
+          'orchestrated fallback is refused rather than spawning an unsupported main orchestrator.';
+        this.logger.error(`[RunExecutor] ${refuseOrchestratedFallback}`, { runId });
+      }
     }
 
     try {
+      if (refuseOrchestratedFallback !== null) {
+        // Drive the SAME failed arm the spawn catch below uses (the run's own
+        // try/catch only wraps the spawn), so the run lands in `failed` carrying
+        // this reason instead of being logged and abandoned by RunLauncher.
+        this.pendingFailedMessage.set(runId, refuseOrchestratedFallback);
+        await this.onLifecycleTransition(runId, 'failed');
+        throw new Error(refuseOrchestratedFallback);
+      }
       const turnKind = this.getWorkflowPromptTurnKind(runId);
       let prompt = await this.getPrompt(runId, workflow);
       const overrides = await this.buildOptionsOverrides(runId, run, workflow);

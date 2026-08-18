@@ -23,6 +23,10 @@ import { useMemo, useState, useEffect, useCallback, type ReactElement, type Reac
 import { ChatInput } from './ChatInput';
 import { SessionActionToast } from './SessionActionToast';
 import { MODEL_OPTIONS } from './unified/ModelPill';
+import {
+  AGENT_PROVIDER_LABELS,
+  DEFAULT_AGENT_PROVIDER,
+} from '../../../../shared/types/agentRuntime';
 import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
@@ -77,7 +81,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     return null;
   }, [runId, runsByProject]);
   const isInteractive = run?.substrate === 'interactive';
-  const agentName = run?.agent_provider === 'codex' ? 'Codex' : 'Claude';
+  const agentName = AGENT_PROVIDER_LABELS[run?.agent_provider ?? DEFAULT_AGENT_PROVIDER];
   const running = run?.status === 'running' || run?.status === 'starting';
   const worktreePath = run?.worktree_path ?? null;
   const branchName = run?.branch_name ?? null;

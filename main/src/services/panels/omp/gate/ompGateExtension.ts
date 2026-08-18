@@ -1,0 +1,1267 @@
+/**
+ * ompGateExtension — cyboflow's SOLE policy engine for OMP (oh-my-pi) tool calls.
+ *
+ * Loaded INSIDE the spawned `omp` process by its Bun runtime via
+ * `-e <path>` (see `ompGatePath.ts` for how the path is resolved). It registers
+ * a `tool_call` handler that applies cyboflow's permission predicate and, for
+ * anything it cannot decide locally, blocks on the orchestrator socket for a
+ * human verdict — the interactive-Claude shell-hook pattern
+ * (`main/src/orchestrator/shellHooks/preToolUseShellHook.ts`) ported to OMP's
+ * extension API, reusing that hook's wire protocol verbatim.
+ *
+ * WHY THIS EXISTS AT ALL (docs/proposals/omp-provider-integration.md §5.3):
+ * OMP's own tool tiers are NEVER cyboflow's trust boundary. OMP's `write`
+ * approval mode auto-approves every write-tier tool and classifies ALL MCP
+ * tools as write-tier — far wider than cyboflow's `acceptEdits` allowance. So
+ * cyboflow spawns OMP with `--approval-mode always-ask` and decides here.
+ *
+ * ===========================================================================
+ * FAIL-CLOSED CONTRACT
+ * ===========================================================================
+ * Three independent layers, all verified in OMP v17.3.3 source (citations in
+ * `ompGateTypes.ts`):
+ *
+ *  1. A handler THROW blocks the call. `ExtensionRunner.emitToolCall` runs each
+ *     handler through `#runHandlerWithTimeout` with an `onFailure` that
+ *     synthesizes `{ block: true, reason: 'Extension <path> failed: <message>' }`
+ *     (runner.ts:1235-1270, 1099-1110). So every `throw` below is a BLOCK whose
+ *     text reaches the model — never a silent pass.
+ *  2. A `{ block: true }` return short-circuits the remaining handlers AND is
+ *     evaluated BEFORE OMP's own approval prompt (wrapper.ts:201-235 precedes
+ *     wrapper.ts:237-339; the model-issued path blocks even earlier, in
+ *     agent-session.ts:3300-3333). A block therefore SUPPRESSES the prompt.
+ *  3. If this module fails to load at all, OMP records the error and continues
+ *     WITHOUT the gate (loader.ts:437-443 — load errors are collected, not
+ *     fatal). That is why the load sentinel exists: no sentinel file ⇒ the
+ *     manager refuses the session. Never infer "gate active" from a live
+ *     process.
+ *
+ * ===========================================================================
+ * !! OMP CAPS EVERY tool_call HANDLER AT 30 SECONDS !!
+ * ===========================================================================
+ * `EXTENSION_HANDLER_TIMEOUT_MS = 30_000` (runner.ts:84) is raced against the
+ * handler by `raceHandlerWithTimeout` (runner.ts:192-227) and applied to
+ * `tool_call` at runner.ts:1237. On expiry the handler is ABORTED and converted
+ * to `{ block: true, reason: 'Extension <path> timed out after 30000ms' }`.
+ * There is no env var, setting, or CLI flag that changes it — the only mutator
+ * is `testSetExtensionHandlerTimeoutMs` (runner.ts:91-93), a test-only export
+ * with no production callsite.
+ *
+ * MEASURED against omp v17.3.2: with a stub orchestrator that accepts the
+ * approval connection and never answers, the turn ended 31.1s after the request
+ * with exactly that block text. The model then RETRIED the tool call, paying a
+ * second full 30s — so an unanswerable gate costs 30s per attempt, not once.
+ *
+ * CONSEQUENCE: a human approval that takes longer than 30s is auto-BLOCKED by
+ * OMP. That is fail-closed (safe), but it means the blocking human gate this
+ * module implements is only usable for sub-30s decisions. We deliberately do
+ * NOT add a timeout of our own (a shorter deadline would only deny sooner, and
+ * "human is slow" must never be confused with "orchestrator is down" — the
+ * shell-hook lesson). Resolving this needs a change OUTSIDE this file: either
+ * an upstream OMP knob for the tool_call budget, or a non-blocking gate shape
+ * (block immediately with a "pending approval" reason and let the model retry
+ * once the verdict lands). Recorded for the manager step.
+ *
+ * WHAT WE DO ABOUT IT: {@link HUMAN_DECISION_BUDGET_MS} — a 25s budget on the
+ * socket wait, 5s inside OMP's cap. Expiring the budget ourselves buys three
+ * things OMP's own expiry cannot: the orchestrator sees a real disconnect
+ * instead of a zombie socket, the model gets an actionable sentence instead of
+ * "Extension <path> timed out", and the run's logs distinguish "nobody answered
+ * in time" from "the gate crashed". Budget expiry is a BLOCK, not a throw —
+ * socket-liveness failures keep throwing, so the two stay distinguishable.
+ *
+ * SOCKET LEAK GUARD: any socket still in flight when the session ends (a
+ * handler OMP abandoned before our budget fired) is tracked and destroyed on
+ * `session_shutdown`, so the leak is bounded by the session, not the app.
+ *
+ * ===========================================================================
+ * RUNTIME CONSTRAINTS
+ * ===========================================================================
+ * This file executes in OMP's Bun process. It therefore:
+ *  - imports NOTHING from cyboflow's source tree (the sibling `ompGateTypes`
+ *    import is `import type`, which erases at compile time);
+ *  - uses only `node:`-namespace APIs Bun implements (`node:net`, `node:fs`);
+ *  - avoids every Bun-only API, so the same module runs under plain Node in the
+ *    unit tests.
+ */
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+
+import type {
+  OmpExtensionApi,
+  OmpGateApprovalResponse,
+  OmpGateConfig,
+  OmpGatePermissionMode,
+  OmpGateSentinel,
+  OmpToolCallEvent,
+  OmpToolCallEventResult,
+} from './ompGateTypes';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Env var carrying the run the decisions are keyed by (workflow_runs.id). */
+export const ENV_RUN_ID = 'CYBOFLOW_RUN_ID';
+/** Env var carrying the orchestrator's Unix socket path. */
+export const ENV_ORCH_SOCKET = 'CYBOFLOW_ORCH_SOCKET';
+/** Env var carrying the JSON gate config (see {@link OmpGateConfig}). */
+export const ENV_GATE_CONFIG = 'CYBOFLOW_OMP_GATE_CONFIG';
+/** Env var carrying the load-sentinel file path. */
+export const ENV_GATE_SENTINEL = 'CYBOFLOW_OMP_GATE_SENTINEL';
+
+/**
+ * OMP's subagent-dispatch tool (`tools/builtin-names.ts:19`). Denied outside
+ * `dontAsk` until hook scope inside OMP subagents is verified — OMP's docs say
+ * subagents run forced-yolo, and whether this extension's `tool_call` handler
+ * is even installed in a subagent session is UNKNOWN.
+ */
+export const OMP_TASK_TOOL_NAME = 'task';
+
+/**
+ * A URI scheme sitting at a token boundary inside a tool argument: `ssh://`,
+ * `file://`, `http://`, `ftp://`, anything of that shape.
+ *
+ * WHY THE GATE CARES (the hole this closes): OMP's read-tier tools ESCALATE
+ * THEMSELVES on a remote target. `tools/read.ts:401` and `tools/grep.ts:906`
+ * reclassify a call to `exec` tier when the path is `ssh://`, because the tool
+ * then runs a remote operation over the user's own SSH credentials. cyboflow's
+ * auto-allow sets are name lists — `read` is `read` — so without this scan a
+ * `default`-mode session would auto-allow a remote read with no human anywhere
+ * in the loop, and the manager's approval bridge would auto-approve OMP's own
+ * redundant prompt behind it.
+ *
+ * NOT `^`-anchored, deliberately: a target reached through a flag-shaped
+ * argument (`--file=ssh://host/x`) or embedded mid-string would evade a
+ * start-anchor, and a false negative here is a silent bypass. The boundary
+ * class in front makes this a strict superset of "the argument IS a URI".
+ *
+ * `file://` is caught deliberately too — it is path indirection, and the point
+ * is that the gate stops guessing about argument semantics it cannot verify.
+ *
+ * Deliberately un-`g`-flagged: a `g` regex carries `lastIndex` between `.test`
+ * calls, which would make this predicate answer differently on repeat inputs.
+ */
+const URI_SCHEME_TARGET = /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * How long we wait for a human verdict before giving up ourselves.
+ *
+ * OMP caps every `tool_call` handler at 30s
+ * (`extensibility/extensions/runner.ts:84`, `EXTENSION_HANDLER_TIMEOUT_MS`,
+ * raced at `runner.ts:192-227` — measured at 31.1s wall clock against omp
+ * v17.3.2). If we simply waited, OMP would abort us at its own deadline and
+ * report `Extension <path> timed out after 30000ms` to the model, leaving the
+ * orchestrator holding a socket nobody will ever read.
+ *
+ * 25s leaves a 5s margin for the block to travel back through
+ * `emitToolCall` before OMP's cap fires, so OUR reason is what the model sees.
+ * Raising this above 30s would be inert; the OMP cap would simply win.
+ */
+export const HUMAN_DECISION_BUDGET_MS = 25_000;
+
+/**
+ * The most restrictive config: gate everything, allow nothing, deny subagents.
+ * A missing or unparseable `CYBOFLOW_OMP_GATE_CONFIG` resolves to exactly this
+ * — the gate never fails open.
+ */
+export const MOST_RESTRICTIVE_GATE_CONFIG: OmpGateConfig = {
+  permissionMode: 'default',
+  disallowedTools: [],
+  autoAllowTools: [],
+  editTools: [],
+  allowRules: [],
+  denyTaskTool: true,
+  // Empty = "no MCP tool is pre-cleared". Rule 3 is exact-membership only, so an
+  // empty list auto-allows NOTHING and every MCP call falls to the human gate —
+  // which is the correct degradation for a config this damaged.
+  cyboflowMcpToolNames: [],
+};
+
+const PERMISSION_MODES: readonly OmpGatePermissionMode[] = [
+  'default',
+  'acceptEdits',
+  'auto',
+  'dontAsk',
+];
+
+/** Shell control operators that separate independently-evaluated commands. */
+const SHELL_SEPARATORS = ['&&', '||', ';', '|'] as const;
+
+// ---------------------------------------------------------------------------
+// Logger
+// ---------------------------------------------------------------------------
+
+/**
+ * Diagnostics sink. Deliberately NOT OMP's `pi.logger`: binding to that would
+ * pin one more upstream shape for no benefit. stderr of the `omp --mode rpc`
+ * child is captured by the manager, and stdout is reserved for the NDJSON
+ * protocol, so stderr is the correct channel.
+ */
+export interface OmpGateLogger {
+  debug(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+const stderrLogger: OmpGateLogger = {
+  debug: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
+  warn: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
+  error: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
+};
+
+// ---------------------------------------------------------------------------
+// Config parsing — defensive, never fails open
+// ---------------------------------------------------------------------------
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === 'string');
+}
+
+function permissionMode(value: unknown): OmpGatePermissionMode | undefined {
+  return typeof value === 'string' &&
+    (PERMISSION_MODES as readonly string[]).includes(value)
+    ? (value as OmpGatePermissionMode)
+    : undefined;
+}
+
+/**
+ * Parse `CYBOFLOW_OMP_GATE_CONFIG`.
+ *
+ * Missing, non-JSON, or non-object input yields {@link MOST_RESTRICTIVE_GATE_CONFIG}.
+ * A parseable object with an individually malformed field falls back to the
+ * restrictive default FOR THAT FIELD ONLY, so one bad key cannot quietly widen
+ * (or needlessly narrow) the rest of the policy.
+ */
+export function parseGateConfig(raw: string | undefined, logger: OmpGateLogger): OmpGateConfig {
+  if (raw === undefined || raw.trim().length === 0) {
+    logger.warn(`${ENV_GATE_CONFIG} is unset — falling back to the most restrictive policy`);
+    return { ...MOST_RESTRICTIVE_GATE_CONFIG };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    logger.error(
+      `${ENV_GATE_CONFIG} is not valid JSON (${err instanceof Error ? err.message : String(err)}) — ` +
+        'falling back to the most restrictive policy',
+    );
+    return { ...MOST_RESTRICTIVE_GATE_CONFIG };
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    logger.error(`${ENV_GATE_CONFIG} is not a JSON object — falling back to the most restrictive policy`);
+    return { ...MOST_RESTRICTIVE_GATE_CONFIG };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  return {
+    permissionMode: permissionMode(obj['permissionMode']) ?? MOST_RESTRICTIVE_GATE_CONFIG.permissionMode,
+    disallowedTools: stringArray(obj['disallowedTools']) ?? [],
+    autoAllowTools: stringArray(obj['autoAllowTools']) ?? [],
+    editTools: stringArray(obj['editTools']) ?? [],
+    allowRules: stringArray(obj['allowRules']) ?? [],
+    // Anything that is not an explicit `false` denies the subagent tool.
+    denyTaskTool: obj['denyTaskTool'] === false ? false : true,
+    cyboflowMcpToolNames: stringArray(obj['cyboflowMcpToolNames']) ?? [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Permission-rule matching (the honored subset of cyboflow's rule grammar)
+// ---------------------------------------------------------------------------
+
+/** A parsed permission rule: `ToolName` or `ToolName(content)`. */
+export interface ParsedGateRule {
+  toolName: string;
+  content?: string;
+}
+
+/**
+ * Parse a raw rule string into `{ toolName, content }` — a verbatim port of
+ * `main/src/orchestrator/permissionRules.ts:67-81` (it cannot be imported:
+ * this module must not reach into cyboflow's source tree).
+ */
+export function parsePermissionRule(rule: string): ParsedGateRule | null {
+  const trimmed = rule.trim();
+  if (trimmed.length === 0) return null;
+
+  const open = trimmed.indexOf('(');
+  if (open === -1) return { toolName: trimmed };
+  if (!trimmed.endsWith(')')) return null;
+
+  const toolName = trimmed.slice(0, open).trim();
+  const content = trimmed.slice(open + 1, -1).trim();
+  if (toolName.length === 0) return null;
+  return content.length === 0 ? { toolName } : { toolName, content };
+}
+
+/** Split a command on unquoted shell separators. Port of permissionRules.ts:84-125. */
+export function splitShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === SHELL_SEPARATORS[0] || two === SHELL_SEPARATORS[1]) {
+      segments.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    if (ch === SHELL_SEPARATORS[2] || ch === SHELL_SEPARATORS[3]) {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+
+  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/** True if a command segment contains command substitution we refuse to trust. */
+export function hasCommandSubstitution(segment: string): boolean {
+  return segment.includes('$(') || segment.includes('`');
+}
+
+/** `git add:*` → prefix match; `done` → exact match. Port of permissionRules.ts:138-146. */
+function matchBashSpecifier(content: string, segment: string): boolean {
+  if (content.endsWith(':*')) {
+    const prefix = content.slice(0, -2).trim();
+    if (prefix.length === 0) return false; // refuse to match-all
+    return segment === prefix || segment.startsWith(prefix + ' ');
+  }
+  return segment === content;
+}
+
+/**
+ * True if the `(toolName, input)` pair matches at least one allow rule.
+ *
+ * HONORED SUBSET, and the two deliberate divergences from
+ * `permissionRules.ts:177-208`:
+ *
+ *  1. Tool names are compared CASE-INSENSITIVELY. cyboflow's rules are written
+ *     against Claude's PascalCase tool names (`Bash`, `Read`, `Write`) while
+ *     OMP's canonical names are lowercase (`bash`, `read`, `write`,
+ *     `tools/builtin-names.ts:1-31`). Without this, no rule would ever match an
+ *     OMP call and `auto` mode would silently degrade to `default`.
+ *  2. `WebFetch(domain:X)` is NOT honored. OMP has no `WebFetch` tool (it ships
+ *     `fetch` and `web_search`), and inventing a URL-field mapping would be
+ *     policy we cannot cite. It falls into the conservative default below.
+ *
+ * Everything else mirrors the original: a bare tool-name rule grants the whole
+ * tool; `Bash(...)` specifiers must match EVERY segment of a compound command
+ * and any segment with command substitution fails; every other specifier kind
+ * (path globs in particular) does NOT auto-allow.
+ */
+export function matchesAllowRules(
+  toolName: string,
+  input: Record<string, unknown>,
+  rules: readonly string[],
+): boolean {
+  const lowered = toolName.toLowerCase();
+  const forTool = rules
+    .map(parsePermissionRule)
+    .filter((r): r is ParsedGateRule => r !== null)
+    .filter((r) => r.toolName.toLowerCase() === lowered);
+
+  if (forTool.length === 0) return false;
+
+  // A bare tool-name rule grants the whole tool.
+  if (forTool.some((r) => r.content === undefined)) return true;
+
+  if (lowered === 'bash') {
+    const command = typeof input['command'] === 'string' ? input['command'].trim() : '';
+    if (command.length === 0) return false;
+    const contents = forTool.map((r) => r.content).filter((c): c is string => c !== undefined);
+    const segments = splitShellSegments(command);
+    if (segments.length === 0) return false;
+    return segments.every(
+      (segment) =>
+        !hasCommandSubstitution(segment) &&
+        contents.some((content) => matchBashSpecifier(content, segment)),
+    );
+  }
+
+  // Unsupported specifier kind (path globs, domain:) — never auto-allow.
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Bash classification — the `safe-bash` rung
+// ---------------------------------------------------------------------------
+
+/**
+ * A DELIBERATE DUPLICATE of `main/src/orchestrator/safeCommandClassifier.ts`,
+ * tables and structural refusals mirrored line for line — NOT an import of it.
+ *
+ * WHY DUPLICATED: this module is loaded by OMP's Bun runtime from a single
+ * standalone file (`-e <path>`) and may import nothing from cyboflow's source
+ * tree; the classifier in turn imports `./permissionRules`, which is main-process
+ * code. Same precedent, same reasoning as the `UnreffableTimer` interface
+ * duplicated between `orchestrator/mcpServer/parentWatchdog.ts` and
+ * `services/mcpOrphanTripwire.ts`. Drift is pinned mechanically: the parity test
+ * (`__tests__/ompGateSafeBash.test.ts`) imports BOTH implementations — tests are
+ * not shipped to Bun, so they may reach across — and asserts the read-only tier
+ * agrees verdict-for-verdict on a shared fixture table.
+ *
+ * WHY THE RUNG EXISTS AT ALL: without it, every `bash` call under `acceptEdits`
+ * or `auto` fell to rule 6 and blocked on the orchestrator socket for a human.
+ * In an autonomous workflow lane there IS no human, so the 25s budget expired
+ * and even `git status` was denied — measured on a live sprint, whose implement
+ * agent could not commit its own work.
+ */
+
+/**
+ * git subcommands that are read-only in EVERY invocation regardless of flags or
+ * positionals. (Notably absent: branch/tag/remote/config/stash — dual-use,
+ * handled below — and every mutating subcommand.)
+ */
+const ALWAYS_READONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'blame',
+  'shortlog',
+  'reflog',
+  'rev-parse',
+  'rev-list',
+  'describe',
+  'ls-files',
+  'ls-tree',
+  'cat-file',
+  'grep',
+  'show-branch',
+  'whatchanged',
+  'name-rev',
+  'merge-base',
+  'count-objects',
+  'verify-commit',
+  'verify-tag',
+  'var',
+]);
+
+/**
+ * Mutating `git branch` flags. `git branch` with only NON-mutating flags (and no
+ * positional, which would name a new branch) lists branches → read-only.
+ */
+const MUTATING_BRANCH_FLAGS: ReadonlySet<string> = new Set([
+  '-d',
+  '-D',
+  '-m',
+  '-M',
+  '-c',
+  '-C',
+  '--delete',
+  '--move',
+  '--copy',
+  '--force',
+  '--edit-description',
+  '--set-upstream-to',
+  '-u',
+  '--unset-upstream',
+]);
+
+/**
+ * Read-only shell utilities. Deliberately excludes anything that can mutate or
+ * execute a sub-program without a shell metacharacter we already reject:
+ * `sed` (-i edits in place), `find` (-delete/-exec), `env`/`xargs`/`nohup`/
+ * `timeout` (run arbitrary programs), `awk` (system()/print-to-file).
+ */
+const SAFE_READONLY_SHELL_PROGRAMS: ReadonlySet<string> = new Set([
+  'ls',
+  'pwd',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'echo',
+  'printf',
+  'which',
+  'whoami',
+  'id',
+  'date',
+  'hostname',
+  'uname',
+  'basename',
+  'dirname',
+  'realpath',
+  'readlink',
+  'tree',
+  'stat',
+  'file',
+  'du',
+  'df',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'ag',
+  'sort',
+  'uniq',
+  'cut',
+  'column',
+  'nl',
+  'diff',
+  'cmp',
+  'comm',
+]);
+
+/**
+ * git subcommands that write ONLY inside the repository the agent is already
+ * working in — the index, the working tree, and local refs. This tier has NO
+ * counterpart in `safeCommandClassifier.ts`: it is a gate-only widening, and it
+ * is what lets an autonomous lane agent commit the work it just wrote.
+ *
+ * WHY IT IS THE SAME TRUST DOMAIN as the write/edit tools this mode already
+ * auto-allows:
+ *  - Nothing here reaches the network. Every subcommand that publishes or
+ *    fetches (push, pull, fetch, clone, remote add, submodule) is absent, so the
+ *    blast radius stays inside the worktree.
+ *  - `git commit` can run repo-local hooks — and the agent can already WRITE
+ *    those hook files with the auto-allowed `write` tool. Denying the commit
+ *    while allowing the hook to be authored buys nothing.
+ *  - Path escape is enforced by git, not by parsing: `git add`/`rm`/`mv`/
+ *    `restore` refuse a pathspec outside the repository, so this tier cannot be
+ *    steered at `/etc` the way a raw `rm` could.
+ *
+ * Deliberately NOT here: checkout/switch/reset/clean/stash/merge/rebase/
+ * cherry-pick/revert/apply — each can destroy uncommitted work that a human or
+ * a sibling lane owns, which is a different question from "may this agent
+ * record its own edits".
+ */
+const LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'add',
+  'commit',
+  'restore',
+  'rm',
+  'mv',
+]);
+
+/** Tokenize a single shell segment on whitespace (segments are pre-split). */
+function tokenizeSegment(segment: string): string[] {
+  return segment
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+}
+
+/** Strip a trailing `=value` so `--set-upstream-to=origin/x` matches its flag. */
+function flagName(token: string): string {
+  const eq = token.indexOf('=');
+  return eq === -1 ? token : token.slice(0, eq);
+}
+
+/**
+ * Structural refusals shared by BOTH tiers. Command substitution hides an
+ * unknowable command; redirection (`>`/`<`) writes or reads files the tables
+ * never vetted; `&` backgrounds or chains outside the segment model
+ * {@link splitShellSegments} gives us.
+ */
+function hasStructuralRefusal(segment: string): boolean {
+  return hasCommandSubstitution(segment) || /[<>&]/.test(segment);
+}
+
+/**
+ * True if a `git <args>` invocation (args = tokens AFTER `git`) is read-only.
+ * The subcommand must be the FIRST token — a leading global option (`-C path`,
+ * `-c k=v`, …) is refused rather than parsed, keeping the common
+ * `git <subcommand>` form fast and the exotic forms safely prompted.
+ */
+function isSafeReadOnlyGitInvocation(args: string[]): boolean {
+  const sub = args[0];
+  if (sub === undefined || sub.startsWith('-')) return false;
+  const subArgs = args.slice(1);
+
+  if (ALWAYS_READONLY_GIT_SUBCOMMANDS.has(sub)) return true;
+
+  switch (sub) {
+    case 'branch':
+      // List form only: no positional (would name a new branch) and no mutating
+      // flag. `git branch`, `git branch -a -v` pass; `git branch -d foo` refuses.
+      return (
+        subArgs.every((t) => t.startsWith('-')) &&
+        !subArgs.some((t) => MUTATING_BRANCH_FLAGS.has(flagName(t)))
+      );
+    case 'tag':
+      // List form only: any positional would create/delete a tag.
+      return subArgs.every((t) => t.startsWith('-'));
+    case 'remote':
+      // `git remote`, `git remote -v`, `git remote show [name]`,
+      // `git remote get-url [name]` read; add/remove/rename/prune/set-url mutate.
+      return (
+        subArgs.length === 0 || ['-v', '--verbose', 'show', 'get-url'].includes(subArgs[0]!)
+      );
+    case 'config':
+      // Read forms only; a bare `git config k v` writes.
+      return (
+        subArgs.length > 0 &&
+        ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(subArgs[0]!)
+      );
+    case 'stash':
+      // `git stash list` / `git stash show` read; bare `git stash` and
+      // pop/drop/apply/push/clear mutate the working tree or stash list.
+      return subArgs.length > 0 && ['list', 'show'].includes(subArgs[0]!);
+    default:
+      return false;
+  }
+}
+
+/** True if one shell segment is a provably read-only command. */
+function isSafeReadOnlySegment(segment: string): boolean {
+  if (hasStructuralRefusal(segment)) return false;
+
+  const tokens = tokenizeSegment(segment);
+  if (tokens.length === 0) return false;
+  const program = tokens[0]!;
+
+  if (program === 'git') return isSafeReadOnlyGitInvocation(tokens.slice(1));
+  return SAFE_READONLY_SHELL_PROGRAMS.has(program);
+}
+
+/**
+ * True if one shell segment is a local-only git write —
+ * {@link LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS} named as the FIRST token after `git`,
+ * under the same structural refusals as the read-only tier. A leading git global
+ * option (`git -C /elsewhere commit …`) is refused rather than parsed, which is
+ * also what keeps the tier from being pointed at another repository.
+ */
+function isLocalOnlyGitWriteSegment(segment: string): boolean {
+  if (hasStructuralRefusal(segment)) return false;
+
+  const tokens = tokenizeSegment(segment);
+  if (tokens.length < 2 || tokens[0] !== 'git') return false;
+  const sub = tokens[1]!;
+  if (sub.startsWith('-')) return false;
+  return LOCAL_ONLY_GIT_WRITE_SUBCOMMANDS.has(sub);
+}
+
+/**
+ * True if a bash `command` string is a provably read-only invocation. EVERY
+ * quote-aware segment must classify safe, so `git status && rm -rf .` refuses.
+ *
+ * The mirrored half of the classifier — the parity test pins this against
+ * `isSafeReadOnlyBashCommand` in `main/src/orchestrator/safeCommandClassifier.ts`.
+ */
+export function isSafeReadOnlyBashCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(isSafeReadOnlySegment);
+}
+
+/**
+ * True if EVERY segment of a bash `command` is a local-only git write. Exported
+ * so the tier can be pinned on its own: it is the gate-only widening, so "which
+ * forms exactly" has to be assertable without going through the whole rung.
+ */
+export function isLocalOnlyGitWriteCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(isLocalOnlyGitWriteSegment);
+}
+
+/**
+ * The `safe-bash` rung's predicate: every quote-aware segment is EITHER provably
+ * read-only OR a local-only git write. Mixing the tiers within one command is
+ * fine — `git status && git add -A && git commit -m x` is the shape a lane agent
+ * actually runs.
+ *
+ * The raw-newline refusal is a NARROWING the mirrored classifier does not have.
+ * {@link splitShellSegments} treats only `&&`, `||`, `;` and `|` as separators
+ * (it must, to stay byte-identical to cyboflow's rule grammar in
+ * {@link matchesAllowRules}), so `git status\nrm -rf ~` arrives as ONE segment
+ * that whitespace-tokenizes to `git status` plus stray positionals — read-only
+ * by the table, catastrophic in fact. Teaching the splitter a new separator
+ * would desync the allow-rule matcher; refusing the character is the narrow fix,
+ * and a multi-line command simply reaches the human instead of being auto-run.
+ */
+export function isGateSafeBashCommand(rawCommand: string): boolean {
+  const command = rawCommand.trim();
+  if (command.length === 0) return false;
+  if (/[\r\n]/.test(command)) return false;
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every(
+    (segment) => isSafeReadOnlySegment(segment) || isLocalOnlyGitWriteSegment(segment),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The decision
+// ---------------------------------------------------------------------------
+
+/** Why a call was allowed locally — carried for the debug log, not the model. */
+export type OmpGateAllowRule =
+  | 'cyboflow-mcp'
+  | 'dont-ask'
+  | 'auto-allow-tool'
+  | 'edit-tool'
+  | 'safe-bash'
+  | 'allow-rule';
+
+export type OmpGateDecision =
+  | { kind: 'allow'; rule: OmpGateAllowRule }
+  | { kind: 'block'; reason: string }
+  | { kind: 'ask' };
+
+/**
+ * True when the tool is served by cyboflow's own MCP server.
+ *
+ * EXACT MEMBERSHIP IS THE ONLY AUTO-ALLOW PATH. There is deliberately no
+ * `mcp__cyboflow_` prefix heuristic: OMP auto-imports the user's foreign MCP
+ * configs, and a server named `cyboflow-extra` sanitizes to `cyboflow_extra`
+ * (`mcp/tool-bridge.ts:335-343`), so its tools arrive as `mcp__cyboflow_extra_*`
+ * — names a prefix test accepts. Since this gate is the sole policy engine and
+ * the manager's bridge auto-approves OMP's redundant prompt for anything the
+ * gate passes, a prefix match is a full auto-approval of a foreign server's
+ * tools with no human in the loop.
+ *
+ * So an absent, empty, or malformed `exactNames` auto-allows NO MCP tool. That
+ * is not a breakage: an undecidable MCP call simply falls through to the
+ * ordinary decision ladder and reaches the human like any other tool.
+ *
+ * @param exactNames the composed names from `cyboflowMcpToolNames`. Required
+ *   (though it may be `undefined`) so no callsite can forget the list and
+ *   silently reopen a name-shaped allowance.
+ */
+export function isCyboflowMcpTool(
+  toolName: string,
+  exactNames: readonly string[] | undefined,
+): boolean {
+  return exactNames !== undefined && exactNames.includes(toolName);
+}
+
+/**
+ * True when any string anywhere in a tool call's arguments names a URI-scheme
+ * target — see {@link URI_SCHEME_TARGET} for why the gate treats that as
+ * disqualifying.
+ *
+ * Recursive over arrays and nested objects, because a target can arrive one
+ * level down (`{ files: [{ path: 'ssh://host/x' }] }`) and a top-level-only scan
+ * would miss it. Object identity is tracked so a cyclic input (which JSON cannot
+ * produce, but a foreign runtime could hand us) terminates instead of hanging
+ * the handler inside OMP's 30s cap.
+ */
+export function hasUriSchemeTarget(input: Record<string, unknown>): boolean {
+  return scanForUriScheme(input, new Set<object>());
+}
+
+function scanForUriScheme(value: unknown, seen: Set<object>): boolean {
+  if (typeof value === 'string') return URI_SCHEME_TARGET.test(value);
+  if (value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const members = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  return members.some((member) => scanForUriScheme(member, seen));
+}
+
+/**
+ * Apply cyboflow's predicate to one tool call. Pure — the socket round-trip
+ * lives in {@link requestSocketDecision}, driven by an `'ask'` result.
+ *
+ * Rule order is load-bearing:
+ *  1. `disallowedTools` — refused in EVERY mode, `dontAsk` included.
+ *  2. OMP's `task` subagent tool when `denyTaskTool` — likewise mode-independent.
+ *  3. cyboflow's own MCP tools, by EXACT name — always allowed (our tools, our
+ *     server, reached through our own socket).
+ *  4. `dontAsk` — allow (log-only), rules 1-2 having already applied.
+ *  5. the mode-scoped allowlists — `autoAllowTools`, `editTools`, the
+ *     argument-aware `safe-bash` rung ({@link isGateSafeBashCommand}), and
+ *     `allowRules` — each narrowed by {@link hasUriSchemeTarget}.
+ *  6. otherwise: ask the human.
+ */
+export function decideToolCall(
+  event: Pick<OmpToolCallEvent, 'toolName' | 'input'>,
+  config: OmpGateConfig,
+): OmpGateDecision {
+  const { toolName, input } = event;
+
+  // 1. Explicitly disallowed — mode-independent.
+  if (config.disallowedTools.includes(toolName)) {
+    return {
+      kind: 'block',
+      reason:
+        `cyboflow blocked \`${toolName}\`: it is listed in this run's disallowedTools. ` +
+        'Use a different tool, or ask the user to change the run configuration.',
+    };
+  }
+
+  // 2. Subagent dispatch — mode-independent while hook scope inside OMP
+  //    subagents is unverified.
+  if (toolName.toLowerCase() === OMP_TASK_TOOL_NAME && config.denyTaskTool) {
+    return {
+      kind: 'block',
+      reason:
+        `cyboflow blocked \`${toolName}\`: subagent hook scope is unverified, so cyboflow ` +
+        'cannot gate tool calls made inside an OMP subagent. Do the work in this session.',
+    };
+  }
+
+  // 3. cyboflow's own MCP tools.
+  if (isCyboflowMcpTool(toolName, config.cyboflowMcpToolNames)) {
+    return { kind: 'allow', rule: 'cyboflow-mcp' };
+  }
+
+  // 4. dontAsk — log-only.
+  if (config.permissionMode === 'dontAsk') {
+    return { kind: 'allow', rule: 'dont-ask' };
+  }
+
+  // 5. Mode-scoped allowlists — every one of them NARROWED by the argument scan.
+  //
+  // The invariant, stated once and applied without carve-outs: NO auto-allow
+  // path passes a call whose arguments name a URI-scheme target. All three
+  // paths below decide on a tool NAME (or, for `allowRules`, on a name plus a
+  // bash-command specifier), and a name cannot express that OMP's own `read` /
+  // `grep` escalate themselves to remote exec-tier operations on an `ssh://`
+  // path (read.ts:401, grep.ts:906). A scheme in the arguments therefore
+  // disqualifies the shortcut and the call falls through to rule 6.
+  //
+  // This DOES reach `Bash(...)` allow rules whose command carries a URL — an
+  // `auto`-mode rule like `Bash(curl https://api.example.com:*)` now asks the
+  // human. That is the deliberate cost of a rule with no exceptions: a carve-out
+  // for "argument-aware rules" is exactly where the next bypass would live, and
+  // erring toward the human is the safe direction.
+  //
+  // Rules 1-4 are untouched: a disallowed tool and the `task` tool still block
+  // first, `dontAsk` still allows first (log-only is log-only), and our own MCP
+  // tools are not narrowed — they are exact-name matched, served by cyboflow's
+  // own server, and routinely carry URLs in finding bodies and artifact payloads.
+  const remoteTarget = hasUriSchemeTarget(input);
+
+  if (!remoteTarget) {
+    if (config.autoAllowTools.includes(toolName)) {
+      return { kind: 'allow', rule: 'auto-allow-tool' };
+    }
+    if (
+      (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
+      config.editTools.includes(toolName)
+    ) {
+      return { kind: 'allow', rule: 'edit-tool' };
+    }
+    // The argument-aware bash rung. Name matched EXACTLY ('bash' is OMP's
+    // canonical name, `tools/builtin-names.ts:1-31`): a differently-cased name is
+    // one this gate has not verified, and falling through to the human is the
+    // fail-closed direction for an auto-allow path.
+    if (
+      (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
+      toolName === 'bash' &&
+      typeof input['command'] === 'string' &&
+      isGateSafeBashCommand(input['command'])
+    ) {
+      return { kind: 'allow', rule: 'safe-bash' };
+    }
+    if (config.permissionMode === 'auto' && matchesAllowRules(toolName, input, config.allowRules)) {
+      return { kind: 'allow', rule: 'allow-rule' };
+    }
+  }
+
+  // 6. Undecidable locally.
+  return { kind: 'ask' };
+}
+
+// ---------------------------------------------------------------------------
+// The orchestrator socket round-trip
+// ---------------------------------------------------------------------------
+
+/**
+ * A verdict read off the orchestrator socket.
+ *
+ * `'timeout'` is NOT an error: the orchestrator was reachable and the request
+ * was delivered, but no human answered inside {@link HUMAN_DECISION_BUDGET_MS}.
+ * It resolves (as a block upstream) rather than rejecting, precisely so it stays
+ * distinguishable from an orchestrator-down failure, which throws.
+ */
+export interface OmpGateSocketVerdict {
+  decision: 'allow' | 'deny' | 'timeout';
+  reason?: string;
+}
+
+/**
+ * OMP's canonical tool names → Claude's, for the shell-approval frame ONLY.
+ *
+ * The server side of this socket is shared with the interactive-Claude shell
+ * hook and matches CLAUDE-CASED names: `handleShellApprovalRequest`
+ * (`main/src/orchestrator/mcpServer/mcpQueryHandler.ts`) feeds `msg.toolName`
+ * to `isAcceptEditsAutoApprovable` (`orchestrator/permissionModeMapper.ts`) and
+ * to `isToolAllowed` against the run's `permissions.allow` rules, both of which
+ * compare against `Bash` / `Read` / `Write` / … Sending OMP's lowercase `bash`
+ * means neither the acceptEdits fast-path nor any permission rule can EVER fire
+ * for an OMP call, so every such call lands on a human.
+ *
+ * `fetch`/`web_search`/`todo` map to the Claude names with the same semantics
+ * (`WebFetch`/`WebSearch`/`TodoWrite`) so a rule written once covers both
+ * providers.
+ */
+const OMP_TO_CLAUDE_TOOL_NAMES: ReadonlyMap<string, string> = new Map([
+  ['bash', 'Bash'],
+  ['read', 'Read'],
+  ['write', 'Write'],
+  ['edit', 'Edit'],
+  ['glob', 'Glob'],
+  ['grep', 'Grep'],
+  ['fetch', 'WebFetch'],
+  ['web_search', 'WebSearch'],
+  ['todo', 'TodoWrite'],
+]);
+
+/**
+ * Canonicalize an OMP tool name for the orchestrator frame.
+ *
+ * MCP names pass through untouched — `mcp__server_tool` is already the shared
+ * cross-provider spelling, and rewriting one would break the server's own
+ * matching. So does anything unmapped: an OMP-only tool has no Claude
+ * counterpart, and inventing a name would be policy nobody can cite. Both
+ * pass-throughs are conservative — an unrecognized name simply fails to match a
+ * fast-path or a rule and reaches the human, which is where it started.
+ */
+export function canonicalToolNameForOrchestrator(toolName: string): string {
+  if (toolName.startsWith('mcp__')) return toolName;
+  return OMP_TO_CLAUDE_TOOL_NAMES.get(toolName) ?? toolName;
+}
+
+/** Socket factory, injectable so tests can drive a stub. */
+export type OmpGateConnect = (socketPath: string) => net.Socket;
+
+export interface OmpGateSocketOptions {
+  socketPath: string;
+  runId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  logger: OmpGateLogger;
+  connect?: OmpGateConnect;
+  /** Registry of live sockets, destroyed on `session_shutdown`. */
+  inFlight?: Set<net.Socket>;
+  /** Human-decision budget; defaults to {@link HUMAN_DECISION_BUDGET_MS}. */
+  budgetMs?: number;
+}
+
+/**
+ * Ask the orchestrator and block until it answers.
+ *
+ * The frame carries the CLAUDE-CASED tool name
+ * ({@link canonicalToolNameForOrchestrator}); the server's acceptEdits fast-path
+ * and permission-rule matching are name-cased and would otherwise never fire.
+ *
+ * REJECTS (which OMP converts into a block — see this file's header, layer 1)
+ * on every LIVENESS failure: connection error, close before a verdict, an
+ * `ok:false` frame, or a correlated frame carrying no recognizable decision.
+ *
+ * RESOLVES with `'timeout'` when the orchestrator stayed connected but no human
+ * answered within the budget. The socket is DESTROYED rather than ended so the
+ * orchestrator observes a disconnect and can settle its own pending approval,
+ * instead of holding a socket whose reader is gone.
+ *
+ * The reject/resolve split is the whole point: "orchestrator is down" and
+ * "nobody answered yet" are different failures and must stay separable — the
+ * invariant preToolUseShellHook.ts:1-40 establishes. What has changed since
+ * that hook is only that we can no longer wait forever, because OMP kills the
+ * handler at 30s (see this file's header).
+ */
+export function requestSocketDecision(opts: OmpGateSocketOptions): Promise<OmpGateSocketVerdict> {
+  const { socketPath, runId, toolName, toolInput, logger } = opts;
+  const connect = opts.connect ?? ((p: string) => net.createConnection(p));
+
+  const requestId = `omp-gate-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+  return new Promise<OmpGateSocketVerdict>((resolve, reject) => {
+    let settled = false;
+    const socket = connect(socketPath);
+    opts.inFlight?.add(socket);
+
+    /**
+     * @param close 'destroy' on budget expiry — an abrupt disconnect is the
+     *   signal that tells the orchestrator to stop holding this approval open.
+     *   'end' everywhere else, which is the graceful half-close.
+     */
+    const settle = (fn: () => void, close: 'end' | 'destroy' = 'end'): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(budgetTimer);
+      opts.inFlight?.delete(socket);
+      try {
+        if (close === 'destroy') socket.destroy();
+        else socket.end();
+      } catch {
+        // best-effort close
+      }
+      fn();
+    };
+
+    const budgetMs = opts.budgetMs ?? HUMAN_DECISION_BUDGET_MS;
+    const budgetTimer = setTimeout(() => {
+      logger.warn(
+        `no decision for \`${toolName}\` within ${budgetMs}ms — blocking (OMP would abort us at 30s regardless)`,
+      );
+      settle(() => resolve({ decision: 'timeout' }), 'destroy');
+    }, budgetMs);
+    // Never hold the process open on this timer alone.
+    budgetTimer.unref?.();
+
+    socket.on('connect', () => {
+      logger.debug(`connected to the orchestrator for \`${toolName}\` (run ${runId})`);
+      socket.write(
+        JSON.stringify({
+          type: 'shell-approval-request',
+          requestId,
+          runId,
+          // Claude-cased on the wire; the local logs keep OMP's own name so a
+          // stderr line still matches what the model asked for.
+          toolName: canonicalToolNameForOrchestrator(toolName),
+          // Unchanged: OMP's bash input is `{ command: string }` — the same key
+          // the server's classifiers and Bash(...) rules read.
+          toolInput,
+        }) + '\n',
+      );
+    });
+
+    // Rolling receive buffer — a stream socket can split one JSON frame across
+    // 'data' events or batch several into one.
+    let recvBuffer = '';
+    socket.on('data', (buf: Buffer) => {
+      recvBuffer += buf.toString('utf8');
+      let nl: number;
+      while ((nl = recvBuffer.indexOf('\n')) !== -1) {
+        const raw = recvBuffer.slice(0, nl).trim();
+        recvBuffer = recvBuffer.slice(nl + 1);
+        if (raw.length === 0) continue;
+
+        let msg: OmpGateApprovalResponse;
+        try {
+          msg = JSON.parse(raw) as OmpGateApprovalResponse;
+        } catch {
+          // A stray unparseable frame must not kill the gate; keep reading.
+          logger.warn('ignored an unparseable frame from the orchestrator');
+          continue;
+        }
+        if (msg.requestId !== requestId) continue;
+
+        const verdict = msg.ok === true ? msg.data?.permissionDecision : undefined;
+        if (verdict === 'allow' || verdict === 'deny') {
+          const reason = msg.data?.permissionDecisionReason;
+          settle(() => resolve(reason === undefined ? { decision: verdict } : { decision: verdict, reason }));
+          return;
+        }
+        settle(() =>
+          reject(
+            new Error(
+              'cyboflow orchestrator returned a malformed approval verdict — failing closed',
+            ),
+          ),
+        );
+        return;
+      }
+    });
+
+    socket.on('error', (err: Error) => {
+      settle(() =>
+        reject(new Error(`cyboflow orchestrator unreachable (${err.message}) — failing closed`)),
+      );
+    });
+    socket.on('close', () => {
+      settle(() =>
+        reject(
+          new Error('cyboflow orchestrator closed the connection before a decision — failing closed'),
+        ),
+      );
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The load sentinel
+// ---------------------------------------------------------------------------
+
+/**
+ * Stamp the load sentinel — the manager's fail-closed handshake. Its ABSENCE is
+ * the signal (no sentinel ⇒ the gate never loaded ⇒ refuse the session), so a
+ * failed write must leave no file behind rather than write a partial one.
+ *
+ * @returns true when the sentinel now exists on disk.
+ */
+export function writeGateSentinel(
+  sentinelPath: string | undefined,
+  runId: string,
+  logger: OmpGateLogger,
+  writeFile: (p: string, data: string) => void = (p, data) => fs.writeFileSync(p, data, 'utf8'),
+): boolean {
+  if (sentinelPath === undefined || sentinelPath.trim().length === 0) {
+    logger.warn(`${ENV_GATE_SENTINEL} is unset — the manager cannot confirm the gate loaded`);
+    return false;
+  }
+  const sentinel: OmpGateSentinel = {
+    loadedAt: new Date().toISOString(),
+    runId,
+    pid: process.pid,
+  };
+  try {
+    writeFile(sentinelPath, JSON.stringify(sentinel));
+    return true;
+  } catch (err) {
+    logger.error(
+      `failed to write the load sentinel at ${sentinelPath} ` +
+        `(${err instanceof Error ? err.message : String(err)})`,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handler assembly
+// ---------------------------------------------------------------------------
+
+export interface OmpGateRuntime {
+  config: OmpGateConfig;
+  runId: string;
+  socketPath: string | undefined;
+  logger: OmpGateLogger;
+  connect?: OmpGateConnect;
+  inFlight: Set<net.Socket>;
+  /** Human-decision budget override; production leaves it unset. */
+  budgetMs?: number;
+}
+
+/**
+ * Build the `tool_call` handler for a resolved runtime.
+ *
+ * Returning `undefined` means "no opinion" — OMP proceeds to its own approval
+ * gate, which cyboflow's spawn keeps at `always-ask`; the `ompApprovalBridge`
+ * auto-approves the now-redundant prompt for calls this gate passed
+ * (docs/proposals §5.3). Returning `{ block, reason }` stops the call before
+ * that prompt is ever raised.
+ */
+export function createToolCallHandler(
+  runtime: OmpGateRuntime,
+): (event: OmpToolCallEvent) => Promise<OmpToolCallEventResult | undefined> {
+  return async (event: OmpToolCallEvent): Promise<OmpToolCallEventResult | undefined> => {
+    const { config, logger } = runtime;
+    const decision = decideToolCall(event, config);
+
+    if (decision.kind === 'block') {
+      logger.debug(`blocked \`${event.toolName}\`: ${decision.reason}`);
+      return { block: true, reason: decision.reason };
+    }
+    if (decision.kind === 'allow') {
+      logger.debug(`allowed \`${event.toolName}\` (${decision.rule})`);
+      return undefined;
+    }
+
+    // Undecidable locally — ask the human. A missing socket path means cyboflow
+    // never wired the gate; there is nobody to ask, so fail closed by throwing
+    // (OMP turns the throw into a block, per this file's header).
+    if (runtime.socketPath === undefined || runtime.socketPath.trim().length === 0) {
+      throw new Error(
+        `cyboflow cannot gate \`${event.toolName}\`: ${ENV_ORCH_SOCKET} is unset — failing closed`,
+      );
+    }
+
+    const verdict = await requestSocketDecision({
+      socketPath: runtime.socketPath,
+      runId: runtime.runId,
+      toolName: event.toolName,
+      toolInput: event.input,
+      logger,
+      ...(runtime.connect ? { connect: runtime.connect } : {}),
+      ...(runtime.budgetMs !== undefined ? { budgetMs: runtime.budgetMs } : {}),
+      inFlight: runtime.inFlight,
+    });
+
+    if (verdict.decision === 'allow') {
+      logger.debug(`allowed \`${event.toolName}\` (human approval)`);
+      return undefined;
+    }
+    if (verdict.decision === 'timeout') {
+      return {
+        block: true,
+        reason:
+          `cyboflow surfaced \`${event.toolName}\` to the human for approval, but no decision ` +
+          `arrived within ${Math.round(HUMAN_DECISION_BUDGET_MS / 1000)}s (OMP caps gate handlers ` +
+          'at 30s, so cyboflow cannot wait longer). The human can approve the request and ask you ' +
+          'to retry, or switch this session\'s permission mode.',
+      };
+    }
+    return {
+      block: true,
+      reason:
+        verdict.reason !== undefined && verdict.reason.length > 0
+          ? `cyboflow denied \`${event.toolName}\`: ${verdict.reason}`
+          : `cyboflow denied \`${event.toolName}\`.`,
+    };
+  };
+}
+
+/** Resolve the runtime from a process environment. Exported for tests. */
+export function resolveGateRuntime(
+  env: NodeJS.ProcessEnv,
+  logger: OmpGateLogger = stderrLogger,
+): OmpGateRuntime {
+  return {
+    config: parseGateConfig(env[ENV_GATE_CONFIG], logger),
+    runId: env[ENV_RUN_ID] ?? '',
+    socketPath: env[ENV_ORCH_SOCKET],
+    logger,
+    inFlight: new Set<net.Socket>(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The extension factory (OMP's default export contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * OMP's `-e` entry point: a default-exported factory run at import time
+ * (`extensibility/extensions/loader.ts:55-59`).
+ *
+ * Handler registration happens FIRST and the sentinel is written second, so a
+ * sentinel failure can never leave a loaded-but-ungated session: either the
+ * gate is installed and the sentinel proves it, or the sentinel is missing and
+ * the manager refuses the session.
+ *
+ * Only registration is legal during load — runtime action methods throw
+ * `ExtensionRuntimeNotInitializedError` (`docs/extensions.md:62-66`). Writing a
+ * file is not such an action.
+ */
+export default function cyboflowOmpGate(pi: OmpExtensionApi): void {
+  const logger = stderrLogger;
+  const runtime = resolveGateRuntime(process.env, logger);
+
+  pi.setLabel?.('cyboflow gate');
+  pi.on('tool_call', createToolCallHandler(runtime));
+
+  // Destroy any approval socket still blocked when the session ends. OMP may
+  // have abandoned the handler at its 30s cap while the orchestrator still
+  // holds the connection open; without this the socket outlives the session.
+  pi.on('session_shutdown', () => {
+    for (const socket of runtime.inFlight) {
+      try {
+        socket.destroy();
+      } catch {
+        // best-effort teardown
+      }
+    }
+    runtime.inFlight.clear();
+  });
+
+  writeGateSentinel(process.env[ENV_GATE_SENTINEL], runtime.runId, logger);
+}

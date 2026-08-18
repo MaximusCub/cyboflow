@@ -43,6 +43,7 @@ const BUILTIN_ENTRY: AgentEntry = {
   tools: ['Read', 'Edit', 'Write', 'Bash'],
   model: null,
   runtime: null,
+  providerModel: null,
   codexModel: null,
   enabledMcps: [],
   source: 'builtin',
@@ -134,6 +135,8 @@ const MCP_CATALOGUE: McpEntry[] = [
 import { AgentEditorModal } from '../AgentEditorModal';
 import { trpc } from '../../../../trpc/client';
 import { CLI_TOOLS } from '../agentEditorTokens';
+import { useConfigStore } from '../../../../stores/configStore';
+import type { AppConfig } from '../../../../types/config';
 
 const mockGet = vi.mocked(trpc.cyboflow.agents.get.query);
 const mockUpsert = vi.mocked(trpc.cyboflow.agents.upsertOverride.mutate);
@@ -152,6 +155,9 @@ beforeEach(() => {
   mockCreate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'my-helper', name: 'My Helper', isCustom: true });
   mockUpdateCustom.mockResolvedValue(structuredClone(CUSTOM_ENTRY));
   mockMcpsList.mockResolvedValue(structuredClone(MCP_CATALOGUE));
+  // The config store is module-global; reset it so one test's provider toggles
+  // cannot decide what a later test's runtime picker offers.
+  useConfigStore.setState({ config: null });
 });
 
 afterEach(() => {
@@ -521,6 +527,64 @@ describe('AgentEditorModal — visual-verify now gets the normal runtime treatme
     expect(select.value).toBe(''); // '' = inherit the run model
     fireEvent.change(select, { target: { value: 'haiku' } });
     await waitFor(() => expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled());
+  });
+});
+
+/**
+ * The provider model block is PROVIDER-DRIVEN, not Codex-shaped.
+ *
+ * The heading, the aria-label and the guidance sentence all used to say "Codex"
+ * in prose while the branch was selected by a literal `runtime === 'codex-sdk'`.
+ * Under an `omp-sdk` pin that meant the CLAUDE alias picker rendered — a pin the
+ * run would then drop — and a field labelled for the wrong vendor once fixed
+ * naively. Both are misses no other assertion in this file would catch.
+ */
+describe('AgentEditorModal — a non-Claude pin names its OWN provider', () => {
+  function enableOmp(): void {
+    useConfigStore.setState({
+      config: {
+        gitRepoPath: '/repo',
+        agentProviderAccess: { claude: true, codex: true, omp: true },
+      } as AppConfig,
+    });
+  }
+
+  it('offers omp-sdk in the runtime select once the provider is switched on', async () => {
+    enableOmp();
+    await renderModal();
+
+    const select = screen.getByTestId('agent-runtime-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toContain('omp-sdk');
+  });
+
+  it('hides omp-sdk while the provider is off (absent access key ⇒ disabled)', async () => {
+    await renderModal();
+
+    const select = screen.getByTestId('agent-runtime-select') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).not.toContain('omp-sdk');
+    // Codex is unaffected — its absent key still floors to ENABLED.
+    expect(Array.from(select.options).map((o) => o.value)).toContain('codex-sdk');
+  });
+
+  it('labels the provider model block for OMP, not Codex, under an omp-sdk pin', async () => {
+    enableOmp();
+    await renderModal({ entry: { ...BUILTIN_ENTRY, runtime: 'omp-sdk' } });
+
+    expect(screen.getByTestId('agent-codex-model-select')).toBeInTheDocument();
+    expect(screen.getByLabelText('Agent OMP model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Agent Codex model')).not.toBeInTheDocument();
+    expect(screen.getByText('OMP model')).toBeInTheDocument();
+    // The programmatic-plane note fires for ANY non-Claude pin and names it.
+    expect(screen.getByTestId('agent-runtime-plane-note')).toHaveTextContent(/A per-agent OMP runtime/);
+  });
+
+  it('keeps the Claude alias picker under a CLAUDE pin (the branch still discriminates)', async () => {
+    enableOmp();
+    await renderModal({ entry: { ...BUILTIN_ENTRY, runtime: 'claude-sdk' } });
+
+    expect(screen.getByTestId('agent-model-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-codex-model-select')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-runtime-plane-note')).not.toBeInTheDocument();
   });
 });
 

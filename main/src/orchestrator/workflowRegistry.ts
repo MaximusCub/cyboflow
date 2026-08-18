@@ -22,18 +22,28 @@ import {
   parseWorkflowDefinition,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../shared/types/workflows';
-import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
+import {
+  MixedProviderOrchestratedError,
+  ProviderOrchestratedUnsupportedError,
+} from '../../../shared/types/executionModelErrors';
+import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
 import { loadBuiltInAgents } from './agents/agentCatalogue';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
+  AGENT_PROVIDER_LABELS,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+  assertProviderRuntimeConsistent,
   claudeRuntimeFromSubstrate,
   isAgentProviderEnabled,
+  isWorkflowLaunchableRuntime,
+  providerForRuntime,
   type AgentProvider,
   type AgentProviderAccess,
-  type WorkflowAgentRuntime,
+  type WorkflowLaunchableRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -150,6 +160,15 @@ export const QUICK_WORKFLOW_NAME = '__quick__' as const;
  * planner/sprint, not be filtered as legacy cruft.
  */
 export const LEGACY_DROPPED_WORKFLOW_NAMES = ['soloflow', 'prune'] as const;
+
+/**
+ * The providers `createRun`'s stamp ladder knows how to resolve — derived from
+ * the launchable runtime set rather than listed, so it grows the moment a
+ * provider's runtime becomes launchable and cannot drift from that set.
+ */
+const LAUNCH_LADDER_PROVIDERS: ReadonlySet<AgentProvider> = new Set(
+  WORKFLOW_LAUNCHABLE_RUNTIMES.map((runtime) => providerForRuntime(runtime)),
+);
 
 // ---------------------------------------------------------------------------
 // WorkflowRegistry
@@ -535,7 +554,7 @@ export class WorkflowRegistry {
       model?: string | null;
       executionModel?: 'orchestrated' | 'programmatic' | null;
       agentProvider?: AgentProvider | null;
-      agentRuntime?: WorkflowAgentRuntime | null;
+      agentRuntime?: WorkflowLaunchableRuntime | null;
       weight?: number;
       label?: string;
     },
@@ -1040,7 +1059,7 @@ export class WorkflowRegistry {
       variantModel?: string;
       variantExecutionModel?: ExecutionModel;
       variantAgentProvider?: AgentProvider;
-      variantAgentRuntime?: WorkflowAgentRuntime;
+      variantAgentRuntime?: WorkflowLaunchableRuntime;
       experimentId?: string;
       experimentArm?: ExperimentArm;
       /**
@@ -1086,7 +1105,15 @@ export class WorkflowRegistry {
        */
       verifyDeliverable?: VerificationRequestInput | null;
       requestedAgentProvider?: AgentProvider;
-      requestedAgentRuntime?: WorkflowAgentRuntime;
+      /**
+       * STORABLE, not launchable. The `__quick__` sentinel run is created
+       * through this same method, and it must carry whatever runtime the quick
+       * SESSION resolved onto — the dispatch facade reads the row back to pick
+       * the owning manager, so narrowing this to the launchable set would drop
+       * the identity of a session-legal runtime and misroute it. A runtime that
+       * is storable but not launchable is refused below rather than resolved.
+       */
+      requestedAgentRuntime?: WorkflowRunStorableRuntime;
       /**
        * Defense-in-depth guard for Design Mode (design-mode.md "Session plumbing
        * — SDK-pinned, fail-closed"): design sessions MUST resolve to the SDK
@@ -1169,18 +1196,39 @@ export class WorkflowRegistry {
     const requestedAgentRuntime = demoMode
       ? undefined
       : opts?.requestedAgentRuntime ?? opts?.variantAgentRuntime;
-    if (
-      requestedAgentProvider === 'codex' &&
-      requestedAgentRuntime !== undefined &&
-      requestedAgentRuntime !== 'codex-sdk'
-    ) {
+    assertProviderRuntimeConsistent(
+      requestedAgentProvider,
+      requestedAgentRuntime,
+      'WorkflowRegistry.createRun',
+    );
+
+    // The `__quick__` sentinel is a ROW, not a workflow LAUNCH: it exists to
+    // carry whatever runtime the quick SESSION resolved onto, and the dispatch
+    // facade reads it back to pick the owning manager. Hoisted above the
+    // launch-resolution guard below, which the sentinel is exempt from.
+    const isQuickSentinel = workflow.name === QUICK_WORKFLOW_NAME;
+
+    // The stamp ladder below resolves every provider whose runtime is STORABLE.
+    // A real workflow LAUNCH is narrower: it may only name a runtime the flow
+    // machinery can actually deploy on (WORKFLOW_LAUNCHABLE_RUNTIMES), and a
+    // request naming any other would advertise support that does not exist.
+    // Refuse it where a developer sees it rather than resolving it. The two sets
+    // COINCIDE today (omp-sdk joined the launchable set in Phase 2), so nothing a
+    // caller can currently name reaches the throw — it is the seam that keeps the
+    // NEXT storable-first runtime out of a launch, not dead code.
+    //
+    // The SENTINEL is exempt precisely because it is not advertising anything:
+    // dropping a quick session's own runtime there would fall through to
+    // `claudeRuntimeFromSubstrate` and misroute an OMP chat to Claude, which is
+    // the silent-floor failure the provider registry exists to prevent.
+    const unstampable =
+      !isQuickSentinel &&
+      ((requestedAgentRuntime !== undefined && !isWorkflowLaunchableRuntime(requestedAgentRuntime)) ||
+        (requestedAgentProvider !== undefined && !LAUNCH_LADDER_PROVIDERS.has(requestedAgentProvider)));
+    if (unstampable) {
       throw new Error(
-        `WorkflowRegistry.createRun: agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
-      );
-    }
-    if (requestedAgentProvider === 'claude' && requestedAgentRuntime === 'codex-sdk') {
-      throw new Error(
-        'WorkflowRegistry.createRun: agentProvider claude conflicts with agentRuntime codex-sdk',
+        `WorkflowRegistry.createRun: agentProvider ${requestedAgentProvider ?? '-'} / ` +
+          `agentRuntime ${requestedAgentRuntime ?? '-'} has no launch resolution yet`,
       );
     }
 
@@ -1198,27 +1246,41 @@ export class WorkflowRegistry {
     const providerAccess = demoMode ? undefined : this.config?.getAgentProviderAccess?.();
     const claudeEnabled = isAgentProviderEnabled(providerAccess, 'claude');
     const codexEnabled = isAgentProviderEnabled(providerAccess, 'codex');
-    const codexExplicit =
-      requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
-    const claudeExplicit =
-      requestedAgentProvider === 'claude' ||
-      requestedAgentRuntime === 'claude-sdk' ||
-      requestedAgentRuntime === 'claude-interactive';
-    if (codexExplicit && !codexEnabled) {
+    // The provider this request EXPLICITLY names, through either half of the
+    // pair (they are already known consistent — assertProviderRuntimeConsistent
+    // ran above). Derived from the registry rather than a per-provider pair of
+    // `=== 'codex'` tests, which each silently missed a third provider.
+    const explicitProvider: AgentProvider | undefined =
+      requestedAgentProvider ??
+      (requestedAgentRuntime !== undefined ? providerForRuntime(requestedAgentRuntime) : undefined);
+    if (explicitProvider !== undefined && !isAgentProviderEnabled(providerAccess, explicitProvider)) {
       throw new Error(
-        'WorkflowRegistry.createRun: the Codex provider is disabled in Settings → Integrations',
+        `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is disabled in Settings → Integrations`,
       );
     }
-    if (claudeExplicit && !claudeEnabled) {
-      throw new Error(
-        'WorkflowRegistry.createRun: the Claude provider is disabled in Settings → Integrations',
-      );
-    }
-    const codexSdkRequested = codexExplicit || (!claudeEnabled && codexEnabled);
+    // An UNREQUESTED run whose default route (Claude) is switched off reroutes to
+    // Codex. OMP is deliberately not a reroute target: it is absent⇒disabled, so
+    // reaching it always takes an explicit request.
+    const codexSdkRequested =
+      explicitProvider === 'codex' || (explicitProvider === undefined && !claudeEnabled && codexEnabled);
+    const ompSdkRequested = explicitProvider === 'omp';
+    /**
+     * The STRUCTURED non-Claude runtime this run resolves onto, or undefined for
+     * Claude. This is the ONE place a provider's launch arm is named: it drives
+     * the substrate projection ('sdk' — both structured runtimes piggyback it),
+     * the sdk-substrate conflict guard, and both stamps. A provider whose
+     * runtime is storable-but-not-launchable can only reach here on the
+     * sentinel; the guard above refuses a real launch that names one.
+     */
+    const structuredSdkRuntime: WorkflowRunStorableRuntime | undefined = codexSdkRequested
+      ? 'codex-sdk'
+      : ompSdkRequested
+        ? 'omp-sdk'
+        : undefined;
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'
-        : requestedAgentRuntime === 'claude-sdk' || codexSdkRequested
+        : requestedAgentRuntime === 'claude-sdk' || structuredSdkRuntime !== undefined
           ? 'sdk'
           : undefined;
     if (
@@ -1252,7 +1314,6 @@ export class WorkflowRegistry {
     // DemoTerminalView paints a purely client-side scripted session. Scoped to
     // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
     // (which WOULD dispatch to the real interactive manager via the facade).
-    const isQuickSentinel = workflow.name === QUICK_WORKFLOW_NAME;
     const demoHonorsInteractive =
       demoMode &&
       isQuickSentinel &&
@@ -1273,9 +1334,9 @@ export class WorkflowRegistry {
           globalDefaultSubstrate,
           env: process.env,
         });
-    if (codexSdkRequested && substrate !== 'sdk') {
+    if (structuredSdkRuntime !== undefined && substrate !== 'sdk') {
       throw new Error(
-        `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
+        `WorkflowRegistry.createRun: ${structuredSdkRuntime} workflow runs require sdk substrate compatibility (got ${substrate})`,
       );
     }
     if (opts?.requireSdkSubstrate && substrate !== 'sdk') {
@@ -1283,14 +1344,12 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: design sessions require sdk substrate compatibility (got ${substrate})`,
       );
     }
-    const agentProvider: AgentProvider = demoMode
+    const agentProvider: AgentProvider = demoMode || structuredSdkRuntime === undefined
       ? 'claude'
-      : codexSdkRequested ? 'codex' : 'claude';
-    const agentRuntime: WorkflowAgentRuntime = demoMode
+      : providerForRuntime(structuredSdkRuntime);
+    const agentRuntime: WorkflowRunStorableRuntime = demoMode
       ? 'claude-sdk'
-      : codexSdkRequested
-        ? 'codex-sdk'
-        : claudeRuntimeFromSubstrate(substrate);
+      : structuredSdkRuntime ?? claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive
@@ -1320,26 +1379,48 @@ export class WorkflowRegistry {
           env: process.env,
         });
 
-    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent Codex
-    // pin — set EITHER in a workflow agent config
-    // (`WorkflowAgentConfig.runtime === 'codex-sdk'`) OR in the project's
-    // `agent_overrides` catalogue via the Agents editor — is only honored by the
-    // PROGRAMMATIC step runner, which spawns each step as its own CLI process. An
-    // ORCHESTRATED run is a single agent process for the whole DAG, so a per-step
-    // Codex override would be SILENTLY IGNORED there. Guard here, before any
+    // Whole-run provider / orchestrated guard. The mixed-provider guard below is
+    // deliberately scoped to a CLAUDE base provider, because a whole-run
+    // non-Claude request is one consistent provider rather than a mix. That
+    // exemption assumes the provider can actually HOST an orchestrated run — one
+    // process walking the DAG with the prompt envelope and question bridge — and
+    // that is a per-provider capability, not a given: OMP shipped its
+    // programmatic lane only. Refuse here, before any workflow_runs row exists,
+    // so a launch that would otherwise start a main orchestrator outside the
+    // shipped contract fails with a sentence naming the fix instead.
+    //
+    // The `__quick__` sentinel is EXEMPT and must stay so: it hard-pins
+    // 'orchestrated' above (a quick chat is not a DAG), and its provider is
+    // whatever the quick SESSION resolved onto — tripping this would make every
+    // OMP quick session unlaunchable.
+    if (
+      executionModel === 'orchestrated' &&
+      !isQuickSentinel &&
+      !providerSupportsOrchestrated(agentProvider)
+    ) {
+      throw new ProviderOrchestratedUnsupportedError(providerLabel(agentProvider));
+    }
+
+    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent
+    // NON-CLAUDE runtime pin — set EITHER in a workflow agent config
+    // (`WorkflowAgentConfig.runtime`) OR in the project's `agent_overrides`
+    // catalogue via the Agents editor — is only honored by the PROGRAMMATIC step
+    // runner, which spawns each step as its own CLI process. An ORCHESTRATED run
+    // is a single agent process for the whole DAG, so a per-step provider
+    // override would be SILENTLY IGNORED there. Guard here, before any
     // workflow_runs row exists, so a mixed flow never launches silently-degraded —
     // a later slice's UI catches MixedProviderOrchestratedError to prompt "switch
     // to programmatic?" instead.
     //
-    // Scoped to the run's BASE provider being Claude: a whole-run Codex
-    // request (agentProvider === 'codex' — every step already targets Codex)
+    // Scoped to the run's BASE provider being Claude: a whole-run non-Claude
+    // request (agentProvider === 'codex' / 'omp' — every step already targets it)
     // is a single consistent provider, not a mix, and must NOT trip this.
     //
     // The `__quick__` sentinel is EXEMPT: a quick chat is a single ad-hoc Claude
-    // turn, not a DAG that dispatches step agents, so a per-agent Codex pin is
+    // turn, not a DAG that dispatches step agents, so a per-agent pin is
     // inert there — and neither the quick-session nor the chat-sentinel createRun
     // caller catches MixedProviderOrchestratedError, so tripping it would brick
-    // quick sessions project-wide the moment any agent is pinned to Codex.
+    // quick sessions project-wide the moment any agent is pinned off Claude.
     if (executionModel === 'orchestrated' && agentProvider === 'claude' && !isQuickSentinel) {
       // Resolve the same effective definition the frozen spec below is
       // derived from: a variant run's frozen opts.variantSpecJson when
@@ -1355,7 +1436,7 @@ export class WorkflowRegistry {
         opts?.variantSpecJson !== undefined
           ? parseWorkflowDefinition(opts.variantSpecJson)
           : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
-      if (this.effectiveSetPinsCodexRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
+      if (this.effectiveSetPinsNonClaudeRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
         throw new MixedProviderOrchestratedError();
       }
     }
@@ -1495,29 +1576,36 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Does an agent THIS workflow can actually dispatch resolve onto the Codex
+   * Does an agent THIS workflow can actually dispatch resolve onto a NON-CLAUDE
    * runtime? — the orchestrated mixed-provider trip condition.
    *
    * Two-part check:
    *   1. REACHABILITY — the agent keys the workflow can spawn: every phase step's
    *      agent plus every fan-out inner step's agent (resolveStepAgentKey maps a
-   *      step label to its canonical key; the `human` gate → null). A Codex pin on
+   *      step label to its canonical key; the `human` gate → null). A pin on
    *      an agent this workflow never spawns (e.g. a planner-only agent pinned in
    *      the catalogue, launched under sprint) can't cause a mix, so it must NOT
    *      trip — scoping to reachable agents avoids blocking unrelated workflows.
    *   2. EFFECTIVE RUNTIME — the project `agent_overrides` catalogue layered UNDER
    *      the workflow's `agentConfigs` (the same precedence the spawn-time overlay
    *      applies; variant deltas can't touch `runtime`, so they're excluded).
-   *      Consulting the RESOLVED set is what catches a Codex pin set through the
+   *      Consulting the RESOLVED set is what catches a pin set through the
    *      Agents editor, while a workflow config that pins an agent back to a Claude
-   *      runtime correctly MASKS a catalogue Codex pin (no false positive).
+   *      runtime correctly MASKS a catalogue non-Claude pin (no false positive).
+   *
+   * The trip condition is "the pinned runtime's provider is not Claude", read
+   * through the runtime registry — NOT a literal `=== 'codex-sdk'`. That literal
+   * is exactly what would let an `omp-sdk` per-agent pin launch an orchestrated
+   * run that silently ignores it, which is the failure this guard exists to
+   * prevent; the guard has to widen with the launchable set, not one provider
+   * behind it.
    *
    * Fail-soft: an unresolvable definition (null) or any read/parse error yields
    * `false` — an unprovable mix must never break a launch. A missing catalogue
    * table is expected on a schema-narrow test DB (→ no overrides); a genuine read
    * error is logged so a silently-disabled guard stays diagnosable.
    */
-  private effectiveSetPinsCodexRuntime(
+  private effectiveSetPinsNonClaudeRuntime(
     projectId: number,
     definition: WorkflowDefinition | null,
   ): boolean {
@@ -1543,7 +1631,7 @@ export class WorkflowRegistry {
           .all(projectId) as AgentOverrideRow[];
       } catch (err) {
         this.logger.warn(
-          `WorkflowRegistry.effectiveSetPinsCodexRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+          `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       let effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
@@ -1551,11 +1639,14 @@ export class WorkflowRegistry {
         effective = applyWorkflowAgentConfigs(effective, definition.agentConfigs);
       }
       return effective.some(
-        (agent) => agent.runtime === 'codex-sdk' && reachable.has(agent.agentKey),
+        (agent) =>
+          agent.runtime != null &&
+          providerForRuntime(agent.runtime) !== 'claude' &&
+          reachable.has(agent.agentKey),
       );
     } catch (err) {
       this.logger.warn(
-        `WorkflowRegistry.effectiveSetPinsCodexRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+        `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }

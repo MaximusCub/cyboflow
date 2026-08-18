@@ -12,6 +12,7 @@ import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
 import type { AttachedImage, AttachedText, ComposerAttachments } from './attachments';
 import type { FastModeStateNotice } from '../../../../../shared/types/panels';
+import { providerForRuntimeValue } from '../../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import type { Question } from '../../../../../shared/types/questions';
 import { useQuestionStore } from '../../../stores/questionStore';
@@ -124,8 +125,8 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
-  const agentProvider = activeSession.agentProvider
-    ?? (activeSession.agentRuntime?.startsWith('codex-') ? 'codex' : 'claude');
+  const agentProvider =
+    activeSession.agentProvider ?? providerForRuntimeValue(activeSession.agentRuntime);
   // `running` is the AUTHORITATIVE, self-clearing turn-in-flight signal. The host
   // (ClaudePanel) supplies it as `working` = `sessionRunning || live-tail
   // isGenerating` — a genuinely generating quick SDK turn frequently does NOT

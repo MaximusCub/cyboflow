@@ -16,6 +16,14 @@ export interface GitDiffResult {
   afterHash?: string;
 }
 
+/**
+ * Largest untracked file we will read whole. Both untracked paths below —
+ * rendering the file as a diff block, and counting its lines for the stats
+ * meter — read with the synchronous fs API, so an unbounded read blocks the
+ * main process for as long as the file takes to load.
+ */
+const MAX_UNTRACKED_READ_BYTES = 1024 * 1024;
+
 export interface GitCommit {
   hash: string;
   message: string;
@@ -101,6 +109,54 @@ export class GitDiffManager {
       );
       throw error;
     }
+  }
+
+  /**
+   * Stats-only twin of captureDiffAgainstRef: the SAME "working tree vs <ref>,
+   * including committed, uncommitted, and untracked changes" view, but computed
+   * from `git diff --numstat` WITHOUT materializing the diff blob.
+   *
+   * Exists because the session-stats poll (sessions:get-statistics, re-fetched
+   * every few seconds while the session card is visible) only needs the three
+   * numbers and the file list — building the full diff string for a worktree
+   * with hundreds of changed files just to count its lines is pure waste.
+   *
+   * `--numstat` reports per-file `additions \t deletions \t path`, with `-` in
+   * both count columns for binary files (counted as a changed file, zero lines
+   * — same as `--stat`).
+   */
+  async getDiffStatsAgainstRef(
+    worktreePath: string,
+    ref: string = 'HEAD',
+  ): Promise<{ stats: GitDiffStats; changedFiles: string[] }> {
+    let additions = 0;
+    let deletions = 0;
+    const changedFiles: string[] = [];
+
+    const numstat = (await runGitAsync(worktreePath, ['diff', '--numstat', ref])).trim();
+    if (numstat) {
+      for (const line of numstat.split('\n')) {
+        const [added, deleted, ...pathParts] = line.split('\t');
+        const filePath = pathParts.join('\t').trim();
+        if (!filePath) continue;
+        changedFiles.push(filePath);
+        if (added !== '-') additions += parseInt(added, 10) || 0;
+        if (deleted !== '-') deletions += parseInt(deleted, 10) || 0;
+      }
+    }
+
+    // Untracked files are invisible to `git diff` at any ref, so add them the
+    // same way getDiffStats does: every line counts as an addition.
+    const untrackedFiles = await this.getUntrackedFiles(worktreePath);
+    if (untrackedFiles.length > 0) {
+      changedFiles.push(...untrackedFiles);
+      additions += this.countUntrackedAdditions(worktreePath, untrackedFiles);
+    }
+
+    return {
+      stats: { additions, deletions, filesChanged: changedFiles.length },
+      changedFiles,
+    };
   }
 
   /**
@@ -475,30 +531,8 @@ export class GitDiffManager {
       // Add stats for untracked files
       const untrackedFiles = await this.getUntrackedFiles(worktreePath);
       if (untrackedFiles.length > 0) {
-        let untrackedAdditions = 0;
-        for (const file of untrackedFiles) {
-          // Skip invalid filenames
-          if (!file || file.trim().length === 0) {
-            continue;
-          }
-
-          try {
-            const cleanFile = file.trim();
-            const filePath = `${worktreePath}/${cleanFile}`;
-            // Read the file directly — no shell involved, so filenames with $(...) /
-            // backticks / ${...} cannot inject commands. Use 'utf8' to mirror the
-            // semantics of `wc -l`, which counts newline characters in text mode.
-            const content = fs.readFileSync(filePath, 'utf8');
-            // `wc -l` counts \n occurrences; match that exactly.
-            const lineCount = (content.match(/\n/g) || []).length;
-            untrackedAdditions += lineCount;
-          } catch {
-            // Skip files that can't be read (binary, permission denied, missing, etc.)
-          }
-        }
-
         return {
-          additions: trackedStats.additions + untrackedAdditions,
+          additions: trackedStats.additions + this.countUntrackedAdditions(worktreePath, untrackedFiles),
           deletions: trackedStats.deletions,
           filesChanged: trackedStats.filesChanged + untrackedFiles.length
         };
@@ -571,6 +605,47 @@ export class GitDiffManager {
   }
 
   /**
+   * Line count of every readable untracked file, which is what an untracked
+   * file contributes to a diff: all of its lines are additions.
+   *
+   * Oversize files are skipped rather than read. This runs on the
+   * sessions:get-statistics poll (every few seconds, on the main process), so
+   * an unbounded readFileSync here would let one large untracked artifact — a
+   * build output, a captured log, a dataset — stall the event loop and
+   * allocate a file-sized string on every tick. The skipped file still counts
+   * as a changed file; only its line count is unknown, exactly as in
+   * createDiffForUntrackedFiles, which omits oversize files from the diff for
+   * the same reason.
+   */
+  private countUntrackedAdditions(worktreePath: string, untrackedFiles: string[]): number {
+    let untrackedAdditions = 0;
+    for (const file of untrackedFiles) {
+      // Skip invalid filenames
+      if (!file || file.trim().length === 0) {
+        continue;
+      }
+
+      try {
+        const cleanFile = file.trim();
+        const filePath = `${worktreePath}/${cleanFile}`;
+        if (fs.statSync(filePath).size > MAX_UNTRACKED_READ_BYTES) {
+          this.logger?.verbose(`Skipping line count for oversize untracked file ${cleanFile}`);
+          continue;
+        }
+        // Read the file directly — no shell involved, so filenames with $(...) /
+        // backticks / ${...} cannot inject commands. Use 'utf8' to mirror the
+        // semantics of `wc -l`, which counts newline characters in text mode.
+        const content = fs.readFileSync(filePath, 'utf8');
+        // `wc -l` counts \n occurrences; match that exactly.
+        untrackedAdditions += (content.match(/\n/g) || []).length;
+      } catch {
+        // Skip files that can't be read (binary, permission denied, missing, etc.)
+      }
+    }
+    return untrackedAdditions;
+  }
+
+  /**
    * Create diff-like output for untracked files
    */
   private createDiffForUntrackedFiles(worktreePath: string, untrackedFiles: string[]): string {
@@ -588,7 +663,7 @@ export class GitDiffManager {
         // Pre-flight size check matches the previous `maxBuffer: 1MB` bound from
         // execSync — large files are skipped (caught below) to avoid OOM.
         const stat = fs.statSync(filePath);
-        if (stat.size > 1024 * 1024) {
+        if (stat.size > MAX_UNTRACKED_READ_BYTES) {
           throw new Error(`File too large: ${stat.size} bytes`);
         }
         const fileContent = fs.readFileSync(filePath, 'utf8');

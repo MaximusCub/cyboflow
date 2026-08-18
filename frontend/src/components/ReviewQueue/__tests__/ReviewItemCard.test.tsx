@@ -148,7 +148,7 @@ describe('ReviewItemCard', () => {
   });
 
   it('decision Approve resolves the item with outcome=approve (flow advancement)', async () => {
-    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec', blocking: true })} />);
+    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec', blocking: true })} surface="session" />);
     fireEvent.click(screen.getByTestId('decision-resolve'));
     await waitFor(() =>
       expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec', outcome: 'approve' }),
@@ -156,7 +156,7 @@ describe('ReviewItemCard', () => {
   });
 
   it('decision Reject resolves the item with outcome=reject (no dismiss)', async () => {
-    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec_r', blocking: true })} />);
+    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec_r', blocking: true })} surface="session" />);
     fireEvent.click(screen.getByTestId('decision-reject'));
     await waitFor(() =>
       expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec_r', outcome: 'reject' }),
@@ -316,7 +316,7 @@ describe('ReviewItemCard', () => {
 
   it('calls onResolved after a successful triage', async () => {
     const onResolved = vi.fn();
-    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec2' })} onResolved={onResolved} />);
+    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec2' })} onResolved={onResolved} surface="session" />);
     fireEvent.click(screen.getByTestId('decision-resolve'));
     await waitFor(() => expect(onResolved).toHaveBeenCalledTimes(1));
   });
@@ -403,8 +403,8 @@ describe('ReviewItemCard', () => {
     expect(mockResolve).not.toHaveBeenCalled();
   });
 
-  it('a BLOCKING finding renders Resolve & resume (routes to resolve, no outcome)', async () => {
-    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_bf', blocking: true })} />);
+  it('a BLOCKING finding renders Resolve & resume in-session (routes to resolve, no outcome)', async () => {
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_bf', blocking: true })} surface="session" />);
     // Blocking findings get a distinct resolve-and-resume affordance (not the
     // accept-routing legacy actions).
     expect(screen.getByTestId('finding-resolve')).toHaveTextContent('Resolve');
@@ -438,6 +438,130 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('promote-to-task')).toHaveTextContent('Promote to task');
   });
 
+  // -- Default (option-less) escalation CTAs: Open in session / Dismiss ------
+
+  describe('option-less escalations default to Open in session / Dismiss', () => {
+    // A blocking finding, a human_task, and a generic gate:human-step decision all
+    // reach the human carrying NO options of their own, so the QUEUE surface must
+    // route to the run instead of inventing resolve / promote verdicts.
+    const optionLess: Array<[string, ReviewItem]> = [
+      ['blocking finding', makeItem('finding', { id: 'rvw_q_bf', blocking: true })],
+      ['human_task', makeItem('human_task', { id: 'rvw_q_ht', blocking: true })],
+      [
+        'generic human-step gate',
+        makeItem('decision', { id: 'rvw_q_gate', blocking: true, source: 'gate:human-step:approve-plan' }),
+      ],
+    ];
+
+    for (const [label, item] of optionLess) {
+      it(`${label}: queue offers ONLY Open in session + Dismiss`, () => {
+        render(<ReviewItemCard item={item} />);
+        expect(screen.getByTestId('open-in-session')).toHaveTextContent('Open in session');
+        expect(screen.getByText('Dismiss')).toBeInTheDocument();
+        // None of the verdict-inventing affordances survive on this surface.
+        expect(screen.queryByTestId('finding-resolve')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('promote-to-task')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
+        expect(screen.queryByText('Resolve')).not.toBeInTheDocument();
+      });
+    }
+
+    it('Open in session activates the run and switches to the session view', async () => {
+      const { useNavigationStore } = await import('../../../stores/navigationStore');
+      const { useCyboflowStore } = await import('../../../stores/cyboflowStore');
+      useNavigationStore.setState({ activeProjectId: null });
+      // The real setActiveRun opens a run-event IPC subscription (window.electron),
+      // which jsdom lacks — stub it so the handler's navigation half is observable.
+      const setActiveRun = vi.fn();
+      const realSetActiveRun = useCyboflowStore.getState().setActiveRun;
+      useCyboflowStore.setState({ setActiveRun });
+      try {
+        render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_q_nav', blocking: true })} />);
+
+        fireEvent.click(screen.getByTestId('open-in-session'));
+
+        expect(setActiveRun).toHaveBeenCalledWith('run-1');
+        expect(useNavigationStore.getState().activeProjectId).toBe(5);
+        expect(useNavigationStore.getState().view).toBe('session');
+        // Navigation is NOT triage — the item stays pending.
+        expect(mockResolve).not.toHaveBeenCalled();
+        expect(mockDismiss).not.toHaveBeenCalled();
+      } finally {
+        useCyboflowStore.setState({ setActiveRun: realSetActiveRun });
+      }
+    });
+
+    it('a finding Dismiss routes through reviewItems.dismiss (aggregate-unblock resume)', async () => {
+      render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_q_dis', blocking: true })} />);
+      fireEvent.click(screen.getByTestId('default-dismiss'));
+      await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_dis' }));
+      expect(mockResolve).not.toHaveBeenCalled();
+    });
+
+    it('a human_task Dismiss routes through reviewItems.dismiss', async () => {
+      render(<ReviewItemCard item={makeItem('human_task', { id: 'rvw_q_htd', blocking: true })} />);
+      fireEvent.click(screen.getByTestId('default-dismiss'));
+      await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_htd' }));
+      expect(mockResolve).not.toHaveBeenCalled();
+    });
+
+    it('a DECISION Dismiss rejects via resolve — never dismiss — so gate teardown runs', async () => {
+      // A dismissed gate is read as a rejection either way (humanGate onChange),
+      // but ONLY resolve(outcome:'reject') runs deleteRunCreatedEntities for an
+      // approve-plan gate. Routing through dismiss would reject the plan and
+      // orphan its pending draft epics/tasks on the board.
+      const item = makeItem('decision', {
+        id: 'rvw_q_gate_dis',
+        blocking: true,
+        source: 'gate:human-step:approve-plan',
+      });
+      render(<ReviewItemCard item={item} />);
+      fireEvent.click(screen.getByTestId('default-dismiss'));
+      await waitFor(() =>
+        expect(mockResolve).toHaveBeenCalledWith({
+          projectId: 5,
+          reviewItemId: 'rvw_q_gate_dis',
+          outcome: 'reject',
+        }),
+      );
+      expect(mockDismiss).not.toHaveBeenCalled();
+    });
+
+    it('a RUN-LESS item keeps its full action set (Open in session has no destination)', () => {
+      // `makeItem` defaults run_id via `??`, so a null must be applied after it.
+      const item: ReviewItem = { ...makeItem('human_task', { id: 'rvw_q_norun' }), run_id: null };
+      render(<ReviewItemCard item={item} />);
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      // Manual work must still be completable and promotable, not just discardable.
+      expect(screen.getByText('Resolve')).toBeInTheDocument();
+      expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
+      expect(screen.getByText('Dismiss')).toBeEnabled();
+    });
+
+    it('a RUN-LESS blocking finding keeps resolve + promote too', () => {
+      const item: ReviewItem = { ...makeItem('finding', { id: 'rvw_q_nf', blocking: true }), run_id: null };
+      render(<ReviewItemCard item={item} />);
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      expect(screen.getByTestId('finding-resolve')).toBeInTheDocument();
+      expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
+    });
+
+    it('an option-CARRYING gate is unaffected on the queue surface', () => {
+      // The idea-size guard provides its own two mutations — it must NOT collapse
+      // into the default pair.
+      const item = makeItem(
+        'decision',
+        { id: 'rvw_q_guard', blocking: true },
+        { kind: 'decision', gate: 'idea-size-guard', ideaRef: 'IDEA-014' },
+      );
+      render(<ReviewItemCard item={item} />);
+      expect(screen.getByTestId('guard-launch-separate')).toBeInTheDocument();
+      expect(screen.getByTestId('guard-return-backlog')).toBeInTheDocument();
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+    });
+  });
+
   // -- A/B testing slice C: experiment-comparison decision routing -----------
 
   it("a decision with gate:'experiment-comparison' routes to 'View comparison' instead of resolve/dismiss", async () => {
@@ -467,9 +591,9 @@ describe('ReviewItemCard', () => {
     expect(mockDismiss).not.toHaveBeenCalled();
   });
 
-  it('a decision with a foreign gate keeps the legacy resolve/dismiss actions', () => {
+  it('a decision with a foreign gate keeps the legacy resolve/dismiss actions in-session', () => {
     const item = makeItem('decision', { id: 'rvw_gate' }, { kind: 'decision', gate: 'approve-idea' });
-    render(<ReviewItemCard item={item} />);
+    render(<ReviewItemCard item={item} surface="session" />);
     expect(screen.queryByTestId('decision-view-comparison')).not.toBeInTheDocument();
     expect(screen.getByTestId('decision-resolve')).toBeInTheDocument();
   });

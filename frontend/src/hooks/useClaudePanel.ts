@@ -25,18 +25,23 @@ export async function dispatchQuickSessionInput(
   // the SESSION-scoped path: sessions:input resolves the session's FIRST chat
   // panel, which would answer on the inherited lane instead of this panel's.
   const inherits = panelSubstrate === undefined || panelSubstrate === null;
-  const isCodexSdkPanel =
-    session.agentRuntime === 'codex-sdk'
+  // omp-sdk takes the SAME route as codex-sdk (docs/proposals/omp-provider-
+  // integration.md §5.5): first message via sessions:input, follow-ups via the
+  // panel-scoped panels:continue. omp-pty mirrors codex-pty the same way for the
+  // panel-substrate-override case.
+  const isStructuredSdkPanel =
+    session.agentRuntime === 'codex-sdk' || session.agentRuntime === 'omp-sdk'
       ? panelSubstrate !== 'interactive'
-      : session.agentRuntime === 'codex-pty' && panelSubstrate === 'sdk';
+      : (session.agentRuntime === 'codex-pty' || session.agentRuntime === 'omp-pty') &&
+        panelSubstrate === 'sdk';
 
-  if (isCodexSdkPanel) {
-    // The FIRST message starts the codex turn via the session-scoped input path
-    // (the panel is idle, so there is nothing to guard against). A CONTINUE routes
-    // through the panel-scoped panels:continue — the codex branch there gives it
-    // the SAME mid-turn queue guard + Interrupt & send behavior Claude gets,
-    // instead of the old sessions:input hard-reject ("Codex is still processing")
-    // that turned a mid-turn send into a FAILED row.
+  if (isStructuredSdkPanel) {
+    // The FIRST message starts the turn via the session-scoped input path (the
+    // panel is idle, so there is nothing to guard against). A CONTINUE routes
+    // through the panel-scoped panels:continue — the structured-runtime branch
+    // there gives it the SAME mid-turn queue guard + Interrupt & send behavior
+    // Claude gets, instead of the old sessions:input hard-reject ("Codex is
+    // still processing") that turned a mid-turn send into a FAILED row.
     if (mode === 'initial' && inherits) {
       const response = await API.sessions.sendInput(session.id, input);
       return { success: response.success, error: response.error };

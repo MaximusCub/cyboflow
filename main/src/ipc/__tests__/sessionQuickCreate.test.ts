@@ -80,6 +80,26 @@ vi.mock('../../orchestrator/artifactRouter', () => ({
   ArtifactRouter: { getInstance: () => ({ apply: artifactApplyMock }) },
 }));
 
+// Per-panel resume identity (migration 087): a structured chat turn resumes the
+// panel's OWN provider thread. Mocked so a test can hand the turn a target of a
+// chosen provider/runtime; the default (null) is a fresh thread.
+interface ResumeTargetStub {
+  provider: string;
+  runtime: string;
+  externalSessionId: string;
+}
+const resumeTargetMock = vi.fn<() => ResumeTargetStub | null>(() => null);
+vi.mock('../../orchestrator/agentInvocationStore', () => ({
+  AgentInvocationStore: class {
+    getLatestPanelResumeTarget(): ResumeTargetStub | null {
+      return resumeTargetMock();
+    }
+    getLatestTopLevelResumeTarget(): ResumeTargetStub | null {
+      return null;
+    }
+  },
+}));
+
 import {
   generateQuickWorktreeBranchName,
   registerSessionHandlers,
@@ -168,6 +188,7 @@ beforeEach(() => {
   // The core's claim set spans the module lifetime; fixtures here reuse the
   // constant 'sess-001' id, so a stale claim would time out every later await.
   _resetClaimedQuickSessionIdsForTesting();
+  resumeTargetMock.mockReturnValue(null);
 });
 
 function makeServices(opts?: {
@@ -198,7 +219,7 @@ function makeServices(opts?: {
    * Settings → Integrations / onboarding Connect provider toggles. Defaults to
    * both providers ON, so every existing test keeps its byte-identical path.
    */
-  providerAccess?: { claude: boolean; codex: boolean };
+  providerAccess?: { claude?: boolean; codex?: boolean; omp?: boolean };
 }) {
   const dbRunCalls: Array<{ sql: string; args: unknown[] }> = [];
   let lastPreparedSql = '';
@@ -313,6 +334,14 @@ function makeServices(opts?: {
     stopPanel: vi.fn(),
   };
 
+  const fakeOmpPtyManager = {
+    isPanelRunning: vi.fn(() => false),
+    relayUserTurn: vi.fn(),
+    startPanel: vi.fn(() => new Promise<void>(() => {})),
+    stopPanel: vi.fn(),
+    on: vi.fn(),
+  };
+
   const codexListeners = new Map<string, (payload: Record<string, unknown>) => void>();
   const fakeCodexSdkManager = {
     on: vi.fn((event: string, listener: (payload: Record<string, unknown>) => void) => {
@@ -325,10 +354,24 @@ function makeServices(opts?: {
     codexListeners.get(event)?.(payload);
   };
 
+  const ompListeners = new Map<string, (payload: Record<string, unknown>) => void>();
+  const fakeOmpSdkManager = {
+    on: vi.fn((event: string, listener: (payload: Record<string, unknown>) => void) => {
+      ompListeners.set(event, listener);
+    }),
+    isPanelRunning: vi.fn(() => false),
+    spawnCliProcess: vi.fn(async (_options: Record<string, unknown>) => undefined),
+    stopPanel: vi.fn(),
+  };
+  const emitOmp = (event: string, payload: Record<string, unknown>): void => {
+    ompListeners.get(event)?.(payload);
+  };
+
   // At-spawn runId→panelId seed (facade.registerInteractivePanel) — the spawn
   // sites must call it BEFORE the fire-and-forget startPanel.
   const fakeRegisterLivePanel = vi.fn();
   const fakeRegisterCodexPtyPanel = vi.fn();
+  const fakeRegisterOmpPtyPanel = vi.fn();
 
   const services = {
     sessionManager: fakeSessionManager,
@@ -340,10 +383,13 @@ function makeServices(opts?: {
     interactiveCliManager: fakeInteractiveCliManager,
     codexSdkManager: fakeCodexSdkManager,
     codexPtyManager: fakeCodexPtyManager,
+    ompSdkManager: fakeOmpSdkManager,
+    ompPtyManager: fakeOmpPtyManager,
     endLiveSession: vi.fn(async () => {}),
     killLiveSession: vi.fn(async () => {}),
     registerLivePanel: fakeRegisterLivePanel,
     registerCodexPtyPanel: fakeRegisterCodexPtyPanel,
+    registerOmpPtyPanel: fakeRegisterOmpPtyPanel,
     gitStatusManager: {},
     archiveProgressManager: undefined,
     // Demo-mode probe used by the eager-spawn + sessions:input interactive
@@ -362,9 +408,10 @@ function makeServices(opts?: {
       getConfig: () => ({}),
       // Provider-access gate (Settings → Integrations toggles). Both providers on
       // unless a test opts out, so the launch path stays byte-identical here.
+      // OMP is absent⇒DISABLED by policy, so it is only on when a test says so.
       getAgentProviderAccess: () => opts?.providerAccess ?? { claude: true, codex: true },
-      isAgentProviderEnabled: (provider: 'claude' | 'codex') =>
-        (opts?.providerAccess ?? { claude: true, codex: true })[provider] ?? true,
+      isAgentProviderEnabled: (provider: 'claude' | 'codex' | 'omp') =>
+        (opts?.providerAccess ?? { claude: true, codex: true })[provider] ?? provider !== 'omp',
     },
     cyboflow: {
       workflowRegistry: fakeWorkflowRegistry,
@@ -386,8 +433,12 @@ function makeServices(opts?: {
     fakeCodexSdkManager,
     emitCodex,
     fakeCodexPtyManager,
+    fakeOmpSdkManager,
+    emitOmp,
+    fakeOmpPtyManager,
     fakeRegisterLivePanel,
     fakeRegisterCodexPtyPanel,
+    fakeRegisterOmpPtyPanel,
   };
 }
 
@@ -932,6 +983,177 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       agentRuntime: 'codex-sdk',
     }));
   });
+
+  // ── OMP (the third provider) ──
+
+  const OMP_ON = { claude: true, codex: true, omp: true };
+
+  it('accepts omp-sdk for quick sessions, stamps the session and sentinel, and waits for first input', async () => {
+    const {
+      services,
+      createRunArgs,
+      dbRunCalls,
+      fakeOmpSdkManager,
+      fakeOmpPtyManager,
+      fakeCodexSdkManager,
+      fakeInteractiveCliManager,
+      fakeTaskQueue,
+    } = makeServices({ providerAccess: OMP_ON });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      agentModel: 'anthropic/claude-sonnet-4',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    // Structured lanes wait for the user's first message — no eager panel.
+    expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      agentModel: 'anthropic/claude-sonnet-4',
+    }));
+    const sessionStamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(sessionStamp?.args).toEqual(['sdk', 'omp-sdk', 'sess-001']);
+    // The SENTINEL carries the runtime too — the dispatch facade reads that row
+    // back to pick the manager, so a dropped stamp misroutes the chat to Claude.
+    expect(createRunArgs[0][4]).toEqual({
+      requestedModel: 'anthropic/claude-sonnet-4',
+      requestedAgentProvider: 'omp',
+      requestedAgentRuntime: 'omp-sdk',
+    });
+    expect(fakeOmpSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeOmpPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('projects a bare omp PROVIDER request onto the structured omp-sdk lane', async () => {
+    const { services, fakeTaskQueue, dbRunCalls } = makeServices({ providerAccess: OMP_ON });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'omp',
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+    }));
+    const sessionStamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(sessionStamp?.args).toEqual(['sdk', 'omp-sdk', 'sess-001']);
+  });
+
+  it('eagerly spawns the OMP terminal for an omp-pty quick session and stamps interactive', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeOmpPtyManager,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeRegisterLivePanel,
+      fakeRegisterCodexPtyPanel,
+      fakeRegisterOmpPtyPanel,
+    } = makeServices({ providerAccess: OMP_ON });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'omp',
+      agentRuntime: 'omp-pty',
+      agentModel: 'anthropic/claude-sonnet-4',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data?.claudePanelId).toBe('panel-quick-1');
+
+    // omp-pty is NOT storable, so the sentinel carries no runtime — the SESSION
+    // row is the only place this terminal's identity lands.
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'omp-pty', 'sess-001']);
+
+    expect(fakeOmpPtyManager.startPanel).toHaveBeenCalledTimes(1);
+    const startArgs = fakeOmpPtyManager.startPanel.mock.calls[0] as unknown as unknown[];
+    expect(startArgs[0]).toBe('panel-quick-1');
+    expect(startArgs[1]).toBe('sess-001');
+    expect(startArgs[2]).toBe(`/tmp/project/${TEST_BRANCH}`);
+    expect(startArgs[3]).toContain('cyboflow');
+    // That keyword is the USER's to type — never cyboflow-authored prompt text.
+    expect(startArgs[3]).not.toMatch(/ultracode/i);
+    expect(startArgs[5]).toBe('anthropic/claude-sonnet-4');
+    expect(startArgs[6]).toBe('test-run-id-abc');
+
+    // No sibling terminal may answer for OMP.
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
+    expect(fakeRegisterCodexPtyPanel).not.toHaveBeenCalled();
+
+    expect(fakeRegisterOmpPtyPanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
+    expect(fakeRegisterOmpPtyPanel.mock.invocationCallOrder[0]).toBeLessThan(
+      fakeOmpPtyManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  // OMP is the first provider whose ABSENT access key means DISABLED, so the
+  // default fixture (claude+codex only) is exactly the "never opted in" install.
+  it('rejects an OMP launch when the provider access map omits OMP entirely', async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/OMP provider is turned off/i);
+    // Fails BEFORE anything is created — no session, no worktree.
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects an omp-pty launch when OMP is explicitly switched off', async () => {
+    const { services, fakeTaskQueue, fakeOmpPtyManager } = makeServices({
+      providerAccess: { claude: true, codex: true, omp: false },
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentRuntime: 'omp-pty',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/OMP provider is turned off/i);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+    expect(fakeOmpPtyManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('never reroutes an unrequested quick session onto OMP', async () => {
+    // Claude off, Codex off, OMP on: the reroute is Codex-only by design, so
+    // this must NOT silently start an OMP session behind the user's back.
+    const { services, fakeTaskQueue } = makeServices({
+      providerAccess: { claude: false, codex: false, omp: true },
+    });
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ agentProvider: 'omp' }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1258,8 +1480,15 @@ describe('sessions:input handler - substrate routing', () => {
   const SESSION_ID = 'sess-001';
   const PANEL = { id: 'panel-1', sessionId: SESSION_ID, type: 'claude', state: {} };
 
-  function setupInput(opts: { substrate?: string; agentRuntime?: string; replRunning?: boolean; codexRunning?: boolean; runId?: string }) {
-    const made = makeServices();
+  function setupInput(opts: {
+    substrate?: string;
+    agentRuntime?: string;
+    replRunning?: boolean;
+    codexRunning?: boolean;
+    ompRunning?: boolean;
+    runId?: string;
+  }) {
+    const made = makeServices({ providerAccess: { claude: true, codex: true, omp: true } });
     (made.fakeDatabaseService.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
       id: SESSION_ID,
       substrate: opts.substrate,
@@ -1279,6 +1508,8 @@ describe('sessions:input handler - substrate routing', () => {
     made.fakeInteractiveCliManager.isPanelRunning.mockReturnValue(opts.replRunning ?? false);
     made.fakeCodexPtyManager.isPanelRunning.mockReturnValue(opts.codexRunning ?? false);
     made.fakeCodexSdkManager.isPanelRunning.mockReturnValue(opts.codexRunning ?? false);
+    made.fakeOmpPtyManager.isPanelRunning.mockReturnValue(opts.ompRunning ?? false);
+    made.fakeOmpSdkManager.isPanelRunning.mockReturnValue(opts.ompRunning ?? false);
     const handlers = registerWith(made.services);
     return { ...made, handlers };
   }
@@ -1513,4 +1744,220 @@ describe('sessions:input handler - substrate routing', () => {
     };
     expect(listed.data).toEqual([]);
   });
+
+  // ── OMP: the four event classes per lane (proposal §5.5) ──
+  //
+  // These are the branches the adversarial review flagged: every one of them was
+  // a binary claude-vs-codex test that would have answered an OMP panel with
+  // Claude. Each assertion below therefore also pins that NO other manager was
+  // touched, not just that the right one was.
+
+  it('relays an omp-pty session turn into the live OMP terminal, never Claude or Codex', async () => {
+    const {
+      handlers,
+      fakeOmpPtyManager,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+    } = setupInput({ agentRuntime: 'omp-pty', ompRunning: true });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello omp')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeOmpPtyManager.relayUserTurn).toHaveBeenCalledWith('panel-1', 'hello omp');
+    expect(fakeOmpPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeCodexPtyManager.relayUserTurn).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.relayUserTurn).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+  });
+
+  it('re-spawns a dead omp-pty session fire-and-forget with the input as first prompt', async () => {
+    const {
+      handlers,
+      fakeOmpPtyManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeRegisterOmpPtyPanel,
+    } = setupInput({ agentRuntime: 'omp-pty', ompRunning: false, runId: 'run-quick-001' });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'wake omp')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeOmpPtyManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      SESSION_ID,
+      `/tmp/project/${TEST_BRANCH}`,
+      'wake omp',
+      undefined, // permissionMode
+      undefined, // model — no persisted panel settings in this test
+      'run-quick-001', // gate runId
+    );
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+    expect(fakeRegisterOmpPtyPanel).toHaveBeenCalledWith('run-quick-001', 'panel-1');
+    expect(fakeRegisterOmpPtyPanel.mock.invocationCallOrder[0]).toBeLessThan(
+      fakeOmpPtyManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('routes an omp-sdk session turn through the structured OMP manager (initial turn)', async () => {
+    const {
+      handlers,
+      fakeOmpSdkManager,
+      fakeCodexSdkManager,
+      fakeOmpPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeDatabaseService,
+    } = setupInput({ agentRuntime: 'omp-sdk', runId: 'run-quick-001' });
+    fakeDatabaseService.getPanelSettings.mockReturnValue({ model: 'anthropic/claude-sonnet-4' });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello omp sdk')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeOmpSdkManager.spawnCliProcess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        panelId: 'panel-1',
+        sessionId: SESSION_ID,
+        runId: 'run-quick-001',
+        worktreePath: `/tmp/project/${TEST_BRANCH}`,
+        prompt: 'hello omp sdk',
+        model: 'anthropic/claude-sonnet-4',
+      }),
+    );
+    // OMP's spawn has no `--append-system-prompt` equivalent, so a briefing must
+    // NOT be passed — it would be silently dropped rather than delivered.
+    expect(fakeOmpSdkManager.spawnCliProcess.mock.calls[0][0]).not.toHaveProperty('systemPromptAppend');
+    // No prior invocation for this panel, so the first turn carries no resume.
+    expect(fakeOmpSdkManager.spawnCliProcess.mock.calls[0][0]).not.toHaveProperty('resumeSessionId');
+    expect(fakeSessionManager.addPanelConversationMessage).toHaveBeenCalledWith('panel-1', 'user', 'hello omp sdk');
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+    expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeOmpPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('refuses a second omp-sdk turn while one is in flight (session-scoped path)', async () => {
+    const { handlers, fakeOmpSdkManager } = setupInput({
+      agentRuntime: 'omp-sdk',
+      ompRunning: true,
+      runId: 'run-quick-001',
+    });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'too soon')) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('OMP is still processing the previous message.');
+    expect(fakeOmpSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
+  it('keeps OMP SDK queued input in its OWN queue, out of ClaudeCodeManager', async () => {
+    const { handlers, fakeOmpSdkManager, fakeClaudeCodeManager } = setupInput({
+      agentRuntime: 'omp-sdk',
+      ompRunning: true,
+      runId: 'run-quick-001',
+    });
+    vi.mocked(panelManager.getPanel).mockReturnValue(
+      PANEL as unknown as ReturnType<typeof panelManager.getPanel>,
+    );
+
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-a', 'first');
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-b', 'second');
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: Array<{ id: string; text: string }>;
+    };
+    expect(listed.data).toEqual([
+      { id: 'pending-a', text: 'first' },
+      { id: 'pending-b', text: 'second' },
+    ]);
+
+    const dequeued = (await invoke(handlers, 'panels:dequeue-input', 'panel-1', 'pending-a')) as {
+      data: { dequeued: boolean };
+    };
+    expect(dequeued.data.dequeued).toBe(true);
+    expect(fakeOmpSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('drains OMP SDK queued input as one combined turn at the rest boundary', async () => {
+    const { handlers, fakeOmpSdkManager, fakeSessionManager, emitOmp } = setupInput({
+      agentRuntime: 'omp-sdk',
+      ompRunning: true,
+      runId: 'run-quick-001',
+    });
+    vi.mocked(panelManager.getPanel).mockReturnValue(
+      PANEL as unknown as ReturnType<typeof panelManager.getPanel>,
+    );
+
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-a', 'first');
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-b', 'second');
+    fakeOmpSdkManager.isPanelRunning.mockReturnValue(false);
+    emitOmp('exit', { panelId: 'panel-1', sessionId: SESSION_ID, exitCode: 0 });
+    await vi.waitFor(() => expect(fakeOmpSdkManager.spawnCliProcess).toHaveBeenCalledTimes(1));
+
+    expect(fakeOmpSdkManager.spawnCliProcess).toHaveBeenCalledWith(expect.objectContaining({
+      panelId: 'panel-1',
+      prompt: 'first\n\nsecond',
+    }));
+    expect(fakeSessionManager.addPanelConversationMessage).toHaveBeenCalledWith(
+      'panel-1',
+      'user',
+      'first\n\nsecond',
+    );
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: unknown[];
+    };
+    expect(listed.data).toEqual([]);
+  });
+
+  it("resumes an omp-sdk follow-up turn from that panel's OWN session file", async () => {
+    const { handlers, fakeOmpSdkManager } = setupInput({
+      agentRuntime: 'omp-sdk',
+      runId: 'run-quick-001',
+    });
+    // OMP's external session id is the session FILE PATH (proposal fact §2.6).
+    resumeTargetMock.mockReturnValue({
+      provider: 'omp',
+      runtime: 'omp-sdk',
+      externalSessionId: '/omp-sessions/panel-1/abc.jsonl',
+    });
+
+    await invoke(handlers, 'sessions:input', SESSION_ID, 'follow up');
+
+    expect(fakeOmpSdkManager.spawnCliProcess).toHaveBeenCalledWith(
+      expect.objectContaining({ resumeSessionId: '/omp-sessions/panel-1/abc.jsonl' }),
+    );
+  });
+
+  it("never hands another vendor's resume handle to OMP", async () => {
+    const { handlers, fakeOmpSdkManager } = setupInput({
+      agentRuntime: 'omp-sdk',
+      runId: 'run-quick-001',
+    });
+    // A session switched between vendors leaves a Codex thread id behind; OMP
+    // would fail (or worse, silently start fresh) if it were passed through.
+    resumeTargetMock.mockReturnValue({
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      externalSessionId: 'codex-thread-1',
+    });
+
+    await invoke(handlers, 'sessions:input', SESSION_ID, 'follow up');
+
+    expect(fakeOmpSdkManager.spawnCliProcess.mock.calls[0][0]).not.toHaveProperty('resumeSessionId');
+  });
+
 });

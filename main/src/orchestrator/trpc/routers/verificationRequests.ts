@@ -39,7 +39,10 @@
  *              whether EACH project has a proven runbook, in one pass over
  *              `verify_runbook_local`. Verification is configured per project,
  *              so a single global setup button can only ever speak for the
- *              selected one.
+ *              selected one. `'proven'` is confirmed against the LIVE
+ *              conjunction (`ctx.verifyRunbookStatus`), not the stored column —
+ *              see {@link effectiveRunbookStatus}; the same applies to
+ *              `health`'s per-modality `runbook.status`.
  *
  *   - hostProbes / provisionChromium : the §6 live host-capability probes and
  *              the chromium fix-it action. `provisionChromium` is the only
@@ -58,7 +61,8 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { DatabaseLike } from '../../types';
-import type { VerifyHostProbesLike } from '../context';
+import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from '../context';
+import type { VerifyRunbookStatus } from '../../verify/runbookStore';
 import {
   REQUEST_STATUS,
   TERMINAL_REQUEST_STATUSES,
@@ -422,10 +426,11 @@ function readCapabilities(
  * Read the project's runbook records (migration 096), keyed by modality.
  * Fail-soft to empty on a pre-096 DB, same posture as the capability ledger.
  */
-function readRunbooks(
+async function readRunbooks(
   db: DatabaseLike,
   projectId: number,
-): Map<VerificationModality, VerificationRunbookState> {
+  resolveStatus: VerifyRunbookStatusLike | undefined,
+): Promise<Map<VerificationModality, VerificationRunbookState>> {
   const out = new Map<VerificationModality, VerificationRunbookState>();
   let rows: { modality: string; status: string; version: number; portable_hash: string }[] = [];
   try {
@@ -442,13 +447,58 @@ function readRunbooks(
   for (const row of rows) {
     if (!isVerificationModality(row.modality)) continue;
     if (row.status !== 'proven' && row.status !== 'unproven-draft') continue;
+    // `version` / `portableHash` come from the RECORD (they identify the
+    // revision), but a PROVEN one has its status re-confirmed against the live
+    // conjunction — see {@link effectiveRunbookStatus}. A record can name a
+    // revision that no longer holds in this tree; that is worth showing,
+    // mislabelled is not.
+    //
+    // A stored draft is NOT probed: the conjunction can only ever demote, so
+    // re-checking one could not promote it and would only spend a file read.
+    // (It also matters for correctness here — a resolver answering 'proven'
+    // must never be able to launder a draft into a proof.)
+    const status: VerifyRunbookStatus =
+      row.status === 'proven'
+        ? await effectiveRunbookStatus(resolveStatus, projectId, row.modality)
+        : 'unproven-draft';
+    if (status === 'absent') continue;
     out.set(row.modality, {
-      status: row.status,
+      status,
       version: row.version,
       portableHash: row.portable_hash,
     });
   }
   return out;
+}
+
+/**
+ * The status the ENGINE would resolve for this (project, modality) — not the
+ * `verify_runbook_local.status` column.
+ *
+ * The column is one conjunct. `VerifyRunbookStore.status()` re-checks the whole
+ * conjunction on every read (portable file present in the probed tree AND
+ * hashing to the record, AND matching project input-hash, AND matching host
+ * fingerprint), and the degrade gate + the enqueue-time pin both go through it.
+ * A record left reading `'proven'` while the file lives on an unmerged branch
+ * is the exact case this indirection exists for: the gate skips every request
+ * with "no proven verification runbook" while the panel shows a green "Set up".
+ *
+ * Unwired resolver ⇒ `'unproven-draft'`, never `'proven'` (see
+ * {@link ContextDeps.verifyRunbookStatus}), and a THROWING resolver degrades the
+ * same way rather than failing the whole panel query: one modality whose probe
+ * blew up must not blank out a project's health.
+ */
+async function effectiveRunbookStatus(
+  resolveStatus: VerifyRunbookStatusLike | undefined,
+  projectId: number,
+  modality: VerificationModality,
+): Promise<VerifyRunbookStatus> {
+  if (resolveStatus === undefined) return 'unproven-draft';
+  try {
+    return await resolveStatus(projectId, modality);
+  } catch {
+    return 'unproven-draft';
+  }
 }
 
 /** The singleton host capability generation; 0 when the row/table is absent (fresh install — nothing is stale). */
@@ -795,7 +845,7 @@ export const verificationRequestsRouter = router({
 
       const hostGeneration = readHostGeneration(db);
       // Runbooks FIRST: they decide which capability row is the live one.
-      const runbooks = readRunbooks(db, input.projectId);
+      const runbooks = await readRunbooks(db, input.projectId, ctx.verifyRunbookStatus);
       const capabilities = readCapabilities(db, input.projectId, runbooks, hostGeneration, Date.now());
 
       // A modality earns a row if it has traffic, a ledger entry, OR a runbook.
@@ -857,7 +907,20 @@ export const verificationRequestsRouter = router({
     for (const row of rows) {
       if (typeof row.project_id !== 'number') continue;
       seen.add(row.project_id);
-      if (row.status !== 'proven' || !isVerificationModality(row.modality)) continue;
+      if (!isVerificationModality(row.modality)) continue;
+      // NOT `row.status === 'proven'`. That column is one conjunct of the
+      // answer; the badge must show what the GATE would answer, or it goes
+      // green over exactly the failure it exists to warn about. See
+      // {@link effectiveRunbookStatus}.
+      //
+      // The `row.status !== 'proven'` shortcut is deliberate and not merely an
+      // optimization: the live conjunction can only ever DEMOTE a record, never
+      // promote one, so a record that is not proven cannot become proven here —
+      // and skipping those spares the probe (a file read + an input hash) for
+      // every project that would fail it anyway.
+      if (row.status !== 'proven') continue;
+      const status = await effectiveRunbookStatus(ctx.verifyRunbookStatus, row.project_id, row.modality);
+      if (status !== 'proven') continue;
       let set = proven.get(row.project_id);
       if (!set) {
         set = new Set<VerificationModality>();

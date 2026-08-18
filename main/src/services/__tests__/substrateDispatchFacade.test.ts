@@ -21,7 +21,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'crypto';
-import { SubstrateDispatchFacade } from '../substrateDispatchFacade';
+import { SubstrateDispatchFacade, type PanelOwnerLookup } from '../substrateDispatchFacade';
 import { RunExecutor } from '../../orchestrator/runExecutor';
 import type {
   ClaudeSpawnerOptions,
@@ -29,6 +29,8 @@ import type {
   LifecycleTransitionsLike,
 } from '../../orchestrator/runExecutor';
 import type { AbstractCliManager } from '../panels/cli/AbstractCliManager';
+import type { LoggerLike } from '../../orchestrator/types';
+import { ALL_PANEL_LANES, type PanelLane } from '../panelLane';
 import type { StreamEventPublisher } from '../../orchestrator/runLauncher';
 import type { StreamEnvelope } from '../../../../shared/types/claudeStream';
 import { bridgeEvents } from '../../orchestrator/runEventBridge';
@@ -94,6 +96,36 @@ function makeSpyManager(): SpyManager {
 
 function asManager(spy: SpyManager): AbstractCliManager {
   return spy as unknown as AbstractCliManager;
+}
+
+/**
+ * Build a facade over the lane registrations these tests care about.
+ *
+ * The facade takes a lane→manager registration list; nearly every test here only
+ * wants "the Claude pair, plus maybe a Codex manager", so this keeps the old
+ * positional ergonomics at the call sites and does the registration mapping
+ * once. Tests that are ABOUT the registration API construct the facade directly.
+ */
+function makeFacade(
+  sdk: SpyManager,
+  interactive: SpyManager,
+  registry: WorkflowRegistryLike,
+  logger: LoggerLike,
+  ptyManagers: SpyManager[] = [],
+  codexSdk?: SpyManager,
+  panelOwnerLookup?: PanelOwnerLookup,
+): SubstrateDispatchFacade {
+  return new SubstrateDispatchFacade({
+    managers: [
+      { lane: 'claude-sdk', manager: asManager(sdk) },
+      { lane: 'claude-interactive', manager: asManager(interactive) },
+      ...(codexSdk ? [{ lane: 'codex-sdk' as const, manager: asManager(codexSdk) }] : []),
+      ...ptyManagers.map((m) => ({ lane: 'codex-pty' as const, manager: asManager(m) })),
+    ],
+    registry,
+    logger,
+    panelOwnerLookup,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +220,7 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -207,7 +239,7 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -226,7 +258,7 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -247,7 +279,7 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     };
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: 'unknown-run',
@@ -271,13 +303,13 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const codexSdk = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       registry,
       makeSpyLogger(),
       [],
-      asManager(codexSdk),
+      codexSdk,
     );
 
     await facade.spawnCliProcess({
@@ -305,13 +337,13 @@ describe('SubstrateDispatchFacade — per-spawn agentProvider/agentRuntime overr
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const codexSdk = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       registry,
       makeSpyLogger(),
       [],
-      asManager(codexSdk),
+      codexSdk,
     );
 
     await facade.spawnCliProcess({
@@ -333,7 +365,7 @@ describe('SubstrateDispatchFacade — per-spawn agentProvider/agentRuntime overr
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -353,7 +385,7 @@ describe('SubstrateDispatchFacade — per-spawn agentProvider/agentRuntime overr
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -379,7 +411,7 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -401,7 +433,7 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.spawnCliProcess({
       panelId: run.id,
@@ -426,7 +458,7 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const logger = makeSpyLogger();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, logger);
+    const facade = makeFacade(sdk, interactive, registry, logger);
 
     // No prior spawn — panel is untracked.
     await facade.abort(run.id);
@@ -451,9 +483,9 @@ describe('SubstrateDispatchFacade — hasTurnInFlightForSession ORs across manag
     const interactive = makeSpyManager();
     const extraPty = makeSpyManager();
     const codexSdk = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk), asManager(interactive), registry, makeSpyLogger(),
-      [asManager(extraPty)], asManager(codexSdk),
+    const facade = makeFacade(
+      sdk, interactive, registry, makeSpyLogger(),
+      [extraPty], codexSdk,
     );
 
     expect(facade.hasTurnInFlightForSession('sess-1')).toBe(false);
@@ -469,9 +501,9 @@ describe('SubstrateDispatchFacade — hasTurnInFlightForSession ORs across manag
     const interactive = makeSpyManager();
     const codexSdk = makeSpyManager();
     codexSdk.hasTurnInFlightForSession.mockImplementation((sid) => sid === 'sess-1');
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk), asManager(interactive), registry, makeSpyLogger(),
-      [], asManager(codexSdk),
+    const facade = makeFacade(
+      sdk, interactive, registry, makeSpyLogger(),
+      [], codexSdk,
     );
 
     expect(facade.hasTurnInFlightForSession('sess-1')).toBe(true);
@@ -493,7 +525,7 @@ describe('SubstrateDispatchFacade — killSession hard-kills the live process', 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.killSession(run.id);
 
@@ -507,7 +539,7 @@ describe('SubstrateDispatchFacade — killSession hard-kills the live process', 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.killSession(run.id);
 
@@ -530,7 +562,7 @@ describe('SubstrateDispatchFacade — endSession dispatches an SDK kill (no grac
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.endSession(run.id);
 
@@ -544,7 +576,7 @@ describe('SubstrateDispatchFacade — endSession dispatches an SDK kill (no grac
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     await facade.endSession(run.id);
 
@@ -563,7 +595,7 @@ describe('SubstrateDispatchFacade — relayInput routes to the interactive manag
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     facade.relayInput(run.id, 'hello world\n');
 
@@ -579,7 +611,7 @@ describe('SubstrateDispatchFacade — relayInput routes to the interactive manag
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     facade.relayInput(run.id, 'should not relay');
 
@@ -593,7 +625,7 @@ describe('SubstrateDispatchFacade — relayInput routes to the interactive manag
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     facade.relayInput(run.id, 'legacy');
 
@@ -610,7 +642,7 @@ describe('SubstrateDispatchFacade — relayInput routes to the interactive manag
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     interactive.isPanelRunning.mockReturnValue(false);
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     expect(() => facade.relayInput(run.id, 'typed into a dead repl')).not.toThrow();
 
@@ -627,7 +659,7 @@ describe('SubstrateDispatchFacade — relayResize relays geometry into the live 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = new ResizeCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     facade.relayResize(run.id, 120, 40);
 
@@ -641,7 +673,7 @@ describe('SubstrateDispatchFacade — relayResize relays geometry into the live 
     const sdk = makeSpyManager();
     // Base SpyManager has no resizePanel — feature detection must no-op cleanly.
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // Must not throw even though the seam is absent.
     expect(() => facade.relayResize(run.id, 100, 30)).not.toThrow();
@@ -652,7 +684,7 @@ describe('SubstrateDispatchFacade — relayResize relays geometry into the live 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = new ResizeCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     facade.relayResize(run.id, 90, 25);
 
@@ -687,7 +719,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // Quick-session shape: the process lives under 'panel-X', the run is 'run-Y'.
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
@@ -703,7 +735,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // Deterministic at-spawn registration (sessions:create-quick / dead-REPL
     // re-spawn) — no 'pty-output'/'turn-end' has flowed yet.
@@ -724,7 +756,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('turn-end', { panelId: 'panel-X', sessionId: 'panel-X', runId: 'run-Y' });
 
@@ -738,7 +770,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = new ResizeCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
 
@@ -753,7 +785,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = new EndSessionCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
 
@@ -768,7 +800,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
 
@@ -783,7 +815,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // Map MISS (no events seen yet) → fallback to runId.
     facade.relayInput(run.id, 'first');
@@ -800,7 +832,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
     interactive.emit('exit', { panelId: 'panel-X', sessionId: 'panel-X', exitCode: 0, signal: null });
@@ -815,7 +847,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
     const registry = makeRegistry(run);
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y', 'quick paint'));
     expect(facade.getPtyBacklog('run-Y')).toBe('quick paint');
@@ -830,7 +862,7 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
     facade.dispose();
@@ -871,7 +903,7 @@ describe('SubstrateDispatchFacade — concurrent PTY chat panels isolate by pane
     };
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // The added-panel eager spawn seeds an IDENTITY entry per panel (panelId ===
     // runId), so a relay racing the first PTY byte resolves to that panel.
@@ -894,9 +926,9 @@ describe('SubstrateDispatchFacade — concurrent PTY chat panels isolate by pane
       getById: vi.fn().mockReturnValue(makeWorkflowRow()),
     };
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(makeSpyManager()),
-      asManager(interactive),
+    const facade = makeFacade(
+      makeSpyManager(),
+      interactive,
       registry,
       makeSpyLogger(),
     );
@@ -929,7 +961,7 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('output', (p) => received.push(p));
@@ -947,7 +979,7 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('output', (p) => received.push(p));
@@ -964,7 +996,7 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('exit', (p) => received.push(p));
@@ -984,7 +1016,7 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('spawned', (p) => received.push(p));
@@ -1004,12 +1036,12 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const codexPty = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeRegistry(run),
       makeSpyLogger(),
-      [asManager(codexPty)],
+      [codexPty],
     );
     const received: unknown[] = [];
     facade.on('exit', (payload) => received.push(payload));
@@ -1037,7 +1069,7 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('output', (p) => received.push(p));
@@ -1069,7 +1101,7 @@ describe('SubstrateDispatchFacade — pty-output fan-in (interactive only)', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('pty-output', (p) => received.push(p));
@@ -1087,7 +1119,7 @@ describe('SubstrateDispatchFacade — pty-output fan-in (interactive only)', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('pty-output', (p) => received.push(p));
@@ -1104,7 +1136,7 @@ describe('SubstrateDispatchFacade — pty-output fan-in (interactive only)', () 
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const received: unknown[] = [];
     facade.on('pty-output', (p) => received.push(p));
@@ -1138,7 +1170,7 @@ describe('SubstrateDispatchFacade — PTY backlog for replay-on-attach', () => {
   it('accumulates pty-output bytes per run; getPtyBacklog returns them concatenated verbatim', () => {
     const run = makeWorkflowRunRow({ substrate: 'interactive' });
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, makeRegistry(run), makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk(run.id, '\x1b[2Jhel'));
     interactive.emit('pty-output', ptyChunk(run.id, 'lo paint'));
@@ -1149,7 +1181,7 @@ describe('SubstrateDispatchFacade — PTY backlog for replay-on-attach', () => {
   it('caps the backlog to the last CAP bytes (keeps the recent ANSI tail)', () => {
     const run = makeWorkflowRunRow({ substrate: 'interactive' });
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, makeRegistry(run), makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk(run.id, 'A'.repeat(CAP)));
     interactive.emit('pty-output', ptyChunk(run.id, 'TAIL'));
@@ -1162,7 +1194,7 @@ describe('SubstrateDispatchFacade — PTY backlog for replay-on-attach', () => {
   it('clears a run backlog on its REPL exit (panelId === runId)', () => {
     const run = makeWorkflowRunRow({ substrate: 'interactive' });
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, makeRegistry(run), makeSpyLogger());
 
     interactive.emit('pty-output', ptyChunk(run.id, 'paint'));
     expect(facade.getPtyBacklog(run.id)).toBe('paint');
@@ -1174,14 +1206,14 @@ describe('SubstrateDispatchFacade — PTY backlog for replay-on-attach', () => {
   it('getPtyBacklog returns "" for an unknown / SDK run (no backlog entry)', () => {
     const run = makeWorkflowRunRow({ substrate: 'sdk' });
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, makeRegistry(run), makeSpyLogger());
     expect(facade.getPtyBacklog('never-seen')).toBe('');
   });
 
   it('dispose() clears all retained backlogs', () => {
     const run = makeWorkflowRunRow({ substrate: 'interactive' });
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    const facade = makeFacade(makeSpyManager(), interactive, makeRegistry(run), makeSpyLogger());
     interactive.emit('pty-output', ptyChunk(run.id, 'paint'));
     facade.dispose();
     expect(facade.getPtyBacklog(run.id)).toBe('');
@@ -1199,7 +1231,7 @@ describe('SubstrateDispatchFacade — cross-substrate envelope parity through br
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const envelopes: StreamEnvelope[] = [];
     const spyPublisher: StreamEventPublisher = {
@@ -1266,7 +1298,7 @@ describe('RunExecutor-over-facade — interactive-branch clean drain drives iden
     const interactive = makeSpyManager();
     const logger = makeSpyLogger();
 
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, logger);
+    const facade = makeFacade(sdk, interactive, registry, logger);
     const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
 
     // The facade IS both the spawner (arg 1) and the EventEmitter source (arg 8).
@@ -1305,7 +1337,7 @@ describe('RunExecutor-over-facade — interactive-branch clean drain drives iden
     const interactive = makeSpyManager();
     const logger = makeSpyLogger();
 
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, logger);
+    const facade = makeFacade(sdk, interactive, registry, logger);
     const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
 
     const executor = new TestableRunExecutor(
@@ -1344,7 +1376,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     const sdk = new SteeringCapableSpyManager();
     sdk.listLiveSpawnKeys.mockReturnValue([`${run.id}:item-1`, `${run.id}:item-2`]);
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const keys = facade.listLiveSpawnKeys(run.id);
 
@@ -1359,7 +1391,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     const sdk = new SteeringCapableSpyManager();
     sdk.injectSteering.mockReturnValue(true);
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     const spawnKey = `${run.id}:item-1`;
     const ok = facade.injectSteering(spawnKey, run.id, 'focus on the failing test');
@@ -1375,7 +1407,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     const sdk = new SteeringCapableSpyManager();
     sdk.injectSteering.mockReturnValue(false); // e.g. turn not in flight / closing
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'too late')).toBe(false);
   });
@@ -1387,7 +1419,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     // reach it for an interactive run — use a steering-capable spy to prove it.
     const sdk = new SteeringCapableSpyManager();
     const interactive = new SteeringCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     expect(facade.listLiveSpawnKeys(run.id)).toEqual([]);
     expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'ignored')).toBe(false);
@@ -1404,7 +1436,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     // Base SpyManager has neither method — the isSteeringCapable guard must no-op.
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     expect(facade.listLiveSpawnKeys(run.id)).toEqual([]);
     expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'noop')).toBe(false);
@@ -1416,7 +1448,7 @@ describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / i
     const sdk = new SteeringCapableSpyManager();
     sdk.listLiveSpawnKeys.mockReturnValue([run.id]);
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
 
     // undefined substrate → DEFAULT_SUBSTRATE ('sdk'), so the SDK seam is reached.
     expect(facade.listLiveSpawnKeys(run.id)).toEqual([run.id]);
@@ -1446,9 +1478,9 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
   it('relays input to the PTY manager for a panel id that matches no run', () => {
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeEmptyRegistry(),
       makeSpyLogger(),
       [],
@@ -1465,9 +1497,9 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
   it('relays a resize to the PTY manager for a panel id that matches no run', () => {
     const sdk = makeSpyManager();
     const interactive = new ResizeCapableSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeEmptyRegistry(),
       makeSpyLogger(),
       [],
@@ -1484,12 +1516,12 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const codexPty = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeEmptyRegistry(),
       makeSpyLogger(),
-      [asManager(codexPty)],
+      [codexPty],
       undefined,
       () => asManager(codexPty),
     );
@@ -1505,9 +1537,9 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
   it('still floors to the SDK manager for an id that is neither a run nor a panel', () => {
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeEmptyRegistry(),
       makeSpyLogger(),
       [],
@@ -1526,9 +1558,9 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
     const sdk = makeSpyManager();
     const interactive = makeSpyManager();
     const lookup = vi.fn().mockReturnValue(asManager(interactive));
-    const facade = new SubstrateDispatchFacade(
-      asManager(sdk),
-      asManager(interactive),
+    const facade = makeFacade(
+      sdk,
+      interactive,
       makeRegistry(run),
       makeSpyLogger(),
       [],
@@ -1540,5 +1572,249 @@ describe('SubstrateDispatchFacade — panel-id resolution', () => {
 
     expect(lookup).not.toHaveBeenCalled();
     expect(interactive.sendInput).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// lane registry — construction shape + registry-driven dispatch
+//
+// These construct the facade DIRECTLY (not through makeFacade) because the
+// registration list is what they are about.
+// ---------------------------------------------------------------------------
+
+/**
+ * EVERY lane registered, one distinct spy each — the boot wiring's shape. Built
+ * from ALL_PANEL_LANES rather than a hand-written list so a lane added to the
+ * union is covered here automatically instead of silently going untested.
+ */
+function makeFourLaneFacade(registry: WorkflowRegistryLike): {
+  facade: SubstrateDispatchFacade;
+  managers: Record<PanelLane, SpyManager>;
+} {
+  const managers = Object.fromEntries(
+    ALL_PANEL_LANES.map((lane) => [lane, makeSpyManager()]),
+  ) as Record<PanelLane, SpyManager>;
+  const facade = new SubstrateDispatchFacade({
+    managers: ALL_PANEL_LANES.map((lane) => ({
+      lane,
+      manager: asManager(managers[lane]),
+    })),
+    registry,
+    logger: makeSpyLogger(),
+  });
+  return { facade, managers };
+}
+
+async function spawnOn(facade: SubstrateDispatchFacade, runId: string, overrides: Partial<ClaudeSpawnerOptions> = {}): Promise<void> {
+  await facade.spawnCliProcess({
+    panelId: runId,
+    sessionId: runId,
+    runId,
+    worktreePath: '/fake/worktree',
+    prompt: 'go',
+    ...overrides,
+  });
+}
+
+/** The single manager a dispatch reached, or a readable failure. */
+function spawnedLane(managers: Record<PanelLane, SpyManager>): PanelLane {
+  const hit = (Object.keys(managers) as PanelLane[]).filter(
+    (lane) => managers[lane].spawnCliProcess.mock.calls.length > 0,
+  );
+  expect(hit).toHaveLength(1);
+  return hit[0];
+}
+
+describe('SubstrateDispatchFacade — registry dispatch from the run row', () => {
+  it.each([
+    ['claude-sdk', { substrate: 'sdk' as const, agent_provider: 'claude' as const, agent_runtime: 'claude-sdk' as const }],
+    ['claude-interactive', { substrate: 'interactive' as const, agent_provider: 'claude' as const, agent_runtime: 'claude-interactive' as const }],
+    ['codex-sdk', { substrate: 'sdk' as const, agent_provider: 'codex' as const, agent_runtime: 'codex-sdk' as const }],
+  ])('routes a %s run row to that lane', async (lane, stamp) => {
+    const run = makeWorkflowRunRow(stamp);
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe(lane);
+  });
+
+  it('falls back to the substrate axis for a row with a provider but no runtime stamp', async () => {
+    // No writer produces this shape (createRun stamps provider and runtime
+    // together), but it pins how the two axes combine when only one is present.
+    const run = makeWorkflowRunRow({ substrate: 'interactive', agent_provider: 'codex' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('codex-pty');
+  });
+
+  it('keeps the legacy Claude-SDK floor for a row with neither stamp', async () => {
+    const run = makeWorkflowRunRow();
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('claude-sdk');
+  });
+
+  it('fails LOUDLY on a run row naming a runtime no provider owns', async () => {
+    // The pre-registry chain read this as "not codex-sdk" and silently ran it on
+    // Claude. NODE_ENV is 'test' under vitest, so the policy throws here.
+    const run = makeWorkflowRunRow({
+      agent_runtime: 'acme-sdk' as unknown as WorkflowRunRow['agent_runtime'],
+    });
+    const { facade } = makeFourLaneFacade(makeRegistry(run));
+
+    await expect(spawnOn(facade, run.id)).rejects.toThrow(/matches no registered provider prefix/);
+  });
+
+  // The quick sentinel is the only row that can carry omp-sdk today, and it
+  // carries it precisely so this dispatch resolves — a runtime declared without
+  // being wired here is the misroute the lane registry exists to prevent.
+  it('routes a declared-but-not-yet-launchable runtime to its OWN lane, never Claude', async () => {
+    const run = makeWorkflowRunRow({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('omp-sdk');
+  });
+
+  // An omp-pty session's sentinel carries NO runtime (omp-pty is not storable),
+  // so its run row resolves by the two axes instead — provider 'omp' plus the
+  // interactive substrate must land on the OMP terminal, not the Claude one.
+  it('routes an omp provider on the interactive substrate to the OMP PTY lane', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive', agent_provider: 'omp' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id);
+
+    expect(spawnedLane(managers)).toBe('omp-pty');
+  });
+
+  it('fails LOUDLY when the run names a real lane that has no registered manager', async () => {
+    const run = makeWorkflowRunRow({ agent_provider: 'codex', agent_runtime: 'codex-sdk' });
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = makeFacade(sdk, interactive, makeRegistry(run), makeSpyLogger());
+
+    await expect(spawnOn(facade, run.id)).rejects.toThrow(/\(provider 'codex'\): no manager registered/);
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+    expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
+  });
+});
+
+describe('SubstrateDispatchFacade — registry dispatch from the spawn override', () => {
+  it.each([
+    ['claude-sdk' as const],
+    ['claude-interactive' as const],
+    ['codex-sdk' as const],
+  ])('routes an agentRuntime: %s override to that lane, overriding the run row', async (runtime) => {
+    // The run row says interactive Claude; the per-step override must win.
+    const run = makeWorkflowRunRow({ substrate: 'interactive', agent_runtime: 'claude-interactive' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id, { agentRuntime: runtime });
+
+    expect(spawnedLane(managers)).toBe(runtime);
+  });
+
+  it('routes a provider-only override to that provider when it disagrees with the run', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id, { agentProvider: 'codex' });
+
+    expect(spawnedLane(managers)).toBe('codex-sdk');
+  });
+
+  it('leaves the run-level resolution alone when the provider override AGREES', async () => {
+    // Same provider ⇒ the run's own substrate choice must survive the override.
+    const run = makeWorkflowRunRow({ substrate: 'interactive', agent_runtime: 'claude-interactive' });
+    const { facade, managers } = makeFourLaneFacade(makeRegistry(run));
+
+    await spawnOn(facade, run.id, { agentProvider: 'claude' });
+
+    expect(spawnedLane(managers)).toBe('claude-interactive');
+  });
+});
+
+describe('SubstrateDispatchFacade — construction', () => {
+  it('refuses to build without a manager on the fallback lane', () => {
+    expect(
+      () =>
+        new SubstrateDispatchFacade({
+          managers: [{ lane: 'claude-interactive', manager: asManager(makeSpyManager()) }],
+          registry: makeEmptyRegistry(),
+          logger: makeSpyLogger(),
+        }),
+    ).toThrow(/fallback lane/);
+  });
+
+  it('refuses to register one lane against two different managers', () => {
+    expect(
+      () =>
+        new SubstrateDispatchFacade({
+          managers: [
+            { lane: 'claude-sdk', manager: asManager(makeSpyManager()) },
+            { lane: 'claude-sdk', manager: asManager(makeSpyManager()) },
+          ],
+          registry: makeEmptyRegistry(),
+          logger: makeSpyLogger(),
+        }),
+    ).toThrow(/registered twice/);
+  });
+
+  it('subscribes each lane per its wiring row, and dispose() unsubscribes every one', () => {
+    const { facade, managers } = makeFourLaneFacade(makeEmptyRegistry());
+    const seen: string[] = [];
+    for (const event of ['output', 'exit', 'spawned', 'pty-output', 'turn-end']) {
+      facade.on(event, () => seen.push(event));
+    }
+
+    // Codex SDK deliberately does NOT forward 'spawned' (see LANE_WIRING), and
+    // Codex PTY deliberately does NOT forward 'output'. Both asymmetries predate
+    // the registry; this pins them so a later "cleanup" is a deliberate choice.
+    managers['claude-sdk'].emit('spawned', { panelId: 'p' });
+    managers['codex-sdk'].emit('spawned', { panelId: 'p' });
+    managers['claude-interactive'].emit('output', { panelId: 'p' });
+    managers['codex-pty'].emit('output', { panelId: 'p' });
+    managers['codex-pty'].emit('pty-output', { panelId: 'p', runId: 'p', data: 'x' });
+
+    expect(seen).toEqual(['spawned', 'output', 'pty-output']);
+
+    // The OMP lanes take the row their TRANSPORT implies rather than copying
+    // either Codex asymmetry: the SDK lane forwards output AND spawned, and the
+    // PTY lane forwards output, pty-output and turn-end.
+    seen.length = 0;
+    managers['omp-sdk'].emit('spawned', { panelId: 'p' });
+    managers['omp-sdk'].emit('output', { panelId: 'p' });
+    managers['omp-pty'].emit('output', { panelId: 'p' });
+    managers['omp-pty'].emit('pty-output', { panelId: 'p', runId: 'p', data: 'x' });
+    managers['omp-pty'].emit('turn-end', { panelId: 'p', runId: 'p' });
+
+    expect(seen).toEqual(['spawned', 'output', 'output', 'pty-output', 'turn-end']);
+
+    facade.dispose();
+    seen.length = 0;
+    for (const lane of Object.keys(managers) as PanelLane[]) {
+      managers[lane].emit('output', { panelId: 'p' });
+      managers[lane].emit('exit', { panelId: 'p', exitCode: 0 });
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('ORs hasTurnInFlightForSession across every registered lane', () => {
+    const { facade, managers } = makeFourLaneFacade(makeEmptyRegistry());
+
+    expect(facade.hasTurnInFlightForSession('sess-1')).toBe(false);
+    for (const lane of Object.keys(managers) as PanelLane[]) {
+      expect(managers[lane].hasTurnInFlightForSession).toHaveBeenCalledWith('sess-1');
+    }
+
+    managers['codex-pty'].hasTurnInFlightForSession.mockReturnValue(true);
+    expect(facade.hasTurnInFlightForSession('sess-1')).toBe(true);
   });
 });

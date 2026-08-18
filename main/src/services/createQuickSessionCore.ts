@@ -22,13 +22,15 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import {
   claudeRuntimeFromSubstrate,
-  isWorkflowRuntimeSupported,
+  isWorkflowRunStorableRuntime,
+  providerForRuntime,
   type AgentProvider,
   type SessionAgentRuntime,
-  type WorkflowAgentRuntime,
+  type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
+import { isPtyLane } from './panelLane';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -74,7 +76,8 @@ export interface CreateQuickSessionCoreDeps {
       opts?: {
         requestedModel?: string;
         requestedAgentProvider?: AgentProvider;
-        requestedAgentRuntime?: WorkflowAgentRuntime;
+        /** STORABLE: the sentinel carries the SESSION's runtime — see below. */
+        requestedAgentRuntime?: WorkflowRunStorableRuntime;
         requireSdkSubstrate?: boolean;
       },
     ): { runId: string; substrate: CliSubstrate };
@@ -233,7 +236,12 @@ export async function createQuickSessionCore(
   try {
     // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
     const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
-    const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
+    // The sentinel is a workflow_runs ROW, not a workflow launch: it must carry
+    // whatever runtime the session actually resolved onto, because the dispatch
+    // facade reads this row back to pick the owning manager. Gating it on the
+    // LAUNCHABLE set instead would silently drop the identity of a runtime that
+    // is session-legal but not yet offered as a flow target, misrouting it.
+    const sentinelAgentRuntime = isWorkflowRunStorableRuntime(opts.agentRuntime)
       ? opts.agentRuntime
       : undefined;
     const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(
@@ -283,12 +291,67 @@ export async function createQuickSessionCore(
   }
 }
 
+/**
+ * The STRUCTURED (non-PTY) runtime a quick launch resolves onto when it names a
+ * PROVIDER but no runtime — the wizard never sends a bare provider for a
+ * terminal launch, so the structured lane is the honest projection.
+ *
+ * An exhaustive Record so a provider added to the union cannot ship without
+ * someone naming its lane here; the `claude` row exists to satisfy that
+ * exhaustiveness and is deliberately NOT consulted by the create-quick handler
+ * (Claude keeps its substrate ladder — see ipc/session.ts).
+ */
+export const QUICK_PROVIDER_SDK_RUNTIME: Readonly<Record<AgentProvider, SessionAgentRuntime>> = {
+  claude: 'claude-sdk',
+  codex: 'codex-sdk',
+  omp: 'omp-sdk',
+};
+
+/**
+ * The NON-Claude runtime a launch request resolves onto, or undefined when it
+ * resolves onto Claude (whose runtime comes from the substrate instead) — i.e.
+ * exactly what {@link QuickSessionRuntimeStampInput.sessionAgentRuntime} wants.
+ *
+ * Mirrors the `nonClaudeQuickRuntime` ladder in the `sessions:create-quick`
+ * handler, minus the rungs only that handler has (the design-session pin and the
+ * provider-access reroute, both of which resolve the provider BEFORE this
+ * projection). The A/B quick-arm path (index.ts `createArmSession`) has neither
+ * rung, so this is its whole derivation.
+ *
+ * Generic ON PURPOSE. The arm stamp used to test `agentRuntime === 'codex-sdk'`,
+ * which meant an `omp-sdk` arm stamped no runtime at all and
+ * {@link stampQuickSessionRuntimeConfig} derived `claude-sdk` from the SDK
+ * substrate: the sentinel run row said omp-sdk while the session row said
+ * claude-sdk, and every chat turn dispatched to Claude. A per-provider literal
+ * is wrong here by construction — the answer is "whatever provider this runtime
+ * belongs to", read from the registry.
+ */
+export function resolveNonClaudeSessionRuntime(request: {
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+}): SessionAgentRuntime | undefined {
+  const runtime =
+    request.agentRuntime ??
+    (request.agentProvider !== undefined && request.agentProvider !== 'claude'
+      ? QUICK_PROVIDER_SDK_RUNTIME[request.agentProvider]
+      : undefined);
+  if (runtime === undefined) return undefined;
+  return providerForRuntime(runtime) === 'claude' ? undefined : runtime;
+}
+
 /** Input for {@link stampQuickSessionRuntimeConfig}. */
 export interface QuickSessionRuntimeStampInput {
   /** The RESOLVED substrate returned by the core's sentinel createRun. */
   resolvedSubstrate: CliSubstrate;
-  useCodexSdk: boolean;
-  useCodexPty: boolean;
+  /**
+   * The NON-Claude runtime this launch resolved onto, when it resolved onto one
+   * ('codex-sdk' | 'codex-pty' | 'omp-sdk' | 'omp-pty'). Undefined means Claude,
+   * whose runtime is derived from the resolved substrate instead.
+   *
+   * ONE field replaces the `useCodexSdk`/`useCodexPty` boolean pair: a third
+   * provider would otherwise need a third pair here and at both call sites.
+   */
+  sessionAgentRuntime?: SessionAgentRuntime;
   /** Only stamped when explicitly chosen — undefined keeps the global default (NULL). */
   requestedAgentMode?: PermissionMode;
   /**
@@ -316,6 +379,11 @@ export interface QuickSessionRuntimeStampInput {
  *   CYBOFLOW_SUBSTRATE, and stamping only on explicit request would leave the
  *   run row saying interactive while the session behaved SDK. NULL remains the
  *   legacy/SDK meaning for pre-migration rows only.
+ *
+ * A PTY-transport runtime (codex-pty, omp-pty) also FORCES `substrate` to
+ * 'interactive': the sentinel run only carries the STORABLE runtimes, so a PTY
+ * launch reaches createRun with a substrate request and no runtime, and the
+ * session row is where its terminal identity has to land.
  */
 export function stampQuickSessionRuntimeConfig(
   db: Database.Database,
@@ -328,13 +396,17 @@ export function stampQuickSessionRuntimeConfig(
       sessionId,
     );
   }
-  const resolvedSessionAgentRuntime = input.agentRuntimeOverride
-    ?? (input.useCodexSdk
-      ? 'codex-sdk'
-      : input.useCodexPty
-        ? 'codex-pty'
-        : claudeRuntimeFromSubstrate(input.resolvedSubstrate));
-  const resolvedSessionSubstrate = input.useCodexPty ? 'interactive' : input.resolvedSubstrate;
+  const resolvedSessionAgentRuntime =
+    input.agentRuntimeOverride ??
+    input.sessionAgentRuntime ??
+    claudeRuntimeFromSubstrate(input.resolvedSubstrate);
+  // omp-fleet is NOT a PTY lane (it supervises a remote fleet, not a terminal):
+  // its substrate stays whatever the sentinel resolved, exactly as before the
+  // lane abstraction — isPtyLane covers the PTY-transport runtimes only.
+  const resolvedSessionSubstrate =
+    resolvedSessionAgentRuntime !== 'omp-fleet' && isPtyLane(resolvedSessionAgentRuntime)
+      ? 'interactive'
+      : input.resolvedSubstrate;
   db.prepare(
     `UPDATE sessions
         SET substrate = ?,

@@ -2,24 +2,29 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ModelPill, MODEL_OPTIONS, formatDynamicClaudeLabel } from '../ModelPill';
-import { _resetClaudeModelCatalogForTesting } from '../../../../stores/claudeModelCatalogStore';
+import { resetProviderModelCatalogsForTests } from '../../../../stores/providerModelCatalogStore';
 
 const mockSetModel = vi.fn();
 const mockGetCodexCatalog = vi.fn();
 const mockGetClaudeCatalog = vi.fn();
+const mockGetOmpCatalog = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     claudePanels: { setModel: (...args: unknown[]) => mockSetModel(...args) },
     models: {
-      getCodexCatalog: (...args: unknown[]) => mockGetCodexCatalog(...args),
-      getClaudeCatalog: (...args: unknown[]) => mockGetClaudeCatalog(...args),
+      getCatalog: (provider: string) =>
+        provider === 'codex'
+          ? mockGetCodexCatalog()
+          : provider === 'omp'
+            ? mockGetOmpCatalog()
+            : mockGetClaudeCatalog(),
     },
   },
 }));
 
 describe('ModelPill', () => {
   beforeEach(() => {
-    _resetClaudeModelCatalogForTesting();
+    resetProviderModelCatalogsForTests();
     mockSetModel.mockReset();
     mockSetModel.mockResolvedValue({ success: true });
     // Default: no dynamic Claude models — pinned-only picker (existing tests).
@@ -33,6 +38,16 @@ describe('ModelPill', () => {
           { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'Balanced coding model', isDefault: false },
         ],
         defaultModel: 'gpt-5.6-sol',
+      },
+    });
+    mockGetOmpCatalog.mockReset();
+    mockGetOmpCatalog.mockResolvedValue({
+      success: true,
+      data: {
+        models: [
+          { id: 'anthropic/claude-3-5-sonnet-20240620', label: 'Claude Sonnet 3.5', ompProvider: 'anthropic' },
+          { id: 'openai/gpt-5.4', label: 'GPT-5.4', ompProvider: 'openai' },
+        ],
       },
     });
   });
@@ -76,6 +91,41 @@ describe('ModelPill', () => {
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'gpt-5.6-terra'));
     expect(onChange).toHaveBeenCalledWith('gpt-5.6-terra');
   });
+  it('shows OMP models grouped by ompProvider and persists the canonical id verbatim', async () => {
+    const onChange = vi.fn();
+    render(
+      <ModelPill
+        panelId="p1"
+        agentProvider="omp"
+        currentModel="anthropic/claude-3-5-sonnet-20240620"
+        onModelChange={onChange}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText('Claude Sonnet 3.5')); // open the dropdown
+    expect(await screen.findByText('anthropic')).toBeInTheDocument();
+    expect(screen.getByText('openai')).toBeInTheDocument();
+    expect(screen.getByText('GPT-5.4')).toBeInTheDocument();
+    expect(screen.queryByText(/Fable 5/)).toBeNull();
+
+    fireEvent.click(screen.getByText('GPT-5.4'));
+    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'openai/gpt-5.4'));
+    expect(onChange).toHaveBeenCalledWith('openai/gpt-5.4');
+  });
+
+  it('shows "Default" (not a synthesized auto row) when no OMP model is set', () => {
+    render(<ModelPill panelId="p1" agentProvider="omp" currentModel={null} onModelChange={vi.fn()} />);
+    expect(screen.getByText('Default')).toBeInTheDocument();
+  });
+
+  it('shows a loading/empty placeholder while the OMP catalog has not resolved to any models', async () => {
+    mockGetOmpCatalog.mockResolvedValue({ success: true, data: { models: [] } });
+    render(<ModelPill panelId="p1" agentProvider="omp" currentModel={null} onModelChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Default')); // open the dropdown
+    expect(await screen.findByText('No OMP models available')).toBeInTheDocument();
+  });
+
   it('does not re-persist when selecting the already-active model', async () => {
     const onChange = vi.fn();
     render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={onChange} />);

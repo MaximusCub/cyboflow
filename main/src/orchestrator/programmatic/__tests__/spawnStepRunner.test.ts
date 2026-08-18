@@ -542,6 +542,29 @@ describe('SpawnStepRunner', () => {
       expect(passed.model).toBe('gpt-5.2-codex');
     });
 
+    // migration 104: providerModel generalizes the deprecated codexModel alias.
+    // resolveStepAgent is an injected thunk, so both keys are re-normalized here
+    // (providerModel ?? codexModel) in case a not-yet-migrated caller returns
+    // only the old key — proven above; this proves the new key wins when both
+    // are present, mirroring the rest of the resolution chain.
+    it('an explicit providerModel wins over a stale codexModel on the SAME resolver return', async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: () => ({
+          runtime: 'codex-sdk',
+          providerModel: 'gpt-5.2-codex',
+          codexModel: 'gpt-5-stale',
+        }),
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('gpt-5.2-codex');
+    });
+
     it('resolveStepAgent returning undefined for this step (agent unoverridden) omits agentProvider/agentRuntime and keeps opts.model', async () => {
       const spawner = makeSpawner();
       const runner = new SpawnStepRunner(spawner, {

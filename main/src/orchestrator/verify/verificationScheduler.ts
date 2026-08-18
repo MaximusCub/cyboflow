@@ -48,6 +48,7 @@ import type {
   VerificationTaskV1,
   VerificationType,
   VerdictV1,
+  VerifyChainEntry,
   VisualBackend,
   VisualBackendId,
   VlmJudge,
@@ -1226,6 +1227,39 @@ export interface AwaitTerminalOutcome {
   feedback: string | null;
 }
 
+/**
+ * One row of {@link VerificationScheduler.listRequestsForRun} — the COLD-READ
+ * counterpart to {@link AwaitTerminalOutcome}. `awaitTerminal` answers "what
+ * happened to the id I am holding"; this answers "what verifications does this
+ * run have", which is the only question left once a context compaction has
+ * taken the ids away.
+ *
+ * `screenshotFiles` is deliberately PER-REQUEST and nullable, not the run's
+ * artifact file list: the `screenshots` artifact permanently UNIONS filenames
+ * across every delivery on the run, so reporting it per row would attribute an
+ * earlier turn's PNGs to this request. `null` means "this engine persisted no
+ * exact per-request list" (the legacy capture path writes no `report_json`) —
+ * distinct from `[]`, which means the agent ran and captured nothing.
+ */
+export interface VerificationRequestSummary {
+  id: string;
+  status: RequestStatus;
+  verifyType: string | null;
+  attempt: number;
+  errorMessage: string | null;
+  failureClass: string | null;
+  feedback: string | null;
+  enqueuedAt: string | null;
+  endedAt: string | null;
+  /**
+   * The git sha the snapshot worktree was built at. Read together with
+   * `dirtyWorktree` from the enqueue reply: a verdict certifies THIS sha, not
+   * necessarily what the user is looking at.
+   */
+  snapshotSha: string | null;
+  screenshotFiles: string[] | null;
+}
+
 /** How often {@link VerificationScheduler.awaitTerminal} re-reads the row. */
 export const AWAIT_TERMINAL_POLL_INTERVAL_MS = 1000;
 
@@ -1510,7 +1544,7 @@ export class VerificationScheduler {
       .all() as VerificationRequestRow[];
     let terminalized = 0;
     for (const row of rows) {
-      if (!this.isAgentStampedRun(row.run_id)) continue;
+      if (!this.isAgentEngineRequest(row)) continue;
       const input = this.parseInput(row.deliverable_json) ?? undefined;
       await this.markTerminalAndDeliver(
         row,
@@ -1566,7 +1600,17 @@ export class VerificationScheduler {
     projectId: number;
     type: VerificationType;
     input: VerificationRequestInput;
-    chain: VisualBackendId[];
+    /**
+     * The backend chain persisted to `chain_json`. Typed `VerifyChainEntry[]`
+     * (not `VisualBackendId[]`) because the single-member `['agent']` ENGINE
+     * SELECTOR is a legal value here: the `__quick__` chat sentinel resolves its
+     * posture at call time and writes the resolved chain verbatim, which is the
+     * first rung of {@link VerificationScheduler.isAgentEngineRequest}. Flow runs
+     * still pass the host-capability intersection (`[]` under the agent engine).
+     * The legacy waterfall reads this column back through `parseChain`, which
+     * narrows to `VisualBackendId[]` and drops the 'agent' member.
+     */
+    chain: VerifyChainEntry[];
     /** The composed task (§5.1), when this request was enqueued via the dual-format contract. Absent ⇒ task_json stays NULL. */
     task?: VerificationTaskV1;
     /** The git sha the verification agent's snapshot worktree was built at (§5.5). Absent/null ⇒ snapshot_sha stays NULL. */
@@ -1845,6 +1889,107 @@ export class VerificationScheduler {
     };
   }
 
+  /**
+   * Every verification request belonging to `runId`, newest first — the cold read
+   * behind the `cyboflow_get_verifications` MCP tool. `requestId` narrows to a
+   * single row (still run-scoped: a foreign id yields an empty list, so the caller
+   * cannot use this to read another run's verdict).
+   *
+   * Run-scoping is enforced HERE in the SQL rather than by filtering afterwards,
+   * so there is no shape in which a row from another run is materialized at all.
+   *
+   * Column availability is handled with the SAME widen-then-fall-back ladder as
+   * {@link readAwaitSnapshot}: a pre-078/pre-095 DB throws on `prepare` before any
+   * read, and losing the whole listing to that throw would make this tool answer
+   * "no verifications" on a binary that genuinely has them. The fallback drops only
+   * the columns such a DB never had.
+   *
+   * Fail-soft to `[]` on an unreadable table — an empty listing is the honest
+   * answer for a caller that cannot be shown the rows.
+   */
+  listRequestsForRun(runId: string, requestId?: string): VerificationRequestSummary[] {
+    interface ListRow {
+      id: unknown;
+      status: unknown;
+      verify_type: unknown;
+      attempt: unknown;
+      error_message: unknown;
+      verdict_json: unknown;
+      enqueued_at: unknown;
+      ended_at: unknown;
+      failure_class?: unknown;
+      snapshot_sha?: unknown;
+      report_json?: unknown;
+    }
+    const narrow = 'id, status, verify_type, attempt, error_message, verdict_json, enqueued_at, ended_at';
+    const wide = `${narrow}, failure_class, snapshot_sha, report_json`;
+    const where = `WHERE run_id = ?${requestId === undefined ? '' : ' AND id = ?'}`;
+    const params = requestId === undefined ? [runId] : [runId, requestId];
+    const order = 'ORDER BY enqueued_at DESC, id DESC';
+
+    const read = (columns: string): ListRow[] =>
+      this.db
+        .prepare(`SELECT ${columns} FROM verification_requests ${where} ${order}`)
+        .all(...params) as ListRow[];
+
+    let rows: ListRow[];
+    try {
+      rows = read(wide);
+    } catch {
+      try {
+        rows = read(narrow);
+      } catch (err) {
+        this.logger?.warn('[VerificationScheduler] request listing read failed (fail-soft)', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return [];
+      }
+    }
+
+    return rows.map((row) => ({
+      id: typeof row.id === 'string' ? row.id : '',
+      // An unrecognized status is reported as 'running' for the same reason
+      // readAwaitSnapshot does it: non-terminal is the safe reading of a row this
+      // scheduler cannot vouch for, and it never looks like a verdict.
+      status: isRequestStatus(row.status) ? row.status : 'running',
+      verifyType: typeof row.verify_type === 'string' ? row.verify_type : null,
+      attempt: typeof row.attempt === 'number' ? row.attempt : 0,
+      errorMessage: typeof row.error_message === 'string' ? row.error_message : null,
+      failureClass:
+        typeof row.failure_class === 'string' && row.failure_class.length > 0 ? row.failure_class : null,
+      feedback: parseVerdictFeedback(row.verdict_json),
+      enqueuedAt: typeof row.enqueued_at === 'string' ? row.enqueued_at : null,
+      endedAt: typeof row.ended_at === 'string' ? row.ended_at : null,
+      snapshotSha: typeof row.snapshot_sha === 'string' && row.snapshot_sha.length > 0 ? row.snapshot_sha : null,
+      screenshotFiles: this.reportScreenshotFileNames(row.report_json),
+    }));
+  }
+
+  /**
+   * The screenshot basenames THIS request's agent report recorded, or `null` when
+   * the row carries no `report_json` at all (the legacy capture path, or a request
+   * that never reached a terminal). Shares the extraction shape with
+   * {@link deriveReplayFileNames}; kept separate because that one falls back to the
+   * verdict's `judgedFileNames` for the artifact merge, whereas a caller being told
+   * "these are THIS request's screenshots" must get `null` rather than a
+   * best-effort list it would relay as exact.
+   */
+  private reportScreenshotFileNames(reportJson: unknown): string[] | null {
+    if (typeof reportJson !== 'string' || reportJson.length === 0) return null;
+    try {
+      const parsed: unknown = JSON.parse(reportJson);
+      if (parsed === null || typeof parsed !== 'object') return null;
+      const shots = (parsed as { screenshots?: unknown }).screenshots;
+      if (!Array.isArray(shots)) return null;
+      return shots
+        .map((s) => (s !== null && typeof s === 'object' ? (s as { fileName?: unknown }).fileName : undefined))
+        .filter((n): n is string => typeof n === 'string' && n.length > 0);
+    } catch {
+      return null;
+    }
+  }
+
   // --------------------------------------------------------------------------
   // nudge — schedule a drain on THIS scheduler's OWN setImmediate loop
   // --------------------------------------------------------------------------
@@ -1988,7 +2133,7 @@ export class VerificationScheduler {
         'skipped',
         {
           error: `queued-age deadline exceeded — request never acquired a lease within ${ageMin} min (persistent resource contention or a wedged pool)`,
-          ...(this.isAgentStampedRun(row.run_id) ? { captureOrigin: 'agent' as const } : {}),
+          ...(this.isAgentEngineRequest(row) ? { captureOrigin: 'agent' as const } : {}),
         },
         undefined,
         [],
@@ -2081,13 +2226,15 @@ export class VerificationScheduler {
       return { work: null };
     }
 
-    // DISPATCH ON THE RUN STAMP (redesign §5.8): a run stamped `verify_chain:
-    // ['agent']` routes to the VerificationAgentRunner instead of the capture-
-    // backend + VLM waterfall below. Keying on the RUN stamp (not the request's
-    // chain_json — which the MCP handler leaves empty for an 'agent' stamp, §5.2)
-    // is what makes dispatch immune to which column happens to be populated. A
-    // legacy stamp (or an unreadable one — fail-soft) falls through byte-identically.
-    if (this.isAgentStampedRun(row.run_id)) {
+    // DISPATCH ON THE ENGINE KEY (redesign §5.8): an agent-engine request routes
+    // to the VerificationAgentRunner instead of the capture-backend + VLM
+    // waterfall below. `isAgentEngineRequest` reads the request's own
+    // `chain_json` first (the `__quick__` late-binding case, where posture is
+    // resolved at call time and the run stamp cannot carry it) and falls back to
+    // the RUN stamp for everything else — which is what every flow run hits, since
+    // its request's chain_json is always the empty intersection. A legacy stamp
+    // (or an unreadable one — fail-soft) falls through byte-identically.
+    if (this.isAgentEngineRequest(row)) {
       return this.processAgentRow(row, parsed);
     }
 
@@ -2178,22 +2325,70 @@ export class VerificationScheduler {
   // --------------------------------------------------------------------------
 
   /**
+   * True when a persisted chain JSON is exactly `['agent']` (the agent engine,
+   * §5.8). Parsed defensively — accepting the 'agent' member the legacy
+   * VisualBackendId parse would drop — and fail-soft to false (legacy path) on
+   * malformed JSON. Shared by the run-stamp read and the request-row read so both
+   * halves of the dispatch key agree on what "agent" looks like on the wire.
+   */
+  private chainJsonIsAgent(raw: unknown): boolean {
+    if (typeof raw !== 'string' || raw.length === 0) return false;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length === 1 && parsed[0] === 'agent';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * THE dispatch key: does this request run on the agent engine?
+   *
+   * Two rungs, request-row FIRST:
+   *
+   *   1. `chain_json === '["agent"]'` — the request carries its OWN resolved
+   *      engine. Only the `__quick__` chat sentinel writes this: its posture is
+   *      resolved at CALL time (the sentinel is minted once per session, long
+   *      before the global toggle is consulted, and `verify_chain` has no UPDATE
+   *      path — see visualVerificationResolver.ts:5-7), so the run stamp cannot
+   *      carry it. A request row is never re-enqueued, so this is every bit as
+   *      immutable as the run stamp it stands in for.
+   *   2. Otherwise the RUN stamp (`isAgentStampedRun`) — the original §5.8 key,
+   *      unchanged.
+   *
+   * FLOW RUNS ARE BYTE-IDENTICAL under this change. An agent-stamped flow run's
+   * request already persists `chain_json: '[]'`, because the MCP handler
+   * intersects `FALLBACK_CHAINS[type]` with a chain narrowed to `VisualBackendId[]`
+   * — and 'agent' is not one, so the intersection is always empty. Rung 1 misses,
+   * rung 2 decides exactly as before.
+   *
+   * Every consumer of the key goes through THIS method — drain dispatch, the
+   * `CYBOFLOW_VERIFY_LEGACY` boot sweep, and the queued-age expiry's provenance
+   * stamp — so a quick request is swept and attributed with the same provenance
+   * as a flow run's rather than being stranded by a sweep that only knew about
+   * the run stamp.
+   */
+  private isAgentEngineRequest(row: { run_id: string; chain_json: string | null }): boolean {
+    if (this.chainJsonIsAgent(row.chain_json)) return true;
+    return this.isAgentStampedRun(row.run_id);
+  }
+
+  /**
    * True when the row's RUN is stamped `verify_chain: ['agent']` (the agent
-   * engine, §5.8). Parsed defensively — accepting the 'agent' member the legacy
-   * VisualBackendId parse would drop — and fail-soft to false (legacy path) when
-   * workflow_runs / the column is unavailable (a minimal test DB with only
-   * verification_requests) or the JSON is malformed. Read fresh per row from the
-   * injected db; the stamp is immutable per run, so there is no staleness concern.
+   * engine, §5.8). Fail-soft to false (legacy path) when workflow_runs / the
+   * column is unavailable (a minimal test DB with only verification_requests).
+   * Read fresh per row from the injected db; the stamp is immutable per run, so
+   * there is no staleness concern.
+   *
+   * Prefer {@link isAgentEngineRequest} at any site that has the request row —
+   * this one alone cannot see a `__quick__` request's call-time-resolved posture.
    */
   private isAgentStampedRun(runId: string): boolean {
     try {
       const row = this.db
         .prepare('SELECT verify_chain FROM workflow_runs WHERE id = ?')
         .get(runId) as { verify_chain: string | null } | undefined;
-      const raw = row?.verify_chain;
-      if (typeof raw !== 'string') return false;
-      const parsed: unknown = JSON.parse(raw);
-      return Array.isArray(parsed) && parsed.length === 1 && parsed[0] === 'agent';
+      return this.chainJsonIsAgent(row?.verify_chain);
     } catch {
       return false;
     }

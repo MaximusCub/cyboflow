@@ -32,6 +32,7 @@
 import { Loader2, Clock, AlertTriangle, RotateCcw, Settings2 } from 'lucide-react';
 import { cn } from '../../../utils/cn';
 import {
+  AGENT_PROVIDER_LABELS,
   isAgentProviderEnabled,
   parseAgentProviderDisabled,
 } from '../../../../../shared/types/agentRuntime';
@@ -84,7 +85,7 @@ export function PendingSendRow({ entries, onReopen }: PendingSendRowProps): Reac
         const recovered =
           disabled !== null && isAgentProviderEnabled(providerAccess, disabled.provider);
         const reason = recovered
-          ? `${disabled.provider === 'codex' ? 'Codex' : 'Claude'} is back on — click to retry.`
+          ? `${AGENT_PROVIDER_LABELS[disabled.provider]} is back on — click to retry.`
           : (disabled?.message ?? (entry.status === 'failed' ? entry.error : undefined));
 
         return (

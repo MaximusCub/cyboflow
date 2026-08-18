@@ -25,17 +25,21 @@
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * caveats text + lock behavior are single-sourced (no drift). `runtimeScope`
- * controls Codex availability: Codex SDK is launchable for workflows and quick
- * sessions; Codex PTY remains session-only.
+ * narrows by LAUNCH KIND, not by vendor: every structured runtime is launchable
+ * for workflows and quick sessions alike, while the terminal runtimes
+ * (`codex-pty`, `omp-pty`) stay session-only — the scope test reads
+ * `workflowRuntimeForLaunch`, so a runtime joining the launchable set is offered
+ * here with no edit.
  */
 import { useEffect } from 'react';
 import {
   firstEnabledRuntime,
   isRuntimeProviderEnabled,
   isSessionAgentRuntime,
-  isWorkflowAgentRuntime,
+  isWorkflowLaunchableRuntime,
   type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
+import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import { useOmpAvailability } from '../../hooks/useOmpAvailability';
@@ -56,6 +60,17 @@ export const INTERACTIVE_CAVEATS: readonly string[] = [
   'Streaming is coarser — output arrives at turn-level granularity, not token-level deltas.',
 ];
 
+/** The v1 limits of the OMP structured (omp-sdk) lane, mirroring INTERACTIVE_CAVEATS' style. */
+export const OMP_SDK_CAVEATS: readonly string[] = [
+  'No question gate yet — approvals land in the review queue.',
+  'Slow approvals (over 25s) are blocked and can be retried.',
+];
+
+/** The v1 limits of the OMP terminal (omp-pty) lane. */
+export const OMP_PTY_CAVEATS: readonly string[] = [
+  'Approvals stay in the OMP terminal — no Cyboflow review-queue integration.',
+];
+
 interface SubstrateSelectorProps {
   value: LaunchAgentRuntime;
   onChange: (runtime: LaunchAgentRuntime) => void;
@@ -69,14 +84,31 @@ interface SubstrateSelectorProps {
   runtimeScope?: 'workflow' | 'session' | 'mixed';
 }
 
-/** Every runtime the picker can offer, in display order. */
+/** Every runtime this picker knows a row for, in display order. */
 const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = [
   { runtime: 'claude-sdk', label: 'Claude SDK (default)' },
   { runtime: 'claude-interactive', label: 'Claude interactive (PTY)' },
   { runtime: 'codex-sdk', label: 'Codex SDK' },
   { runtime: 'codex-pty', label: 'Codex PTY — quick sessions only' },
-  { runtime: 'omp-fleet', label: 'OMP Fleet — quick sessions only' },
+  { runtime: 'omp-sdk', label: 'OMP' },
+  { runtime: 'omp-pty', label: 'OMP terminal' },
+  { runtime: 'omp-fleet', label: 'OMP fleet — quick sessions only' },
 ];
+
+/**
+ * The rows the picker may render at all, before the provider toggles narrow them
+ * further. Gated on `RUNTIME_CAPABILITIES.selectableInPickers` rather than on
+ * membership of the list above, so a runtime declared ahead of its managers can
+ * carry its row and label here from the start and stay invisible until that one
+ * flag flips — the alternative is a second list to remember, and a row added to
+ * only one of them.
+ *
+ * Everything downstream (the option list, the disabled-provider fallback, the
+ * "some are hidden" note) counts against THIS, never against RUNTIME_OPTIONS.
+ */
+const SELECTABLE_RUNTIME_OPTIONS = RUNTIME_OPTIONS.filter((o) =>
+  isRuntimeSelectableInPickers(o.runtime),
+);
 
 /**
  * Scope-level unavailability — rendered as a DISABLED option so the user can
@@ -96,7 +128,7 @@ function enabledRuntimeOptions(
   access: AgentProviderAccess,
   ompAvailable: boolean,
 ): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return RUNTIME_OPTIONS.filter((o) => {
+  return SELECTABLE_RUNTIME_OPTIONS.filter((o) => {
     if (o.runtime === 'omp-fleet' && !ompAvailable) return false;
     return isRuntimeProviderEnabled(access, o.runtime);
   });
@@ -104,24 +136,34 @@ function enabledRuntimeOptions(
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
   if (scope === 'workflow') {
-    return 'Workflows can run on Claude or Codex SDK. Codex PTY remains quick-session-only.';
+    return 'Workflows run on any structured runtime — Claude, Codex SDK, or OMP. The terminal runtimes remain quick-session-only.';
   }
   if (scope === 'session') {
-    return 'Codex SDK runs structured quick-session chat. Codex PTY opens an interactive terminal-style Codex session.';
+    return 'The structured runtimes run quick-session chat; the terminal runtimes open an interactive terminal-style session instead.';
   }
-  return 'Codex SDK can run workflows or quick sessions. Codex PTY starts quick sessions only.';
+  return 'A structured runtime can run workflows or quick sessions. The terminal runtimes start quick sessions only.';
 }
 
-function InteractiveCaveats({ testId }: { testId: string }): React.JSX.Element {
+/** Shared caveats-block rendering — the interactive PTY and both OMP rows use
+ *  the same "v1 limits" panel, differing only in title + item list. */
+function CaveatsPanel({
+  testId,
+  title,
+  items,
+}: {
+  testId: string;
+  title: string;
+  items: readonly string[];
+}): React.JSX.Element {
   return (
     <div
       data-testid={testId}
       role="note"
       className="mt-1 rounded-input border border-status-warning bg-bg-secondary px-3 py-2 text-xs text-text-secondary"
     >
-      <p className="mb-1 font-semibold text-text-primary">Interactive substrate — v1 limits</p>
+      <p className="mb-1 font-semibold text-text-primary">{title}</p>
       <ul className="list-disc space-y-1 pl-4">
-        {INTERACTIVE_CAVEATS.map((caveat) => (
+        {items.map((caveat) => (
           <li key={caveat}>{caveat}</li>
         ))}
       </ul>
@@ -167,7 +209,9 @@ export function SubstrateSelector({
   // always name a provider the backend will accept.
   const fallbackRuntime = firstEnabledRuntime(
     providerAccess,
-    RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map((o) => o.runtime),
+    SELECTABLE_RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map(
+      (o) => o.runtime,
+    ),
   );
   useEffect(() => {
     if (isRuntimeProviderEnabled(providerAccess, value)) return;
@@ -211,7 +255,7 @@ export function SubstrateSelector({
           Claude SDK is disabled globally (Settings → AI Integration → CLI runtime). Every run uses
           the interactive PTY runtime.
         </p>
-        <InteractiveCaveats testId={caveatsTestId} />
+        <CaveatsPanel testId={caveatsTestId} title="Interactive substrate — v1 limits" items={INTERACTIVE_CAVEATS} />
       </div>
     );
   }
@@ -227,7 +271,7 @@ export function SubstrateSelector({
         onChange={(e) => {
           const next = e.target.value;
           if (
-            (isSessionAgentRuntime(next) || isWorkflowAgentRuntime(next)) &&
+            (isSessionAgentRuntime(next) || isWorkflowLaunchableRuntime(next)) &&
             !isRuntimeDisabled(next, runtimeScope) &&
             isRuntimeProviderEnabled(providerAccess, next)
           ) {
@@ -248,12 +292,20 @@ export function SubstrateSelector({
         ))}
       </select>
       <p className="text-xs text-text-tertiary">
-        {options.length === RUNTIME_OPTIONS.length
+        {options.length === SELECTABLE_RUNTIME_OPTIONS.length
           ? scopeHelp(runtimeScope)
           : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
       </p>
 
-      {value === 'claude-interactive' && <InteractiveCaveats testId={caveatsTestId} />}
+      {value === 'claude-interactive' && (
+        <CaveatsPanel testId={caveatsTestId} title="Interactive substrate — v1 limits" items={INTERACTIVE_CAVEATS} />
+      )}
+      {value === 'omp-sdk' && (
+        <CaveatsPanel testId={caveatsTestId} title="OMP — v1 limits" items={OMP_SDK_CAVEATS} />
+      )}
+      {value === 'omp-pty' && (
+        <CaveatsPanel testId={caveatsTestId} title="OMP terminal — v1 limits" items={OMP_PTY_CAVEATS} />
+      )}
     </div>
   );
 }

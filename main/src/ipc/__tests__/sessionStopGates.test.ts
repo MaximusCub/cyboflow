@@ -71,10 +71,15 @@ interface DbRow {
   chat_run_id?: string | null;
   run_id?: string | null;
   agent_runtime?: string;
+  substrate?: string;
 }
 
 function makeServices(dbSession: DbRow | undefined) {
   const stopClaudePanel = vi.fn(async () => {});
+  const codexSdkManager = { on: vi.fn(), stopPanel: vi.fn(async () => {}) };
+  const codexPtyManager = { on: vi.fn(), stopPanel: vi.fn(async () => {}) };
+  const ompSdkManager = { on: vi.fn(), stopPanel: vi.fn(async () => {}) };
+  const ompPtyManager = { on: vi.fn(), stopPanel: vi.fn(async () => {}) };
   const services = {
     sessionManager: {
       addSessionOutput: vi.fn(),
@@ -86,11 +91,13 @@ function makeServices(dbSession: DbRow | undefined) {
       getSession: vi.fn(() => dbSession),
     },
     claudeCodeManager: { stopPanel: stopClaudePanel, stopSession: vi.fn() },
-    codexSdkManager: { on: vi.fn(), stopPanel: vi.fn() },
-    codexPtyManager: { on: vi.fn(), stopPanel: vi.fn() },
+    codexSdkManager,
+    codexPtyManager,
+    ompSdkManager,
+    ompPtyManager,
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
-  return { services, stopClaudePanel };
+  return { services, stopClaudePanel, codexSdkManager, codexPtyManager, ompSdkManager, ompPtyManager };
 }
 
 function register(services: AppServices) {
@@ -170,5 +177,59 @@ describe('sessions:stop — pending-gate settlement', () => {
 
     expect(result.success).toBe(true);
     expect(stopClaudePanel).toHaveBeenCalledWith('panel-1');
+  });
+});
+
+/**
+ * Stop dispatches per PANEL LANE. A session-level test would send a mixed
+ * session's odd panel to the wrong manager, and the switch this replaces knew
+ * only the two Codex lanes — so an OMP panel's process survived its own Stop.
+ */
+describe('sessions:stop — per-lane teardown', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([CLAUDE_PANEL]);
+    db = createTestDb();
+    QuestionRouter.initialize(dbAdapter(db));
+    ApprovalRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    QuestionRouter._resetForTesting();
+    ApprovalRouter._resetForTesting();
+    db.close();
+  });
+
+  it.each([
+    ['codex-sdk', 'sdk', 'codexSdkManager'],
+    ['codex-pty', 'interactive', 'codexPtyManager'],
+    ['omp-sdk', 'sdk', 'ompSdkManager'],
+    ['omp-pty', 'interactive', 'ompPtyManager'],
+  ] as const)('routes a %s panel to its own manager', async (agentRuntime, substrate, ownerKey) => {
+    const made = makeServices({ id: 's1', chat_run_id: 'gate-run-1', agent_runtime: agentRuntime, substrate });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:stop', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(made[ownerKey].stopPanel).toHaveBeenCalledWith('panel-1');
+    // Claude must never answer for another vendor's panel.
+    expect(made.stopClaudePanel).not.toHaveBeenCalled();
+    for (const other of ['codexSdkManager', 'codexPtyManager', 'ompSdkManager', 'ompPtyManager'] as const) {
+      if (other === ownerKey) continue;
+      expect(made[other].stopPanel).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps a Claude panel on claudeCodeManager', async () => {
+    const made = makeServices({ id: 's1', chat_run_id: 'gate-run-1', agent_runtime: 'claude-sdk' });
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:stop', 's1');
+
+    expect(made.stopClaudePanel).toHaveBeenCalledWith('panel-1');
+    expect(made.ompSdkManager.stopPanel).not.toHaveBeenCalled();
   });
 });

@@ -178,11 +178,16 @@ export interface SpawnStepRunnerOptions {
    * programmatic step turn IS the agent (a top-level spawn), so the agent
    * overlay's `model:` frontmatter — which binds only when the CLI dispatches a
    * subagent — never applies here.
+   *
+   * `providerModel` is the model id for the step's resolved NON-CLAUDE provider
+   * (already normalized `providerModel ?? codexModel` by the caller);
+   * `codexModel` mirrors it for a not-yet-migrated reader.
    */
   resolveStepAgent?: (agentKey: string) =>
     | {
         runtime?: WorkflowAgentRuntime;
         model?: string;
+        providerModel?: string;
         codexModel?: string;
         effort?: ReasoningEffort;
       }
@@ -232,16 +237,27 @@ export class SpawnStepRunner implements StepRunner {
     const runProvider = this.opts.promptRenderContext?.provider ?? 'claude';
     const effectiveProvider = stepProvider ?? runProvider;
     // Resolve the spawn model to one that BELONGS to the effective provider. The
-    // per-agent pin is consulted for the matching provider only (Codex model for a
-    // Codex step, Claude model for a Claude step). The run-level model is inherited
-    // ONLY when the step stays on the run's provider — a step that FLIPS provider
-    // must never inherit the other provider's concrete id (a claude-* id into a
-    // Codex spawn, or a gpt-* id into a Claude spawn), which would reject or
-    // misroute the turn; a flipped step with no matching per-agent model omits
-    // `model` so the provider default applies. (Without this, a per-agent Claude
-    // model pin — including a legacy model-only override — would override the Codex
-    // model on a whole-run Codex programmatic run.)
-    const perAgentModel = effectiveProvider === 'codex' ? stepAgent?.codexModel : stepAgent?.model;
+    // per-agent pin is consulted for the matching provider only (the resolved
+    // provider's own model for a matching step, the Claude alias for a Claude
+    // step). The run-level model is inherited ONLY when the step stays on the
+    // run's provider — a step that FLIPS provider must never inherit the other
+    // provider's concrete id (a claude-* id into a non-Claude spawn, or a
+    // provider-specific id into a Claude spawn), which would reject or misroute
+    // the turn; a flipped step with no matching per-agent model omits `model` so
+    // the provider default applies. (Without this, a per-agent Claude model pin —
+    // including a legacy model-only override — would override the model on a
+    // whole-run non-Claude programmatic run.)
+    //
+    // Which model FIELD a provider's per-agent pin lives on is keyed on the
+    // CLAUDE branch, never the non-Claude one: Claude keeps its own alias field
+    // (`model`), and EVERY other provider — Codex today, any future provider —
+    // shares the generic `providerModel` field. A ternary on `'codex'` would
+    // silently misroute a later provider's pin to the wrong (Claude) field.
+    // `providerModel ?? codexModel` re-applies the read-seam normalization here
+    // too: `resolveStepAgent` is an injected thunk, and a caller that has not
+    // migrated to the new field name may still return only the deprecated alias.
+    const perAgentModel =
+      effectiveProvider === 'claude' ? stepAgent?.model : stepAgent?.providerModel ?? stepAgent?.codexModel;
     const spawnModel =
       perAgentModel ?? (effectiveProvider === runProvider ? this.opts.model : undefined);
     // Normalize the per-agent effort against the provider this step actually spawns

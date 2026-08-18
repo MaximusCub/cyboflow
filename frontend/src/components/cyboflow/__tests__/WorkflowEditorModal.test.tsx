@@ -74,6 +74,7 @@ const CUSTOM_AGENT: AgentEntry = {
   tools: [],
   model: null,
   runtime: null,
+  providerModel: null,
   codexModel: null,
   enabledMcps: [],
   source: 'custom',

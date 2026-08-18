@@ -2053,6 +2053,103 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(reapPrototypeServers).toHaveBeenCalledWith('run-reap-dismiss');
   });
 
+  // -------------------------------------------------------------------------
+  // cancelVerificationsForRun — every way a run can END must cancel its
+  // outstanding visual verifications. Dismiss/cancel already did this via
+  // cancelRunHandler; merge / createPr / the RAIL-level runs.dismiss complete a
+  // run down THIS path instead and previously did not, so a still-draining
+  // verification kept running and later delivered a review-queue finding +
+  // screenshots artifact onto an already-closed-out run (and held a snapshot
+  // worktree cut from the worktree close-out removes). Optional + fail-soft (via
+  // cancelVerificationsForRunSafe), so a throw never blocks the close-out.
+  // -------------------------------------------------------------------------
+
+  it('merge cancels the run outstanding visual verifications at close-out', async () => {
+    seedRun(db, { id: 'run-vcancel-merge', status: 'awaiting_review', worktreePath: '/tmp/wt/run-vcancel-merge' });
+    const cancelVerificationsForRun = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      cancelVerificationsForRun,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-vcancel-merge', strategy: 'preserve' });
+
+    expect(cancelVerificationsForRun).toHaveBeenCalledWith('run-vcancel-merge');
+  });
+
+  it('createPr cancels the run outstanding visual verifications at close-out', async () => {
+    seedRun(db, { id: 'run-vcancel-pr', status: 'awaiting_review', worktreePath: '/tmp/wt/run-vcancel-pr' });
+    const cancelVerificationsForRun = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      cancelVerificationsForRun,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.createPr({ runId: 'run-vcancel-pr' });
+
+    expect(cancelVerificationsForRun).toHaveBeenCalledWith('run-vcancel-pr');
+  });
+
+  it('dismiss cancels the run outstanding visual verifications at close-out', async () => {
+    seedRun(db, { id: 'run-vcancel-dismiss', status: 'stuck', worktreePath: '/tmp/wt/run-vcancel-dismiss' });
+    const cancelVerificationsForRun = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      cancelVerificationsForRun,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-vcancel-dismiss' });
+
+    expect(cancelVerificationsForRun).toHaveBeenCalledWith('run-vcancel-dismiss');
+  });
+
+  it('a THROWING cancelVerificationsForRun never blocks the merge close-out', async () => {
+    // Fail-soft is the whole contract: the verification queue is downstream of the
+    // run's terminal state, so a broken scheduler must not strand the user's merge.
+    seedRun(db, { id: 'run-vcancel-throw', status: 'awaiting_review', worktreePath: '/tmp/wt/run-vcancel-throw' });
+    const wm = makeWmStub();
+    setRunCloseoutDeps({
+      worktreeManager: wm,
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      cancelVerificationsForRun: vi.fn(() => {
+        throw new Error('scheduler exploded');
+      }),
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-vcancel-throw', strategy: 'preserve' });
+
+    expect(result).toEqual({ success: true });
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-vcancel-throw');
+    expect(getStatus('run-vcancel-throw')).toBe('completed');
+  });
+
+  it('close-out proceeds normally when cancelVerificationsForRun is UNWIRED (verification disabled)', async () => {
+    seedRun(db, { id: 'run-vcancel-absent', status: 'awaiting_review', worktreePath: '/tmp/wt/run-vcancel-absent' });
+    const wm = makeWmStub();
+    wire(wm); // no cancelVerificationsForRun in the bag at all
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-vcancel-absent', strategy: 'preserve' });
+
+    expect(result).toEqual({ success: true });
+    expect(getStatus('run-vcancel-absent')).toBe('completed');
+  });
+
   it('createPr reaps the run prototype server at close-out', async () => {
     seedRun(db, { id: 'run-reap-pr', status: 'awaiting_review', worktreePath: '/tmp/wt/run-reap-pr' });
     const reapPrototypeServers = vi.fn();

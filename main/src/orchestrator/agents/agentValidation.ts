@@ -15,7 +15,7 @@ import { isCliTool } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import { isAgentModelAlias, referencesForbiddenWriterTool } from '../../../../shared/types/agents';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
-import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { isWorkflowLaunchableRuntime } from '../../../../shared/types/agentRuntime';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The discriminated set of validation/conflict failure codes. */
@@ -55,7 +55,13 @@ export interface AgentDraft {
   model?: AgentModelAlias | null;
   /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
   runtime?: WorkflowAgentRuntime | null;
-  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  /**
+   * Model id for this agent's resolved non-Claude provider, used when `runtime`
+   * names a non-Claude provider (e.g. `'codex-sdk'`); `null`/omitted = that
+   * provider's default.
+   */
+  providerModel?: string | null;
+  /** @deprecated Alias of {@link providerModel}; unused once a caller sets providerModel directly. */
   codexModel?: string | null;
   enabledMcps: string[];
   isCustom: boolean;
@@ -134,9 +140,9 @@ export function validateAgentDraft(draft: AgentDraft): void {
   }
 
   // runtime is optional: null/undefined inherits the run-level runtime; any other
-  // value must be a known WORKFLOW_AGENT_RUNTIMES value (defense-in-depth — the
-  // tRPC zod already constrains it).
-  if (draft.runtime != null && !isWorkflowAgentRuntime(draft.runtime)) {
+  // value must be a known WORKFLOW_LAUNCHABLE_RUNTIMES value (defense-in-depth —
+  // the tRPC zod already constrains it).
+  if (draft.runtime != null && !isWorkflowLaunchableRuntime(draft.runtime)) {
     throw new AgentOverrideError(
       'invalid_runtime',
       `Agent runtime "${String(draft.runtime)}" is not a permitted runtime.`,

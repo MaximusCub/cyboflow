@@ -452,12 +452,18 @@ describe('shell-approval-request handler branch', () => {
     emitClose();
     await flush();
 
-    // The pending approval row is cleared (via clearPendingForRun) so it no
-    // longer leaks into the cross-run review queue. The in-memory pending entry
-    // is gone too. (The workflow_runs.status reset is the teardown path's job,
-    // not clearPendingForRun's — see approvalRouter.ts:415-473.)
+    // The pending approval row is cleared so it no longer leaks into the
+    // cross-run review queue, and the in-memory pending entry is gone.
     expect(pendingApprovalCount('run-disc')).toBe(0);
     expect(ApprovalRouter.getInstance().getPending()).toHaveLength(0);
+    // ABANDONMENT, not termination: the run is still executing, so the gate is
+    // handed back (abandonPendingForRun). Left in 'awaiting_review' the run
+    // wedges — every later requestApproval loops in the 'wait' branch and no
+    // gate is ever shown again.
+    const runStatus = db
+      .prepare(`SELECT status FROM workflow_runs WHERE id = 'run-disc'`)
+      .get() as { status: string };
+    expect(runStatus.status).toBe('running');
   });
 
   it('(g) cancel affordance denies + closes every in-flight socket for a runId and clears the pending row', async () => {

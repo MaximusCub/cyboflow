@@ -64,18 +64,39 @@ vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
   StdioServerTransport: class {},
 }));
 
+// Mutable double-state for the `net` mock below, declared via vi.hoisted so it
+// exists before vi.mock's (hoisted-to-the-top) factory runs. `destroyed`
+// starts true (see the comment below) and is flipped false ONLY by the
+// argument-mapping tests near the bottom of this file, which need sendQuery
+// to actually reach ipcClient.write() instead of short-circuiting on the
+// connection guard — they flip it back immediately afterward so every other
+// test in this file keeps the fast, deterministic reject behavior this
+// comment describes. `writes` records every payload written while
+// `destroyed` was false, for those same tests to inspect.
+const netDouble = vi.hoisted(() => ({
+  writes: [] as string[],
+  destroyed: true,
+}));
+
 // node:net — connectToOrchestrator must not open a real socket. The double
 // reports `destroyed: true` so sendQuery short-circuits with an immediate
 // reject ('IPC client not connected') instead of awaiting the 30s orchestrator
 // timeout — a valid CallTool then surfaces that connection error, NOT a
 // validation error, which is exactly what the dispatch-path assertion needs.
+// `write` always records what was sent — it only ever fires while `destroyed`
+// is false (see netDouble above), which happens for exactly two tests.
 vi.mock('net', () => {
   return {
     createConnection: () => ({
       on: () => undefined,
-      write: () => true,
+      write: (data: string): boolean => {
+        netDouble.writes.push(data);
+        return true;
+      },
       end: () => undefined,
-      destroyed: true,
+      get destroyed(): boolean {
+        return netDouble.destroyed;
+      },
     }),
   };
 });
@@ -135,6 +156,35 @@ async function callTool(
   if (!captured.callTool) throw new Error('CallTool handler was not captured');
   const result = await captured.callTool({ params: { name, arguments: args } });
   return JSON.parse(result.content[0].text) as Record<string, unknown>;
+}
+
+/**
+ * Captures the exact wire message sendQuery serializes for one CallTool
+ * invocation — { type, requestId, runId, ...params } — by flipping the
+ * shared `net` double's `destroyed` flag off just long enough for sendQuery's
+ * Promise executor (which runs SYNCHRONOUSLY at construction time, before any
+ * await yields control) to reach ipcClient.write(). The resulting CallTool
+ * promise is deliberately left unawaited and unresolved: nothing ever answers
+ * it, and the caller must wrap the call in vi.useFakeTimers()/useRealTimers()
+ * so sendQuery's 30s timeout timer never becomes a real, process-hanging
+ * timer. This is strictly stronger than the "reaches dispatch, doesn't return
+ * invalid_arguments" pattern used elsewhere in this file: it can catch a
+ * misspelled dispatch type string or a dropped/mis-renamed argument, which
+ * that pattern cannot.
+ */
+function captureDispatchedQuery(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (!captured.callTool) throw new Error('CallTool handler was not captured');
+  netDouble.writes.length = 0;
+  netDouble.destroyed = false;
+  try {
+    void captured.callTool({ params: { name, arguments: args } });
+  } finally {
+    netDouble.destroyed = true;
+  }
+  if (netDouble.writes.length !== 1) {
+    throw new Error(`expected exactly one socket write, got ${netDouble.writes.length}`);
+  }
+  return JSON.parse(netDouble.writes[0].trimEnd()) as Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -900,5 +950,79 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
       runbook_local_version: 2,
     });
     expect(res['error']).not.toBe('invalid_arguments');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow_get_verifications — the non-blocking cold-read companion to
+// cyboflow_await_verification (b5f25edb, "let quick sessions queue visual
+// verifications over MCP"): declaration, request_id validation, and — unlike
+// every "reaches dispatch path" test above, which can only prove arg
+// validation passed — argument mapping verified against the ACTUAL wire
+// message sendQuery serialized, so a misspelled dispatch type string or a
+// dropped/mis-renamed argument would fail these tests even though the mocked
+// net double normally swallows that detail behind a generic connection error.
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer ListTools cyboflow_get_verifications', () => {
+  it('declares cyboflow_get_verifications with an optional request_id and no required fields', async () => {
+    const tools = await listTools();
+    const tool = tools.find((t) => t.name === 'cyboflow_get_verifications');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema;
+    expect(schema.properties['request_id'].type).toBe('string');
+    expect(schema.required).toEqual([]);
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_get_verifications validation', () => {
+  it('rejects an empty request_id', async () => {
+    expect(await callTool('cyboflow_get_verifications', { request_id: '' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('rejects a non-string request_id', async () => {
+    expect(await callTool('cyboflow_get_verifications', { request_id: 42 })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation with no arguments and with a valid request_id, reaching the dispatch path', async () => {
+    const empty = await callTool('cyboflow_get_verifications', {});
+    expect(empty['error']).not.toBe('invalid_arguments');
+
+    const withId = await callTool('cyboflow_get_verifications', { request_id: 'vr_1' });
+    expect(withId['error']).not.toBe('invalid_arguments');
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_get_verifications argument mapping', () => {
+  // Both tests wrap the capture in fake timers: sendQuery schedules a real
+  // 30s setTimeout once it gets past the (deliberately disabled here)
+  // connection guard, and with real timers that would leave a live,
+  // process-hanging timer behind since the CallTool promise this produces is
+  // never awaited or resolved. Faking timers means that setTimeout is never
+  // real and — since it's never advanced — never fires either.
+  it("dispatches 'mcp-get-verifications' with verificationRequestId mapped from request_id", () => {
+    vi.useFakeTimers();
+    try {
+      const msg = captureDispatchedQuery('cyboflow_get_verifications', { request_id: 'vr_1' });
+      expect(msg['type']).toBe('mcp-get-verifications');
+      expect(msg['verificationRequestId']).toBe('vr_1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispatches with no verificationRequestId when called with no arguments', () => {
+    vi.useFakeTimers();
+    try {
+      const msg = captureDispatchedQuery('cyboflow_get_verifications', {});
+      expect(msg['type']).toBe('mcp-get-verifications');
+      expect(msg).not.toHaveProperty('verificationRequestId');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

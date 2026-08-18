@@ -66,6 +66,17 @@ jobs:
     - name: Rebuild better-sqlite3 for host Node ABI
       run: node scripts/rebuild-better-sqlite3-host.mjs
 
+    # The cyboflowMcpServer subprocess lifecycle tests spawn the BUILT bundle at
+    # main/dist/.../cyboflowMcpServer.js — they cannot import the server, because
+    # it runs main() and calls process.exit at module scope. `test:unit` does not
+    # build, so without this step that artifact is absent in CI and those tests
+    # skip themselves, silently removing the entire regression guard for the
+    # orphaned-MCP-process fix while the suite still reports green. The test file
+    # hard-fails (rather than skipping) when CI=true and the bundle is missing, so
+    # deleting this step turns CI red instead of quietly losing the coverage.
+    - name: Build main (MCP server bundle for subprocess tests)
+      run: pnpm build:main
+
     # Headless unit chain (main + frontend vitest, schema parity, build scripts).
     # The Playwright E2E suite is intentionally excluded: the renderer cannot
     # bootstrap in CI without the Electron preload-injected electronTRPC bridge,

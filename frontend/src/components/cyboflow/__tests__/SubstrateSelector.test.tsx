@@ -35,6 +35,7 @@ import { SubstrateSelector } from '../SubstrateSelector';
 import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
 import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
+import { runtimesWithCapability } from '../../../../../shared/types/agentCapabilities';
 
 /** Drive the picker's provider gate through the real config store. */
 function setProviderAccess(access: AgentProviderAccess | undefined): void {
@@ -61,7 +62,7 @@ describe('SubstrateSelector — no forced pin', () => {
     expect(screen.getByRole('option', { name: /Claude interactive/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
-    expect(screen.getByText(/Workflows can run on Claude or Codex SDK/i)).toBeInTheDocument();
+    expect(screen.getByText(/Workflows run on any structured runtime/i)).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -71,7 +72,7 @@ describe('SubstrateSelector — no forced pin', () => {
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK runs structured quick-session chat/i)).toBeInTheDocument();
+    expect(screen.getByText(/The structured runtimes run quick-session chat/i)).toBeInTheDocument();
   });
 
   it('keeps both Codex runtimes available on the mixed launcher', () => {
@@ -79,7 +80,7 @@ describe('SubstrateSelector — no forced pin', () => {
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK can run workflows or quick sessions/i)).toBeInTheDocument();
+    expect(screen.getByText(/A structured runtime can run workflows or quick sessions/i)).toBeInTheDocument();
   });
 
   it('ignores programmatic changes to a runtime disabled for the current scope', () => {
@@ -156,15 +157,18 @@ describe('SubstrateSelector — provider access toggles', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('offers everything when the toggles were never touched (absent config field)', () => {
+  it('offers both legacy providers when the toggles were never touched (absent config field)', () => {
     setProviderAccess(undefined);
     mockUseOmpAvailability.mockReturnValue(true);
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
 
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Claude SDK/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /OMP Fleet/i })).toBeInTheDocument();
-    expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+    // OMP's absent key floors to DISABLED, so its lanes are access-hidden and
+    // the "…are hidden" note now fires — accurately: there IS a provider the
+    // user could switch on in Settings → Integrations.
+    expect(screen.queryByRole('option', { name: /OMP/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/turned off in Settings → Integrations are hidden/i)).toBeInTheDocument();
   });
 
   it('hides OMP Fleet when the bridge is not configured (availability false)', () => {
@@ -215,5 +219,120 @@ describe('SubstrateSelector — demo pin (sdk wins)', () => {
     expect(screen.getByRole('combobox', { name: /select agent runtime/i })).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The option list is hand-ordered for display, but WHICH runtimes appear is a
+ * capability question — `RUNTIME_CAPABILITIES.selectableInPickers`. Ties the two
+ * together so a runtime declared unofferable can never quietly show up here (and
+ * a newly offerable one is not silently omitted).
+ */
+describe('SubstrateSelector — offers exactly the picker-selectable runtimes', () => {
+  beforeEach(() => mockUseForcedSubstrate.mockReturnValue(null));
+
+  it('renders one option per selectable runtime and none for the rest', () => {
+    // Availability is a second gating axis added by the fleet merge (omp-fleet is
+    // selectable-in-pickers but hidden while the bridge is unconfigured), so the
+    // probe is driven ON here — the test then measures the capability tie alone.
+    mockUseOmpAvailability.mockReturnValue(true);
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).toEqual(runtimesWithCapability('selectableInPickers'));
+  });
+
+  // The rows exist regardless of access (label and order are decided with the
+  // row, not bolted on later) — with the provider off, access is the only
+  // thing keeping them off screen, and an explicit false behaves like absent.
+  it('hides the OMP rows while the provider is off, and offers them once on', () => {
+    setProviderAccess({ claude: true, codex: true, omp: false });
+    const { unmount } = render(
+      <SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />,
+    );
+    let offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).not.toContain('omp-sdk');
+    expect(offered).not.toContain('omp-pty');
+    unmount();
+
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+    offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
+    expect(offered).toContain('omp-sdk');
+    expect(offered).toContain('omp-pty');
+  });
+
+  // The T1 promotion, at the picker: `omp-sdk` is a real workflow launch target
+  // and `omp-pty` still is not. The scope filter reads `workflowRuntimeForLaunch`
+  // (i.e. WORKFLOW_LAUNCHABLE_RUNTIMES), so this is what proves the launchable
+  // set actually reaches the workflow scope rather than the two OMP rows being
+  // treated alike because they share a provider.
+  it('enables omp-sdk but disables omp-pty on a workflow launch', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="workflow" />);
+
+    expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP terminal' })).toBeDisabled();
+    // The Codex split is unchanged — this promotion moved one runtime, not the
+    // whole "PTY is quick-session-only" rule.
+    expect(screen.getByRole('option', { name: /^Codex SDK$/ })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/ })).toBeDisabled();
+  });
+
+  it('leaves both OMP rows selectable on a quick session', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: 'OMP terminal' })).not.toBeDisabled();
+  });
+
+  // The note reads "…are hidden" only when the PROVIDER TOGGLES removed
+  // something. Counting against the raw row list instead of the selectable one
+  // would make it fire permanently: codex-exec is always unselectable and its
+  // absence must never be reported as a switched-off provider.
+  it('does not claim runtimes are hidden when only unselectable ones are absent', () => {
+    // Availability probe ON — without it the selectable omp-fleet row would be
+    // availability-hidden and spuriously read as a provider-toggle removal.
+    mockUseOmpAvailability.mockReturnValue(true);
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The OMP caveats panels (added alongside the row's pre-existing capability
+ * gate — see the block above). `value` is forced directly rather than
+ * selected from the dropdown, since the picker still hides the OMP options
+ * (selectableInPickers: false) — this only proves the caveats copy renders
+ * correctly for the day the flag flips, without flipping it.
+ */
+describe('SubstrateSelector — OMP caveats copy (v1 limits)', () => {
+  it('shows the omp-sdk caveats when the value is forced to omp-sdk', () => {
+    render(<SubstrateSelector value="omp-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const panel = screen.getByTestId('substrate-caveats');
+    expect(panel).toHaveTextContent('OMP — v1 limits');
+    expect(panel).toHaveTextContent('No question gate yet');
+    expect(panel).toHaveTextContent('approvals land in the review queue');
+    expect(panel).toHaveTextContent('Slow approvals (over 25s) are blocked and can be retried');
+  });
+
+  it('shows the omp-pty caveats when the value is forced to omp-pty', () => {
+    render(<SubstrateSelector value="omp-pty" onChange={vi.fn()} runtimeScope="session" />);
+
+    const panel = screen.getByTestId('substrate-caveats');
+    expect(panel).toHaveTextContent('OMP terminal — v1 limits');
+    expect(panel).toHaveTextContent('Approvals stay in the OMP terminal');
+    expect(panel).toHaveTextContent('no Cyboflow review-queue integration');
+  });
+
+  it('shows no caveats panel for an ordinary claude-sdk value', () => {
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.queryByTestId('substrate-caveats')).not.toBeInTheDocument();
   });
 });

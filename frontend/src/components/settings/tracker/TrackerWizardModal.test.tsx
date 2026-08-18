@@ -445,6 +445,66 @@ describe('TrackerWizardModal — Step 5 reconcile', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('discards a stale reconcile response after the target project changes mid-request', async () => {
+    renderWizard();
+    await authorize();
+    await advance(4); // → Project → Source → Tasks → States
+
+    // Project A (7, the seeded active project) starts a reconcile fetch that
+    // will not resolve until resolveA is called below.
+    let resolveA: (rows: TrackerReconcileItem[]) => void = () => {};
+    mockReconcile.mockReturnValueOnce(
+      new Promise<TrackerReconcileItem[]>((resolve) => {
+        resolveA = resolve;
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() =>
+      expect(mockReconcile).toHaveBeenCalledWith({ projectId: 7, issues: ISSUES }),
+    );
+
+    // The step rail stays usable while that request is pending — jump back to
+    // Project and retarget to B before A's response ever arrives.
+    fireEvent.click(screen.getByTestId('tracker-step-1'));
+    await screen.findByText('Which cyboflow project does this sync into?');
+    fireEvent.click(screen.getByRole('button', { name: /Website/ }));
+
+    const RECONCILE_B: TrackerReconcileItem[] = [
+      {
+        entityType: 'idea',
+        entityId: 'idea-9',
+        ref: 'IDEA-009',
+        title: 'Website backlog item',
+        suggestedExternalId: null,
+      },
+    ];
+    mockReconcile.mockResolvedValue(RECONCILE_B);
+
+    // A's response finally arrives — it must not be installed for B.
+    resolveA(RECONCILE);
+    await waitFor(() =>
+      expect(screen.queryByText('Add token budget alerts')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Nothing was in this project/)).toBeInTheDocument();
+
+    // Reaching Review re-fetches reconcile because it was never marked loaded
+    // for B, proving A's stale response did not silently satisfy the guard.
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    await waitFor(() =>
+      expect(mockReconcile).toHaveBeenLastCalledWith({ projectId: 9, issues: ISSUES }),
+    );
+    expect(await screen.findByText('Review the connection')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 9,
+        reconcile: [{ entityType: 'idea', entityId: 'idea-9', action: 'keep' }],
+      }),
+    );
+  });
+
   it('carries a flipped direction mode through to the connect payload', async () => {
     renderWizard();
     await authorize();

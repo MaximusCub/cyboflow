@@ -6,6 +6,22 @@
  * the workflow_runs row (no UPDATE path — a long run can't change posture
  * mid-flight; migration 055's verify_enabled / verify_type / verify_chain).
  *
+ * "No UPDATE path" is still true without exception — nothing ever mutates a
+ * stamped run row. What is NOT true without qualification: that the run stamp
+ * is the only place posture lives. The `__quick__` chat sentinel is minted
+ * ONCE on the session's first turn and then reused for the session's whole
+ * life, so a session that predates a later change to the global master switch
+ * (or its own project config) would read a stale stamp forever if it depended
+ * on that stamp at all. Rather than add an UPDATE path, `mcpQueryHandler.ts`'s
+ * `handleRequestVerification` BYPASSES the stamp for a quick run: it calls
+ * this resolver again at each `cyboflow_request_verification` call (fed the
+ * same ladder `createRun` would use, read live) and writes the freshly
+ * resolved chain verbatim onto that request's own row instead of the run's.
+ * The request row is itself never re-enqueued, so the result is exactly as
+ * immutable as the run stamp — just pinned at request granularity instead of
+ * run granularity for this one caller. Every other run keeps reading the
+ * frozen run stamp exactly as this file always documented.
+ *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', 'fs', or any concrete service in main/src/services/*. It
  * depends only on the renderer-safe shared visual-verification types — the

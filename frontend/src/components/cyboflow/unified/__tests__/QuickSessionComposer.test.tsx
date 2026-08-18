@@ -45,7 +45,10 @@ vi.mock('../../../../utils/api', () => ({
     },
     models: {
       onModelFallback: (cb: (notice: unknown) => void) => mockOnModelFallback(cb),
-      getCodexCatalog: () => mockGetCodexCatalog(),
+      getCatalog: (provider: string) =>
+        provider === 'codex'
+          ? mockGetCodexCatalog()
+          : Promise.resolve({ success: true, data: { models: [], defaultModel: null } }),
     },
   },
 }));

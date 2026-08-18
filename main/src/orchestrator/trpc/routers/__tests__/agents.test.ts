@@ -90,6 +90,7 @@ function createAgentsTestDb(): Database.Database {
       model          TEXT,
       runtime        TEXT,
       codex_model    TEXT,
+      provider_model TEXT,
       created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE (project_id, agent_key),
@@ -280,7 +281,7 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
     expect(reset.stats.model).toBe('inherits run model');
   });
 
-  it('upsert with a codex-sdk runtime + codex model surfaces both on the entry; reset clears them', async () => {
+  it('upsert with a codex-sdk runtime + codex model surfaces both providerModel and the deprecated codexModel on the entry; reset clears them', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
 
     const pinned = await caller.cyboflow.agents.upsertOverride({
@@ -294,6 +295,7 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
       codexModel: 'gpt-5.2-codex',
     });
     expect(pinned.runtime).toBe('codex-sdk');
+    expect(pinned.providerModel).toBe('gpt-5.2-codex');
     expect(pinned.codexModel).toBe('gpt-5.2-codex');
 
     const reset = await caller.cyboflow.agents.resetOverride({
@@ -301,10 +303,50 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
       agentKey: 'implement',
     });
     expect(reset.runtime).toBeNull();
+    expect(reset.providerModel).toBeNull();
     expect(reset.codexModel).toBeNull();
   });
 
-  it('upsert with a Claude runtime drops any supplied codex model', async () => {
+  // migration 104: providerModel is the canonical write field; codexModel stays
+  // a read-compat alias. Round-trips through the REAL DB (agent_overrides.provider_model
+  // + .codex_model, both written), not just the pure resolver.
+  it('upsert with a codex-sdk runtime + NEW providerModel key surfaces both fields identically', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    const pinned = await caller.cyboflow.agents.upsertOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+      name: 'cyboflow-implement',
+      description: 'Pin provider model.',
+      systemPrompt: 'You are my implement.',
+      tools: ['Read', 'Edit'],
+      runtime: 'codex-sdk',
+      providerModel: 'gpt-5.2-codex',
+    });
+    expect(pinned.runtime).toBe('codex-sdk');
+    expect(pinned.providerModel).toBe('gpt-5.2-codex');
+    expect(pinned.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('upsert with BOTH providerModel and the deprecated codexModel: providerModel wins', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    const pinned = await caller.cyboflow.agents.upsertOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+      name: 'cyboflow-implement',
+      description: 'Both keys.',
+      systemPrompt: 'You are my implement.',
+      tools: ['Read', 'Edit'],
+      runtime: 'codex-sdk',
+      providerModel: 'gpt-5.2-codex',
+      codexModel: 'gpt-5-stale',
+    });
+    expect(pinned.providerModel).toBe('gpt-5.2-codex');
+    expect(pinned.codexModel).toBe('gpt-5.2-codex');
+  });
+
+  it('upsert with a Claude runtime drops any supplied provider/codex model', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
 
     const pinned = await caller.cyboflow.agents.upsertOverride({
@@ -318,6 +360,7 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
       codexModel: 'gpt-5.2-codex',
     });
     expect(pinned.runtime).toBe('claude-interactive');
+    expect(pinned.providerModel).toBeNull();
     expect(pinned.codexModel).toBeNull();
   });
 });

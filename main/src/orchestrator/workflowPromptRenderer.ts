@@ -1,4 +1,7 @@
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type {
+  AgentProvider,
+  WorkflowRunStorableRuntime,
+} from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowPrompt } from './workflowPromptReader';
 
@@ -6,7 +9,10 @@ export type WorkflowPromptTurnKind = 'launch' | 'nudge' | 'resume' | 'programmat
 
 export interface WorkflowPromptRenderContext {
   provider: AgentProvider;
-  runtime: WorkflowAgentRuntime;
+  // The runtime the run is EXECUTING on (a run row's value), not a launch
+  // choice — a runtime that is storable but not workflow-launchable still
+  // renders prompts.
+  runtime: WorkflowRunStorableRuntime;
   executionModel?: ExecutionModel;
   turnKind?: WorkflowPromptTurnKind;
 }
@@ -36,11 +42,38 @@ Provider adaptation rules:
 
 ---`;
 
+/**
+ * The runtime-adapter block prepended to a launch / programmatic-step prompt,
+ * per provider. `null` = the workflow body needs no adaptation, which is what
+ * Claude means (the bodies are written for it) and what a provider that has not
+ * yet been taught the orchestrator contract must also mean — an envelope is
+ * authored deliberately, never inherited from another vendor.
+ *
+ * The Record is exhaustive over `AgentProvider`, so a new provider cannot ship
+ * without someone deciding which of the two it is.
+ */
+export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
+  claude: null,
+  codex: CODEX_WORKFLOW_ENVELOPE,
+  // `null` per this map's own rule: an envelope is authored deliberately for a
+  // provider that has been taught the orchestrator contract, never inherited
+  // from another vendor. OMP now runs T1 programmatic per-step agents, and that
+  // tier deliberately needs no envelope: a step turn is a self-contained task
+  // whose gates the HOST owns (proposal §6, "Not required at T1: question
+  // bridge, subagent role mapping, prompt envelope"). What an envelope adapts is
+  // the T2 ORCHESTRATOR contract — AskUserQuestion redirection, subagent role
+  // mapping — which OMP has not been taught. So an omp step prompt renders
+  // IDENTITY, and pasting Codex's envelope in would describe a contract OMP does
+  // not implement. Authored in Phase 3, with T2.
+  omp: null,
+};
+
 export function renderWorkflowPromptForRuntime(
   prompt: WorkflowPrompt,
   context: WorkflowPromptRenderContext = DEFAULT_RENDER_CONTEXT,
 ): WorkflowPrompt {
-  if (context.provider !== 'codex') {
+  const envelope = PROVIDER_PROMPT_ENVELOPES[context.provider];
+  if (envelope === null) {
     return prompt;
   }
   if (context.turnKind === 'nudge' || context.turnKind === 'resume') {
@@ -48,7 +81,7 @@ export function renderWorkflowPromptForRuntime(
   }
 
   return {
-    prompt: `${CODEX_WORKFLOW_ENVELOPE}\n\n${prompt.prompt}`,
+    prompt: `${envelope}\n\n${prompt.prompt}`,
     systemPromptAppend: prompt.systemPromptAppend,
   };
 }

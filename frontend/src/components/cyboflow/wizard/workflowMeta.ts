@@ -145,6 +145,17 @@ function titleCase(name: string): string {
 }
 
 /**
+ * The display title for a raw workflow name — the static map, else the
+ * title-cased name. Exported because surfaces that hold only the RAW name (the
+ * top-bar WorkflowPicker, whose rows carry `name` and never build a
+ * {@link WorkflowCardMeta}) still have to label a flow the way the wizard does.
+ * {@link buildWorkflowMeta} calls it too, so the two can never drift.
+ */
+export function workflowTitleForName(name: string): string {
+  return TITLE_BY_NAME[name] ?? titleCase(name);
+}
+
+/**
  * Build the per-workflow card models for the wizard.
  *
  * For each workflow row:
@@ -182,7 +193,7 @@ export function buildWorkflowMeta(
     return {
       id: row.id,
       name: row.name,
-      title: TITLE_BY_NAME[row.name] ?? titleCase(row.name),
+      title: workflowTitleForName(row.name),
       subtitle: SUBTITLE_BY_NAME[row.name] ?? '',
       slashCommand: `/${row.name}`,
       isDefault: row.name === DEFAULT_WORKFLOW_NAME,

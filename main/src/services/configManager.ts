@@ -15,7 +15,9 @@ import {
 import {
   type AgentProvider,
   type AgentProviderAccess,
+  type AgentRuntime,
   isAgentProviderEnabled,
+  isAgentRuntime,
   resolveAgentProviderAccess,
 } from '../../../shared/types/agentRuntime';
 import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../shared/types/substrate';
@@ -267,15 +269,68 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * Resolve the model for a launch kind. A per-kind override wins; otherwise
-   * the kind's picker floor wins. In particular, workflow launches floor to
-   * Opus and never inherit the legacy global defaultModel setting.
+   * The GLOBAL default launch model — the middle rung of the launch ladder, read
+   * off `defaultLaunchModel`. Floors to undefined when unset or blank so the
+   * caller falls through to the per-kind floor.
+   *
+   * Deliberately NOT `defaultModel`: that legacy field feeds the global assistant
+   * fallback (getDefaultModel) and the legacy panel backfill, and a launch must
+   * never inherit it. The two fields exist separately precisely so setting one
+   * cannot silently move the other's behavior.
+   */
+  private getGlobalLaunchModel(): string | undefined {
+    const value = this.config.defaultLaunchModel?.trim();
+    return value && value.length > 0 ? value : undefined;
+  }
+
+  /**
+   * Resolve the model for a launch kind, on the same three-rung ladder as the
+   * canonical renderer-side resolver (resolveRunTypeLaunchDefaults):
+   *
+   *   per-run-type stored value → global `defaultLaunchModel` → the kind's floor
+   *
+   * The floor is chosen BY KIND (DEFAULT_RUN_TYPE_MODEL_FLOORS), so workflow
+   * launches floor to Opus. Legacy `defaultModel` is never consulted at any rung.
    */
   getDefaultLaunchModel(runType: string): string {
     return this.config.runTypeDefaults?.[runType]?.model
+      ?? this.getGlobalLaunchModel()
       ?? (runType === 'quick'
         ? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick
         : DEFAULT_RUN_TYPE_MODEL_FLOORS.workflow);
+  }
+
+  /**
+   * The GLOBAL default agent runtime for launches (quick sessions AND flow runs
+   * share this one field) — the middle rung of the launch ladder. Floors to
+   * undefined when unset OR when the persisted value is not a valid runtime
+   * (config.json is user-editable). Like `defaultAgentPermissionMode`, NOT seeded
+   * into the constructor defaults, so existing config.json files stay
+   * byte-identical.
+   */
+  getDefaultAgentRuntime(): AgentRuntime | undefined {
+    const value = this.config.defaultAgentRuntime;
+    return isAgentRuntime(value) ? value : undefined;
+  }
+
+  /**
+   * Resolve the agent runtime for a launch kind — the runtime twin of
+   * getDefaultLaunchModel:
+   *
+   *   per-run-type stored value → global `defaultAgentRuntime` → undefined
+   *
+   * There is deliberately NO floor. `resolveRunTypeLaunchDefaults` returns
+   * `agentRuntime: undefined` when nothing is configured and every launch seam
+   * OMITS the field in that case rather than synthesizing one, which is what keeps
+   * an install that never set a runtime byte-identical. Returning
+   * DEFAULT_SESSION_AGENT_RUNTIME here would pin every payload instead.
+   *
+   * Returned VERBATIM, exactly like the shared resolver: a workflow seam must
+   * still validate it for its own launch kind (isWorkflowAgentRuntime /
+   * workflowRuntimeForLaunch) and drop a runtime that kind cannot run.
+   */
+  getDefaultLaunchAgentRuntime(runType: string): AgentRuntime | undefined {
+    return this.config.runTypeDefaults?.[runType]?.agentRuntime ?? this.getDefaultAgentRuntime();
   }
 
   /**

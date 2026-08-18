@@ -62,6 +62,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '036_agent_override_model.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '038_agent_mcp_access.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '070_agent_override_runtime.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '104_agent_override_provider_model.sql'), 'utf-8'));
   // run_evals (LLM-judge rollup) — FK -> workflow_runs(id) from 006 (loaded above).
   db.exec(readFileSync(join(migDir, '043_run_evals.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '069_run_eval_jury.sql'), 'utf-8'));
@@ -195,7 +196,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
     db.close();
   });
 
-  it('AgentOverrideRow field names match the agent_overrides columns exactly (migrations 029 + 036 model + 038 mcps + 070 runtime)', () => {
+  it('AgentOverrideRow field names match the agent_overrides columns exactly (migrations 029 + 036 model + 038 mcps + 070 runtime + 104 provider_model)', () => {
     const db = buildDb();
     const agentOverrideRowKeys: Array<keyof AgentOverrideRow> = [
       'id',
@@ -213,6 +214,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
       'model',
       'runtime',
       'codex_model',
+      'provider_model',
       'created_at',
       'updated_at',
     ];

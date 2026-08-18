@@ -1,12 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Bot, Code2, ExternalLink, RefreshCw } from 'lucide-react';
-import type { AgentProvider } from '../../../../shared/types/agentRuntime';
-import { isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
-import type {
-  ClaudeDetectionResult,
-  CodexDetectionResult,
-} from '../../../../shared/types/onboarding';
+import { Bot, Code2, ExternalLink, RefreshCw, Boxes } from 'lucide-react';
+import type { AgentProvider, AgentProviderAccess } from '../../../../shared/types/agentRuntime';
+import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useConfigStore } from '../../stores/configStore';
 import { API } from '../../utils/api';
@@ -147,7 +144,7 @@ function ProviderRow({
 }
 
 function claudeView(
-  detection: ClaudeDetectionResult | null,
+  detection: ProviderDetectionResult<'claude'> | null,
   error: string | null,
 ): ProviderViewModel {
   if (error) {
@@ -185,7 +182,7 @@ function claudeView(
 }
 
 function codexView(
-  detection: CodexDetectionResult | null,
+  detection: ProviderDetectionResult<'codex'> | null,
   error: string | null,
 ): ProviderViewModel {
   if (error) {
@@ -224,15 +221,56 @@ function codexView(
   };
 }
 
+function ompView(
+  detection: ProviderDetectionResult<'omp'> | null,
+  error: string | null,
+): ProviderViewModel {
+  if (error) {
+    return { status: 'unavailable', label: 'Check failed', detail: error };
+  }
+  if (!detection) {
+    return { status: 'checking', label: 'Checking', detail: 'Looking for an omp binary on this machine.' };
+  }
+  if (detection.state === 'unavailable') {
+    // A binaryPath with no usable version means the ladder found something but
+    // its version probe failed — the most common cause is a build older than
+    // OMP_MIN_SUPPORTED_VERSION, so name that explicitly rather than claiming
+    // omp is simply missing.
+    if (detection.binaryPath !== null) {
+      return {
+        status: 'unavailable',
+        label: 'Unsupported version',
+        detail: detection.version
+          ? `Found omp ${detection.version}, but this version isn't supported.`
+          : "Found an omp binary, but its version couldn't be verified.",
+        metadata: detection.binaryPath,
+      };
+    }
+    return {
+      status: 'unavailable',
+      label: 'Not available',
+      detail: 'omp was not found on this machine.',
+    };
+  }
+  return {
+    status: 'connected',
+    label: 'Detected',
+    detail: detection.version ? `omp ${detection.version}` : 'omp binary found',
+    metadata: detection.binaryPath ?? undefined,
+  };
+}
+
 function responseError(provider: string, error?: string): string {
   return error?.trim() || `Cyboflow could not check ${provider}.`;
 }
 
 export function IntegrationsSettings(): React.JSX.Element {
-  const [claudeDetection, setClaudeDetection] = useState<ClaudeDetectionResult | null>(null);
-  const [codexDetection, setCodexDetection] = useState<CodexDetectionResult | null>(null);
+  const [claudeDetection, setClaudeDetection] = useState<ProviderDetectionResult<'claude'> | null>(null);
+  const [codexDetection, setCodexDetection] = useState<ProviderDetectionResult<'codex'> | null>(null);
+  const [ompDetection, setOmpDetection] = useState<ProviderDetectionResult<'omp'> | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const [codexError, setCodexError] = useState<string | null>(null);
+  const [ompError, setOmpError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const requestId = useRef(0);
 
@@ -241,10 +279,12 @@ export function IntegrationsSettings(): React.JSX.Element {
     setChecking(true);
     setClaudeError(null);
     setCodexError(null);
+    setOmpError(null);
 
-    const [claudeResult, codexResult] = await Promise.allSettled([
-      API.claude.detect(),
-      API.codex.detect(),
+    const [claudeResult, codexResult, ompResult] = await Promise.allSettled([
+      API.providers.detect('claude'),
+      API.providers.detect('codex'),
+      API.providers.detect('omp'),
     ]);
     if (currentRequest !== requestId.current) return;
 
@@ -266,6 +306,15 @@ export function IntegrationsSettings(): React.JSX.Element {
       setCodexError(responseError('Codex', message));
     }
 
+    if (ompResult.status === 'fulfilled' && ompResult.value.success && ompResult.value.data) {
+      setOmpDetection(ompResult.value.data);
+    } else {
+      const message = ompResult.status === 'rejected'
+        ? ompResult.reason instanceof Error ? ompResult.reason.message : undefined
+        : ompResult.value.error;
+      setOmpError(responseError('OMP', message));
+    }
+
     setChecking(false);
   }, []);
 
@@ -280,8 +329,16 @@ export function IntegrationsSettings(): React.JSX.Element {
     void window.electronAPI?.openExternal('https://claude.ai/code');
   };
 
+  // OMP is not bundled in v1 (docs/proposals/omp-provider-integration.md §3.3) —
+  // the app can only point at the project's own install docs, the same posture
+  // as Claude's "Install" action.
+  const installOmp = (): void => {
+    void window.electronAPI?.openExternal('https://omp.sh');
+  };
+
   const claude = claudeView(claudeDetection, claudeError);
   const codex = codexView(codexDetection, codexError);
+  const omp = ompView(ompDetection, ompError);
 
   // Provider access — the toggles below write AppConfig.agentProviderAccess,
   // the same field the onboarding Connect step writes, so the two surfaces are
@@ -290,6 +347,16 @@ export function IntegrationsSettings(): React.JSX.Element {
   const providerAccess = useAgentProviderAccess();
   const claudeEnabled = isAgentProviderEnabled(providerAccess, 'claude');
   const codexEnabled = isAgentProviderEnabled(providerAccess, 'codex');
+  // OMP is the first provider introduced after these toggles existed, so an
+  // absent key floors to DISABLED (AGENT_PROVIDER_REGISTRY.omp.defaultEnabled),
+  // unlike claude/codex — isAgentProviderEnabled already applies that per-
+  // provider default, so this reads correctly with no special-casing here.
+  const ompEnabled = isAgentProviderEnabled(providerAccess, 'omp');
+  const enabledByProvider: Record<AgentProvider, boolean> = {
+    claude: claudeEnabled,
+    codex: codexEnabled,
+    omp: ompEnabled,
+  };
   const [savingProvider, setSavingProvider] = useState<AgentProvider | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -297,11 +364,12 @@ export function IntegrationsSettings(): React.JSX.Element {
     async (provider: AgentProvider, enabled: boolean): Promise<void> => {
       setSavingProvider(provider);
       setSaveError(null);
-      // Full access object, never a partial patch — the sibling member must not
+      // Full access object, never a partial patch — a sibling member must not
       // be dropped by an update that only meant to change one provider.
-      const next = {
+      const next: AgentProviderAccess = {
         claude: provider === 'claude' ? enabled : claudeEnabled,
         codex: provider === 'codex' ? enabled : codexEnabled,
+        omp: provider === 'omp' ? enabled : ompEnabled,
       };
       const ok = await useConfigStore.getState().updateConfig({ agentProviderAccess: next });
       if (!ok) {
@@ -311,7 +379,7 @@ export function IntegrationsSettings(): React.JSX.Element {
       }
       setSavingProvider(null);
     },
-    [claudeEnabled, codexEnabled],
+    [claudeEnabled, codexEnabled, ompEnabled],
   );
 
   // Guard rail mirroring onboarding's "enable at least one detected provider":
@@ -319,7 +387,7 @@ export function IntegrationsSettings(): React.JSX.Element {
   const lastEnabledReason = 'At least one provider must stay enabled.';
   const toggleReason = (provider: AgentProvider, enabled: boolean): string | undefined => {
     if (savingProvider !== null) return 'Saving…';
-    const otherEnabled = provider === 'claude' ? codexEnabled : claudeEnabled;
+    const otherEnabled = AGENT_PROVIDERS.some((p) => p !== provider && enabledByProvider[p]);
     if (enabled && !otherEnabled) return lastEnabledReason;
     return undefined;
   };
@@ -364,6 +432,27 @@ export function IntegrationsSettings(): React.JSX.Element {
             toggleDisabledReason={toggleReason('codex', codexEnabled)}
             toggleTestId="provider-toggle-codex"
           />
+          <ProviderRow
+            name="OMP"
+            description="Multi-provider agent harness (60+ model providers) using its own accounts and credentials — Cyboflow only detects the binary, never your OMP logins."
+            icon={<Boxes className="h-4 w-4" />}
+            view={omp}
+            enabled={ompEnabled}
+            onToggle={(next) => void setProviderEnabled('omp', next)}
+            toggleDisabledReason={toggleReason('omp', ompEnabled)}
+            toggleTestId="provider-toggle-omp"
+            action={ompDetection?.state === 'unavailable' && ompDetection.binaryPath === null ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                icon={<ExternalLink className="h-3.5 w-3.5" />}
+                onClick={installOmp}
+              >
+                Install
+              </Button>
+            ) : undefined}
+          />
         </div>
 
         {saveError && (
@@ -375,6 +464,13 @@ export function IntegrationsSettings(): React.JSX.Element {
           <p className="mt-3 text-xs leading-relaxed text-text-tertiary">
             Claude is off: design sessions and visual verification, which always run on Claude,
             are unavailable until you turn it back on.
+          </p>
+        )}
+        {!ompEnabled && (
+          <p className="mt-3 text-xs leading-relaxed text-text-tertiary">
+            OMP is off by default — turn it on here once you've installed it and signed in
+            (run <code className="border border-border-primary bg-bg-primary px-1">omp</code> in a
+            terminal and <code className="border border-border-primary bg-bg-primary px-1">/login &lt;provider&gt;</code>).
           </p>
         )}
       </SettingsSection>

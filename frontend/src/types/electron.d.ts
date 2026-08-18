@@ -34,8 +34,9 @@ import type {
 } from '../../../shared/types/designPrototypeServer';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
-import type { CodexModelCatalog, ClaudeModelCatalog } from '../../../shared/types/agentModels';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
+import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
+import type { AgentProvider } from '../../../shared/types/agentRuntime';
+import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 
@@ -470,19 +471,14 @@ interface ElectronAPI {
     getEffort: (panelId: string) => Promise<IPCResponse<ReasoningEffort | null>>;
   };
 
-  // First-run onboarding — Claude Code login/binary probe.
-  claude: {
-    detect: () => Promise<IPCResponse<ClaudeDetectionResult>>;
+  // First-run onboarding + Settings — per-provider login/runtime probe.
+  providers: {
+    detect: <P extends AgentProvider>(provider: P) => Promise<IPCResponse<ProviderDetectionResult<P>>>;
   };
-  codex: {
-    detect: () => Promise<IPCResponse<CodexDetectionResult>>;
-  };
-
   // Model availability (guarded models, e.g. Fable 5)
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
-    getCodexCatalog: () => Promise<IPCResponse<CodexModelCatalog>>;
-    getClaudeCatalog: () => Promise<IPCResponse<ClaudeModelCatalog>>;
+    getCatalog: <P extends AgentProvider>(provider: P) => Promise<IPCResponse<ProviderModelCatalogs[P]>>;
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
     onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => () => void;
   };

@@ -127,7 +127,13 @@ export function RunPendingInputStrip({
       </div>
       <div className="flex-1 overflow-y-auto" role="list">
         {pendingItems.map((item) => (
-          <ReviewItemCard key={item.id} item={item} />
+          // surface="session": this strip IS the run, so an option-less escalation
+          // renders its real actions here rather than the queue's "Open in session"
+          // routing pair. For a flow with no verdict artifact tab of its own
+          // (sprint's human-review, compound's approve-learnings, ship's gates) this
+          // is the ONLY surface that can approve the gate — see ReviewItemCard's
+          // "Default CTAs vs. option-carrying CTAs".
+          <ReviewItemCard key={item.id} item={item} surface="session" />
         ))}
         {stripQuestions.map((question) => (
           <AskUserQuestionCard key={question.toolUseId} item={question} />

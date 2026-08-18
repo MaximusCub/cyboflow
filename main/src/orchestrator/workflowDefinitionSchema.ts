@@ -28,7 +28,7 @@ import type {
 import { ARTIFACT_POLICIES } from '../../../shared/types/artifacts';
 import type { ArtifactType } from '../../../shared/types/artifacts';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
-import { WORKFLOW_AGENT_RUNTIMES } from '../../../shared/types/agentRuntime';
+import { WORKFLOW_LAUNCHABLE_RUNTIMES } from '../../../shared/types/agentRuntime';
 import { ALL_EFFORT_LEVELS } from '../../../shared/types/reasoningEffort';
 import { CLI_TOOLS } from '../../../shared/types/cliTools';
 import { validateAgentDraft, AgentOverrideError } from './agents/agentValidation';
@@ -127,16 +127,22 @@ const workflowAgentCustomCopySchema = z.object({
 
 /**
  * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
- * `{}` (none of `model`, `custom`, `runtime`, `codexModel`, `effort` set) is
- * rejected below — it carries no signal and the editor must prune it before
- * persisting. `effort` accepts the whole cross-provider union here; the
- * resolved provider narrows it at spawn time (see normalizeEffortSelection).
+ * `{}` (none of `model`, `custom`, `runtime`, `providerModel`/`codexModel`,
+ * `effort` set) is rejected below — it carries no signal and the editor must
+ * prune it before persisting. `effort` accepts the whole cross-provider union
+ * here; the resolved provider narrows it at spawn time (see
+ * normalizeEffortSelection). Both `providerModel` and its deprecated alias
+ * `codexModel` are accepted: persisted workflow definitions and the MCP
+ * `cyboflow_update_workflow`/`cyboflow_create_variant`/`cyboflow_update_variant`
+ * writers may still write the old key, so rejecting it would break existing
+ * data — every read seam normalizes via `providerModel ?? codexModel`.
  */
 const workflowAgentConfigSchema = z
   .object({
     model: z.enum(AGENT_MODEL_ALIASES).optional(),
     custom: workflowAgentCustomCopySchema.optional(),
-    runtime: z.enum(WORKFLOW_AGENT_RUNTIMES).optional(),
+    runtime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).optional(),
+    providerModel: z.string().min(1).optional(),
     codexModel: z.string().min(1).optional(),
     effort: z.enum(ALL_EFFORT_LEVELS).optional(),
   })
@@ -145,13 +151,14 @@ const workflowAgentConfigSchema = z
       config.model === undefined &&
       config.custom === undefined &&
       config.runtime === undefined &&
+      config.providerModel === undefined &&
       config.codexModel === undefined &&
       config.effort === undefined
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'agentConfigs entry must set "model", "custom", "runtime", "codexModel", and/or "effort" — an empty {} config must be pruned before persisting',
+          'agentConfigs entry must set "model", "custom", "runtime", "providerModel" (or the deprecated "codexModel"), and/or "effort" — an empty {} config must be pruned before persisting',
       });
     }
   }) satisfies z.ZodType<WorkflowAgentConfig>;

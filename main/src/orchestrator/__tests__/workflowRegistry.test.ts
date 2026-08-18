@@ -23,10 +23,18 @@ import { writeFileSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type WorkflowConfigProvider } from '../workflowRegistry';
 import { computeSpecHash } from '../specHash';
+import {
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+  type WorkflowRunStorableRuntime,
+} from '../../../../shared/types/agentRuntime';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
+import {
+  isMixedProviderOrchestratedError,
+  isProviderOrchestratedUnsupportedError,
+} from '../../../../shared/types/executionModelErrors';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -1160,6 +1168,327 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    // ───── the omp-sdk launch arm (T1) ─────
+    //
+    // createRun accepts the STORABLE set so the `__quick__` sentinel can carry a
+    // session's own runtime; a real workflow LAUNCH is narrower and may only
+    // name a runtime the flow machinery can deploy on. omp-sdk is now BOTH — its
+    // programmatic per-step support landed — so the sentinel and a real launch
+    // both resolve it, onto the same 'sdk'-projected substrate Codex uses.
+    //
+    // These registries enable OMP explicitly: the provider is absent⇒DISABLED,
+    // so the access gate would otherwise answer first and prove nothing about
+    // the launch-resolution ladder.
+    const ompEnabledRegistry = (): WorkflowRegistry =>
+      new WorkflowRegistry(dbAdapter(db), logger, {
+        ...makeConfig('default'),
+        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true }),
+      });
+
+    it('STAMPS omp-sdk on a real workflow launch, projecting the sdk substrate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-launchable.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        // Programmatic is REQUIRED, not incidental: the whole-run provider guard
+        // refuses an orchestrated OMP launch (OMP ships the programmatic lane
+        // only), and this fixture's config has no execution-model default, so it
+        // would otherwise floor to 'orchestrated' and be refused before the stamp.
+        const { runId, substrate } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        // The substrate is PROJECTED, not requested: omp-sdk carries no
+        // sdk/interactive axis of its own and piggybacks 'sdk' exactly as
+        // codex-sdk does, which is what makes it eligible for programmatic mode.
+        expect(substrate).toBe('sdk');
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+      });
+    });
+
+    it('resolves the omp launch arm from the PROVIDER half alone', async () => {
+      // The provider half resolves independently: a variant row or an
+      // MCP-written config can name a provider with no runtime beside it, and it
+      // must land on that provider's structured runtime rather than flooring to
+      // Claude.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-provider-only.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const { runId } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          // See the sibling test: an OMP workflow run is programmatic-only.
+          requestedExecutionModel: 'programmatic',
+        });
+
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+      });
+    });
+
+    it('refuses an omp-sdk workflow launch when the provider is switched off', async () => {
+      // The access gate is what a default install hits: OMP is absent⇒DISABLED,
+      // and it must answer BEFORE the launch resolves — otherwise the T1
+      // promotion would have opened OMP for every install that never opted in.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-disabled-launch.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: true, codex: true }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+            requestedAgentRuntime: 'omp-sdk',
+          }),
+        ).toThrow(/OMP provider is disabled/);
+      });
+    });
+
+    it('refuses a storable-but-not-launchable runtime on a real workflow launch', async () => {
+      // No SHIPPED runtime is storable-but-not-launchable today (the two sets
+      // coincide), so the guard is exercised through a cast — it is the seam
+      // that keeps the NEXT such runtime out of a launch, and a guard with no
+      // test stops being a guard the moment the sets diverge again.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-pty-not-launchable.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+            requestedAgentRuntime: 'omp-pty' as WorkflowRunStorableRuntime,
+          }),
+        ).toThrow(/has no launch resolution yet/);
+      });
+    });
+
+    it('STAMPS omp-sdk on the __quick__ sentinel (the storable-runtime relaxation)', () => {
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      const { runId, substrate } = gated.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
+        requestedAgentProvider: 'omp',
+        requestedAgentRuntime: 'omp-sdk',
+      });
+
+      expect(substrate).toBe('sdk');
+      const row = db
+        .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+        .get(runId) as { agent_provider: string; agent_runtime: string };
+      // NOT the Claude floor: the dispatch facade reads this row back to pick
+      // the owning manager, so a floored stamp is a misrouted chat.
+      expect(row).toEqual({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+    });
+
+    // ───── whole-run provider / orchestrated guard ─────
+    //
+    // The mixed-provider guard exempts a whole-run non-Claude request because
+    // every step targets one provider. That is only safe when the provider can
+    // HOST an orchestrated run; OMP shipped the programmatic lane only (no
+    // prompt envelope, no question bridge, `task` denied), so an orchestrated
+    // OMP launch would start a main orchestrator outside the shipped contract.
+
+    it('refuses an orchestrated whole-run OMP launch, naming the fix', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-orchestrated.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        interface CountRow { count: number }
+        const countBefore = (
+          db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+        ).count;
+
+        let thrown: unknown;
+        try {
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+            requestedAgentRuntime: 'omp-sdk',
+            requestedExecutionModel: 'orchestrated',
+          });
+        } catch (err) {
+          thrown = err;
+        }
+
+        expect((thrown as Error | undefined)?.name).toBe('ProviderOrchestratedUnsupportedError');
+        expect((thrown as { code?: string } | undefined)?.code).toBe('PROVIDER_REQUIRES_PROGRAMMATIC');
+        expect(isProviderOrchestratedUnsupportedError(thrown)).toBe(true);
+        // The vendor LABEL, not the provider id, and the actionable remedy.
+        expect((thrown as Error).message).toMatch(/OMP workflow runs are programmatic-only/);
+        expect((thrown as Error).message).toMatch(/switch the run\/variant to programmatic/);
+        // Distinct from the mixed-provider code: the wizard's mixed-provider
+        // prompt renders hardcoded "runs one or more steps on Codex" copy, which
+        // would be wrong here.
+        expect(isMixedProviderOrchestratedError(thrown)).toBe(false);
+
+        // Refused BEFORE any row exists.
+        const countAfter = (
+          db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+        ).count;
+        expect(countAfter).toBe(countBefore);
+      });
+    });
+
+    it('refuses an OMP launch that FLOORS to orchestrated with no execution-model override', async () => {
+      // The realistic shape: nothing names an execution model, so the resolver
+      // floors to 'orchestrated'. The guard has to read the RESOLVED value, not
+      // the requested one, or the default path walks straight past it.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-floored.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'omp',
+            requestedAgentRuntime: 'omp-sdk',
+          }),
+        ).toThrow(/programmatic-only/);
+      });
+    });
+
+    it('ACCEPTS a programmatic whole-run OMP launch', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'omp-programmatic.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(result.executionModel).toBe('programmatic');
+        expect(gated.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('leaves an orchestrated whole-run CODEX launch alone', async () => {
+      // Codex HAS the orchestrated pieces (prompt envelope + question bridge),
+      // so the guard must be a capability check, not "non-Claude is refused".
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-orchestrated.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedExecutionModel: 'orchestrated',
+        });
+
+        expect(result.executionModel).toBe('orchestrated');
+        const row = db
+          .prepare('SELECT agent_provider, execution_model FROM workflow_runs WHERE id = ?')
+          .get(result.runId) as { agent_provider: string; execution_model: string };
+        expect(row).toEqual({ agent_provider: 'codex', execution_model: 'orchestrated' });
+      });
+    });
+
+    it('EXEMPTS the __quick__ sentinel, which hard-pins orchestrated', () => {
+      // A quick chat is not a DAG — the sentinel row exists to carry the
+      // session's runtime for the dispatch facade. Tripping the guard here would
+      // make every OMP quick session unlaunchable.
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      const result = gated.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
+        requestedAgentProvider: 'omp',
+        requestedAgentRuntime: 'omp-sdk',
+      });
+
+      expect(result.executionModel).toBe('orchestrated');
+      const row = db
+        .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+        .get(result.runId) as { agent_provider: string; agent_runtime: string };
+      expect(row).toEqual({ agent_provider: 'omp', agent_runtime: 'omp-sdk' });
+    });
+
+    it('refuses an omp-sdk sentinel paired with the interactive substrate', () => {
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      expect(() =>
+        gated.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
+        }),
+      ).toThrow(/substrate interactive conflicts with agentRuntime omp-sdk/);
+    });
+
+    // The access gate is the reason the relaxation is safe: OMP is the first
+    // provider whose ABSENT access key means DISABLED, so a sentinel create on
+    // an install that has never seen the OMP card fails closed.
+    it('rejects an OMP sentinel when the provider access map omits OMP entirely', () => {
+      const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+        ...makeConfig('default'),
+        getAgentProviderAccess: () => ({ claude: true, codex: true }),
+      });
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      expect(() =>
+        gated.createRun(workflowId, 'sdk', TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'omp',
+          requestedAgentRuntime: 'omp-sdk',
+        }),
+      ).toThrow(/OMP provider is disabled/);
+    });
+
+    it('still accepts every launchable runtime unchanged', () => {
+      // Every provider ENABLED: this arm is about the launch-resolution ladder
+      // accepting the whole launchable set, not about the access gate (which the
+      // omp-disabled arm above covers). Without the enabled map, `omp-sdk`
+      // joining the set would fail here for the wrong reason.
+      const gated = ompEnabledRegistry();
+      const workflowId = gated.ensureQuickWorkflow(1);
+
+      for (const runtime of WORKFLOW_LAUNCHABLE_RUNTIMES) {
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentRuntime: runtime,
+          }),
+        ).not.toThrow();
+      }
+    });
+
     // ───── requireSdkSubstrate guard (Design Mode belt, design-mode.md
     // "Session plumbing — SDK-pinned, fail-closed") ─────
 
@@ -1484,6 +1813,75 @@ describe('WorkflowRegistry', () => {
           thrown = err;
         }
         expect((thrown as Error | undefined)?.name).toBe('MixedProviderOrchestratedError');
+      });
+    });
+
+    // The guard has to widen WITH the launchable set. A literal `=== 'codex-sdk'`
+    // trip condition would let an `omp-sdk` pin launch an orchestrated run that
+    // silently ignores it — the exact silent degradation this guard exists to
+    // prevent, one provider later.
+    it('throws MixedProviderOrchestratedError for an orchestrated run whose CATALOGUE pins a REACHABLE agent onto OMP', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-omp-orchestrated.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        insertRuntimeOverride('implement', 'omp-sdk', 'anthropic/claude-haiku-4-5');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
+
+        let thrown: unknown;
+        try {
+          registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        } catch (err) {
+          thrown = err;
+        }
+        // The SAME error class, so the UI's "switch to programmatic?" prompt
+        // (isMixedProviderOrchestratedError in SessionStartWizard) covers OMP
+        // with no edit.
+        expect((thrown as Error | undefined)?.name).toBe('MixedProviderOrchestratedError');
+      });
+    });
+
+    it('does NOT throw for a programmatic run with the same CATALOGUE OMP pin', async () => {
+      // Programmatic is exactly where a per-agent pin IS honored — each step
+      // spawns its own process — so the guard must stay out of its way.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-omp-programmatic.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        insertRuntimeOverride('implement', 'omp-sdk', 'anthropic/claude-haiku-4-5');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedExecutionModel: 'programmatic',
+        });
+        expect(result.executionModel).toBe('programmatic');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw when the CATALOGUE pins a reachable agent back onto a CLAUDE runtime', async () => {
+      // The trip condition is "the pinned runtime's provider is not Claude", not
+      // "a runtime is pinned at all": an explicit claude-sdk pin is the same
+      // provider the run already uses, so it is not a mix.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-claude-pin.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        insertRuntimeOverride('implement', 'claude-sdk', '');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        expect(result.executionModel).toBe('orchestrated');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
       });
     });
 

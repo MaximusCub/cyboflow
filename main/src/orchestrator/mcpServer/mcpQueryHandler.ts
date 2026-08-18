@@ -139,8 +139,10 @@ import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   VerificationScheduler,
 } from '../verify/verificationScheduler';
+import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from '../visualVerificationResolver';
+import { loadVerifyConfig } from '../verifyConfigLoader';
 import { prepareVerificationEnqueue } from '../verify/enqueueFromTask';
-import { captureSnapshotSha, isRunbookCommittedAtHead } from '../verify/snapshotProvisioner';
+import { captureSnapshotSha, isRunbookCommittedAtHead, isWorktreeDirty } from '../verify/snapshotProvisioner';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
 import { isVerifyRunbookModality, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
 import {
@@ -155,6 +157,8 @@ import type {
   VerificationRequestInput,
   VerificationTaskV1,
   VisualBackendId,
+  VerifyChainEntry,
+  ResolvedVisualVerifyConfig,
 } from '../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
@@ -563,6 +567,20 @@ export type McpQueryMessage =
       verificationRequestId: string;
       /** Wait budget in ms; defaults to 15 min and is clamped to a 20-min ceiling. */
       timeoutMs?: number;
+    }
+  | {
+      /**
+       * NON-BLOCKING COLD READ: list THIS run's verification requests and their
+       * outcomes. The complement to `mcp-await-verification`, which can only
+       * answer for an id the caller is still holding — after a context compaction
+       * there is otherwise no way to enumerate what a run has already verified.
+       * Run-bound like every other tool on this socket.
+       */
+      type: 'mcp-get-verifications';
+      requestId: string;
+      runId: string;
+      /** Optional verification_requests.id to narrow to a single row. Still run-scoped. */
+      verificationRequestId?: string;
     }
   | {
       /**
@@ -1379,6 +1397,25 @@ export interface McpQueryHandlerDeps {
    * is affected.
    */
   verifyRunbookStore?: VerifyRunbookStore;
+
+  /**
+   * The GLOBAL visual-verification config (the master switch + default type),
+   * read LIVE — the same `configManager.getVisualVerifyConfig()` the
+   * WorkflowRegistry injects into `createRun`.
+   *
+   * Needed because a `__quick__` chat sentinel's verify posture cannot come from
+   * its run stamp. The sentinel is minted ONCE on the session's first chat turn
+   * and reused for the session's whole life, and `verify_chain` has no UPDATE
+   * path by design (visualVerificationResolver.ts:5-7) — so a session that
+   * existed before the master switch was turned on would be stamped disabled
+   * forever. Quick runs therefore resolve posture at CALL time through this dep;
+   * every other run keeps reading its frozen stamp, untouched.
+   *
+   * Absent ⇒ the quick branch falls back to the frozen stamp (i.e. the
+   * pre-existing behavior), so the dozens of fixtures that build a deps bag
+   * without it keep passing unchanged.
+   */
+  getVisualVerifyConfig?(): ResolvedVisualVerifyConfig;
 }
 
 /**
@@ -1574,6 +1611,10 @@ export class McpQueryHandler {
           // needs the verdict IN ITS OWN TURN; fire-and-continue delivery has no
           // channel back to a live turn.
           await this.handleAwaitVerification(msg, client);
+          break;
+        case 'mcp-get-verifications':
+          // NON-BLOCKING cold read — a plain run-scoped SELECT, no waiting.
+          this.handleGetVerifications(msg, client);
           break;
         case 'mcp-register-verify-runbook':
           // AWAITED: the store reads + validates the portable runbook file and
@@ -4294,6 +4335,13 @@ export class McpQueryHandler {
       return;
     }
 
+    // The run's FROZEN workflow identity, resolved ONCE up here because two
+    // things below need it: the `__quick__` late-binding branch immediately
+    // after, and the `setup_proof` authorization further down (which used to
+    // make this call itself, inside its own block).
+    const frozenSpec = resolveRunFrozenSpec(this.db, msg.runId);
+    const isQuickRun = frozenSpec?.workflowName === QUICK_WORKFLOW_NAME;
+
     // Read the run's IMMUTABLE verify stamp (migration 055). Read defensively — a
     // pre-036 DB lacking the columns degrades to a disabled posture (skipped).
     let enabled = false;
@@ -4314,13 +4362,71 @@ export class McpQueryHandler {
       enabled = false;
     }
 
+    // QUICK-SESSION LATE BINDING: a `__quick__` chat sentinel resolves its posture
+    // NOW instead of reading the stamp above. See `getVisualVerifyConfig` on
+    // McpQueryHandlerDeps for why the stamp cannot serve here (minted once per
+    // session, no UPDATE path — a session predating the master switch would be
+    // disabled forever).
+    //
+    // This honors the EXISTING enablement ladder rather than adding a setting:
+    // the same `resolveVisualVerification` `createRun` calls, fed the same global
+    // rung and the same project rung — just read at call time. The chain it
+    // returns is used VERBATIM (not intersected) further down; that resolved
+    // chain is what the scheduler's request-level dispatch key reads.
+    let quickResolvedChain: VerifyChainEntry[] | null = null;
+    if (isQuickRun && this.deps.getVisualVerifyConfig !== undefined) {
+      const globalConfig = this.deps.getVisualVerifyConfig();
+      // PROJECT RUNG, WORKTREE-FIRST — matching the runtime resolution order in
+      // verifyConfigLoader's resolveDeliverableContext. A quick session editing
+      // its own `.cyboflow/verify.json` must see that edit take effect without
+      // merging first; reading the project checkout instead would make the
+      // session's own config change inert, which is precisely the case this
+      // late binding exists to serve. Falls back to the project checkout when the
+      // worktree has no (or an unparseable) config.
+      const worktreePath = this.resolveRunWorktree(msg.runId);
+      let projectVerifyConfig = worktreePath === null ? null : await loadVerifyConfig(worktreePath, this.logger);
+      if (projectVerifyConfig === null) {
+        const projectPath = this.resolveProjectPath(ctx.projectId);
+        if (projectPath !== null) projectVerifyConfig = await loadVerifyConfig(projectPath, this.logger);
+      }
+
+      const resolved = resolveVisualVerification({
+        // No `setupFlowBootstrap` rung: a quick session is not the setup flow and
+        // must not inherit its deadlock-breaking exemption.
+        requestedEnabled: null,
+        projectConfigEnabled: projectVerifyConfig?.enabled ?? null,
+        globalDefaultEnabled: globalConfig.enabled,
+        requestedType: isVerificationType(msg.typeOverride) ? msg.typeOverride : null,
+        projectConfigDefaultType: projectVerifyConfig?.defaultType ?? null,
+        globalDefaultType: globalConfig.defaultType,
+        deliverable: null,
+        availableBackends: SHIPPED_VERIFY_BACKENDS,
+        // MUST be passed, exactly as createRun does (workflowRegistry.ts:1422).
+        // Omitting it defaults to the AGENT engine, which would mint an agent
+        // posture on a host explicitly rolled back to the legacy waterfall.
+        legacyEngine: process.env.CYBOFLOW_VERIFY_LEGACY === '1',
+      });
+      enabled = resolved.enabled;
+      stampedType = resolved.type;
+      quickResolvedChain = resolved.enabled ? resolved.chain : null;
+    }
+
     // Disabled run → no-op SKIP (never an error). A typeOverride cannot enable it.
+    //
+    // The ack ALWAYS names its reason. A bare `{ skipped: true }` is not a usable
+    // answer for the caller: at least three different conditions skip a request
+    // (this branch, plus the scheduler's §3.2 no-proven-runbook degrade and its
+    // capability suppressions), and an agent handed an unlabelled skip has no way
+    // to tell them apart — so it GUESSES, and the guess reads to a human as a
+    // diagnosis. That is not hypothetical: a quick session skipped here for a
+    // plain disabled switch reported "no proven verification runbook" to the user,
+    // because that was the only skip reason named anywhere in its context.
     if (!enabled || stampedType === null) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { skipped: true },
+        data: { skipped: true, reason: this.disabledSkipReason(isQuickRun, enabled) },
       });
       return;
     }
@@ -4335,7 +4441,25 @@ export class McpQueryHandler {
     // why typeOverride can only NARROW — it can never reach a backend the host lacks.
     // Order follows FALLBACK_CHAINS (easy→hard). An empty intersection still enqueues
     // (the scheduler treats an empty chain as a SKIP, never a fabricated fail).
-    const chain = FALLBACK_CHAINS[effectiveType].filter((backend) => stampedChain.includes(backend));
+    //
+    // QUICK RUNS write their CALL-TIME-RESOLVED chain VERBATIM instead. This is
+    // what makes the feature reachable at all: `VerificationScheduler.processRow`
+    // decides the engine via `isAgentEngineRequest`, whose first rung is the
+    // request's own `chain_json`. Intersecting here would erase the resolved
+    // `['agent']` selector ('agent' is not a VisualBackendId, so it survives no
+    // intersection), the row would fall to the legacy waterfall, select no
+    // candidate, and terminate `skipped: 'no usable backend'` behind a
+    // healthy-looking `{ requestId }` reply.
+    //
+    // FLOW RUNS ARE UNCHANGED — byte-for-byte. `quickResolvedChain` is null for
+    // every non-quick run, and an agent-stamped flow run's intersection already
+    // evaluates to `[]` today (parseStampedChain narrows to VisualBackendId[],
+    // which drops 'agent'), so its dispatch still resolves off the run stamp
+    // exactly as before.
+    const chain =
+      quickResolvedChain !== null
+        ? [...quickResolvedChain]
+        : FALLBACK_CHAINS[effectiveType].filter((backend) => stampedChain.includes(backend));
 
     // DUAL-FORMAT CONTRACT (redesign §5.2): when `task` is present it is
     // authoritative for the deliverable. Strictly validate it FIRST — an invalid
@@ -4470,8 +4594,11 @@ export class McpQueryHandler {
       // asking for the exemption is rejected, and the error names the run's
       // ACTUAL workflow so a legitimate caller can see immediately why it was
       // denied rather than guessing.
-      const frozen = resolveRunFrozenSpec(this.db, msg.runId);
-      const actualWorkflow = frozen?.workflowName ?? 'unknown';
+      // `frozenSpec` is resolved ONCE near the top of this method (the quick-run
+      // branch needs it too). Same lookup, same guarantee: it is keyed off the
+      // (workflow_id, spec_hash) pair stamped at createRun, so a live edit to
+      // `workflows.name` mid-run cannot be raced into passing this check.
+      const actualWorkflow = frozenSpec?.workflowName ?? 'unknown';
       if (actualWorkflow !== VERIFY_SETUP_WORKFLOW_NAME) {
         this.writeResponse(client, {
           type: 'mcp-query-response',
@@ -4571,6 +4698,12 @@ export class McpQueryHandler {
     // fire-and-continue seam must never have.
     let snapshotSha: string | null = null;
     let snapshotWorktreePath: string | null = null;
+    // Does the worktree carry uncommitted work the snapshot at `snapshotSha`
+    // will NOT contain? Probed for QUICK runs only — a sprint lane commits before
+    // it verifies, so the answer there is both uninteresting and (with siblings
+    // mid-edit in the shared worktree) usually a false alarm. Reported to the
+    // caller rather than blocking: see `isWorktreeDirty`.
+    let dirtyWorktree = false;
     try {
       snapshotWorktreePath = this.resolveRunWorktree(msg.runId);
       if (snapshotWorktreePath === null) {
@@ -4579,6 +4712,7 @@ export class McpQueryHandler {
         });
       } else {
         snapshotSha = await captureSnapshotSha(snapshotWorktreePath);
+        if (isQuickRun) dirtyWorktree = await isWorktreeDirty(snapshotWorktreePath);
       }
     } catch (err) {
       this.logger?.warn('[Cyboflow MCP Query] request-verification: snapshot sha capture failed', {
@@ -4610,7 +4744,12 @@ export class McpQueryHandler {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { requestId, type: effectiveType },
+        // `snapshotSha` + `dirtyWorktree` travel WITH the ack so the caller learns
+        // what is actually being verified at the moment it fires, not after the
+        // verdict. A PASS on a dirty tree certifies `snapshotSha`, not the working
+        // copy, and the tool description requires both be stated alongside any
+        // verdict relayed to the user.
+        data: { requestId, type: effectiveType, snapshotSha, dirtyWorktree },
       });
       VerificationScheduler.getInstance().nudge();
     } catch (err) {
@@ -4836,6 +4975,61 @@ export class McpQueryHandler {
         error: 'verification_await_failed',
       });
     }
+  }
+
+  /**
+   * List THIS run's verification requests — the NON-BLOCKING cold read behind
+   * `cyboflow_get_verifications`.
+   *
+   * WHY IT EXISTS. `awaitTerminal` already returns instantly for an
+   * already-terminal request, so `cyboflow_await_verification` doubles as a
+   * later-turn read — but ONLY while the caller still holds the request id. A
+   * quick chat session fires-and-continues, and after a context compaction the
+   * ids are gone; without this tool the agent that fired a verification cannot
+   * find out what happened to it, while the human can see it in the artifacts
+   * pane. That asymmetry is the gap this closes.
+   *
+   * RUN-SCOPED IN SQL (`listRequestsForRun`), not by post-filtering: a foreign
+   * `request_id` yields an empty list rather than another run's verdict, and no
+   * cross-run row is ever materialized. There is deliberately no `not_your_request`
+   * error here — unlike `await`, which must distinguish "not yours" from "not
+   * found" so a flow does not block on an id it will never be told about, a
+   * listing's honest answer for a row it may not see is simply that the row is
+   * not in the list.
+   */
+  private handleGetVerifications(
+    msg: Extract<McpQueryMessage, { type: 'mcp-get-verifications' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const scheduler = VerificationScheduler.tryGetInstance();
+    if (scheduler === null) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'verification_unavailable',
+      });
+      return;
+    }
+
+    const narrowTo =
+      typeof msg.verificationRequestId === 'string' && msg.verificationRequestId.length > 0
+        ? msg.verificationRequestId
+        : undefined;
+    const verifications = scheduler.listRequestsForRun(msg.runId, narrowTo);
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { verifications },
+    });
   }
 
   /**
@@ -5354,6 +5548,49 @@ export class McpQueryHandler {
   }
 
   /**
+   * The human-readable reason for a DISABLED-posture verification skip.
+   *
+   * Three conditions land in that one branch and they are not interchangeable —
+   * each has a different fix, and only the caller can carry that to the user:
+   *
+   *   - a QUICK session whose posture resolved off ⇒ the master switch (or the
+   *     project's `.cyboflow/verify.json`) is off. Fixable in Settings, and the
+   *     late binding means it takes effect on the NEXT call — no restart, no new
+   *     session. Naming that is the whole point: the fix is one toggle away.
+   *   - a FLOW run stamped disabled ⇒ the stamp is immutable (migration 055, no
+   *     UPDATE path), so no setting change rescues THIS run; it needs a new one.
+   *   - enabled but no type resolved ⇒ a posture that survived the enablement
+   *     ladder yet named no verification type. Rare, and worth saying plainly
+   *     rather than folding into "disabled", which would be a lie.
+   *
+   * Deliberately NOT a reason this function can emit: anything about runbooks.
+   * The runbook gate lives in the scheduler and fires only AFTER a row exists —
+   * a request skipped here never reached it, so claiming it did would invent
+   * evidence.
+   */
+  private disabledSkipReason(isQuickRun: boolean, enabled: boolean): string {
+    if (enabled) {
+      return (
+        'visual verification is enabled but resolved no verification type — nothing was enqueued. ' +
+        'Check the project/global visualVerify defaultType.'
+      );
+    }
+    if (isQuickRun) {
+      return (
+        'visual verification is turned OFF — nothing was enqueued, no budget spent. ' +
+        'Enable it in Settings (or in this project/worktree\'s .cyboflow/verify.json); a quick ' +
+        'session reads the switch on every call, so the next request picks it up with no restart ' +
+        'and no new session. This skip says NOTHING about whether the project has a runbook.'
+      );
+    }
+    return (
+      "this run's visual-verification posture was stamped disabled when the run was created, and " +
+      'that stamp is immutable — changing the setting now cannot enable THIS run; a new run is ' +
+      'required. This skip says NOTHING about whether the project has a runbook.'
+    );
+  }
+
+  /**
    * Resolve the run's worktree_path (the session/run cwd) for the allow-list
    * lookup. Returns null when the run row is absent (the precondition check in
    * requestApproval then surfaces the failure loudly).
@@ -5366,6 +5603,29 @@ export class McpQueryHandler {
       return null;
     }
     return row.worktree_path;
+  }
+
+  /**
+   * Resolve a project's root checkout path. Used as the SECOND rung of the
+   * quick-session verify-config lookup, behind the run's own worktree — a run's
+   * commands execute in its worktree, so a recipe the branch under verification
+   * added must win over the project checkout's copy.
+   *
+   * Fail-soft to null (absent row, missing column on an older schema): the caller
+   * treats "no project config" and "could not read one" identically, falling to
+   * the global rung, which is the same posture `createRun` takes when no project
+   * config is injected.
+   */
+  private resolveProjectPath(projectId: number): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT path FROM projects WHERE id = ?')
+        .get(projectId) as { path?: unknown } | undefined;
+      const p = row?.path;
+      return typeof p === 'string' && p.length > 0 ? p : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -5416,12 +5676,18 @@ export class McpQueryHandler {
         { runId },
       );
       // Clear the pending approval so the run does not leak in awaiting_review.
-      // clearPendingForRun is a no-op socketReply path (correct here — the socket
-      // is already gone), and idempotently settles the DB row.
+      // ABANDONMENT, not termination: the run is still executing, only its
+      // requester went away (gate-extension decision budget expired, hook
+      // subprocess died). abandonPendingForRun therefore also restores
+      // awaiting_review → running — clearPendingForRun would settle the approval
+      // and leave the run wedged, making every later requestApproval loop in the
+      // 'wait' branch with no row inserted and no gate ever shown. It is a no-op
+      // socketReply path (correct here — the socket is already gone) and
+      // idempotently settles the DB row.
       try {
-        ApprovalRouter.getInstance().clearPendingForRun(runId);
+        ApprovalRouter.getInstance().abandonPendingForRun(runId);
       } catch (err) {
-        this.logger?.debug('[Cyboflow MCP Query] clearPendingForRun on disconnect failed', {
+        this.logger?.debug('[Cyboflow MCP Query] abandonPendingForRun on disconnect failed', {
           runId,
           error: err instanceof Error ? err.message : String(err),
         });

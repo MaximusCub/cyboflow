@@ -179,7 +179,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   const handleStartQuickSession = useCallback(() => {
     if (projectId === null) return;
-    void quickSession.start();
+    void quickSession.startWithDefaults('quick');
   }, [projectId, quickSession]);
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });

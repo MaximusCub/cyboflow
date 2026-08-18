@@ -47,7 +47,12 @@ import type {
   FetchLike,
   IssueDraft,
 } from './adapterTypes';
-import { TrackerApiError, TrackerAuthError } from './errors';
+import {
+  TrackerApiError,
+  TrackerAuthError,
+  TRACKER_REQUEST_TIMEOUT_MS,
+  describeTransportFailure,
+} from './errors';
 
 const PROVIDER: TrackerProvider = 'plane';
 const DEFAULT_BASE_URL = 'https://api.plane.so';
@@ -109,6 +114,12 @@ export interface PlaneAdapterOptions {
   /** Self-hosted instance origin; omitted = Plane cloud. */
   baseUrl?: string;
   fetchImpl?: FetchLike;
+  /**
+   * Per-request abort budget; defaults to {@link TRACKER_REQUEST_TIMEOUT_MS}.
+   * Injectable so a test can prove the abort path in milliseconds instead of
+   * waiting out the real budget.
+   */
+  requestTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,19 +213,37 @@ export class PlaneAdapter implements TrackerAdapter {
    * fresh instance re-derives it the same way every time.
    */
   private workItemsSegment: WorkItemsSegment = 'work-items';
+  private readonly requestTimeoutMs: number;
 
   constructor(options: PlaneAdapterOptions) {
     this.apiKey = options.apiKey;
     this.workspaceSlug = options.workspaceSlug;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? TRACKER_REQUEST_TIMEOUT_MS;
   }
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     const me = await this.request<PlaneUserWire>('GET', '/users/me/');
     // Authorization probe for the configured slug specifically — /users/me/
     // only proves the key is live, not that it can see this workspace.
-    await this.request('GET', `/workspaces/${this.workspaceSlug}/projects/`);
+    //
+    // A 404 HERE HAS EXACTLY ONE MEANING and it is worth saying out loud: the
+    // key is good (the call above just succeeded with it) and the path is a
+    // literal workspace slug, so the only thing that can be missing is the
+    // WORKSPACE. Left to `assertOk` this reached the wizard as "[plane] request
+    // failed (404)", which reads like a bug in cyboflow rather than a typo in
+    // the one field the user just filled in. Every other 404 in this adapter
+    // keeps the generic message — they name an id the user did not type.
+    const probe = await this.send('GET', `/workspaces/${this.workspaceSlug}/projects/`);
+    if (probe.status === 404) {
+      throw new TrackerApiError(
+        PROVIDER,
+        `workspace not found — check the workspace slug "${this.workspaceSlug}"`,
+        404
+      );
+    }
+    this.assertOk(probe);
     return {
       // Plane's REST API exposes no prettier workspace display name on
       // /users/me/ or /workspaces/{slug}/projects/ — the slug is all we have
@@ -640,15 +669,35 @@ export class PlaneAdapter implements TrackerAdapter {
     return results;
   }
 
-  private send(method: string, pathFromApiV1: string, body?: unknown): Promise<Response> {
-    return this.fetchImpl(`${this.baseUrl}/api/v1${pathFromApiV1}`, {
-      method,
-      headers: {
-        'X-API-Key': this.apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+  /**
+   * The single fetch every path in this adapter goes through.
+   *
+   * EVERY call carries an abort timeout (see TRACKER_REQUEST_TIMEOUT_MS): a
+   * request that never settles would pin the sync engine's per-connection lock
+   * for the life of the process. The abort — and any other transport-level
+   * failure, which used to escape this class RAW and untyped — surfaces as a
+   * TrackerApiError with a NULL status, which is what puts it on the outbox's
+   * RETRY path rather than its terminal one: a timeout says nothing about
+   * whether the write is valid.
+   */
+  private async send(method: string, pathFromApiV1: string, body?: unknown): Promise<Response> {
+    try {
+      return await this.fetchImpl(`${this.baseUrl}/api/v1${pathFromApiV1}`, {
+        method,
+        headers: {
+          'X-API-Key': this.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (err) {
+      throw new TrackerApiError(
+        PROVIDER,
+        describeTransportFailure(err, this.requestTimeoutMs),
+        null
+      );
+    }
   }
 
   private assertOk(response: Response): void {

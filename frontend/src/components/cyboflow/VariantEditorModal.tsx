@@ -25,14 +25,19 @@ import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
 import { WorkflowStepInspector } from './WorkflowStepInspector';
 import { MODEL_OPTIONS } from './unified/ModelPill';
-import { providerForRuntime } from './agentRuntimeUi';
+import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
-import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
+import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
+import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
-import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
-import { isRuntimeProviderEnabled } from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import {
+  AGENT_PROVIDER_LABELS,
+  isRuntimeProviderEnabled,
+  WORKFLOW_LAUNCHABLE_RUNTIMES,
+} from '../../../../shared/types/agentRuntime';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 
 export interface VariantEditorModalProps {
@@ -77,6 +82,7 @@ const VARIANT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
   'claude-sdk': 'Claude SDK',
   'claude-interactive': 'Claude interactive (PTY)',
   'codex-sdk': 'Codex SDK',
+  'omp-sdk': 'OMP',
 };
 
 export function VariantEditorModal({
@@ -122,32 +128,42 @@ export function VariantEditorModal({
   );
 
   // The variant's effective agent provider, derived from its runtime pin. When
-  // unpinned (INHERIT) the launch default (Claude) drives the pickers. A Codex
-  // variant swaps the Claude model list for the runtime-discovered catalog and
-  // hides the per-agent overrides (a Codex run is single-model, no overlays).
-  // The wire schema is 2-wide (`claude | codex`): a variant pin is a
-  // `WorkflowAgentRuntime` (never `omp-fleet` in v1), so the cast is total.
-  const variantProvider: 'claude' | 'codex' =
-    agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as WorkflowAgentRuntime);
-  const isCodexVariant = variantProvider === 'codex';
-  const { options: codexModelOptions } = useCodexModelCatalog(isCodexVariant);
+  // unpinned (INHERIT) the launch default (Claude) drives the pickers. A
+  // NON-CLAUDE variant swaps the Claude model list for that provider's
+  // runtime-discovered catalog and hides the per-agent overrides (those runs are
+  // single-model — there is no agent overlay on a non-Claude spawn).
+  const variantProvider: AgentProvider =
+    agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as LaunchAgentRuntime);
+  const isNonClaudeVariant = variantProvider !== 'claude';
+  // Both catalogue hooks are called unconditionally (Rules of Hooks); each
+  // `enabled` flag defers its own fetch until that provider is the pinned one.
+  const { options: codexModelOptions } = useCodexModelCatalog(variantProvider === 'codex');
+  const { options: ompModelOptions } = useOmpModelCatalog(variantProvider === 'omp');
+  const providerModelOptions =
+    variantProvider === 'codex'
+      ? codexModelOptions
+      : variantProvider === 'omp'
+        ? ompModelOptions
+        : MODEL_OPTIONS;
   // Provider access (Settings → Integrations): a variant may not pin a runtime
   // whose provider is switched off — createRun rejects such a pin at launch, so
   // offering it here would only mint an unlaunchable variant. An already-saved
   // pin stays listed so the select renders its own value until the user repins.
   const providerAccess = useAgentProviderAccess();
-  const runtimePinOptions = (
-    ['claude-sdk', 'claude-interactive', 'codex-sdk'] as const
-  ).filter((r) => isRuntimeProviderEnabled(providerAccess, r) || r === agentRuntime);
+  const runtimePinOptions = WORKFLOW_LAUNCHABLE_RUNTIMES.filter(
+    (r) => isRuntimeProviderEnabled(providerAccess, r) || r === agentRuntime,
+  );
 
-  // Drop a run-level model pin that no longer matches the variant's provider (a
-  // Claude alias under Codex, or a Codex id under Claude) — mirrors WorkflowPicker,
+  // Drop a run-level model pin another provider's family claims (a Claude alias
+  // under Codex, an OMP `provider/model` under Claude) — mirrors WorkflowPicker,
   // resetting to INHERIT (the variant's no-pin) rather than a provider default.
+  // Keyed on `normalizeAgentModelSelection`, the same shared family predicates
+  // createRun normalizes with, so the picker and the launch agree on what
+  // "belongs to this provider" for EVERY provider rather than for Codex alone.
   useEffect(() => {
     if (model === INHERIT) return;
-    if (isCodexVariant && !isCodexModelSelection(model)) setModel(INHERIT);
-    else if (!isCodexVariant && isCodexModelFamily(model)) setModel(INHERIT);
-  }, [isCodexVariant, model]);
+    if (normalizeAgentModelSelection(variantProvider, model) === undefined) setModel(INHERIT);
+  }, [variantProvider, model]);
 
   const actionInFlightRef = useRef(false);
 
@@ -387,7 +403,7 @@ export function VariantEditorModal({
               data-testid="variant-editor-model-select"
             >
               <option value={INHERIT}>Inherit (no pin)</option>
-              {(isCodexVariant ? codexModelOptions : MODEL_OPTIONS).map((o) => (
+              {providerModelOptions.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.label}
                 </option>
@@ -435,16 +451,16 @@ export function VariantEditorModal({
           data-testid="variant-editor-agent-deltas"
         >
           <h3 className="text-xs font-semibold text-text-primary">Agent overrides</h3>
-          {isCodexVariant && (
+          {isNonClaudeVariant && (
             <p className="text-xs text-text-tertiary" data-testid="variant-editor-agent-deltas-codex-note">
-              Codex runs use a single model per run and don't apply per-agent model or
-              system-prompt overrides — set the run model above.
+              {AGENT_PROVIDER_LABELS[variantProvider]} runs use a single model per run and don&apos;t
+              apply per-agent model or system-prompt overrides — set the run model above.
             </p>
           )}
-          {!isCodexVariant && agentKeys.length === 0 && (
+          {!isNonClaudeVariant && agentKeys.length === 0 && (
             <p className="text-xs text-text-tertiary">No agents available for this project.</p>
           )}
-          {!isCodexVariant && agentKeys.map((agentKey) => {
+          {!isNonClaudeVariant && agentKeys.map((agentKey) => {
             const delta = overrides[agentKey];
             return (
               <div

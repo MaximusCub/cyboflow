@@ -14,7 +14,10 @@
  *     the row `done`, and stamps the echo-suppression baseline on the link.
  *   - create_sub_issue: links the created issue (parent + baseline snapshot).
  *   - 5xx -> retry with next_attempt_at = now + min(2^attempts, 32) minutes.
- *   - TrackerAuthError -> terminal failure, connection paused, drain HALTS.
+ *   - TrackerAuthError -> connection paused and drain HALTS, with the rejected
+ *     row HELD unsettled (not terminal) so a key rotation replays it.
+ *   - supersession: a newer state write settles the queued older one at ENQUEUE,
+ *     and the drain refuses a stale row that never met that sweep.
  *   - a group with no provider state -> terminal failure (no retry storm).
  *   - post-send local failure leaves the row `in_flight` for boot recovery.
  *   - a create whose outcome is UNCERTAIN on a non-idempotent provider parks as
@@ -48,6 +51,8 @@ import {
   getLinkByEntity,
   insertConnection,
   requeueInFlightAsAmbiguous,
+  supersedeQueuedStateWrites,
+  updateConnectionSettings,
   upsertLink,
   type NewConnectionRow,
 } from '../store';
@@ -626,6 +631,161 @@ describe('drainOutbox — top-level issue creation (push)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Drain — supersession
+//
+// The drain is serial, so two writes are never in flight at once — but they can
+// still land out of ORDER across passes, and the tracker keeps whichever
+// arrived last.
+// ---------------------------------------------------------------------------
+
+describe('a stale state write never lands after a newer one', () => {
+  /**
+   * Enqueue a state write the way the two real call sites do —
+   * writeBack.enqueueStateWrite and TrackerSyncService.enqueueGroupWriteBack —
+   * which is `enqueueOutbox` followed by the supersession sweep.
+   */
+  function enqueueSuperseding(
+    connectionId: string,
+    externalId: string,
+    desiredGroup: UpdateStatePayload['desiredGroup'],
+    kind: 'update_state' | 'close_parent' = 'update_state',
+  ): TrackerOutboxRow {
+    const row = enqueueStateWrite(connectionId, externalId, desiredGroup, kind);
+    supersedeQueuedStateWrites(raw, connectionId, externalId, row.id);
+    return row;
+  }
+
+  it('settles the queued older write the moment a newer one is enqueued', async () => {
+    const connection = seedConnection();
+    const stale = enqueueSuperseding(connection.id, 'ext-1', 'started');
+    const fresh = enqueueSuperseding(connection.id, 'ext-1', 'completed');
+
+    // Settled at ENQUEUE, before any drain: `done`, not `failed`. Nothing went
+    // wrong — the instruction was replaced — so there is nothing to retry and
+    // nothing to report as a failure.
+    const dropped = fetchOutbox(stale.id);
+    expect(dropped.state).toBe('done');
+    expect(dropped.next_attempt_at).toBeNull();
+    expect(dropped.last_error).toContain('superseded');
+
+    const adapter = new FakeAdapter();
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    expect(report.sent).toBe(1);
+    expect(report.failedTerminal).toBe(0);
+    expect(fetchOutbox(fresh.id).state).toBe('done');
+  });
+
+  it('drops a stale write whose backoff outlived the newer one that ALREADY LANDED', async () => {
+    // THE REGRESSION, in the sequence that produces it: 'started' fails and
+    // takes a two-minute backoff; 'completed' is enqueued, is eligible
+    // immediately, and drains; then the backoff expires and the stale row is
+    // claimed — dragging a Done issue back to In Progress.
+    //
+    // This is also why the fix cannot live at claim time alone: by then the
+    // newer row is `done`, so nothing the drain can query still knows it
+    // existed. The enqueue in the middle of this test is the only moment both
+    // rows are visible at once.
+    const connection = seedConnection();
+    const stale = enqueueSuperseding(connection.id, 'ext-1', 'started');
+    const adapter = new FakeAdapter();
+    adapter.failUpdate = new TrackerApiError('linear', 'bad gateway', 502);
+    await drainOutbox(makeDeps(adapter), connection);
+    expect(fetchOutbox(stale.id).state).toBe('pending');
+    expect(fetchOutbox(stale.id).next_attempt_at).not.toBeNull();
+
+    adapter.failUpdate = null;
+    const fresh = enqueueSuperseding(connection.id, 'ext-1', 'completed');
+    await drainOutbox(makeDeps(adapter), connection);
+    expect(fetchOutbox(fresh.id).state).toBe('done');
+
+    // The backoff expires. Nothing more may go out for this issue.
+    raw.prepare('UPDATE tracker_outbox SET next_attempt_at = NULL WHERE id = ?').run(stale.id);
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.sent).toBe(0);
+    // The last thing the tracker was told is the CURRENT state, not the stale one.
+    expect(adapter.updateCalls.at(-1)).toEqual({ externalId: 'ext-1', stateId: 'state-done' });
+    expect(fetchOutbox(stale.id).state).toBe('done');
+  });
+
+  it('supersedes ACROSS the two status kinds, and never across different issues', async () => {
+    // update_state and close_parent both move the SAME issue's state, so a
+    // later one of either kind states the truth the earlier one is wrong about
+    // — the same key writeBack's enqueue dedupe uses. A write for a DIFFERENT
+    // issue supersedes nothing.
+    const connection = seedConnection();
+    const stale = enqueueSuperseding(connection.id, 'ext-idea', 'started');
+    const other = enqueueSuperseding(connection.id, 'ext-other', 'started');
+    enqueueSuperseding(connection.id, 'ext-idea', 'completed', 'close_parent');
+
+    expect(fetchOutbox(stale.id).state).toBe('done');
+    expect(fetchOutbox(other.id).state).toBe('pending');
+
+    const adapter = new FakeAdapter();
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.sent).toBe(2);
+    expect(adapter.updateCalls).toEqual([
+      { externalId: 'ext-other', stateId: 'state-progress' },
+      { externalId: 'ext-idea', stateId: 'state-done' },
+    ]);
+  });
+
+  it('leaves an IN-FLIGHT older write alone — its request is already out', async () => {
+    // Settling it would be a lie about an outcome nobody knows, and it needs no
+    // handling: the claim is serial, so the newer row is claimed only after the
+    // in-flight one finishes and therefore still lands last.
+    const connection = seedConnection();
+    const older = enqueueStateWrite(connection.id, 'ext-1', 'started');
+    raw.prepare("UPDATE tracker_outbox SET state = 'in_flight' WHERE id = ?").run(older.id);
+
+    enqueueSuperseding(connection.id, 'ext-1', 'completed');
+
+    expect(fetchOutbox(older.id).state).toBe('in_flight');
+  });
+
+  it('BACKSTOP: the drain refuses a stale row that never met the enqueue sweep', async () => {
+    // The invariant re-checked at the point of use, for a row queued before this
+    // behaviour existed (or by an enqueue path that forgets the sweep). Raw
+    // enqueues here, deliberately — no supersession at write time.
+    const connection = seedConnection();
+    const stale = enqueueStateWrite(connection.id, 'ext-1', 'started');
+    const fresh = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    expect(fetchOutbox(stale.id).state).toBe('pending');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.superseded).toBe(1);
+    expect(report.sent).toBe(1);
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    expect(fetchOutbox(stale.id).last_error).toContain('superseded');
+    expect(fetchOutbox(fresh.id).state).toBe('done');
+  });
+
+  it('BACKSTOP: a TERMINALLY FAILED newer row supersedes nothing', async () => {
+    // Only an UNSETTLED row can still speak for the issue. A newer write that
+    // failed for good will never reach the tracker, so dropping the older one
+    // for it would leave the remote at neither value.
+    const connection = seedConnection();
+    const older = enqueueStateWrite(connection.id, 'ext-1', 'started');
+    const newer = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    raw
+      .prepare("UPDATE tracker_outbox SET state = 'failed', next_attempt_at = NULL WHERE id = ?")
+      .run(newer.id);
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.superseded).toBe(0);
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-progress' }]);
+    expect(fetchOutbox(older.id).state).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Drain — failures
 // ---------------------------------------------------------------------------
 
@@ -672,7 +832,7 @@ describe('drainOutbox — failure handling', () => {
     expect(fetchOutbox(row.id).state).toBe('failed');
   });
 
-  it('pauses the connection and HALTS the drain on an auth failure', async () => {
+  it('pauses the connection and HALTS the drain on an auth failure, HOLDING the rejected row', async () => {
     const connection = seedConnection();
     const first = enqueueStateWrite(connection.id, 'ext-1', 'completed');
     const second = enqueueStateWrite(connection.id, 'ext-2', 'completed');
@@ -682,13 +842,49 @@ describe('drainOutbox — failure handling', () => {
     const report = await drainOutbox(makeDeps(adapter), connection);
 
     expect(report.authPaused).toBe(true);
-    expect(report.failedTerminal).toBe(1);
     expect(getConnection(raw, connection.id)?.status).toBe('paused');
-    expect(fetchOutbox(first.id).state).toBe('failed');
+
+    // NOT terminal: the credentials are wrong, the WRITE is not, and nothing
+    // re-derives a stage move whose entity event is long past. The row waits,
+    // eligible the instant the connection is usable again — no backoff, because
+    // no drain claims a non-active connection's rows in the meantime.
+    expect(report.failedTerminal).toBe(0);
+    expect(report.retriesScheduled).toBe(1);
+    const held = fetchOutbox(first.id);
+    expect(held.state).toBe('pending');
+    expect(held.next_attempt_at).toBe(NOW);
+    expect(held.last_error).toContain('invalid api key');
+
     // The second row was never claimed — the drain stopped.
     expect(fetchOutbox(second.id).state).toBe('pending');
     expect(fetchOutbox(second.id).attempts).toBe(0);
     expect(adapter.updateCalls).toHaveLength(1);
+  });
+
+  it('replays every held write once the connection is resumed with a working key', async () => {
+    const connection = seedConnection();
+    const first = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const second = enqueueStateWrite(connection.id, 'ext-2', 'cancelled');
+    const adapter = new FakeAdapter();
+    adapter.failUpdate = new TrackerAuthError('linear', 'invalid api key', 401);
+    await drainOutbox(makeDeps(adapter), connection);
+    expect(adapter.updateCalls).toHaveLength(1);
+
+    // The rotation (facade: updateCredentials) stores a fresh key and flips the
+    // connection back to 'active'. Both held rows are still queued, in order.
+    adapter.failUpdate = null;
+    updateConnectionSettings(raw, connection.id, { status: 'active' });
+    const resumed = getConnection(raw, connection.id);
+    if (resumed === null) throw new Error('connection vanished');
+
+    const report = await drainOutbox(makeDeps(adapter), resumed);
+
+    expect(report.sent).toBe(2);
+    // Past the one rejected attempt the paused drain made, both held writes go
+    // out — in their original order, which is what holding them preserved.
+    expect(adapter.updateCalls.slice(1).map((call) => call.externalId)).toEqual(['ext-1', 'ext-2']);
+    expect(fetchOutbox(first.id).state).toBe('done');
+    expect(fetchOutbox(second.id).state).toBe('done');
   });
 
   it('leaves the row in_flight when the local record fails AFTER a successful send', async () => {
@@ -865,6 +1061,16 @@ describe('processAmbiguous', () => {
 
   it('adopts an ambiguous TOP-LEVEL push by its marker, searching the container with no parent', async () => {
     const connection = seedConnection({ provider: 'plane' });
+    // The originating idea has to still BE there: recovery re-reads it before
+    // adopting, so that a create whose idea was removed mid-crash cannot come
+    // back as an active link (see the orphan cases below).
+    svc.seedDefaultBoard(PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id)
+         VALUES ('ide_1', ?, 'IDEA-1', 'Ship the push direction', ?, ?)`,
+      )
+      .run(PROJECT_ID, `board-${PROJECT_ID}-default`, resolveStageIds(raw, PROJECT_ID).idea);
     const row = enqueueOutbox(raw, {
       connection_id: connection.id,
       kind: 'create_issue',
@@ -895,6 +1101,107 @@ describe('processAmbiguous', () => {
     expect(adapter.clientKeyScopes).toEqual([
       { containerId: SELECTION.containerId, parentExternalId: null },
     ]);
+  });
+
+  /** A board + one idea row, so a recovered push has something to adopt onto. */
+  function seedPushIdea(id: string, opts: { archived?: boolean } = {}): void {
+    svc.seedDefaultBoard(PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id, archived_at)
+         VALUES (?, ?, 'IDEA-1', 'Ship the push direction', ?, ?, ?)`,
+      )
+      .run(
+        id,
+        PROJECT_ID,
+        `board-${PROJECT_ID}-default`,
+        resolveStageIds(raw, PROJECT_ID).idea,
+        opts.archived === true ? '2026-07-30 11:00:00' : null,
+      );
+  }
+
+  /** An ambiguous top-level push whose issue DID land, carrying the row's marker. */
+  function seedRecoverablePush(connectionId: string, entityId: string): TrackerOutboxRow {
+    const row = enqueueOutbox(raw, {
+      connection_id: connectionId,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: entityId,
+      client_key: 'client-key-push',
+      payload_json: '{}',
+    });
+    makeAmbiguous(row.id, connectionId);
+    return row;
+  }
+
+  it('does NOT link a recovered push whose idea was DELETED during the crash window', async () => {
+    // The remote create committed; only its response was lost. By the time
+    // recovery runs — potentially a whole app restart later — the user has
+    // hard-deleted the idea. Adopting anyway wrote an active link to an entity
+    // that no longer exists: a zombie the inbound poller finds, fails to
+    // resolve, and skips on every pass forever.
+    const connection = seedConnection({ provider: 'plane' });
+    const row = seedRecoverablePush(connection.id, 'ide_gone');
+    const adapter = new FakeMarkerAdapter();
+    adapter.issues = [
+      makeIssue('proj-1/ours', { title: 'Ship the push direction', identifier: 'PROJ-8' }),
+    ];
+    adapter.markers.set('proj-1/ours', 'client-key-push');
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(getLinkByEntity(raw, 'idea', 'ide_gone', 'plane')).toBeNull();
+    expect(report.created).toBe(0);
+    expect(report.orphanedCreates).toBe(1);
+    expect(report.ambiguousResolved).toBe(1);
+
+    // Settled, not failed — nothing is left to attempt. The stranded remote
+    // issue is named on the row (and counted into the connection's sync log),
+    // because this is the only record that it exists at all. It is deliberately
+    // NOT deleted or cancelled remotely: the user's local removal said nothing
+    // about an issue they never knew had been created.
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('done');
+    expect(settled.last_error).toContain('gone');
+    expect(settled.last_error).toContain('PROJ-8');
+  });
+
+  it('does NOT link a recovered push whose idea was ARCHIVED during the crash window', async () => {
+    // Archived is the more dangerous of the two: the entity still EXISTS, so an
+    // active link would keep inbound sync mutating something the user retired.
+    const connection = seedConnection({ provider: 'plane' });
+    seedPushIdea('ide_archived', { archived: true });
+    const row = seedRecoverablePush(connection.id, 'ide_archived');
+    const adapter = new FakeMarkerAdapter();
+    adapter.issues = [
+      makeIssue('proj-1/ours', { title: 'Ship the push direction', identifier: 'PROJ-8' }),
+    ];
+    adapter.markers.set('proj-1/ours', 'client-key-push');
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(getLinkByEntity(raw, 'idea', 'ide_archived', 'plane')).toBeNull();
+    expect(report.orphanedCreates).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('done');
+    expect(settled.last_error).toContain('archived');
+  });
+
+  it('links a recovered push whose idea is still live', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    seedPushIdea('ide_1');
+    seedRecoverablePush(connection.id, 'ide_1');
+    const adapter = new FakeMarkerAdapter();
+    adapter.issues = [
+      makeIssue('proj-1/ours', { title: 'Ship the push direction', identifier: 'PROJ-8' }),
+    ];
+    adapter.markers.set('proj-1/ours', 'client-key-push');
+
+    const report = await processAmbiguous(makeDeps(adapter), connection);
+
+    expect(report.created).toBe(1);
+    expect(report.orphanedCreates).toBe(0);
+    expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')?.external_id).toBe('proj-1/ours');
   });
 
   it('returns a PROVABLY-UNSENT top-level push to pending, and the drain then creates it once', async () => {
@@ -1042,7 +1349,14 @@ describe('processAmbiguous', () => {
 
     expect(report.authPaused).toBe(true);
     expect(getConnection(raw, connection.id)?.status).toBe('paused');
-    expect(fetchOutbox(first.id).state).toBe('failed');
+    // The row STAYS ambiguous — and specifically is not returned to `pending`.
+    // An auth failure on the reconciling lookup says nothing about whether the
+    // create landed, so retrying it could duplicate a sub-issue; and settling it
+    // terminally would abandon a write that is still perfectly valid.
+    const held = fetchOutbox(first.id);
+    expect(held.state).toBe('ambiguous');
+    expect(held.last_error).toContain('revoked key');
+    expect(report.failedTerminal).toBe(0);
     expect(fetchOutbox(second.id).state).toBe('ambiguous');
   });
 });

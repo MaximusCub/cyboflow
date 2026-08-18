@@ -47,10 +47,18 @@ import {
 } from './services/designFrameWatchdog';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
-import { CliManagerFactory } from './services/cliManagerFactory';
+import {
+  CliManagerFactory,
+  isCodexPtyManagerLike,
+  isCodexSdkManagerLike,
+  isOmpPtyManagerLike,
+  isOmpSdkManagerLike,
+  type CodexPtyManagerLike,
+  type OmpPtyManagerLike,
+} from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
-import { resolvePanelLane } from './services/panelLane';
+import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
@@ -63,10 +71,12 @@ import {
   type SessionSummarySchedulerLike,
 } from './orchestrator/sessionSummary/sessionSummaryScheduler';
 import { wireSessionSummaryScheduler } from './orchestrator/sessionSummary/wireSessionSummaryScheduler';
-import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
-import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { ClaudeModelCatalogService } from './services/claudeModelCatalogService';
-import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
+import {
+  SubstrateDispatchFacade,
+  resolveLaneManager,
+  type ManagerRegistration,
+} from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
@@ -118,7 +128,7 @@ import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
-import type { VerifyHostProbesLike } from './orchestrator/trpc/context';
+import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -160,6 +170,7 @@ import { StaticServerManager } from './services/visualVerify/staticServerManager
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
+import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
@@ -263,11 +274,16 @@ import {
 } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
-import { createQuickSessionCore, stampQuickSessionRuntimeConfig } from './services/createQuickSessionCore';
+import {
+  createQuickSessionCore,
+  resolveNonClaudeSessionRuntime,
+  stampQuickSessionRuntimeConfig,
+} from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
+import { runGitAsync } from './utils/runGit';
 
 export let mainWindow: BrowserWindow | null = null;
 
@@ -468,7 +484,8 @@ let sessionManager: SessionManager;
 let worktreeManager: WorktreeManager;
 let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
-let codexPtyManager: CodexPtyManager;
+let codexPtyManager: CodexPtyManagerLike;
+let ompPtyManager: OmpPtyManagerLike;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -513,6 +530,21 @@ const codexBrokerReaper = new CodexBrokerReaper();
 // process.kill), so safe to construct at module load; boot-swept and then swept on
 // an interval below, and stopped in before-quit.
 const vitestOrphanReaper = new VitestOrphanReaper();
+
+// Observe-only tripwire (Phase 3 of the cyboflowMcpServer spawner-death fix,
+// see parentWatchdog.ts) for orphaned cyboflowMcpServer subprocesses. Has NO
+// kill authority — it exists solely to prove the Phase 1 ppid-watchdog fix is
+// still working, since a CLI-spawned server's own stderr is unreachable once
+// its parent is dead.
+//
+// Null until boot wires it, like trackerSyncService below: its entire output is
+// log lines, so it MUST be constructed with the real application logger, and
+// that does not exist at module load. (Constructing it here with no logger
+// silently produced a tripwire that observed correctly and reported to nobody —
+// a verification channel verifying nothing, which is the exact failure it is
+// meant to catch elsewhere. The logger is now a required constructor arg so
+// that instance no longer type-checks.)
+let mcpOrphanTripwire: McpOrphanTripwire | null = null;
 
 // Issue-tracker sync loop — Linear/Plane (docs/proposals/tracker-sync-integration.md).
 // Module-level so the before-quit handler can stop it; constructed + started in
@@ -732,6 +764,18 @@ if (!gotSingleInstanceLock) {
 let verifyHostProbes: VerifyHostProbesLike | undefined;
 
 /**
+ * The health panel's runbook-status resolver — the SAME closure the scheduler's
+ * `runbookStatus` dependency gets (assigned together at the wiring site below).
+ *
+ * One implementation, deliberately: the panel's badge and the §3.2 degrade gate
+ * answer the same question, and a second read of `verify_runbook_local.status`
+ * is how they came to disagree — a record marked proven whose portable half sits
+ * on an unmerged branch made the gate skip every request while the panel showed
+ * "Set up". See {@link ContextDeps.verifyRunbookStatus}.
+ */
+let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -792,6 +836,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // attached before initializeServices finished still sees the probes
         // once they exist.
         verifyHostProbes,
+        verifyRunbookStatus,
       }),
   });
 }
@@ -862,6 +907,16 @@ function runDeferredStartupWork(): void {
     console.error('[Main] vitest-orphan boot sweep failed:', err);
   });
   vitestOrphanReaper.start();
+
+  // Observe-only tripwire for orphaned cyboflowMcpServer subprocesses (Phase 3
+  // of the spawner-death fix — see McpOrphanTripwire's docstring for why this is
+  // periodic, and why it confirms across scans rather than gating on age).
+  // Constructed here rather than at module load because it reports exclusively
+  // through the logger, which does not exist until boot. start() is idempotent
+  // and fires one scan immediately, then hourly; scan() is fail-soft, so no
+  // .catch() is needed.
+  mcpOrphanTripwire = new McpOrphanTripwire({ logger: makeLoggerLike(logger) });
+  mcpOrphanTripwire.start();
 
   // Design Mode v1 boot recovery (design-mode.md "Design feedback v1"): re-drive
   // every design-feedback batch a crash left queued/dispatching/dispatched.
@@ -1437,8 +1492,11 @@ async function initializeServices(): Promise<boolean> {
     },
     skipValidation: true,
   });
-  if (!(createdCodexSdkManager instanceof CodexSdkManager)) {
-    throw new Error('[Main] cliManagerFactory returned a non-CodexSdkManager for codex-sdk');
+  // Structural, not `instanceof`: the demo factory returns a DemoCliManager
+  // carrying the same seams, and requiring the concrete class is what used to
+  // force it to fabricate a prototype-grafted stand-in.
+  if (!isCodexSdkManagerLike(createdCodexSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Codex SDK seams for codex-sdk');
   }
 
   const createdCodexPtyManager = await cliManagerFactory.createManager('codex-pty', {
@@ -1447,10 +1505,36 @@ async function initializeServices(): Promise<boolean> {
     configManager,
     skipValidation: true,
   });
-  if (!(createdCodexPtyManager instanceof CodexPtyManager)) {
-    throw new Error('[Main] cliManagerFactory returned a non-CodexPtyManager for codex-pty');
+  if (!isCodexPtyManagerLike(createdCodexPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Codex PTY seams for codex-pty');
   }
   codexPtyManager = createdCodexPtyManager;
+
+  const createdOmpSdkManager = await cliManagerFactory.createManager('omp-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
+    skipValidation: true,
+  });
+  // Structural, exactly like the Codex twins above — demo mode returns a
+  // DemoCliManager carrying the seams rather than an OmpSdkManager.
+  if (!isOmpSdkManagerLike(createdOmpSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the OMP SDK seams for omp-sdk');
+  }
+
+  const createdOmpPtyManager = await cliManagerFactory.createManager('omp-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isOmpPtyManagerLike(createdOmpPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the OMP PTY seams for omp-pty');
+  }
+  ompPtyManager = createdOmpPtyManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -2027,6 +2111,21 @@ async function initializeServices(): Promise<boolean> {
     },
     logger: cyboflowLogger,
   });
+
+  // ONE resolver, two consumers: the scheduler's §3.2 degrade gate (below) and
+  // the health panel's setup badge (via the tRPC context). Probed against the
+  // PROJECT path — both ask a project-level question ("has this project ever
+  // proven a runbook for this modality, and does that proof still hold here?"),
+  // while the enqueue-time injection (scheduler.resolveProvenRunbook) probes the
+  // requesting RUN's worktree, which is the tree whose commands would actually
+  // execute. No project path (a deleted/unresolvable project row) ⇒ 'absent',
+  // which skips with the setup CTA rather than guessing.
+  verifyRunbookStatus = async (projectId, modality) => {
+    const projectPath = databaseService.getProject(projectId)?.path;
+    if (!projectPath) return 'absent';
+    return verifyRunbookStore.status(projectId, projectPath, modality);
+  };
+
   const verificationAgentRunner = new VerificationAgentRunner({
     // The SAME binary the capability gate measured — see verifyPeekabooPath.
     peekabooBin: verifyPeekabooPath,
@@ -2194,11 +2293,7 @@ async function initializeServices(): Promise<boolean> {
     // which is the tree whose commands would actually execute. No project path
     // (a deleted/unresolvable project row) ⇒ 'absent', which skips with the setup
     // CTA rather than guessing.
-    runbookStatus: async (projectId, modality) => {
-      const projectPath = databaseService.getProject(projectId)?.path;
-      if (!projectPath) return 'absent';
-      return verifyRunbookStore.status(projectId, projectPath, modality);
-    },
+    runbookStatus: verifyRunbookStatus,
     // The same store instance backs the enqueue-time pinned injection (§5.2 seam
     // 3) and the ENGINE-ENFORCED proof flip (§5.3) — a setup-proof request that
     // actually passed is the only transition into 'proven'.
@@ -2480,6 +2575,14 @@ async function initializeServices(): Promise<boolean> {
       // passing setup-proof run, so the two halves of "derive → prove" must be
       // looking at one store over one DB.
       verifyRunbookStore,
+      // The GLOBAL visual-verify config, read LIVE per call — the same accessor
+      // the WorkflowRegistry injects into createRun. Only the `__quick__` chat
+      // sentinel consults it: its run stamp is minted on the session's first turn
+      // and has no UPDATE path, so a quick session resolves its verify posture at
+      // CALL time through this closure instead. A closure (not the resolved value)
+      // so toggling the master switch in Settings takes effect on the next tool
+      // call rather than requiring a restart.
+      getVisualVerifyConfig: () => configManager.getVisualVerifyConfig(),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
@@ -2574,31 +2677,44 @@ async function initializeServices(): Promise<boolean> {
   // resolver (services/panelLane.ts), so the facade agrees with every dispatch
   // seam on both axes: the session fixes the provider, the panel's own override
   // fixes the substrate.
+  // THE lane→manager table for this process. Shared by the dispatch facade and
+  // the panel-owner lookup below so both answer "which manager owns this lane"
+  // from one registration list — a new provider is an added entry here and
+  // nothing else at this seam.
+  const laneManagers: ManagerRegistration[] = [
+    { lane: 'claude-sdk', manager: defaultCliManager },
+    { lane: 'claude-interactive', manager: interactiveCliManager },
+    { lane: 'codex-sdk', manager: createdCodexSdkManager },
+    { lane: 'codex-pty', manager: codexPtyManager },
+    { lane: 'omp-sdk', manager: createdOmpSdkManager },
+    { lane: 'omp-pty', manager: ompPtyManager },
+  ];
+  const managerByLane = new Map<PanelLane, AbstractCliManager>(
+    laneManagers.map(({ lane, manager }) => [lane, manager]),
+  );
+
   const resolvePanelOwner = (panelId: string): AbstractCliManager | undefined => {
     const panel = panelManager.getPanel(panelId);
     if (!panel || panel.type !== 'claude') return undefined;
     const dbSession = databaseService.getSession(panel.sessionId);
-    switch (resolvePanelLane(dbSession, panel)) {
-      case 'codex-pty':
-        return codexPtyManager;
-      case 'codex-sdk':
-        return createdCodexSdkManager;
-      case 'claude-interactive':
-        return interactiveCliManager;
-      default:
-        return defaultCliManager;
-    }
+    // A lane with no manager is a wiring bug, not a reason to run the panel on
+    // Claude: resolveLaneManager throws in dev/test and logs before flooring in
+    // production. The `default:`-to-Claude arm this replaces was silent, so a
+    // provider whose manager had not been registered ran as Claude unnoticed.
+    return resolveLaneManager(
+      resolvePanelLane(dbSession, panel),
+      managerByLane,
+      defaultCliManager,
+      `[Main] resolvePanelOwner(${panelId})`,
+    );
   };
 
-  substrateFacade = new SubstrateDispatchFacade(
-    defaultCliManager,
-    interactiveCliManager,
-    workflowRegistry,
-    cyboflowLogger,
-    [codexPtyManager],
-    createdCodexSdkManager,
-    resolvePanelOwner,
-  );
+  substrateFacade = new SubstrateDispatchFacade({
+    managers: laneManagers,
+    registry: workflowRegistry,
+    logger: cyboflowLogger,
+    panelOwnerLookup: resolvePanelOwner,
+  });
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
   // delegating to the transitionTo* helpers at the index.ts boundary.
@@ -2749,7 +2865,7 @@ async function initializeServices(): Promise<boolean> {
     // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
     // FULL effective agent set (project overrides + workflow agentConfigs + variant
     // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/model/codexModel/effort. Absent EVERY override
+    // requested agentKey's runtime/model/providerModel/effort. Absent EVERY override
     // (unoverridden agent) -> undefined, so the step spawns under the run-level
     // provider/runtime/model with no per-agent effort. Effort is returned even
     // without a runtime override so a Claude agent can carry a reasoning-effort pin
@@ -2788,7 +2904,11 @@ async function initializeServices(): Promise<boolean> {
       return {
         ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
         ...(model ? { model } : {}),
-        ...(a.codexModel ? { codexModel: a.codexModel } : {}),
+        // a.providerModel is already normalized (providerModel ?? codexModel) by
+        // effectiveAgents; codexModel mirrors it so a not-yet-migrated consumer of
+        // this return shape (there is none left in-tree, but the field stays a
+        // read-compat alias) still sees the correct value.
+        ...(a.providerModel ? { providerModel: a.providerModel, codexModel: a.providerModel } : {}),
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
@@ -3031,6 +3151,33 @@ async function initializeServices(): Promise<boolean> {
             map.set(row.task_id, files);
           }
           return map;
+        },
+        // Commit-integrity backstop: 'integrated' means "complete AND committed
+        // in the session worktree", which inner-step verdicts alone cannot
+        // establish — a lane whose `git commit` was denied by a permission gate
+        // reported green with its changes left untracked on disk (observed live).
+        // Read the run's worktree HEAD at lane start and re-read it at lane end;
+        // the controller refuses to integrate a lane that moved HEAD nowhere and
+        // left the tree dirty. Every failure path (no worktree row, git error)
+        // degrades to "no probe" / a rethrow the controller swallows, so the
+        // backstop can only withhold a false integrate, never invent a failure.
+        beginCommitProbe: async (rid) => {
+          const row = rawDb
+            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
+            .get(rid) as { worktree_path?: unknown } | undefined;
+          const worktreePath =
+            row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
+              ? row.worktree_path
+              : null;
+          if (worktreePath === null) return undefined;
+          const readHead = async (): Promise<string> =>
+            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+          const startHead = await readHead();
+          return async () => {
+            const endHead = await readHead();
+            const porcelain = await runGitAsync(worktreePath, ['status', '--porcelain']);
+            return { headAdvanced: endHead !== startHead, dirty: porcelain.trim().length > 0 };
+          };
         },
         driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
           try {
@@ -3353,6 +3500,15 @@ async function initializeServices(): Promise<boolean> {
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
+  // OMP takes the same MCP runtime config and nothing else: its approval dialogs
+  // are answered in-process by OmpApprovalBridge (the gating extension is the
+  // policy engine, so a prompt reaching the bridge was already allowed), so
+  // there is no router provider to inject here.
+  createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
+    orchSocketPath: socketPath,
+    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
+    nodeExecutablePath: await nodeResolver.getNodePath(),
+  });
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
@@ -3459,6 +3615,8 @@ async function initializeServices(): Promise<boolean> {
     codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
     ompSessionManager,
+    ompSdkManager: createdOmpSdkManager,
+    ompPtyManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
@@ -3477,6 +3635,8 @@ async function initializeServices(): Promise<boolean> {
       substrateFacade.registerInteractivePanel(runId, panelId),
     registerCodexPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
+    registerOmpPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, ompPtyManager),
     // The SAME provider the Claude managers were injected with above, handed to
     // the IPC layer for the CODEX lanes: those spawn from ipc/ with a
     // caller-supplied runId instead of resolving the gate inside the manager, so
@@ -4830,17 +4990,24 @@ app.whenReady().then(async () => {
         // agent_runtime. Without this the sub-form's substrate and permission
         // picks silently never applied: the arm ran as an SDK session on the
         // global permission default while its run row claimed otherwise. Infra
-        // arms (no quickConfig) keep their pre-existing NULL stamps. useCodexSdk
-        // mirrors the quick handler's derivation; codex-pty is excluded from the
-        // arm wire schema so useCodexPty is always false here.
+        // arms (no quickConfig) keep their pre-existing NULL stamps.
+        //
+        // The runtime is derived GENERICALLY, through the same helper the quick
+        // handler's ladder ends in (resolveNonClaudeSessionRuntime): a
+        // provider-literal test here used to recognize only codex-sdk, so an
+        // omp-sdk arm stamped nothing and the shared chokepoint fell back to
+        // deriving claude-sdk from the SDK substrate — the sentinel run row said
+        // omp-sdk while sessions.agent_runtime said claude-sdk, and every chat
+        // turn in that arm dispatched to Claude. The arm wire schema carries only
+        // STORABLE runtimes, so no PTY runtime can appear here.
         if (quickConfig) {
           try {
+            const armSessionRuntime = resolveNonClaudeSessionRuntime(quickConfig);
             stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
               resolvedSubstrate,
-              useCodexSdk:
-                quickConfig.agentRuntime === 'codex-sdk' ||
-                (quickConfig.agentProvider === 'codex' && quickConfig.agentRuntime === undefined),
-              useCodexPty: false,
+              ...(armSessionRuntime !== undefined
+                ? { sessionAgentRuntime: armSessionRuntime }
+                : {}),
               requestedAgentMode: quickConfig.permissionMode,
             });
           } catch (err) {
@@ -5337,6 +5504,13 @@ app.whenReady().then(async () => {
       // (merge / createPr / dismiss). Fail-soft is handled inside the router.
       reapPrototypeServers: (runId) =>
         prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
+      // Visual-verify cleanup on the MERGE / CREATE-PR close-out path. Deliberately
+      // the SAME closure the cancel/dismiss bag above wires, so both ways a run can
+      // end reach one implementation: without it, merging left a draining
+      // verification to deliver a finding onto a closed-out run. Fail-soft inside
+      // the router; tryGetInstance keeps it a no-op when verification is disabled.
+      cancelVerificationsForRun: (runId) =>
+        VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
       // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
       // run's outcome and recompute the linked task's derived execution stage.
       // getInstance() resolves the singleton initialized during service construction.
@@ -5436,6 +5610,11 @@ app.on('before-quit', async (event) => {
   // hold the process open, but leaving a sweep to fire into a torn-down app is
   // pointless work.
   vitestOrphanReaper.stop();
+
+  // Stop the MCP-orphan tripwire's hourly scan. Its interval is already
+  // unref'd (never holds the event loop open on its own), so this is cleanup
+  // for tidiness rather than a shutdown-correctness requirement.
+  mcpOrphanTripwire?.stop();
 
   // Stop orchestrator (drains run queues)
   if (orchestrator) {

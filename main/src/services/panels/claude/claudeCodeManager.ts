@@ -9,6 +9,7 @@ import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scri
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { getShellPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
@@ -3186,6 +3187,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // family; 'design' → the minimal design toolset. Absent ⇒ no scope env,
             // run-scoped and byte-identical to before.
             ...(options.mcpScope ? { CYBOFLOW_MCP_SCOPE: options.mcpScope } : {}),
+            // CRITICAL fork-bomb guard: nodeCmd may resolve to the Electron app
+            // binary (packaged app, no node on PATH) — spawning it plainly boots
+            // a whole new Cyboflow app in an unkillable loop. See electronNodeGuard.
+            ...electronRunAsNodeGuardEnv(nodeCmd),
           },
           // SDK 0.3.142 made MCP startup non-blocking by default; block startup
           // until the injected socket server is connected so turn-1 cyboflow_*

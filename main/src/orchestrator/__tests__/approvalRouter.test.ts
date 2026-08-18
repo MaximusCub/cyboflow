@@ -709,6 +709,137 @@ describe('ApprovalRouter', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Mid-run abandonment (abandonPendingForRun): the REQUESTER went away but the
+  // run is still alive, so the gate must be handed back — settle semantics of
+  // clearPendingForRun PLUS a guarded awaiting_review → running restore.
+  // -------------------------------------------------------------------------
+  it('abandonPendingForRun settles the approval with deny AND restores the run to running', async () => {
+    const db = createTestDb();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const runId = 'run-abandon';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, socketReply);
+    await router['getApprovalQueue'](runId).onIdle();
+    expect(
+      (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status,
+    ).toBe('awaiting_review');
+
+    router.abandonPendingForRun(runId);
+
+    const decision = await approvalPromise;
+    expect(decision.behavior).toBe('deny');
+    expect(decision.message).toMatch(/disconnected/i);
+    // NOT the termination wording — the run was never torn down.
+    expect(decision.message).not.toMatch(/terminated/i);
+    expect(socketReply.mock.calls).toHaveLength(0);
+    expect(router.getPending()).toHaveLength(0);
+
+    const approval = db
+      .prepare('SELECT status, decided_by FROM approvals WHERE run_id = ?')
+      .get(runId) as { status: string; decided_by: string };
+    expect(approval.status).toBe('rejected');
+    expect(approval.decided_by).toBe('system');
+
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(run.status).toBe('running');
+  });
+
+  // Regression test for the wedge: with the run left in 'awaiting_review', every
+  // later requestApproval takes the 'wait' branch forever — no approvals row, no
+  // 'approvalCreated', nothing for the user to act on.
+  it('a requestApproval AFTER abandonPendingForRun grabs immediately (inserts a row + emits approvalCreated)', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const runId = 'run-abandon-regrab';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const created: Array<{ toolName: string }> = [];
+    router.on('approvalCreated', (req: { toolName: string }) => { created.push(req); });
+
+    const first = router.requestApproval(runId, 'tool_first', {}, vi.fn());
+    await router['getApprovalQueue'](runId).onIdle();
+    router.abandonPendingForRun(runId);
+    await first;
+
+    // The next gate must GRAB, not park in waitForApprovalSlot.
+    const second = router.requestApproval(runId, 'tool_second', {}, vi.fn());
+    await router['getApprovalQueue'](runId).onIdle();
+
+    const pendingRows = db
+      .prepare("SELECT tool_name FROM approvals WHERE run_id = ? AND status = 'pending'")
+      .all(runId) as Array<{ tool_name: string }>;
+    expect(pendingRows).toHaveLength(1);
+    expect(pendingRows[0].tool_name).toBe('tool_second');
+    expect(created.map((r) => r.toolName)).toEqual(['tool_first', 'tool_second']);
+    expect(router.getPending()).toHaveLength(1);
+
+    // Clean up the still-open gate.
+    const secondId = router.getPending()[0].id;
+    await router.respond(secondId, { behavior: 'deny' });
+    await second;
+  });
+
+  it('abandonPendingForRun restores a wedged run with NO in-memory entry (the wedge outlives the entry)', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const runId = 'run-abandon-orphan';
+    // A run wedged in awaiting_review whose pending entry is gone (app restart,
+    // or an entry a concurrent respond() already removed).
+    seedRun(db, { id: runId, status: 'awaiting_review' });
+    seedApproval(db, { id: 'orphan-a', runId, status: 'pending' });
+
+    router.abandonPendingForRun(runId);
+
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(run.status).toBe('running');
+    const approval = db.prepare('SELECT status FROM approvals WHERE id = ?').get('orphan-a') as { status: string };
+    expect(approval.status).toBe('rejected');
+  });
+
+  it('abandonPendingForRun does NOT resurrect a run that concurrently went terminal', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const runId = 'run-abandon-canceled';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, vi.fn());
+    await router['getApprovalQueue'](runId).onIdle();
+
+    // Concurrent cancel between the grab and the disconnect.
+    db.prepare("UPDATE workflow_runs SET status = 'canceled' WHERE id = ?").run(runId);
+
+    router.abandonPendingForRun(runId);
+    await approvalPromise;
+
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(run.status).toBe('canceled');
+  });
+
+  it('clearPendingForRun (termination path) leaves workflow_runs.status untouched', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const runId = 'run-terminate-status';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, vi.fn());
+    await router['getApprovalQueue'](runId).onIdle();
+
+    router.clearPendingForRun(runId);
+    await approvalPromise;
+
+    // Termination owns the run's status — the router must not hand the gate back.
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(run.status).toBe('awaiting_review');
+  });
+
   it('clearPendingForSource settles one invocation without canceling a sibling lane', async () => {
     const db = createTestDb();
     const router = ApprovalRouter.initialize(dbAdapter(db));

@@ -1,8 +1,9 @@
 /**
  * Unit coverage for relayOrSpawnPtyPanel — the panel-scoped relay/spawn seam
- * that gives every PTY chat panel (interactive Claude / Codex PTY) its OWN live
- * REPL, keyed by the panel's own id. Guards the "second PTY chat doesn't work"
- * and "second codex chat shares a stream" regressions at the routing layer:
+ * that gives every PTY chat panel (interactive Claude / Codex PTY / OMP PTY)
+ * its OWN live REPL, keyed by the panel's own id. Guards the "second PTY chat
+ * doesn't work" and "second codex chat shares a stream" regressions at the
+ * routing layer:
  *   - an ADDED panel spawns a fresh REPL under its OWN panelId (identity
  *     registration + startPanel), not the session's first panel;
  *   - a live panel relays a real user turn (relayUserTurn), never re-spawning;
@@ -19,12 +20,20 @@ import {
 import {
   QUICK_PTY_BRIEFING,
   QUICK_CODEX_PTY_BRIEFING,
+  QUICK_OMP_PTY_BRIEFING,
 } from '../quickSessionBriefings';
 
 interface DbSessionStub {
   agent_runtime?: string | null;
   substrate?: 'sdk' | 'interactive' | null;
   chat_run_id?: string | null;
+}
+
+/** The three PTY managers are stubbed identically; only the routing differs. */
+interface PtyManagerStub {
+  isPanelRunning: ReturnType<typeof vi.fn>;
+  relayUserTurn: ReturnType<typeof vi.fn>;
+  startPanel: ReturnType<typeof vi.fn>;
 }
 
 function makeDeps(
@@ -37,25 +46,26 @@ function makeDeps(
   } = {},
 ): {
   deps: PtyPanelDispatchDeps;
-  interactive: { isPanelRunning: ReturnType<typeof vi.fn>; relayUserTurn: ReturnType<typeof vi.fn>; startPanel: ReturnType<typeof vi.fn> };
-  codex: { isPanelRunning: ReturnType<typeof vi.fn>; relayUserTurn: ReturnType<typeof vi.fn>; startPanel: ReturnType<typeof vi.fn> };
+  interactive: PtyManagerStub;
+  codex: PtyManagerStub;
+  omp: PtyManagerStub;
   registerLivePanel: ReturnType<typeof vi.fn>;
   registerCodexPtyPanel: ReturnType<typeof vi.fn>;
+  registerOmpPtyPanel: ReturnType<typeof vi.fn>;
   updateSession: ReturnType<typeof vi.fn>;
 } {
   const running = overrides.running ?? new Set<string>();
-  const interactive = {
+  const makeManager = (): PtyManagerStub => ({
     isPanelRunning: vi.fn((panelId: string) => running.has(panelId)),
     relayUserTurn: vi.fn(),
     startPanel: vi.fn(async () => {}),
-  };
-  const codex = {
-    isPanelRunning: vi.fn((panelId: string) => running.has(panelId)),
-    relayUserTurn: vi.fn(),
-    startPanel: vi.fn(async () => {}),
-  };
+  });
+  const interactive = makeManager();
+  const codex = makeManager();
+  const omp = makeManager();
   const registerLivePanel = vi.fn();
   const registerCodexPtyPanel = vi.fn();
+  const registerOmpPtyPanel = vi.fn();
   const updateSession = vi.fn(async () => {});
 
   const deps: PtyPanelDispatchDeps = {
@@ -73,11 +83,22 @@ function makeDeps(
     configManager: { isDemoMode: () => overrides.demoMode === true },
     interactiveCliManager: interactive,
     codexPtyManager: codex,
+    ompPtyManager: omp,
     registerLivePanel,
     registerCodexPtyPanel,
+    registerOmpPtyPanel,
     ...(overrides.chatSentinelProvider ? { chatSentinelProvider: overrides.chatSentinelProvider } : {}),
   };
-  return { deps, interactive, codex, registerLivePanel, registerCodexPtyPanel, updateSession };
+  return {
+    deps,
+    interactive,
+    codex,
+    omp,
+    registerLivePanel,
+    registerCodexPtyPanel,
+    registerOmpPtyPanel,
+    updateSession,
+  };
 }
 
 const panel = (id: string, sessionId = 'sess', substrate?: 'sdk' | 'interactive'): PtyPanelLike => ({
@@ -203,6 +224,83 @@ describe('relayOrSpawnPtyPanel — Codex PTY', () => {
   });
 });
 
+describe('relayOrSpawnPtyPanel — OMP PTY', () => {
+  it('eager-spawns an added omp-pty panel under its own id with the OMP briefing', async () => {
+    const { deps, omp, codex, interactive, registerOmpPtyPanel } = makeDeps({
+      agent_runtime: 'omp-pty',
+      chat_run_id: 'chat-run',
+    });
+
+    const handled = await relayOrSpawnPtyPanel(deps, panel('omp-P'), null);
+
+    expect(handled).toBe(true);
+    expect(registerOmpPtyPanel).toHaveBeenCalledWith('omp-P', 'omp-P');
+    expect(omp.startPanel).toHaveBeenCalledTimes(1);
+    const args = omp.startPanel.mock.calls[0];
+    expect(args[0]).toBe('omp-P'); // panelId
+    expect(args[3]).toBe(QUICK_OMP_PTY_BRIEFING); // briefing
+    expect(args[6]).toBe('chat-run'); // runId aligned with the session chat sentinel
+    // OMP's TUI takes no per-turn thinking flag, so nothing follows the runId.
+    expect(args).toHaveLength(7);
+    // Neither sibling terminal may answer for OMP.
+    expect(codex.startPanel).not.toHaveBeenCalled();
+    expect(interactive.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('relays a real turn into a live omp-pty panel', async () => {
+    const running = new Set<string>(['omp-P']);
+    const { deps, omp } = makeDeps({ agent_runtime: 'omp-pty' }, { running });
+
+    await relayOrSpawnPtyPanel(deps, panel('omp-P'), 'ping');
+
+    expect(omp.relayUserTurn).toHaveBeenCalledWith('omp-P', 'ping');
+    expect(omp.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('keeps an omp-pty session on the OMP terminal when substrate was never stamped', async () => {
+    const { deps, omp } = makeDeps({ agent_runtime: 'omp-pty' });
+    const handled = await relayOrSpawnPtyPanel(deps, panel('legacy-omp-P'), 'ping');
+    expect(handled).toBe(true);
+    expect(omp.startPanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves the omp runId through the chat-sentinel provider, not the raw column', async () => {
+    const chatSentinelProvider = vi.fn(() => 'revived-run');
+    const { deps, omp } = makeDeps(
+      { agent_runtime: 'omp-pty', chat_run_id: 'parked-run' },
+      { chatSentinelProvider },
+    );
+
+    await relayOrSpawnPtyPanel(deps, panel('omp-P', 'sess-42'), 'ping');
+
+    expect(chatSentinelProvider).toHaveBeenCalledWith('sess-42');
+    expect(omp.startPanel.mock.calls[0][6]).toBe('revived-run');
+  });
+
+  it('routes an interactive override in an omp-SDK session to the OMP terminal, not Claude', async () => {
+    const { deps, omp, interactive } = makeDeps({
+      agent_runtime: 'omp-sdk',
+      substrate: 'sdk',
+      chat_run_id: 'chat-run',
+    });
+
+    const handled = await relayOrSpawnPtyPanel(deps, panel('omp-override-P', 'sess', 'interactive'), 'hi');
+
+    expect(handled).toBe(true);
+    expect(omp.startPanel).toHaveBeenCalledTimes(1);
+    expect(interactive.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('leaves an sdk override in an omp-PTY session to the caller (the RPC path)', async () => {
+    const { deps, omp } = makeDeps({ agent_runtime: 'omp-pty', substrate: 'interactive' });
+
+    const handled = await relayOrSpawnPtyPanel(deps, panel('omp-sdk-override-P', 'sess', 'sdk'), 'hi');
+
+    expect(handled).toBe(false); // not a PTY lane — panels:continue starts an OMP SDK turn
+    expect(omp.startPanel).not.toHaveBeenCalled();
+  });
+});
+
 /**
  * The provider (session-wide) and the substrate (per-panel) resolve
  * INDEPENDENTLY. Both cells below were unreachable while this seam tested
@@ -240,6 +338,13 @@ describe('relayOrSpawnPtyPanel — per-panel overrides stay inside the session p
     const handled = await relayOrSpawnPtyPanel(deps, panel('codex-demo-P', 'sess', 'interactive'), null);
     expect(handled).toBe(true);
     expect(codex.startPanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let demo mode swallow an OMP terminal either', async () => {
+    const { deps, omp } = makeDeps({ agent_runtime: 'omp-pty' }, { demoMode: true });
+    const handled = await relayOrSpawnPtyPanel(deps, panel('omp-demo-P'), null);
+    expect(handled).toBe(true);
+    expect(omp.startPanel).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -27,9 +27,9 @@ describe('API — Electron-absent guard', () => {
     await expect(API.sessions.getAll()).rejects.toThrow('Electron API not available');
     await expect(API.projects.getAll()).rejects.toThrow('Electron API not available');
     await expect(API.config.get()).rejects.toThrow('Electron API not available');
-    await expect(API.codex.detect()).rejects.toThrow('Electron API not available');
+    await expect(API.providers.detect('codex')).rejects.toThrow('Electron API not available');
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
-    await expect(API.models.getCodexCatalog()).rejects.toThrow('Electron API not available');
+    await expect(API.models.getCatalog('codex')).rejects.toThrow('Electron API not available');
   });
 
   it('models.onAvailabilityChanged returns a no-op unsubscribe off Electron (no throw)', () => {
@@ -53,8 +53,17 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
   });
 
-  it('getCodexCatalog throws rather than crashing on a skewed models bridge', async () => {
-    await expect(API.models.getCodexCatalog()).rejects.toThrow('Electron API not available');
+  it('getCatalog(codex) throws rather than crashing on a skewed models bridge', async () => {
+    await expect(API.models.getCatalog('codex')).rejects.toThrow('Electron API not available');
+  });
+
+  it('getCatalog(claude) degrades to an empty catalog rather than throwing', async () => {
+    // Per-provider fallback policy: a Claude picker still renders its four
+    // PINNED aliases, so an empty dynamic catalog is a usable control.
+    await expect(API.models.getCatalog('claude')).resolves.toEqual({
+      success: true,
+      data: { models: [], defaultModel: null },
+    });
   });
 
   it('onAvailabilityChanged degrades to a no-op unsubscribe (does not read undefined.models)', () => {
@@ -72,15 +81,15 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
 describe('API — happy path forwards args verbatim', () => {
   const get = vi.fn();
   const create = vi.fn();
-  const codexDetect = vi.fn();
+  const providersDetect = vi.fn();
   const modelsGetAvailability = vi.fn();
-  const modelsGetCodexCatalog = vi.fn();
+  const modelsGetCatalog = vi.fn();
   const modelsOnChanged = vi.fn().mockReturnValue(() => {});
 
   beforeEach(() => {
     get.mockReset().mockResolvedValue({ success: true, data: { id: 's1' } });
     create.mockReset().mockResolvedValue({ success: true });
-    codexDetect.mockReset().mockResolvedValue({
+    providersDetect.mockReset().mockResolvedValue({
       success: true,
       data: {
         state: 'detected',
@@ -89,17 +98,17 @@ describe('API — happy path forwards args verbatim', () => {
       },
     });
     modelsGetAvailability.mockReset().mockResolvedValue({ success: true, data: {} });
-    modelsGetCodexCatalog.mockReset().mockResolvedValue({
+    modelsGetCatalog.mockReset().mockResolvedValue({
       success: true,
       data: { models: [], defaultModel: null },
     });
     modelsOnChanged.mockClear();
     setElectronAPI({
       sessions: { get, create },
-      codex: { detect: codexDetect },
+      providers: { detect: providersDetect },
       models: {
         getAvailability: modelsGetAvailability,
-        getCodexCatalog: modelsGetCodexCatalog,
+        getCatalog: modelsGetCatalog,
         onAvailabilityChanged: modelsOnChanged,
       },
     });
@@ -120,9 +129,9 @@ describe('API — happy path forwards args verbatim', () => {
     expect(create).toHaveBeenCalledWith(request);
   });
 
-  it('codex.detect forwards to the preload bridge', async () => {
-    await API.codex.detect();
-    expect(codexDetect).toHaveBeenCalledTimes(1);
+  it('providers.detect forwards the provider argument to the preload bridge', async () => {
+    await API.providers.detect('codex');
+    expect(providersDetect).toHaveBeenCalledWith('codex');
   });
 
   it('models.getAvailability forwards to the bridge when present', async () => {
@@ -130,9 +139,9 @@ describe('API — happy path forwards args verbatim', () => {
     expect(modelsGetAvailability).toHaveBeenCalledTimes(1);
   });
 
-  it('models.getCodexCatalog forwards to the bridge when present', async () => {
-    await API.models.getCodexCatalog();
-    expect(modelsGetCodexCatalog).toHaveBeenCalledTimes(1);
+  it('models.getCatalog forwards the provider argument to the bridge when present', async () => {
+    await API.models.getCatalog('codex');
+    expect(modelsGetCatalog).toHaveBeenCalledWith('codex');
   });
 
   it('models.onAvailabilityChanged registers the callback and returns the bridge unsubscribe', () => {

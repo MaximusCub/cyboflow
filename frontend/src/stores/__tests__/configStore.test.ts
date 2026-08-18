@@ -70,8 +70,15 @@ describe('configStore.updateConfig', () => {
   });
 });
 
+/**
+ * `applyRunTypeDefault` resolves a DISCRIMINATED result. Collapsing "succeeded,
+ * key held nothing" and "the write failed" onto a bare `undefined` is what let a
+ * failed write report success on the launch surfaces — and then let its Undo
+ * issue `{ kind: 'replace', value: null }`, DELETING a default the failed write
+ * never overwrote.
+ */
 describe('configStore.applyRunTypeDefault', () => {
-  it('returns the previous value and refetches after a successful write', async () => {
+  it('returns { ok: true, previous } and refetches after a successful write', async () => {
     const previous = { model: 'sonnet' };
     const initial = baseConfig({ runTypeDefaults: { workflow: { model: 'sonnet' } } });
     const writeResponseConfig = baseConfig({
@@ -98,7 +105,7 @@ describe('configStore.applyRunTypeDefault', () => {
       { kind: 'merge', value: { model: 'opus' } },
     );
 
-    expect(result).toBe(previous);
+    expect(result).toEqual({ ok: true, previous });
     expect(configApplyRunTypeDefault).toHaveBeenCalledWith(
       'workflow',
       { kind: 'merge', value: { model: 'opus' } },
@@ -109,7 +116,25 @@ describe('configStore.applyRunTypeDefault', () => {
     expect(useConfigStore.getState().config).not.toBe(writeResponseConfig);
   });
 
-  it('leaves config untouched and does not refetch when the write fails', async () => {
+  it('returns { ok: true, previous: null } when the write succeeded but the key held nothing', async () => {
+    // The IPC spells "no prior entry" as `undefined`; the store normalizes it to
+    // `null` so success has exactly ONE absent-value spelling — and so callers
+    // can never confuse it with a failure.
+    configApplyRunTypeDefault.mockResolvedValue({
+      success: true,
+      data: { previous: undefined, config: baseConfig() },
+    });
+    configGet.mockResolvedValue({ success: true, data: baseConfig() });
+
+    const result = await useConfigStore.getState().applyRunTypeDefault('workflow', {
+      kind: 'merge',
+      value: { model: 'opus' },
+    });
+
+    expect(result).toEqual({ ok: true, previous: null });
+  });
+
+  it('returns { ok: false } (never a success shape) and does not refetch when the write fails', async () => {
     const existing = baseConfig({ runTypeDefaults: { workflow: { model: 'sonnet' } } });
     useConfigStore.setState({ config: existing });
     configApplyRunTypeDefault.mockResolvedValue({ success: false, error: 'nope' });
@@ -119,13 +144,13 @@ describe('configStore.applyRunTypeDefault', () => {
       value: null,
     });
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({ ok: false, error: 'nope' });
     expect(configGet).not.toHaveBeenCalled();
     expect(useConfigStore.getState().config).toBe(existing);
     expect(useConfigStore.getState().error).toBe('nope');
   });
 
-  it('swallows a thrown write error', async () => {
+  it('returns { ok: false } for a thrown write and still swallows it into error state', async () => {
     configApplyRunTypeDefault.mockRejectedValue(new Error('network down'));
 
     const result = await useConfigStore.getState().applyRunTypeDefault('workflow', {
@@ -133,7 +158,7 @@ describe('configStore.applyRunTypeDefault', () => {
       value: { model: 'opus' },
     });
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({ ok: false, error: 'Failed to apply run type default' });
     expect(useConfigStore.getState().error).toBe('Failed to apply run type default');
   });
 });

@@ -5,7 +5,10 @@ import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
-import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import {
+  AGENT_PROVIDER_LABELS,
+  type AgentProvider,
+} from '../../../../../shared/types/agentRuntime';
 
 /**
  * EffortPill — interactive reasoning-effort selector for a quick session's
@@ -58,7 +61,7 @@ export function EffortPill({
     {
       id: DEFAULT_ID,
       label: 'Default',
-      description: `Let ${agentProvider === 'codex' ? 'Codex' : 'Claude'} pick the effort`,
+      description: `Let ${AGENT_PROVIDER_LABELS[agentProvider]} pick the effort`,
       icon: Gauge,
       iconColor: 'text-text-secondary',
       onClick: () => void handleSelect(null),

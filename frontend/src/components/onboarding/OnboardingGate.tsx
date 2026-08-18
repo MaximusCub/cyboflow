@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../../shared/types/onboarding';
-import { CLAUDE_DETECT_CHANNEL, CODEX_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
+import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
+import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { Project } from '../../types/project';
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
@@ -42,15 +42,21 @@ import { RailMapStep } from './steps/RailMapStep';
  * "Resume setup" affordance while skipped).
  */
 
-const MISSING_DETECTION: ClaudeDetectionResult = {
+const MISSING_DETECTION: ProviderDetectionResult<'claude'> = {
   credentials: { found: false, source: null, account: null },
   binary: { found: false, path: null, version: null },
   state: 'missing',
 };
 
-const UNAVAILABLE_CODEX_DETECTION: CodexDetectionResult = {
+const UNAVAILABLE_CODEX_DETECTION: ProviderDetectionResult<'codex'> = {
   runtime: { found: false, path: null, version: null },
   account: { found: false, email: null, planType: null },
+  state: 'unavailable',
+};
+
+const UNAVAILABLE_OMP_DETECTION: ProviderDetectionResult<'omp'> = {
+  binaryPath: null,
+  version: null,
   state: 'unavailable',
 };
 
@@ -70,6 +76,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   const connected = useOnboardingStore((s) => s.connected);
   const codexDetection = useOnboardingStore((s) => s.codexDetection);
   const codexConnected = useOnboardingStore((s) => s.codexConnected);
+  const ompDetection = useOnboardingStore((s) => s.ompDetection);
+  const ompConnected = useOnboardingStore((s) => s.ompConnected);
   const permMode = useOnboardingStore((s) => s.permMode);
 
   const hydrate = useOnboardingStore((s) => s.hydrate);
@@ -82,6 +90,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   const setConnected = useOnboardingStore((s) => s.setConnected);
   const setCodexDetection = useOnboardingStore((s) => s.setCodexDetection);
   const setCodexConnected = useOnboardingStore((s) => s.setCodexConnected);
+  const setOmpDetection = useOnboardingStore((s) => s.setOmpDetection);
+  const setOmpConnected = useOnboardingStore((s) => s.setOmpConnected);
   const setPermMode = useOnboardingStore((s) => s.setPermMode);
   const anchorActioned = useOnboardingStore((s) => s.anchorActioned);
   const realEvent = useOnboardingStore((s) => s.realEvent);
@@ -204,12 +214,15 @@ export function OnboardingGate(): React.JSX.Element | null {
   // degrades independently so one provider never hides a usable sibling.
   const runDetect = useCallback(async () => {
     setChecking(true);
-    const [claudeResponse, codexResponse] = await Promise.all([
-      window.electron?.invoke(CLAUDE_DETECT_CHANNEL).catch(() => undefined) as
-        | Promise<IPCResponse<ClaudeDetectionResult> | undefined>
+    const [claudeResponse, codexResponse, ompResponse] = await Promise.all([
+      window.electron?.invoke(PROVIDERS_DETECT_CHANNEL, 'claude').catch(() => undefined) as
+        | Promise<IPCResponse<ProviderDetectionResult<'claude'>> | undefined>
         | undefined,
-      window.electron?.invoke(CODEX_DETECT_CHANNEL).catch(() => undefined) as
-        | Promise<IPCResponse<CodexDetectionResult> | undefined>
+      window.electron?.invoke(PROVIDERS_DETECT_CHANNEL, 'codex').catch(() => undefined) as
+        | Promise<IPCResponse<ProviderDetectionResult<'codex'>> | undefined>
+        | undefined,
+      window.electron?.invoke(PROVIDERS_DETECT_CHANNEL, 'omp').catch(() => undefined) as
+        | Promise<IPCResponse<ProviderDetectionResult<'omp'>> | undefined>
         | undefined,
     ]);
     setDetection(
@@ -222,31 +235,41 @@ export function OnboardingGate(): React.JSX.Element | null {
         ? codexResponse.data
         : UNAVAILABLE_CODEX_DETECTION,
     );
+    setOmpDetection(
+      ompResponse?.success && ompResponse.data
+        ? ompResponse.data
+        : UNAVAILABLE_OMP_DETECTION,
+    );
     setChecking(false);
-  }, [setCodexDetection, setDetection]);
+  }, [setCodexDetection, setDetection, setOmpDetection]);
 
   useEffect(() => {
     if (
       status === 'active'
       && step === 1
-      && (detection === null || codexDetection === null)
+      && (detection === null || codexDetection === null || ompDetection === null)
       && !checking
     ) {
       void runDetect();
     }
-  }, [status, step, detection, codexDetection, checking, runDetect]);
+  }, [status, step, detection, codexDetection, ompDetection, checking, runDetect]);
 
   // Step-1 toggles reflect the SAVED provider access, so replaying the
   // walkthrough on a configured install opens on the user's current setting
   // rather than a blank slate (and Continue then re-persists it unchanged).
   // A pristine install has no saved value — the toggles stay off and the step
-  // gate keeps demanding an explicit opt-in, exactly as before.
+  // gate keeps demanding an explicit opt-in, exactly as before. OMP's floor is
+  // the ONE difference: claude/codex default to `true` here (their absent⇒
+  // enabled legacy floor), but OMP defaults to `false` — a pristine install
+  // must never seed the toggle on for a provider AGENT_PROVIDER_REGISTRY.omp
+  // itself floors to disabled.
   const persistedProviderAccess = useConfigStore((s) => s.config?.agentProviderAccess);
   useEffect(() => {
     if (status !== 'active' || step !== 1 || persistedProviderAccess === undefined) return;
     setConnected(persistedProviderAccess.claude ?? true);
     setCodexConnected(persistedProviderAccess.codex ?? true);
-  }, [status, step, persistedProviderAccess, setConnected, setCodexConnected]);
+    setOmpConnected(persistedProviderAccess.omp ?? false);
+  }, [status, step, persistedProviderAccess, setConnected, setCodexConnected, setOmpConnected]);
 
   // Step-5 precondition: the Quick Session card lives in the wizard, so ensure it
   // is the center surface before the coachmark tries to anchor.
@@ -337,9 +360,11 @@ export function OnboardingGate(): React.JSX.Element | null {
     connectNextInFlight.current = true;
     try {
       // Full access object, never a partial patch — the step gate guarantees at
-      // least one member is true, so this can never write an all-off map.
+      // least one of claude/codex is true, so this can never write an all-off
+      // map. `omp` rides along at whatever the (optional, non-gating) toggle is
+      // currently set to — false unless the user explicitly opted in.
       await useConfigStore.getState().updateConfig({
-        agentProviderAccess: { claude: connected, codex: codexConnected },
+        agentProviderAccess: { claude: connected, codex: codexConnected, omp: ompConnected },
       });
     } catch {
       /* non-fatal — advance regardless; the toggles live on in Settings → Integrations */
@@ -347,7 +372,7 @@ export function OnboardingGate(): React.JSX.Element | null {
       connectNextInFlight.current = false;
     }
     next();
-  }, [connected, codexConnected, next]);
+  }, [connected, codexConnected, ompConnected, next]);
 
   // Re-entry guard: the config write is async, so a second activation (held
   // ArrowRight auto-repeat, double-click) while the await is in flight would
@@ -359,7 +384,8 @@ export function OnboardingGate(): React.JSX.Element | null {
     try {
       // MUST go through the config store: updateConfig persists AND refetches
       // the renderer's cached config, so downstream seeds (the wizard's
-      // useAgentPermissionMode) inherit the choice without an app restart.
+      // permission-mode useSeededSelection) inherit the choice without an app
+      // restart.
       await useConfigStore.getState().updateConfig({ defaultAgentPermissionMode: permMode });
     } catch {
       /* non-fatal — advance regardless; the pill can be changed in Settings */
@@ -481,9 +507,12 @@ export function OnboardingGate(): React.JSX.Element | null {
             claudeConnected={connected}
             codexDetection={codexDetection}
             codexConnected={codexConnected}
+            ompDetection={ompDetection}
+            ompConnected={ompConnected}
             checking={checking}
             onToggleClaude={() => setConnected(!connected)}
             onToggleCodex={() => setCodexConnected(!codexConnected)}
+            onToggleOmp={() => setOmpConnected(!ompConnected)}
             onRecheck={() => void runDetect()}
             onLocate={() => void handleLocate()}
             onInstall={handleInstall}

@@ -12,6 +12,7 @@
  *   Sync now         -> cyboflow.tracker.syncNow  (its returned log replaces the card's)
  *   conflict rulings -> cyboflow.tracker.resolveConflict
  *   Disconnect       -> cyboflow.tracker.disconnect (inline confirm first)
+ *   Reconnect        -> cyboflow.tracker.updateCredentials (paused connections only)
  *
  * Toggle state is mirrored locally so a row flips immediately and the summary
  * re-read (driven by the parent's onTrackerChanged subscription) reconciles it.
@@ -36,7 +37,7 @@ import type {
   TrackerSyncLogEntry,
 } from '../../../../../shared/types/trackerSync';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
-import { logMarkerClass, mappingTargetLabel, providerMeta } from './trackerVocabulary';
+import { logMarkerClass, mappingTargetLabel, providerMeta, trackerInputClass } from './trackerVocabulary';
 
 const CARD = 'rounded-none border border-border-primary bg-surface-primary';
 
@@ -105,6 +106,11 @@ export function TrackerConnectedView({
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
 
   const [conflicts, setConflicts] = useState<TrackerConflictSummary[]>([]);
+
+  // Reconnect (paused connections only) — a fresh key for the same connection.
+  const [reconnectApiKey, setReconnectApiKey] = useState('');
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
 
   // Re-seed from a fresh summary (the parent re-reads on every tracker event).
   useEffect(() => {
@@ -214,6 +220,26 @@ export function TrackerConnectedView({
       .catch((err: unknown) => setError(errorMessage(err)));
   };
 
+  const handleReconnect = async (): Promise<void> => {
+    setReconnectError(null);
+    setReconnecting(true);
+    try {
+      await trpc.cyboflow.tracker.updateCredentials.mutate({
+        connectionId: connection.id,
+        apiKey: reconnectApiKey.trim(),
+      });
+      setReconnectApiKey('');
+      // The connection flips to 'active' server-side; the parent's
+      // onTrackerChanged subscription re-reads the row, same as every other
+      // write here.
+      onChanged();
+    } catch (err) {
+      setReconnectError(errorMessage(err));
+    } finally {
+      setReconnecting(false);
+    }
+  };
+
   const mappedCount = Object.values(connection.stateMapping).filter((t) => t !== 'dont').length;
   const totalStates = Object.keys(connection.stateMapping).length;
 
@@ -282,6 +308,49 @@ export function TrackerConnectedView({
               >
                 {error}
               </p>
+            )}
+
+            {/* Paused reconnect banner */}
+            {connection.status === 'paused' && (
+              <div
+                className={cn(CARD, 'border-status-warning p-4')}
+                data-testid="tracker-reconnect-banner"
+              >
+                <p className="text-xs font-semibold text-status-warning">
+                  Credentials need attention
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-text-secondary">
+                  {meta.name} rejected the stored key on the last sync, so syncing is paused.
+                  Paste a new {meta.apiKeyLabel.toLowerCase()} to reconnect.
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="password"
+                    value={reconnectApiKey}
+                    onChange={(e) => setReconnectApiKey(e.target.value)}
+                    placeholder="paste your key"
+                    aria-label={`New ${meta.apiKeyLabel}`}
+                    className={cn(trackerInputClass, 'max-w-[360px]')}
+                  />
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    className="flex-shrink-0 rounded-none"
+                    disabled={reconnectApiKey.trim().length === 0 || reconnecting}
+                    loading={reconnecting}
+                    loadingText="Reconnecting…"
+                    onClick={() => void handleReconnect()}
+                  >
+                    Reconnect
+                  </Button>
+                </div>
+                {reconnectError !== null && (
+                  <p role="alert" className="mt-2 text-xs text-status-error">
+                    {reconnectError}
+                  </p>
+                )}
+              </div>
             )}
 
             {/* Identity + disconnect */}

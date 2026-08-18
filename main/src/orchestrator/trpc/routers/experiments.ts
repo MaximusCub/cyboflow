@@ -21,7 +21,15 @@ import type { TaskChange } from '../../taskChangeRouter';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../../../shared/types/agentRuntime';
+import {
+  AGENT_PROVIDERS,
+  WORKFLOW_RUN_STORABLE_RUNTIMES,
+  providerRuntimeConflict,
+} from '../../../../../shared/types/agentRuntime';
+import type {
+  AgentProvider,
+  WorkflowRunStorableRuntime,
+} from '../../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type {
@@ -145,11 +153,12 @@ export interface ExperimentArmQuickConfig {
   substrate?: CliSubstrate;
   agentProvider?: AgentProvider;
   /**
-   * WorkflowAgentRuntime, not SessionAgentRuntime: the wire schema (and the
-   * modal's clamp) exclude `codex-pty` for an A/B arm, so the interface must
+   * The run-storable set, not SessionAgentRuntime: the arm's runtime is stamped
+   * onto the quick session's `__quick__` sentinel run, and the wire schema (and
+   * the modal's clamp) exclude `codex-pty` for an A/B arm, so the interface must
    * not overstate what the boundary accepts.
    */
-  agentRuntime?: WorkflowAgentRuntime;
+  agentRuntime?: WorkflowRunStorableRuntime;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   permissionMode?: PermissionMode;
@@ -2234,8 +2243,10 @@ export function listDashboardExperiments(deps: ExperimentsDeps, input: ListDashb
 const experimentArmQuickConfigSchema = z
   .object({
     substrate: z.enum(['sdk', 'interactive']).optional(),
-    agentProvider: z.enum(['claude', 'codex']).optional(),
-    agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
+    agentProvider: z.enum(AGENT_PROVIDERS).optional(),
+    // The arm's runtime lands on the quick session's `__quick__` sentinel run,
+    // so this is the STORABLE set, not the workflow-launchable one.
+    agentRuntime: z.enum(WORKFLOW_RUN_STORABLE_RUNTIMES).optional(),
     model: z.string().min(1).optional(),
     reasoningEffort: z.enum(ALL_EFFORT_LEVELS).optional(),
     permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
@@ -2248,18 +2259,12 @@ const experimentArmQuickConfigSchema = z
         message: 'agentRuntime is required when agentProvider or model is set',
       });
     }
-    if (cfg.agentProvider === 'codex' && cfg.agentRuntime !== undefined && cfg.agentRuntime !== 'codex-sdk') {
+    const conflict = providerRuntimeConflict(cfg.agentProvider, cfg.agentRuntime);
+    if (conflict) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['agentRuntime'],
-        message: "agentProvider 'codex' requires agentRuntime 'codex-sdk'",
-      });
-    }
-    if (cfg.agentProvider === 'claude' && cfg.agentRuntime === 'codex-sdk') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['agentRuntime'],
-        message: "agentProvider 'claude' cannot use agentRuntime 'codex-sdk'",
+        message: `agentProvider '${conflict.provider}' cannot use agentRuntime '${conflict.runtime}'`,
       });
     }
   });

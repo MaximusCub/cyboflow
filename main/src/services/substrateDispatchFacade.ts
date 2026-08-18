@@ -13,11 +13,12 @@
  *   standalone-typecheck invariant).
  *
  * What it does:
- *   1. Implements ClaudeSpawnerLike — resolving run.substrate per run (via the
- *      WorkflowRegistry.getRunById(runId) backed resolver, NOT a constructor-fixed
- *      manager) and dispatching spawnCliProcess / abort to the matching manager.
- *   2. Extends EventEmitter and subscribes (fan-in) to BOTH managers' 'output' and
- *      'exit' events, re-emitting each payload object UNCHANGED on itself. Because
+ *   1. Implements ClaudeSpawnerLike — resolving each run's LANE (provider ×
+ *      transport, see services/panelLane.ts) from its workflow_runs row via
+ *      WorkflowRegistry.getRunById(runId), NOT a constructor-fixed manager, and
+ *      dispatching spawnCliProcess / abort to that lane's registered manager.
+ *   2. Extends EventEmitter and subscribes (fan-in) to every registered manager's
+ *      events, re-emitting each payload object UNCHANGED on itself. Because
  *      the re-emit preserves the payload by reference, the panelId===runId===sessionId
  *      invariant and the `type:'json'` filter in runEventBridge.ts survive identically
  *      regardless of which manager produced the event — so runEventBridge.ts needs
@@ -28,9 +29,17 @@
  * satisfies both RunExecutor seams (spawner arg + source arg), which is exactly why
  * the single-source constraint is honored.
  *
- * Substrate resolution floor: `run?.substrate ?? DEFAULT_SUBSTRATE` (== 'sdk') means
- * every legacy / null workflow_runs row resolves to the SDK manager, so the default
- * path is byte-identical.
+ * Managers arrive as a REGISTRATION LIST ({@link ManagerRegistration}), one entry
+ * per lane. They used to arrive by four different routes — two fixed positional
+ * parameters, an array, and an optional trailing parameter — with dispatch then
+ * testing for the odd one out by name; a third provider meant a fifth route and
+ * another name test at every seam. See {@link ManagerRegistration}.
+ *
+ * Resolution floor: `run.substrate ?? DEFAULT_SUBSTRATE` (== 'sdk') means every
+ * legacy / null workflow_runs row still resolves to the Claude SDK manager, so the
+ * default path is byte-identical. What is NOT floored silently any more is an
+ * unresolvable lane: it throws in dev/test and logs an error before flooring in
+ * production (see managerForLane).
  */
 
 import { EventEmitter } from 'node:events';
@@ -39,6 +48,15 @@ import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, WorkflowRegistryLike } fr
 import type { LoggerLike } from '../orchestrator/types';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
+import type { WorkflowRunRow } from '../../../shared/types/workflows';
+import { isPtyLane, type PanelLane } from './panelLane';
+import {
+  claudeRuntimeFromSubstrate,
+  DEFAULT_AGENT_PROVIDER,
+  failUnresolvable,
+  providerForRuntimeValue,
+  type AgentProvider,
+} from '../../../shared/types/agentRuntime';
 
 /**
  * Bound event handler signature — both managers emit 'output' and 'exit' payloads
@@ -50,6 +68,127 @@ type ForwardHandler = (payload: unknown) => void;
 function isFailedExit(payload: unknown): boolean {
   return typeof payload === 'object' && payload !== null &&
     'exitCode' in payload && typeof payload.exitCode === 'number' && payload.exitCode !== 0;
+}
+
+/**
+ * One manager's registration with the facade: the lane it serves (provider ×
+ * transport — see services/panelLane.ts) and the manager serving it.
+ *
+ * Every manager registers the SAME way. The four managers used to arrive by four
+ * DIFFERENT routes — Claude SDK and Claude interactive as fixed positional
+ * parameters, Codex PTY inside an `additionalPtyManagers` array, Codex SDK as an
+ * optional trailing parameter — and dispatch then tested for Codex by name
+ * (`run.agent_runtime === 'codex-sdk'`). A third provider under that shape means
+ * another parameter and another name test at every seam; under this one it means
+ * another entry in the list.
+ */
+export interface ManagerRegistration {
+  readonly lane: PanelLane;
+  readonly manager: AbstractCliManager;
+}
+
+/** Everything the facade is constructed with. */
+export interface SubstrateDispatchFacadeOptions {
+  /**
+   * The managers this facade multiplexes, one per lane. Registration ORDER is
+   * not meaningful; the lane is the whole identity.
+   */
+  readonly managers: readonly ManagerRegistration[];
+  readonly registry: WorkflowRegistryLike;
+  readonly logger: LoggerLike;
+  readonly panelOwnerLookup?: PanelOwnerLookup;
+}
+
+/**
+ * Which of a manager's events the facade fans in, per lane.
+ *
+ * Not a policy so much as a RECORD: these are the exact subscriptions each lane
+ * had before the registry landed, kept verbatim so this refactor moves no bytes
+ * on the wire. Two rows are narrower than their transport would suggest and the
+ * asymmetry is historical, not considered:
+ *
+ *   - `codex-sdk` omits 'spawned' even though CodexSdkManager emits it, so a
+ *     Codex run never satisfies a turn-start waiter (nudgeRunHandler's
+ *     `deliveredAt: 'turn-start'`) the way a Claude run does.
+ *   - `codex-pty` omits 'output', so whatever AbstractCliManager emits there
+ *     never reaches the structured panel — only the raw 'pty-output' bytes do.
+ *
+ * Both are worth revisiting on their own; neither should be COPIED. A new
+ * provider's lane wants the row its transport implies: an SDK lane forwards
+ * output + exit + spawned, a PTY lane those plus pty-output and turn-end.
+ *
+ * 'exit' is subscribed for every lane and so is not listed. 'pty-output' follows
+ * `isPtyLane` exactly, so it is not listed either.
+ */
+interface LaneWiring {
+  readonly output: boolean;
+  readonly spawned: boolean;
+  readonly turnEnd: boolean;
+  /**
+   * Keep the PTY backlog when the process exits NON-ZERO, so a terminal that
+   * mounts after a failed startup can still replay the error tail. Codex PTY
+   * only: a Claude REPL's exit always drops its backlog.
+   */
+  readonly retainBacklogOnFailedExit: boolean;
+}
+
+const LANE_WIRING: Readonly<Record<PanelLane, LaneWiring>> = {
+  'claude-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
+  'claude-interactive': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: false },
+  'codex-sdk': { output: true, spawned: false, turnEnd: false, retainBacklogOnFailedExit: false },
+  'codex-pty': { output: false, spawned: false, turnEnd: false, retainBacklogOnFailedExit: true },
+  // Declared with the OMP lanes, taking the row each transport IMPLIES rather
+  // than copying the two Codex asymmetries this comment warns against: the SDK
+  // lane forwards output + spawned, the PTY lane those plus turn-end. Both are
+  // live — `omp-sdk` additionally serves workflow runs since Phase 2, which is
+  // exactly why it keeps `spawned` where codex-sdk drops it: a turn-start waiter
+  // (nudgeRunHandler's `deliveredAt: 'turn-start'`) is satisfied on an OMP run.
+  // `retainBacklogOnFailedExit` follows codex-pty for codex-pty's reason and not
+  // by imitation: OMP is spawned from a user-installed binary found by a
+  // discovery ladder, so a failed startup is the expected failure and its error
+  // tail has to survive for a terminal that mounts afterwards.
+  'omp-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
+  'omp-pty': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: true },
+};
+
+/**
+ * The lane an unresolvable dispatch floors to: the default provider on the
+ * default substrate. Spelled through `claudeRuntimeFromSubstrate` rather than as
+ * a literal so it tracks DEFAULT_SUBSTRATE, and deliberately CLAUDE — the floor
+ * has to be the provider that is always present, which is what
+ * DEFAULT_AGENT_PROVIDER means.
+ */
+const FALLBACK_LANE: PanelLane = claudeRuntimeFromSubstrate(DEFAULT_SUBSTRATE);
+
+/**
+ * Look a lane up in a lane→manager table, handing a miss to the shared
+ * {@link failUnresolvable} policy (throw in dev/test, log and floor in prod —
+ * see its comment for why the throw is opt-IN on those two environments). Never
+ * returns the floor SILENTLY: an unrecognized runtime quietly becoming Claude is
+ * the whole class of bug this replaces.
+ *
+ * `floor` must be a safe degradation rather than a guess. The Claude SDK manager
+ * is the honest one here — it is what `resolvePanelOwner`'s old `default:` arm
+ * fell to, so production behavior is unchanged while development now fails loudly.
+ *
+ * Generic over the manager type and exported because the boot seam runs the same
+ * lookup against the same table BEFORE the facade exists (`resolvePanelOwner` is
+ * constructor input), and it must report a miss the same way rather than
+ * re-deriving the rule.
+ */
+export function resolveLaneManager<T>(
+  lane: PanelLane | null,
+  managers: ReadonlyMap<PanelLane, T>,
+  floor: T,
+  context: string,
+): T {
+  const manager = lane === null ? undefined : managers.get(lane);
+  if (manager !== undefined) return manager;
+  return failUnresolvable(
+    `${context}: no manager registered for lane '${lane ?? 'unresolved'}' ` +
+      `(registered: ${[...managers.keys()].join(', ')})`,
+    floor,
+  );
 }
 
 /**
@@ -146,33 +285,15 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private readonly panelOwners = new Map<string, AbstractCliManager>();
 
-  // Stored bound handler references so dispose() can off() the exact listeners.
-  private readonly sdkOutputHandler: ForwardHandler;
-  private readonly sdkExitHandler: ForwardHandler;
-  // Per-logical-turn start fan-in — BOTH managers emit 'spawned' once per turn
-  // (SDK: cold spawn AND warm push; interactive: PTY spawn). Re-emitted by
-  // reference so boot wiring can await a run's turn-start (nudgeRunHandler's
-  // `deliveredAt: 'turn-start'` waiter) without reaching past the facade.
-  private readonly sdkSpawnedHandler: ForwardHandler;
-  private readonly interactiveSpawnedHandler: ForwardHandler;
-  private readonly interactiveOutputHandler: ForwardHandler;
-  private readonly interactiveExitHandler: ForwardHandler;
-  private readonly codexSdkOutputHandler: ForwardHandler | null = null;
-  private readonly codexSdkExitHandler: ForwardHandler | null = null;
-  // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
-  // manager has no PTY and never emits 'pty-output', so it is deliberately NOT
-  // subscribed here (the path is interactive-only by construction).
-  private readonly interactivePtyHandler: ForwardHandler;
-  // Turn-end fan-in (TASK-818 / IDEA-030) — interactive manager ONLY. Each
-  // persistent-REPL assistant turn boundary emits 'turn-end'; the facade re-emits
-  // it by reference to RunExecutor's event-driven rest handler. The SDK manager
-  // NEVER emits 'turn-end' (it drains via the query() iterator), so it is
-  // deliberately NOT subscribed — the SDK path is structurally untouched.
-  private readonly interactiveTurnEndHandler: ForwardHandler;
-  private readonly additionalPtyHandlers: Array<{
+  /**
+   * Every fan-in subscription this facade owns, in registration order, so
+   * dispose() can off() the exact bound listeners it on()'d. One entry per
+   * (manager, event) pair.
+   */
+  private readonly subscriptions: Array<{
     manager: AbstractCliManager;
-    ptyHandler: ForwardHandler;
-    exitHandler: ForwardHandler;
+    event: string;
+    handler: ForwardHandler;
   }> = [];
 
   /**
@@ -182,8 +303,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * claude's startup TUI paint is lost before InteractiveTerminalView mounts and
    * subscribes. We retain a bounded tail (PTY_BACKLOG_CAP_BYTES) here so the
    * renderer can REPLAY it on attach (getPtyBacklog), reconstructing the current
-   * screen. Cleared per run on 'exit'. Interactive-only by construction (only the
-   * interactive manager emits 'pty-output').
+   * screen. Cleared per run on 'exit'. PTY lanes only by construction — an SDK
+   * lane has no terminal and never emits 'pty-output'.
    */
   private readonly ptyBacklog = new Map<string, string>();
 
@@ -197,118 +318,213 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * resolves runId from sessions.run_id (the `__quick__` sentinel), so
    * panelId ≠ runId — without translation the inherited sendInput would throw
    * "No claude process found for panel <sentinelRunId>". Fed from the
-   * interactive 'pty-output' and 'turn-end' payloads (both carry
-   * { panelId, runId }; the interactive 'output' payload has NO runId so it is
-   * not a source); evicted when the interactive 'exit' fires for the panel.
-   * Interactive-only by construction (only interactive events feed it).
+   * 'pty-output' and 'turn-end' payloads of every PTY lane (both carry
+   * { panelId, runId }; the 'output' payload has NO runId so it is not a
+   * source); evicted when that lane's 'exit' fires for the panel.
    */
   private readonly interactiveRunToPanel = new Map<string, string>();
   private readonly interactivePanelToRun = new Map<string, string>();
   private readonly livePtyOwners = new Map<string, AbstractCliManager>();
 
+  /** lane → the manager serving it. THE dispatch table; nothing else routes. */
+  private readonly managersByLane = new Map<PanelLane, AbstractCliManager>();
+  /** The reverse, for the seams that start from a manager (spawn stamp, provider match). */
+  private readonly lanesByManager = new Map<AbstractCliManager, PanelLane>();
+  /** lane → its owning provider, resolved ONCE at registration (see registerManager). */
+  private readonly providersByLane = new Map<PanelLane, AgentProvider>();
+
   /**
-   * Every manager that drives a real PTY: the interactive Claude manager plus any
-   * `additionalPtyManagers` (Codex PTY). The relay/close-out seams used to test
+   * Every manager that drives a real PTY. The relay/close-out seams used to test
    * `mgr !== this.interactiveManager` to mean "SDK — no PTY, no-op", which was
    * true while the interactive manager was the only PTY owner. With Codex PTY
-   * wired as an additional manager that test wrongly classifies a live Codex PTY
-   * as SDK. Membership here is the real question those seams are asking.
+   * wired too that test wrongly classifies a live Codex PTY as SDK. Membership
+   * here — `isPtyLane` of the registered lane — is the real question those seams
+   * are asking.
    */
   private readonly ptyManagers = new Set<AbstractCliManager>();
 
-  /** Does this manager own a PTY (interactive Claude or an additional PTY manager)? */
+  /** Does this manager own a PTY (i.e. is it registered on a PTY lane)? */
   private isPtyManager(mgr: AbstractCliManager): boolean {
     return this.ptyManagers.has(mgr);
   }
 
-  constructor(
-    private readonly sdkManager: AbstractCliManager,
-    private readonly interactiveManager: AbstractCliManager,
-    private readonly registry: WorkflowRegistryLike,
-    private readonly logger: LoggerLike,
-    additionalPtyManagers: AbstractCliManager[] = [],
-    private readonly codexSdkManager?: AbstractCliManager,
-    private readonly panelOwnerLookup?: PanelOwnerLookup,
-  ) {
+  private readonly registry: WorkflowRegistryLike;
+  private readonly logger: LoggerLike;
+  private readonly panelOwnerLookup?: PanelOwnerLookup;
+
+  /**
+   * The Claude interactive manager, resolved once from its lane. Named because
+   * `registerInteractivePanel` IS the Claude-interactive quick-session seam (the
+   * Codex twin calls `registerPtyPanel` with its own manager); undefined when
+   * that lane is not registered, which makes the seam a no-op rather than a crash.
+   */
+  private readonly interactiveManager: AbstractCliManager | undefined;
+
+  constructor(options: SubstrateDispatchFacadeOptions) {
     super();
+    this.registry = options.registry;
+    this.logger = options.logger;
+    this.panelOwnerLookup = options.panelOwnerLookup;
 
-    // Fan-in: subscribe to BOTH managers' 'output'/'exit' events and re-emit the
-    // payload object UNCHANGED on this facade. One listener per event per manager,
-    // so the default 10-listener cap is never hit (no setMaxListeners needed).
-    this.sdkOutputHandler = (payload) => this.emit('output', payload);
-    this.sdkExitHandler = (payload) => this.emit('exit', payload);
-    this.sdkSpawnedHandler = (payload) => this.emit('spawned', payload);
-    this.interactiveSpawnedHandler = (payload) => this.emit('spawned', payload);
-    this.interactiveOutputHandler = (payload) => this.emit('output', payload);
-    this.interactiveExitHandler = (payload) => {
-      // Drop the run's PTY backlog when its REPL exits (resolved through the
-      // panel→run mapping so quick sessions — panelId ≠ runId — clear too),
-      // THEN evict the panel's runId↔panelId mapping (order matters: the
-      // backlog clear consumes the mapping).
-      this.clearPtyBacklog(payload);
-      this.clearInteractivePanelMapping(payload);
-      this.emit('exit', payload);
-    };
-    // Raw-PTY fan-in — record the runId↔panelId mapping (the payload carries
-    // both ids), accumulate a bounded per-run backlog for replay-on-attach
-    // (blank-xterm fix), then re-emit 'pty-output' by reference (live channel
-    // unchanged). Interactive manager ONLY (the SDK manager is never subscribed).
-    this.interactivePtyHandler = (payload) => {
-      this.recordInteractivePanelMapping(payload, this.interactiveManager);
-      this.recordPtyBacklog(payload);
-      this.emit('pty-output', payload);
-    };
-    // Turn-end fan-in — re-emit 'turn-end' by reference (TASK-818). Interactive
-    // manager ONLY; the SDK manager never emits it. The payload also carries
-    // { panelId, runId } — a second mapping source so the runId→panelId
-    // translation is available even before any PTY byte flows.
-    this.interactiveTurnEndHandler = (payload) => {
-      this.recordInteractivePanelMapping(payload, this.interactiveManager);
-      this.emit('turn-end', payload);
-    };
-
-    this.sdkManager.on('output', this.sdkOutputHandler);
-    this.sdkManager.on('exit', this.sdkExitHandler);
-    this.sdkManager.on('spawned', this.sdkSpawnedHandler);
-    this.interactiveManager.on('spawned', this.interactiveSpawnedHandler);
-    this.interactiveManager.on('output', this.interactiveOutputHandler);
-    this.interactiveManager.on('exit', this.interactiveExitHandler);
-    this.interactiveManager.on('pty-output', this.interactivePtyHandler);
-    this.interactiveManager.on('turn-end', this.interactiveTurnEndHandler);
-    this.ptyManagers.add(this.interactiveManager);
-
-    if (this.codexSdkManager) {
-      this.codexSdkOutputHandler = (payload) => this.emit('output', payload);
-      this.codexSdkExitHandler = (payload) => this.emit('exit', payload);
-      this.codexSdkManager.on('output', this.codexSdkOutputHandler);
-      this.codexSdkManager.on('exit', this.codexSdkExitHandler);
+    for (const registration of options.managers) {
+      this.registerManager(registration);
     }
+    if (!this.managersByLane.has(FALLBACK_LANE)) {
+      throw new Error(
+        `[SubstrateDispatchFacade] no manager registered for the fallback lane '${FALLBACK_LANE}' — ` +
+          'an unresolvable dispatch would have nowhere to floor',
+      );
+    }
+    this.interactiveManager = this.managersByLane.get('claude-interactive');
 
-    for (const manager of additionalPtyManagers) {
-      const ptyHandler: ForwardHandler = (payload) => {
+    this.logger.debug('[SubstrateDispatchFacade] subscribed to registered lane managers', {
+      lanes: [...this.managersByLane.keys()],
+      defaultSubstrate: DEFAULT_SUBSTRATE,
+    });
+  }
+
+  /**
+   * Wire one lane's manager: record it in the dispatch table and fan its events
+   * in, re-emitting each payload object UNCHANGED on this facade. Because the
+   * re-emit preserves the payload by reference, the panelId===runId===sessionId
+   * invariant and runEventBridge's `type:'json'` filter survive identically
+   * whichever manager produced the event. One listener per event per manager, so
+   * the default 10-listener cap is never hit (no setMaxListeners needed).
+   */
+  private registerManager({ lane, manager }: ManagerRegistration): void {
+    const existing = this.managersByLane.get(lane);
+    if (existing !== undefined && existing !== manager) {
+      throw new Error(`[SubstrateDispatchFacade] lane '${lane}' registered twice with different managers`);
+    }
+    if (existing === manager) return;
+
+    this.managersByLane.set(lane, manager);
+    this.lanesByManager.set(manager, lane);
+    // Resolve the lane's provider EAGERLY: a lane id whose prefix matches no
+    // registered provider is a wiring bug, and construction is when a developer
+    // can still see it (providerForRuntimeValue throws in dev/test).
+    this.providersByLane.set(lane, providerForRuntimeValue(lane, `SubstrateDispatchFacade lane '${lane}'`));
+
+    const wiring = LANE_WIRING[lane];
+    const pty = isPtyLane(lane);
+    if (wiring.output) this.subscribe(manager, 'output', (payload) => this.emit('output', payload));
+    // Per-logical-turn start fan-in — a manager emits 'spawned' once per turn
+    // (SDK: cold spawn AND warm push; PTY: process spawn). Re-emitted by
+    // reference so boot wiring can await a run's turn-start (nudgeRunHandler's
+    // `deliveredAt: 'turn-start'` waiter) without reaching past the facade.
+    if (wiring.spawned) this.subscribe(manager, 'spawned', (payload) => this.emit('spawned', payload));
+    this.subscribe(manager, 'exit', (payload) => {
+      if (pty) {
+        // Drop the run's PTY backlog when its REPL exits (resolved through the
+        // panel→run mapping so quick sessions — panelId ≠ runId — clear too),
+        // THEN evict the panel's runId↔panelId mapping (order matters: the
+        // backlog clear consumes the mapping).
+        if (!(wiring.retainBacklogOnFailedExit && isFailedExit(payload))) this.clearPtyBacklog(payload);
+        this.clearInteractivePanelMapping(payload);
+      }
+      this.emit('exit', payload);
+    });
+    if (pty) {
+      // Raw-PTY fan-in (TASK-814 / IDEA-030) — record the runId↔panelId mapping
+      // (the payload carries both ids), accumulate a bounded per-run backlog for
+      // replay-on-attach (blank-xterm fix), then re-emit by reference (live
+      // channel unchanged). An SDK lane has no PTY and never emits this.
+      this.subscribe(manager, 'pty-output', (payload) => {
         this.recordInteractivePanelMapping(payload, manager);
         this.recordPtyBacklog(payload);
         this.emit('pty-output', payload);
-      };
-      const exitHandler: ForwardHandler = (payload) => {
-        // Keep a failed startup/runtime tail available for replay when the
-        // terminal mounts after the process has already exited. Successful
-        // close-out still drops the backlog normally.
-        if (!isFailedExit(payload)) {
-          this.clearPtyBacklog(payload);
-        }
-        this.clearInteractivePanelMapping(payload);
-        this.emit('exit', payload);
-      };
-      manager.on('pty-output', ptyHandler);
-      manager.on('exit', exitHandler);
-      this.additionalPtyHandlers.push({ manager, ptyHandler, exitHandler });
-      this.ptyManagers.add(manager);
+      });
     }
+    if (wiring.turnEnd) {
+      // Turn-end fan-in (TASK-818 / IDEA-030) — each persistent-REPL assistant
+      // turn boundary emits 'turn-end'; re-emitted by reference to RunExecutor's
+      // event-driven rest handler. The payload also carries { panelId, runId } —
+      // a second mapping source, live even before any PTY byte flows.
+      this.subscribe(manager, 'turn-end', (payload) => {
+        this.recordInteractivePanelMapping(payload, manager);
+        this.emit('turn-end', payload);
+      });
+    }
+    if (pty) this.ptyManagers.add(manager);
+  }
 
-    this.logger.debug('[SubstrateDispatchFacade] subscribed to both substrate managers', {
-      defaultSubstrate: DEFAULT_SUBSTRATE,
-    });
+  /** on() the handler and remember the exact pair for dispose(). */
+  private subscribe(manager: AbstractCliManager, event: string, handler: ForwardHandler): void {
+    manager.on(event, handler);
+    this.subscriptions.push({ manager, event, handler });
+  }
+
+  /**
+   * The manager for a lane, or the production floor when that lane has none.
+   *
+   * An unregistered lane is a routing bug — the run asked for a provider this
+   * build cannot serve — so it throws in dev/test where a developer will see it,
+   * and in production logs an error and floors to {@link FALLBACK_LANE}. It never
+   * floors SILENTLY, which is what the old `=== 'codex-sdk'` chain did for every
+   * runtime it did not recognize.
+   */
+  private managerForLane(lane: PanelLane | null, context: string): AbstractCliManager {
+    return resolveLaneManager(
+      lane,
+      this.managersByLane,
+      // Non-null: the constructor refuses to build without the fallback lane.
+      this.managersByLane.get(FALLBACK_LANE) as AbstractCliManager,
+      `[SubstrateDispatchFacade] ${context}`,
+    );
+  }
+
+  /**
+   * The registered lane serving `provider` on `substrate`, or null when the
+   * provider has no lane at all.
+   *
+   * Selects among REGISTERED lanes rather than composing a lane id from strings:
+   * transports are not named uniformly across providers (`claude-interactive` vs
+   * `codex-pty`), and a lane with no manager behind it is not an answer.
+   * A provider that IS registered but not on the requested transport falls back
+   * to its other lane — better a right provider on the wrong transport than a
+   * silent flip to Claude.
+   */
+  private laneFor(provider: AgentProvider, substrate: CliSubstrate): PanelLane | null {
+    const wantPty = substrate === 'interactive';
+    let firstForProvider: PanelLane | null = null;
+    for (const lane of this.managersByLane.keys()) {
+      if (this.providersByLane.get(lane) !== provider) continue;
+      if (isPtyLane(lane) === wantPty) return lane;
+      firstForProvider ??= lane;
+    }
+    return firstForProvider;
+  }
+
+  /**
+   * The lane a `workflow_runs` row names.
+   *
+   * The row's own runtime stamp IS a lane id whenever it names a registered one
+   * ('claude-sdk' | 'claude-interactive' | 'codex-sdk'), so it wins outright —
+   * that is the row's explicit answer, and re-deriving it from the two axes could
+   * only disagree. Otherwise provider and substrate are resolved separately and
+   * combined: the provider from the runtime's prefix via the shared registry (an
+   * unknown non-empty runtime fails loudly there rather than resolving to Claude),
+   * falling back to the row's own provider column, and the substrate from
+   * `run.substrate` with the legacy `?? DEFAULT_SUBSTRATE` floor that keeps every
+   * pre-provider-axis row on the SDK manager.
+   *
+   * Note the one row shape whose reading changed: a row naming a NON-default
+   * provider with no runtime AND `substrate: 'interactive'` now resolves to that
+   * provider's PTY lane where it used to resolve to its SDK one. No writer
+   * produces it — `createRun` stamps provider and runtime together, and the only
+   * storable Codex runtime is pinned to `substrate: 'sdk'`.
+   */
+  private laneForRun(run: WorkflowRunRow, context: string): { lane: PanelLane | null; provider: AgentProvider } {
+    const runtime: string | undefined = run.agent_runtime;
+    if (runtime !== undefined && this.managersByLane.has(runtime as PanelLane)) {
+      const lane = runtime as PanelLane;
+      // Non-null: providersByLane is populated for every registered lane.
+      return { lane, provider: this.providersByLane.get(lane) as AgentProvider };
+    }
+    const provider = runtime
+      ? providerForRuntimeValue(runtime, context)
+      : (run.agent_provider ?? DEFAULT_AGENT_PROVIDER);
+    return { lane: this.laneFor(provider, run.substrate ?? DEFAULT_SUBSTRATE), provider };
   }
 
   /**
@@ -326,44 +542,48 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private resolveManager(runId: string): AbstractCliManager {
     const run = this.registry.getRunById(runId);
-    if (run?.agent_runtime === 'codex-sdk' || run?.agent_provider === 'codex') {
-      if (!this.codexSdkManager) {
-        throw new Error(`[SubstrateDispatchFacade] run ${runId} requested Codex SDK but no codex-sdk manager is wired`);
-      }
-      return this.codexSdkManager;
-    }
     if (run) {
-      const substrate: CliSubstrate = run.substrate ?? DEFAULT_SUBSTRATE;
-      return substrate === 'interactive' ? this.interactiveManager : this.sdkManager;
+      const context = `run ${runId}`;
+      const { lane, provider } = this.laneForRun(run, context);
+      return this.managerForLane(lane, lane === null ? `${context} (provider '${provider}')` : context);
     }
     const byPanel = this.panelOwnerLookup?.(runId);
     if (byPanel) {
       this.logger.debug('[SubstrateDispatchFacade] resolved a non-run id as a chat panel', { panelId: runId });
       return byPanel;
     }
-    return this.sdkManager;
+    return this.managerForLane(FALLBACK_LANE, `id ${runId}`);
   }
 
   /**
    * Resolve the manager for ONE spawn, honoring a per-call `agentProvider`/
-   * `agentRuntime` override (Codex-per-step mixing) before falling back to the
+   * `agentRuntime` override (per-step provider mixing) before falling back to the
    * run-level `resolveManager(panelId)` resolution. The override lets the
-   * programmatic step runner send a single step to Codex inside an otherwise-
-   * Claude run without mutating the run's `workflow_runs` stamp. Absent override
-   * ⇒ identical to the pre-existing run-level path.
+   * programmatic step runner send a single step to another provider inside an
+   * otherwise-Claude run without mutating the run's `workflow_runs` stamp. Absent
+   * override ⇒ identical to the pre-existing run-level path.
+   *
+   * A runtime override names a lane outright. A provider override with NO runtime
+   * only redirects when it DISAGREES with the provider the run already resolves
+   * to: when they agree the run-level resolution is already in the right provider
+   * and keeps its substrate choice, which is why a same-provider override has
+   * always been a no-op here.
    */
   private resolveManagerForSpawn(options: ClaudeSpawnerOptions): AbstractCliManager {
-    if (options.agentRuntime === 'codex-sdk' || options.agentProvider === 'codex') {
-      if (!this.codexSdkManager) {
-        throw new Error(`[SubstrateDispatchFacade] spawn for panel ${options.panelId} requested Codex SDK but no codex-sdk manager is wired`);
+    const context = `spawn for panel ${options.panelId}`;
+    if (options.agentRuntime) {
+      const lane = this.managersByLane.has(options.agentRuntime as PanelLane)
+        ? (options.agentRuntime as PanelLane)
+        : this.laneFor(providerForRuntimeValue(options.agentRuntime, context), DEFAULT_SUBSTRATE);
+      return this.managerForLane(lane, context);
+    }
+    if (options.agentProvider) {
+      const runManager = this.resolveManager(options.panelId);
+      const runLane = this.lanesByManager.get(runManager);
+      if (runLane !== undefined && this.providersByLane.get(runLane) === options.agentProvider) {
+        return runManager;
       }
-      return this.codexSdkManager;
-    }
-    if (options.agentRuntime === 'claude-interactive') {
-      return this.interactiveManager;
-    }
-    if (options.agentRuntime === 'claude-sdk') {
-      return this.sdkManager;
+      return this.managerForLane(this.laneFor(options.agentProvider, DEFAULT_SUBSTRATE), context);
     }
     return this.resolveManager(options.panelId);
   }
@@ -377,10 +597,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome | void> {
     const { panelId } = options;
     const mgr = this.resolveManagerForSpawn(options);
-    const substrate: CliSubstrate = mgr === this.interactiveManager ? 'interactive' : 'sdk';
-    const runtime = mgr === this.codexSdkManager ? 'codex-sdk' : substrate;
+    // The registration knows its own lane, so the log names the resolved lane
+    // (provider × transport) instead of re-deriving a runtime by identity test.
+    const lane = this.lanesByManager.get(mgr);
+    const substrate: CliSubstrate = lane !== undefined && isPtyLane(lane) ? 'interactive' : 'sdk';
     this.panelOwners.set(panelId, mgr);
-    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate, runtime });
+    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate, lane });
     // AbstractCliManager.spawnCliProcess accepts the CliSpawnOptions superset of
     // ClaudeSpawnerOptions (it adds an index signature for CLI-specific keys). Binding
     // the method to a ClaudeSpawnerLike-shaped reference narrows the parameter via the
@@ -422,13 +644,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * degrades to the pre-barrier behavior rather than blocking the settle.
    */
   hasTurnInFlightForSession(sessionId: string): boolean {
-    const managers: AbstractCliManager[] = [
-      this.sdkManager,
-      this.interactiveManager,
-      ...(this.codexSdkManager ? [this.codexSdkManager] : []),
-      ...this.additionalPtyHandlers.map((h) => h.manager),
-    ];
-    return managers.some((m) => m.hasTurnInFlightForSession(sessionId));
+    return [...this.managersByLane.values()].some((m) => m.hasTurnInFlightForSession(sessionId));
   }
 
   /**
@@ -715,6 +931,13 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * interactive 'exit' like any event-fed entry.
    */
   registerInteractivePanel(runId: string, panelId: string): void {
+    if (!this.interactiveManager) {
+      this.logger.warn('[SubstrateDispatchFacade] registerInteractivePanel no-op — claude-interactive lane not registered', {
+        runId,
+        panelId,
+      });
+      return;
+    }
     this.registerPtyPanel(runId, panelId, this.interactiveManager);
   }
 
@@ -787,21 +1010,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * listeners + the panelOwners map. Idempotent.
    */
   dispose(): void {
-    this.sdkManager.off('output', this.sdkOutputHandler);
-    this.sdkManager.off('exit', this.sdkExitHandler);
-    this.sdkManager.off('spawned', this.sdkSpawnedHandler);
-    this.interactiveManager.off('spawned', this.interactiveSpawnedHandler);
-    this.interactiveManager.off('output', this.interactiveOutputHandler);
-    this.interactiveManager.off('exit', this.interactiveExitHandler);
-    this.interactiveManager.off('pty-output', this.interactivePtyHandler);
-    this.interactiveManager.off('turn-end', this.interactiveTurnEndHandler);
-    if (this.codexSdkManager && this.codexSdkOutputHandler && this.codexSdkExitHandler) {
-      this.codexSdkManager.off('output', this.codexSdkOutputHandler);
-      this.codexSdkManager.off('exit', this.codexSdkExitHandler);
-    }
-    for (const { manager, ptyHandler, exitHandler } of this.additionalPtyHandlers) {
-      manager.off('pty-output', ptyHandler);
-      manager.off('exit', exitHandler);
+    for (const { manager, event, handler } of this.subscriptions) {
+      manager.off(event, handler);
     }
     this.removeAllListeners();
     this.panelOwners.clear();
@@ -809,7 +1019,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveRunToPanel.clear();
     this.interactivePanelToRun.clear();
     this.livePtyOwners.clear();
-    this.additionalPtyHandlers.length = 0;
-    this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');
+    this.subscriptions.length = 0;
+    this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from every registered manager');
   }
 }

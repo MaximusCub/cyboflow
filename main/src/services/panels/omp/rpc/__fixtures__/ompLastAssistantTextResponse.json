@@ -1,0 +1,7 @@
+{
+  "id": "last-1",
+  "type": "response",
+  "command": "get_last_assistant_text",
+  "success": true,
+  "data": {}
+}

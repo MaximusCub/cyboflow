@@ -26,6 +26,8 @@ import { AskUserQuestionCard } from '../../AskUserQuestion/AskUserQuestionCard';
 import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
 import { LiveTail } from '../../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../../utils/liveTailReducer';
+import { AGENT_PROVIDER_LABELS } from '../../../../../shared/types/agentRuntime';
+import { providerForRuntime } from '../../cyboflow/agentRuntimeUi';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -80,6 +82,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
   const isCodexPtySession = substrateSession?.agentRuntime === 'codex-pty';
+  // The isOmpPtySession twin the Phase-1A comment below promised, now that
+  // OmpPtyManager exists (docs/proposals/omp-provider-integration.md §5.2):
+  // every gate below that treats codex-pty as "PTY-backed, health-probe-blind"
+  // treats omp-pty the same way.
+  const isOmpPtySession = substrateSession?.agentRuntime === 'omp-pty';
+  const isVendorPtySession = isCodexPtySession || isOmpPtySession;
   // Effective substrate for THIS panel: a per-panel override (TASK-104 —
   // panel.substrate, set at "Add chat" creation time via the picker, or later
   // via claude-panels:set-substrate) wins over the session's substrate,
@@ -88,10 +96,10 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // meant an added chat with a PTY override on an otherwise-SDK session still
   // rendered the SDK transcript/composer — which then waits forever for SDK
   // stream events that never arrive, since the backend actually spawned a PTY
-  // for that panel. isCodexPtySession stays session-only: per-panel
-  // agentRuntime override is explicitly out of scope for TASK-104.
+  // for that panel. isCodexPtySession/isOmpPtySession stay session-only:
+  // per-panel agentRuntime override is explicitly out of scope for TASK-104.
   const effectiveSubstrate = panel.substrate ?? substrateSession?.substrate;
-  const isPtyBackedSession = isCodexPtySession || effectiveSubstrate === 'interactive';
+  const isPtyBackedSession = isVendorPtySession || effectiveSubstrate === 'interactive';
   // PTY-backed panels (interactive Claude AND Codex PTY) key their live terminal
   // by their OWN panelId, NOT the session's shared chatSentinelProvider
   // chat_run_id sentinel (every panel of a session resolves the SAME chat_run_id
@@ -112,7 +120,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // (ipc/session.ts). Render the canned DemoTerminalView instead of the live
   // InteractiveTerminalView (which would subscribe to an empty pty channel).
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
-  const showDemoTerminal = !isCodexPtySession && demoModeEnabled && interactiveRunId !== null;
+  const showDemoTerminal = !isVendorPtySession && demoModeEnabled && interactiveRunId !== null;
 
   // Interactive quick sessions are driven by typing DIRECTLY into the live PTY
   // terminal above, so the separate "Message the live session" composer is
@@ -171,7 +179,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     setResumePromptDismissed(false);
     setResumeArmed(false);
     setCanOfferResume(false);
-    if (interactiveRunId === null || showDemoTerminal || isCodexPtySession || !sessionId) return;
+    if (interactiveRunId === null || showDemoTerminal || isVendorPtySession || !sessionId) return;
     // The user already chose "Start fresh" for this session this app run — don't
     // re-offer until the REPL is live again (a new loss episode).
     if (declinedResumeSessions.has(sessionId)) return;
@@ -192,18 +200,19 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     return () => {
       cancelled = true;
     };
-  }, [panel.sessionId, panel.id, interactiveRunId, showDemoTerminal, isCodexPtySession]);
+  }, [panel.sessionId, panel.id, interactiveRunId, showDemoTerminal, isVendorPtySession]);
 
   // Dead-terminal detection + retry. Same enablement guard as the resume probe
-  // above — and Codex PTY is excluded for a hard reason: the probe asks Claude's
-  // interactiveCliManager whether the panel's process is alive, and it knows
-  // nothing about Codex panels, so every healthy Codex terminal would read as
-  // dead. `guardFirstInteraction` cases (demo) are excluded for the same reason
-  // their resume probe is: there is no real REPL to be alive.
+  // above — and vendor PTY runtimes (Codex, OMP) are excluded for a hard reason:
+  // the probe asks Claude's interactiveCliManager whether the panel's process is
+  // alive, and it knows nothing about Codex/OMP panels, so every healthy vendor
+  // terminal would read as dead. `guardFirstInteraction` cases (demo) are
+  // excluded for the same reason their resume probe is: there is no real REPL to
+  // be alive.
   const terminalHealth = useInteractiveTerminalHealth(
     panel.sessionId,
     panel.id,
-    interactiveRunId !== null && !showDemoTerminal && !isCodexPtySession,
+    interactiveRunId !== null && !showDemoTerminal && !isVendorPtySession,
   );
 
   // Arm the resume offer from the LIVE liveness signal, not only from the
@@ -295,20 +304,27 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // observed frozen at 'initializing' while the session was actually running,
   // which froze `sessionRunning` → `composerWorking` → the Stop / Queue /
   // Interrupt affordances. Claude hid that behind the live-tail isGenerating
-  // flag; codex-sdk emits no stream deltas, so its Stop button never appeared at
-  // all. substrateSession keeps its context-first preference because it is read
-  // for chatRunId / substrate, which the store copy can still be lagging on
-  // right after a quick-session create.
+  // flag; codex-sdk and omp-sdk both emit no stream deltas (v1 for OMP —
+  // §5.1's "dropped in v1" call), so either one's Stop button never appeared
+  // at all without this preference. substrateSession keeps its context-first
+  // preference because it is read for chatRunId / substrate, which the store
+  // copy can still be lagging on right after a quick-session create.
   const paneSession = panelStoreSession ?? sessionCtx?.session ?? activeSession;
   const isInteractive = interactiveRunId !== null;
+  // The composer's agent name, fully provider-registry-driven: a non-Claude
+  // panel names its vendor on EITHER transport (SDK or PTY) — 'Codex' or 'OMP'
+  // — and only Claude's own PTY distinguishes 'Terminal' (its interactive
+  // substrate is a raw terminal, not a vendor-branded TUI). This subsumes the
+  // old "two Codex arms" special case: paneProvider !== 'claude' is true for
+  // codex-sdk/codex-pty/omp-sdk/omp-pty alike, so the OMP PTY case (now that
+  // OmpPtyManager exists) needs no arm of its own.
+  const paneProvider = providerForRuntime(paneSession?.agentRuntime ?? 'claude-sdk');
   const agentName =
-    paneSession?.agentRuntime === 'omp-fleet'
-      ? 'OMP Fleet'
-      : isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
-        ? 'Codex'
-        : isInteractive
-          ? 'Terminal'
-          : 'Claude';
+    paneProvider !== 'claude'
+      ? AGENT_PROVIDER_LABELS[paneProvider]
+      : isInteractive
+        ? 'Terminal'
+        : AGENT_PROVIDER_LABELS.claude;
 
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.

@@ -17,6 +17,8 @@
  * `result` payload's `total_cost_usd` and is SDK-only (null elsewhere).
  */
 
+import type { AgentProvider } from './agentRuntime';
+
 // ---------------------------------------------------------------------------
 // Statistics (mockup section 02)
 // ---------------------------------------------------------------------------
@@ -357,7 +359,7 @@ export type RunEvalSample = Record<string, unknown>;
 /** Per-slot provenance for the heterogeneous code-review jury. */
 export type RunEvalJurySlot = {
   slot: string;
-  provider: 'claude' | 'codex';
+  provider: AgentProvider;
   model: string | null;
   status: 'ok' | 'unavailable' | 'failed';
   errorCode?: string;

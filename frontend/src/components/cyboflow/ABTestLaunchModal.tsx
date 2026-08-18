@@ -48,7 +48,9 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
-import { providerForRuntime, isCodexRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import type { AgentProvider, WorkflowRunStorableRuntime } from '../../../../shared/types/agentRuntime';
+import { runtimeSupportsEffort } from '../../../../shared/types/agentCapabilities';
 
 /**
  * Per-arm quick-session config, local to the modal. Mirrors the subset of the
@@ -70,18 +72,20 @@ const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
 };
 
 /**
- * The wire-schema `agentRuntime` enum for an experiment quick arm is the
- * workflow set `claude-sdk | claude-interactive | codex-sdk` — it excludes
- * `codex-pty` (session-only elsewhere, not for an A/B arm) and `omp-fleet`
- * (v1 offers OMP as a quick-session runtime only, not to A/B arms); see
- * `experimentArmQuickConfigSchema` in `experiments.ts`. `QuickArmConfigForm`'s
- * `SubstrateSelector` uses `runtimeScope="workflow"`, so it never lists either
- * value; this clamps any out-of-set value anyway — `codex-pty` to its
- * `codex-sdk` SDK equivalent, `omp-fleet` to the `claude-sdk` launch default —
- * as defense-in-depth and to satisfy the narrower type.
+ * The modal's `ArmQuickConfig.runtime` is the workflow-LAUNCHABLE set — it
+ * excludes `codex-pty`/`omp-pty` (PTY transport, unreachable for a quick arm)
+ * and `omp-fleet` (v1 offers the fleet supervisor as a quick-session runtime
+ * only, never to A/B arms); the wire schema's `agentRuntime` enum is the wider
+ * STORABLE set (see the router's `experimentArmQuickConfigSchema`).
+ * `QuickArmConfigForm`'s `SubstrateSelector` uses `runtimeScope="workflow"`,
+ * so the disabled options can never be picked through the UI; this clamps
+ * anyway — each PTY transport to its provider's SDK equivalent, `omp-fleet`
+ * to the `claude-sdk` launch default — as defense-in-depth and to satisfy the
+ * narrower type.
  */
 function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowAgentRuntime {
   if (runtime === 'codex-pty') return 'codex-sdk';
+  if (runtime === 'omp-pty') return 'omp-sdk';
   if (runtime === 'omp-fleet') return 'claude-sdk';
   return runtime;
 }
@@ -93,14 +97,31 @@ function substrateForQuickArm(runtime: WorkflowAgentRuntime): 'sdk' | 'interacti
 }
 
 /**
+ * The model an arm resets to when its runtime crosses into `provider`.
+ * Exhaustive over `AgentProvider`, so a provider added to the union cannot ship
+ * without someone choosing its reset value.
+ *
+ * `''` for OMP means NO PIN: unlike Codex's `'auto'` sentinel, OMP advertises no
+ * "let the runtime pick" row — its catalogue is concrete `provider/model` ids —
+ * and {@link buildQuickConfigPayload} omits the wire field entirely for it, so
+ * the arm launches on the runtime's own default.
+ */
+const QUICK_ARM_MODEL_RESET: Readonly<Record<AgentProvider, string>> = {
+  claude: DEFAULT_QUICK_MODEL,
+  codex: DEFAULT_CODEX_MODEL,
+  omp: '',
+};
+
+/**
  * Fold a runtime change into an arm's quick config. When the change crosses the
- * Claude/Codex PROVIDER boundary, reset `model` + `reasoningEffort` to the new
- * provider's defaults: the two model catalogs and effort scales (Claude low..max
- * vs Codex none..xhigh) are disjoint, so carrying the prior provider's selection
- * across would submit an invalid cross-provider value (e.g. `opus`/`max` into a
- * Codex arm). A same-provider runtime flip (claude-sdk ↔ claude-interactive)
- * keeps the model/effort — the catalog + scale are identical. Mirrors
- * SessionStartWizard's reset-on-provider-transition behaviour.
+ * PROVIDER boundary, reset `model` + `reasoningEffort` to the new provider's
+ * defaults: the model catalogs and effort scales (Claude low..max vs Codex
+ * none..xhigh vs OMP's own) are disjoint, so carrying the prior provider's
+ * selection across would submit an invalid cross-provider value (e.g.
+ * `opus`/`max` into a Codex arm). A same-provider runtime flip (claude-sdk ↔
+ * claude-interactive) keeps the model/effort — the catalog + scale are
+ * identical. Mirrors SessionStartWizard's reset-on-provider-transition
+ * behaviour.
  */
 function applyQuickArmRuntimeChange(
   config: ArmQuickConfig,
@@ -114,7 +135,7 @@ function applyQuickArmRuntimeChange(
   return {
     ...config,
     runtime: armRuntime,
-    model: isCodexRuntime(armRuntime) ? DEFAULT_CODEX_MODEL : DEFAULT_QUICK_MODEL,
+    model: QUICK_ARM_MODEL_RESET[providerForRuntime(armRuntime)],
     reasoningEffort: null,
   };
 }
@@ -150,36 +171,40 @@ function QuickArmConfigForm({
         agentProvider={provider}
         agentRuntime={config.runtime}
       />
-      {/* Reasoning-effort select (always present: a quick arm's runtime is a
-          `WorkflowAgentRuntime`, which excludes codex-pty by type). */}
-      <div className="flex flex-col gap-1">
-        <label
-          htmlFor={`${testIdPrefix}-effort`}
-          className="text-xs font-medium text-text-secondary"
-        >
-          Reasoning effort
-        </label>
-        <select
-          id={`${testIdPrefix}-effort`}
-          value={config.reasoningEffort ?? ''}
-          onChange={(e) =>
-            onChange({
-              ...config,
-              reasoningEffort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
-            })
-          }
-          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-input-text"
-          aria-label={`Select reasoning effort for arm ${arm.toUpperCase()}`}
-          data-testid={`${testIdPrefix}-effort`}
-        >
-          <option value="">Default</option>
-          {effortLevelsForProvider(provider).map((level) => (
-            <option key={level} value={level}>
-              {level}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Reasoning-effort select — excluded for a runtime that drops the flag
+          (RUNTIME_CAPABILITIES.supportsEffort; mirrors SessionStartWizard), moot
+          here since the runtime choice above already disables every effort-less
+          runtime for a quick arm. */}
+      {runtimeSupportsEffort(config.runtime) && (
+        <div className="flex flex-col gap-1">
+          <label
+            htmlFor={`${testIdPrefix}-effort`}
+            className="text-xs font-medium text-text-secondary"
+          >
+            Reasoning effort
+          </label>
+          <select
+            id={`${testIdPrefix}-effort`}
+            value={config.reasoningEffort ?? ''}
+            onChange={(e) =>
+              onChange({
+                ...config,
+                reasoningEffort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
+              })
+            }
+            className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-input-text"
+            aria-label={`Select reasoning effort for arm ${arm.toUpperCase()}`}
+            data-testid={`${testIdPrefix}-effort`}
+          >
+            <option value="">Default</option>
+            {effortLevelsForProvider(provider).map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <AgentPermissionModeSelector
         value={config.permissionMode}
         onChange={(permissionMode) => onChange({ ...config, permissionMode })}
@@ -462,9 +487,9 @@ export function ABTestLaunchModal({
 
   const buildQuickConfigPayload = (config: ArmQuickConfig): {
     substrate?: 'sdk' | 'interactive';
-    agentProvider: 'claude' | 'codex';
-    agentRuntime: 'claude-sdk' | 'claude-interactive' | 'codex-sdk';
-    model: string;
+    agentProvider: AgentProvider;
+    agentRuntime: WorkflowRunStorableRuntime;
+    model?: string;
     reasoningEffort?: ReasoningEffort;
     permissionMode: PermissionMode;
   } => {
@@ -472,8 +497,12 @@ export function ABTestLaunchModal({
     return {
       ...(substrate ? { substrate } : {}),
       agentProvider: providerForRuntime(config.runtime),
-      agentRuntime: config.runtime,
-      model: config.model,
+      agentRuntime: quickArmAgentRuntime(config.runtime),
+      // OMITTED when empty — "no pin", the reset value for a provider with no
+      // "let the runtime pick" sentinel. The wire schema takes `model` as
+      // `.min(1).optional()`, so sending `''` would fail validation where
+      // sending nothing correctly means the runtime default.
+      ...(config.model !== '' ? { model: config.model } : {}),
       ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
       permissionMode: config.permissionMode,
     };

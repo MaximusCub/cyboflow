@@ -121,7 +121,51 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
   });
 
-  it('does not broadcast transcript refreshes for non-Codex panel output', () => {
+  // The signal is resolved by LANE, not by a `agent_runtime === 'codex-sdk'`
+  // test: every STRUCTURED non-Claude lane projects its provider's events
+  // straight into panel output and needs the persisted-transcript refresh, so a
+  // runtime-name test left an OMP panel (and an sdk-override panel in a PTY
+  // session) rendering a stale transcript.
+  it('notifies panel transcript consumers for an omp-sdk panel too', () => {
+    const dbSession = makeDbSession({ agent_runtime: 'omp-sdk' });
+    const db = makeDbMock(dbSession);
+    db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const notices: Array<{ sessionId: string; panelId: string }> = [];
+    mgr.on('session-output-available', (notice) => notices.push(notice));
+
+    mgr.addPanelOutput('panel-1', {
+      type: 'stdout',
+      data: 'persisted OMP output',
+      timestamp: new Date('2026-07-10T12:00:00.000Z'),
+    });
+
+    expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
+  });
+
+  it('notifies for an sdk-OVERRIDE panel inside a PTY session (lane, not session runtime)', () => {
+    const dbSession = makeDbSession({ agent_runtime: 'omp-pty', substrate: 'interactive' });
+    const db = makeDbMock(dbSession);
+    db.getPanel.mockReturnValue({
+      id: 'panel-1',
+      sessionId: dbSession.id,
+      type: 'claude',
+      substrate: 'sdk',
+    });
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const notices: Array<{ sessionId: string; panelId: string }> = [];
+    mgr.on('session-output-available', (notice) => notices.push(notice));
+
+    mgr.addPanelOutput('panel-1', {
+      type: 'stdout',
+      data: 'override panel output',
+      timestamp: new Date('2026-07-10T12:00:00.000Z'),
+    });
+
+    expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
+  });
+
+  it('does not broadcast transcript refreshes for Claude SDK panel output', () => {
     const dbSession = makeDbSession({ agent_runtime: 'claude-sdk' });
     const db = makeDbMock(dbSession);
     db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
@@ -138,6 +182,28 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     expect(db.addPanelOutput).toHaveBeenCalledOnce();
     expect(notice).not.toHaveBeenCalled();
   });
+
+  // A PTY lane streams raw bytes over its own live channel; broadcasting every
+  // one of those writes here caused an app-wide refresh fanout.
+  it.each(['claude-interactive', 'codex-pty', 'omp-pty'] as const)(
+    'does not broadcast transcript refreshes for a %s panel',
+    (agentRuntime) => {
+      const dbSession = makeDbSession({ agent_runtime: agentRuntime, substrate: 'interactive' });
+      const db = makeDbMock(dbSession);
+      db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
+      const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+      const notice = vi.fn();
+      mgr.on('session-output-available', notice);
+
+      mgr.addPanelOutput('panel-1', {
+        type: 'stdout',
+        data: 'raw pty bytes',
+        timestamp: new Date('2026-07-10T12:00:00.000Z'),
+      });
+
+      expect(notice).not.toHaveBeenCalled();
+    },
+  );
 
   it('copies run_id="flow-001" to runId="flow-001" (flow-owned session)', () => {
     const dbSession = makeDbSession({ run_id: 'flow-001' });

@@ -24,8 +24,14 @@
  *     `baseline_json` (see {@link WriteBackBaselineStamp}), so the inbound
  *     poller diffs our own write to "no change" and never echoes it back.
  *
+ *   - A claimed state write is dropped unsent when a NEWER unsettled write for
+ *     the same issue exists (see {@link isSuperseded}), so a delayed retry can
+ *     never regress the remote past a decision the user has already replaced.
+ *
  * Failure taxonomy:
- *   - TrackerAuthError            -> terminal failure, connection paused, drain STOPS.
+ *   - TrackerAuthError            -> connection paused, drain STOPS, and the row is
+ *                                    HELD unsettled (see {@link pauseConnection}) so a
+ *                                    key rotation replays it rather than losing it.
  *   - Other 4xx (not 408/429)     -> terminal failure; a malformed/forbidden write
  *                                    will never succeed on retry.
  *   - 5xx / 408 / 429 / network   -> retry, next_attempt_at = now + min(2^attempts, 32) min.
@@ -82,12 +88,26 @@ export interface OutboxReport {
   sent: number;
   /** Issues created — mirrored children AND pushed ideas, including ones ADOPTED by ambiguous recovery. */
   created: number;
-  /** Rows that will never be retried (auth, 4xx, unresolvable state, malformed payload). */
+  /**
+   * The `create_issue` subset of {@link created} — top-level issues created for
+   * pushed local ideas. Split out so the sync log can word a pushed idea as
+   * "pushed", not mislabel it a mirrored sub-issue.
+   */
+  pushedIdeas: number;
+  /** Rows that will never be retried (4xx, unresolvable state, malformed payload). */
   failedTerminal: number;
   /** Rows re-queued with a backoff `next_attempt_at`. */
   retriesScheduled: number;
   /** Rows moved OUT of `ambiguous` (adopted as done, or returned to pending). */
   ambiguousResolved: number;
+  /** Stale state writes settled unsent because a newer one supersedes them (see {@link isSuperseded}). */
+  superseded: number;
+  /**
+   * Recovered creates whose ORIGINATING IDEA is gone or archived: the remote
+   * issue exists and nothing local may point at it, so it is left orphaned in
+   * the tracker and reported here for the connected view's log.
+   */
+  orphanedCreates: number;
   /** The connection was paused by an auth failure and the drain stopped early. */
   authPaused: boolean;
 }
@@ -96,9 +116,12 @@ function emptyReport(): OutboxReport {
   return {
     sent: 0,
     created: 0,
+    pushedIdeas: 0,
     failedTerminal: 0,
     retriesScheduled: 0,
     ambiguousResolved: 0,
+    superseded: 0,
+    orphanedCreates: 0,
     authPaused: false,
   };
 }
@@ -188,6 +211,50 @@ async function processRow(
   return await processStateWrite(deps, connection, adapter, states, row, report);
 }
 
+/**
+ * Is this claimed state write STALE — does a NEWER unsettled write for the same
+ * issue already exist?
+ *
+ * THE BACKSTOP HALF of supersession, not the primary one. The ordering hazard
+ * is fixed where both rows are knowable — at ENQUEUE, in
+ * store.supersedeQueuedStateWrites, which is the only moment that can see a
+ * newer write that has already LANDED and settled. This check enforces the same
+ * invariant at the point of USE, for a row that never met that sweep: anything
+ * queued before this behaviour existed, or by an enqueue path added later that
+ * forgets to call it. Redundant on the ordinary path, and deliberately so — the
+ * cost is one already-cheap query per claimed state write, and the failure it
+ * prevents is silent.
+ *
+ * THE KEY is `external_id` + the two STATUS kinds, deliberately not `kind`
+ * alone — the same key writeBack's enqueue dedupe uses, and for the same
+ * reason: `update_state` and `close_parent` both move the SAME issue's state,
+ * so a later one of either kind states the truth the earlier one is now wrong
+ * about. Newer means a higher autoincrement `id`; unsettled means
+ * pending/in_flight/ambiguous, so a row that already failed terminally cannot
+ * supersede anything.
+ *
+ * CRASH-SAFE by the existing state machine: the decision is made on a row we
+ * have just CLAIMED, under the same exclusion the send would have had. A crash
+ * between this check and the settle leaves the row `in_flight`, boot recovery
+ * demotes it to `ambiguous`, and {@link resolveAmbiguous} returns a state write
+ * straight to `pending` — where the next claim asks the same question again,
+ * against data that is by then even fresher. Nothing is lost, nothing is sent
+ * twice.
+ */
+function isSuperseded(
+  db: Database.Database,
+  connectionId: string,
+  row: TrackerOutboxRow,
+): boolean {
+  if (row.external_id === null) return false;
+  return listUnresolvedOutbox(db, connectionId).some(
+    (other) =>
+      other.id > row.id &&
+      other.external_id === row.external_id &&
+      (other.kind === 'update_state' || other.kind === 'close_parent'),
+  );
+}
+
 /** `update_state` / `close_parent`: resolve the provider state, write it, stamp the baseline. */
 async function processStateWrite(
   deps: OutboxDeps,
@@ -197,6 +264,16 @@ async function processStateWrite(
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
+  // Settled, not failed: a superseded write is not a problem, it is an
+  // instruction the user has already replaced. Sending it would be the bug.
+  if (isSuperseded(deps.db, connection.id, row)) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'superseded by a newer state write for the same issue',
+    });
+    report.superseded += 1;
+    return false;
+  }
+
   const desiredGroup = readDesiredGroup(row.payload_json);
   if (desiredGroup === null || row.external_id === null) {
     failTerminal(deps, row, report, 'malformed payload: desiredGroup / external_id missing');
@@ -369,6 +446,7 @@ async function processPush(
 
   adoptPushedIssue(deps, connection, row, issue, groupOfState(providerStates, issue.stateId));
   report.created += 1;
+  report.pushedIdeas += 1;
   return false;
 }
 
@@ -458,12 +536,22 @@ function groupOfState(states: TrackerState[], stateId: string): WriteBackGroup |
 /**
  * What {@link resolveAmbiguous} did with a row:
  *   - `adopted`    — the write HAD landed; the row is done and its issue linked.
+ *   - `orphaned`   — the write HAD landed, but the entity that asked for it is
+ *                    gone or archived; the row is settled with NO link and the
+ *                    stranded remote issue is reported (see {@link adoptOrOrphanPush}).
  *   - `requeued`   — the write did NOT land; the row is pending again (safe to retry).
  *   - `unresolved` — still unknown (the reconciling lookup itself failed); stays ambiguous.
  *   - `failed`     — unusable row, settled terminally.
- *   - `halted`     — auth failure: the connection is paused and the pass stops.
+ *   - `halted`     — auth failure: the connection is paused, the row is left
+ *                    UNSETTLED, and the pass stops.
  */
-export type AmbiguousOutcome = 'adopted' | 'requeued' | 'unresolved' | 'failed' | 'halted';
+export type AmbiguousOutcome =
+  | 'adopted'
+  | 'orphaned'
+  | 'requeued'
+  | 'unresolved'
+  | 'failed'
+  | 'halted';
 
 /**
  * Reconcile every `ambiguous` row for a connection — writes whose outcome is
@@ -484,6 +572,10 @@ export async function processAmbiguous(
     const outcome = await resolveAmbiguous(deps, connection, row);
     if (outcome === 'adopted') {
       report.created += 1;
+      if (row.kind === 'create_issue') report.pushedIdeas += 1;
+      report.ambiguousResolved += 1;
+    } else if (outcome === 'orphaned') {
+      report.orphanedCreates += 1;
       report.ambiguousResolved += 1;
     } else if (outcome === 'requeued') {
       report.ambiguousResolved += 1;
@@ -491,7 +583,8 @@ export async function processAmbiguous(
       report.failedTerminal += 1;
       report.ambiguousResolved += 1;
     } else if (outcome === 'halted') {
-      report.failedTerminal += 1;
+      // NOT a terminal failure: the row is deliberately left unsettled so it
+      // replays once the credentials are fixed (see {@link pauseConnection}).
       report.authPaused = true;
       break;
     }
@@ -560,7 +653,12 @@ export async function resolveAmbiguous(
         });
   } catch (err) {
     if (err instanceof TrackerAuthError) {
-      resolveOutbox(deps.db, row.id, 'failed', { lastError: describeError(err) });
+      // The row stays `ambiguous` — its outcome is still genuinely unknown, and
+      // the auth failure told us nothing about it. Returning it to `pending`
+      // would let a retry duplicate a create the first attempt may already have
+      // committed. See {@link pauseConnection} for the same "hold, do not
+      // terminalize" reasoning on the drain side.
+      resolveOutbox(deps.db, row.id, 'ambiguous', { lastError: describeError(err) });
       updateConnectionSettings(deps.db, connection.id, { status: 'paused' });
       return 'halted';
     }
@@ -576,14 +674,53 @@ export async function resolveAmbiguous(
 
   if (payload !== null) {
     adoptCreatedIssue(deps, connection, row, found, payload.parentExternalId);
-  } else {
-    // No `lastWrittenGroup` stamp on this path, deliberately: reading the
-    // issue's group back would cost a state-list round trip on a rare recovery,
-    // and its only effect is suppressing ONE redundant (idempotent) state write
-    // the next time this idea moves. The sub-issue adopt path makes the same
-    // trade.
-    adoptPushedIssue(deps, connection, row, found, null);
+    return 'adopted';
   }
+  return adoptOrOrphanPush(deps, connection, row, found);
+}
+
+/**
+ * Finish a RECOVERED top-level push: link the created issue back to the idea
+ * that asked for it — or, when that idea is gone, settle the row and leave the
+ * issue orphaned.
+ *
+ * WHY THE RE-READ. The remote create already committed; only its response was
+ * lost. Between then and this recovery pass — which can be a whole app restart
+ * later — the user may well have deleted or archived the idea, and the ordinary
+ * push path treats exactly that as "there is nothing left to push"
+ * ({@link processPush}). Adopting regardless would write an ACTIVE link to an
+ * entity that is archived (inbound sync would then keep mutating something the
+ * user retired) or to no entity at all (a permanent zombie link the poller
+ * finds, fails to resolve, and skips on every pass forever).
+ *
+ * WHAT ORPHANING MEANS. The row settles `done` — nothing failed, and there is
+ * nothing left to attempt — with the reason recorded on the row, and the count
+ * surfaces in the connected view's log. We do NOT delete or cancel the remote
+ * issue: this module never hard-deletes on someone else's tracker, and the
+ * user's local removal never said anything about an issue they did not know had
+ * been created. Discoverable and reversible by hand beats tidy and destructive.
+ *
+ * NO `lastWrittenGroup` STAMP on the adopt path, deliberately: reading the
+ * issue's group back would cost a state-list round trip on a rare recovery, and
+ * its only effect is suppressing ONE redundant (idempotent) state write the next
+ * time this idea moves. The sub-issue adopt path makes the same trade.
+ */
+function adoptOrOrphanPush(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  row: TrackerOutboxRow,
+  issue: TrackerIssue,
+): AmbiguousOutcome {
+  const idea = row.entity_id === null ? null : readPushableIdea(deps.db, row.entity_id);
+  if (idea === null || idea.archived_at !== null) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError:
+        `the idea this issue was created for is ${idea === null ? 'gone' : 'archived'}; ` +
+        `${issue.identifier} (${issue.url}) was left in the tracker, unlinked`,
+    });
+    return 'orphaned';
+  }
+  adoptPushedIssue(deps, connection, row, issue, null);
   return 'adopted';
 }
 
@@ -644,10 +781,15 @@ async function findByClientKey(
   return await adapter.findIssueByClientKey(scope, clientKey);
 }
 
-/** Put a row back in the pending queue, eligible immediately. */
-function requeue(deps: OutboxDeps, row: TrackerOutboxRow): void {
+/**
+ * Put a row back in the pending queue, eligible immediately. `lastError`
+ * defaults to whatever the row already carried — a requeue is not itself a new
+ * failure — and is passed explicitly when the requeue IS the response to one
+ * (see {@link pauseConnection}).
+ */
+function requeue(deps: OutboxDeps, row: TrackerOutboxRow, lastError?: string): void {
   resolveOutbox(deps.db, row.id, 'failed', {
-    lastError: row.last_error,
+    lastError: lastError ?? row.last_error,
     nextAttemptAtIso: toSqliteUtc(deps.nowIso()),
   });
 }
@@ -658,8 +800,8 @@ function requeue(deps: OutboxDeps, row: TrackerOutboxRow): void {
 
 /**
  * Settle a failed adapter call. Returns true when the DRAIN must stop (auth).
- * Auth failures are terminal AND pause the connection (the request was rejected,
- * so it provably did not land); other client errors are terminal; everything
+ * Auth failures pause the connection and HOLD the row (see
+ * {@link pauseConnection}); other client errors are terminal; everything
  * else — 5xx, 408/429, a network error with no status at all — leaves the
  * outcome UNKNOWN and is re-queued with exponential backoff.
  *
@@ -724,6 +866,27 @@ function failTerminal(deps: OutboxDeps, row: TrackerOutboxRow, report: OutboxRep
   report.failedTerminal += 1;
 }
 
+/**
+ * A 401/403: the CREDENTIALS are wrong, the write is not. Pause the connection
+ * and HOLD the row — pending, no backoff — so it replays verbatim once the user
+ * rotates the key.
+ *
+ * TERMINALIZING IT INSTEAD LOSES REAL WORK, which is why this is not the
+ * ordinary 4xx path it superficially resembles. A revoked or rotated API key is
+ * routine, and it rejects EVERY queued write at once: mirrored sub-issue
+ * creates, the stage moves recording that a story shipped, a user's explicit
+ * "cancel this in Linear". None of those are re-derivable — writeBack only
+ * enqueues on the entity EVENT, which is long past — so a terminal failure
+ * silently drops the lot, and the tracker stays permanently behind with no
+ * indication of what went missing.
+ *
+ * NO BACKOFF CHURN comes for free from the pause: `next_attempt_at` is cleared
+ * (the row is eligible the instant the connection is usable again), and every
+ * entry point into a drain — the tick, "Sync now", the debounced write-back
+ * nudge — refuses a non-`active` connection, so nothing claims the row in the
+ * meantime. The drain also stops here (this returns true), because every
+ * remaining row would fail identically.
+ */
 function pauseConnection(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
@@ -731,9 +894,9 @@ function pauseConnection(
   report: OutboxReport,
   err: TrackerAuthError,
 ): void {
-  resolveOutbox(deps.db, row.id, 'failed', { lastError: describeError(err) });
+  requeue(deps, row, describeError(err));
   updateConnectionSettings(deps.db, connection.id, { status: 'paused' });
-  report.failedTerminal += 1;
+  report.retriesScheduled += 1;
   report.authPaused = true;
 }
 

@@ -111,12 +111,17 @@ import {
   type TrackerSyncFacade,
 } from '../../orchestrator/trackerSyncBridge';
 import type { TrackerAdapter } from './adapterTypes';
-import { TrackerAuthError } from './errors';
+import {
+  TrackerAuthError,
+  TrackerConnectionNotFoundError,
+  TrackerIdentityMismatchError,
+} from './errors';
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
   clearSecret,
+  connectionMatchesIdentity,
   enqueueOutbox,
   findDisconnectedConnection,
   getConflict,
@@ -136,6 +141,7 @@ import {
   requeueInFlightAsAmbiguous,
   resolveConflict,
   storeSecret,
+  supersedeQueuedStateWrites,
   updateBaseline,
   updateConnectionSettings,
   upsertLink,
@@ -1296,9 +1302,49 @@ export class TrackerSyncService implements TrackerSyncFacade {
     else reactivateConnection(this.db, connectionId, row);
     storeSecret(this.db, connectionId, cipher);
 
+    // OWNERSHIP FIRST. A reconcile decision names an entity by bare id, and the
+    // payload is a wizard submission that can be minutes stale — composed
+    // against one project, submitted after the user switched to another. Neither
+    // the archive below nor `upsertLink` checks project membership on its own,
+    // so an id from project A applied under a project-B connection would
+    // silently archive A's idea, or hang a live link (and therefore inbound
+    // mutations, and write-back) off an entity that is not in this connection's
+    // project at all.
+    //
+    // Only ACTIONABLE rows are checked: a 'keep' decides to do nothing, and
+    // reporting a no-op as skipped would be noise.
+    const skippedRefs: string[] = [];
+    const decisions = payload.reconcile.filter((decision) => {
+      if (decision.action === 'keep') return false;
+      if (entityBelongsToProject(this.db, decision.entityType, decision.entityId, payload.projectId)) {
+        return true;
+      }
+      skippedRefs.push(`${decision.entityType} ${decision.entityId}`);
+      return false;
+    });
+    if (skippedRefs.length > 0) {
+      this.logger?.error('[trackerSync] reconcile decisions skipped — entity is not in this project', {
+        connectionId,
+        projectId: payload.projectId,
+        entities: skippedRefs,
+      });
+      this.persistLog(
+        connectionId,
+        [
+          {
+            marker: '⚠',
+            line: `${skippedRefs.length} reconcile ${
+              skippedRefs.length === 1 ? 'row' : 'rows'
+            } skipped · not in this project`,
+          },
+        ],
+        { stampSyncedAt: false },
+      );
+    }
+
     // Past the anchor: every reconcile row from here is applied on its own, and
     // a failure is logged and skipped rather than thrown.
-    for (const decision of payload.reconcile) {
+    for (const decision of decisions) {
       if (decision.action !== 'discard') continue;
       try {
         await this.router.applyChange(payload.projectId, {
@@ -1316,7 +1362,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       }
     }
 
-    for (const decision of payload.reconcile) {
+    for (const decision of decisions) {
       if (decision.action !== 'link') continue;
       const externalId = decision.linkExternalId;
       if (externalId === undefined || externalId.length === 0) continue;
@@ -1356,6 +1402,81 @@ export class TrackerSyncService implements TrackerSyncFacade {
     });
 
     return { connectionId };
+  }
+
+  /**
+   * ROTATE a live connection's API key, in place. The reconnect path for the
+   * one thing `connect` cannot express: the key changed, nothing else did.
+   *
+   * WHY NOT JUST RE-RUN THE WIZARD. `connect` only revives a DISCONNECTED row
+   * (see {@link findDisconnectedConnection}); against an active or paused one it
+   * mints a SECOND connection, stranding every link on the first and re-importing
+   * the whole synced backlog as fresh ideas. A paused connection — which is
+   * exactly what a revoked key produces — therefore had no non-destructive way
+   * back, short of disconnecting first and remembering to.
+   *
+   * ORDER, and what each step buys:
+   *   1. PROBE the new key live. It is the only way to learn what the key
+   *      actually authorizes, and it must happen before anything is stored.
+   *   2. CHECK THE IDENTITY against the row's own workspace
+   *      ({@link connectionMatchesIdentity} — the same test the re-connect
+   *      lookup applies, from the other end). A key for a DIFFERENT workspace is
+   *      refused: storing it would leave every retained link pointing at
+   *      external ids that belong to somebody else's workspace, so write-back
+   *      would target strangers' issues and the deletion sweep would read their
+   *      absence as deletions and archive live local entities. That workspace
+   *      wants its own connection, not this one's history.
+   *      (On Plane the check is a formality — its `validateCredentials` reports
+   *      back the slug it was GIVEN — but the probe it makes is workspace-scoped
+   *      and 403s/404s a key that cannot see the slug, which enforces the same
+   *      thing one layer down.)
+   *   3. STORE encrypted, exactly as connect does; the plaintext never reaches
+   *      sqlite and never returns to the renderer (the result is the identity,
+   *      which carries no key material).
+   *   4. RESUME: status back to 'active', which is what un-gates the poll loop
+   *      and the drain — including every row an auth failure HELD unsettled
+   *      (outboxWorker.pauseConnection), which now replays in order.
+   *   5. Kick a pass fire-and-forget, like connect, so the user sees it work.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerIdentityMismatchError} the key authorizes another workspace.
+   */
+  async updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity> {
+    const connection = getConnection(this.db, connectionId);
+    if (connection === null) throw new TrackerConnectionNotFoundError(connectionId);
+
+    const identity = await this.adapterForCredentials({
+      provider: connection.provider,
+      apiKey,
+      // The connection's OWN addressing, not the renderer's: this call rotates a
+      // key, it does not re-point a connection at a different instance.
+      baseUrl: connection.base_url ?? undefined,
+      workspaceSlug: connection.workspace_id ?? undefined,
+    }).validateCredentials();
+
+    if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
+      throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
+    }
+
+    const cipher = encryptTrackerSecret(apiKey);
+    storeSecret(this.db, connectionId, cipher);
+    updateConnectionSettings(this.db, connectionId, {
+      status: 'active',
+      // The authorizing user can legitimately change with the key; the workspace
+      // cannot (step 2 just proved it).
+      workspace_name: identity.workspaceName,
+      actor_label: identity.actorLabel,
+    });
+    this.emitTrackerChange(connection.project_id, connectionId, 'connection');
+
+    void this.syncNow(connectionId).catch((err: unknown) => {
+      this.logger?.error('[trackerSync] sync after a credential rotation failed', {
+        connectionId,
+        error: describeError(err),
+      });
+    });
+
+    return identity;
   }
 
   /** The project's connected-view cards (disconnected connections are not listed). */
@@ -1739,7 +1860,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     );
     if (duplicate) return false;
     const payload: UpdateStatePayload = { desiredGroup: group };
-    enqueueOutbox(this.db, {
+    const enqueued = enqueueOutbox(this.db, {
       connection_id: connection.id,
       kind: 'update_state',
       entity_type: link.entity_type,
@@ -1747,6 +1868,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
       external_id: link.external_id,
       payload_json: JSON.stringify(payload),
     });
+    // Same reasoning as writeBack's own enqueue: this row is now the truth
+    // about the issue's state, so anything still queued for it would regress the
+    // tracker if a backoff let it drain last.
+    supersedeQueuedStateWrites(this.db, connection.id, link.external_id, enqueued.id);
     return true;
   }
 
@@ -2091,28 +2216,56 @@ function appendWriteBackLines(
 ): void {
   const sent = ambiguous.sent + (drained?.sent ?? 0);
   const created = ambiguous.created + (drained?.created ?? 0);
+  const pushed = ambiguous.pushedIdeas + (drained?.pushedIdeas ?? 0);
+  const mirrored = created - pushed;
   const recovered = ambiguous.ambiguousResolved;
   const retries = ambiguous.retriesScheduled + (drained?.retriesScheduled ?? 0);
   const failed = ambiguous.failedTerminal + (drained?.failedTerminal ?? 0);
+  const superseded = ambiguous.superseded + (drained?.superseded ?? 0);
+  const orphaned = ambiguous.orphanedCreates + (drained?.orphanedCreates ?? 0);
 
   if (recovered > 0) {
     entries.push({ marker: '·', line: `recovered ${plural(recovered, 'in-flight write')}` });
   }
   if (sent > 0) entries.push({ marker: '✓', line: `wrote ${plural(sent, 'issue state')}` });
-  if (created > 0) entries.push({ marker: '✓', line: `mirrored ${plural(created, 'sub-issue')}` });
+  if (pushed > 0) entries.push({ marker: '✓', line: `pushed ${plural(pushed, 'idea')}` });
+  if (mirrored > 0) entries.push({ marker: '✓', line: `mirrored ${plural(mirrored, 'sub-issue')}` });
+  if (superseded > 0) {
+    entries.push({ marker: '·', line: `${plural(superseded, 'stale state write')} superseded` });
+  }
+  // The ONLY surface that names a remote issue we created and can no longer
+  // point at — see outboxWorker.adoptOrOrphanPush. The row's `last_error`
+  // carries its identifier and URL.
+  if (orphaned > 0) {
+    entries.push({
+      marker: '⚠',
+      line: `${plural(orphaned, 'created issue')} left orphaned · the local idea was removed`,
+    });
+  }
   if (retries > 0) entries.push({ marker: '·', line: `${plural(retries, 'write')} queued for retry` });
   if (failed > 0) entries.push({ marker: '⚠', line: `${plural(failed, 'write')} failed` });
 }
 
 /**
- * Does the outbox still hold a create whose outcome is genuinely unknown? True
- * only for a provider without idempotent creates — everywhere else the client
- * key IS the created issue's id, so a lost create is recovered by a point lookup
- * and inbound's own `client_key` halt already covers the window.
+ * Does the outbox still hold a create whose REMOTE OUTCOME is genuinely
+ * unknown? True only for a provider without idempotent creates — everywhere
+ * else the client key IS the created issue's id, so a lost create is recovered
+ * by a point lookup and inbound's own `client_key` halt already covers the
+ * window.
  *
- * `listUnresolvedOutbox` is already scoped to pending / in_flight / ambiguous,
- * which is exactly the unsettled set: a terminal failure ('failed', no
- * `next_attempt_at`) is not pending an answer and never gates a poll.
+ * UNSETTLED IS NOT THE SAME AS UNKNOWN, and conflating the two is what made
+ * this gate a deadlock. `listUnresolvedOutbox` returns pending / in_flight /
+ * ambiguous, and a NEVER-ATTEMPTED pending row has a perfectly known outcome:
+ * no request was ever sent, so no remote issue exists and nothing can be
+ * re-imported. Gating on it disabled inbound sync entirely for a connection
+ * whose push direction is 'manual' — the backfill default for every existing
+ * Plane connection — because the create it enqueues is never claimed until the
+ * user drains push by hand, and until then automatic pull AND linked-status
+ * sync were both wedged behind it, indefinitely.
+ *
+ * So the gate asks {@link outcomeIsUnknown} instead, which still covers every
+ * genuine hazard: a row mid-send, a row parked `ambiguous`, and a row that was
+ * attempted and then returned to the queue.
  */
 function hasUnresolvedCreateRecovery(
   db: Database.Database,
@@ -2125,8 +2278,32 @@ function hasUnresolvedCreateRecovery(
   // that matches neither the outbox row's `external_id` nor its `client_key` —
   // except that importing it would duplicate the very idea that produced it.
   return listUnresolvedOutbox(db, connectionId).some(
-    (row) => row.kind === 'create_sub_issue' || row.kind === 'create_issue',
+    (row) =>
+      (row.kind === 'create_sub_issue' || row.kind === 'create_issue') && outcomeIsUnknown(row),
   );
+}
+
+/**
+ * Could this unsettled outbox row have produced a remote issue nobody knows
+ * about?
+ *
+ *   - `in_flight`  — claimed and mid-send. The definition of unknown.
+ *   - `ambiguous`  — parked precisely BECAUSE the outcome is unknown.
+ *   - `pending` with `attempts > 0` — claimed at least once, so a request went
+ *     out, and something put the row back in the queue. Even the paths that
+ *     requeue only after PROVING the create never landed
+ *     (outboxWorker.resolveAmbiguous) are treated as unknown here: the proof
+ *     was a lookup at some earlier moment, this predicate costs at most one
+ *     deferred poll, and a wrong answer costs a duplicated idea.
+ *   - `pending` with `attempts === 0` — never claimed, therefore never sent.
+ *     KNOWN, and the only case that must not gate.
+ *
+ * `attempts` is incremented by store.claimNextPending inside the claim
+ * transaction, so it is exactly "how many times this row has been handed to a
+ * sender" — the fact this reading needs, and one no other column carries.
+ */
+function outcomeIsUnknown(row: TrackerOutboxRow): boolean {
+  return row.state === 'pending' ? row.attempts > 0 : true;
 }
 
 /**
@@ -2269,6 +2446,24 @@ function readEntityIdentity(
     .prepare(`SELECT ref, title, body FROM ${IDENTITY_TABLE[entityType]} WHERE id = ?`)
     .get(entityId) as EntityIdentity | undefined;
   return row ?? null;
+}
+
+/**
+ * Does this entity exist AND live in `projectId`? The membership check behind
+ * `connect`'s reconcile decisions — a missing row and a row belonging to
+ * another project are the same answer here, because both mean "not something
+ * this connection may act on".
+ */
+function entityBelongsToProject(
+  db: Database.Database,
+  entityType: TrackerEntityType,
+  entityId: string,
+  projectId: number,
+): boolean {
+  const row = db
+    .prepare(`SELECT project_id FROM ${IDENTITY_TABLE[entityType]} WHERE id = ?`)
+    .get(entityId) as { project_id: number } | undefined;
+  return row?.project_id === projectId;
 }
 
 /** One Reconcile candidate row (the union of active ideas + active tasks). */

@@ -7,7 +7,8 @@ import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
-import type { CodexModelCatalog, ClaudeModelCatalog } from '../../shared/types/agentModels';
+import type { ProviderModelCatalogs } from '../../shared/types/agentModels';
+import type { AgentProvider } from '../../shared/types/agentRuntime';
 import type {
   LoadArtifactHtmlRequest,
   LoadArtifactHtmlResult,
@@ -37,10 +38,8 @@ import {
   type PrototypeServerEvent,
 } from '../../shared/types/designPrototypeServer';
 import {
-  CLAUDE_DETECT_CHANNEL,
-  CODEX_DETECT_CHANNEL,
-  type ClaudeDetectionResult,
-  type CodexDetectionResult,
+  PROVIDERS_DETECT_CHANNEL,
+  type ProviderDetectionResult,
 } from '../../shared/types/onboarding';
 
 interface LogEntry {
@@ -525,22 +524,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // First-run onboarding — Claude Code login/binary probe (step 1, "Check again").
-  claude: {
-    detect: (): Promise<IPCResponse<ClaudeDetectionResult>> => ipcRenderer.invoke(CLAUDE_DETECT_CHANNEL),
-  },
-  codex: {
-    detect: (): Promise<IPCResponse<CodexDetectionResult>> => ipcRenderer.invoke(CODEX_DETECT_CHANNEL),
+  // First-run onboarding + Settings — per-provider login/runtime probe
+  // ("Check again"). Provider-keyed: one channel, the provider as its argument.
+  providers: {
+    detect: <P extends AgentProvider>(provider: P): Promise<IPCResponse<ProviderDetectionResult<P>>> =>
+      ipcRenderer.invoke(PROVIDERS_DETECT_CHANNEL, provider),
   },
 
   // Model availability (guarded models, e.g. Fable 5)
   models: {
     getAvailability: (): Promise<IPCResponse<ModelAvailabilityMap>> =>
       ipcRenderer.invoke('models:get-availability'),
-    getCodexCatalog: (): Promise<IPCResponse<CodexModelCatalog>> =>
-      ipcRenderer.invoke('models:get-codex-catalog'),
-    getClaudeCatalog: (): Promise<IPCResponse<ClaudeModelCatalog>> =>
-      ipcRenderer.invoke('models:get-claude-catalog'),
+    getCatalog: <P extends AgentProvider>(provider: P): Promise<IPCResponse<ProviderModelCatalogs[P]>> =>
+      ipcRenderer.invoke('models:get-catalog', provider),
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => {
       const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
       ipcRenderer.on('model-availability-changed', subscription);

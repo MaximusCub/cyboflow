@@ -1,10 +1,13 @@
 /**
- * Unit tests for the agent-editor reducer's runtime/model behavior (migration 070).
+ * Unit tests for the agent-editor reducer's runtime/model behavior (migration
+ * 070), and the `providerModel` generalization of `codexModel` (migration 104).
  *
- * SEED carries the runtime + codexModel from the entry; SET_RUNTIME away from the
- * Codex runtime clears codexModel (mirrors the server-side normalizeRuntime) so a
- * Claude runtime never keeps a stale Codex model; switching back and picking a
- * Codex model round-trips.
+ * SEED carries the runtime + providerModel from the entry (normalized
+ * `providerModel ?? codexModel` — an explicit providerModel wins, and a legacy
+ * entry carrying only codexModel still seeds correctly); SET_RUNTIME away from
+ * a non-Claude runtime clears providerModel (mirrors the server-side
+ * normalizeRuntime) so a Claude runtime never keeps a stale provider model;
+ * switching back and picking a model round-trips.
  */
 import { describe, it, expect } from 'vitest';
 import { agentEditorReducer, initAgentEditorState } from '../useAgentEditorState';
@@ -20,6 +23,7 @@ function entry(overrides: Partial<AgentEntry> = {}): AgentEntry {
     tools: ['Read', 'Edit'],
     model: null,
     runtime: null,
+    providerModel: null,
     codexModel: null,
     enabledMcps: [],
     source: 'builtin',
@@ -38,37 +42,51 @@ function entry(overrides: Partial<AgentEntry> = {}): AgentEntry {
   };
 }
 
-describe('agentEditorReducer — runtime/codexModel', () => {
-  it('SEED carries the entry runtime + codexModel into the draft', () => {
-    const state = initAgentEditorState(entry({ runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' }));
+describe('agentEditorReducer — runtime/providerModel', () => {
+  it('SEED carries the entry runtime + providerModel into the draft', () => {
+    const state = initAgentEditorState(entry({ runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' }));
     expect(state.draft.runtime).toBe('codex-sdk');
-    expect(state.draft.codexModel).toBe('gpt-5.2-codex');
+    expect(state.draft.providerModel).toBe('gpt-5.2-codex');
   });
 
-  it('SET_RUNTIME to a Claude runtime clears codexModel', () => {
-    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' }));
+  it('SEED normalizes a legacy entry carrying only the deprecated codexModel alias', () => {
+    const state = initAgentEditorState(
+      entry({ runtime: 'codex-sdk', providerModel: null, codexModel: 'gpt-5.2-codex' }),
+    );
+    expect(state.draft.providerModel).toBe('gpt-5.2-codex');
+  });
+
+  it('SEED prefers an explicit providerModel over a stale codexModel', () => {
+    const state = initAgentEditorState(
+      entry({ runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex', codexModel: 'gpt-5-stale' }),
+    );
+    expect(state.draft.providerModel).toBe('gpt-5.2-codex');
+  });
+
+  it('SET_RUNTIME to a Claude runtime clears providerModel', () => {
+    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' }));
     state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: 'claude-interactive' });
     expect(state.draft.runtime).toBe('claude-interactive');
-    expect(state.draft.codexModel).toBeNull();
+    expect(state.draft.providerModel).toBeNull();
   });
 
-  it('SET_RUNTIME to inherit (null) clears codexModel', () => {
-    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' }));
+  it('SET_RUNTIME to inherit (null) clears providerModel', () => {
+    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' }));
     state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: null });
     expect(state.draft.runtime).toBeNull();
-    expect(state.draft.codexModel).toBeNull();
+    expect(state.draft.providerModel).toBeNull();
   });
 
-  it('SET_RUNTIME to codex-sdk keeps a previously chosen codexModel', () => {
-    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' }));
+  it('SET_RUNTIME to codex-sdk keeps a previously chosen providerModel', () => {
+    let state = initAgentEditorState(entry({ runtime: 'codex-sdk', providerModel: 'gpt-5.2-codex' }));
     state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: 'codex-sdk' });
-    expect(state.draft.codexModel).toBe('gpt-5.2-codex');
+    expect(state.draft.providerModel).toBe('gpt-5.2-codex');
   });
 
-  it('SET_CODEX_MODEL updates the codex model', () => {
+  it('SET_PROVIDER_MODEL updates the provider model', () => {
     let state = initAgentEditorState(entry({ runtime: 'codex-sdk' }));
-    state = agentEditorReducer(state, { type: 'SET_CODEX_MODEL', codexModel: 'gpt-5.2-codex' });
-    expect(state.draft.codexModel).toBe('gpt-5.2-codex');
+    state = agentEditorReducer(state, { type: 'SET_PROVIDER_MODEL', providerModel: 'gpt-5.2-codex' });
+    expect(state.draft.providerModel).toBe('gpt-5.2-codex');
   });
 
   // A Claude model pin is only meaningful under a pinned Claude runtime — under

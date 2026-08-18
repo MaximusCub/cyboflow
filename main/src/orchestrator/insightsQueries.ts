@@ -55,6 +55,7 @@ import type {
   RunEvalJurySlot,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
+import { isAgentProvider } from '../../../shared/types/agentRuntime';
 import type {
   VariantStats,
   RotationArmStats,
@@ -2613,7 +2614,7 @@ function parseJury(text: string | null): RunEvalJurySlot[] | null {
     if (
       !isRecord(entry)
       || typeof entry.slot !== 'string'
-      || (entry.provider !== 'claude' && entry.provider !== 'codex')
+      || !isAgentProvider(entry.provider)
       || (entry.model !== null && typeof entry.model !== 'string')
       || (entry.status !== 'ok' && entry.status !== 'unavailable' && entry.status !== 'failed')
     ) {

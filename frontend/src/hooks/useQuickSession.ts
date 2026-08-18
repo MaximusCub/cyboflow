@@ -28,13 +28,24 @@ import { panelApi } from '../services/panelApi';
 import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { usePanelStore } from '../stores/panelStore';
+import { useConfigStore } from '../stores/configStore';
 import { dispatchQuickSessionInput } from './useClaudePanel';
 import type { Session } from '../types/session';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import { isSessionAgentRuntime, providerForRuntime } from '../../../shared/types/agentRuntime';
+import { runtimeSupportsEffort } from '../../../shared/types/agentCapabilities';
+import { DEFAULT_CODEX_MODEL, isCodexModelSelection } from '../../../shared/types/agentModels';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import type { RunTypeLaunchGlobals } from '../../../shared/types/sessionDefaults';
+import {
+  DEFAULT_QUICK_SUBSTRATE,
+  DEFAULT_RUN_TYPE_MODEL_FLOORS,
+  QUICK_RUN_TYPE_KEY,
+  resolveRunTypeLaunchDefaults,
+} from '../../../shared/types/sessionDefaults';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -64,13 +75,15 @@ interface UseQuickSessionReturn {
    * `reasoningEffort` (IDEA-029, the wizard's effort select / the in-composer
    * EffortPill) rides claudeConfig alongside model/fastMode for the interactive
    * eager spawn, and is persisted on the frontend-created panel the same way model
-   * is — for BOTH Claude SDK and codex-sdk (codex-sdk has no eager server spawn, so
-   * its panel is frontend-created here and startCodexSdkTurn reads the persisted
-   * effort per turn). Only codex-pty is excluded: it emits no effort flag and its
-   * panel is server-eager-created, so it never reaches the persistence branch. The
+   * is — for Claude SDK AND every structured non-Claude runtime with no eager
+   * server spawn of its own (codex-sdk, omp-sdk): each has its panel
+   * frontend-created here, and its turn-start seam reads the persisted effort
+   * per turn. A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false is
+   * excluded — codex-pty/omp-pty emit no effort flag and their panels are
+   * server-eager-created, so neither reaches the persistence branch. The
    * claudeConfig ride stays Claude-only (create-quick reads it for
-   * `quickAgentProvider === 'claude'`); codex-sdk relies solely on the setEffort
-   * persistence below.
+   * `quickAgentProvider === 'claude'`); codex-sdk and omp-sdk rely solely on the
+   * setEffort persistence below.
    *
    * `designIdeaId` (Design Mode, design-mode.md): the idea a design session
    * binds to, threaded into createQuick so the server can validate the idea
@@ -111,6 +124,24 @@ interface UseQuickSessionReturn {
     designIdeaId?: string,
     kickoffPrompt?: string,
   ) => Promise<void>;
+  /**
+   * Zero-arg-friendly entry point for launches that only know a run-type key
+   * (e.g. the synthetic global `'quick'` key used by the ⌘-shortcut / "New
+   * quick session" affordance) — NOT a `start` replacement. Delegates the
+   * whole ladder (stored per-type default → global config default → floor) to
+   * the canonical `resolveRunTypeLaunchDefaults`, then threads every resolved
+   * field — model, permissionMode, substrate, agentRuntime, reasoningEffort —
+   * into `start`'s existing positional args, so a saved Quick Session default
+   * (Settings → "Run type defaults") is honored rather than write-only.
+   *
+   * `reasoningEffort` resolves off the `'quick'` key even when the caller
+   * passes a workflow key: this seam always creates a quick session, and v1
+   * never writes effort under any other key (see RunTypeDefaults).
+   *
+   * Added by TASK-153 as a NEW, additive method — `start`'s 13-positional-
+   * param signature is unchanged; do not expand it further.
+   */
+  startWithDefaults: (key: string) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -141,15 +172,24 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       setIsStarting(true);
 
       try {
-        const isCodexRuntime =
-          agentProvider === 'codex' || agentRuntime === 'codex-sdk' || agentRuntime === 'codex-pty';
+        // OMP follows Codex's path here: no claudeConfig blob, model persisted
+        // via agentModel/setModel like Codex's, no eager server spawn to
+        // receive claudeConfig on the interactive substrate (Codex/OMP have no
+        // "interactive" substrate of their own — each names its transport in
+        // the runtime id). Structural check (providerForRuntime) rather than a
+        // per-runtime literal list, so a future non-Claude runtime is covered
+        // automatically instead of needing its own arm here.
+        const runtimeProvider = agentRuntime !== undefined ? providerForRuntime(agentRuntime) : undefined;
+        const isNonClaudeRuntime =
+          (agentProvider !== undefined && agentProvider !== 'claude') ||
+          (runtimeProvider !== undefined && runtimeProvider !== 'claude');
         // model + fastMode + reasoningEffort ride the request as claudeConfig so the
         // INTERACTIVE eager spawn (server-side) receives them; the SDK panel is
         // created on the frontend below and persisted there. Sending both ways is
         // harmless — the SDK create-quick path ignores claudeConfig (no panel to
         // start yet).
         const claudeConfig =
-          !isCodexRuntime && (model !== undefined || fastMode === true || reasoningEffort !== undefined)
+          !isNonClaudeRuntime && (model !== undefined || fastMode === true || reasoningEffort !== undefined)
             ? {
                 ...(model !== undefined ? { model } : {}),
                 fastMode: fastMode === true,
@@ -164,7 +204,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           ...(substrate ? { substrate } : {}),
           ...(agentProvider ? { agentProvider } : {}),
           ...(agentRuntime ? { agentRuntime } : {}),
-          ...(isCodexRuntime && model !== undefined ? { agentModel: model } : {}),
+          ...(isNonClaudeRuntime && model !== undefined ? { agentModel: model } : {}),
           ...(effort ? { effort } : {}),
           ...(claudeConfig ? { claudeConfig } : {}),
           // Per-session MCP deny / plugin selection chosen in the wizard's Advanced
@@ -213,16 +253,20 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // claudeConfig only reaches the interactive eager spawn, never this
           // frontend-created SDK panel.
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
-          // fastMode is Claude-only (no Codex analogue).
-          if (!isCodexRuntime) {
+          // fastMode is Claude-only (no Codex or OMP analogue).
+          if (!isNonClaudeRuntime) {
             await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
           }
           // Reasoning effort persists for every effort-capable runtime that owns a
           // frontend-created panel: Claude SDK AND codex-sdk (startCodexSdkTurn reads
           // it per turn → buildCodexAppServerTurnOptions maps it onto the app-server
-          // turn). Only codex-pty is excluded — it is server-eager-created (so it
-          // never reaches this frontend branch) and emits no effort flag regardless.
-          if (reasoningEffort !== undefined && agentRuntime !== 'codex-pty') {
+          // turn). A runtime whose RUNTIME_CAPABILITIES.supportsEffort is false is
+          // excluded — codex-pty is server-eager-created (so it never reaches this
+          // frontend branch) and emits no effort flag regardless.
+          if (
+            reasoningEffort !== undefined &&
+            (agentRuntime === undefined || runtimeSupportsEffort(agentRuntime))
+          ) {
             await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
           }
         }
@@ -283,5 +327,81 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     [opts.projectId, opts.onSuccess],
   );
 
-  return { start, isStarting, error };
+  const startWithDefaults = useCallback(
+    (key: string): Promise<void> => {
+      const config = useConfigStore.getState().config;
+      const runTypeDefaults = config?.runTypeDefaults;
+      // The GLOBAL launch model (`config.defaultLaunchModel`), normalized the
+      // same way main's `configManager.getGlobalLaunchModel` normalizes it —
+      // trimmed, and blank ⇒ unset — so the renderer and main cannot resolve a
+      // hand-edited config.json differently.
+      const globalLaunchModel = config?.defaultLaunchModel?.trim() || undefined;
+      // The GLOBAL agent runtime, taken ONLY when it is launchable as a quick
+      // session. `codex-exec` (never offered by any picker, reachable via a
+      // hand-edited config) is dropped here rather than sent as an unlaunchable
+      // runtime; every other member of the union is a valid quick session,
+      // including `codex-pty`.
+      const globalAgentRuntime = config?.defaultAgentRuntime;
+      // This seam always creates a QUICK session, so the quick-kind floors
+      // apply even when the caller hands over a workflow key — pin them here
+      // rather than let the key pick the (workflow) floor table. The global
+      // model sits BETWEEN the stored per-type value and that floor.
+      //
+      // `agentRuntime` is the rung a GENUINE user-set global runtime rides, and
+      // nothing else: a resolved runtime OWNS its implied substrate, so a
+      // runtime synthesized from `quickSessionDefaultSubstrate` here would
+      // outrank a stored substrate carrying no runtime of its own. The
+      // substrate preference therefore stays on the SUBSTRATE rung below, where
+      // a stored substrate still beats it.
+      const globals: RunTypeLaunchGlobals = {
+        model: globalLaunchModel ?? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick,
+        permissionMode: config?.defaultAgentPermissionMode,
+        substrate: config?.quickSessionDefaultSubstrate ?? DEFAULT_QUICK_SUBSTRATE,
+        ...(isSessionAgentRuntime(globalAgentRuntime) ? { agentRuntime: globalAgentRuntime } : {}),
+      };
+      const resolved = resolveRunTypeLaunchDefaults(key, runTypeDefaults, globals);
+      // Effort always resolves off the quick key — see the doc above.
+      const { reasoningEffort } = resolveRunTypeLaunchDefaults(
+        QUICK_RUN_TYPE_KEY,
+        runTypeDefaults,
+        globals,
+      );
+      // `start` takes the session-scoped runtime union; a 'codex-exec' (never
+      // written by the settings UI, but reachable via a hand-edited config) is
+      // dropped rather than sent as an unlaunchable runtime. The global rung is
+      // already filtered above, so this now only guards a STORED value.
+      const agentRuntime = isSessionAgentRuntime(resolved.agentRuntime)
+        ? resolved.agentRuntime
+        : undefined;
+      // Keep the model in the resolved runtime's family. `resolved.model` can be
+      // a Claude value with a Codex runtime whenever the model rung falls
+      // through to a global or floor that knows nothing about the runtime — the
+      // quick floor is always Claude — which would launch Codex with e.g.
+      // 'opus'. Only the Codex direction needs this: every Claude-family floor
+      // is already valid under a Claude runtime.
+      const model =
+        agentRuntime !== undefined &&
+        providerForRuntime(agentRuntime) === 'codex' &&
+        !isCodexModelSelection(resolved.model)
+          ? DEFAULT_CODEX_MODEL
+          : resolved.model;
+
+      return start(
+        resolved.permissionMode,
+        resolved.substrate,
+        undefined,
+        model,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        agentRuntime,
+        reasoningEffort,
+      );
+    },
+    [start],
+  );
+
+  return { start, startWithDefaults, isStarting, error };
 }

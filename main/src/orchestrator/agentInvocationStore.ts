@@ -6,14 +6,17 @@
  * dependency keeps this module independent of Electron and better-sqlite3.
  */
 import { randomUUID } from 'node:crypto';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type {
+  AgentProvider,
+  WorkflowRunStorableRuntime,
+} from '../../../shared/types/agentRuntime';
 import type { DatabaseLike } from './types';
 
 export interface CreateAgentInvocationInput {
   runId: string;
   stepId?: string | null;
   provider: AgentProvider;
-  runtime: WorkflowAgentRuntime;
+  runtime: WorkflowRunStorableRuntime;
   model?: string | null;
   /** Optional stable id for callers that already own invocation identity. */
   agentInvocationId?: string;
@@ -29,13 +32,13 @@ export interface CreateAgentInvocationInput {
 
 export interface AgentResumeTarget {
   provider: AgentProvider;
-  runtime: WorkflowAgentRuntime;
+  runtime: WorkflowRunStorableRuntime;
   externalSessionId: string;
 }
 
 interface ResumeTargetRow {
   provider: AgentProvider;
-  runtime: WorkflowAgentRuntime;
+  runtime: WorkflowRunStorableRuntime;
   externalSessionId: string | null;
 }
 
