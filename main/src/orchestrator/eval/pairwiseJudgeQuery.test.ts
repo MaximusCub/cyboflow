@@ -16,21 +16,23 @@ import {
   makeRejectingQuery,
   makeBlockUntilAbortQuery,
   makeRejectOnAbortQuery,
+  sdkAssistantText,
+  sdkResultError,
   sdkResultSuccess,
   type FakeQueryFn,
   type FakeQueryParams,
 } from '../../test/fakes/fakeSdk';
-import { EvalJudgeTimeoutError } from './judgeErrors';
+import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError, isDeterministicJudgeFailure } from './judgeErrors';
 
 /**
  * A FakeQueryFn that ignores the deadline's AbortController entirely and simply
  * takes `delayMs` of real wall-clock time before completing with NO messages.
  *
- * Mechanics only — it reaches the SAME post-drain `if (didTimeOut())` check at
- * pairwiseJudgeQuery.ts:132 that `makeBlockUntilAbortQuery` does; it differs in
- * WHAT ends the stream (its own timer, not the observed abort), not in which
- * production branch runs. The catch-block timeout branch (:147) is a third path,
- * covered by `makeRejectOnAbortQuery` below.
+ * Mechanics only — it reaches the SAME post-drain `if (didTimeOut())` guard that
+ * `makeBlockUntilAbortQuery` does; it differs in WHAT ends the stream (its own
+ * timer, not the observed abort), not in which production branch runs. The
+ * `didTimeOut()` branch inside the CATCH is a third path, covered by
+ * `makeRejectOnAbortQuery` below.
  */
 function makeSlowNaturalCompletionQuery(delayMs: number): FakeQueryFn {
   return function slowNaturalCompletionQuery(): AsyncGenerator<SDKMessage, void> {
@@ -87,10 +89,10 @@ describe('makePairwiseJudgeQuery', () => {
 
   it('a stream that REJECTS in response to the deadline abort (the real SDK shape) rejects with the TYPED EvalJudgeTimeoutError (catch-block branch)', async () => {
     // The production timeout path: abortController.abort() kills the subprocess and
-    // the `for await` throws an AbortError, so the post-drain check at :132 is never
-    // reached and the typing is decided by `didTimeOut()` inside the CATCH at :147.
-    // That branch is what makes isDeterministicJudgeFailure() see a timeout (no
-    // slot retry) rather than a retryable generic Error.
+    // the `for await` throws an AbortError, so the post-drain guard is never reached
+    // and the typing is decided by `didTimeOut()` inside the CATCH. That branch is
+    // what makes isDeterministicJudgeFailure() see a timeout (no slot retry) rather
+    // than a retryable generic Error.
     install(makeRejectOnAbortQuery());
     const fn = makePairwiseJudgeQuery(undefined, 5);
 
@@ -117,6 +119,49 @@ describe('makePairwiseJudgeQuery', () => {
     await expect(rejection).rejects.toThrow('sdk boom');
     await expect(rejection).rejects.toBeInstanceOf(Error);
     await expect(rejection).rejects.not.toBeInstanceOf(EvalJudgeTimeoutError);
+  });
+
+  it('turn exhaustion without structured output rejects with the TYPED EvalJudgeMaxTurnsError (deterministic — no wasted retry)', async () => {
+    // Parity with evalJudgeQuery. Draining an `error_max_turns` result to `null`
+    // made it masquerade downstream as "sample is not an object" — a parse-shaped
+    // failure the worker classifies as RETRYABLE — so a slot that had already
+    // spent its whole turn budget drew a guaranteed-wasted identical retry.
+    install(makeFakeQuery([sdkAssistantText('still deliberating'), sdkResultError({ subtype: 'error_max_turns' })]));
+    const fn = makePairwiseJudgeQuery();
+
+    const rejection = fn({ prompt: 'p', schema: {} });
+    await expect(rejection).rejects.toBeInstanceOf(EvalJudgeMaxTurnsError);
+    await expect(rejection).rejects.toThrow(/turn budget/);
+  });
+
+  it('is deterministic per judgeErrors for BOTH exhaustion classes but not for a generic failure', async () => {
+    // The property the worker's per-slot retry policy actually branches on.
+    install(makeFakeQuery([sdkResultError({ subtype: 'error_max_turns' })]));
+    const maxTurns = await makePairwiseJudgeQuery()({ prompt: 'p', schema: {} }).catch((e: unknown) => e);
+    install(makeBlockUntilAbortQuery());
+    const timedOut = await makePairwiseJudgeQuery(undefined, 5)({ prompt: 'p', schema: {} }).catch((e: unknown) => e);
+    install(makeRejectingQuery(new Error('sdk boom')));
+    const generic = await makePairwiseJudgeQuery()({ prompt: 'p', schema: {} }).catch((e: unknown) => e);
+
+    expect(isDeterministicJudgeFailure(maxTurns)).toBe(true);
+    expect(isDeterministicJudgeFailure(timedOut)).toBe(true);
+    expect(isDeterministicJudgeFailure(generic)).toBe(false);
+  });
+
+  it('a max-turns result that STILL emitted structured output is returned, not thrown', async () => {
+    // Only an EMPTY drain is exhaustion; a verdict that arrived before the budget
+    // ran out is a perfectly good sample.
+    install(
+      makeFakeQuery([
+        sdkResultSuccess({ structuredOutput: { preference: 'B', confidence: 0.7 } }),
+        sdkResultError({ subtype: 'error_max_turns' }),
+      ]),
+    );
+
+    await expect(makePairwiseJudgeQuery()({ prompt: 'p', schema: {} })).resolves.toEqual({
+      preference: 'B',
+      confidence: 0.7,
+    });
   });
 
   it('returns the structured_output of the successful result', async () => {
