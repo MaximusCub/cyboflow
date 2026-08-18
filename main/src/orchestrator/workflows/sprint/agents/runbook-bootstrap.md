@@ -181,9 +181,9 @@ paying for the same attempt on every future sprint — so "could not determine t
 setup" is a wasted answer where "no script serves the renderer; `dev` starts only
 the API" is an actionable one.
 
-## What you return
+## Result
 
-One structured object, nothing else:
+Return ONE structured object, nothing else:
 
 ```json
 {
