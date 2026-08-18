@@ -549,12 +549,12 @@ implementations wired today:
   and badge management.
 - `cyboflow.tasks.*` — entity-model reads + writes (board buckets across ideas/epics/tasks,
   detail editors, lineage edits). All writes delegate to `TaskChangeRouter.applyChange`.
-- `cyboflow.tracker.*` — the Linear/Plane sync surface: stateless wizard probes, `connect`,
+- `cyboflow.tracker.*` — the Linear/Plane/Dart sync surface: stateless wizard probes, `connect`,
   connected-view reads (`connections` / `conflicts`), settings/disconnect/`syncNow`,
   `resolveConflict`, and the `onTrackerChanged` project subscription. The router reaches the
   sync service through the injectable facade in `main/src/orchestrator/trackerSyncBridge.ts`
   (its standalone-typecheck invariant forbids importing `services/`); entity writes still land
-  through `TaskChangeRouter.applyChange` with a `linear`/`plane` actor.
+  through `TaskChangeRouter.applyChange` with a `linear`/`plane`/`dart` actor.
 - `cyboflow.reviewItems.list` / `.get` — project review-inbox reads; `.resolve` / `.dismiss` —
   triage mutations through `ReviewItemRouter` (resolve returns `{ reviewItemId, resumed }`
   where `resumed` reflects aggregate-unblock); `.promoteToTask` — the only TWO-chokepoint
