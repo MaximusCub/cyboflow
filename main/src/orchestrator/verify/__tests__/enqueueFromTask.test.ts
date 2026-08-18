@@ -46,6 +46,7 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  autoBootstrapRunbook: false,
 };
 
 function buildDb(): Database.Database {
@@ -155,7 +156,11 @@ function seedRun(
   );
 }
 
-function initScheduler(db: Database.Database, runbookStore?: VerifyRunbookStore): void {
+function initScheduler(
+  db: Database.Database,
+  runbookStore?: VerifyRunbookStore,
+  over: Partial<Parameters<typeof VerificationScheduler.initialize>[0]> = {},
+): void {
   VerificationScheduler.initialize({
     db: dbAdapter(db),
     backends: {},
@@ -163,6 +168,7 @@ function initScheduler(db: Database.Database, runbookStore?: VerifyRunbookStore)
     artifactsDirResolver: () => '/tmp/a',
     config: baseConfig,
     ...(runbookStore ? { runbookStore } : {}),
+    ...over,
   });
 }
 
@@ -772,5 +778,120 @@ describe('enqueueTaskVerification — §5.2 seam 3 pinned runbook injection', ()
       .get(id) as { key: string; flag: number };
     expect(row.key).toBe('run_bs3:TASK-003:2');
     expect(row.flag).toBe(0);
+  });
+});
+
+/**
+ * The runbook-bootstrap PREFLIGHT at the enqueue seam
+ * (lane-runbook-bootstrap.md §12 step 1, phase 2).
+ *
+ * Phase 2 lands the preflight DARK: it computes and logs a decision, and nothing
+ * acts on it. So the whole contract under test is that it changed nothing — the
+ * request is still written, still pinned, still keyed the same way — while the
+ * decision it computed is reachable and correct. A dark phase that quietly
+ * altered the enqueue would be the worst possible outcome, since nobody would be
+ * looking for it.
+ */
+describe('enqueueTaskVerification — runbook-bootstrap preflight (phase 2, dark)', () => {
+  const serveTask: VerificationTaskV1 = {
+    ...task,
+    serve: { cmd: 'pnpm dev --port ${PORT}' },
+  };
+
+  it('enqueues exactly as before when the toggle is ON and the project has no runbook', async () => {
+    // The bootstrap-eligible case — the one phase 3 will act on. Today it must
+    // be indistinguishable from the toggle being off.
+    seedRun(db, { runId: 'run-pf1' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+    });
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-pf1',
+      task: serveTask,
+      laneTaskRef: 'TASK-1',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    // Unchanged key: no `:bootstrap:` generation, because no bootstrap ran.
+    expect(readRow(result.requestId).enqueue_key).toBe('run-pf1:TASK-1:1');
+  });
+
+  it('the scheduler reports the decision it would act on', async () => {
+    seedRun(db, { runId: 'run-pf2' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+    });
+    await expect(
+      VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+        projectId: 1,
+        runId: 'run-pf2',
+        laneTaskRef: 'TASK-1',
+        modality: 'web',
+        task: serveTask,
+        probePath: gitRepo,
+      }),
+    ).resolves.toEqual({ proceed: true, adopt: false });
+  });
+
+  it('declines with the toggle OFF, which is the shipped default', async () => {
+    seedRun(db, { runId: 'run-pf3' });
+    initScheduler(db);
+    await expect(
+      VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+        projectId: 1,
+        runId: 'run-pf3',
+        laneTaskRef: 'TASK-1',
+        modality: 'web',
+        task: serveTask,
+        probePath: gitRepo,
+      }),
+    ).resolves.toEqual({ proceed: false, reason: 'disabled' });
+  });
+
+  it('the kill switch overrides the toggle', async () => {
+    // The lever for "this is misbehaving on THIS host, stop now" — it must beat
+    // a persisted preference that may have been set on another machine.
+    const prior = process.env.CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP;
+    process.env.CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP = '1';
+    try {
+      seedRun(db, { runId: 'run-pf4' });
+      initScheduler(db, undefined, {
+        config: { ...baseConfig, autoBootstrapRunbook: true },
+      });
+      await expect(
+        VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+          projectId: 1,
+          runId: 'run-pf4',
+          laneTaskRef: 'TASK-1',
+          modality: 'web',
+          task: serveTask,
+          probePath: gitRepo,
+        }),
+      ).resolves.toEqual({ proceed: false, reason: 'disabled' });
+    } finally {
+      if (prior === undefined) delete process.env.CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP;
+      else process.env.CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP = prior;
+    }
+  });
+
+  it('a task that derives no environment is never a bootstrap candidate', async () => {
+    seedRun(db, { runId: 'run-pf5' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+    });
+    await expect(
+      VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+        projectId: 1,
+        runId: 'run-pf5',
+        laneTaskRef: 'TASK-1',
+        modality: 'web',
+        task,
+        probePath: gitRepo,
+      }),
+    ).resolves.toEqual({ proceed: false, reason: 'no-environment' });
   });
 });

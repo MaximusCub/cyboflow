@@ -403,6 +403,41 @@ export async function enqueueTaskVerification(
   // columns then carry the SAME ref regardless of what the composing agent wrote.
   const composedTask: VerificationTaskV1 = { ...opts.task, taskRef: laneTaskRef };
 
+  // (3a) The RUNBOOK-BOOTSTRAP PREFLIGHT (lane-runbook-bootstrap.md §12 step 1).
+  //
+  // Runs HERE — before the shared preparation, before any row — because that is
+  // the last moment a decision still exists. Once the request is written and the
+  // §3.2 gate skips it, the only thing left to write is a `skipped` terminal, and
+  // that terminal BURNS the enqueue key: findLiveRequestByEnqueueKey counts it as
+  // a live dedup hit, so a bootstrap running afterwards could not re-fire this
+  // lane's own request at all.
+  //
+  // PHASE 2: the decision is computed and LOGGED, and nothing acts on it — the
+  // drafting agent, the commit, and the proof land in phase 3. The value of
+  // landing it dark is that turning the toggle on shows a user exactly what the
+  // bootstrap WOULD do on their project, and why it would decline, before any
+  // version of it can write to their branch.
+  //
+  // Wrapped like every other collaborator call in this function: the seam's
+  // contract is NEVER THROWS, and an unavailable scheduler here must degrade to
+  // today's enqueue rather than crash a lane.
+  try {
+    await VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+      projectId,
+      runId,
+      laneTaskRef,
+      modality: resolveTaskModality(type, composedTask),
+      task: composedTask,
+      probePath: worktreePath,
+    });
+  } catch (err) {
+    logger?.debug('[enqueueTaskVerification] runbook-bootstrap preflight unavailable', {
+      runId,
+      laneTaskRef,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // (3b) The SHARED enqueue-time rules (§7.2 guard + §5.2 seam-3 injection). Runs
   // BEFORE deriving the legacy input so `deliverable_json` is derived from the
   // task that is actually persisted, not from the pre-merge one.
