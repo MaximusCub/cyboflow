@@ -27,6 +27,8 @@ function renderGroup(over: Partial<FeatureControlsSettingsProps> = {}) {
     onArtifactCommitDirChange: vi.fn(),
     visualVerifyEnabled: false,
     onVisualVerifyEnabledChange: vi.fn(),
+    autoBootstrapRunbook: false,
+    onAutoBootstrapRunbookChange: vi.fn(),
     idleReviewEnabled: true,
     onIdleReviewEnabledChange: vi.fn(),
     idleReviewThresholdMinutes: 5,

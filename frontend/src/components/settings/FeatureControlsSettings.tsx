@@ -23,6 +23,8 @@ export interface FeatureControlsSettingsProps {
   artifactCommitDir: string;
   onArtifactCommitDirChange: (dir: string) => void;
   visualVerifyEnabled: boolean;
+  autoBootstrapRunbook: boolean;
+  onAutoBootstrapRunbookChange: (value: boolean) => void;
   onVisualVerifyEnabledChange: (enabled: boolean) => void;
   idleReviewEnabled: boolean;
   onIdleReviewEnabledChange: (enabled: boolean) => void;
@@ -41,6 +43,8 @@ export function FeatureControlsSettings({
   artifactCommitDir,
   onArtifactCommitDirChange,
   visualVerifyEnabled,
+  autoBootstrapRunbook,
+  onAutoBootstrapRunbookChange,
   onVisualVerifyEnabledChange,
   idleReviewEnabled,
   onIdleReviewEnabledChange,
@@ -178,11 +182,25 @@ export function FeatureControlsSettings({
             checked={visualVerifyEnabled}
             onChange={(e) => onVisualVerifyEnabledChange(e.target.checked)}
           />
-          <p className="text-xs text-text-tertiary mt-1">
+          <p className="text-xs text-text-tertiary mt-1 mb-3">
             When enabled, workflow runs can request a visual check of a UI deliverable: Cyboflow
             captures a screenshot (offscreen render, headless browser, or the live app) and a
             vision model judges it against the stated intent. Off by default; no captures run
             while disabled.
+          </p>
+          <Checkbox
+            label="Let runs set up verification themselves"
+            checked={autoBootstrapRunbook}
+            disabled={!visualVerifyEnabled}
+            onChange={(e) => onAutoBootstrapRunbookChange(e.target.checked)}
+          />
+          <p className="text-xs text-text-tertiary mt-1">
+            A check that has to build or serve your project is skipped unless the project has a
+            verification runbook that was proven by an actual run — which today only the Verify
+            Setup flow produces. With this on, a sprint or ship run that hits that wall derives a
+            runbook itself, commits it to its own branch, and proves it before verifying; if the
+            proof fails, the run advances exactly as it does now. Off by default: unlike the switch
+            above, this lets a run commit to your branch on its own.
           </p>
         </SettingsSection>
 

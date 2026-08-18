@@ -130,6 +130,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Layered visual verification master switch (default OFF). MVP exposes only the
   // master toggle; advanced numeric fields stay config-only for now.
   const [visualVerifyEnabled, setVisualVerifyEnabled] = useState(false);
+  const [autoBootstrapRunbook, setAutoBootstrapRunbook] = useState(false);
   // Auto-surface idle PTY quick sessions into the human review queue (default ON).
   // A blocking human_task is minted for an interactive quick session that finished
   // a turn and has sat unviewed longer than idleReviewThresholdMinutes.
@@ -212,6 +213,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
       setVisualVerifyEnabled(data.visualVerify?.enabled ?? false);
+      setAutoBootstrapRunbook(data.visualVerify?.autoBootstrapRunbook ?? false);
       setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
       setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
 
@@ -295,7 +297,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
         // Preserve any advanced visualVerify fields the user set in config.json
         // (the UI exposes only the master switch); overwrite just `enabled`.
-        visualVerify: { ..._config?.visualVerify, enabled: visualVerifyEnabled },
+        visualVerify: {
+          ..._config?.visualVerify,
+          enabled: visualVerifyEnabled,
+          autoBootstrapRunbook,
+        },
         // Idle-session auto-review. A non-positive/NaN threshold floors to 5 on
         // the main side too, but clamp here so the persisted value stays sane.
         idleSessionReview: {
@@ -703,6 +709,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onArtifactCommitDirChange={setArtifactCommitDir}
               visualVerifyEnabled={visualVerifyEnabled}
               onVisualVerifyEnabledChange={setVisualVerifyEnabled}
+              autoBootstrapRunbook={autoBootstrapRunbook}
+              onAutoBootstrapRunbookChange={setAutoBootstrapRunbook}
               idleReviewEnabled={idleReviewEnabled}
               onIdleReviewEnabledChange={setIdleReviewEnabled}
               idleReviewThresholdMinutes={idleReviewThresholdMinutes}

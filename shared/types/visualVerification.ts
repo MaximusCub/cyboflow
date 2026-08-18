@@ -1289,6 +1289,23 @@ export interface VisualVerifyConfig {
    * has no bearing on the screen lease's count. Default 2.
    */
   agentSlots?: number;
+  /**
+   * Let a sprint/ship lane DERIVE and PROVE this project's verification runbook
+   * when it does not have one, instead of skipping every build/serve check
+   * forever (docs/proposals/lane-runbook-bootstrap.md).
+   *
+   * Default OFF, and deliberately its own switch rather than riding on
+   * `enabled`. Turning it on grants a run something the master switch never did:
+   * permission to COMMIT to the branch — a runbook, and possibly one narrowly
+   * typed config edit — autonomously, mid-sprint. That is a different decision
+   * from "verify my UI", so it is a different toggle, and a project that only
+   * wants verification gets exactly what it asked for.
+   *
+   * The environment override `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` forces this
+   * off regardless of what is persisted — see
+   * {@link runbookBootstrapKillSwitchEngaged}.
+   */
+  autoBootstrapRunbook?: boolean;
 }
 
 /**
@@ -1305,6 +1322,7 @@ export interface ResolvedVisualVerifyConfig {
   simulatorDevices: string[];
   queuedAgeCeilingMs: number;
   agentSlots: number;
+  autoBootstrapRunbook: boolean;
 }
 
 /**
@@ -1363,7 +1381,28 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
   agentSlots: DEFAULT_VERIFY_AGENT_SLOTS,
+  autoBootstrapRunbook: false,
 };
+
+/**
+ * The lane-runbook-bootstrap KILL SWITCH: `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1`
+ * forces the feature off no matter what the project config says.
+ *
+ * WHY A SWITCH SEPARATE FROM THE TOGGLE. The toggle is a preference someone set
+ * once, possibly on another machine, and changing it means opening settings in a
+ * running app. This is the lever for the moment when the feature is actively
+ * misbehaving on THIS host and the answer needs to be "stop, now" — the same
+ * role `CYBOFLOW_DISABLE_WARM_SDK` plays for warm SDK sessions. It only ever
+ * subtracts: there is no value of this variable that turns the feature ON.
+ *
+ * Read at CALL time rather than captured at module load, so setting it in a
+ * shell and restarting is enough, and a test can flip it per case.
+ */
+export function runbookBootstrapKillSwitchEngaged(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP === '1';
+}
 
 // ===========================================================================
 // Per-project `.cyboflow/verify.json` contract (read by verifyConfigLoader.ts)

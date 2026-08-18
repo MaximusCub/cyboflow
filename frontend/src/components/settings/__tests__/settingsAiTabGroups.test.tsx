@@ -184,7 +184,7 @@ describe('Settings — AI tab groups', () => {
         interactivePtyOnly: true,
         computeCostFromRates: true,
         artifactCommitDir: 'docs/artifacts',
-        visualVerify: { enabled: true },
+        visualVerify: { enabled: true, autoBootstrapRunbook: false },
         idleSessionReview: { enabled: false, thresholdMinutes: 11 },
         // Session settings
         systemPromptAppend: 'be terse',
