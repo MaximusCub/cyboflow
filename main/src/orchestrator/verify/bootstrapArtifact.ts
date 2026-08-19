@@ -30,8 +30,13 @@ export interface BootstrapArtifactInput {
   /** The lane that paid for the bootstrap, so a reader knows where it came from. */
   laneTaskRef: string;
   proven: boolean;
-  /** The runbook JSON as committed, pretty-printed. */
-  runbookJson: string;
+  /**
+   * The runbook JSON as committed, pretty-printed — or null when the bootstrap
+   * was abandoned before it ever committed one. The abandoned case still renders
+   * an artifact, because a rung-1 config edit may already be on the branch and
+   * that is precisely the case a human must not have to discover from a log.
+   */
+  runbookJson: string | null;
   /** The drafting agent's derivation notes, when it wrote any. */
   notes: string | null;
   commitSha: string | null;
@@ -86,8 +91,10 @@ export function renderBootstrapArtifact(input: BootstrapArtifactInput): string {
       `## Result: NOT PROVEN\n\n` +
         'The derived runbook did **not** stand this project up, so nothing was verified and the lane ' +
         'advanced unverified. What is on this branch now:\n\n' +
-        `- \`${VERIFY_RUNBOOK_RELATIVE_PATH}\` — committed as \`${shortSha(input.commitSha)}\`, ` +
-        'registered as an **unproven draft**. It is a starting point, not a working configuration.\n' +
+        (input.commitSha !== null
+          ? `- \`${VERIFY_RUNBOOK_RELATIVE_PATH}\` — committed as \`${shortSha(input.commitSha)}\`, ` +
+            'registered as an **unproven draft**. It is a starting point, not a working configuration.\n'
+          : '- no runbook — the bootstrap was abandoned before it committed one.\n') +
         (input.rung1 !== null
           ? `- \`${input.rung1.path}\` — a configuration change that bought nothing. Reverting it is ` +
             'safe and probably right.\n'
@@ -115,11 +122,13 @@ export function renderBootstrapArtifact(input: BootstrapArtifactInput): string {
     parts.push(`## How it was derived\n\n${input.notes.trim()}`);
   }
 
-  parts.push(
-    `## The runbook, as committed\n\n\`\`\`json\n${input.runbookJson.trim()}\n\`\`\`\n\n` +
-      'It was derived by reading this project — its `package.json` scripts above all — and every command ' +
-      'in it had to resolve to a script this project already declares. Nothing here was invented.',
-  );
+  if (input.runbookJson !== null) {
+    parts.push(
+      `## The runbook, as committed\n\n\`\`\`json\n${input.runbookJson.trim()}\n\`\`\`\n\n` +
+        'It was derived by reading this project — its `package.json` scripts above all — and every command ' +
+        'in it had to resolve to a script this project already declares. Nothing here was invented.',
+    );
+  }
 
   return parts.join('\n\n');
 }

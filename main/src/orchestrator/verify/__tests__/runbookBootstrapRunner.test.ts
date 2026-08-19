@@ -99,6 +99,9 @@ interface Harness {
   commits: Array<{ paths: readonly string[]; message: string }>;
   proofs: Array<{ round: number; runbookHash: string }>;
   drafts: number;
+  /** What a human would actually see — recorded by default so every test can assert on it. */
+  artifacts: ArtifactReport[];
+  findings: FindingReport[];
 }
 
 function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[]; proofs?: BootstrapProofOutcome[] } = {}): Harness {
@@ -109,6 +112,8 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
   const commits: Array<{ paths: readonly string[]; message: string }> = [];
   const proofs: Array<{ round: number; runbookHash: string }> = [];
   const state = { drafts: 0, awaits: 0 };
+  const artifactRecorder = recorder<ArtifactReport>();
+  const findingRecorder = recorder<FindingReport>();
   const draftResults = over.draftResults ?? [{ decision: 'runbook', modality: 'web', runbook: RUNBOOK }];
   const proofOutcomes = over.proofs ?? [PASS];
 
@@ -148,6 +153,8 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
     },
     computeInputHash: async () => 'input-a',
     hostFingerprint: async () => 'host-a',
+    reportArtifact: artifactRecorder.fn,
+    reportFinding: findingRecorder.fn,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   };
   // The two harness-only knobs are stripped rather than destructured-and-ignored:
@@ -165,6 +172,8 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
     written,
     commits,
     proofs,
+    artifacts: artifactRecorder.calls,
+    findings: findingRecorder.calls,
     get drafts() {
       return state.drafts;
     },
@@ -442,6 +451,67 @@ describe('runRunbookBootstrap — the rung-1 operation', () => {
     if (outcome.kind !== 'proven') throw new Error('unreachable');
     expect(outcome.rung1?.path).toBe('package.json');
     expect(outcome.rung1?.description).toContain('verify:serve');
+    h.db.close();
+  });
+
+  it('files the finding even when the bootstrap DIES after committing the edit', async () => {
+    // The compensating control §15A accepted rung 1 on is not the narrowness of
+    // the operation alone — it is the narrowness PLUS a human being told. Every
+    // step after the rung-1 commit can fail, and each one used to return
+    // `declined` having published nothing, leaving a machine-authored commit on
+    // someone's branch that only a log line mentioned.
+    const h = harness({
+      draftResults: [withOperation],
+      registerDraft: async () => ({ error: 'CAS conflict' }),
+    });
+    const outcome = await runRunbookBootstrap(ARGS, h.deps);
+    expect(outcome.kind).toBe('declined');
+    // The edit IS on the branch — this is exactly why it must be surfaced.
+    expect(h.commits.map((c) => c.paths)).toContainEqual(['package.json']);
+    const finding = h.findings.at(-1);
+    expect(finding?.locations).toEqual([{ path: 'package.json' }]);
+    expect(finding?.body).toContain('package.json');
+    expect(h.artifacts).toHaveLength(1);
+    h.db.close();
+  });
+
+  it('files the finding when a dep THROWS after the edit is committed', async () => {
+    // The throw path is the one exit that never runs `refuse`, so it has to do
+    // refuse's work itself — including settling the claim, which an unsettled
+    // stamp would otherwise leave reading as an owner still mid-flight.
+    const h = harness({
+      draftResults: [withOperation],
+      registerDraft: async () => {
+        throw new Error('database is locked');
+      },
+    });
+    const outcome = await runRunbookBootstrap(ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'infrastructure' });
+    expect(h.findings.at(-1)?.locations).toEqual([{ path: 'package.json' }]);
+    expect(h.stamps.read('run-1', 1, 'web')?.state).toBe('failed');
+    h.db.close();
+  });
+
+  it('names a resumed attempt\'s edit, which only the stamp remembers', async () => {
+    // A claim resumed after a crash carries its rung-1 path on the stamp and
+    // nowhere else. If this attempt also fails, that stamp is the only thing
+    // standing between the human and an unexplained commit.
+    const h = harness({
+      draftResults: [withOperation],
+      enqueueProof: async () => ({ error: 'scheduler-unavailable' }),
+    });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(h.findings.at(-1)?.locations).toEqual([{ path: 'package.json' }]);
+    h.db.close();
+  });
+
+  it('publishes NOTHING when it declined before touching the branch', async () => {
+    // The mirror of the above: a bootstrap that changed nothing owes nobody a
+    // review item, and filing one would train readers to ignore them.
+    const h = harness({ draftResults: [{ decision: 'not-possible', reason: 'no script serves the UI' }] });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(h.findings).toHaveLength(0);
+    expect(h.artifacts).toHaveLength(0);
     h.db.close();
   });
 

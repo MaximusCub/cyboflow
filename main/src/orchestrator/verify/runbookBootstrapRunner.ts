@@ -290,12 +290,76 @@ export function composeBootstrapProofTask(
  * machine-authored config change that bought nothing and a human should be told
  * so rather than discovering it in a diff.
  */
+/**
+ * What the bootstrap has already DONE to the branch, carried alongside the
+ * control flow so a failure path can still say it.
+ *
+ * WHY THIS EXISTS. The rung-1 config edit is committed at step (6), and several
+ * later steps can fail — the runbook commit, the draft registration, the proof
+ * enqueue — each of which returned `declined` and published nothing. That left a
+ * machine-authored commit on a human's branch with no artifact and no finding
+ * naming it, which is exactly the compensating control rung 1 was accepted on
+ * (§15A): the edit is narrow, reviewable, separately committed, AND surfaced. An
+ * edit nobody is told about satisfies three of those four.
+ *
+ * Mutated in place as the sequence advances, so both `refuse` and the top-level
+ * catch can publish whatever was true at the moment things stopped.
+ */
+interface BootstrapProgress {
+  modality: VerifyRunbookModality | null;
+  rung1: AppliedRung1 | null;
+  runbookJson: string | null;
+  notes: string | null;
+  commitSha: string | null;
+  runbookHash: string | null;
+  runbookVersion: number | null;
+  rounds: number;
+}
+
+function newProgress(): BootstrapProgress {
+  return {
+    modality: null,
+    rung1: null,
+    runbookJson: null,
+    notes: null,
+    commitSha: null,
+    runbookHash: null,
+    runbookVersion: null,
+    rounds: 0,
+  };
+}
+
+/**
+ * Publish the surfaces for a bootstrap that ENDED BADLY, when it had already
+ * changed the branch. A no-op when it had not — a bootstrap that declined before
+ * committing anything owes a human nothing.
+ */
+async function publishAbandoned(
+  args: RunbookBootstrapArgs,
+  deps: RunbookBootstrapDeps,
+  progress: BootstrapProgress,
+  failureDetail: string,
+): Promise<void> {
+  if (progress.rung1 === null || progress.modality === null) return;
+  await publishSurfaces({ ...args, modality: progress.modality }, deps, {
+    proven: false,
+    runbookJson: progress.runbookJson,
+    notes: progress.notes,
+    commitSha: progress.commitSha,
+    runbookHash: progress.runbookHash,
+    runbookVersion: progress.runbookVersion,
+    rung1: progress.rung1,
+    failureDetail,
+    rounds: progress.rounds,
+  });
+}
+
 async function publishSurfaces(
   args: RunbookBootstrapArgs & { modality: VerifyRunbookModality },
   deps: RunbookBootstrapDeps,
   input: {
     proven: boolean;
-    runbookJson: string;
+    runbookJson: string | null;
     notes: string | null;
     commitSha: string | null;
     runbookHash: string | null;
@@ -362,8 +426,9 @@ export async function runRunbookBootstrap(
   args: RunbookBootstrapArgs,
   deps: RunbookBootstrapDeps,
 ): Promise<BootstrapRunOutcome> {
+  const progress = newProgress();
   try {
-    return await bootstrap(args, deps);
+    return await bootstrap(args, deps, progress);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.logger?.warn('[runbookBootstrap] threw; degrading to today\'s skip', {
@@ -372,6 +437,29 @@ export async function runRunbookBootstrap(
       laneTaskRef: args.laneTaskRef,
       error: detail,
     });
+    // A throw is the one exit that does not run `refuse`, so it has to do
+    // refuse's two jobs itself: settle the claim (an unsettled one reads to the
+    // next attempt as an owner still mid-flight) and surface a config edit that
+    // is already committed. Both are best-effort — this catch exists to keep the
+    // lane's degrade-to-skip contract, and nothing here may re-throw into it.
+    try {
+      if (progress.modality !== null) {
+        deps.stamps.advance({
+          runId: args.runId,
+          projectId: args.projectId,
+          modality: progress.modality,
+          ownerTaskRef: args.laneTaskRef,
+          state: 'failed',
+          detail,
+        });
+      }
+      await publishAbandoned(args, deps, progress, detail);
+    } catch (publishErr) {
+      deps.logger?.debug('[runbookBootstrap] could not settle surfaces after a throw', {
+        runId: args.runId,
+        error: publishErr instanceof Error ? publishErr.message : String(publishErr),
+      });
+    }
     return declined('infrastructure', detail);
   }
 }
@@ -379,6 +467,7 @@ export async function runRunbookBootstrap(
 async function bootstrap(
   args: RunbookBootstrapArgs,
   deps: RunbookBootstrapDeps,
+  progress: BootstrapProgress,
 ): Promise<BootstrapRunOutcome> {
   const { projectId, runId, laneTaskRef, worktreePath } = args;
 
@@ -393,6 +482,7 @@ async function bootstrap(
     );
   }
   const modality: VerifyRunbookModality = args.modality;
+  progress.modality = modality;
 
   // (1) §10 suppression — has this exact project state, on this exact host,
   // already been answered "not possible"? Computed BEFORE the claim so a
@@ -497,8 +587,13 @@ async function bootstrap(
   let feedback: string | null = resumeFeedback ?? stamp.detail;
   let lastCommitSha: string | null = stamp.commitSha;
   let lastRung1: AppliedRung1 | null = rung1FromStamp(stamp);
+  // A RESUMED claim may already have committed a rung-1 edit in the attempt that
+  // died; the stamp is the only record of it, and it still needs surfacing.
+  progress.rung1 = lastRung1;
+  progress.commitSha = lastCommitSha;
 
   for (let round = startRound; round <= MAX_BOOTSTRAP_ROUNDS; round += 1) {
+    progress.rounds = round;
     // (3) The read-only drafting agent.
     const existingRunbookRaw = args.adopt
       ? await deps.readFile(worktreePath, VERIFY_RUNBOOK_RELATIVE_PATH)
@@ -523,6 +618,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'rejected',
         `the drafting agent returned an unusable result: ${parsed.error}`,
         inputHash,
@@ -536,6 +632,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'not-possible',
         parsed.result.reason,
         inputHash,
@@ -558,6 +655,7 @@ async function bootstrap(
         return await refuse(
           { ...args, modality },
           deps,
+          progress,
           'rejected',
           `the proposed config change was refused: ${target.error}`,
           inputHash,
@@ -570,6 +668,7 @@ async function bootstrap(
         return await refuse(
           { ...args, modality },
           deps,
+          progress,
           'rejected',
           `the proposed config change targets ${target.path}, which this worktree does not have`,
           inputHash,
@@ -582,6 +681,7 @@ async function bootstrap(
         return await refuse(
           { ...args, modality },
           deps,
+          progress,
           'rejected',
           `the proposed config change was refused: ${applied.error}`,
           inputHash,
@@ -606,6 +706,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'rejected',
         validation.rejection.message,
         inputHash,
@@ -636,6 +737,7 @@ async function bootstrap(
         return await refuse(
           { ...args, modality },
           deps,
+          progress,
           'infrastructure',
           `the config change could not be committed: ${err instanceof Error ? err.message : String(err)}`,
           inputHash,
@@ -644,6 +746,7 @@ async function bootstrap(
         );
       }
       lastRung1 = { path: rung1Pending.path, description, commitSha: rung1Sha };
+      progress.rung1 = lastRung1;
       deps.stamps.advance({
         runId,
         projectId,
@@ -657,6 +760,8 @@ async function bootstrap(
 
     // (7) Write and pathspec-commit the runbook itself.
     const portableJson = `${JSON.stringify(draftResult.runbook, null, 2)}\n`;
+    progress.runbookJson = portableJson;
+    progress.notes = draftResult.notes ?? null;
     await deps.writeFile(worktreePath, VERIFY_RUNBOOK_RELATIVE_PATH, portableJson);
     try {
       lastCommitSha = await deps.commitPaths(
@@ -670,6 +775,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'infrastructure',
         `the derived runbook could not be committed: ${err instanceof Error ? err.message : String(err)}`,
         inputHash,
@@ -677,6 +783,7 @@ async function bootstrap(
         false,
       );
     }
+    progress.commitSha = lastCommitSha;
 
     // (8) Register it as a DRAFT. Not proven — nothing here can make it proven;
     // only the engine's own terminal path can (§5.3).
@@ -685,6 +792,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'infrastructure',
         `the derived runbook could not be registered: ${registered.error}`,
         inputHash,
@@ -692,6 +800,8 @@ async function bootstrap(
         false,
       );
     }
+    progress.runbookHash = registered.hash;
+    progress.runbookVersion = registered.version;
     // Migration 105 provenance: a human deciding whether to trust this record
     // must be able to see that a lane derived it mid-sprint rather than a human
     // reviewing it at a gate. Both are proven by the same engine-enforced run;
@@ -716,6 +826,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'rejected',
         `the drafted runbook declares no "${modality}" entry to prove`,
         inputHash,
@@ -735,6 +846,7 @@ async function bootstrap(
       return await refuse(
         { ...args, modality },
         deps,
+        progress,
         'infrastructure',
         `the bootstrap proof could not be enqueued: ${enqueued.error}`,
         inputHash,
@@ -925,6 +1037,7 @@ function settledOutcome(stamp: BootstrapStamp): BootstrapRunOutcome {
 async function refuse(
   args: RunbookBootstrapArgs & { modality: VerifyRunbookModality },
   deps: RunbookBootstrapDeps,
+  progress: BootstrapProgress,
   reason: BootstrapDeclineKind,
   detail: string,
   inputHash: string | null,
@@ -956,6 +1069,9 @@ async function refuse(
     detail,
     suppressed: suppress,
   });
+  // Every decline that happens AFTER the rung-1 commit still owes the branch's
+  // owner an artifact and a finding naming the file — see BootstrapProgress.
+  await publishAbandoned(args, deps, progress, detail);
   return declined(reason, detail);
 }
 
