@@ -579,3 +579,67 @@ Recorded because the mistakes are load-bearing, not to be thorough:
 The through-line: v1 reasoned about the feature it wanted and asserted the
 properties it needed from seams it had not read closely enough. Every correction
 above came from reading the seam.
+
+---
+
+## 16. Post-implementation adversarial review (2026-08-19)
+
+The shipped diff was reviewed adversarially after phases 0–4 landed. Five
+blocking defects were found and fixed; each was verified by EXECUTING the code,
+not by reading it.
+
+**Four of the five were surviving instances of the same mistake v2 was written to
+avoid** — asserting a property of a seam rather than checking it. Three of those
+were guards that enumerated the syntax their author thought of instead of the
+syntax they permit:
+
+1. **The read-only shell allowlist inspected only a segment's head**, so `env sh
+   -c '…'` and `command rm -rf x` — exec wrappers sitting on a list of readers —
+   passed anything, and `env node -e` defeated the per-head flag bans too.
+   `awk`'s `system()` and `sed`'s `w` need none of the rejected syntax, and `node
+   <file>` runs any file the repo already ships. 11 of 13 candidate escapes
+   passed. Fixed by removing those four heads outright, restricting `node` to a
+   version probe, and giving `branch`/`remote`/`config` per-subcommand ARGUMENT
+   rules — `git config user.email x` is a write whose write-ness lives entirely
+   in the operand count, where no flag denylist could reach it.
+2. **The declared-script rule listed `&&` and missed a bare `&`.** `pnpm dev & rm
+   -rf x` resolved to the declared script `dev` and passed — and a runbook
+   command is committed, proven, and re-executed on every later verification,
+   which is precisely the "unreviewed command forever" outcome §8 check 3 exists
+   to prevent. `--prefix` and friends went with it: they resolve a declared
+   script and run a different project's copy of it.
+3. **The rung-1 denylist matched lowercase on a filesystem that does not.**
+   `.Claude/settings.json` was admitted and is the same file as the one that
+   decides whether the approval gate binds at all; `relax-strict-port` turned out
+   to be "flip any named boolean in any non-manifest file", so the denylist was
+   the only thing standing in front of it.
+4. **The rung-1 edit could be committed and never surfaced.** Every step after
+   the commit could fail back through `refuse`, which published nothing — leaving
+   a machine-authored commit on a human's branch that only a log line mentioned.
+   §15A accepted rung 1 as REVIEW-BACKED; the operation being narrow was never
+   the whole trade, narrow AND surfaced was, and the review half was reachable
+   only on the paths that happened to succeed.
+
+The fifth was an ordering race in a seam this proposal had already read once:
+
+5. **`awaitTerminal` polls the request ROW, which goes terminal before the record
+   flips.** §5.3 deliberately promoted after delivery so a promotion failure
+   could not disturb a committed verdict — but that put a whole IO pipeline
+   between "the row says passed" and "the record says proven", so a bootstrap
+   could report success and have the lane's very next enqueue skip anyway. The
+   flip now precedes the terminal write, wrapped so it still cannot prevent a
+   verdict. Ordering alone was not enough: the engine legitimately refuses to
+   promote a proof that ran without a clean snapshot or a pin, so the runner now
+   CONFIRMS against the record rather than inferring from the request.
+
+Two serious defects were fixed alongside: `autoBootstrapRunbook` was read from a
+boot-time config snapshot, so the Settings toggle was inert until relaunch in
+both directions; and migrations 106/107 can only be renumbered as a pair, since
+107 ALTERs the table 106 creates and reordering them degrades a fresh database
+silently rather than loudly.
+
+**What this says about the reviews in §15.** Both v1 reviews concluded rung 1
+could not be made structurally safe and the compensating controls were the trade.
+They were right, and defect 4 is the proof: the controls were specified
+correctly and wired only into the success paths. A control that exists on the
+happy path is not a control.
