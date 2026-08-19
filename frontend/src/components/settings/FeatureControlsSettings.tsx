@@ -71,7 +71,7 @@ export function FeatureControlsSettings({
         </SettingsSection>
 
         {/* A Feature control, not a session default: this answers "is the SDK
-            substrate available in this app at all". Locking it to the PTY also
+            substrate available in this app at all". Locking it to the CLI also
             hides the Session settings group's per-session runtime picker — the
             note below spells that dependency out. */}
         <SettingsSection
@@ -82,7 +82,7 @@ export function FeatureControlsSettings({
           <div className="flex flex-col gap-1.5">
             {([
               { ptyOnly: false, label: 'Allow SDK', hint: 'Default · pick per run' },
-              { ptyOnly: true, label: 'Interactive PTY only', hint: 'Force the live terminal' },
+              { ptyOnly: true, label: 'Interactive CLI only', hint: 'Force the live terminal' },
             ] as const).map(({ ptyOnly, label, hint }) => (
               <button
                 key={label}
@@ -106,7 +106,7 @@ export function FeatureControlsSettings({
             ))}
           </div>
           <p className="text-xs text-text-tertiary mt-2">
-            "Interactive PTY only" forces every new run and quick session onto the live terminal
+            "Interactive CLI only" forces every new run and quick session onto the live terminal
             substrate and hides the per-run picker. Pause/Resume (SDK-only) become unavailable, and
             the interactive substrate carries v1 limits. Only affects runs started after you save;
             demo mode always uses the SDK.
@@ -188,7 +188,7 @@ export function FeatureControlsSettings({
 
         <SettingsSection
           title="Idle Session Review"
-          description="Surface quiet PTY quick sessions in the human review queue"
+          description="Surface quiet CLI quick sessions in the human review queue"
           icon={<AlarmClock className="w-4 h-4" />}
         >
           <Checkbox

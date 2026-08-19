@@ -314,7 +314,11 @@ export const OVERLAP_WINDOW_MS = 10 * 60 * 1000;
 // Provenance footer
 // ---------------------------------------------------------------------------
 
-const PROVIDER_LABEL: Record<TrackerProvider, string> = { linear: 'Linear', plane: 'Plane' };
+const PROVIDER_LABEL: Record<TrackerProvider, string> = {
+  linear: 'Linear',
+  plane: 'Plane',
+  dart: 'Dart',
+};
 
 /** The markdown rule the footer block opens with. */
 const FOOTER_FENCE = '---\n';
@@ -606,9 +610,18 @@ interface SyncContext {
   report: InboundSyncReport;
 }
 
-/** The mapping target for an issue's state; an unmapped state never imports. */
+/**
+ * The mapping target for an issue's state; an unmapped state never imports.
+ *
+ * `'indev'` is normalized to `'dont'` HERE rather than being handled at each of
+ * the branches below: it is an outbound-only pin (see TrackerMappingTarget), so
+ * inbound must behave as though the state were simply not imported. Collapsing
+ * it once, at the single point every inbound decision reads, is what keeps the
+ * rest of this file from needing to know the target exists.
+ */
 function targetFor(ctx: SyncContext, issue: TrackerIssue): TrackerMappingTarget {
-  return ctx.mapping[issue.stateId] ?? 'dont';
+  const target = ctx.mapping[issue.stateId] ?? 'dont';
+  return target === 'indev' ? 'dont' : target;
 }
 
 /**

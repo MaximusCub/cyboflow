@@ -563,8 +563,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         title={effectiveSession?.inPlace ? 'Workflows run in their own worktree' : 'Start workflow in a new session?'}
         message={
           effectiveSession?.inPlace
-            ? "This session works directly in the project checkout, so it can't host a workflow run. The workflow will open in a new session with an isolated worktree — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
-            : "This is an interactive (PTY) session, which can't host a second workflow alongside its live terminal. The workflow will start in a new, separate session — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
+            ? "This session works directly in the project checkout, so it can't host a workflow run. The workflow will open in a new session with an isolated worktree — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. CLI)."
+            : "This is an interactive (CLI) session, which can't host a second workflow alongside its live terminal. The workflow will start in a new, separate session — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. CLI)."
         }
         confirmText={effectiveSession?.inPlace ? 'Open in new session' : 'Choose workflow'}
         cancelText="Cancel"
@@ -612,9 +612,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             isOpen={isDismissOpen}
             onClose={() => setIsDismissOpen(false)}
             sessionId={lifecycleTarget.session.id}
-            onSuccess={() => {
+            onSuccess={(completed) => {
               setIsDismissOpen(false);
-              handleActionSuccess('Session dismissed');
+              handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
             }}
           />
         </>

@@ -122,8 +122,8 @@ export interface WriteBackBaselineStamp {
   lastWrittenAt: string;
 }
 
-/** Both providers a link can point at — the lookup order for an unknown-provider entity. */
-const PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane'];
+/** Every provider a link can point at — the lookup order for an unknown-provider entity. */
+const PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart'];
 
 // ---------------------------------------------------------------------------
 // Baseline / payload helpers (shared with outboxWorker)

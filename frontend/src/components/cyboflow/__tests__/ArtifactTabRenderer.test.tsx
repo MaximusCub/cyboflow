@@ -18,9 +18,13 @@ import { ArtifactTabRenderer } from '../ArtifactTabRenderer';
 import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactData';
 import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
 import { useArtifactHtml, type UseArtifactHtml } from '../../../hooks/useArtifactHtml';
+import { useArtifactsList, type UseArtifactsListResult } from '../../../hooks/useArtifactsList';
 import { useFeedback, type UseFeedbackResult } from '../../../hooks/useFeedback';
+import { useCenterPaneStore } from '../../../stores/centerPaneStore';
+import { useActiveRunsStore, type ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { Artifact, ArtifactType, TaskVerificationReportEntry } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
+import type { IdeaComponentState } from '../../../../../shared/types/ideaComponents';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { Question } from '../../../../../shared/types/questions';
 
@@ -36,6 +40,19 @@ vi.mock('../../../hooks/useArtifactImages', () => ({ useArtifactImages: vi.fn() 
 const mockImages = vi.mocked(useArtifactImages);
 function setImages(value: UseArtifactImages): void {
   mockImages.mockReturnValue(value);
+}
+
+// idea-summary's sibling-deliverable list loads through useArtifactsList — mock
+// it (the real hook hits trpc.cyboflow.artifacts.list/onArtifactChanged, neither
+// stubbed by this file's trpc mock) so idea-summary tests control exactly which
+// sibling artifacts "exist" for the hub's links-out section.
+vi.mock('../../../hooks/useArtifactsList', () => ({
+  useArtifactsList: vi.fn(),
+  useSessionArtifactsList: vi.fn(),
+}));
+const mockArtifactsList = vi.mocked(useArtifactsList);
+function setRunArtifacts(value: UseArtifactsListResult): void {
+  mockArtifactsList.mockReturnValue(value);
 }
 
 // Static-mockup HTML loads through useArtifactHtml (artifacts:load-html IPC).
@@ -268,6 +285,10 @@ describe('ArtifactTabRenderer', () => {
     mockSelectedSessionId = null;
     mockSetActiveQuickSession.mockClear();
     mockEnterDesignMode.mockClear();
+    // idea-summary defaults: no sibling deliverables found, no activeRunsStore
+    // row for the run (sessionKey falls back to runId).
+    setRunArtifacts({ artifacts: [], loaded: true });
+    useActiveRunsStore.setState({ runsByProject: {} });
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -1425,6 +1446,30 @@ describe('ArtifactTabRenderer', () => {
     expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
   });
 
+  // --- "Enter design mode" CTA: a sourceRef-less prototype (produced
+  // outside any design session, e.g. by planner/sprint) never gets the CTA.
+  // cyboflow.design.resolveReopenIdea (main/src/orchestrator/design/
+  // reopenIdeaResolver.ts) can resolve such a run back to a single owning
+  // idea, but actually ADOPTING that artifact into a new/promoted design
+  // session is unwired session-creation plumbing this component doesn't own
+  // — see the WHY comment above isDesignSessionCanvas/enterDesignModeCta in
+  // ArtifactTabRenderer.tsx. Rather than render a permanently-disabled CTA
+  // explaining that gap, the canvas withholds the affordance entirely and
+  // never fires the resolver query in the first place.
+
+  it('renders no CTA, no Approve control, and never queries resolveReopenIdea for a sourceRef-less prototype', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', sourceRef: null, sessionId: null, runId: 'run-planner-1' })}
+        {...PROPS}
+      />,
+    );
+    expect(screen.queryByTestId('design-mode-enter-cta')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('design-approve-control')).not.toBeInTheDocument();
+    expect(designDraftStatusQuery).not.toHaveBeenCalled();
+  });
+
   // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---
 
   it('embeds a static ui-prototype mockup via srcDoc (bare sandbox) from a fileName pointer', () => {
@@ -2108,5 +2153,173 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('approve-designs-no-gate-note')).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('approve-designs-open-spec-IDEA-014'));
     await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+  });
+
+  // --- idea-summary -----------------------------------------------------------
+
+  /** One of each of the four visual states, plus one component with NO ledger
+   *  entry at all (tests the "absent -> Not started" fallback). */
+  const IDEA_SUMMARY_COMPONENTS: IdeaComponentState[] = [
+    {
+      component: 'idea-spec',
+      state: 'complete',
+      source: 'derived',
+      sourceRunId: null,
+      sourceSessionId: null,
+      builtAgainstVersion: null,
+      staleAt: null,
+      staleReason: null,
+      updatedAt: null,
+    },
+    {
+      component: 'prototype',
+      state: 'incomplete',
+      source: 'flow',
+      sourceRunId: 'run-x',
+      sourceSessionId: null,
+      builtAgainstVersion: 1,
+      staleAt: '2026-07-01T00:00:00.000Z',
+      staleReason: 'idea body changed',
+      updatedAt: null,
+    },
+    {
+      component: 'architecture',
+      state: 'incomplete',
+      source: 'derived',
+      sourceRunId: null,
+      sourceSessionId: null,
+      builtAgainstVersion: null,
+      staleAt: null,
+      staleReason: null,
+      updatedAt: null,
+    },
+    {
+      component: 'epics',
+      state: 'skipped',
+      source: 'manual',
+      sourceRunId: null,
+      sourceSessionId: null,
+      builtAgainstVersion: null,
+      staleAt: null,
+      staleReason: null,
+      updatedAt: null,
+    },
+    // 'stories' intentionally omitted — no ledger row at all.
+  ];
+
+  it('renders the gray idea-summary hub with the four-way component chips', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'idea-summary', idea: makeIdea(), components: IDEA_SUMMARY_COMPONENTS },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-idea-summary')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · idea summary');
+    expect(eyebrow).toHaveStyle({ color: '#6b6b6b' });
+    expect(screen.getByText('Tabbed center pane')).toBeInTheDocument();
+
+    // Reuses IDEA_COMPONENT_LABELS — must not drift from the backlog card chips.
+    expect(screen.getByTestId('artifact-idea-summary-component-idea-spec')).toHaveTextContent('Idea spec');
+    expect(screen.getByTestId('artifact-idea-summary-component-idea-spec-status')).toHaveTextContent('Complete');
+    expect(screen.getByTestId('artifact-idea-summary-component-prototype-status')).toHaveTextContent(
+      'Needs review',
+    );
+    expect(screen.getByTestId('artifact-idea-summary-component-architecture-status')).toHaveTextContent(
+      'Not started',
+    );
+    expect(screen.getByTestId('artifact-idea-summary-component-epics-status')).toHaveTextContent('Skipped');
+    // 'stories' has no ledger row at all -> same "Not started" fallback.
+    expect(screen.getByTestId('artifact-idea-summary-component-stories-status')).toHaveTextContent(
+      'Not started',
+    );
+  });
+
+  it('shows the idea-summary loading/error/empty states', () => {
+    setHook({ loading: true, error: null, data: null });
+    const { rerender } = render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-idea-summary-loading')).toBeInTheDocument();
+
+    setHook({ loading: false, error: 'boom', data: null });
+    rerender(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-idea-summary-error')).toHaveTextContent('boom');
+
+    setHook({ loading: false, error: null, data: null });
+    rerender(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-idea-summary-empty')).toHaveTextContent('No idea to summarize.');
+  });
+
+  it('shows sibling deliverables that exist as open links and missing ones as "not yet"', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'idea-summary', idea: makeIdea(), components: IDEA_SUMMARY_COMPONENTS },
+    });
+    const specArt = makeArtifact({ id: 'art-spec', atype: 'idea-spec', sourceRef: 'IDEA-018', label: 'Spec' });
+    setRunArtifacts({ artifacts: [specArt], loaded: true });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-idea-summary-link-idea-spec')).toHaveTextContent('open →');
+    expect(screen.getByTestId('artifact-idea-summary-link-prototype')).toHaveTextContent('not yet');
+    expect(screen.getByTestId('artifact-idea-summary-link-architecture')).toHaveTextContent('not yet');
+    expect(screen.getByTestId('artifact-idea-summary-link-stories')).toHaveTextContent('not yet');
+    expect(screen.getByTestId('artifact-idea-summary-link-prototype')).toBeDisabled();
+  });
+
+  it('clicking an existing deliverable link opens its tab, keyed by the run\'s parent session', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'idea-summary', idea: makeIdea(), components: IDEA_SUMMARY_COMPONENTS },
+    });
+    const archArt = makeArtifact({
+      id: 'art-arch',
+      atype: 'arch-design',
+      sourceRef: 'IDEA-018',
+      label: 'Architecture design',
+      committed: true,
+    });
+    setRunArtifacts({ artifacts: [archArt], loaded: true });
+    // The run's activeRunsStore row resolves to parent session 'sess-parent' —
+    // the hub must open under THAT key, not the bare runId.
+    useActiveRunsStore.setState({
+      runsByProject: {
+        1: [{ id: 'run-1', session_id: 'sess-parent' } as unknown as ActiveRunRow],
+      },
+    });
+    const spy = vi.spyOn(useCenterPaneStore.getState(), 'openArtifactTab');
+
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+    fireEvent.click(screen.getByTestId('artifact-idea-summary-link-architecture'));
+
+    expect(spy).toHaveBeenCalledWith('sess-parent', {
+      atype: 'arch-design',
+      label: 'Architecture design',
+      artifactId: 'art-arch',
+      committed: true,
+      isNew: false,
+    });
+  });
+
+  it("falls back to the runId as the session key when activeRunsStore has no row for this run", () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'idea-summary', idea: makeIdea(), components: IDEA_SUMMARY_COMPONENTS },
+    });
+    const specArt = makeArtifact({ id: 'art-spec', atype: 'idea-spec', sourceRef: 'IDEA-018', label: 'Spec' });
+    setRunArtifacts({ artifacts: [specArt], loaded: true });
+    // Default beforeEach state: runsByProject is empty.
+    const spy = vi.spyOn(useCenterPaneStore.getState(), 'openArtifactTab');
+
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'idea-summary' })} {...PROPS} />);
+    fireEvent.click(screen.getByTestId('artifact-idea-summary-link-idea-spec'));
+
+    expect(spy).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ atype: 'idea-spec', artifactId: 'art-spec' }),
+    );
   });
 });

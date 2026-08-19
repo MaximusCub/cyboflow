@@ -6,6 +6,24 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-08-19
+
+### Added
+
+- **Idea component ledger**: ideas now carry a first-class component ledger (schema + shared types, a hybrid resolver, and a write chokepoint with a tRPC surface). Components render as chips with inline expand on backlog cards, an idea-summary artifact acts as the per-idea hub, and the planner reads the ledger to skip finished work and offer a design fork — launching a design session straight from the approve-idea fork, reopening any prototype in design mode, and stamping ledger components complete/incomplete as work moves. Body-change staleness is scoped to the section that moved. Migrations 101 and 102.
+- **Dart tracker provider**: a third tracker-sync provider (`DartAdapter`) surfaced in the tracker integrations settings, filing sub-issues on the parent's dartboard, paginating off count, and guarding creates/client-key recovery with a container check. Adds an outbound-only "in-development" mapping target. Migration 105 (widen the tracker-provider CHECK to admit `dart`).
+- **Mark complete**, for work that landed by a path the app never saw (the agent merged it in chat). Dismissing a session whose commits are already in the main branch now offers it instead of discarding the session outright, and a merge that finds nothing left to merge offers it in place of a "Merge failed" error. Creating a pull request no longer closes the session out on its own — it asks whether to mark it complete or keep it open.
+
+### Changed
+
+- Renamed the user-facing **"PTY" to "CLI"** across every runtime surface.
+- **OMP polish**: `auto` now allows unless hazardous (matching Auto elsewhere), OMP models are offered in Settings rather than the Claude list, the model-override card opens under a non-Claude runtime, OMP inline questions are bridged (the ask-tool caveat is gone), and `cyboflow_set_idea_component` is admitted through the OMP gate.
+
+### Fixed
+
+- **Findings no longer die with the session that produced them.** Archiving a session dismissed every pending review item it had filed — and the merge and create-PR dialogs archive the session the moment the work is away, so a successful merge destroyed its own findings milliseconds later. Since the Insights compounding surface only offers findings from a session that landed its work, and landing the work was exactly what deleted them, the surface was unreachable by construction. The archive sweeps (live and the boot backfill) now keep the findings of a session whose work was delivered, and migration 106 restores the rows already lost. Gates are still dismissed: a permission prompt on an archived session can never be actioned.
+- Stop the verify agent from inheriting the `auto` model sentinel; let the onboarding tour scroll on a short window; fix stuck pending-send reconciliation; compensate a mid-create design-session failure.
+
 ## [0.2.3] — 2026-08-15
 
 ### Added

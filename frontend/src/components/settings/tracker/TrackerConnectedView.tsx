@@ -243,11 +243,16 @@ export function TrackerConnectedView({
   const mappedCount = Object.values(connection.stateMapping).filter((t) => t !== 'dont').length;
   const totalStates = Object.keys(connection.stateMapping).length;
 
-  /** The distinct cyboflow stages this connection imports into. */
+  /**
+   * The distinct cyboflow stages this connection IMPORTS into. 'indev' is
+   * excluded alongside 'dont': it is an outbound-only pin, so listing it here
+   * would claim an inbound destination that does not exist. It still counts as
+   * mapped above, because the user did map it — just not inward.
+   */
   const mappedTargets = useMemo(() => {
     const seen = new Set<TrackerMappingTarget>();
     for (const target of Object.values(connection.stateMapping)) {
-      if (target !== 'dont') seen.add(target);
+      if (target !== 'dont' && target !== 'indev') seen.add(target);
     }
     return [...seen].map(mappingTargetLabel).join(' · ');
   }, [connection.stateMapping]);

@@ -344,6 +344,48 @@ describe('TrackerWizardModal — Step 4 mapping', () => {
     }
   });
 
+  it('offers the one-way In-development target, labelled as such', async () => {
+    renderWizard();
+    await authorize();
+    await advance(4);
+
+    await screen.findByText('Map Linear states to cyboflow');
+    const select = screen.getByLabelText('Cyboflow state for In Progress');
+    const labels = within(select)
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    // The "(one way)" qualifier is part of the option text, not a tooltip: the
+    // asymmetry has to be visible BEFORE the user picks it.
+    expect(labels).toContain('In development (one way)');
+    // Board order, so the picker reads like the board.
+    expect(labels).toEqual([
+      "— Don't import",
+      'Idea',
+      'Ready for development',
+      'In development (one way)',
+      'Done',
+      "Won't do",
+    ]);
+  });
+
+  it('explains the asymmetry inline only once In development is selected', async () => {
+    renderWizard();
+    await authorize();
+    await advance(4);
+
+    await screen.findByText('Map Linear states to cyboflow');
+    const note = 'One way only — pushed to Linear, never imported.';
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Cyboflow state for In Progress'), {
+      target: { value: 'indev' },
+    });
+
+    expect(screen.getByText(note)).toBeInTheDocument();
+    // Scoped to the row that was changed, not the whole table.
+    expect(screen.getAllByText(note)).toHaveLength(1);
+  });
+
   it('always shows mirroring + conflict mode alongside the three direction rows', async () => {
     renderWizard();
     await authorize();

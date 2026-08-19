@@ -10,6 +10,12 @@
  *                             on white, max-width 680px (blue accent #3b6dd6).
  *   - 'arch-design'        -> the idea body's '## Architecture design' section as
  *                             a markdown doc, same chrome (teal accent #2d7a8a).
+ *   - 'idea-summary'       -> a HUB (gray accent): the idea's five ledger
+ *                             components (idea-spec/prototype/architecture/
+ *                             epics/stories), each with its four-way status
+ *                             (complete/needs review/not started/skipped), plus
+ *                             links out to each real sibling deliverable tab.
+ *                             It points at those tabs — it never inlines them.
  *   - 'decomposed-stories' -> an epic/task card grid: one card per epic, tasks in
  *                             a 2-col grid (indigo accent #5a4ad6).
  *   - 'screenshots'        -> a 2-col gallery; no disk image source yet, so a
@@ -40,12 +46,15 @@ import { latestBatchStatus } from './feedback/feedbackLogic';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { useArtifactHtml } from '../../hooks/useArtifactHtml';
+import { useArtifactsList } from '../../hooks/useArtifactsList';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useDesignModeStore } from '../../stores/designModeStore';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { ScoreSummary, findingLocation, findingCategory } from './WorkflowSummaryPanel';
 import type { FindingRow } from './WorkflowSummaryPanel';
 import type { RunEval } from '../../../../shared/types/insights';
@@ -58,6 +67,8 @@ import type {
   TaskVerificationReportEntry,
 } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import { IDEA_COMPONENT_KEYS, IDEA_COMPONENT_LABELS } from '../../../../shared/types/ideaComponents';
+import type { IdeaComponentState } from '../../../../shared/types/ideaComponents';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { IdeaVerdict, IdeaVerdictMap, ReviewItem } from '../../../../shared/types/reviews';
 import type { Question, QuestionPayload } from '../../../../shared/types/questions';
@@ -327,6 +338,208 @@ function ArchDesignBody({ artifact, projectId }: { artifact: Artifact; projectId
               doc
             );
           })()}
+        </div>
+      )}
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// idea-summary — the per-idea HUB: the idea's five ledger components (each
+// with its four-way status — complete / needs review / not started / skipped,
+// per the "reset means re-verify" contract in shared/types/ideaComponents.ts)
+// plus links out to each real sibling deliverable tab. A HUB, not an
+// aggregator: it points at those tabs, it never inlines their content. NO
+// "runs that touched this idea" lineage strip — explicitly out of scope.
+// ---------------------------------------------------------------------------
+
+/** One sibling deliverable this hub can point at. */
+interface IdeaSummaryLink {
+  key: string;
+  label: string;
+  artifact: Artifact | undefined;
+}
+
+/** The four-way status chip for one ledger component (or its absence). */
+function ideaSummaryChip(state: IdeaComponentState | undefined): { text: string; color: string } {
+  if (!state) return { text: 'Not started', color: MUTED };
+  if (state.state === 'skipped') return { text: 'Skipped', color: FAINT };
+  if (state.state === 'complete') return { text: 'Complete', color: VERDICT_PASS };
+  // state.state === 'incomplete': staleAt distinguishes "not started" from
+  // "needs review" (prior work exists) — collapsing the two is the one thing
+  // NOT to do here (see shared/types/ideaComponents.ts).
+  return state.staleAt !== null
+    ? { text: 'Needs review', color: VERDICT_LOW }
+    : { text: 'Not started', color: MUTED };
+}
+
+function IdeaSummaryBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['idea-summary'];
+  const { loading, error, data } = useArtifactData(artifact, projectId);
+  const idea = data?.kind === 'idea-summary' ? data.idea : null;
+  const components = data?.kind === 'idea-summary' ? data.components : [];
+
+  // The sibling deliverables this run has actually produced FOR THIS IDEA —
+  // the hub links out to them rather than inlining their content.
+  const { artifacts: runArtifacts } = useArtifactsList(artifact.runId, projectId);
+  const openArtifactTab = useCenterPaneStore((s) => s.openArtifactTab);
+  // centerPaneStore's tab store is keyed by the run's PARENT SESSION (else the
+  // run id itself for a legacy parentless run) — see centerPaneStore.ts /
+  // RunCenterPane. ArtifactTabRendererProps carries no sessionKey, so this
+  // recomputes the SAME derivation independently from the same source
+  // (activeRunsStore) RunCenterPane itself reads.
+  const sessionIdForRun = useActiveRunsStore(
+    (s) => s.runsByProject[projectId]?.find((r) => r.id === artifact.runId)?.session_id ?? null,
+  );
+  const sessionKey = sessionIdForRun ?? artifact.runId;
+
+  const links: IdeaSummaryLink[] = idea
+    ? [
+        {
+          key: 'idea-spec',
+          label: 'Idea spec',
+          artifact: runArtifacts.find((a) => a.atype === 'idea-spec' && a.sourceRef === idea.id),
+        },
+        {
+          key: 'prototype',
+          label: 'Prototype',
+          artifact: runArtifacts.find(
+            (a) => a.atype === 'ui-prototype' || a.atype === 'interactive-prototype',
+          ),
+        },
+        {
+          key: 'architecture',
+          label: 'Architecture design',
+          artifact: runArtifacts.find((a) => a.atype === 'arch-design' && a.sourceRef === idea.id),
+        },
+        {
+          key: 'stories',
+          label: 'Decomposed stories',
+          artifact: runArtifacts.find((a) => a.atype === 'decomposed-stories'),
+        },
+      ]
+    : [];
+
+  return (
+    <Shell testid="artifact-idea-summary">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · idea summary"
+        meta={artifact.sourceRef ? `${artifact.sourceRef} · ${artifact.stepOrigin ?? 'orchestrator'}` : undefined}
+      />
+      {loading ? (
+        <StateRow testid="artifact-idea-summary-loading" color={MUTED} text="Loading idea summary…" />
+      ) : error ? (
+        <StateRow testid="artifact-idea-summary-error" color={RUST} text={error} />
+      ) : !idea ? (
+        <StateRow testid="artifact-idea-summary-empty" color={MUTED} text="No idea to summarize." />
+      ) : (
+        <div style={{ flex: 1 }}>
+          <div
+            data-testid="artifact-idea-summary-doc"
+            style={{
+              maxWidth: 680,
+              margin: '0 auto',
+              background: 'var(--color-surface-primary)',
+              border: `1px solid ${HAIRLINE}`,
+              padding: '34px 40px 56px',
+              marginTop: 18,
+              marginBottom: 18,
+            }}
+          >
+            <div
+              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+            >
+              {idea.ref}
+            </div>
+            <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
+              {idea.title}
+            </h1>
+            {idea.summary && (
+              <div style={{ fontSize: '11px', color: FAINT, marginBottom: 24 }}>{idea.summary}</div>
+            )}
+
+            <div
+              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: MUTED, marginBottom: 10 }}
+            >
+              Components
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
+              {IDEA_COMPONENT_KEYS.map((key) => {
+                const state = components.find((c) => c.component === key);
+                const chip = ideaSummaryChip(state);
+                return (
+                  <div
+                    key={key}
+                    data-testid={`artifact-idea-summary-component-${key}`}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '7px 10px',
+                      border: `1px solid ${SOFT}`,
+                    }}
+                  >
+                    <span style={{ fontSize: '11px', color: INK }}>{IDEA_COMPONENT_LABELS[key]}</span>
+                    <span
+                      data-testid={`artifact-idea-summary-component-${key}-status`}
+                      style={{ fontSize: '9px', fontWeight: 700, color: chip.color }}
+                    >
+                      {chip.text}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div
+              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: MUTED, marginBottom: 10 }}
+            >
+              Deliverables
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {links.map((link) => {
+                const exists = link.artifact !== undefined;
+                return (
+                  <button
+                    key={link.key}
+                    type="button"
+                    data-testid={`artifact-idea-summary-link-${link.key}`}
+                    disabled={!exists}
+                    onClick={() => {
+                      const target = link.artifact;
+                      if (!target) return;
+                      openArtifactTab(sessionKey, {
+                        atype: target.atype,
+                        label: target.label,
+                        artifactId: target.id,
+                        committed: target.committed,
+                        isNew: false,
+                      });
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '7px 10px',
+                      border: `1px ${exists ? 'solid' : 'dashed'} ${exists ? SOFT : FAINT}`,
+                      background: 'transparent',
+                      textAlign: 'left',
+                      cursor: exists ? 'pointer' : 'default',
+                      opacity: exists ? 1 : 0.6,
+                    }}
+                  >
+                    <span style={{ fontSize: '11px', color: exists ? INK : FAINT }}>{link.label}</span>
+                    <span style={{ fontSize: '9px', fontWeight: 700, color: exists ? accent : FAINT }}>
+                      {exists ? 'open →' : 'not yet'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
     </Shell>
@@ -1931,24 +2144,39 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   // A design session's prototype: sourceRef is server-stamped ONLY for
   // design-scoped artifact reports (see cyboflow_report_artifact / design.ts),
   // so its presence (alongside a sessionId) is what distinguishes a design
-  // canvas from an ordinary ui-prototype/generic live canvas. Non-design
-  // canvas tabs (sourceRef null, or sessionId null) get NO Approve control —
-  // `actions` stays exactly `openInBrowser`, unchanged from before.
-  // "Enter design mode" CTA (v0.5 fullscreen design surface, second entry
-  // door) — same render gate as designControl, rendered leftmost of the two.
-  // BOTH prototype-family atypes qualify: a mid-session tier switch leaves an
+  // canvas from an ordinary ui-prototype/generic live canvas. BOTH
+  // prototype-family atypes qualify: a mid-session tier switch leaves an
   // interactive-prototype tab alongside the lo-fi one, and an interactive-only
   // run would otherwise have NO entry door at all.
-  const isDesignCanvas =
+  const isDesignSessionCanvas =
     (artifact.atype === 'ui-prototype' || artifact.atype === 'interactive-prototype') &&
     artifact.sourceRef !== null &&
     artifact.sessionId !== null;
-  const enterDesignModeCta: ReactNode = isDesignCanvas ? (
+
+  // Reopening a prototype that never ran inside a design session (no
+  // sourceRef — e.g. a planner/sprint-produced ui-prototype) into a NEW or
+  // promoted design session is a real, prepared seam: it resolves to the
+  // single idea its producing run belongs to via
+  // cyboflow.design.resolveReopenIdea (main/src/orchestrator/design/
+  // reopenIdeaResolver.ts) — both remain in place and tested. But actually
+  // ADOPTING that resolved artifact into a session is session-creation
+  // plumbing (main/src/services/*, ipc/session.ts) this component does not
+  // own, so rather than advertise a CTA it cannot honour (a permanently
+  // disabled button + a tooltip explaining internal plumbing), this canvas
+  // withholds the affordance entirely — and never fires the resolver query,
+  // since nothing here would consume its result. Re-enable by wiring an
+  // onClick that starts/promotes a design session seeded from this artifact
+  // once that adoption path exists, gating the CTA on the resolved idea again.
+
+  // "Enter design mode" CTA (v0.5 fullscreen design surface, second entry
+  // door) — rendered leftmost of the two, only for a live design-session
+  // canvas (sourceRef + sessionId present).
+  const enterDesignModeCta: ReactNode = isDesignSessionCanvas ? (
     <button
       type="button"
       data-testid="design-mode-enter-cta"
       onClick={() => {
-        const sessionId = artifact.sessionId as string; // narrowed by isDesignCanvas
+        const sessionId = artifact.sessionId as string; // narrowed by isDesignSessionCanvas
         // The fullscreen surface's chat rail derives from the global active
         // session, so entering design mode for this artifact's session must
         // also make that session the selected session — only when it isn't
@@ -1974,10 +2202,10 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
       Design mode
     </button>
   ) : null;
-  const designControl: ReactNode = isDesignCanvas ? (
+  const designControl: ReactNode = isDesignSessionCanvas ? (
     <DesignApproveControl sessionId={artifact.sessionId as string} artifactRevision={artifact.revision} />
   ) : null;
-  const actions: ReactNode = designControl ? (
+  const actions: ReactNode = isDesignSessionCanvas ? (
     <>
       {enterDesignModeCta}
       {designControl}
@@ -2979,6 +3207,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <IdeaSpecBody artifact={artifact} projectId={projectId} />;
     case 'arch-design':
       return <ArchDesignBody artifact={artifact} projectId={projectId} />;
+    case 'idea-summary':
+      return <IdeaSummaryBody artifact={artifact} projectId={projectId} />;
     case 'compound-recommendations':
       return <RecommendationsBody artifact={artifact} projectId={projectId} />;
     case 'verify-runbook':

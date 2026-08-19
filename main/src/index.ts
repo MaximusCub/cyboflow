@@ -96,6 +96,7 @@ import { OmpSessionManager } from './orchestrator/omp/ompSessionManager';
 import { OmpSupervisedAdapter, type OmpSupervisedAuditEntry } from './orchestrator/omp/ompSupervisedAdapter';
 import { hasSupervise } from '../../shared/types/ompCommand';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
+import { IdeaComponentRouter } from './orchestrator/ideaComponents/ideaComponentRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
 import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
 import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
@@ -165,6 +166,7 @@ import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJu
 import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
+import type { ClaudePanelState } from '../../shared/types/panels';
 import { isAgentProvider, providerForRuntime } from '../../shared/types/agentRuntime';
 import { setAgentProviderAccessResolver } from './services/agentProviderGuard';
 import { DevServerManager } from './services/visualVerify/devServerManager';
@@ -235,6 +237,15 @@ import {
   type ProposalExecutorDeps,
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
+import {
+  DESIGN_MODE_KICKOFF_PROMPT,
+  finishDesignSessionCreate,
+  type DesignSessionLaunchDeps,
+} from './orchestrator/designSessionLaunch';
+import { validateDesignIdeaLink } from './services/designIdeaValidation';
+import { detectClaudeCredentials } from './utils/claudeCredentials';
+import { detectClaudeBinary } from './utils/claudeCodeTest';
+import { computeState as computeClaudeDetectionState } from './ipc/claudeDetection';
 import { agentThreadEvents } from './orchestrator/trpc/routers/agentThread';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
@@ -1692,6 +1703,12 @@ async function initializeServices(): Promise<boolean> {
   // (it binds makeRevisionQuery + TaskChangeRouter, both off-limits to the
   // standalone tRPC router) and read by sendFeedbackHandler via getRevisionLauncher.
   FeedbackRouter.initialize(cyboflowDb);
+
+  // Idea component ledger write chokepoint (migration 101) — the single
+  // serialized writer for `idea_components`; the cyboflow.ideaComponents tRPC
+  // router reaches it via getInstance() for the card's manual-override path.
+  IdeaComponentRouter.initialize(cyboflowDb);
+
   setRevisionLauncher((info) =>
     runRevisionBatch(
       {
@@ -3556,15 +3573,14 @@ async function initializeServices(): Promise<boolean> {
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
-  // OMP takes the same MCP runtime config and nothing else: its approval dialogs
-  // are answered in-process by OmpApprovalBridge (the gating extension is the
-  // policy engine, so a prompt reaching the bridge was already allowed), so
-  // there is no router provider to inject here.
+  // OMP tool approvals are answered in-process after the gating extension vets
+  // them; content questions use the same durable QuestionRouter as Claude/Codex.
   createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
     bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
     nodeExecutablePath: await nodeResolver.getNodePath(),
   });
+  createdOmpSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
@@ -5371,6 +5387,174 @@ app.whenReady().then(async () => {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+
+    // Design-mode-fork launch saga (QuestionRouter.launchDesignModeOnFork /
+    // designSessionLaunch.ts). A HUMAN answering the planner's approve-idea gate
+    // with "Approve → design mode" launches a Design Mode session — the SAME
+    // three-layer belt sessions:create-quick's design branch drives
+    // (ipc/session.ts ~787-1091: validateDesignIdeaLink, createQuickSessionCore
+    // with requireSdkSubstrate, the design_idea_id stamp + ui-prototype stub),
+    // replayed here since this launch has no renderer client. Compensation
+    // (dismissSessionFully) and the review-item failure report reuse the SAME
+    // primitives proposalExecutorDeps wires just above.
+    QuestionRouter.getInstance().setDesignSessionLaunchDeps({
+      validateIdeaLink: (ideaId, projectId) => {
+        const result = validateDesignIdeaLink(databaseService.getDb(), ideaId, projectId);
+        return result.ok ? { ok: true } : { ok: false, error: result.error };
+      },
+      createDesignSession: async ({ projectId, ideaId, nameHint }) => {
+        // Fail-closed Claude/SDK availability pre-flight — mirrors
+        // sessions:create-quick's design branch (ipc/session.ts ~804-834): a
+        // design session is hard-pinned to the Claude SDK substrate, so an
+        // unavailable Claude login/binary must reject BEFORE any worktree is
+        // cut, rather than let substrate resolution silently fall through.
+        if (!configManager.isAgentProviderEnabled('claude')) {
+          throw new Error(
+            'Design sessions require Claude, which is turned off in Settings → Integrations.',
+          );
+        }
+        const [designCredentials, designBinary] = await Promise.all([
+          detectClaudeCredentials(),
+          detectClaudeBinary(configManager.getConfig()?.claudeExecutablePath),
+        ]);
+        if (computeClaudeDetectionState(designCredentials.found, designBinary.found) !== 'detected') {
+          throw new Error(
+            'Design sessions require the Claude SDK substrate — Claude credentials/binary not detected.',
+          );
+        }
+        if (configManager.isInteractivePtyOnly()) {
+          throw new Error(
+            'Design sessions cannot run on the interactive substrate, but this app is locked to interactive-PTY-only mode.',
+          );
+        }
+
+        const { session, runId, resolvedSubstrate } = await createQuickSessionCore(
+          {
+            taskQueue: taskQueue!,
+            sessionManager,
+            workflowRegistry,
+            getDb: () => databaseService.getDb(),
+          },
+          {
+            projectId,
+            nameHint,
+            agentProvider: 'claude',
+            agentRuntime: 'claude-sdk',
+            requestedSubstrate: 'sdk',
+            requireSdkSubstrate: true,
+          },
+        );
+        // From here down, createQuickSessionCore has ALREADY minted a real
+        // session + sentinel run + git worktree — anything that throws past
+        // this point must compensate via a full dismiss before propagating,
+        // because launchDesignSessionForFork (designSessionLaunch.ts) only
+        // records `created.sessionId` once THIS callback resolves; a throw
+        // from inside it leaves the saga's own catch block with no id to
+        // dismiss, orphaning the session/run/worktree. finishDesignSessionCreate
+        // (designSessionLaunch.ts) owns that internal compensation — see its
+        // JSDoc for why this is NOT redundant with the saga's own dismiss (the
+        // two only ever apply in mutually exclusive windows): do NOT also add
+        // a dismiss to the saga's catch for this failure mode.
+        await finishDesignSessionCreate({
+          sessionId: session.id,
+          resolvedSubstrate,
+          stampDesignIdeaId: () => {
+            const dbHandle = databaseService.getDb();
+            dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
+          },
+          dismissSession: dismissSessionFully,
+          onCompensationFailure: (dismissErr) => {
+            loggerLike.warn('[Main] design-mode fork: compensating dismiss failed after mid-create error', {
+              sessionId: session.id,
+              error: dismissErr instanceof Error ? dismissErr.message : String(dismissErr),
+            });
+          },
+        });
+
+        // v0.5 re-entry stub (mirrors ipc/session.ts ~1064-1090) — fail-soft: a
+        // stub failure must never fail session creation. Deliberately called
+        // AFTER finishDesignSessionCreate rather than folded into it — this
+        // failure mode is intentionally NOT compensating.
+        try {
+          await ArtifactRouter.getInstance().apply(projectId, {
+            op: 'create',
+            runId,
+            atype: 'ui-prototype',
+            label: 'Prototype',
+            payloadJson: null,
+            sourceRef: ideaId,
+            sessionId: session.id,
+            isNew: true,
+            actor: 'orchestrator',
+          });
+        } catch (stubErr) {
+          loggerLike.warn('[Main] design-mode fork: prototype stub creation failed (non-fatal)', {
+            sessionId: session.id,
+            error: stubErr instanceof Error ? stubErr.message : String(stubErr),
+          });
+        }
+
+        return { sessionId: session.id, runId, worktreePath: session.worktreePath };
+      },
+      kickoffDesignPanel: async ({ sessionId, worktreePath }) => {
+        // Mirrors useQuickSession.ts's post-create sequence: create the Chat
+        // panel, register it with the Claude runtime, then fire the canonical
+        // design kickoff prompt as its first turn via startPanel — a FRESH
+        // panel has no running process and no claude_session_id yet, so this is
+        // the 'panels:continue' first-message branch (ipc/session.ts ~2783-2797),
+        // never continuePanel/resume.
+        const panel = await panelManager.createPanel({ sessionId, type: 'claude', title: 'Chat' });
+        const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
+        if (!claudePanelManager) throw new Error('the Claude panel manager is not available yet');
+        // We just created this panel with type 'claude', so its customState IS a
+        // ClaudePanelState — but ToolPanel's `state.customState` is a union across
+        // every panel kind with no discriminant tying it to `panel.type`, so TS
+        // cannot see that. The parallel call in ipc/panels.ts:36 passes it
+        // unnarrowed only because its `require` is untyped; narrow here rather
+        // than giving up the typed import.
+        claudePanelManager.registerPanel(
+          panel.id,
+          panel.sessionId,
+          panel.type === 'claude'
+            ? (panel.state.customState as ClaudePanelState | undefined)
+            : undefined,
+        );
+
+        const kickoffPrompt = DESIGN_MODE_KICKOFF_PROMPT;
+        sessionManager.addPanelConversationMessage(panel.id, 'user', kickoffPrompt);
+        const dbSession = sessionManager.getDbSession(sessionId);
+        await claudePanelManager.startPanel(panel.id, worktreePath, kickoffPrompt, dbSession?.permission_mode);
+      },
+      dismissSession: dismissSessionFully,
+      reportLaunchFailure: ({ projectId, ideaId, runId, error }) => {
+        void ReviewItemRouter.getInstance()
+          .applyReviewItem(projectId, {
+            op: 'create',
+            actor: 'orchestrator',
+            kind: 'finding',
+            title: 'Design mode launch failed',
+            body:
+              `The approve-idea gate's design-mode fork could not launch a design session ` +
+              `for idea ${ideaId} (run ${runId}): ${error}\n\nOpen the idea's prototype from the ` +
+              `backlog and start a design session manually, or re-run the planner and pick ` +
+              `"Approve → design mode" again.`,
+            blocking: false,
+            severity: 'error',
+            entityType: 'idea',
+            entityId: ideaId,
+            runId,
+            payload: { kind: 'finding', category: 'design-mode-launch' },
+          })
+          .catch((err) => {
+            loggerLike.error('[Main] design-mode fork: failed to report launch failure', {
+              ideaId,
+              runId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      },
+    } satisfies DesignSessionLaunchDeps);
+    console.log('[Main] design-mode-fork launch deps wired');
 
     // Boot recovery: reconcile EVERY workflow's rotation experiment against its live
     // weighted pool (migration 058). Config could have drifted while a pre-058 build

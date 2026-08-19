@@ -13,6 +13,7 @@
  * Keep this file free of Node.js built-ins so it imports in any environment
  * (main process AND renderer).
  */
+import type { IdeaComponentState } from './ideaComponents';
 
 // ---------------------------------------------------------------------------
 // Scalar enums
@@ -214,6 +215,16 @@ export interface BacklogTaskItem {
    * shape parity; consumers should treat `undefined` as "unknown / not gated".
    */
   readyToWork?: boolean;
+  /**
+   * The idea component ledger (migration 101, shared/types/ideaComponents.ts)
+   * — one entry per tracked component, hybrid-resolved: an authoritative
+   * ledger row when one exists, else a derived 'complete'/'incomplete' entry
+   * synthesized from the DB. Populated for type='idea' ONLY; optional for
+   * shape parity across processes — same convention as `blockedBy`/
+   * `readyToWork` above, consumers should treat `undefined` as "not computed",
+   * not "no components".
+   */
+  components?: IdeaComponentState[];
   children?: BacklogTaskItem[]; // for epics
   childCount?: number;
   pendingTasks?: number;
@@ -238,7 +249,13 @@ export type TaskChangeAction = 'created' | 'updated' | 'stageMoved' | 'decompose
  * main/src/orchestrator/taskChangeRouter.ts re-exports it so every existing
  * import site is unchanged.
  */
-export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear' | 'plane';
+export type TaskActor =
+  | 'user'
+  | 'orchestrator'
+  | `agent:${string}`
+  | 'linear'
+  | 'plane'
+  | 'dart';
 
 export interface TaskChangedEvent {
   projectId: number;

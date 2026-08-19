@@ -2,7 +2,9 @@
  * TrackerIntegrationSection — the issue-tracker catalog inside
  * Settings → Integrations, rendered below the Claude/Codex provider rows.
  *
- * Exactly two provider rows (Linear, Plane). A connection is project-scoped and
+ * One row per entry in TRACKER_PROVIDERS (Linear, Plane, Dart) — the catalog is
+ * data-driven, so a new provider is one row in that table and nothing here.
+ * A connection is project-scoped and
  * the wizard can target ANY cyboflow project, so each row lists EVERY project's
  * connection for that provider (project chip + status + Manage) — not just the
  * active project's. The Connect button stays visible while the ACTIVE project

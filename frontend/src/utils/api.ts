@@ -33,6 +33,13 @@ export interface IPCResponse<T = unknown> {
    * dual declaration in frontend/src/types/electron.d.ts.
    */
   needsRebase?: boolean;
+  /**
+   * Set by the merge handlers when the branch had NOTHING left to merge — its
+   * work is already in main, almost always because the agent merged it in chat.
+   * Not a failure: the dialog offers Mark complete instead of an error. Keep in
+   * sync with the dual declaration in frontend/src/types/electron.d.ts.
+   */
+  alreadyUpToDate?: boolean;
 }
 
 // Type for Git error response.
@@ -273,6 +280,27 @@ export class API {
     async abortRebaseAndUseClaude(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.abortRebaseAndUseClaude(sessionId);
+    },
+
+    /**
+     * Did this session's work land? `delivered` = a run carries a delivery stamp
+     * (our merge / create-PR path ran); `landed` = git says the branch has
+     * nothing left to give main (the agent merged it in chat). Either turns
+     * Dismiss into a Mark-complete choice.
+     */
+    async getDeliveryState(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.getDeliveryState(sessionId);
+    },
+
+    /**
+     * Stamp this session's runs as delivered-by-another-path. Bookkeeping only —
+     * it archives nothing, so callers follow it with `delete`. Order matters:
+     * the stamp is what makes that archive KEEP the session's findings.
+     */
+    async markComplete(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.markComplete(sessionId);
     },
 
     async squashAndRebaseToMain(sessionId: string, commitMessage: string) {

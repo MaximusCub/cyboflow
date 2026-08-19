@@ -22,7 +22,17 @@
  *                                  v0, migration 085) also gets an
  *                                  `approved_design` block with a RESOLVED
  *                                  absolute path to the approved prototype
- *                                  snapshot — the zero-export handoff read path.)
+ *                                  snapshot — the zero-export handoff read path.
+ *                                  An idea also gets `components` — the idea
+ *                                  component ledger's full hybrid read model
+ *                                  (migration 101, resolveIdeaComponents),
+ *                                  always all five, carrying `staleAt` so
+ *                                  "needs review" (prior work, re-verify) is
+ *                                  never collapsed into "not started".)
+ *   - mcp-set-idea-component      (WRITE via IdeaComponentRouter's chokepoint;
+ *                                  source:'flow', sourceRunId + the idea's
+ *                                  current version stamped by this handler,
+ *                                  never by the calling agent.)
  *
  * Plus the INTERACTIVE-substrate PreToolUse gate (IDEA-013 S5 / TASK-810):
  *   - shell-approval-request      (ASYNC-DEFERRED — the first handler that does
@@ -113,6 +123,9 @@ import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../rev
 import { selectFindingForSeed, selectRunFindings } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
+import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
+import { IdeaComponentRouter, IdeaComponentError } from '../ideaComponents/ideaComponentRouter';
+import type { IdeaComponentKey, IdeaComponentStateValue } from '../../../../shared/types/ideaComponents';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import { FeedbackRouter, FeedbackError } from '../feedbackRouter';
 import type { ArtifactActor } from '../artifactRouter';
@@ -318,6 +331,26 @@ export type McpQueryMessage =
       dependsOnTaskId: string;
       /** Edge kind; defaults to 'blocking' at the chokepoint. */
       dependencyKind?: TaskDependencyKind;
+    }
+  | {
+      /**
+       * WRITE: set one idea component's ledger state via
+       * IdeaComponentRouter.applyChange's 'set-component-state' op
+       * (source:'flow'). `ideaId` is an opaque idea id OR its display ref
+       * (e.g. 'IDEA-009') — resolved the same way as mcp-get-task
+       * (selectTaskById-by-id first, then resolveBacklogRef-by-ref), scoped to
+       * THIS run's project. `sourceRunId` (this run's id) and
+       * `builtAgainstVersion` (the idea's CURRENT `version` at call time) are
+       * resolved by handleSetIdeaComponent itself — the calling agent never
+       * supplies either.
+       */
+      type: 'mcp-set-idea-component';
+      requestId: string;
+      runId: string;
+      /** Opaque idea id OR display ref (e.g. 'IDEA-009'). */
+      ideaId: string;
+      component: IdeaComponentKey;
+      state: IdeaComponentStateValue;
     }
   | {
       /**
@@ -1541,6 +1574,9 @@ export class McpQueryHandler {
         case 'mcp-add-task-dependency':
           await this.handleAddTaskDependency(msg, client);
           break;
+        case 'mcp-set-idea-component':
+          await this.handleSetIdeaComponent(msg, client);
+          break;
         case 'mcp-list-tasks':
           // Read-only: projects + flattens selectProjectBacklog's tree. Never writes.
           this.handleListTasks(msg, client);
@@ -2508,6 +2544,110 @@ export class McpQueryHandler {
     });
   }
 
+  /**
+   * Set one idea's component ledger state (cyboflow_set_idea_component) via
+   * IdeaComponentRouter's 'set-component-state' op, source:'flow'. Resolves
+   * `ideaId` id-then-ref exactly like handleGetTask (an opaque id wins; on a
+   * miss, resolveBacklogRef scoped to this run's project), and rejects
+   * 'not_found' when the resolved entity is missing, cross-project, or not an
+   * idea (epics/tasks carry no ledger) — the same "indistinguishable from a
+   * genuine miss" posture handleGetTask uses for its cross-project guard.
+   *
+   * `sourceRunId` and `builtAgainstVersion` are resolved HERE, never accepted
+   * from the calling agent (per the brief: "the tool resolves those, never the
+   * calling agent") — sourceRunId is this run's own id, and
+   * builtAgainstVersion is the idea's CURRENT `version` at call time (the
+   * version this component is being stamped AGAINST).
+   */
+  private async handleSetIdeaComponent(
+    msg: Extract<McpQueryMessage, { type: 'mcp-set-idea-component' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    let item = selectTaskById(this.db, msg.ideaId);
+    if (!item) {
+      const resolvedId = resolveBacklogRef(this.db, ctx.projectId, msg.ideaId);
+      if (resolvedId) {
+        item = selectTaskById(this.db, resolvedId);
+      }
+    }
+
+    if (!item || item.project_id !== ctx.projectId || item.type !== 'idea') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'not_found',
+      });
+      return;
+    }
+
+    try {
+      const { states } = await IdeaComponentRouter.getInstance().applyChange(ctx.projectId, {
+        op: 'set-component-state',
+        ideaId: item.id,
+        component: msg.component,
+        state: msg.state,
+        source: 'flow',
+        sourceRunId: msg.runId,
+        builtAgainstVersion: item.version,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          idea_id: item.id,
+          ref: item.ref,
+          component: msg.component,
+          state: msg.state,
+          // The fresh merged hybrid snapshot (all five) — lets the calling
+          // agent confirm staleness cleared without a separate get_task round
+          // trip (setComponentState always clears stale_at/stale_reason as a
+          // side effect; see ideaComponentRouter.ts).
+          components: states,
+        },
+      });
+    } catch (err) {
+      this.writeIdeaComponentError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Surface an IdeaComponentRouter chokepoint failure as an ok:false response.
+   * Mirrors writeTaskChangeError's shape for the sibling ledger chokepoint.
+   */
+  private writeIdeaComponentError(client: net.Socket, requestId: string, err: unknown): void {
+    if (err instanceof IdeaComponentError) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: err.code,
+      });
+      return;
+    }
+    this.logger?.error('[Cyboflow MCP Query] idea component change failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId,
+      ok: false,
+      error: 'idea_component_change_failed',
+    });
+  }
+
   // --------------------------------------------------------------------------
   // Read-only backlog listing (cyboflow_list_tasks / cyboflow_get_task)
   //
@@ -2797,6 +2937,21 @@ export class McpQueryHandler {
           snapshot_path: path.resolve(approvedDesign.snapshotPath),
         };
       }
+
+      // Idea component ledger (migration 101 / shared/types/ideaComponents.ts):
+      // the hybrid read model, resolved fresh on every get_task rather than
+      // trusted from the listing-path overlay so a same-turn stamp is never
+      // stale. Always all FIVE components — never omitted for an idea (unlike
+      // attachments/approved_design, there is no "component with none" case:
+      // resolveIdeaComponents backfills every component via derivation when no
+      // ledger row exists). Each entry carries `staleAt`, which is the field a
+      // reading agent MUST check, not just `state`: `state: 'incomplete'` alone
+      // is ambiguous between "never started" (staleAt: null) and "needs
+      // review" (staleAt non-null — prior work exists and should be
+      // re-verified against the diff, not redone from scratch). See
+      // planner.md's "component ledger" section for how a flow is expected to
+      // read and act on this.
+      task['components'] = resolveIdeaComponents(this.db, item.id);
     }
 
     this.writeResponse(client, {

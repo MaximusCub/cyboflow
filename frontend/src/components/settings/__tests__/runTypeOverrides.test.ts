@@ -19,9 +19,9 @@ import {
   coerceDraftForSubstrate,
   coerceGlobalLaunchModel,
   draftFromStored,
-  draftUsesCodexRuntime,
+  draftRuntimeProvider,
   effectiveRuntimeForDraft,
-  globalRuntimeUsesCodex,
+  globalRuntimeProvider,
   isQuickRunTypeKey,
   patchFromDraft,
   resolveRunTypeBaseline,
@@ -41,6 +41,7 @@ import {
 import {
   isCodexModelFamily,
   isCodexModelSelection,
+  isOmpModelFamily,
 } from '../../../../../shared/types/agentModels';
 import {
   resolveRunTypeLaunchDefaults,
@@ -271,7 +272,7 @@ describe('resolveRunTypeBaseline', () => {
       })),
     ).toEqual([
       { field: 'model', baseline: 'Sonnet 5 · 1M' },
-      { field: 'agentRuntime', baseline: 'Claude interactive' },
+      { field: 'agentRuntime', baseline: 'Claude Interactive (CLI)' },
     ]);
   });
 
@@ -369,7 +370,7 @@ describe('agentRuntimeOptions', () => {
   // The quick key is the only one whose launch can reach the Codex TUI; a flow
   // run has no PTY seam, so offering it there would be a control that cannot
   // take effect (the same rule that keeps effort quick-only).
-  it('offers Codex terminal on the quick key and never on a flow key', () => {
+  it('offers the Codex CLI runtime on the quick key and never on a flow key', () => {
     expect(agentRuntimeOptions(QUICK_RUN_TYPE_KEY)).toContain('codex-pty');
     expect(agentRuntimeOptions('workflow:wf-1')).not.toContain('codex-pty');
     // Both share the three Claude/Codex-SDK runtimes.
@@ -395,7 +396,7 @@ describe('agentRuntimeOptions', () => {
     // The label map is deliberately wider than the option list — a value that
     // reaches the detail screen must read as a name either way.
     expect(runTypeValueLabel('agentRuntime', 'omp-sdk')).toBe('OMP');
-    expect(runTypeValueLabel('agentRuntime', 'omp-pty')).toBe('OMP terminal');
+    expect(runTypeValueLabel('agentRuntime', 'omp-pty')).toBe('OMP (CLI)');
   });
 });
 
@@ -403,7 +404,7 @@ describe('runTypeValueLabel', () => {
   it('labels every known value from the same maps the pickers use', () => {
     expect(runTypeValueLabel('model', 'sonnet')).toBe('Sonnet 5 · 1M');
     expect(runTypeValueLabel('substrate', 'interactive')).toBe('Interactive terminal');
-    expect(runTypeValueLabel('agentRuntime', 'codex-pty')).toBe('Codex terminal');
+    expect(runTypeValueLabel('agentRuntime', 'codex-pty')).toBe('Codex (CLI)');
     expect(runTypeValueLabel('permissionMode', 'dontAsk')).toBe("Don't ask");
     expect(runTypeValueLabel('reasoningEffort', 'xhigh')).toBe('Xhigh');
   });
@@ -579,9 +580,10 @@ describe('runtime-family coercion — every edit order', () => {
   describe('effective runtime', () => {
     it('falls through to the baseline while the runtime card is off', () => {
       expect(effectiveRuntimeForDraft(draft(), flow)).toBe('claude-sdk');
-      expect(draftUsesCodexRuntime(draft(), flow)).toBe(false);
+      expect(draftRuntimeProvider(draft(), flow)).toBe('claude');
       expect(effectiveRuntimeForDraft(draft({ agentRuntime: 'codex-pty' }), flow)).toBe('codex-pty');
-      expect(draftUsesCodexRuntime(draft({ agentRuntime: 'codex-sdk' }), flow)).toBe(true);
+      expect(draftRuntimeProvider(draft({ agentRuntime: 'codex-sdk' }), flow)).toBe('codex');
+      expect(draftRuntimeProvider(draft({ agentRuntime: 'omp-sdk' }), flow)).toBe('omp');
     });
   });
 
@@ -739,15 +741,17 @@ describe('runtime-family coercion — every edit order', () => {
  * "Built-in default" has to stay reachable.
  */
 describe('global-rung runtime-family coercion (Default Launch Model / Agent Runtime)', () => {
-  describe('globalRuntimeUsesCodex', () => {
+  describe('globalRuntimeProvider', () => {
     it('reads the provider off the runtime, and treats an unset global as Claude', () => {
       // Unset ⇒ each launch kind falls through to its own floor, and every floor
       // is a Claude runtime — so the model controls stay Claude-scoped.
-      expect(globalRuntimeUsesCodex(undefined)).toBe(false);
-      expect(globalRuntimeUsesCodex('claude-sdk')).toBe(false);
-      expect(globalRuntimeUsesCodex('claude-interactive')).toBe(false);
-      expect(globalRuntimeUsesCodex('codex-sdk')).toBe(true);
-      expect(globalRuntimeUsesCodex('codex-pty')).toBe(true);
+      expect(globalRuntimeProvider(undefined)).toBe('claude');
+      expect(globalRuntimeProvider('claude-sdk')).toBe('claude');
+      expect(globalRuntimeProvider('claude-interactive')).toBe('claude');
+      expect(globalRuntimeProvider('codex-sdk')).toBe('codex');
+      expect(globalRuntimeProvider('codex-pty')).toBe('codex');
+      expect(globalRuntimeProvider('omp-sdk')).toBe('omp');
+      expect(globalRuntimeProvider('omp-pty')).toBe('omp');
     });
   });
 
@@ -795,15 +799,29 @@ describe('global-rung runtime-family coercion (Default Launch Model / Agent Runt
   // The property the two edit paths exist to guarantee: whatever is stored is
   // launchable on whatever runtime is stored beside it.
   it('leaves no cross-family pair reachable for any model × runtime combination', () => {
-    const models = ['fable', 'opus', 'sonnet', 'haiku', 'auto', 'gpt-5-codex', 'gpt-5', ''];
+    const models = [
+      'fable',
+      'opus',
+      'sonnet',
+      'haiku',
+      'auto',
+      'gpt-5-codex',
+      'gpt-5',
+      'anthropic/claude-opus-4-5',
+      'openrouter/qwen3-coder',
+      '',
+    ];
     for (const runtime of [undefined, ...SESSION_AGENT_RUNTIMES] as const) {
       for (const model of models) {
         const coerced = coerceGlobalLaunchModel(model, runtime);
         if (coerced === '') continue; // absent ⇒ the launch floor applies
+        const provider = globalRuntimeProvider(runtime);
         expect(
-          globalRuntimeUsesCodex(runtime)
+          provider === 'codex'
             ? isCodexModelSelection(coerced)
-            : !isCodexModelFamily(coerced),
+            : provider === 'omp'
+              ? isOmpModelFamily(coerced)
+              : !isCodexModelFamily(coerced) && !isOmpModelFamily(coerced),
         ).toBe(true);
         // Idempotent: re-coercing a coerced value changes nothing.
         expect(coerceGlobalLaunchModel(coerced, runtime)).toBe(coerced);

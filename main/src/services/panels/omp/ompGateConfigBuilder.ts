@@ -128,6 +128,7 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_resolve_finding',
   'cyboflow_run_eval',
   'cyboflow_set_baseline_rotation',
+  'cyboflow_set_idea_component',
   'cyboflow_set_task_stage',
   'cyboflow_set_variant_status',
   'cyboflow_submit_checkpoint',

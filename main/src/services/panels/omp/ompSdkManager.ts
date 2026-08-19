@@ -33,6 +33,10 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveOmpGateExtensionPath } from './gate/ompGatePath';
 import type { OmpGateConfig, OmpGateSentinel } from './gate/ompGateTypes';
 import { OmpApprovalBridge } from './ompApprovalBridge';
+import {
+  OmpQuestionBridge,
+  type OmpQuestionRouterPort,
+} from './ompQuestionBridge';
 import { detectOmpAvailability } from './ompAvailability';
 import { buildOmpGateConfig } from './ompGateConfigBuilder';
 import { writeOmpMcpConfig } from './ompMcpConfigWriter';
@@ -201,6 +205,8 @@ interface OmpTurnContext {
   completedCleanly: boolean;
   /** Set when the turn's terminal result was an error, so the await can throw. */
   turnError: string | null;
+  /** Accurate replacement for OMP's generic "Interrupted by user" after bridge failure. */
+  questionBridgeError: string | null;
 }
 
 /** A warm (persistent) `omp --mode rpc-ui` child parked between turns. */
@@ -208,6 +214,7 @@ interface WarmOmpEntry {
   client: OmpRpcClientLike;
   rawEventSink: OmpRawEventSink;
   approvalBridge: OmpApprovalBridge;
+  questionBridge: OmpQuestionBridge;
   unsubscribe: (() => void) | null;
   command: string;
   /** The OMP session FILE PATH — the external session id and the resume target. */
@@ -368,6 +375,7 @@ export class OmpSdkManager extends AbstractCliManager {
   private readonly sentinelWaitMs: number;
 
   private cyboflowMcpRuntimeConfig: OmpMcpRuntimeConfig | null = null;
+  private questionRouterProvider: (() => OmpQuestionRouterPort) | null = null;
   private resolvedExecutable: ResolvedOmpExecutable | null = null;
 
   constructor(
@@ -408,6 +416,10 @@ export class OmpSdkManager extends AbstractCliManager {
 
   setCyboflowMcpRuntimeConfig(config: OmpMcpRuntimeConfig): void {
     this.cyboflowMcpRuntimeConfig = config;
+  }
+
+  setQuestionRouterProvider(provider: () => OmpQuestionRouterPort): void {
+    this.questionRouterProvider = provider;
   }
 
   /** The model picker's catalogue, served from the shared 5-minute cache. */
@@ -802,6 +814,7 @@ export class OmpSdkManager extends AbstractCliManager {
       client: undefined as unknown as OmpRpcClientLike,
       rawEventSink: new OmpRawEventSink(this.db, this.logger),
       approvalBridge: undefined as unknown as OmpApprovalBridge,
+      questionBridge: undefined as unknown as OmpQuestionBridge,
       unsubscribe: null,
       command: executable.executablePath,
       sessionFilePath: options.resumeSessionId ?? null,
@@ -819,10 +832,18 @@ export class OmpSdkManager extends AbstractCliManager {
       currentContext: null,
     };
 
+    entry.questionBridge = new OmpQuestionBridge({
+      getRunId: () => entry.currentContext?.runId ?? null,
+      getQuestionRouter: () => this.requireQuestionRouter(),
+      respond: (response) => entry.client.respondToExtensionUi(response),
+      onError: (error) => this.handleQuestionBridgeError(entry, error),
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
     entry.approvalBridge = new OmpApprovalBridge({
       respond: (response) => entry.client.respondToExtensionUi(response),
       isGateVerified: () => entry.gateVerified,
       onSurfacedError: (message) => this.surfaceError(entry, message),
+      onQuestionRequest: (event) => entry.questionBridge.handleUiRequest(event),
       ...(this.logger ? { logger: this.logger } : {}),
     });
 
@@ -888,6 +909,7 @@ export class OmpSdkManager extends AbstractCliManager {
       terminalResultEmitted: false,
       completedCleanly: false,
       turnError: null,
+      questionBridgeError: null,
     };
     entry.currentContext = ctx;
 
@@ -1000,7 +1022,9 @@ export class OmpSdkManager extends AbstractCliManager {
         exitCode = 1;
         const message = error instanceof Error ? error.message : String(error);
         this.logger?.error(`[OmpSdkManager] OMP RPC run error for panel ${displayPanelId}: ${message}`);
-        this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
+        if (message !== ctx.questionBridgeError) {
+          this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
+        }
         if (!ctx.terminalResultEmitted) {
           ctx.terminalResultEmitted = true;
           this.emitProjected(
@@ -1214,16 +1238,23 @@ export class OmpSdkManager extends AbstractCliManager {
     if (!ctx) return; // stray event while parked
 
     for (const projected of ctx.projector.project(event)) {
-      if (projected.type === 'agent_result') {
+      const effective =
+        projected.type === 'agent_result' &&
+        projected.is_error &&
+        projected.result === 'Interrupted by user' &&
+        ctx.questionBridgeError !== null
+          ? { ...projected, result: ctx.questionBridgeError }
+          : projected;
+      if (effective.type === 'agent_result') {
         if (ctx.terminalResultEmitted) continue;
         ctx.terminalResultEmitted = true;
       }
-      this.emitProjected(ctx.router, ctx.runId, ctx.displayPanelId, ctx.sessionId, projected);
-      if (projected.type === 'agent_result') {
-        if (projected.is_error) {
+      this.emitProjected(ctx.router, ctx.runId, ctx.displayPanelId, ctx.sessionId, effective);
+      if (effective.type === 'agent_result') {
+        if (effective.is_error) {
           // Recorded rather than thrown: `runTurn` still resolves on this same
           // `agent_end`, and the awaiting turn converts it into the failure.
-          ctx.turnError = projected.result ?? 'OMP turn failed';
+          ctx.turnError = effective.result ?? 'OMP turn failed';
         } else {
           ctx.completedCleanly = true;
         }
@@ -1265,6 +1296,20 @@ export class OmpSdkManager extends AbstractCliManager {
     });
   }
 
+  private handleQuestionBridgeError(entry: WarmOmpEntry, error: Error): void {
+    const detail = error.cause instanceof Error ? `: ${error.cause.message}` : '';
+    const message = `${error.message}${detail}`;
+    if (entry.currentContext) entry.currentContext.questionBridgeError = message;
+    this.surfaceError(entry, message);
+  }
+
+  private requireQuestionRouter(): OmpQuestionRouterPort {
+    if (!this.questionRouterProvider) {
+      throw new Error('OMP question router provider is not configured');
+    }
+    return this.questionRouterProvider();
+  }
+
   // -------------------------------------------------------------------------
   // Teardown
   // -------------------------------------------------------------------------
@@ -1276,6 +1321,7 @@ export class OmpSdkManager extends AbstractCliManager {
     this.clearWarmIdleTimer(entry);
     if (this.warmOmpRuns.get(spawnKey) === entry) this.warmOmpRuns.delete(spawnKey);
     entry.teardownPromise = (async () => {
+      entry.questionBridge.teardown();
       if (interrupt) {
         // A first-class RPC abort, not a signal: it lets OMP stop the turn
         // cleanly and flush its own aborted `agent_end`.

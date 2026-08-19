@@ -194,6 +194,13 @@ vi.mock('../../../utils/api', () => ({
       delete: vi.fn().mockResolvedValue({ success: true }),
       squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true }),
       rebaseToMain: vi.fn().mockResolvedValue({ success: true }),
+      // Dismiss-dialog delivery probe fires when it opens; default "not
+      // delivered" keeps the plain confirm path (see SessionDismissDialog).
+      getDeliveryState: vi.fn().mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: false, ownCommits: 0 },
+      }),
+      markComplete: vi.fn().mockResolvedValue({ success: true, data: { stamped: 1 } }),
       // Merge-dialog prefill probe fires when the dialog opens.
       getBranchCommitSubjects: vi.fn().mockResolvedValue({ success: true, data: { subjects: [] } }),
       gitPush: vi.fn().mockResolvedValue({ success: true }),
@@ -699,13 +706,15 @@ describe('CyboflowRoot — lifecycle dialog wiring (TASK-796)', () => {
     expect(await screen.findByText('Create pull request')).toBeInTheDocument();
   });
 
-  it('clicking Dismiss opens the SessionDismissDialog', () => {
+  it('clicking Dismiss opens the SessionDismissDialog', async () => {
     activateQuickSession();
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByText('Dismiss session?')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('session-action-dismiss'));
-    expect(screen.getByText('Dismiss session?')).toBeInTheDocument();
+    // The dialog's own delivery-state probe resolves async (default mock:
+    // not delivered) before the plain confirm renders.
+    expect(await screen.findByText('Dismiss session?')).toBeInTheDocument();
   });
 
   it('renders the action bar for an opened workflow run whose session.runId matches activeRunId', () => {

@@ -640,6 +640,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_set_idea_component',
+        description:
+          "Set one idea's component ledger state (migration 101's idea component ledger — idea-spec/prototype/architecture/epics/stories, each complete|incomplete|skipped). Routes through the single IdeaComponentRouter write chokepoint with source:'flow'; sourceRunId and the idea's builtAgainstVersion are resolved by the tool itself from THIS run, never accepted as input. idea_id may be the opaque idea id OR its display ref (e.g. 'IDEA-009') — resolved the same way as cyboflow_get_task. Setting a state ALWAYS clears any prior staleness on that component (an explicit stamp is a reviewed judgment, even 'still incomplete'). Stamp AFTER the body write that completes a component, never before — see cyboflow_get_task's description for why order matters.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            idea_id: { type: 'string', description: "Opaque idea id OR display ref (e.g. 'IDEA-009') (required)" },
+            component: {
+              type: 'string',
+              enum: ['idea-spec', 'prototype', 'architecture', 'epics', 'stories'],
+              description: 'Which of the five tracked idea components to set (required)',
+            },
+            state: {
+              type: 'string',
+              enum: ['complete', 'incomplete', 'skipped'],
+              description: "The component's new state (required). 'skipped' must only be set deliberately — it is never inferred.",
+            },
+          },
+          required: ['idea_id', 'component', 'state'],
+        },
+      },
+      {
         name: 'cyboflow_list_tasks',
         description:
           "List the backlog (ideas/epics/tasks) for THIS run's project. Read-only and run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID). Returns COMPACT items WITHOUT their markdown body — use cyboflow_get_task to fetch one item's full body by the id or ref this tool returns. By default archived items and done/retired items are hidden; opt in with include_archived / include_done. Use this before cyboflow_create_task to check whether an idea/task already exists and avoid creating a duplicate.",
@@ -656,7 +678,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_get_task',
         description:
-          "Fetch ONE backlog entity with its FULL markdown body, by opaque id OR display ref (e.g. IDEA-009, EPIC-002, TASK-014) — pass a ref straight from cyboflow_list_tasks, it is resolved automatically. Read-only, scoped to THIS run's project: an id/ref that belongs to another project is reported as not_found. For an IDEA, the response also includes an 'attachments' array — [{ id, label, mimeType, path }], `path` a RESOLVED ABSOLUTE on-disk path (never base64/dataURLs) — read the image bytes yourself via the Read tool; an idea with none returns attachments: []. Epics/tasks carry no 'attachments' key. For an idea with an approved design (Design Mode), the response also includes 'approved_design': { approved_at, draft_revision, prototype_revision, snapshot_path }, `snapshot_path` a RESOLVED ABSOLUTE on-disk path to the approved prototype snapshot HTML — read it directly via the Read tool, no export step needed. An idea with no approved design omits the key.",
+          "Fetch ONE backlog entity with its FULL markdown body, by opaque id OR display ref (e.g. IDEA-009, EPIC-002, TASK-014) — pass a ref straight from cyboflow_list_tasks, it is resolved automatically. Read-only, scoped to THIS run's project: an id/ref that belongs to another project is reported as not_found. For an IDEA, the response also includes an 'attachments' array — [{ id, label, mimeType, path }], `path` a RESOLVED ABSOLUTE on-disk path (never base64/dataURLs) — read the image bytes yourself via the Read tool; an idea with none returns attachments: []. Epics/tasks carry no 'attachments' key. For an idea with an approved design (Design Mode), the response also includes 'approved_design': { approved_at, draft_revision, prototype_revision, snapshot_path }, `snapshot_path` a RESOLVED ABSOLUTE on-disk path to the approved prototype snapshot HTML — read it directly via the Read tool, no export step needed. An idea with no approved design omits the key. For an IDEA, the response ALSO includes 'components' — the idea component ledger, always all FIVE entries (idea-spec, prototype, architecture, epics, stories; see cyboflow_set_idea_component to write one), each `{ component, state, source, sourceRunId, sourceSessionId, builtAgainstVersion, staleAt, staleReason, updatedAt }`. `state` is one of complete|incomplete|skipped. CRITICAL: an `incomplete` component with `staleAt` non-null is NOT the same as one never started — it means prior work exists (from before the idea's body changed underneath it) and needs RE-VERIFICATION, not a redo from scratch; `staleAt === null` on an `incomplete` component means truly not started. Epics/tasks carry no 'components' key.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -2021,6 +2043,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id, dependsOnTaskId: depends_on_task_id };
       if (kind !== undefined) queryParams['dependencyKind'] = kind;
       return executeMcpQuery('mcp-add-task-dependency', queryParams);
+    }
+
+    case 'cyboflow_set_idea_component': {
+      const args = (request.params.arguments ?? {}) as {
+        idea_id?: unknown;
+        component?: unknown;
+        state?: unknown;
+      };
+      const { idea_id, component, state } = args;
+      if (typeof idea_id !== 'string' || idea_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'idea_id: string' }) },
+          ],
+        };
+      }
+      if (
+        component !== 'idea-spec' &&
+        component !== 'prototype' &&
+        component !== 'architecture' &&
+        component !== 'epics' &&
+        component !== 'stories'
+      ) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'invalid_arguments',
+                expected: "component: 'idea-spec' | 'prototype' | 'architecture' | 'epics' | 'stories'",
+              }),
+            },
+          ],
+        };
+      }
+      if (state !== 'complete' && state !== 'incomplete' && state !== 'skipped') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'invalid_arguments',
+                expected: "state: 'complete' | 'incomplete' | 'skipped'",
+              }),
+            },
+          ],
+        };
+      }
+      return executeMcpQuery('mcp-set-idea-component', { ideaId: idea_id, component, state });
     }
 
     case 'cyboflow_list_tasks': {

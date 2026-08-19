@@ -150,7 +150,7 @@ function rethrowAsTRPCError(err: unknown): never {
 // Zod input schemas — the exact shapes in shared/types/trackerSync.ts
 // ---------------------------------------------------------------------------
 
-const providerSchema = z.enum(['linear', 'plane']);
+const providerSchema = z.enum(['linear', 'plane', 'dart']);
 
 /** Renderer -> main, wizard/connect only. This is the ONLY inbound key path. */
 const credentialsSchema = z.object({
@@ -170,7 +170,7 @@ const sourceSelectionSchema = z.object({
   narrowKind: narrowKindSchema,
 });
 
-const mappingTargetSchema = z.enum(['dont', 'idea', 'ready', 'done', 'wontdo']);
+const mappingTargetSchema = z.enum(['dont', 'idea', 'ready', 'done', 'wontdo', 'indev']);
 /** Keyed by TRACKER state id, so the keys are provider-defined and unconstrained. */
 const stateMappingSchema = z.record(z.string(), mappingTargetSchema);
 

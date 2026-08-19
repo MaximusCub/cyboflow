@@ -56,6 +56,7 @@ import type {
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
 import {
   MAPPING_TARGETS,
+  mappingTargetNote,
   providerMeta,
   seedStateMapping,
   trackerInputClass,
@@ -996,25 +997,33 @@ export function TrackerWizardModal({
                   {stateCounts[state.id] ?? 0}
                 </span>
               </div>
-              <select
-                aria-label={`Cyboflow state for ${state.name}`}
-                value={mapping[state.id] ?? 'dont'}
-                onChange={(e) =>
-                  setMapping((prev) => ({
-                    ...prev,
-                    // The <select> value is always one of MAPPING_TARGETS, so the
-                    // cast below stays inside the TrackerMappingTarget union.
-                    [state.id]: e.target.value as TrackerStateMapping[string],
-                  }))
-                }
-                className={cn(trackerSelectClass, 'w-full')}
-              >
-                {MAPPING_TARGETS.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
+              <div className="flex min-w-0 flex-col gap-1">
+                <select
+                  aria-label={`Cyboflow state for ${state.name}`}
+                  value={mapping[state.id] ?? 'dont'}
+                  onChange={(e) =>
+                    setMapping((prev) => ({
+                      ...prev,
+                      // The <select> value is always one of MAPPING_TARGETS, so the
+                      // cast below stays inside the TrackerMappingTarget union.
+                      [state.id]: e.target.value as TrackerStateMapping[string],
+                    }))
+                  }
+                  className={cn(trackerSelectClass, 'w-full')}
+                >
+                  {MAPPING_TARGETS.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                {(() => {
+                  const note = mappingTargetNote(mapping[state.id] ?? 'dont', meta.name);
+                  return note === null ? null : (
+                    <span className="text-[10px] leading-tight text-text-tertiary">{note}</span>
+                  );
+                })()}
+              </div>
             </div>
           ))}
           {states.length === 0 && (

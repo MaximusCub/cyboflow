@@ -1,41 +1,34 @@
 /**
- * Migration 105_agent_runtime_omp_fleet.sql — admitting 'omp-fleet'.
+ * Migration 105_tracker_provider_dart.sql — provider-CHECK widening tests.
  *
- * The regression this file exists to prevent: an earlier attempt shipped the
- * widening as a NEW file numbered 101 (a gap below the already-released 103)
- * that rebuilt `sessions` from a hardcoded CREATE TABLE. Because the migration
- * ledger is keyed by FILENAME, that file ran LAST on an already-migrated DB
- * rather than in its numeric position — against a post-103/104 schema — where
- * it (a) dropped every column its hardcoded list omitted and (b) restated 103's
- * CHECK lists from memory, silently UN-widening 'omp-sdk'/'omp-pty'.
- *
- * So the tests below run the REAL upgrade a 0.2.3 user performs: a DB is built
- * by a DatabaseService whose migrations dir omits 105 ONLY (103 and 104 are
- * present, exactly as they are on a shipped install), rows are seeded, and a
- * second DatabaseService pointed at the full dir boots on the same file.
- *
- * Proves:
- *   1. 'omp-fleet' becomes storable on sessions and workflow_runs.
- *   2. 103's widenings SURVIVE — 'omp-sdk'/'omp-pty' stay storable on sessions.
- *   3. Every pre-existing row survives verbatim, INCLUDING a seeded omp-sdk
- *      session (the row shape that made the 101 attempt fail closed forever).
- *   4. No column is lost — in particular `status_message`, which database.ts
- *      adds imperatively and no .sql file lists.
- *   5. Indexes, triggers and FK edges are unchanged and foreign_key_check clean.
- *   6. The deliberate narrowings hold: omp-fleet is rejected on the two tables
- *      105 does not widen, and a bogus runtime is still rejected everywhere.
- *   7. The fresh-install path lands the same constraints.
- *   8. Re-applying 105 after a cleared ledger marker is a harmless no-op.
+ * 105 recreates BOTH tracker tables (093's `provider` CHECK is column-level and
+ * SQLite cannot ALTER one), so the interesting properties are not just "does
+ * 'dart' insert" but everything a recreate can silently break. Runs the FULL
+ * real migration chain via DatabaseService.initialize(), the same technique as
+ * migration093.test.ts. Proves:
+ *   1. 'dart' is now storable on both tracker_connections.provider and
+ *      entity_external_links.provider, and an unknown provider is still rejected.
+ *   2. The recreate preserved every column, in order, on both tables — the
+ *      recreate reproduces 093+094's shape by hand, so a dropped or reordered
+ *      column is the live hazard.
+ *   3. Rows written before the widening survive it, and the FK/CASCADE topology
+ *      the recreate had to drop and re-establish still holds (a deleted project
+ *      still takes its connections, links, outbox and conflicts with it, and
+ *      tracker_conflicts.link_id is still ON DELETE SET NULL rather than CASCADE).
+ *   4. entity_external_links' AUTOINCREMENT high-water mark survived, so a post-
+ *      migration insert cannot be handed a retired rowid.
+ *   5. Both UNIQUE constraints on entity_external_links survived the recreate,
+ *      including the one that now has to admit a third provider for one entity.
+ *   6. Replay convergence: a ledger-wiped re-run of the whole directory is
+ *      convergent — 105 has no idempotent-ALTER first statement, so it genuinely
+ *      re-executes, and the copy being verbatim is what makes that safe.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type BetterSqlite3 from 'better-sqlite3';
-import { mkdtempSync, rmSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseService } from '../database';
-
-const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
-const MIGRATION_105 = '105_agent_runtime_omp_fleet.sql';
 
 let tmpDir: string;
 let dbPath: string;
@@ -49,257 +42,232 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/**
- * A migrations dir holding every real migration EXCEPT 105 — i.e. a shipped
- * 0.2.3 install, with 103 and 104 already applied. This is the distinction that
- * matters: excluding everything at-or-above the new file's number (as the 101
- * attempt's own test did) fabricates a pre-state that no user is ever in.
- */
-function migrationsDirWithout105(): string {
-  const dir = join(tmpDir, 'migrations-pre-105');
-  mkdirSync(dir);
-  for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_105) continue;
-    if (!/^\d{3}_.*\.sql$/.test(name)) continue;
-    copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
-  }
-  return dir;
+function columnNames(raw: Database.Database, table: string): string[] {
+  return (raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
 }
 
-function openAt(migrationsDir: string): DatabaseService {
-  const svc = new DatabaseService(dbPath);
-  svc.setMigrationsDirForTesting(migrationsDir);
-  svc.initialize();
-  return svc;
+function seedProject(raw: Database.Database, id: number, path: string): void {
+  raw.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run(id, `Proj ${id}`, path);
 }
 
-/** Seed the rows a 0.2.3 OMP user actually has, plus the legacy baseline. */
-function seedRows(db: BetterSqlite3.Database): void {
-  db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p105')`).run();
-  db.prepare(
-    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
-  ).run();
-
-  const insertSession = db.prepare(
-    `INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, project_id,
-                           status_message, agent_provider, agent_runtime)
-     VALUES (?, ?, 'go', ?, ?, 1, ?, ?, ?)`,
-  );
-  insertSession.run('s-claude', 'Claude', 'wt-1', '/tmp/wt-1', 'Waiting', 'claude', 'claude-sdk');
-  insertSession.run('s-codex-pty', 'Codex TUI', 'wt-2', '/tmp/wt-2', null, 'codex', 'codex-pty');
-  // The row that made the 101 attempt fail closed on every boot, forever.
-  insertSession.run('s-omp-sdk', 'OMP', 'wt-3', '/tmp/wt-3', 'Running', 'omp', 'omp-sdk');
-  insertSession.run('s-omp-pty', 'OMP TUI', 'wt-4', '/tmp/wt-4', null, 'omp', 'omp-pty');
-
-  const insertRun = db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot,
-                                agent_provider, agent_runtime)
-     VALUES (?, 'wf-1', 1, 'completed', 'default', ?, ?)`,
-  );
-  insertRun.run('run-claude', 'claude', 'claude-sdk');
-  insertRun.run('run-omp', 'omp', 'omp-sdk');
+function insertConnection(raw: Database.Database, id: string, provider: string): void {
+  raw
+    .prepare('INSERT INTO tracker_connections (id, project_id, provider) VALUES (?, 1, ?)')
+    .run(id, provider);
 }
 
-function allRows(db: BetterSqlite3.Database, table: string): Array<Record<string, unknown>> {
-  return db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Array<Record<string, unknown>>;
-}
+describe('Migration 105: dart as a third tracker provider', () => {
+  it("admits 'dart' on both provider columns and still rejects an unknown provider", () => {
+    const svc = new DatabaseService(dbPath);
+    svc.initialize();
+    const raw = svc.getDb();
+    seedProject(raw, 1, '/tmp/p1');
 
-function columnNames(db: BetterSqlite3.Database, table: string): string[] {
-  return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
-    .map((c) => c.name)
-    .sort();
-}
+    // The widened value, plus both originals — 105 must ADD, never replace.
+    expect(() => insertConnection(raw, 'conn-dart', 'dart')).not.toThrow();
+    expect(() => insertConnection(raw, 'conn-linear', 'linear')).not.toThrow();
+    expect(() => insertConnection(raw, 'conn-plane', 'plane')).not.toThrow();
+    expect(() => insertConnection(raw, 'conn-bad', 'jira')).toThrow(/CHECK/i);
 
-function schemaObjectNames(db: BetterSqlite3.Database, table: string): string[] {
-  return (
-    db
-      .prepare(
-        `SELECT name FROM sqlite_master
-          WHERE tbl_name = ? AND type IN ('index','trigger','view')
-          ORDER BY name`,
-      )
-      .all(table) as Array<{ name: string }>
-  ).map((r) => r.name);
-}
-
-function fkEdges(db: BetterSqlite3.Database, table: string): string[] {
-  return (
-    db.prepare(`PRAGMA foreign_key_list(${table})`).all() as Array<{
-      table: string;
-      from: string;
-      to: string | null;
-      on_delete: string;
-    }>
-  )
-    .map((fk) => `${table}.${fk.from} -> ${fk.table}.${fk.to} ON DELETE ${fk.on_delete}`)
-    .sort();
-}
-
-interface Snapshot {
-  rows: Record<string, Array<Record<string, unknown>>>;
-  columns: Record<string, string[]>;
-  objects: Record<string, string[]>;
-  fks: Record<string, string[]>;
-}
-
-const TARGET_TABLES = ['sessions', 'workflow_runs'] as const;
-
-function snapshot(db: BetterSqlite3.Database): Snapshot {
-  const snap: Snapshot = { rows: {}, columns: {}, objects: {}, fks: {} };
-  for (const t of TARGET_TABLES) {
-    snap.rows[t] = allRows(db, t);
-    snap.columns[t] = columnNames(db, t);
-    snap.objects[t] = schemaObjectNames(db, t);
-    snap.fks[t] = fkEdges(db, t);
-  }
-  return snap;
-}
-
-/** Migrate to the shipped 0.2.3 state, seed, snapshot; then boot with 105. */
-function upgradeThrough105(): { db: BetterSqlite3.Database; before: Snapshot; svc: DatabaseService } {
-  const pre105 = migrationsDirWithout105();
-  // Two pre-105 boots, not one: initializeSchema() reads PRAGMA table_info(sessions)
-  // before schema.sql has created the table, so its imperative
-  // "ALTER TABLE sessions ADD COLUMN status_message" only lands on the SECOND
-  // launch. Settling that here keeps the snapshot diff about 105 alone — and
-  // makes `status_message` present in the pre-state, which is the whole point.
-  openAt(pre105).close();
-  const pre = openAt(pre105);
-  seedRows(pre.getDb());
-  const before = snapshot(pre.getDb());
-  pre.close();
-
-  const svc = openAt(MIGRATIONS_DIR);
-  return { db: svc.getDb(), before, svc };
-}
-
-/** Insert a session with the given runtime; return the SQLite error, if any. */
-function trySession(db: BetterSqlite3.Database, id: string, provider: string, runtime: string): string | null {
-  try {
-    db.prepare(
-      `INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path,
-                             agent_provider, agent_runtime)
-       VALUES (?, ?, 'go', ?, ?, ?, ?)`,
-    ).run(id, id, `wt-${id}`, `/tmp/${id}`, provider, runtime);
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
-function tryRun(db: BetterSqlite3.Database, id: string, provider: string, runtime: string): string | null {
-  try {
-    db.prepare(
-      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot,
-                                  agent_provider, agent_runtime)
-       VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
-    ).run(id, provider, runtime);
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
-describe('Migration 105: omp-fleet admitted on the session + workflow-run runtime CHECKs', () => {
-  it('(a) makes omp-fleet storable on sessions and workflow_runs', () => {
-    const { db, svc } = upgradeThrough105();
-    expect(trySession(db, 's-fleet', 'omp', 'omp-fleet')).toBeNull();
-    expect(tryRun(db, 'run-fleet', 'omp', 'omp-fleet')).toBeNull();
-    svc.close();
-  });
-
-  it("(b) preserves 103's widenings — omp-sdk and omp-pty stay storable on sessions", () => {
-    const { db, svc } = upgradeThrough105();
-    expect(trySession(db, 's-new-omp-sdk', 'omp', 'omp-sdk')).toBeNull();
-    expect(trySession(db, 's-new-omp-pty', 'omp', 'omp-pty')).toBeNull();
-    expect(tryRun(db, 'run-new-omp-sdk', 'omp', 'omp-sdk')).toBeNull();
-    svc.close();
-  });
-
-  it('(c) preserves every pre-existing row verbatim, including the omp-sdk session', () => {
-    const { db, before, svc } = upgradeThrough105();
-    for (const t of TARGET_TABLES) {
-      expect(allRows(db, t)).toEqual(before.rows[t]);
-    }
-    const ompRow = allRows(db, 'sessions').find((r) => r.id === 's-omp-sdk');
-    expect(ompRow?.agent_runtime).toBe('omp-sdk');
-    expect(ompRow?.status_message).toBe('Running');
-    svc.close();
-  });
-
-  it('(d) loses no column — status_message (added imperatively, listed in no .sql) survives', () => {
-    const { db, before, svc } = upgradeThrough105();
-    for (const t of TARGET_TABLES) {
-      expect(columnNames(db, t)).toEqual(before.columns[t]);
-    }
-    expect(columnNames(db, 'sessions')).toContain('status_message');
-    // The temp parking columns must not leak into the final shape.
-    expect(columnNames(db, 'sessions')).not.toContain('agent_runtime_widen_105');
-    expect(columnNames(db, 'workflow_runs')).not.toContain('agent_runtime_widen_105');
-    svc.close();
-  });
-
-  it('(e) leaves indexes, triggers and foreign keys untouched', () => {
-    const { db, before, svc } = upgradeThrough105();
-    for (const t of TARGET_TABLES) {
-      expect(schemaObjectNames(db, t)).toEqual(before.objects[t]);
-      expect(fkEdges(db, t)).toEqual(before.fks[t]);
-    }
-    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
-    svc.close();
-  });
-
-  it('(f) keeps omp-fleet off workflow_variants and agent_invocations, and still rejects bogus runtimes', () => {
-    const { db, svc } = upgradeThrough105();
-    expect(() =>
-      db
-        .prepare(
-          `INSERT INTO workflow_variants (id, workflow_id, label, agent_provider, agent_runtime)
-           VALUES ('wfv-fleet', 'wf-1', 'fleet-arm', 'omp', 'omp-fleet')`,
-        )
-        .run(),
-    ).toThrow(/CHECK constraint failed/);
-    expect(() =>
-      db
-        .prepare(
-          `INSERT INTO agent_invocations (agent_invocation_id, run_id, agent_provider, agent_runtime)
-           VALUES ('inv-fleet', 'run-claude', 'omp', 'omp-fleet')`,
-        )
-        .run(),
-    ).toThrow(/CHECK constraint failed/);
-    expect(trySession(db, 's-bogus', 'omp', 'omp-telepathy')).toMatch(/CHECK constraint failed/);
-    expect(tryRun(db, 'run-bogus', 'omp', 'omp-telepathy')).toMatch(/CHECK constraint failed/);
-    svc.close();
-  });
-
-  it('(g) lands the same constraints on a fresh install', () => {
-    const svc = openAt(MIGRATIONS_DIR);
-    const db = svc.getDb();
-    db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p105f')`).run();
-    db.prepare(
-      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
-    ).run();
-    expect(trySession(db, 's-fleet', 'omp', 'omp-fleet')).toBeNull();
-    expect(trySession(db, 's-sdk', 'omp', 'omp-sdk')).toBeNull();
-    expect(tryRun(db, 'run-fleet', 'omp', 'omp-fleet')).toBeNull();
-    expect(trySession(db, 's-bogus', 'omp', 'omp-telepathy')).toMatch(/CHECK constraint failed/);
-    svc.close();
-  });
-
-  it('(h) re-applying 105 after a cleared ledger marker is a harmless no-op', () => {
-    const { db, before, svc } = upgradeThrough105();
-    db.prepare('DELETE FROM user_preferences WHERE key = ?').run(
-      `file_migration_applied:${MIGRATION_105}`,
+    const insertLink = raw.prepare(
+      `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+       VALUES (?, ?, ?, ?, ?)`,
     );
-    svc.close();
+    expect(() => insertLink.run('conn-dart', 'idea', 'ide_1', 'dart', 'AbCdEfGhIjKl')).not.toThrow();
+    expect(() => insertLink.run('conn-dart', 'idea', 'ide_2', 'jira', 'X-1')).toThrow(/CHECK/i);
 
-    const again = openAt(MIGRATIONS_DIR);
-    const db2 = again.getDb();
-    for (const t of TARGET_TABLES) {
-      expect(allRows(db2, t)).toEqual(before.rows[t]);
-      expect(columnNames(db2, t)).toEqual(before.columns[t]);
-    }
-    expect(trySession(db2, 's-fleet-again', 'omp', 'omp-fleet')).toBeNull();
-    again.close();
+    // The other CHECKs on the recreated tables came across intact.
+    expect(() =>
+      raw
+        .prepare(
+          `INSERT INTO tracker_connections (id, project_id, provider, status) VALUES ('conn-x', 1, 'dart', 'bogus')`,
+        )
+        .run(),
+    ).toThrow(/CHECK/i);
+    expect(() => insertLink.run('conn-dart', 'bogus', 'x_1', 'dart', 'Zz1122334455')).toThrow(/CHECK/i);
+    raw.close();
+  });
+
+  it('the recreate preserved every column of both tables, in order', () => {
+    const svc = new DatabaseService(dbPath);
+    svc.initialize();
+    const raw = svc.getDb();
+
+    // 093's columns followed by 094's three direction modes — the exact order a
+    // hand-written CREATE TABLE can silently get wrong.
+    expect(columnNames(raw, 'tracker_connections')).toEqual([
+      'id', 'project_id', 'provider', 'status', 'workspace_id', 'workspace_name',
+      'actor_label', 'base_url', 'secret_ciphertext', 'source_json', 'selection_mode',
+      'selection_json', 'state_mapping_json', 'two_way', 'mirror_subissues',
+      'conflict_mode', 'cursor_updated_at', 'cursor_external_id', 'last_sync_at',
+      'last_sync_log_json', 'created_at', 'updated_at', 'status_sync_mode',
+      'pull_mode', 'push_mode',
+    ]);
+    expect(columnNames(raw, 'entity_external_links')).toEqual([
+      'id', 'connection_id', 'entity_type', 'entity_id', 'provider', 'external_id',
+      'external_identifier', 'external_url', 'external_parent_id', 'baseline_json',
+      'orphaned_at', 'created_at', 'updated_at',
+    ]);
+
+    // The indexes 105 re-creates after each rename.
+    const indexes = (
+      raw
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('tracker_connections','entity_external_links')")
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    expect(indexes).toContain('idx_tracker_connections_project');
+    expect(indexes).toContain('idx_entity_external_links_conn');
+    raw.close();
+  });
+
+  it('preserves pre-existing rows and the FK topology the recreate had to re-establish', () => {
+    const svc = new DatabaseService(dbPath);
+    svc.initialize();
+    const raw = svc.getDb();
+    seedProject(raw, 1, '/tmp/p1');
+    insertConnection(raw, 'conn-1', 'linear');
+    raw
+      .prepare(
+        `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+         VALUES ('conn-1', 'idea', 'ide_1', 'linear', 'LIN-1')`,
+      )
+      .run();
+    const linkId = raw
+      .prepare("SELECT id FROM entity_external_links WHERE external_id = 'LIN-1'")
+      .get() as { id: number };
+    raw
+      .prepare(
+        `INSERT INTO tracker_conflicts (connection_id, link_id, kind) VALUES ('conn-1', ?, 'field_conflict')`,
+      )
+      .run(linkId.id);
+    raw
+      .prepare(
+        `INSERT INTO tracker_outbox (connection_id, kind) VALUES ('conn-1', 'create_issue')`,
+      )
+      .run();
+
+    // link_id is ON DELETE SET NULL, not CASCADE: the conflict outlives its link.
+    raw.prepare('DELETE FROM entity_external_links WHERE id = ?').run(linkId.id);
+    expect(
+      raw.prepare("SELECT link_id FROM tracker_conflicts WHERE connection_id = 'conn-1'").get(),
+    ).toEqual({ link_id: null });
+
+    // project_id is ON DELETE CASCADE, and it reaches the children transitively.
+    raw.prepare('DELETE FROM projects WHERE id = 1').run();
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get()).toEqual({ n: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM tracker_conflicts').get()).toEqual({ n: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM tracker_outbox').get()).toEqual({ n: 0 });
+    raw.close();
+  });
+
+  it("carries entity_external_links' AUTOINCREMENT high-water mark across the recreate", () => {
+    // The regression 105 guards against: rows minted before the migration whose
+    // ids are then CASCADE-deleted leave a sequence mark higher than max(id) of
+    // the survivors, and copying explicit ids alone would let it regress.
+    const svc1 = new DatabaseService(dbPath);
+    svc1.initialize();
+    const raw1 = svc1.getDb();
+    seedProject(raw1, 1, '/tmp/p1');
+    insertConnection(raw1, 'conn-1', 'linear');
+    const insertLink = raw1.prepare(
+      `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+       VALUES ('conn-1', 'idea', ?, 'linear', ?)`,
+    );
+    insertLink.run('ide_1', 'LIN-1');
+    insertLink.run('ide_2', 'LIN-2');
+    insertLink.run('ide_3', 'LIN-3');
+    // Delete the newest two, so max(id) among survivors is 1 but the mark is 3.
+    raw1.prepare("DELETE FROM entity_external_links WHERE external_id IN ('LIN-2','LIN-3')").run();
+    const seqBefore = raw1
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'entity_external_links'")
+      .get() as { seq: number };
+    expect(seqBefore.seq).toBe(3);
+    raw1.close();
+
+    // Force 105 to re-run over that state.
+    const rawWipe = new Database(dbPath);
+    rawWipe.prepare("DELETE FROM user_preferences WHERE key LIKE 'file_migration_applied:%'").run();
+    rawWipe.close();
+
+    const svc2 = new DatabaseService(dbPath);
+    svc2.initialize();
+    const raw2 = svc2.getDb();
+    expect(
+      raw2.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'entity_external_links'").get(),
+    ).toEqual({ seq: 3 });
+    // A fresh insert therefore gets 4, never a retired rowid.
+    raw2
+      .prepare(
+        `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+         VALUES ('conn-1', 'idea', 'ide_4', 'dart', 'AbCdEfGhIjKl')`,
+      )
+      .run();
+    expect(
+      raw2.prepare("SELECT id FROM entity_external_links WHERE external_id = 'AbCdEfGhIjKl'").get(),
+    ).toEqual({ id: 4 });
+    raw2.close();
+  });
+
+  it('keeps both UNIQUE constraints on entity_external_links, now across three providers', () => {
+    const svc = new DatabaseService(dbPath);
+    svc.initialize();
+    const raw = svc.getDb();
+    seedProject(raw, 1, '/tmp/p1');
+    insertConnection(raw, 'conn-linear', 'linear');
+    insertConnection(raw, 'conn-dart', 'dart');
+    const insertLink = raw.prepare(
+      `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+       VALUES (?, 'idea', ?, ?, ?)`,
+    );
+    insertLink.run('conn-linear', 'ide_1', 'linear', 'LIN-1');
+
+    // One entity may link once PER PROVIDER — so the same idea can carry a Dart
+    // link alongside its Linear one...
+    expect(() => insertLink.run('conn-dart', 'ide_1', 'dart', 'AbCdEfGhIjKl')).not.toThrow();
+    // ...but not twice for the same provider.
+    expect(() => insertLink.run('conn-linear', 'ide_1', 'linear', 'LIN-9')).toThrow(/UNIQUE/i);
+    // And one external issue maps to at most one entity per connection.
+    expect(() => insertLink.run('conn-dart', 'ide_2', 'dart', 'AbCdEfGhIjKl')).toThrow(/UNIQUE/i);
+    raw.close();
+  });
+
+  it('replay convergence: a ledger-wiped re-run preserves dart rows and the schema', () => {
+    const svc1 = new DatabaseService(dbPath);
+    svc1.initialize();
+    const raw1 = svc1.getDb();
+    seedProject(raw1, 1, '/tmp/p1');
+    insertConnection(raw1, 'conn-dart', 'dart');
+    raw1
+      .prepare(
+        `INSERT INTO entity_external_links (connection_id, entity_type, entity_id, provider, external_id)
+         VALUES ('conn-dart', 'idea', 'ide_1', 'dart', 'AbCdEfGhIjKl')`,
+      )
+      .run();
+    const colsBefore = {
+      tracker_connections: columnNames(raw1, 'tracker_connections'),
+      entity_external_links: columnNames(raw1, 'entity_external_links'),
+    };
+    raw1.close();
+
+    const rawWipe = new Database(dbPath);
+    rawWipe.prepare("DELETE FROM user_preferences WHERE key LIKE 'file_migration_applied:%'").run();
+    rawWipe.close();
+
+    const svc2 = new DatabaseService(dbPath);
+    expect(() => svc2.initialize()).not.toThrow();
+    const raw2 = svc2.getDb();
+
+    expect(raw2.prepare("SELECT id, provider FROM tracker_connections WHERE id = 'conn-dart'").get()).toEqual({
+      id: 'conn-dart',
+      provider: 'dart',
+    });
+    expect(
+      raw2.prepare("SELECT entity_id, provider FROM entity_external_links WHERE external_id = 'AbCdEfGhIjKl'").get(),
+    ).toEqual({ entity_id: 'ide_1', provider: 'dart' });
+    expect(columnNames(raw2, 'tracker_connections')).toEqual(colsBefore.tracker_connections);
+    expect(columnNames(raw2, 'entity_external_links')).toEqual(colsBefore.entity_external_links);
+    // Still widened after the replay (the CHECK is not silently narrowed back).
+    expect(() => insertConnection(raw2, 'conn-dart-2', 'dart')).not.toThrow();
+    raw2.close();
   });
 });

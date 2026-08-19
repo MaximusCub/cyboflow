@@ -35,6 +35,7 @@ vi.mock('../../../utils/api', () => ({
 
 // Imported after the mock so vi.mock hoisting is in effect.
 import { TrackerIntegrationSection } from './TrackerIntegrationSection';
+import { TRACKER_PROVIDERS } from './trackerVocabulary';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 import { useNavigationStore } from '../../../stores/navigationStore';
@@ -105,15 +106,20 @@ beforeEach(() => {
 });
 
 describe('TrackerIntegrationSection', () => {
-  it('renders exactly the Linear and Plane rows', async () => {
+  it('renders exactly the catalog rows and nothing else', async () => {
     render(<TrackerIntegrationSection />);
 
     expect(await screen.findByText('Linear')).toBeInTheDocument();
     expect(screen.getByText('Plane')).toBeInTheDocument();
+    expect(screen.getByText('Dart')).toBeInTheDocument();
     // No GitHub/Jira/Slack rows survive from the prototype.
     expect(screen.queryByText('GitHub')).not.toBeInTheDocument();
     expect(screen.queryByText('Jira')).not.toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(2);
+    // Counted off the catalog rather than restated: the section is data-driven,
+    // so adding a provider must not require editing an arithmetic literal here.
+    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(
+      TRACKER_PROVIDERS.length,
+    );
   });
 
   it('shows Connected + Manage for a connected provider and leaves its sibling connectable', async () => {
@@ -123,9 +129,11 @@ describe('TrackerIntegrationSection', () => {
     expect(await screen.findByText('Connected')).toBeInTheDocument();
     expect(screen.getByText('Cyboflow')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
-    // Plane is still the one connectable row: Linear's active project is taken.
-    expect(screen.getByText('Not connected')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(1);
+    // Only Linear's active project is taken, so every OTHER row stays connectable.
+    expect(screen.getAllByText('Not connected')).toHaveLength(TRACKER_PROVIDERS.length - 1);
+    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(
+      TRACKER_PROVIDERS.length - 1,
+    );
   });
 
   it('lists a connection on a NON-active project with its project chip', async () => {
@@ -136,8 +144,10 @@ describe('TrackerIntegrationSection', () => {
     expect(await screen.findByText('Connected')).toBeInTheDocument();
     expect(screen.getByText('Website')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
-    // The ACTIVE project still has no Plane connection, so both rows keep Connect.
-    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(2);
+    // The ACTIVE project still has no connection anywhere, so every row keeps Connect.
+    expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(
+      TRACKER_PROVIDERS.length,
+    );
   });
 
   it('renders a paused connection as a warning, never green', async () => {

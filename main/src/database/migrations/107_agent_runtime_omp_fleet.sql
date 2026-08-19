@@ -1,5 +1,12 @@
--- Migration 105: admit 'omp-fleet' on sessions.agent_runtime and
+-- Migration 107: admit 'omp-fleet' on sessions.agent_runtime and
 -- workflow_runs.agent_runtime (OMP Phase 4, the fleet-supervisor runtime).
+--
+-- NUMBERED 107, NOT 105. This file was authored as 105 before main shipped
+-- 105_tracker_provider_dart.sql and 106_restore_delivered_session_findings.sql;
+-- it was renumbered on the merge so the on-disk order matches the release order.
+-- The ledger is keyed by FILENAME, so any DEV install that already applied the
+-- old 105 name will apply this one again — which is harmless: the sequence is
+-- idempotent, and test (h) pins that.
 --
 -- WHY A NEW FILE RATHER THAN AN EDIT TO 103. The migration ledger is keyed by
 -- FILENAME and applies each .sql exactly once, so widening 103's CHECK list in
@@ -57,14 +64,14 @@
 -- sessions.agent_runtime  (103 list + 'omp-fleet')
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE sessions ADD COLUMN agent_runtime_widen_105 TEXT;
-UPDATE sessions SET agent_runtime_widen_105 = agent_runtime;
+ALTER TABLE sessions ADD COLUMN agent_runtime_widen_107 TEXT;
+UPDATE sessions SET agent_runtime_widen_107 = agent_runtime;
 ALTER TABLE sessions DROP COLUMN agent_runtime;
 ALTER TABLE sessions
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty','omp-sdk','omp-pty','omp-fleet'));
-UPDATE sessions SET agent_runtime = COALESCE(agent_runtime_widen_105, 'claude-sdk');
-ALTER TABLE sessions DROP COLUMN agent_runtime_widen_105;
+UPDATE sessions SET agent_runtime = COALESCE(agent_runtime_widen_107, 'claude-sdk');
+ALTER TABLE sessions DROP COLUMN agent_runtime_widen_107;
 
 -- ---------------------------------------------------------------------------
 -- workflow_runs.agent_runtime  (103 list + 'omp-fleet')
@@ -73,11 +80,11 @@ ALTER TABLE sessions DROP COLUMN agent_runtime_widen_105;
 -- structured events, usage, MCP progress and review-queue integration.
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE workflow_runs ADD COLUMN agent_runtime_widen_105 TEXT;
-UPDATE workflow_runs SET agent_runtime_widen_105 = agent_runtime;
+ALTER TABLE workflow_runs ADD COLUMN agent_runtime_widen_107 TEXT;
+UPDATE workflow_runs SET agent_runtime_widen_107 = agent_runtime;
 ALTER TABLE workflow_runs DROP COLUMN agent_runtime;
 ALTER TABLE workflow_runs
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','omp-sdk','omp-fleet'));
-UPDATE workflow_runs SET agent_runtime = COALESCE(agent_runtime_widen_105, 'claude-sdk');
-ALTER TABLE workflow_runs DROP COLUMN agent_runtime_widen_105;
+UPDATE workflow_runs SET agent_runtime = COALESCE(agent_runtime_widen_107, 'claude-sdk');
+ALTER TABLE workflow_runs DROP COLUMN agent_runtime_widen_107;

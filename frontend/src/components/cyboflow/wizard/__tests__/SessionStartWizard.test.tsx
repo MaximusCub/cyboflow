@@ -508,7 +508,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     expect(runtimeSelect).toBeInTheDocument();
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).toBeDisabled();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
     // Permission selector + summary always present.
@@ -525,7 +525,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     // workflows keep Codex disabled until workflow compatibility ships.
     expect(screen.getByLabelText('Select agent runtime')).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).not.toBeDisabled();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary still present.

@@ -73,12 +73,30 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
   },
+  {
+    provider: 'dart',
+    name: 'Dart',
+    description:
+      'Import a Dart dartboard as cyboflow ideas and write status back.',
+    mark: 'DT',
+    apiKeyLabel: 'Personal authentication token',
+    apiKeyHint: 'Dart → Settings → Account → Authentication token.',
+    // Dart scopes everything by the token itself and is cloud-only, so it needs
+    // neither a workspace slug nor a base URL — see dartAdapter.ts.
+    needsWorkspaceSlug: false,
+    defaultBaseUrl: null,
+    scopes: [
+      { label: 'read:tasks', granted: true },
+      { label: 'write:tasks', granted: true },
+    ],
+    scopeFootnote: 'No access to docs, comments, attachments, or billing.',
+  },
 ];
 
 export function providerMeta(provider: TrackerProvider): TrackerProviderMeta {
   const meta = TRACKER_PROVIDERS.find((p) => p.provider === provider);
-  // The union has exactly two members and both are in the table above; the
-  // fallback exists so the return type is not needlessly optional.
+  // Every member of the union is in the table above; the fallback exists so the
+  // return type is not needlessly optional.
   return meta ?? TRACKER_PROVIDERS[0];
 }
 
@@ -86,21 +104,49 @@ export function providerMeta(provider: TrackerProvider): TrackerProviderMeta {
 // State mapping
 // ---------------------------------------------------------------------------
 
-/** The mapping dropdown's options — cyboflow's four writable stages plus opt-out. */
+/**
+ * The mapping dropdown's options — cyboflow's four writable stages, opt-out,
+ * and the one-way 'indev'. Listed in BOARD order (Idea → Ready → In
+ * development → Done → Won't do) so the picker reads like the board does.
+ *
+ * 'In development' is labelled "(one way)" right in the option text because the
+ * asymmetry is the whole point: picking it does not import anything, it names
+ * which provider state a task entering In development is pushed to. See
+ * MAPPING_TARGET_NOTE for the inline caption the picker shows once it is chosen.
+ */
 export const MAPPING_TARGETS: readonly { value: TrackerMappingTarget; label: string }[] = [
   { value: 'dont', label: "— Don't import" },
   { value: 'idea', label: 'Idea' },
   { value: 'ready', label: 'Ready for development' },
+  { value: 'indev', label: 'In development (one way)' },
   { value: 'done', label: 'Done' },
   { value: 'wontdo', label: "Won't do" },
 ];
+
+/**
+ * The caption shown under a picker whose target needs a qualifier — keyed by
+ * target so a future one-way target does not need another branch in the view.
+ * `{provider}` is substituted with the provider's display name.
+ */
+export const MAPPING_TARGET_NOTE: Partial<Record<TrackerMappingTarget, string>> = {
+  indev: 'One way only — pushed to {provider}, never imported.',
+};
+
+/** The note for a target with the provider name filled in, or null. */
+export function mappingTargetNote(
+  target: TrackerMappingTarget,
+  providerName: string,
+): string | null {
+  const note = MAPPING_TARGET_NOTE[target];
+  return note === undefined ? null : note.replace('{provider}', providerName);
+}
 
 export function mappingTargetLabel(target: TrackerMappingTarget): string {
   return MAPPING_TARGETS.find((t) => t.value === target)?.label ?? target;
 }
 
 /**
- * Seed defaults keyed by the adapter's canonical state group (both providers
+ * Seed defaults keyed by the adapter's canonical state group (every provider
  * normalize onto it, so the wizard never branches on provider here).
  */
 export const DEFAULT_TARGET_BY_GROUP: Record<TrackerStateGroup, TrackerMappingTarget> = {

@@ -16,7 +16,7 @@ Two-way sync between cyboflow's backlog and external issue trackers. Issues impo
 | Parent completion | Shared "close parent when all mirrored children done" write in the provider-agnostic sync core. Idempotent no-op where Linear's native auto-close automation already fired; primary mechanism for Plane (no native equivalent). |
 | Auth (v1) | **Personal API keys**, no OAuth: Linear personal API key; Plane personal access token (`X-API-Key`) + instance base URL for self-hosted. OAuth can slot behind the same wizard step later. |
 | Plane scope | **First-class in v1** — two live adapters day one. |
-| Catalog rows | **Linear + Plane only.** Drop the prototype's GitHub/Jira/Slack rows. Existing Claude/Codex provider rows in the Integrations tab stay as they are. |
+| Catalog rows | **Linear + Plane only** in v1 (Dart added later — see "Provider adapter seam"). Drop the prototype's GitHub/Jira/Slack rows. Existing Claude/Codex provider rows in the Integrations tab stay as they are. |
 | Conflict resolution | Per-connection mode: **Auto** or **Manual** (see below). |
 | Local delete of a linked entity | **Prompt the user** for what happens to the tracker issue. |
 | Remote delete of a linked issue | Routed through conflict resolution: Auto → archive the cyboflow idea/task; Manual → per-item decision. |
@@ -105,7 +105,7 @@ No existing pattern for app-owned third-party secrets exists (no keytar/safeStor
 
 ```ts
 interface TrackerAdapter {
-  provider: 'linear' | 'plane';
+  provider: 'linear' | 'plane' | 'dart';
   validateCredentials(creds): Promise<WorkspaceIdentity>;
   listHierarchy(): Promise<SourceTree>;            // teams/projects → narrows (views, cycles, modules)
   listStates(source): Promise<TrackerState[]>;     // id, name, color, canonical group
@@ -115,14 +115,37 @@ interface TrackerAdapter {
   createSubIssue(parentExternalId, draft, clientKey): Promise<TrackerIssue>;
   updateIssueState(externalId, stateId): Promise<void>;
   capabilities: {
-    nativeParentAutoClose: boolean;   // Linear true, Plane false
-    selfHostedBaseUrl: boolean;       // Plane true
-    idempotentCreate: boolean;        // Linear true (client-supplied issue id); Plane false → reconcile-by-lookup
+    nativeParentAutoClose: boolean;   // Linear true; Plane and Dart false
+    selfHostedBaseUrl: boolean;       // Plane true; Linear and Dart cloud-only
+    idempotentCreate: boolean;        // Linear true (client-supplied issue id); Plane and Dart false → reconcile-by-lookup
   };
 }
 ```
 
-Linear = GraphQL client; Plane = REST client (`X-API-Key`, configurable base URL). The wizard, sync engine, mapping table, conflict machinery, and mirroring logic are all provider-agnostic above this seam.
+Linear = GraphQL client; Plane = REST client (`X-API-Key`, configurable base URL); Dart = REST client (`Bearer` token, cloud-only). The wizard, sync engine, mapping table, conflict machinery, and mirroring logic are all provider-agnostic above this seam.
+
+**Dart (added after v1)** exercised the seam for the first time and cost one adapter plus eight mechanical widenings — no change to the wizard, the sync engine, or any frontend component beyond a row in `TRACKER_PROVIDERS`. Three things about its API have no Linear or Plane analogue and are worth knowing before touching `dartAdapter.ts`:
+
+- **Titles, not ids.** `GET /config` is the only discovery endpoint and returns dartboards and statuses as bare strings, so `TrackerSourceContainer.id` and `TrackerState.id` *are* those titles. A rename in Dart therefore invalidates a connection's stored source selection and state-mapping keys. Since `GET /tasks/list` answers a vanished dartboard with an empty page — which `listIssueIds` would hand the deletion sweep as "everything was deleted remotely" — the adapter guards every pass with `assertContainerExists` and fails loudly instead.
+- **List responses omit the description.** Dart's list shape (`ConciseTask`) drops `description`, which the three-way merge and the recovery marker both need, so `listIssues` hydrates every row through `GET /tasks/{id}` at bounded concurrency. `listIssueIds` deliberately does not, keeping the deletion sweep cheap.
+- **No state grouping.** Dart publishes no state type or category, so `inferStateGroup` guesses `TrackerStateGroup` from the status name. Low-stakes by construction: the group only seeds the wizard's mapping defaults, which the user then overrides.
+- **Sub-issue placement is not inherited.** A `parentId`-only create lands the child on the API user's *default* dartboard, not the parent's — where this connection's dartboard-scoped reads can never see it. `createSubIssue` therefore reads the parent's board and names it explicitly. This one contradicted the obvious reading of the spec and was only caught by running it.
+
+Dart also exposes no workspace identity (`/me` returns only the user, and `/config` carries no space id or name), so `TrackerWorkspaceIdentity.workspaceId` binds to the *account*. The rotation guard (`TrackerIdentityMismatchError`) is correspondingly weaker there: it catches a token pasted from a different account, but not the same user's token for a different space. **Open risk**: if Dart tokens are space-scoped, that gap lets a rotation retain links whose issues the new token cannot see, and the sweep's `getIssue` confirmation would then read them as genuinely deleted. Verifying it needs a second space on one account.
+
+**Measured against a live space (2026-08-18)**, since the spec leaves these open and each one is load-bearing:
+
+| Behaviour | Result |
+| --- | --- |
+| `updated_at_after` bound | **Inclusive** (gte) — the contract's requirement, met natively |
+| `description` list filter | **Contains** — the client-key fast path does hit |
+| Unknown dartboard title | **200 + empty page**, never an error — `assertContainerExists` is load-bearing |
+| Empty `dartboard=` | Filter dropped: returns the **whole space** |
+| Trashed task | **404s** on `GET /tasks/{id}`, absent from listings unless `in_trash=true` |
+| Default filters | `meta.defaultsApplied: false` on a fresh space; `no_defaults=true` changes nothing |
+| `ids` filter | **Silently ignored** in every serialization — a documented param that does nothing |
+
+That last row is the general lesson: Dart drops filters it does not honour rather than erroring, so a test that only asserts "the row I wanted came back" can pass against a filter that never ran. The adapter's own filters (`dartboard`, `parent_id`, `description`, `updated_at_after`) were each re-checked with a negative control.
 
 ## Implementation notes (v1 as landed)
 
@@ -143,4 +166,4 @@ Where the build refined the design above — the spec stands, these are the delt
 ## V2 (explicitly out of v1 scope)
 
 - **Smart import**: an agent classifies incoming issues (idea vs. task, nesting, epic assignment) instead of ideas-by-default.
-- OAuth flows (hosted token exchange), additional providers (Jira, GitHub), assignee/estimate/priority mapping (v1 imports them as display metadata only), configurable cadence, real-time webhooks.
+- OAuth flows (hosted token exchange), further providers (Jira, GitHub — Dart has since landed), assignee/estimate/priority mapping (v1 imports them as display metadata only), configurable cadence, real-time webhooks.
