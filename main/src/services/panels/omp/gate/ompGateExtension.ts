@@ -153,6 +153,49 @@ export const OMP_BASH_TOOL_NAME = 'bash';
 const URI_SCHEME_TARGET = /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//i;
 
 /**
+ * Tool arguments that carry AUTHORED FILE TEXT rather than a target, keyed by
+ * the tool that carries them.
+ *
+ * WHY THIS EXCLUSION EXISTS (the defect it closes): {@link URI_SCHEME_TARGET}
+ * disqualifies every auto-allow rung when a scheme appears ANYWHERE in the
+ * arguments, and {@link scanForUriScheme} recurses into every value. For a
+ * write-tier tool that means it reads the FILE BODY. A local write of a README,
+ * an HTML page, a JSON report, or any source file with a link in a comment
+ * therefore fell through to the human — observed live on 2026-08-19, where an
+ * `auto`-mode session could not write its own report because the report's text
+ * contained `https://example.com`. The file's CARGO is not its DESTINATION, and
+ * the escalation the scan defends against (`read.ts:401`, `grep.ts:906`) is a
+ * property of the target only.
+ *
+ * EXCLUSION, NOT AN ALLOWLIST OF TARGET KEYS, and the asymmetry is the reason:
+ * a target hiding under `content` / `new_string` / `out` would require OMP to
+ * put a path in a field whose entire purpose is text the model authored, while
+ * a FUTURE OMP version adding a new target key to `write` is ordinary version
+ * drift. Naming the body keys fails safe against the drift that can actually
+ * happen; naming the target keys would not.
+ *
+ * Scoped per tool, exact-name matched, for the same reason every other rung in
+ * this file is: a tool this gate has not verified gets the unnarrowed scan.
+ *
+ *   write     `content`                     (`tools/write.ts`; target: `path`)
+ *   edit      `old_string` / `new_string`   (`edit/index.ts:382975`; target: `path`)
+ *   ast_edit  `pat` / `out` inside `ops`    (`tools/ast-edit.ts:569362`; target: `paths`)
+ */
+const FILE_BODY_KEYS_BY_TOOL: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['write', new Set(['content'])],
+  ['edit', new Set(['old_string', 'new_string'])],
+  ['ast_edit', new Set(['pat', 'out'])],
+]);
+
+/**
+ * The body keys to skip when scanning `toolName`'s arguments — empty for every
+ * tool that does not carry a file body, which is the unnarrowed scan.
+ */
+function fileBodyKeysFor(toolName: string): ReadonlySet<string> | undefined {
+  return FILE_BODY_KEYS_BY_TOOL.get(toolName);
+}
+
+/**
  * How long we wait for a human verdict before giving up ourselves.
  *
  * OMP caps every `tool_call` handler at 30s
@@ -1097,18 +1140,34 @@ export function isCyboflowMcpTool(
  * would miss it. Object identity is tracked so a cyclic input (which JSON cannot
  * produce, but a foreign runtime could hand us) terminates instead of hanging
  * the handler inside OMP's 30s cap.
+ *
+ * `skipKeys` names the argument keys whose VALUE is authored file text rather
+ * than a target — see {@link FILE_BODY_KEYS_BY_TOOL}. It is matched at every
+ * depth (`ast_edit`'s live inside an `ops` array) and only ever suppresses the
+ * value: the key's siblings, including the tool's real target, still scan.
  */
-export function hasUriSchemeTarget(input: Record<string, unknown>): boolean {
-  return scanForUriScheme(input, new Set<object>());
+export function hasUriSchemeTarget(
+  input: Record<string, unknown>,
+  skipKeys?: ReadonlySet<string>,
+): boolean {
+  return scanForUriScheme(input, new Set<object>(), skipKeys);
 }
 
-function scanForUriScheme(value: unknown, seen: Set<object>): boolean {
+function scanForUriScheme(
+  value: unknown,
+  seen: Set<object>,
+  skipKeys: ReadonlySet<string> | undefined,
+): boolean {
   if (typeof value === 'string') return URI_SCHEME_TARGET.test(value);
   if (value === null || typeof value !== 'object') return false;
   if (seen.has(value)) return false;
   seen.add(value);
-  const members = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
-  return members.some((member) => scanForUriScheme(member, seen));
+  if (Array.isArray(value)) {
+    return value.some((member) => scanForUriScheme(member, seen, skipKeys));
+  }
+  return Object.entries(value as Record<string, unknown>).some(
+    ([key, member]) => skipKeys?.has(key) !== true && scanForUriScheme(member, seen, skipKeys),
+  );
 }
 
 /**
@@ -1168,12 +1227,18 @@ export function decideToolCall(
   // 5. Mode-scoped allowlists — every one of them NARROWED by the argument scan.
   //
   // The invariant, stated once and applied without carve-outs: NO auto-allow
-  // path passes a call whose arguments name a URI-scheme target. All three
+  // path passes a call whose arguments name a URI-scheme TARGET. All three
   // paths below decide on a tool NAME (or, for `allowRules`, on a name plus a
   // bash-command specifier), and a name cannot express that OMP's own `read` /
   // `grep` escalate themselves to remote exec-tier operations on an `ssh://`
   // path (read.ts:401, grep.ts:906). A scheme in the arguments therefore
   // disqualifies the shortcut and the call falls through to rule 6.
+  //
+  // TARGET is the load-bearing word, and it is not a carve-out: the scan skips
+  // the argument keys that carry AUTHORED FILE TEXT
+  // ({@link FILE_BODY_KEYS_BY_TOOL}), because a file's cargo is not its
+  // destination and no escalation follows from it. Every target key — `path`,
+  // `paths`, and anything a future OMP adds — still scans.
   //
   // This DOES reach `Bash(...)` allow rules whose command carries a URL — an
   // `auto`-mode rule like `Bash(curl https://api.example.com:*)` now asks the
@@ -1185,7 +1250,7 @@ export function decideToolCall(
   // first, `dontAsk` still allows first (log-only is log-only), and our own MCP
   // tools are not narrowed — they are exact-name matched, served by cyboflow's
   // own server, and routinely carry URLs in finding bodies and artifact payloads.
-  const remoteTarget = hasUriSchemeTarget(input);
+  const remoteTarget = hasUriSchemeTarget(input, fileBodyKeysFor(toolName));
 
   if (!remoteTarget) {
     if (config.autoAllowTools.includes(toolName)) {

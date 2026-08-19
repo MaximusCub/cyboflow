@@ -434,6 +434,94 @@ describe('rule 5 narrowing: URI-scheme targets', () => {
     ).toBe('ask');
   });
 
+  // -------------------------------------------------------------------------
+  // The body/target split. Regression cover for the 2026-08-19 live defect:
+  // an `auto`-mode session could not write ANY file whose text contained a URL,
+  // because the scan read the file body as if it were a target. It could not
+  // even emit its own smoke report — the report's prose named
+  // `https://example.com`, which gated the write that would have saved it.
+  // -------------------------------------------------------------------------
+
+  it('auto-allows a local write whose CONTENT mentions a URL', () => {
+    const acceptEdits = config({ permissionMode: 'acceptEdits', editTools: ['write'] });
+    expect(
+      decideToolCall(
+        {
+          toolName: 'write',
+          input: {
+            path: '/repo/.claude/smoke/report.json',
+            content: '{"note":"read of https://example.com surfaced approval"}',
+          },
+        },
+        acceptEdits,
+      ),
+    ).toEqual({ kind: 'allow', rule: 'edit-tool' });
+  });
+
+  it('still asks when the WRITE TARGET is remote, however innocent the content', () => {
+    const acceptEdits = config({ permissionMode: 'acceptEdits', editTools: ['write'] });
+    expect(
+      decideToolCall(
+        { toolName: 'write', input: { path: 'ssh://host/x.ts', content: 'export const x = 1;' } },
+        acceptEdits,
+      ).kind,
+    ).toBe('ask');
+  });
+
+  it('skips the body keys of edit and ast_edit, at every depth', () => {
+    const auto = config({ permissionMode: 'auto', editTools: ['write', 'edit', 'ast_edit'] });
+
+    // `edit`: both halves of the replacement are authored text.
+    expect(
+      decideToolCall(
+        {
+          toolName: 'edit',
+          input: {
+            path: '/repo/README.md',
+            old_string: 'see http://old.example',
+            new_string: 'see https://new.example',
+          },
+        },
+        auto,
+      ),
+    ).toEqual({ kind: 'allow', rule: 'edit-tool' });
+
+    // `ast_edit`: the body keys live one level down, inside `ops`.
+    expect(
+      decideToolCall(
+        {
+          toolName: 'ast_edit',
+          input: {
+            paths: ['src/**/*.ts'],
+            ops: [{ pat: 'fetch("http://a/b")', out: 'fetch("https://a/b")' }],
+          },
+        },
+        auto,
+      ),
+    ).toEqual({ kind: 'allow', rule: 'edit-tool' });
+
+    // …and `paths` is a TARGET key, so it is scanned exactly as before.
+    expect(
+      decideToolCall(
+        {
+          toolName: 'ast_edit',
+          input: { paths: ['ok/x.ts', 'ssh://host/y.ts'], ops: [{ pat: 'a', out: 'b' }] },
+        },
+        auto,
+      ).kind,
+    ).toBe('ask');
+  });
+
+  it('leaves the scan unnarrowed for tools that carry no file body', () => {
+    // `content` is only a body key ON THE TOOLS THAT DECLARE ONE. An unverified
+    // tool passing the same key gets the full scan — the exclusion is scoped by
+    // exact tool name, like every other rung in the gate.
+    const auto = config({ permissionMode: 'auto', autoAllowTools: ['read'] });
+    expect(
+      decideToolCall({ toolName: 'read', input: { content: 'ssh://host/x' } }, auto).kind,
+    ).toBe('ask');
+  });
+
   it('narrows editTools too — an ssh:// WRITE is worse than an ssh:// read', () => {
     const acceptEdits = config({ permissionMode: 'acceptEdits', editTools: ['write'] });
 
