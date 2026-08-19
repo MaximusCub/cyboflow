@@ -97,6 +97,17 @@ the documented next step.
 
 ## 5. Availability + gating (concrete)
 
+- **Aria mode is the grant + the flavor switch.** `AppConfig.ariaMode`
+  (Settings → Advanced Options → OMP Runtime) answers both "does this install
+  supervise a REMOTE fleet or run OMP locally" and "is Cyboflow authorized to
+  drive it". `omp-fleet` and `omp-sdk`/`omp-pty` are ALTERNATIVES — a panel is
+  either a local OMP process or a supervised remote worker — so the picker
+  offers one flavor or the other, never both. `CYBOFLOW_OMP_SUPERVISE` remains
+  an override for headless/CI hosts with no Settings UI; the two are OR-ed.
+  Requiring a shell variable to switch on a desktop feature was a real usability
+  failure, not a security property: reachability of the bridge and authorization
+  to drive it stay separate questions, but the operator answers the second one
+  by clicking, not by exporting.
 - **Fail-closed config:** `OmpSessionManager` is constructed **only** when
   `resolveOmpBridgeCommandConfig()` resolves **and** the boot principal holds
   `omp:supervise`. Either one missing ⇒ no manager instance ⇒ dispatch returns
@@ -108,6 +119,13 @@ the documented next step.
   `AgentProviderAccess` toggle system works for OMP with zero new gating code. The OMP
   entry is visible **only if** `isAgentProviderEnabled(access, 'omp')` **AND** the bridge
   config resolved.
+- **`cyboflow.omp.availability` reports the manager, not the config.** It asks whether
+  the boot-built `OmpSessionManager` EXISTS rather than re-deriving
+  `resolveOmpBridgeCommandConfig()`. Re-deriving would let the picker offer OMP fleet the
+  instant Aria mode is toggled while dispatch still answered "the bridge is not
+  configured" until the next launch; asking the manager keeps the picker and the dispatch
+  seam telling one story. `ariaMode` rides the same probe and IS live, because the flavor
+  split is pure presentation.
 - **Capability:** enforcement is **structural, not by convention**. Every adapter handed
   to a caller — the tRPC context's and the session manager's alike — is wrapped in
   `OmpSupervisedAdapter`, which capability-checks all eight verbs and audits the six

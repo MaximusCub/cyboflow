@@ -365,6 +365,14 @@ export interface ContextDeps {
   ompCommand?: OmpCommandAdapter;
   /** Redacted audit sink for OMP commands (attempted + completed). Injected as a closure like setDockBadge. */
   auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
+  /**
+   * Whether the boot-built fleet session manager EXISTS. A closure rather than a
+   * boolean so the router reads the live wiring (like `getForcedSubstrate`), and
+   * so the standalone router keeps no services/* import. Absent ⇒ not launchable.
+   */
+  ompFleetLaunchable?: () => boolean;
+  /** Aria mode — remote fleet vs local OMP runtimes (see AppConfig.ariaMode). Absent ⇒ false. */
+  ompAriaMode?: () => boolean;
 
   /**
    * Resolve a (project, modality) runbook's status the way the ENGINE resolves
@@ -431,6 +439,8 @@ export function createContext(deps: ContextDeps = {}): {
   principal?: OmpPrincipal;
   ompCommand?: OmpCommandAdapter;
   auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
+  ompFleetLaunchable?: () => boolean;
+  ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
 } {
   const {
@@ -448,6 +458,8 @@ export function createContext(deps: ContextDeps = {}): {
     principal,
     ompCommand,
     auditOmp,
+    ompFleetLaunchable,
+    ompAriaMode,
     verifyRunbookStatus,
   } = deps;
   return {
@@ -466,6 +478,8 @@ export function createContext(deps: ContextDeps = {}): {
     principal,
     ompCommand,
     auditOmp,
+    ompFleetLaunchable,
+    ompAriaMode,
     verifyRunbookStatus,
   };
 }

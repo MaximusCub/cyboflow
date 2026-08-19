@@ -23,7 +23,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // runs.start.mutate.
 // ---------------------------------------------------------------------------
 const { mockUseOmpAvailability } = vi.hoisted(() => ({
-  mockUseOmpAvailability: vi.fn<() => boolean>(() => false),
+  mockUseOmpAvailability: vi.fn<() => { launchable: boolean; ariaMode: boolean }>(() => ({
+    launchable: false,
+    ariaMode: false,
+  })),
 }));
 
 vi.mock('../../../../hooks/useOmpAvailability', () => ({
@@ -446,7 +449,7 @@ beforeEach(() => {
     // across app restart, so tests start from the same "no active surface"
     // baseline the real app does.
     useDesignModeStore.setState({ activeDesignSessionId: null });
-    mockUseOmpAvailability.mockReturnValue(false);
+    mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: false });
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
@@ -587,7 +590,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 
 describe('SessionStartWizard — OMP Fleet runtime controls', () => {
   it('hides the Claude model picker + reasoning-effort select when OMP Fleet is selected', async () => {
-    mockUseOmpAvailability.mockReturnValue(true);
+    mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
     // The merged provider registry floors an absent `omp` key to DISABLED (the
     // back-branch defaulted it enabled, which is why this seed used to be
     // unnecessary). Without it the picker snaps a fleet selection back to a

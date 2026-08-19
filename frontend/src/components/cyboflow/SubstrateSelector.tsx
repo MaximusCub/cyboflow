@@ -42,7 +42,7 @@ import {
 import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
-import { useOmpAvailability } from '../../hooks/useOmpAvailability';
+import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import {
   workflowRuntimeForLaunch,
   type LaunchAgentRuntime,
@@ -123,15 +123,33 @@ function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<Subst
   return false;
 }
 
-/** The options a picker may show, given the provider toggles + OMP availability. */
-function enabledRuntimeOptions(
-  access: AgentProviderAccess,
-  ompAvailable: boolean,
+/** The LOCAL OMP runtimes — an OMP process this machine runs. */
+const LOCAL_OMP_RUNTIMES: ReadonlySet<LaunchAgentRuntime> = new Set<LaunchAgentRuntime>(['omp-sdk', 'omp-pty']);
+
+/**
+ * The options a picker may show, given the provider toggles + OMP availability.
+ *
+ * The two OMP flavors are ALTERNATIVES, not a stack: a panel is either a local
+ * OMP process or a supervised remote worker. Aria mode picks which one this
+ * install runs, so exactly one of them is ever offered — showing both would
+ * imply a choice the runtime does not actually support, and `omp-fleet` needs a
+ * configured bridge the local runtimes do not.
+ */
+function flavorVisibleOptions(
+  omp: OmpAvailability,
 ): readonly { runtime: LaunchAgentRuntime; label: string }[] {
   return SELECTABLE_RUNTIME_OPTIONS.filter((o) => {
-    if (o.runtime === 'omp-fleet' && !ompAvailable) return false;
-    return isRuntimeProviderEnabled(access, o.runtime);
+    if (o.runtime === 'omp-fleet') return omp.ariaMode && omp.launchable;
+    if (LOCAL_OMP_RUNTIMES.has(o.runtime)) return !omp.ariaMode;
+    return true;
   });
+}
+
+function enabledRuntimeOptions(
+  access: AgentProviderAccess,
+  omp: OmpAvailability,
+): readonly { runtime: LaunchAgentRuntime; label: string }[] {
+  return flavorVisibleOptions(omp).filter((o) => isRuntimeProviderEnabled(access, o.runtime));
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -185,8 +203,13 @@ export function SubstrateSelector({
   // Provider toggles (Settings → Integrations / onboarding). A switched-off
   // provider's runtimes leave the picker entirely and can never be submitted.
   const providerAccess = useAgentProviderAccess();
-  const ompAvailable = useOmpAvailability();
-  const options = enabledRuntimeOptions(providerAccess, ompAvailable);
+  const omp = useOmpAvailability();
+  const options = enabledRuntimeOptions(providerAccess, omp);
+  // Baseline for the "…are hidden" note: the rows this OMP FLAVOR can show, not
+  // every selectable runtime. Aria mode always hides one flavor, so counting
+  // against the full list would fire the note permanently and blame the provider
+  // toggles for a row the flavor removed.
+  const flavorOptionCount = flavorVisibleOptions(omp).length;
   const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
 
   // Under the interactive lock, keep the controlled value consistent so the
@@ -292,7 +315,7 @@ export function SubstrateSelector({
         ))}
       </select>
       <p className="text-xs text-text-tertiary">
-        {options.length === SELECTABLE_RUNTIME_OPTIONS.length
+        {options.length === flavorOptionCount
           ? scopeHelp(runtimeScope)
           : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
       </p>

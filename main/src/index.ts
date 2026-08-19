@@ -91,7 +91,7 @@ import { OmpBridgeHttpClient } from './orchestrator/omp/ompBridgeClient';
 import { resolveOmpBridgeCommandConfig } from './orchestrator/omp/ompBridgeConfig';
 import { resolveOmpPrincipal } from './orchestrator/omp/ompPrincipal';
 import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
-import type { OmpCommandAdapter } from '../../shared/types/ompCommand';
+import type { OmpCommandAdapter, OmpPrincipal } from '../../shared/types/ompCommand';
 import { OmpSessionManager } from './orchestrator/omp/ompSessionManager';
 import { OmpSupervisedAdapter, type OmpSupervisedAuditEntry } from './orchestrator/omp/ompSupervisedAdapter';
 import { hasSupervise } from '../../shared/types/ompCommand';
@@ -362,10 +362,27 @@ const fleetRegistryReader = new FleetRegistryReader();
 
 /**
  * The OMP command principal and audit sink, at module scope so the tRPC context
- * and the fleet session manager share ONE identity and ONE trail. Resolved once
- * at boot: the capability is an environment opt-in, not a per-request value.
+ * and the fleet session manager share ONE identity and ONE trail.
+ *
+ * Resolved lazily rather than as a module-scope const: the supervise capability
+ * now comes from Aria mode (`configManager.getAriaMode()`), and configManager is
+ * not constructed at module-evaluation time. Calling this per tRPC context keeps
+ * the ROUTER's view of the capability live, so revoking Aria mode forbids
+ * commands immediately. The fleet session manager still reads it once at boot
+ * (it owns long-lived remote workers), which is why the Settings copy says a
+ * change takes effect on the next launch.
  */
-const ompPrincipal = resolveOmpPrincipal();
+function currentOmpPrincipal(): OmpPrincipal {
+  // Guarded: a caller before initializeServices() gets the fail-closed answer
+  // rather than a crash.
+  let ariaMode = false;
+  try {
+    ariaMode = configManager.getAriaMode();
+  } catch {
+    ariaMode = false;
+  }
+  return resolveOmpPrincipal(ariaMode);
+}
 const auditOmp = (entry: OmpSupervisedAuditEntry): void => {
   logger.info(
     `omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`,
@@ -387,7 +404,7 @@ function buildOmpCommandAdapter(): OmpCommandAdapter {
   logger.info(`omp:command adapter configured for session ${config.sessionId}`);
   return new OmpSupervisedAdapter(
     new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId)),
-    ompPrincipal,
+    currentOmpPrincipal(),
     auditOmp,
   );
 }
@@ -823,8 +840,12 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
         omp: fleetRegistryReader,
         ompCommand,
-        principal: ompPrincipal,
+        principal: currentOmpPrincipal(),
         auditOmp,
+        // The manager is built once at boot (it owns remote workers), so the
+        // picker asks whether it EXISTS rather than re-deriving the config.
+        ompFleetLaunchable: () => ompSessionManager !== undefined,
+        ompAriaMode: () => configManager.getAriaMode(),
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).
@@ -1584,20 +1605,22 @@ async function initializeServices(): Promise<boolean> {
     // the ompCommand router refuses without the capability, so the manager that
     // drives it from the panel seams must refuse on the same terms — otherwise
     // the product's actual path sits outside the authorization model.
-    if (ompBridgeConfig !== undefined && !hasSupervise(ompPrincipal)) {
+    const bootPrincipal = currentOmpPrincipal();
+    if (ompBridgeConfig !== undefined && !hasSupervise(bootPrincipal)) {
       logger.info(
         'omp:fleet bridge is configured but the supervise capability is absent ' +
-          '(set CYBOFLOW_OMP_SUPERVISE to authorize this machine) — fleet sessions stay unavailable',
+          '(turn on Aria mode in Settings → Advanced Options, or set CYBOFLOW_OMP_SUPERVISE ' +
+          'on a headless host) — fleet sessions stay unavailable',
       );
     }
     ompSessionManager =
-      ompBridgeConfig !== undefined && hasSupervise(ompPrincipal)
+      ompBridgeConfig !== undefined && hasSupervise(bootPrincipal)
         ? new OmpSessionManager(
             new OmpSupervisedAdapter(
               new OmpBridgeCommandAdapter(
                 new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
               ),
-              ompPrincipal,
+              bootPrincipal,
               auditOmp,
             ),
             cyboflowLogger,
