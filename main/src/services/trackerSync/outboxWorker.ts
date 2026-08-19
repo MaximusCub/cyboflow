@@ -63,7 +63,12 @@ import {
   type WriteBackBaselineStamp,
   type WriteBackGroup,
 } from './writeBack';
-import { pickWriteBackState, resolveStageIds, stageIdToWriteBackGroup } from './stateMapping';
+import {
+  pickWriteBackState,
+  resolveEffectiveMapping,
+  resolveStageIds,
+  stageIdToWriteBackGroup,
+} from './stateMapping';
 import { splitBody } from './inboundSync';
 
 // ---------------------------------------------------------------------------
@@ -282,7 +287,14 @@ async function processStateWrite(
 
   let state: TrackerState | null;
   try {
-    state = pickWriteBackState(await states.load(), desiredGroup);
+    const loaded = await states.load();
+    // The mapping is passed so an explicit 'indev' pin can name the started
+    // state instead of falling back to the adapter's group inference.
+    state = pickWriteBackState(
+      loaded,
+      desiredGroup,
+      resolveEffectiveMapping(loaded, connection.state_mapping_json),
+    );
   } catch (err) {
     return recordAdapterFailure(deps, connection, row, report, err);
   }
@@ -471,7 +483,11 @@ function composePushDraft(
 ): IssueDraft {
   const stageIds = resolveStageIds(deps.db, connection.project_id);
   const group = stageIdToWriteBackGroup(idea.stage_id, stageIds) ?? 'backlog';
-  const state = pickWriteBackState(states, group);
+  const state = pickWriteBackState(
+    states,
+    group,
+    resolveEffectiveMapping(states, connection.state_mapping_json),
+  );
   const { description } = splitBody(idea.body);
   return {
     title: idea.title,

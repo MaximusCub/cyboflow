@@ -89,8 +89,22 @@ export interface TrackerState {
   group: TrackerStateGroup;
 }
 
-/** Mapping target: cyboflow's four writable stages, or don't-import. */
-export type TrackerMappingTarget = 'dont' | 'idea' | 'ready' | 'done' | 'wontdo';
+/**
+ * Mapping target: cyboflow's four writable stages, don't-import, or the
+ * OUTBOUND-ONLY `'indev'`.
+ *
+ * `'indev'` is deliberately asymmetric and the UI says so ("In development
+ * (one way)"). Position 7 'In development' is orchestrator-DERIVED — a tracker
+ * actor writing it is rejected by TaskChangeRouter as 'forbidden_stage' — so
+ * this target can never place an issue there on the way IN, and inbound treats
+ * it exactly like `'dont'`. What it DOES do is pin the way OUT: it names which
+ * provider state a task entering In development writes back to, replacing the
+ * "first state in the `started` group" guess. That guess is fine where the
+ * provider declares its own state groups (Linear, Plane) and much weaker where
+ * the adapter has to infer them from state NAMES (Dart), which is why the pin
+ * exists at all.
+ */
+export type TrackerMappingTarget = 'dont' | 'idea' | 'ready' | 'done' | 'wontdo' | 'indev';
 
 /** Per-connection state mapping, keyed by tracker state id. */
 export type TrackerStateMapping = Record<string, TrackerMappingTarget>;

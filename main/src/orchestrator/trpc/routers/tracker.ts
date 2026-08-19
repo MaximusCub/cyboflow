@@ -170,7 +170,7 @@ const sourceSelectionSchema = z.object({
   narrowKind: narrowKindSchema,
 });
 
-const mappingTargetSchema = z.enum(['dont', 'idea', 'ready', 'done', 'wontdo']);
+const mappingTargetSchema = z.enum(['dont', 'idea', 'ready', 'done', 'wontdo', 'indev']);
 /** Keyed by TRACKER state id, so the keys are provider-defined and unconstrained. */
 const stateMappingSchema = z.record(z.string(), mappingTargetSchema);
 

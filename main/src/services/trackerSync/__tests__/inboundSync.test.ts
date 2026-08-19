@@ -324,6 +324,23 @@ function baselineOf(externalId: string): TrackerBaseline {
 // ---------------------------------------------------------------------------
 
 describe('runInboundSync — fresh import', () => {
+  it("treats an outbound-only 'indev' mapping exactly like don't-import", async () => {
+    // 'indev' pins the WRITE-BACK state; it must never act as an inbound
+    // target, because position 7 is orchestrator-derived and a tracker actor
+    // writing it is rejected as 'forbidden_stage'. Importing it would either
+    // throw or land a stage the boot self-heal reverts on the next pass.
+    const connection = makeConnection({
+      state_mapping_json: JSON.stringify({ 'st-backlog': 'indev' }),
+    });
+    adapter.issues = [makeIssue()];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.imported).toBe(0);
+    expect(report.skipped).toBe(1);
+    expect(ideas()).toHaveLength(0);
+  });
+
   it('imports an orphaned issue as an idea with a provenance footer, link, baseline and cursor', async () => {
     const connection = makeConnection();
     const issue = makeIssue();
