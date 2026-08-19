@@ -26,13 +26,25 @@
 --
 -- The widened sets deliberately differ per table, exactly as 103's do:
 --   sessions      + 'omp-fleet'  — the fleet supervisor is a session runtime.
---   workflow_runs + 'omp-fleet'  — the quick-session SENTINEL is a workflow_runs
---                                  ROW and must carry the session's resolved
---                                  runtime; the dispatch facade reads it back to
---                                  pick the owning manager. Storable, never
---                                  launchable (WORKFLOW_LAUNCHABLE_RUNTIMES
---                                  still excludes it — a fleet supervisor has no
---                                  per-step event stream).
+--   workflow_runs + 'omp-fleet'  — parity with the declared contract:
+--                                  WORKFLOW_RUN_STORABLE_RUNTIMES
+--                                  (shared/types/agentRuntime.ts) lists
+--                                  'omp-fleet' as storable, so the column's
+--                                  CHECK must admit every value that constant
+--                                  permits or the type and the schema disagree.
+--                                  NOTE: no writer emits it TODAY. The
+--                                  quick-session sentinel does not carry the
+--                                  session's resolved runtime — workflowRegistry
+--                                  derives its stamp from `ompSdkRequested` and
+--                                  writes 'omp-sdk' for a fleet session
+--                                  (workflowRegistry.ts, createRun). This
+--                                  widening is therefore forward-looking: it
+--                                  keeps a future stamp from failing the CHECK
+--                                  at write time, and costs nothing meanwhile.
+--                                  Storable, never launchable
+--                                  (WORKFLOW_LAUNCHABLE_RUNTIMES still excludes
+--                                  it — a fleet supervisor has no per-step event
+--                                  stream).
 -- workflow_variants and agent_invocations are deliberately NOT widened: a
 -- variant resolves to a workflow-launchable runtime, and an invocation row
 -- records a per-step agent turn. Neither can ever be a fleet supervisor.

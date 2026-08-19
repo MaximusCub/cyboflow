@@ -26,6 +26,7 @@ import type {
 import {
   newOutputSince,
   OmpSessionManager,
+  type OmpErrorEvent,
   type OmpExitEvent,
   type OmpOutputEvent,
   type OmpSpawnedEvent,
@@ -515,5 +516,78 @@ describe('newOutputSince', () => {
 
   it('falls back to the whole window when nothing overlaps', () => {
     expect(newOutputSince('xyz\n', 'abc\n')).toBe('abc\n');
+  });
+});
+
+describe('OmpSessionManager — teardown races', () => {
+  it('kills the worker when a stop lands while fleet_spawn is still in flight', async () => {
+    let releaseSpawn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    const { manager, kill } = makeManager({
+      spawn: async () => {
+        await gate;
+        return okResult('worker=w9 pane=p1 model=m [pane]');
+      },
+    });
+
+    const inFlight = manager.spawn('panel-1', 'session-1', 'go', { model: 'm' });
+    // The stop lands while the reservation still has a null workerId, so it
+    // has nothing to kill and simply marks the record terminal.
+    await manager.stopPanel('panel-1');
+    expect(kill).not.toHaveBeenCalled();
+
+    releaseSpawn();
+    expect(await inFlight).toBe(false);
+
+    // The worker was born AFTER the kill sweep passed. If spawn does not reap
+    // it here, nothing ever will: no record tracks it and its id exists in no
+    // other frame — it would keep working the worktree forever.
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill.mock.calls[0][0]).toMatchObject({ workerId: 'w9' });
+    expect(manager.isPanelRunning('panel-1')).toBe(false);
+    expect(manager.panelCount).toBe(1); // the terminal record, replaceable by a respawn
+  });
+
+  it('emits no output after exit when a stop races an in-flight fleet_read', async () => {
+    let releaseRead!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const { manager } = makeManager({
+      read: async () => {
+        await gate;
+        return okResult('a late line\n');
+      },
+    });
+    const outputs = collect<OmpOutputEvent>(manager, 'output');
+    const exits = collect<OmpExitEvent>(manager, 'exit');
+
+    await manager.spawn('panel-1', 'session-1', 'go', { model: 'm' });
+    const ticking = manager.tick('panel-1');
+    await manager.stopPanel('panel-1');
+    expect(exits).toHaveLength(1);
+
+    releaseRead();
+    await ticking;
+
+    // The read resolved after exit. Emitting it would reopen a panel the
+    // consumer has already closed out.
+    expect(outputs).toHaveLength(0);
+  });
+
+  it('marks a poll blip transient and keeps the panel live', async () => {
+    const { manager } = makeManager({ state: async () => failResult('bridge unreachable') });
+    const errors = collect<OmpErrorEvent>(manager, 'error');
+
+    await manager.spawn('panel-1', 'session-1', 'go', { model: 'm' });
+    await manager.tick('panel-1');
+
+    // Transient: the worker is untouched and the next poll may succeed, so the
+    // consumer must not park the panel in a terminal-looking 'error' state.
+    expect(errors).toHaveLength(1);
+    expect(errors[0].transient).toBe(true);
+    expect(manager.isPanelRunning('panel-1')).toBe(true);
   });
 });

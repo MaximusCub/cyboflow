@@ -93,6 +93,13 @@ export interface OmpErrorEvent {
   panelId: string;
   sessionId: string;
   error: string;
+  /**
+   * `true` when the panel SURVIVES this error — a bridge blip, a herder
+   * hiccup, a rejected send. The worker is still live and the next poll may
+   * succeed, so consumers must not park the panel in a terminal-looking
+   * state. Real termination arrives as `exit`, never as `error`.
+   */
+  transient: boolean;
 }
 
 export interface OmpSpawnConfig {
@@ -281,10 +288,22 @@ export class OmpSessionManager extends EventEmitter {
     // marks it terminal while spawn is still in flight; honor that instead of
     // reviving the panel.
     if (pending.terminal) {
-      this.logger?.info(`[OmpSessionManager] panel ${panelId} stopped while spawn was in flight; not tracking the worker`, {
+      // stopPanel/stopAll ran while `fleet_spawn` was in flight, so it saw a
+      // null workerId and had nothing to kill — the worker was born AFTER the
+      // kill sweep passed. Untracked and unkilled, it would keep working the
+      // worktree forever. Reap it here: this is the only frame that has ever
+      // held its id.
+      this.logger?.info(`[OmpSessionManager] panel ${panelId} stopped while spawn was in flight; killing the orphaned worker`, {
         sessionId,
         workerId,
       });
+      const killed = await this.adapter.kill({ operationId: randomUUID(), workerId });
+      if (!killed.ok) {
+        this.logger?.warn(`[OmpSessionManager] fleet_kill failed for orphaned worker ${workerId} (panel ${panelId})`, {
+          sessionId,
+          detail: killed.detail,
+        });
+      }
       return false;
     }
     pending.workerId = workerId;
@@ -497,6 +516,10 @@ export class OmpSessionManager extends EventEmitter {
   }
 
   private emitOutput(record: OmpPanelRecord, data: string): void {
+    // A concurrent stopPanel can terminate the record while an awaited
+    // fleet_read is in flight; `exit` has already been emitted by then, and
+    // output arriving after it reopens a panel the consumer has closed out.
+    if (record.terminal) return;
     this.emit(
       "output",
       {
@@ -509,11 +532,18 @@ export class OmpSessionManager extends EventEmitter {
     );
   }
 
+  /**
+   * Every current call site is a LIVE-panel failure (poll blip, failed send):
+   * the record stays non-terminal and the panel remains usable, so the event
+   * is marked transient. Terminal outcomes go through {@link finishTerminal}.
+   */
   private emitError(record: OmpPanelRecord, error: string): void {
+    if (record.terminal) return;
     this.emit("error", {
       panelId: record.panelId,
       sessionId: record.sessionId,
       error,
+      transient: true,
     } satisfies OmpErrorEvent);
   }
 

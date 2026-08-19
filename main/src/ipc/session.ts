@@ -1496,7 +1496,28 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // ultracode/fast-mode spawn options these lanes have no equivalent for.
       const eagerPtyLane =
         nonClaudeQuickRuntime !== undefined ? quickPtyLanes.get(nonClaudeQuickRuntime) : undefined;
-      if (eagerPtyLane) {
+      // OMP FLEET FIRST — this branch must outrank every substrate branch below.
+      // A fleet session's work runs on a REMOTE worker; any local eager spawn
+      // here would boot a second, unwanted agent against the same worktree.
+      // Today `ompSdkRequested` happens to force resolvedSubstrate to 'sdk', so
+      // the interactive branches miss it by luck rather than by design — one
+      // change to substrate resolution and a fleet session would silently grow a
+      // local Claude REPL. Ordering makes that structural instead of incidental.
+      if (useOmpFleet) {
+        // Create the panel server-side (so the frontend skips a duplicate) but
+        // do NOT spawn — the ADR's "first message spawns". The remote worker
+        // boots on the first panels:send-input / panels:continue.
+        try {
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'claude',
+            title: 'Chat',
+          });
+          claudePanelId = panel.id;
+        } catch (error) {
+          console.error(`[IPC] Failed to create OMP panel for quick session ${session.id}:`, error);
+        }
+      } else if (eagerPtyLane) {
         try {
           const panel = await panelManager.createPanel({
             sessionId: session.id,
@@ -1625,20 +1646,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         } catch (error) {
           console.error(`[IPC] Failed to create Claude panel for interactive quick session ${session.id}:`, error);
           // Continue without the eager spawn — sessions:input bootstraps on demand.
-        }
-      } else if (useOmpFleet) {
-        // OMP fleet: create the panel server-side (so the frontend skips a
-        // duplicate) but do NOT spawn — the ADR's "first message spawns". The
-        // remote worker boots on the first panels:send-input / panels:continue.
-        try {
-          const panel = await panelManager.createPanel({
-            sessionId: session.id,
-            type: 'claude',
-            title: 'Chat',
-          });
-          claudePanelId = panel.id;
-        } catch (error) {
-          console.error(`[IPC] Failed to create OMP panel for quick session ${session.id}:`, error);
         }
       }
 
