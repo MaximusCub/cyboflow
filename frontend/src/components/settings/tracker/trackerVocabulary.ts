@@ -104,14 +104,42 @@ export function providerMeta(provider: TrackerProvider): TrackerProviderMeta {
 // State mapping
 // ---------------------------------------------------------------------------
 
-/** The mapping dropdown's options — cyboflow's four writable stages plus opt-out. */
+/**
+ * The mapping dropdown's options — cyboflow's four writable stages, opt-out,
+ * and the one-way 'indev'. Listed in BOARD order (Idea → Ready → In
+ * development → Done → Won't do) so the picker reads like the board does.
+ *
+ * 'In development' is labelled "(one way)" right in the option text because the
+ * asymmetry is the whole point: picking it does not import anything, it names
+ * which provider state a task entering In development is pushed to. See
+ * MAPPING_TARGET_NOTE for the inline caption the picker shows once it is chosen.
+ */
 export const MAPPING_TARGETS: readonly { value: TrackerMappingTarget; label: string }[] = [
   { value: 'dont', label: "— Don't import" },
   { value: 'idea', label: 'Idea' },
   { value: 'ready', label: 'Ready for development' },
+  { value: 'indev', label: 'In development (one way)' },
   { value: 'done', label: 'Done' },
   { value: 'wontdo', label: "Won't do" },
 ];
+
+/**
+ * The caption shown under a picker whose target needs a qualifier — keyed by
+ * target so a future one-way target does not need another branch in the view.
+ * `{provider}` is substituted with the provider's display name.
+ */
+export const MAPPING_TARGET_NOTE: Partial<Record<TrackerMappingTarget, string>> = {
+  indev: 'One way only — pushed to {provider}, never imported.',
+};
+
+/** The note for a target with the provider name filled in, or null. */
+export function mappingTargetNote(
+  target: TrackerMappingTarget,
+  providerName: string,
+): string | null {
+  const note = MAPPING_TARGET_NOTE[target];
+  return note === undefined ? null : note.replace('{provider}', providerName);
+}
 
 export function mappingTargetLabel(target: TrackerMappingTarget): string {
   return MAPPING_TARGETS.find((t) => t.value === target)?.label ?? target;
