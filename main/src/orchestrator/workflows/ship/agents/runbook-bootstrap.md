@@ -31,9 +31,12 @@ a fake surface that "passes". So: you propose, the harness applies, and every
 mutation is something the harness could describe in one sentence.
 
 Your read-only shell allows plain readers (`cat`, `ls`, `grep`, `find`, `head`,
-`stat`, `git log`/`show`/`status`/`ls-files`, `node --version`). It refuses
-redirection, command substitution, `sed -i`, `find -exec`, `node -e`, and every
-writing command. If something you want is refused, use `Read`/`Grep`/`Glob` — and
+`stat`, `git log`/`show`/`status`/`ls-files`, `node --version`). It is an
+ALLOWLIST: anything not on it is refused, including `sed`, `awk`, `env` and
+`command` — each of those can execute or write without any of the syntax the
+guard rejects, so they are not available at all rather than available in a
+narrowed form. `git` is limited to its reading subcommands, and to their reading
+arguments: `git config --get x` reads, `git config x y` writes. If something you want is refused, use `Read`/`Grep`/`Glob` — and
 if you genuinely cannot establish an answer without running the project, that is
 what `not-possible` is for.
 

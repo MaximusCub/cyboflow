@@ -50,8 +50,16 @@ export type RunbookDraftValidation = { ok: true } | { ok: false; rejection: Runb
  * Shell metacharacters that make a command more than one invocation. Their
  * presence is the rejection itself — see the module header on why this does not
  * try to decompose them.
+ *
+ * A BARE `&` COUNTS. It was missed on the first pass because `&&` was listed and
+ * a single ampersand reads like a lesser version of it; it is not — `pnpm dev &
+ * rm -rf x` backgrounds the script and runs the rest, and the resolver below
+ * would have answered "dev", a declared script, and let it through. This
+ * command's blast radius is not one run: it is committed, proven, and re-executed
+ * on every verification of this project from then on. Redirection is refused on
+ * the same grounds.
  */
-const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|`]|\$\(|<\(|\n)/;
+const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|&`<>]|\$\(|\n|\r)/;
 
 /**
  * Package-manager prefixes whose next non-flag token names a script.
@@ -71,6 +79,21 @@ const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
  * and the runbook's commands execute from the repo root.
  */
 const VALUELESS_PM_FLAGS = new Set(['--silent', '-s', '--quiet']);
+
+/**
+ * Flags that change WHICH project's script runs, wherever they appear.
+ *
+ * Everything after the script name is normally the script's own argument
+ * (`pnpm dev --port ${PORT}` is the shape this feature exists to support), but
+ * package managers keep parsing their own flags there too: `npm run build
+ * --prefix ../other` resolves to the declared script `build` and then runs a
+ * DIFFERENT project's copy of it. The runbook's commands execute from the repo
+ * root by construction, so none of these has a legitimate use here.
+ */
+const PROJECT_REDIRECTING_FLAGS = new Set([
+  '--prefix', '-C', '--cwd', '--dir', '--workspace', '-w', '--workspaces',
+  '--filter', '-F', '--package', '--node-options', '--script-shell', '--use-npm-ci',
+]);
 
 /**
  * The script name a command invokes, or `null` when it does not resolve to one.
@@ -99,6 +122,11 @@ export function scriptNameForCommand(command: string): string | null {
   // A flag in the script position means the command is doing something other
   // than running a script (`pnpm --version`, `npm run --workspace=x`).
   if (candidate.startsWith('-')) return null;
+  // A redirecting flag anywhere in the command disqualifies it, including after
+  // the script name — see PROJECT_REDIRECTING_FLAGS.
+  for (const token of tokens) {
+    if (PROJECT_REDIRECTING_FLAGS.has(token.split('=')[0])) return null;
+  }
   return candidate;
 }
 

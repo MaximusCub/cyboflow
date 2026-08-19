@@ -37,6 +37,21 @@
  * that this binary, invoked without the syntax rejected below, cannot modify the
  * worktree.
  */
+/**
+ * NOT ON THIS LIST, DELIBERATELY, AND THE REASON MATTERS MORE THAN THE ENTRIES.
+ *
+ * `env` and `command` are EXEC WRAPPERS: they take the real command as an
+ * argument, and this module only ever inspects a segment's head. `env sh -c '…'`
+ * defeats the entire allowlist in one token, and `env node -e …` defeats the
+ * per-head flag bans below, which key on the head. A wrapper on a list of
+ * readers is a hole in the shape of a list entry.
+ *
+ * `awk` and `sed` carry their own write and exec primitives that need none of
+ * the syntax rejected below: `awk 'BEGIN{system("…")}'` and `sed 'w file'`. They
+ * were removed rather than pattern-matched, because a guard that enumerates the
+ * spellings it thought of is exactly the failure this module is written against
+ * — and `grep`/`Read`/`Glob` cover what a survey actually needs.
+ */
 const READ_ONLY_HEADS: ReadonlySet<string> = new Set([
   'cat',
   'head',
@@ -67,13 +82,9 @@ const READ_ONLY_HEADS: ReadonlySet<string> = new Set([
   'false',
   'which',
   'type',
-  'command',
-  'env',
   'node',
   'jq',
   'yq',
-  'sed',
-  'awk',
   'git',
   'json',
   'diff',
@@ -108,6 +119,47 @@ const READ_ONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
 const GIT_WRITE_FLAGS = new Set(['--set', '--unset', '--unset-all', '--add', '--replace-all', '--edit', '-e']);
 
 /**
+ * Per-subcommand argument allowlists, for the three subcommands whose READ form
+ * and WRITE form differ only in their arguments.
+ *
+ * The subcommand allowlist above is necessary and was not sufficient: `git
+ * branch -D main` deletes, `git branch -m` renames the branch five lanes are
+ * committing to, `git remote remove origin` unhooks the repo, and `git config
+ * user.email x` writes with no flag at all — its write form is POSITIONAL, which
+ * is why a flag denylist could never have caught it.
+ *
+ * Expressed as "these arguments and no others", so a form nobody here thought of
+ * is refused rather than admitted.
+ */
+interface GitArgRule {
+  /** Tokens admitted verbatim — read flags, and the read sub-verbs of `remote`. */
+  readonly allowed: readonly string[];
+  /** How many bare operands the READ form needs. Every write form needs more. */
+  readonly maxPositionals: number;
+}
+
+const GIT_SUBCOMMAND_ARG_RULES: Record<string, GitArgRule> = {
+  // No operand at all: `git branch <name>` CREATES one and `git branch -D <name>`
+  // deletes one, so a bare operand is never a read.
+  branch: {
+    allowed: [
+      '--list', '-l', '-a', '--all', '-r', '--remotes', '-v', '-vv', '--verbose',
+      '--show-current', '--merged', '--no-merged', '--format', '--sort',
+    ],
+    maxPositionals: 0,
+  },
+  // `git remote show origin` / `get-url origin` — one operand, the remote's name.
+  // `add`/`remove`/`rename`/`set-url` all need two or more and fall out here.
+  remote: { allowed: ['-v', '--verbose', 'show', 'get-url'], maxPositionals: 1 },
+  // `git config --get <key>` reads one key; `git config <key> <value>` writes,
+  // and its write-ness is carried ENTIRELY by the operand count.
+  config: {
+    allowed: ['--get', '--get-all', '--get-regexp', '--list', '-l', '--local', '--global', '--show-origin'],
+    maxPositionals: 1,
+  },
+};
+
+/**
  * Syntax that makes ANY command a potential write, regardless of its head:
  * redirection, command substitution, and process substitution. Rejected before
  * the head check, because the head of `cat x > y` is `cat`.
@@ -126,9 +178,18 @@ const PER_HEAD_FORBIDDEN_FLAGS: Record<string, readonly string[]> = {
   // `node -e`/`--eval`/`-p` executes arbitrary code, which is the whole shell
   // escape in one flag.
   sed: ['-i', '--in-place'],
-  find: ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprintf'],
-  node: ['-e', '--eval', '-p', '--print', '--input-type'],
-  env: ['-S'],
+  find: ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprintf', '-fls'],
+};
+
+/**
+ * Heads admitted ONLY in an exact set of forms. `node <file>` executes whatever
+ * that file says — and a repo's own tooling is the easiest thing in the world to
+ * point at (this project ships a script that rewrites a mapped `.node` in
+ * place). The one genuinely useful read is the version, so that is the only form
+ * that survives.
+ */
+const EXACT_FORMS_ONLY: Record<string, readonly string[]> = {
+  node: ['--version', '-v'],
 };
 
 /** Why a command was refused, or `null` when it is allowed. */
@@ -171,6 +232,14 @@ function rejectSegment(segment: string): string | null {
     return `\`${head}\` is not one of the read-only commands this agent may run`;
   }
 
+  const exactForms = EXACT_FORMS_ONLY[head];
+  if (exactForms !== undefined) {
+    const rest = tokens.slice(1);
+    if (rest.length !== 1 || !exactForms.includes(rest[0])) {
+      return `\`${head}\` is available only as ${exactForms.map((f) => `\`${head} ${f}\``).join(' or ')}`;
+    }
+  }
+
   const forbidden = PER_HEAD_FORBIDDEN_FLAGS[head];
   if (forbidden !== undefined) {
     for (const token of tokens.slice(1)) {
@@ -192,6 +261,23 @@ function rejectSegment(segment: string): string | null {
     for (const token of tokens.slice(2)) {
       if (GIT_WRITE_FLAGS.has(token.split('=')[0])) {
         return `\`git ${sub} ${token}\` writes, so it is not available to this agent`;
+      }
+    }
+    // Subcommands whose write form is an ARGUMENT rather than a flag: allowlist
+    // the read arguments and refuse everything else, including bare positionals
+    // (`git config user.email x` is a write with no flag in it anywhere).
+    const rule = GIT_SUBCOMMAND_ARG_RULES[sub];
+    if (rule !== undefined) {
+      let positionals = 0;
+      for (const token of tokens.slice(2)) {
+        if (rule.allowed.includes(token.split('=')[0])) continue;
+        if (token.startsWith('-')) {
+          return `\`git ${sub} ${token}\` is not one of the read-only forms of \`git ${sub}\``;
+        }
+        positionals += 1;
+        if (positionals > rule.maxPositionals) {
+          return `\`git ${sub}\` takes no more than ${rule.maxPositionals} argument(s) in its read form`;
+        }
       }
     }
   }

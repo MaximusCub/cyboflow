@@ -42,6 +42,38 @@ function validate(over: { build?: string[]; serveCmd?: string } = {}, manifest: 
   return validateDraftedRunbook({ runbook: runbook(over), modality: 'web', packageJsonRaw: manifest });
 }
 
+describe('scriptNameForCommand — composition and redirection', () => {
+  it.each([
+    // A single `&` composes exactly as `&&` does; it was missed because `&&`
+    // was listed and an ampersand reads like a lesser version of it. The tail
+    // rides into a shell, and this command is committed, proven, and re-run on
+    // every later verification of the project.
+    'pnpm dev & rm -rf /tmp/x',
+    'pnpm dev > /tmp/out',
+    'pnpm dev >> /tmp/out',
+    'pnpm dev < /tmp/in',
+  ])('does not resolve `%s`', (command) => {
+    expect(scriptNameForCommand(command)).toBeNull();
+  });
+
+  it.each([
+    // Package-manager flags that change WHICH project's script runs. These sit
+    // after the script name, where everything else is the script's own argument.
+    'npm run build --prefix ../other',
+    'npm run build --prefix=../other',
+    'pnpm --filter web dev',
+    'pnpm dev --node-options=--require=/tmp/x',
+  ])('does not resolve `%s` — it redirects the project', (command) => {
+    expect(scriptNameForCommand(command)).toBeNull();
+  });
+
+  it('still resolves the shape this feature exists to support', () => {
+    expect(scriptNameForCommand('pnpm run preview --port ${PORT}')).toBe('preview');
+    expect(scriptNameForCommand('pnpm --silent run build')).toBe('build');
+    expect(scriptNameForCommand('bun run dev')).toBe('dev');
+  });
+});
+
 describe('scriptNameForCommand', () => {
   it.each([
     ['pnpm run build', 'build'],

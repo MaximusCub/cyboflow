@@ -103,9 +103,57 @@ describe('readOnlyCommandRejection — the readers that can write', () => {
   });
 
   it('still allows the read-only forms of those same heads', () => {
-    expect(readOnlyCommandRejection('sed -n "1,20p" package.json')).toBeNull();
     expect(readOnlyCommandRejection('find . -name "*.config.ts"')).toBeNull();
     expect(readOnlyCommandRejection('node --version')).toBeNull();
+    expect(readOnlyCommandRejection('grep -rn scripts package.json')).toBeNull();
+  });
+
+  it.each([
+    // Exec wrappers: the real command is an ARGUMENT, and this guard reads heads.
+    'env sh -c "rm -rf x"',
+    'env node -e "require(\'fs\').unlinkSync(\'x\')"',
+    'command rm -rf x',
+    // Interpreters carrying their own write/exec primitives, needing none of the
+    // syntax rejected elsewhere in this module.
+    'awk \'BEGIN{system("rm -rf x")}\'',
+    "sed 'w /tmp/out' package.json",
+    // `node <file>` executes whatever that file says, and every repo ships files.
+    'node scripts/ensure-sqlite-abi.mjs electron',
+    'find . -fls /tmp/out',
+  ])('refuses `%s` — the head is not the command', (command) => {
+    expect(readOnlyCommandRejection(command)).not.toBeNull();
+  });
+});
+
+describe('readOnlyCommandRejection — git subcommands whose write form is an argument', () => {
+  it.each([
+    // Flag-carried writes on a subcommand allowlisted as a read.
+    'git branch -D main',
+    'git branch -m hijacked',
+    'git branch --set-upstream-to=origin/main',
+    // Operand-carried writes — `git config user.email x` contains no flag at
+    // all, which is why a flag denylist could never have caught it.
+    'git config user.email attacker@example.com',
+    'git config core.hooksPath /tmp/hooks',
+    'git remote remove origin',
+    'git remote add evil https://example.com/x.git',
+    'git remote set-url origin https://example.com/x.git',
+    // Creating a branch is a write too, and it is a bare operand.
+    'git branch newbranch',
+  ])('refuses `%s`', (command) => {
+    expect(readOnlyCommandRejection(command)).not.toBeNull();
+  });
+
+  it.each([
+    'git config --get user.email',
+    'git config --list',
+    'git remote show origin',
+    'git remote get-url origin',
+    'git remote -v',
+    'git branch --show-current',
+    'git branch -a',
+  ])('still allows `%s`', (command) => {
+    expect(readOnlyCommandRejection(command)).toBeNull();
   });
 });
 

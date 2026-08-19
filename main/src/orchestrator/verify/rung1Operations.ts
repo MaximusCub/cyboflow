@@ -50,18 +50,29 @@ import { targetFileForOperation } from './runbookDraft';
  *
  * Matched against the POSIX-normalized, repo-relative path.
  */
+/*
+ * CASE-INSENSITIVE, AND THAT IS LOAD-BEARING RATHER THAN TIDY. macOS ships a
+ * case-INsensitive filesystem by default, so `.Claude/settings.json` and
+ * `.claude/settings.json` are the same file while a case-sensitive pattern sees
+ * only one of them — and the repo `.claude/settings.json` is a file whose
+ * contents decide whether the approval gate binds at all. `.git/` and `.husky/`
+ * were added at the same time: hooks and repo config are executed, which is the
+ * property this list is actually about.
+ */
 export const RUNG1_DENIED_PATH_PATTERNS: readonly RegExp[] = [
-  /(^|\/)pnpm-lock\.yaml$/,
-  /(^|\/)package-lock\.json$/,
-  /(^|\/)yarn\.lock$/,
-  /(^|\/)bun\.lockb$/,
-  /(^|\/)\.github\//,
-  /(^|\/)\.gitlab-ci\.yml$/,
-  /(^|\/)\.circleci\//,
-  /(^|\/)azure-pipelines\.yml$/,
-  /(^|\/)\.claude\//,
-  /(^|\/)\.cyboflow\//,
-  /(^|\/)scripts\//,
+  /(^|\/)pnpm-lock\.yaml$/i,
+  /(^|\/)package-lock\.json$/i,
+  /(^|\/)yarn\.lock$/i,
+  /(^|\/)bun\.lockb$/i,
+  /(^|\/)\.github\//i,
+  /(^|\/)\.gitlab-ci\.yml$/i,
+  /(^|\/)\.circleci\//i,
+  /(^|\/)azure-pipelines\.yml$/i,
+  /(^|\/)\.claude\//i,
+  /(^|\/)\.cyboflow\//i,
+  /(^|\/)scripts\//i,
+  /(^|\/)\.git\//i,
+  /(^|\/)\.husky\//i,
 ];
 
 /** Result of applying an operation to one file's content. */
@@ -114,10 +125,10 @@ export function validateRung1Target(
     }
   }
 
-  if (operation.kind === 'add-script' && path !== 'package.json') {
+  if (operation.kind === 'add-script' && path.toLowerCase() !== 'package.json') {
     return { ok: false, error: `add-script may only edit the root package.json (got ${path})` };
   }
-  if (operation.kind !== 'add-script' && path.split('/').at(-1) === 'package.json') {
+  if (operation.kind !== 'add-script' && path.split('/').at(-1)?.toLowerCase() === 'package.json') {
     // package.json changes are confined to `scripts`, and `add-script` is the
     // only operation that can express that confinement. A textual substitution
     // inside a manifest would be an arbitrary JSON edit wearing a narrow

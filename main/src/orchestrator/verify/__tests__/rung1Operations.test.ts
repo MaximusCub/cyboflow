@@ -40,6 +40,31 @@ function strictOp(file: string, setting = 'strictPort'): Rung1Operation {
   return { kind: 'relax-strict-port', file, setting };
 }
 
+describe('validateRung1Target — the denylist folds case, because the filesystem does', () => {
+  it.each([
+    // macOS is case-insensitive by DEFAULT, so each of these names the same file
+    // as its lowercase twin. `.claude/settings.json` in particular decides
+    // whether the approval gate binds at all.
+    '.Claude/settings.json',
+    '.GitHub/workflows/ci.yml',
+    'Scripts/build.js',
+    '.CyboFlow/verify-runbook.json',
+    'PNPM-lock.yaml',
+    // Executed-on-checkout surfaces, added with the case fix.
+    '.git/config',
+    '.husky/pre-commit',
+  ])('refuses `%s`', (file) => {
+    const result = validateRung1Target({ kind: 'relax-strict-port', file, setting: 'strictPort' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('still admits an ordinary config file', () => {
+    expect(validateRung1Target({ kind: 'relax-strict-port', file: 'vite.config.ts', setting: 'strictPort' }).ok).toBe(
+      true,
+    );
+  });
+});
+
 describe('normalizeRung1Path', () => {
   it('normalizes a relative path and its separators', () => {
     expect(normalizeRung1Path('./apps\\web/vite.config.ts')).toEqual({
