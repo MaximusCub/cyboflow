@@ -2324,6 +2324,13 @@ async function initializeServices(): Promise<boolean> {
       registerDraft: (projectId, worktreePath, modality) =>
         verifyRunbookStore.registerDraft(projectId, worktreePath, modality),
       setOrigin: (projectId, modality, origin) => verifyRunbookStore.setOrigin(projectId, modality, origin),
+      // A passing proof and a proven record are two different facts: the engine
+      // declines to promote a proof that ran in the dirty-worktree fallback,
+      // carried no pin, or lost its CAS. Ask the record itself rather than infer
+      // it from the request's status — probing the RUN WORKTREE, the same tree
+      // the lane's own enqueue will resolve against.
+      confirmProven: async () =>
+        (await verifyRunbookStore.status(args.projectId, args.worktreePath, args.modality)) === 'proven',
       // The proof rides the SAME enqueue seam as ordinary lane traffic, with the
       // migration-105 kind set. `bootstrapProof` is not a wire field and this is
       // its only writer, which makes it a strictly stronger guarantee than

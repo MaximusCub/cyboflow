@@ -454,6 +454,21 @@ describe('runRunbookBootstrap — the rung-1 operation', () => {
     h.db.close();
   });
 
+  it('does NOT report proven when the record did not actually flip', async () => {
+    // A passing proof is not a proven record. The engine declines to promote one
+    // that ran in the dirty-worktree fallback, carried no pin, or lost its CAS —
+    // all of which end as `passed`. Claiming proven there hands the lane a
+    // runbook its own enqueue then fails to resolve, which surfaces as a
+    // mysterious skip after the bootstrap reported success.
+    const h = harness({ confirmProven: async () => false });
+    const outcome = await runRunbookBootstrap(ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    if (outcome.kind !== 'unproven') throw new Error('unreachable');
+    expect(outcome.detail).toContain('did not become proven');
+    expect(h.stamps.read('run-1', 1, 'web')?.state).toBe('failed');
+    h.db.close();
+  });
+
   it('files the finding even when the bootstrap DIES after committing the edit', async () => {
     // The compensating control §15A accepted rung 1 on is not the narrowness of
     // the operation alone — it is the narrowness PLUS a human being told. Every

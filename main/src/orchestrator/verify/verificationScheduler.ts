@@ -3619,6 +3619,36 @@ export class VerificationScheduler {
       );
     }
 
+    // §5.3 — the proof flip runs BEFORE the terminal write, and the ordering is
+    // load-bearing rather than incidental.
+    //
+    // IT USED TO RUN AFTER, on the reasoning that a proof-recording failure must
+    // never change a verdict already committed. That reasoning still holds and is
+    // preserved by the try/catch below — but the ordering it produced was a race.
+    // `awaitTerminal` polls the request ROW, and the row went terminal here,
+    // before `deliver()` — a whole pipeline of real IO — and only then did the
+    // record flip. A bootstrap waiting on its own proof could therefore observe
+    // `passed`, return "proven", and have the lane's very next enqueue read the
+    // record as still an unproven draft and skip the verification anyway: the
+    // exact outcome the bootstrap spent an agent, a budget charge, two commits
+    // and up to fifteen minutes to avoid.
+    //
+    // Flipping first makes "the row is terminal" mean "the record has already
+    // been decided", which is what every reader assumed it meant.
+    if ((setupProof || bootstrapProof) && status === 'passed') {
+      try {
+        this.recordRunbookProof(row, modality, result, snapshotSha);
+      } catch (err) {
+        // Swallowed deliberately: the verdict below is the load-bearing act, and
+        // a proof-recording failure may not prevent it from being written.
+        this.logger?.warn('[VerificationScheduler] recording the runbook proof threw; the verdict still stands', {
+          requestId: row.id,
+          modality,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     await this.markTerminalAndDeliver(
       row,
       status,
@@ -3636,18 +3666,6 @@ export class VerificationScheduler {
       result.fileNames,
       input,
     );
-
-    // §5.3 — the proof flip runs AFTER the terminal write, exactly like the
-    // ledger feedback below and for the same reason: the verdict is the
-    // load-bearing act, and a proof-recording failure must never be able to
-    // change one that is already committed.
-    // A BOOTSTRAP proof promotes on exactly the same terms (and through the same
-    // engine-enforced path, with the same dirty-worktree refusal and the same
-    // double CAS): the whole point of the lane bootstrap is that it cannot assert
-    // its own success any more than the setup flow can.
-    if ((setupProof || bootstrapProof) && status === 'passed') {
-      this.recordRunbookProof(row, modality, result, snapshotSha);
-    }
 
     await this.recordCapabilityOutcome(
       row,

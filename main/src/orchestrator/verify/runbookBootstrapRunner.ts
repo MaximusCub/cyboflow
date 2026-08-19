@@ -208,6 +208,16 @@ export interface RunbookBootstrapDeps {
    * never awaited for its effect on the outcome: a reporting failure must not
    * turn a proven runbook into an unproven one.
    */
+  /**
+   * Does the RECORD now resolve proven? Asked after a passing proof, because a
+   * passing proof and a proven record are two different facts: the engine
+   * legitimately declines to promote one that ran in the dirty-worktree
+   * fallback, carried no pin, or lost its CAS. Without this the runner would
+   * report "proven" and the lane's next enqueue would find a draft and skip.
+   *
+   * Optional: a caller that cannot answer gets the old, trusting behaviour.
+   */
+  confirmProven?: () => boolean | Promise<boolean>;
   reportArtifact?: (args: { projectId: number; runId: string; label: string; markdown: string }) => Promise<void>;
   /**
    * File the §8.1 review-queue finding naming an auto-edited config file. This
@@ -917,8 +927,10 @@ async function bootstrap(
  *
  * Returns a terminal outcome, or `null` meaning "it did not pass and the caller
  * may try another round". A PASS here is NOT this function promoting anything —
- * the engine already flipped the record on its own terminal path before this
- * read; all that happens here is the stamp learning about it.
+ * only the engine's own terminal path can, and it does so before it writes the
+ * terminal status this awaits. What happens here is the stamp learning about it,
+ * and — because a passing proof is still not the same fact as a proven record —
+ * CONFIRMING it before the caller is told the lane can verify from here.
  */
 async function consumeProof(
   args: RunbookBootstrapArgs & { modality: VerifyRunbookModality },
@@ -934,6 +946,26 @@ async function consumeProof(
   const outcome = await deps.awaitProof(requestId, BOOTSTRAP_PROOF_AWAIT_MS);
 
   if (outcome.status === 'passed' && runbookHash !== null && runbookVersion !== null) {
+    // The engine refuses to promote a proof that ran in the dirty-worktree
+    // fallback, carried no pin, or lost its CAS — all of which end as `passed`.
+    // Reporting "proven" on any of those hands the lane a runbook it will then
+    // fail to resolve, which reads as a mysterious skip rather than a failure.
+    const confirmed = deps.confirmProven === undefined ? true : await deps.confirmProven();
+    if (!confirmed) {
+      const detail =
+        'the bootstrap proof passed but the runbook record did not become proven ' +
+        '(the engine declines to promote a proof that ran without a clean snapshot or a pin)';
+      deps.stamps.advance({
+        runId,
+        projectId,
+        modality,
+        ownerTaskRef: laneTaskRef,
+        state: 'failed',
+        round,
+        detail,
+      });
+      return { settled: { kind: 'unproven', detail, commitSha, rung1: rung1Summary(rung1) } };
+    }
     deps.stamps.advance({
       runId,
       projectId,
