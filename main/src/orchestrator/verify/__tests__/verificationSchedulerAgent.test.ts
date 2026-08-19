@@ -2279,3 +2279,58 @@ describe('VerificationScheduler — awaitTerminal (§5.2 seam 2)', () => {
     expect(outcome.feedback).toBeNull();
   });
 });
+
+describe('VerificationScheduler — the bootstrap toggle is read live', () => {
+  it('honours a toggle flipped after boot, in BOTH directions', async () => {
+    // `config` is resolved once at boot, which is right for the judge threshold
+    // and the port pools and wrong for a Settings checkbox. The OFF direction is
+    // the one that matters: unchecking the box mid-incident used to leave the
+    // next lane still deriving and committing to the branch until a relaunch,
+    // with nothing in the UI saying a restart was required.
+    const db = buildDb();
+    let enabled = false;
+    const attempts: string[] = [];
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend(vi.fn(async () => ({ ok: true, fileNames: [] }) satisfies CaptureResult)) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: { ...CONFIG, autoBootstrapRunbook: false },
+      liveConfig: () => ({ ...CONFIG, autoBootstrapRunbook: enabled }),
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict: () => {},
+      runbookStatus: async () => ({ status: 'unproven-draft', reason: 'draft' }),
+      runbookBootstrap: async (args) => {
+        attempts.push(args.laneTaskRef);
+        return { kind: 'declined', reason: 'unavailable', detail: 'test' };
+      },
+    });
+
+    const call = () =>
+      scheduler.maybeBootstrapRunbook({
+        projectId: 1,
+        runId: 'run-toggle',
+        laneTaskRef: 'TASK-1',
+        modality: 'web',
+        probePath: '/wt',
+        task: {
+          version: 1,
+          summary: 'verify the widget',
+          serve: { cmd: 'pnpm run preview' },
+          behaviors: [],
+        },
+      });
+
+    expect(await call()).toMatchObject({ kind: 'not-attempted' });
+    expect(attempts).toHaveLength(0);
+
+    enabled = true;
+    expect(await call()).toMatchObject({ kind: 'declined' });
+    expect(attempts).toEqual(['TASK-1']);
+
+    enabled = false;
+    expect(await call()).toMatchObject({ kind: 'not-attempted' });
+    expect(attempts).toHaveLength(1);
+    db.close();
+  });
+});

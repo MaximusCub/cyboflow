@@ -909,6 +909,15 @@ export interface VerificationSchedulerDeps {
   logger?: LoggerLike;
   /** Resolved visualVerify config (port/sim pools, threshold). Defaults applied. */
   config?: ResolvedVisualVerifyConfig;
+  /**
+   * The LIVE config, re-read per call. `config` above is resolved once at boot,
+   * which is right for the judge threshold and the port pools (a run must not
+   * change shape underneath itself) and wrong for a user-facing toggle: a switch
+   * flipped in Settings is expected to bind the next run, not the next launch.
+   * That mattered most in the OFF direction — unchecking "let runs set up
+   * verification themselves" mid-incident left the next lane still committing.
+   */
+  liveConfig?: () => ResolvedVisualVerifyConfig;
   /** Verdict-delivery side-effect hook (P8 wires the real one; stubbed here). */
   onVerdict?: OnVerdict;
   /** Shared lease pool override (tests). Defaults to a pool over the global mutex. */
@@ -1408,6 +1417,7 @@ export class VerificationScheduler {
   private readonly artifactsDirResolver: (runId: string) => string;
   private readonly logger?: LoggerLike;
   private readonly config: ResolvedVisualVerifyConfig;
+  private readonly liveConfig: (() => ResolvedVisualVerifyConfig) | null;
   private readonly onVerdict?: OnVerdict;
   private readonly leasePool: ResourceLeasePool;
   private readonly requestTimeoutMs: number;
@@ -1484,6 +1494,7 @@ export class VerificationScheduler {
     this.artifactsDirResolver = deps.artifactsDirResolver;
     this.logger = deps.logger;
     this.config = deps.config ?? VISUAL_VERIFY_DEFAULTS;
+    this.liveConfig = deps.liveConfig ?? null;
     this.onVerdict = deps.onVerdict;
     this.leasePool = deps.leasePool ?? new ResourceLeasePool();
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -2788,10 +2799,13 @@ export class VerificationScheduler {
       },
       {
         // The project toggle AND the host kill switch, combined here so the
-        // decision module never reads the environment. Read at CALL time: a
-        // switch flipped after boot is meant to take effect.
+        // decision module never reads the environment. Both are read at CALL
+        // time — the toggle through `liveConfig`, because the boot-time snapshot
+        // made a Settings checkbox require a restart to mean anything, in both
+        // directions and with nothing in the UI saying so.
         enabled:
-          this.config.autoBootstrapRunbook === true && !runbookBootstrapKillSwitchEngaged(),
+          (this.liveConfig?.() ?? this.config).autoBootstrapRunbook === true &&
+          !runbookBootstrapKillSwitchEngaged(),
         status: (projectId, modality, path) => this.runbookStatus(projectId, modality, path),
         ...(this.logger ? { logger: this.logger } : {}),
       },

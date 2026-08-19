@@ -2420,6 +2420,9 @@ async function initializeServices(): Promise<boolean> {
     artifactsDirResolver: verifyArtifactsDirResolver,
     logger: cyboflowLogger,
     config: visualVerifyConfig,
+    // Re-read per call, for the settings a user expects to take effect without
+    // relaunching the app — see `liveConfig` on the scheduler's deps.
+    liveConfig: () => configManager.getVisualVerifyConfig(),
     // P8a — advisory verdict delivery through the existing router chokepoints
     // (artifact enrich on every judged outcome + a FAIL/low-confidence finding).
     onVerdict: createVerdictDelivery({
