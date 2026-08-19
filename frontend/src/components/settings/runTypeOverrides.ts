@@ -139,6 +139,44 @@ export function agentRuntimeOptions(key: string): readonly AgentRuntime[] {
   return forKind.filter((runtime) => isRuntimeSelectableInPickers(runtime));
 }
 
+/** The OMP runtimes that run OMP on THIS machine, as opposed to supervising a remote fleet. */
+const LOCAL_OMP_RUNTIMES: ReadonlySet<AgentRuntime> = new Set(['omp-sdk', 'omp-pty']);
+
+/**
+ * {@link agentRuntimeOptions} narrowed to the OMP flavor this install actually
+ * runs — the same rule `SubstrateSelector` applies, so Settings and the launch
+ * picker cannot disagree about which OMP exists here.
+ *
+ * The two flavors are ALTERNATIVES: Aria mode supervises a remote fleet
+ * (`omp-fleet`), everything else runs OMP locally (`omp-sdk`/`omp-pty`). Never
+ * both. `omp-fleet` additionally needs `launchable` — a stored preference for a
+ * runtime with no bridge behind it is the same defect in Settings as it is on
+ * the launch picker.
+ *
+ * `current` is preserved unconditionally. A value already stored for this key
+ * must stay in its own dropdown even when the flavor would hide it: a `<select>`
+ * whose list omits its own value renders blank and would rewrite the stored
+ * override the next time any OTHER field on the screen is saved. Flipping the
+ * toggle changes what you can PICK, never what is already stored.
+ *
+ * NOTE: deliberately separate from `agentRuntimeOptions`, which stays the pure
+ * launch-KIND coercion the baseline math depends on (`runTypeBaseline`). Flavor
+ * is a display concern; folding it into the coercion would move baselines — and
+ * therefore every diff chip — when the toggle flips.
+ */
+export function agentRuntimePickerOptions(
+  key: string,
+  omp: { launchable: boolean; ariaMode: boolean },
+  current?: string | null,
+): readonly AgentRuntime[] {
+  return agentRuntimeOptions(key).filter((runtime) => {
+    if (runtime === current) return true;
+    if (runtime === 'omp-fleet') return omp.ariaMode && omp.launchable;
+    if (LOCAL_OMP_RUNTIMES.has(runtime)) return !omp.ariaMode;
+    return true;
+  });
+}
+
 /** The model aliases the picker offers (single-sourced with the composer pill). */
 export const RUN_TYPE_MODEL_OPTIONS = MODEL_OPTIONS;
 

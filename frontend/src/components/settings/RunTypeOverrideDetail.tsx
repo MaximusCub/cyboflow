@@ -40,11 +40,12 @@ import { ChevronLeft, RotateCcw } from 'lucide-react';
 import { useConfigStore } from '../../stores/configStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
+import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import {
   RUN_TYPE_EFFORT_OPTIONS,
   RUN_TYPE_MODEL_OPTIONS,
   RUN_TYPE_FIELD_LABELS,
-  agentRuntimeOptions,
+  agentRuntimePickerOptions,
   baselineValueFor,
   coerceDraftForModel,
   coerceDraftForRuntime,
@@ -190,6 +191,11 @@ export function RunTypeOverrideDetail({
     });
   };
 
+  // Which OMP flavor this install runs (Aria mode) — the runtime picker offers
+  // the remote fleet OR the local runtimes, never both. Same source the launch
+  // picker reads, so the two surfaces cannot disagree.
+  const omp = useOmpAvailability();
+
   const draftValue = (field: RunTypeFieldId): string | null => draft[field];
 
   const cardIsOn = (card: KnobCard): boolean => card.fields.some((f) => draftValue(f) !== null);
@@ -218,7 +224,7 @@ export function RunTypeOverrideDetail({
     if (field !== 'model') return fromBaseline;
     const coerced = coerceDraftForModel(draft, fromBaseline, baseline).model;
     if (coerced !== null) return coerced;
-    const offered = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions);
+    const offered = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions, omp, draftValue('agentRuntime'));
     return offered[0]?.id ?? null;
   };
 
@@ -277,7 +283,7 @@ export function RunTypeOverrideDetail({
     const base = baselineValueFor(field, baseline);
     const changed = value !== null && value !== base;
     const selectId = `run-type-${field}`;
-    const options = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions);
+    const options = fieldOptions(field, runTypeKey, provider, codexModelOptions, ompModelOptions, omp, draftValue('agentRuntime'));
     // "Follow defaults" is unavailable for a CODEX model, exactly as on the
     // launch pickers: an omitted model member resolves to the always-Claude
     // floor, so offering it here would BE the cross-family pair rather than an
@@ -507,6 +513,8 @@ function fieldOptions(
   provider: AgentProvider,
   codexModels: readonly CodexModelOption[],
   ompModels: readonly OmpModelOption[],
+  omp: OmpAvailability,
+  currentRuntime: string | null,
 ): readonly FieldOption[] {
   switch (field) {
     case 'model':
@@ -520,7 +528,7 @@ function fieldOptions(
     case 'substrate':
       return provider === 'claude' ? labelled(field, ['sdk', 'interactive']) : [];
     case 'agentRuntime':
-      return labelled(field, agentRuntimeOptions(runTypeKey));
+      return labelled(field, agentRuntimePickerOptions(runTypeKey, omp, currentRuntime));
     case 'permissionMode':
       return labelled(field, PERMISSION_MODE_OPTIONS.map((o) => o.id));
   }
