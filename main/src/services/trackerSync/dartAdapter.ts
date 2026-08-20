@@ -61,6 +61,7 @@ import type {
   TrackerSourceTree,
   TrackerSourceNarrow,
   TrackerSourceSelection,
+  TrackerNarrowKind,
   TrackerState,
   TrackerStateGroup,
   TrackerIssue,
@@ -312,8 +313,12 @@ export class DartAdapter implements TrackerAdapter {
       else members.push(title);
     }
 
+    // Group ids are NAMESPACED because the two sections share one title
+    // universe: a slash-less board titled exactly like a derived space
+    // ("Engineering" beside "Engineering/Sprint") would otherwise mint two rows
+    // with one id, and every wizard structure keyed on it would conflate them.
     const spaceGroups: TrackerGroup[] = [...spaces].map(([space, boards]) => ({
-      id: space,
+      id: `space:${space}`,
       name: space,
       // Dart has no short key chip, at either level.
       key: null,
@@ -328,7 +333,7 @@ export class DartAdapter implements TrackerAdapter {
     }));
 
     const boardGroups: TrackerGroup[] = looseBoards.map((title) => ({
-      id: title,
+      id: `board:${title}`,
       name: title,
       key: null,
       sourceLabel: title,
@@ -512,7 +517,11 @@ export class DartAdapter implements TrackerAdapter {
    * a mapped `TrackerIssue` — it has to read the raw payload here.
    */
   async findIssueByClientKey(
-    scope: { containerId: string | null; parentExternalId: string | null },
+    scope: {
+      containerId: string | null;
+      narrowKind?: TrackerNarrowKind | null;
+      parentExternalId: string | null;
+    },
     clientKey: string
   ): Promise<TrackerIssue | null> {
     const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
@@ -529,9 +538,11 @@ export class DartAdapter implements TrackerAdapter {
       scope.parentExternalId !== null
         ? [{ parent_id: scope.parentExternalId }]
         : scope.containerId !== null
-          ? (await this.resolveRecoveryBoards(scope.containerId)).map((board) => ({
-              dartboard: board,
-            }))
+          ? (await this.resolveRecoveryBoards(scope.containerId, scope.narrowKind ?? null)).map(
+              (board) => ({
+                dartboard: board,
+              })
+            )
           : [];
     if (scopeParamSets.length === 0) {
       throw new TrackerApiError(
@@ -641,13 +652,29 @@ export class DartAdapter implements TrackerAdapter {
 
   /**
    * The boards {@link DartAdapter.findIssueByClientKey} searches for a
-   * containerId that reaches it WITHOUT a narrowKind (the outbox records only
-   * the id). A title in `/config` is a board; a title that prefixes at least one
-   * board is a space; anything else is the renamed/deleted case, which must
-   * throw rather than search nothing.
+   * container-scoped recovery. When the caller carries the selection's
+   * `narrowKind` it is AUTHORITATIVE — a space and a board can share a title
+   * ("Engineering" beside "Engineering/Sprint"), and guessing from the title
+   * would search the wrong boards and read a committed create as never landed.
+   * Only a caller with no kind at all (none exists today; the sub-issue arm is
+   * parent-scoped) falls back to the title heuristic: a title in `/config` is a
+   * board; a title that prefixes at least one board is a space; anything else
+   * is the renamed/deleted case, which must throw rather than search nothing.
    */
-  private async resolveRecoveryBoards(containerId: string): Promise<string[]> {
+  private async resolveRecoveryBoards(
+    containerId: string,
+    narrowKind: TrackerNarrowKind | null
+  ): Promise<string[]> {
     const config = await this.getConfig();
+    if (narrowKind === 'space') {
+      const members = spaceMembers(config.dartboards, containerId);
+      if (members.length === 0) throw emptySpaceError(containerId);
+      return members;
+    }
+    if (narrowKind !== null) {
+      if (config.dartboards.includes(containerId)) return [containerId];
+      throw missingDartboardError(containerId);
+    }
     if (config.dartboards.includes(containerId)) return [containerId];
     const members = spaceMembers(config.dartboards, containerId);
     if (members.length > 0) return members;

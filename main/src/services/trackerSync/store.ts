@@ -323,7 +323,7 @@ export function findDisconnectedConnection(
   provider: TrackerConnectionRow['provider'],
   workspaceId: string,
   baseUrl: string | null,
-  sourceContainerId: string | null,
+  sourceScope: StoredSourceScope,
 ): TrackerConnectionRow | null {
   const rows = db
     .prepare(
@@ -336,27 +336,154 @@ export function findDisconnectedConnection(
     rows.find(
       (row) =>
         connectionMatchesIdentity(row, workspaceId, baseUrl) &&
-        storedSourceContainerId(row) === sourceContainerId,
+        revivableSourceMatch(storedSourceScope(row), sourceScope),
     ) ?? null
   );
 }
 
 /**
- * The container a row's persisted source names, or null when it has none (a row
+ * The source scope a row's persisted selection names — the FULL
+ * (containerId, narrowId, narrowKind) triple — or null when it has none (a row
  * minted before a source was chosen, or an unparseable blob).
  *
+ * All three keys matter for mapping identity: every Linear project group under
+ * one team shares the team's `containerId` and differs only in
+ * `narrowId`/`narrowKind`, so a container-only read would collapse distinct
+ * mappings into one. `narrowKind` defaults to 'all' the way
+ * parseSourceSelection's does, so a pre-narrowKind blob still yields a scope.
+ *
  * `source_json` is the wizard's selection PLUS its display label on one blob
- * (see TrackerSyncService.connect), so only the one key is read and everything
+ * (see TrackerSyncService.connect), so only these keys are read and everything
  * else is ignored — the same by-name read parseSourceSelection does.
  */
-export function storedSourceContainerId(row: TrackerConnectionRow): string | null {
+export interface StoredSourceScope {
+  containerId: string;
+  narrowId: string;
+  narrowKind: string;
+}
+
+export function storedSourceScope(row: TrackerConnectionRow): StoredSourceScope | null {
   if (row.source_json === null) return null;
   try {
-    const parsed = JSON.parse(row.source_json) as { containerId?: unknown };
-    return typeof parsed.containerId === 'string' ? parsed.containerId : null;
+    const parsed = JSON.parse(row.source_json) as {
+      containerId?: unknown;
+      narrowId?: unknown;
+      narrowKind?: unknown;
+    };
+    if (typeof parsed.containerId !== 'string' || typeof parsed.narrowId !== 'string') return null;
+    return {
+      containerId: parsed.containerId,
+      narrowId: parsed.narrowId,
+      narrowKind: typeof parsed.narrowKind === 'string' ? parsed.narrowKind : 'all',
+    };
   } catch {
     return null;
   }
+}
+
+/** Exact scope equality — the mapping-identity comparison connect() no-ops on. */
+export function sourceScopeEquals(a: StoredSourceScope | null, b: StoredSourceScope | null): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.containerId === b.containerId &&
+    a.narrowId === b.narrowId &&
+    a.narrowKind === b.narrowKind
+  );
+}
+
+/**
+ * Does a retired row's stored scope qualify it for revival under `incoming`?
+ *
+ * Exact equality, or the incoming scope strictly WIDENS the stored one:
+ *
+ *  - a whole-container scope (narrowId 'all') claims any narrow of the SAME
+ *    container — a legacy row pinned to a cycle/view/project narrow revives
+ *    into the team/project-wide mapping that contains it;
+ *  - a Dart SPACE scope claims a retired row pinned to one of its member
+ *    BOARDS (stored container "Engineering/Sprint" under incoming space
+ *    "Engineering") — pre-rev-4 Dart rows are board-scoped and the Map step
+ *    only offers the space now;
+ *  - a stored NULL scope (no source ever recorded) contradicts nothing and is
+ *    claimed by anything, matching the pre-scope-key behavior for such rows.
+ *
+ * Widening-only is the load-bearing property. Reviving rewrites the row onto
+ * the incoming scope, and a SUPERSET scope cannot strand a link: every
+ * retained link's issue stays fetchable and the reset cursor re-fetches from
+ * the beginning. A NARROWER or SIBLING incoming scope (a Linear project group
+ * arriving at another project group's retired row — same containerId,
+ * different narrowId) must NOT match: it would repoint the other mapping's
+ * links onto a row that no longer polls them, and mints its own row instead.
+ */
+function revivableSourceMatch(stored: StoredSourceScope | null, incoming: StoredSourceScope): boolean {
+  if (stored === null) return true;
+  if (sourceScopeEquals(stored, incoming)) return true;
+  if (incoming.narrowId === 'all' && incoming.containerId === stored.containerId) return true;
+  return (
+    incoming.narrowKind === 'space' && stored.containerId.startsWith(`${incoming.containerId}/`)
+  );
+}
+
+/**
+ * Make `winnerId` the ONE live push target for `(projectId, provider)` in a
+ * single atomic statement: the winner is armed and every other non-disconnected
+ * sibling is demoted.
+ *
+ * This is connect()'s enforcement of the invariant push_target exists for — at
+ * most one pusher per (project, provider) — and it deliberately spans WIZARD
+ * RUNS: a later run mapping a second tracker group into an already-mapped
+ * project would otherwise leave two armed rows, and one new idea would file two
+ * remote issues (writeBack.handleIdeaPush skips only push_target = 0).
+ */
+export function claimPushTarget(
+  db: Database.Database,
+  projectId: number,
+  provider: TrackerConnectionRow['provider'],
+  winnerId: string,
+): void {
+  db.prepare(
+    `UPDATE tracker_connections
+        SET push_target = CASE WHEN id = ? THEN 1 ELSE 0 END,
+            updated_at = datetime('now')
+      WHERE project_id = ? AND provider = ? AND status != 'disconnected'
+        AND push_target != (CASE WHEN id = ? THEN 1 ELSE 0 END)`,
+  ).run(winnerId, projectId, provider, winnerId);
+}
+
+/**
+ * Every (project, provider) pair holding MORE THAN ONE armed push target among
+ * its live rows — a state no connect() leaves behind, but one a ledger-wiped
+ * migration replay can manufacture: 105's table recreate predates 109, so a
+ * full replay drops push_target and 109 re-adds it at DEFAULT 1 on every row
+ * (see 109's header). Boot reconciliation reads this and demotes all but the
+ * oldest row per pair.
+ */
+export function listDuplicatePushTargets(
+  db: Database.Database,
+): { project_id: number; provider: TrackerConnectionRow['provider'] }[] {
+  return db
+    .prepare(
+      `SELECT project_id, provider FROM tracker_connections
+        WHERE status != 'disconnected' AND push_target = 1
+        GROUP BY project_id, provider
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as { project_id: number; provider: TrackerConnectionRow['provider'] }[];
+}
+
+/** The live rows for one (project, provider) pair, oldest first. */
+export function listConnectionsForProviderProject(
+  db: Database.Database,
+  projectId: number,
+  provider: TrackerConnectionRow['provider'],
+): TrackerConnectionRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM tracker_connections
+        WHERE project_id = ? AND provider = ? AND status != 'disconnected'
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(projectId, provider) as TrackerConnectionRow[];
 }
 
 /**

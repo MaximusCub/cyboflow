@@ -39,6 +39,7 @@ import type { TrackerConnectionRow, TrackerOutboxRow } from '../../../database/m
 import type {
   TrackerIssue,
   TrackerProvider,
+  TrackerNarrowKind,
   TrackerSourceNarrow,
   TrackerSourceSelection,
   TrackerGroupTree,
@@ -227,11 +228,18 @@ class FakeMarkerAdapter extends FakeAdapter {
   readonly markers = new Map<string, string>();
   clientKeyLookups = 0;
   /** Every scope a recovery lookup was made with, so a test can assert the shape. */
-  readonly clientKeyScopes: Array<{ containerId: string | null; parentExternalId: string | null }> =
-    [];
+  readonly clientKeyScopes: Array<{
+    containerId: string | null;
+    narrowKind?: TrackerNarrowKind | null;
+    parentExternalId: string | null;
+  }> = [];
 
   async findIssueByClientKey(
-    scope: { containerId: string | null; parentExternalId: string | null },
+    scope: {
+      containerId: string | null;
+      narrowKind?: TrackerNarrowKind | null;
+      parentExternalId: string | null;
+    },
     clientKey: string,
   ): Promise<TrackerIssue | null> {
     this.clientKeyLookups += 1;
@@ -1133,9 +1141,11 @@ describe('processAmbiguous', () => {
     // Linked back to the ORIGINATING idea — the whole point of the row.
     expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')?.external_id).toBe('proj-1/ours');
     // Scoped by the connection's source container, with NO parent constraint:
-    // a top-level issue has no parent to key on.
+    // a top-level issue has no parent to key on. The narrow KIND rides along so
+    // an adapter never has to guess what the container id names (a Dart space
+    // and a board can share a title).
     expect(adapter.clientKeyScopes).toEqual([
-      { containerId: SELECTION.containerId, parentExternalId: null },
+      { containerId: SELECTION.containerId, narrowKind: SELECTION.narrowKind, parentExternalId: null },
     ]);
   });
 

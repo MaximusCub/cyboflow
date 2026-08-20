@@ -44,7 +44,12 @@
  */
 import type Database from 'better-sqlite3';
 import type { TrackerConnectionRow, TrackerOutboxRow } from '../../database/models';
-import type { TrackerIssue, TrackerSourceSelection, TrackerState } from '../../../../shared/types/trackerSync';
+import type {
+  TrackerIssue,
+  TrackerNarrowKind,
+  TrackerSourceSelection,
+  TrackerState,
+} from '../../../../shared/types/trackerSync';
 import type { IssueDraft, TrackerAdapter } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
 import {
@@ -663,8 +668,13 @@ export async function resolveAmbiguous(
       : await findByClientKey(adapter, connection, clientKey, {
           // A sub-issue lives in its parent's container, so the parent both
           // scopes and constrains the search; a top-level push is scoped by the
-          // selection's container with NO parent constraint.
+          // selection's container with NO parent constraint. The narrow KIND
+          // rides along so the adapter never has to guess what the container
+          // id names — a Dart SPACE and a Dart board can share a title, and a
+          // wrong guess searches the wrong boards and re-creates a committed
+          // create.
           containerId: selection?.containerId ?? null,
+          narrowKind: selection?.narrowKind ?? null,
           parentExternalId: payload?.parentExternalId ?? null,
         });
   } catch (err) {
@@ -752,7 +762,12 @@ function adoptOrOrphanPush(
  */
 interface ClientKeyRecoverableAdapter {
   findIssueByClientKey(
-    scope: { containerId: string | null; parentExternalId: string | null },
+    scope: {
+      containerId: string | null;
+      /** What `containerId` names (the selection's narrow kind), or null when only a parent scopes the search. */
+      narrowKind: TrackerNarrowKind | null;
+      parentExternalId: string | null;
+    },
     clientKey: string,
   ): Promise<TrackerIssue | null>;
 }
@@ -786,7 +801,11 @@ async function findByClientKey(
   adapter: TrackerAdapter,
   connection: TrackerConnectionRow,
   clientKey: string,
-  scope: { containerId: string | null; parentExternalId: string | null },
+  scope: {
+    containerId: string | null;
+    narrowKind: TrackerNarrowKind | null;
+    parentExternalId: string | null;
+  },
 ): Promise<TrackerIssue | null> {
   if (!supportsClientKeyRecovery(adapter)) {
     throw new TrackerApiError(

@@ -112,6 +112,7 @@ import {
   type TrackerSyncFacade,
 } from '../../orchestrator/trackerSyncBridge';
 import type { TrackerAdapter } from './adapterTypes';
+import type { StoredSourceScope } from './store';
 import {
   TrackerAuthError,
   TrackerConnectionNotFoundError,
@@ -144,7 +145,11 @@ import {
   requeueInFlightAsAmbiguous,
   resolveConflict,
   storeSecret,
-  storedSourceContainerId,
+  claimPushTarget,
+  listConnectionsForProviderProject,
+  listDuplicatePushTargets,
+  sourceScopeEquals,
+  storedSourceScope,
   supersedeQueuedStateWrites,
   updateBaseline,
   updateConnectionSettings,
@@ -495,6 +500,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     if (this.timer !== null) return;
 
     this.recoverInFlightWrites();
+    this.reconcilePushTargets();
 
     this.listener = createWriteBackListener({ db: this.db, nowIso: this.nowIso });
     this.subscription = (event: TaskChangedEvent): void => this.handleTaskChanged(event);
@@ -540,6 +546,34 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * the next pass reconciles it before retrying anything. Fail-soft per
    * connection — one unreadable connection must not strand the others.
    */
+  /**
+   * Boot repair for the one-pusher-per-(project, provider) invariant. connect()
+   * never leaves two armed rows behind, but a ledger-wiped migration replay
+   * can: 105's table recreate predates 109, so a full replay drops push_target
+   * and 109 re-adds it at DEFAULT 1 on EVERY row (109's header documents this).
+   * Left alone, the next pushed idea would file one remote issue per armed
+   * sibling. The oldest row keeps the flag — the stable choice, and for any
+   * pre-replay state the row most likely to have held it.
+   */
+  private reconcilePushTargets(): void {
+    try {
+      for (const pair of listDuplicatePushTargets(this.db)) {
+        const rows = listConnectionsForProviderProject(this.db, pair.project_id, pair.provider);
+        if (rows.length === 0) continue;
+        claimPushTarget(this.db, pair.project_id, pair.provider, rows[0].id);
+        this.logger?.warn('[trackerSync] boot recovery: demoted duplicate push targets', {
+          projectId: pair.project_id,
+          provider: pair.provider,
+          keptConnectionId: rows[0].id,
+        });
+      }
+    } catch (err) {
+      this.logger?.error('[trackerSync] boot recovery: push-target reconciliation failed', {
+        error: describeError(err),
+      });
+    }
+  }
+
   private recoverInFlightWrites(): void {
     let connections: TrackerConnectionRow[];
     try {
@@ -1275,11 +1309,23 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // ideas, and each pushing its own copy back.
     //
     // The match is the mapping's full identity — project, provider, workspace,
-    // instance, source container — so it recognizes only a row this same submit
-    // would have created. Everything downstream is skipped, not re-run: the
-    // reconcile decisions were applied by the successful call and re-applying
-    // them would re-archive rows the user has since restored, and the first pass
-    // is already scheduled or done.
+    // instance, and the FULL source scope (container + narrow + kind: every
+    // Linear project group under one team shares the team's containerId, so a
+    // container-only match would swallow the team's second mapping) — so it
+    // recognizes only a row this same submit would have created. The reconcile
+    // decisions are skipped, not re-run: the successful call applied them, and
+    // re-applying would re-archive rows the user has since restored. What IS
+    // re-applied is everything the re-submit legitimately carries fresh: the
+    // just-validated key (a paused row's whole problem is a stale one — resume
+    // it and kick a pass), and the push-target choice (the wizard recomputes it
+    // from the live radio, so a retry after re-picking must land the new
+    // choice; the early return used to drop it, leaving two armed siblings).
+    const cipher = encryptTrackerSecret(payload.credentials.apiKey);
+    const incomingScope: StoredSourceScope = {
+      containerId: payload.source.containerId,
+      narrowId: payload.source.narrowId,
+      narrowKind: payload.source.narrowKind,
+    };
     const existing = listConnectionsByIdentity(
       this.db,
       payload.credentials.provider,
@@ -1288,11 +1334,31 @@ export class TrackerSyncService implements TrackerSyncFacade {
     ).find(
       (row) =>
         row.project_id === payload.projectId &&
-        storedSourceContainerId(row) === payload.source.containerId,
+        sourceScopeEquals(storedSourceScope(row), incomingScope),
     );
-    if (existing !== undefined) return { connectionId: existing.id };
-
-    const cipher = encryptTrackerSecret(payload.credentials.apiKey);
+    if (existing !== undefined) {
+      storeSecret(this.db, existing.id, cipher);
+      if (payload.pushTarget === false) {
+        updateConnectionSettings(this.db, existing.id, { push_target: 0 });
+      } else {
+        claimPushTarget(this.db, payload.projectId, payload.credentials.provider, existing.id);
+      }
+      if (existing.status === 'paused') {
+        updateConnectionSettings(this.db, existing.id, {
+          status: 'active',
+          workspace_name: identity.workspaceName,
+          actor_label: identity.actorLabel,
+        });
+        void this.syncNow(existing.id).catch((err: unknown) => {
+          this.logger?.error('[trackerSync] sync after a paused mapping was re-connected failed', {
+            connectionId: existing.id,
+            error: describeError(err),
+          });
+        });
+      }
+      this.emitTrackerChange(payload.projectId, existing.id, 'connection');
+      return { connectionId: existing.id };
+    }
 
     // The row the wizard just described, composed ONCE so the insert and the
     // re-connect path below cannot drift apart.
@@ -1347,27 +1413,35 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // different workspace, a different INSTANCE of the same workspace slug, or
     // one whose identity was never recorded, still mints.
     //
-    // A different NARROW (cycle/module) under the same source container is
-    // deliberately still a revival, because a narrowed scope cannot strand a
-    // link: the cursor reset re-fetches the new scope from the beginning, and a
-    // link whose issue now falls OUTSIDE it is protected by the deletion sweep's
-    // selection-independent point lookup — absence from a scoped listing is
-    // confirmed against getIssue before anything is archived, so out-of-scope
-    // reads as out-of-scope, not as deleted (see runDeletionSweep). A different
-    // CONTAINER is a different MAPPING under multi-project mapping and mints its
-    // own row, which is why the container joins the revival key.
+    // A different SOURCE SCOPE is a different MAPPING under multi-project
+    // mapping and mints its own row, which is why the full scope triple joins
+    // the revival key — container alone would let a Linear team's second
+    // project group revive (and repoint) its sibling's retired row. The
+    // deliberate exceptions are store.revivableSourceMatch's WIDENING arms —
+    // a whole-container scope claims any narrow of that container, a Dart
+    // SPACE scope claims its member boards — because a superset scope cannot
+    // strand a retained link, and pre-rev-4 rows (board- or narrow-scoped)
+    // would otherwise re-import their whole backlog as duplicates.
     const revivable = findDisconnectedConnection(
       this.db,
       payload.projectId,
       payload.credentials.provider,
       identity.workspaceId,
       payload.credentials.baseUrl ?? null,
-      payload.source.containerId,
+      incomingScope,
     );
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
     if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
     else reactivateConnection(this.db, connectionId, row);
     storeSecret(this.db, connectionId, cipher);
+    // Enforce the one-pusher-per-(project, provider) invariant across WIZARD
+    // RUNS: a later run mapping a second group into an already-mapped project
+    // arrives here with pushTarget true (its own run's cluster default) while
+    // the earlier row is still armed — the newest choice wins and the sibling
+    // is demoted, else one new idea would file one remote issue per armed row.
+    if (payload.pushTarget !== false) {
+      claimPushTarget(this.db, payload.projectId, payload.credentials.provider, connectionId);
+    }
 
     // OWNERSHIP FIRST. A reconcile decision names an entity by bare id, and the
     // payload is a wizard submission that can be minutes stale — composed

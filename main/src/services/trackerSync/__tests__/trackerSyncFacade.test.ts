@@ -25,10 +25,15 @@
  *     on the provider's default origin) revives the retired row.
  *   - MULTI-PROJECT MAPPING: connect is an idempotent no-op for a mapping that
  *     already exists (the Map step retries failed connects by re-submitting the
- *     set), a different source container mints a SIBLING row instead, push_target
- *     defaults to 1 and is written 0 for a non-pushing sibling — and
- *     updateCredentials FANS OUT across every live row sharing the key, so one
- *     paste resumes all the mappings without re-arming a retired one.
+ *     set), matched on the FULL source scope so two groups differing only in
+ *     their narrow stay two mappings; a different source container mints a
+ *     SIBLING row instead, push_target defaults to 1 and is written 0 for a
+ *     non-pushing sibling. What a re-submit legitimately re-applies is pinned
+ *     too — the push-target choice (either direction, demoting the sibling that
+ *     held it) and the freshly-validated key that resumes a PAUSED mapping —
+ *     as is the mint path's cross-run demotion. And updateCredentials FANS OUT
+ *     across every live row sharing the key, so one paste resumes all the
+ *     mappings without re-arming a retired one.
  *   - connections(): the summary's counts, source label, mapping, push target
  *     and defensively-parsed log.
  *   - resolveConflictChoice: all four branches (field remote / field local /
@@ -889,6 +894,104 @@ describe('TrackerSyncService.connect — multi-project mapping', () => {
   it('defaults push_target to 1 when the payload omits it (every pre-rev-4 connect)', async () => {
     const { connectionId } = await service.connect(connectPayload());
     expect(getConnection(raw, connectionId)?.push_target).toBe(1);
+  });
+
+  it('mints a SECOND row for two groups that differ only in the NARROW under one container', async () => {
+    // The defect: the idempotent no-op matched on `containerId` alone, but every
+    // Linear project group under one team carries the TEAM's container and
+    // differs only in the narrow — so mapping a team's second project group was
+    // swallowed as a re-submit of the first, and the user's second mapping
+    // silently never existed.
+    const first = await service.connect(connectPayload());
+    const second = await service.connect(
+      connectPayload({
+        source: { containerId: 'team-1', narrowId: 'proj-1', narrowKind: 'project' },
+        sourceLabel: 'Platform · Core',
+        pushTarget: false,
+      }),
+    );
+
+    expect(second.connectionId).not.toBe(first.connectionId);
+    const scopes = raw
+      .prepare('SELECT id, source_json FROM tracker_connections ORDER BY rowid ASC')
+      .all() as Array<{ id: string; source_json: string }>;
+    expect(scopes.map((r) => r.id)).toEqual([first.connectionId, second.connectionId]);
+    expect(scopes.map((r) => (JSON.parse(r.source_json) as TrackerSourceSelection).narrowId)).toEqual(
+      ['all', 'proj-1'],
+    );
+  });
+
+  it('a re-submit carrying pushTarget:false DEMOTES the mapping the earlier submit armed', async () => {
+    // The defect: the no-op path returned before applying anything, so a retry
+    // after re-picking the push target in the Map step dropped the new choice.
+    const first = await service.connect(connectPayload());
+    expect(getConnection(raw, first.connectionId)?.push_target).toBe(1);
+
+    await service.connect(connectPayload({ pushTarget: false }));
+
+    expect(getConnection(raw, first.connectionId)?.push_target).toBe(0);
+  });
+
+  it('a re-submit that CLAIMS the push target demotes the armed sibling of the same project', async () => {
+    // Same dropped choice, the other direction: promoting a sibling has to
+    // demote whoever held the flag, or one filed idea becomes two remote issues.
+    const armed = await service.connect(connectPayload());
+    const quiet = await service.connect(
+      connectPayload({
+        source: { containerId: 'team-2', narrowId: 'all', narrowKind: 'all' },
+        sourceLabel: 'Web · Whole team',
+        pushTarget: false,
+      }),
+    );
+
+    await service.connect(
+      connectPayload({
+        source: { containerId: 'team-2', narrowId: 'all', narrowKind: 'all' },
+        sourceLabel: 'Web · Whole team',
+      }),
+    );
+
+    expect(getConnection(raw, quiet.connectionId)?.push_target).toBe(1);
+    expect(getConnection(raw, armed.connectionId)?.push_target).toBe(0);
+  });
+
+  it('a NEW mapping that claims the push target demotes the row an EARLIER wizard run armed', async () => {
+    // The mint path's half of the same invariant: a later run mapping a second
+    // group into an already-mapped project arrives with its own run's cluster
+    // default (armed) while the earlier row is still armed.
+    const first = await service.connect(connectPayload());
+    const second = await service.connect(
+      connectPayload({
+        source: { containerId: 'team-2', narrowId: 'all', narrowKind: 'all' },
+        sourceLabel: 'Web · Whole team',
+      }),
+    );
+
+    expect(getConnection(raw, second.connectionId)?.push_target).toBe(1);
+    expect(getConnection(raw, first.connectionId)?.push_target).toBe(0);
+  });
+
+  it('a re-submit of a PAUSED mapping resumes it on the freshly-validated key', async () => {
+    // The defect: the no-op path returned the id without storing the key or
+    // touching the status, so the one thing a re-connect is FOR — a mapping
+    // paused on a stale key — was the one thing it could not fix.
+    makeConnection({ status: 'paused' });
+
+    const again = await service.connect(
+      connectPayload({ credentials: { provider: 'linear', apiKey: 'lin_rotated_key' } }),
+    );
+
+    expect(again.connectionId).toBe(CONN_ID);
+    const rows = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
+    expect(rows.n).toBe(1);
+    expect(getConnection(raw, CONN_ID)?.status).toBe('active');
+    expect((readSecret(raw, CONN_ID) as Buffer).toString('utf-8')).toBe('lin_rotated_key');
+    expect(broadcasts.some((e) => e.kind === 'connection' && e.connectionId === CONN_ID)).toBe(true);
+    // …and the pass the resume kicks actually runs, which is what replays every
+    // write the auth failure held.
+    await vi.waitFor(() => {
+      expect(getConnection(raw, CONN_ID)?.last_sync_at).not.toBeNull();
+    });
   });
 });
 

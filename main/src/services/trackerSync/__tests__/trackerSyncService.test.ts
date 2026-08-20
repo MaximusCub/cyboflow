@@ -15,7 +15,8 @@
  * so the loop is driven directly instead of against wall-clock timers.
  *
  * Covers, per the task brief:
- *   - boot recovery: `in_flight` -> `ambiguous` -> adopted on the next pass.
+ *   - boot recovery: `in_flight` -> `ambiguous` -> adopted on the next pass, and
+ *     the push-target repair that demotes every armed sibling but the oldest.
  *   - due-connection gating: a fresh pass stamps last_sync_at, a second tick
  *     inside the interval skips, and syncNow bypasses the gate.
  *   - phase order (ambiguous -> outbox drain -> inbound -> sweep), observed
@@ -493,6 +494,32 @@ describe('TrackerSyncService boot recovery', () => {
     service.start();
 
     expect(outboxRows()[0].state).toBe('in_flight');
+  });
+
+  it('demotes duplicate push targets at boot, keeping the OLDEST row armed', () => {
+    // The defect a ledger-wiped migration replay manufactures: 105's table
+    // recreate predates 109, so a replay drops push_target and 109 re-adds it at
+    // DEFAULT 1 on EVERY row. Left alone, the next pushed idea files one remote
+    // issue per armed sibling. Not reachable through connect(), which is exactly
+    // why boot has to repair it.
+    makeConnection();
+    makeConnection({
+      id: 'conn-sibling',
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+    // Out of scope: another provider's row keeps its flag, duplicate or not.
+    makeConnection({ id: 'conn-plane', provider: 'plane' });
+    // `datetime('now')` has one-second resolution, so two inserts in the same
+    // test tie — stamp them apart rather than sleeping.
+    const stamp = raw.prepare('UPDATE tracker_connections SET created_at = ? WHERE id = ?');
+    stamp.run('2026-07-01 00:00:00', CONN_ID);
+    stamp.run('2026-07-02 00:00:00', 'conn-sibling');
+
+    service.start();
+
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(1);
+    expect(getConnection(raw, 'conn-sibling')?.push_target).toBe(0);
+    expect(getConnection(raw, 'conn-plane')?.push_target).toBe(1);
   });
 });
 

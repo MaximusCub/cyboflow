@@ -14,6 +14,10 @@
  *     local one;
  *   - dartboards and statuses are addressed by TITLE, so a rename must fail
  *     LOUD rather than return an empty page the deletion sweep would act on;
+ *   - one title can name a space AND a board at the same time ("Engineering"
+ *     beside "Engineering/Sprint"), so group ids are namespaced and a
+ *     container-scoped recovery reads the selection's narrowKind instead of
+ *     guessing which of the two the title meant;
  *   - statuses carry no group, so inferStateGroup guesses from the name;
  *   - creates are not idempotent, so every create stamps the
  *     `cyboflow-sync: <clientKey>` recovery marker, which must be stripped from
@@ -299,7 +303,7 @@ describe('DartAdapter source discovery', () => {
         label: 'Spaces',
         groups: [
           {
-            id: 'Engineering',
+            id: 'space:Engineering',
             name: 'Engineering',
             key: null,
             sourceLabel: 'Engineering · whole space',
@@ -314,7 +318,7 @@ describe('DartAdapter source discovery', () => {
             stateScopeKey: 'workspace',
           },
           {
-            id: 'Design',
+            id: 'space:Design',
             name: 'Design',
             key: null,
             sourceLabel: 'Design · whole space',
@@ -351,7 +355,7 @@ describe('DartAdapter source discovery', () => {
         label: 'Dartboards',
         groups: [
           {
-            id: 'Tasks',
+            id: 'board:Tasks',
             name: 'Tasks',
             key: null,
             sourceLabel: 'Tasks',
@@ -360,7 +364,7 @@ describe('DartAdapter source discovery', () => {
             stateScopeKey: 'workspace',
           },
           {
-            id: 'Inbox',
+            id: 'board:Inbox',
             name: 'Inbox',
             key: null,
             sourceLabel: 'Inbox',
@@ -386,8 +390,44 @@ describe('DartAdapter source discovery', () => {
     const { sections } = await new DartAdapter({ apiKey: 'k', fetchImpl }).listGroups();
 
     expect(sections.map((s) => s.label)).toEqual(['Spaces', 'Dartboards']);
-    expect(sections[0].groups.map((g) => g.id)).toEqual(['Engineering']);
-    expect(sections[1].groups.map((g) => g.id)).toEqual(['/Odd']);
+    expect(sections[0].groups.map((g) => g.id)).toEqual(['space:Engineering']);
+    expect(sections[1].groups.map((g) => g.id)).toEqual(['board:/Odd']);
+  });
+
+  it('NAMESPACES group ids, so a board titled like a space is its own group', async () => {
+    // The defect: both sections drew their id from the raw title, so a bare
+    // board sharing a derived space's name minted two groups with ONE id — and
+    // every wizard structure keyed on that id (the per-group project pick, the
+    // push-target radio) conflated the two mappings.
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/config'),
+        respond: () => ({
+          status: 200,
+          body: { dartboards: ['Engineering', 'Engineering/Sprint'], statuses: CONFIG.statuses },
+        }),
+      },
+    ]);
+
+    const { sections } = await new DartAdapter({ apiKey: 'k', fetchImpl }).listGroups();
+
+    expect(sections.map((s) => s.label)).toEqual(['Spaces', 'Dartboards']);
+    expect(sections[0].groups.map((g) => g.id)).toEqual(['space:Engineering']);
+    expect(sections[1].groups.map((g) => g.id)).toEqual(['board:Engineering']);
+    // Two groups, two ids, and the selections they carry are genuinely
+    // different scopes — the space reads its member boards, the board reads
+    // itself.
+    expect(sections[0].groups[0].selection).toEqual({
+      containerId: 'Engineering',
+      narrowId: 'all',
+      narrowKind: 'space',
+      pushContainerId: 'Engineering/Sprint',
+    });
+    expect(sections[1].groups[0].selection).toEqual({
+      containerId: 'Engineering',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
   });
 
   it("offers only the whole-dartboard narrow, and it is the contract's 'all'", async () => {
@@ -783,6 +823,68 @@ describe('DartAdapter space-scoped selections', () => {
     expect(found?.externalId).toBe('engbacklog01');
     expect(seen).not.toContain('Engineering');
     expect(new Set(seen)).toEqual(new Set([BOARD, 'Engineering/Backlog']));
+  });
+
+  /** A workspace where one bare board is titled exactly like a derived space. */
+  const COLLIDING = ['Engineering', BOARD, 'Engineering/Backlog'];
+  const COLLIDING_BY_BOARD: Record<string, Record<string, unknown>[]> = {
+    Engineering: [concise({ id: 'bareboard001' })],
+    [BOARD]: sprintRows,
+    'Engineering/Backlog': backlogRows,
+  };
+
+  it('recovers on the selection narrowKind, never GUESSING between a space and a board of one title', async () => {
+    // The defect: the recovery boards were guessed from the title alone, and a
+    // bare board titled like the space wins that guess — so a space-scoped
+    // create was hunted on one unrelated board, came back empty, and the outbox
+    // read the empty result as PROOF the create never landed and filed it twice.
+    const seen: string[] = [];
+    const marked = task({ id: 'engbacklog01', description: `Body\n\ncyboflow-sync: ${CLIENT_KEY}` });
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(COLLIDING),
+      boardListRoute(COLLIDING_BY_BOARD, seen),
+      makeDetailRoute({ ...DETAIL, bareboard001: task({ id: 'bareboard001' }), engbacklog01: marked }),
+    ]);
+
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: 'Engineering', narrowKind: 'space', parentExternalId: null },
+      CLIENT_KEY,
+    );
+
+    expect(found?.externalId).toBe('engbacklog01');
+    expect(seen).not.toContain('Engineering');
+    expect(new Set(seen)).toEqual(new Set([BOARD, 'Engineering/Backlog']));
+  });
+
+  it('keeps a plain-board recovery on that ONE board, and fails loud when the title is not a board', async () => {
+    // The other half of the same authority: with a narrowKind the caller is
+    // believed, so the same title under 'all' searches the bare BOARD and
+    // nothing under the space that shares its name.
+    const seen: string[] = [];
+    const marked = task({ id: 'bareboard001', description: `Body\n\ncyboflow-sync: ${CLIENT_KEY}` });
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(COLLIDING),
+      boardListRoute(COLLIDING_BY_BOARD, seen),
+      makeDetailRoute({ ...DETAIL, bareboard001: marked }),
+    ]);
+
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: 'Engineering', narrowKind: 'all', parentExternalId: null },
+      CLIENT_KEY,
+    );
+
+    expect(found?.externalId).toBe('bareboard001');
+    expect(new Set(seen)).toEqual(new Set(['Engineering']));
+
+    // And a board scope naming a title that is only a SPACE prefix is the
+    // renamed/deleted case — the kind rules out the space reading entirely.
+    const { fetchImpl: noBareBoard } = scriptedFetch([spaceConfigRoute(), boardListRoute(BY_BOARD)]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl: noBareBoard }).findIssueByClientKey(
+        { containerId: 'Engineering', narrowKind: 'all', parentExternalId: null },
+        CLIENT_KEY,
+      ),
+    ).rejects.toThrow(/no longer exists/i);
   });
 
   it('still fails LOUD in recovery for a title that is neither a board nor a space', async () => {
