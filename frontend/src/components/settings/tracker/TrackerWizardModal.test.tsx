@@ -22,6 +22,12 @@
  * pre-answered, every probe names the connection, `connect` carries
  * `sourceConnectionId`, and the Map step chips the scopes its siblings cover
  * without locking them.
+ *
+ * That mode's three sibling-aware behaviours are covered alongside it, because
+ * each is invisible to a run that only reads its own mappings: the push target
+ * a live sibling already holds is never claimed, a failed mount groups probe
+ * offers a Retry instead of stranding the step, and scope overlap is computed
+ * against the siblings too, in both directions.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -277,6 +283,21 @@ const ALPHA_SIBLING: TrackerConnectionSummary = {
   pushTarget: false,
 };
 
+/** A sibling covering the WHOLE Core team, into the Website project. */
+const CORE_TEAM_SIBLING: TrackerConnectionSummary = {
+  ...SOURCE_CONNECTION,
+  id: 'conn-core',
+  projectId: 9,
+  sourceLabel: 'Core · all open issues',
+  sourceScope: { containerId: 'core', narrowId: 'all', narrowKind: 'all' },
+  pushTarget: false,
+};
+
+/** The one overlap sentence both directions share, parameterised by group name. */
+function overlapText(name: string): string {
+  return `Issues in ${name} are covered by both mappings — each imports once, under whichever mapping syncs it first.`;
+}
+
 const onClose = vi.fn();
 const onConnected = vi.fn();
 
@@ -331,7 +352,7 @@ function renderWizard(): void {
  * select can be changed — a `fireEvent.change` to a value whose <option> has not
  * rendered yet is silently a no-op.
  */
-async function openAddMapping(): Promise<void> {
+function renderAddMapping(): void {
   render(
     <TrackerWizardModal
       isOpen
@@ -342,6 +363,10 @@ async function openAddMapping(): Promise<void> {
       onConnected={onConnected}
     />,
   );
+}
+
+async function openAddMapping(): Promise<void> {
+  renderAddMapping();
   await screen.findByLabelText('Cyboflow project for Alpha');
   await screen.findAllByRole('option', { name: 'Cyboflow (Active)' });
 }
@@ -887,5 +912,189 @@ describe('TrackerWizardModal — add-mapping mode', () => {
     fireEvent.change(alphaSelect, { target: { value: '9' } });
     expect(alphaSelect).toHaveValue('9');
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+  });
+});
+
+/**
+ * `connect` claims the push target across wizard runs — main demotes every other
+ * armed row of the (project, provider) pair unless the payload says
+ * `pushTarget: false`. The wizard's own cluster only knows THIS run's mappings,
+ * so a run that adds a group to an already-pushing project has to read the
+ * connection's live siblings or it silently takes over their filing.
+ */
+describe('TrackerWizardModal — add-mapping mode · push target', () => {
+  it('declines the push target a live sibling already holds', async () => {
+    // The default siblings: conn-src maps Platform into Cyboflow (7) and pushes.
+    await openAddMapping();
+    mapGroup('Alpha', 7);
+
+    // No radio — this run makes no push-target choice for that project. It says
+    // who keeps filing instead of implying the choice is being made here.
+    expect(await screen.findByTestId('tracker-push-incumbent-7')).toHaveTextContent(
+      'New cyboflow ideas in Cyboflow keep pushing through Platform · all open issues.',
+    );
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByText('New cyboflow ideas in Cyboflow push to:')).not.toBeInTheDocument();
+
+    await advance(4); // → Tasks → States → Reconcile → Review
+
+    // Review agrees with the payload: the row claims nothing.
+    expect(
+      within(screen.getByTestId('tracker-mapping-proj-alpha')).queryByText('Push target'),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ projectId: 7, pushTarget: false }),
+    );
+  });
+
+  it('declines it for EVERY mapping into that project, cluster or not', async () => {
+    await openAddMapping();
+    mapGroup('Alpha', 7);
+    mapGroup('Beta', 7);
+
+    // Two groups share the project, but the pusher is not this run's to pick.
+    await screen.findByTestId('tracker-push-incumbent-7');
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+
+    await advance(4);
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(2));
+    for (const call of mockConnect.mock.calls) {
+      expect(call[0]).toMatchObject({ projectId: 7, pushTarget: false });
+    }
+  });
+
+  it('still claims it when this run re-connects the pusher’s own scope', async () => {
+    // Re-mapping Platform into Cyboflow IS the armed row: sending false here
+    // would take main's existing-row branch and disarm the project entirely.
+    await openAddMapping();
+    mapGroup('Platform', 7);
+
+    expect(screen.queryByTestId('tracker-push-incumbent-7')).not.toBeInTheDocument();
+    await advance(4);
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ projectId: 7, pushTarget: true }),
+    );
+  });
+
+  it('keeps the radio where the run genuinely decides — a project with no pusher', async () => {
+    await openAddMapping();
+    mapGroup('Alpha', 9);
+    mapGroup('Beta', 9);
+
+    // Website has no live mapping of its own, so the cluster is this run's call.
+    expect(screen.queryByTestId('tracker-push-incumbent-9')).not.toBeInTheDocument();
+    expect(screen.getByText('New cyboflow ideas in Website push to:')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Alpha' })).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: 'Beta' }));
+
+    await advance(4);
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(2));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ sourceLabel: 'Core · Alpha', pushTarget: false }),
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sourceLabel: 'Core · Beta', pushTarget: true }),
+    );
+  });
+});
+
+describe('TrackerWizardModal — add-mapping mode · failed groups probe', () => {
+  it('offers a Retry that re-drives the probe instead of stranding the step', async () => {
+    mockGroups.mockRejectedValueOnce(new Error('Linear returned 500.'));
+    renderAddMapping();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Linear returned 500.');
+    // Nothing is mapped, so Continue — the only other caller of the group probe
+    // — is blocked; without the card the step's only live control is Close.
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    const retryCard = await screen.findByTestId('tracker-groups-retry');
+    expect(within(retryCard).getByText('Linear did not return its groups.')).toBeInTheDocument();
+
+    // A rail click wipes the error banner; the affordance keys off the missing
+    // tree, so it survives that and still describes the state.
+    fireEvent.click(screen.getByTestId('tracker-step-1'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tracker-groups-retry')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByLabelText('Cyboflow project for Alpha')).toBeInTheDocument();
+    expect(mockGroups).toHaveBeenCalledTimes(2);
+    expect(mockGroups).toHaveBeenLastCalledWith({ connectionId: 'conn-src' });
+    expect(screen.queryByTestId('tracker-groups-retry')).not.toBeInTheDocument();
+  });
+
+  it('does not offer it while the mount probe is still in flight', async () => {
+    let resolveGroups: (tree: TrackerGroupTree) => void = () => undefined;
+    mockGroups.mockImplementationOnce(
+      () =>
+        new Promise<TrackerGroupTree>((resolve) => {
+          resolveGroups = resolve;
+        }),
+    );
+    renderAddMapping();
+
+    // An empty tree mid-fetch is not a failure, and must not be described as one.
+    expect(screen.queryByTestId('tracker-groups-retry')).not.toBeInTheDocument();
+    resolveGroups(GROUPS);
+    await screen.findByLabelText('Cyboflow project for Alpha');
+    expect(screen.queryByTestId('tracker-groups-retry')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The overlap warning exists so the cross-scope skip is not discovered after the
+ * first sync. In add-mapping mode the run owns only part of the connection's
+ * mappings, so the subsuming half can sit on either side of the seam.
+ */
+describe('TrackerWizardModal — add-mapping mode · overlap with live siblings', () => {
+  it('warns when a live whole-team sibling covers a group mapped here', async () => {
+    mockMappings.mockResolvedValue([CORE_TEAM_SIBLING]);
+    await openAddMapping();
+
+    mapGroup('Alpha', 7);
+    expect(await screen.findByText(overlapText('Alpha'))).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Cyboflow project for Alpha'), {
+      target: { value: '' },
+    });
+    expect(screen.queryByText(overlapText('Alpha'))).not.toBeInTheDocument();
+  });
+
+  it('warns in the reverse direction — a whole team mapped over a narrowed sibling', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    await openAddMapping();
+    await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website');
+
+    // Beta shares Alpha's container but not its narrow — nothing subsumes it.
+    mapGroup('Beta', 9);
+    expect(screen.queryByText(overlapText('Beta'))).not.toBeInTheDocument();
+
+    // The whole Core team does subsume the sibling that holds Alpha.
+    mapGroup('Core', 9);
+    expect(screen.getByText(overlapText('Core'))).toBeInTheDocument();
+  });
+
+  it('never warns on the idempotent re-connect of a sibling’s own scope', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    await openAddMapping();
+    await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website');
+
+    // Both scopes are already live on this connection; re-mapping either one
+    // changes nothing, so neither arm may fire.
+    mapGroup('Alpha', 9);
+    mapGroup('Platform', 7);
+    expect(screen.queryByText(overlapText('Alpha'))).not.toBeInTheDocument();
+    expect(screen.queryByText(overlapText('Platform'))).not.toBeInTheDocument();
   });
 });

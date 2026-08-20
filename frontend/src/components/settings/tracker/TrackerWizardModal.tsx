@@ -42,6 +42,11 @@
  * reads the connection's live siblings once and chips the groups they already
  * cover; the chip is information, never a lock, because re-connecting an
  * unchanged (scope → project) pair is idempotent.
+ *
+ * Those siblings are also what keeps the mode honest about the two things a run
+ * can only see with them: the push target (a project a sibling already pushes
+ * for is left alone — no radio, no claim) and scope overlap (a sibling covering
+ * the same container warns exactly as a second in-run mapping would).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
@@ -147,6 +152,22 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Whether a live connection's recorded scope names the exact slice a mappable
+ * group covers. The whole triple is the identity — two rows under the same
+ * container are different mappings unless the narrow matches too.
+ */
+function sameScope(
+  scope: NonNullable<TrackerConnectionSummary['sourceScope']>,
+  selection: TrackerGroup['selection'],
+): boolean {
+  return (
+    scope.containerId === selection.containerId &&
+    scope.narrowId === selection.narrowId &&
+    scope.narrowKind === selection.narrowKind
+  );
+}
+
 export interface TrackerWizardModalProps {
   isOpen: boolean;
   provider: TrackerProvider;
@@ -184,7 +205,12 @@ export function TrackerWizardModal({
   const [step, setStep] = useState(firstStep);
   /** Furthest step reached — the rail only navigates to steps already unlocked. */
   const [maxStep, setMaxStep] = useState(firstStep);
-  const [loading, setLoading] = useState(false);
+  /**
+   * Add-mapping mode mounts already fetching (the group tree its Map step opens
+   * on), so it starts loading rather than rendering one frame of "nothing came
+   * back" before the mount probe has even fired.
+   */
+  const [loading, setLoading] = useState(sourceConnection !== undefined);
   const [stepError, setStepError] = useState<string | null>(null);
 
   // ── Step 0 · credentials + identity ───────────────────────────────────────
@@ -331,11 +357,7 @@ export function TrackerWizardModal({
    */
   const mappedSiblingsFor = (group: TrackerGroup): TrackerConnectionSummary[] =>
     existingMappings.filter(
-      (m) =>
-        m.sourceScope !== null &&
-        m.sourceScope.containerId === group.selection.containerId &&
-        m.sourceScope.narrowId === group.selection.narrowId &&
-        m.sourceScope.narrowKind === group.selection.narrowKind,
+      (m) => m.sourceScope !== null && sameScope(m.sourceScope, group.selection),
     );
 
   /** Distinct target projects, first-mapped first. */
@@ -351,7 +373,54 @@ export function TrackerWizardModal({
   const groupsForProject = (pid: number): TrackerGroup[] =>
     mappedGroups.filter((g) => mappings[g.id] === pid);
 
-  /** Projects several groups feed — the only ones needing a push-target choice. */
+  /**
+   * Target projects whose pusher is a LIVE SIBLING this run is not re-connecting
+   * — the push-target question those projects answered in an earlier run.
+   *
+   * It matters because `connect` claims the push target across wizard runs: main
+   * demotes every other armed row of the (project, provider) pair unless the
+   * payload says `pushTarget: false`. This run's cluster is run-local, so
+   * without this the FIRST group mapped into such a project would silently take
+   * the incumbent's place — a choice the user was never shown. So the run
+   * declines instead: no radio, `pushGroupIdFor` → null, `pushTarget: false` on
+   * every mapping into the project, and the incumbent keeps filing.
+   *
+   * The same-scope exclusion is load-bearing. Re-mapping the incumbent's own
+   * scope into its own project is the idempotent re-connect, and `pushTarget:
+   * false` there takes main's existing-row branch and DISARMS the project
+   * outright, leaving it with no pusher at all. Empty outside add-mapping mode
+   * (`existingMappings` is [] there), so the paste-a-key run is unchanged.
+   */
+  const pushIncumbents = useMemo<{ projectId: number; sibling: TrackerConnectionSummary }[]>(() => {
+    const out: { projectId: number; sibling: TrackerConnectionSummary }[] = [];
+    for (const pid of targetProjectIds) {
+      const runScopes = mappedGroups.filter((g) => mappings[g.id] === pid).map((g) => g.selection);
+      const sibling = existingMappings.find((m) => {
+        const scope = m.sourceScope;
+        // A legacy row with no recorded scope is not evidence of anything, same
+        // rule the chips follow — an unknown scope claims no coverage.
+        if (m.projectId !== pid || !m.pushTarget || scope === null) return false;
+        return !runScopes.some((selection) => sameScope(scope, selection));
+      });
+      if (sibling !== undefined) out.push({ projectId: pid, sibling });
+    }
+    return out;
+  }, [targetProjectIds, mappedGroups, mappings, existingMappings]);
+
+  const pushIncumbentFor = (pid: number): TrackerConnectionSummary | undefined =>
+    pushIncumbents.find((i) => i.projectId === pid)?.sibling;
+
+  const pushIncumbentIds = useMemo(
+    () => new Set(pushIncumbents.map((i) => i.projectId)),
+    [pushIncumbents],
+  );
+
+  /**
+   * Projects several groups feed AND this run decides for — the only ones
+   * needing a push-target choice. A project with an incumbent is excluded even
+   * at N groups: the payload sends `pushTarget: false` for all of them, so a
+   * radio would offer a choice nothing acts on.
+   */
   const pushClusters = useMemo(() => {
     const byProject = new Map<number, TrackerGroup[]>();
     for (const g of mappedGroups) {
@@ -361,16 +430,19 @@ export function TrackerWizardModal({
       else byProject.set(pid, [g]);
     }
     return [...byProject.entries()]
-      .filter(([, groups]) => groups.length > 1)
+      .filter(([pid, groups]) => groups.length > 1 && !pushIncumbentIds.has(pid))
       .map(([pid, groups]) => ({ projectId: pid, groups }));
-  }, [mappedGroups, mappings]);
+  }, [mappedGroups, mappings, pushIncumbentIds]);
 
   /**
-   * Which mapping pushes new ideas for a project. A stale choice (its group was
-   * remapped elsewhere) falls back to the first mapping rather than leaving the
-   * project with no pusher.
+   * Which mapping pushes new ideas for a project, or null when this run claims
+   * nothing there. A stale choice (its group was remapped elsewhere) falls back
+   * to the first mapping rather than leaving the project with no pusher.
    */
   const pushGroupIdFor = (pid: number): string | null => {
+    // An incumbent outside this run answers for the project already; claiming
+    // over it would demote a mapping the user never chose to replace.
+    if (pushIncumbentFor(pid) !== undefined) return null;
     const groups = groupsForProject(pid);
     const chosen = pushChoice[pid];
     if (groups.some((g) => g.id === chosen)) return chosen;
@@ -381,22 +453,52 @@ export function TrackerWizardModal({
    * A whole-team mapping and a project mapping under the same team both import
    * the project's issues; the engine's cross-row guard skips the second. Say so
    * here rather than letting the user discover it after the first sync.
+   *
+   * The overlap is with every LIVE mapping, not just this run's: in add-mapping
+   * mode the run owns only part of the connection's set, and a sibling covers
+   * exactly as much as an in-run row would. Both directions are checked, because
+   * the subsuming half can sit on either side.
    */
   const overlapWarnings = useMemo<string[]>(() => {
-    const covered = new Set(
-      mappedGroups.filter((g) => g.selection.narrowKind === 'all').map((g) => g.selection.containerId),
-    );
-    if (covered.size === 0) return [];
-    return mappedGroups
-      .filter((g) => g.selection.narrowKind !== 'all' && covered.has(g.selection.containerId))
-      .map(
-        (g) =>
-          // Honest about the engine's guarantee: the cross-scope guard imports
-          // each issue ONCE, under whichever mapping fetches it first — not
-          // deterministically under either row.
-          `Issues in ${g.name} are covered by both mappings — each imports once, under whichever mapping syncs it first.`,
-      );
-  }, [mappedGroups]);
+    // Honest about the engine's guarantee: the cross-scope guard imports each
+    // issue ONCE, under whichever mapping fetches it first — not
+    // deterministically under either row.
+    const overlapText = (name: string): string =>
+      `Issues in ${name} are covered by both mappings — each imports once, under whichever mapping syncs it first.`;
+
+    // Containers some whole-container mapping already covers — this run's plus
+    // the source connection's live siblings. A legacy row with no recorded
+    // scope covers nothing, same rule the chips follow.
+    const covered = new Set<string>();
+    for (const g of mappedGroups) {
+      if (g.selection.narrowKind === 'all') covered.add(g.selection.containerId);
+    }
+    for (const m of existingMappings) {
+      if (m.sourceScope !== null && m.sourceScope.narrowKind === 'all') {
+        covered.add(m.sourceScope.containerId);
+      }
+    }
+
+    const out: string[] = [];
+    for (const g of mappedGroups) {
+      if (g.selection.narrowKind !== 'all') {
+        // Narrowed here, subsumed by a whole-container mapping on either side.
+        if (covered.has(g.selection.containerId)) out.push(overlapText(g.name));
+      } else if (
+        // Whole-container here, subsuming a sibling narrowed under it — the
+        // direction a this-run-only scan can never see.
+        existingMappings.some(
+          (m) =>
+            m.sourceScope !== null &&
+            m.sourceScope.narrowKind !== 'all' &&
+            m.sourceScope.containerId === g.selection.containerId,
+        )
+      ) {
+        out.push(overlapText(g.name));
+      }
+    }
+    return out;
+  }, [mappedGroups, existingMappings]);
 
   /** Every fetched issue across the mapped groups, in mapping order. */
   const allIssues = useMemo(
@@ -598,7 +700,10 @@ export function TrackerWizardModal({
 
   // The wizard opens ON Map here, so the group tree that Step 0's Continue would
   // have fetched is fetched on mount instead. A failure surfaces as the step
-  // error and leaves `groupTree` null, so Continue's `ensureGroups` retries it.
+  // error and leaves `groupTree` null — and Continue CANNOT retry it, because
+  // an empty tree means nothing is mapped and the footer guard blocks the only
+  // other call site of `ensureGroups`. The Map step's Retry card is what
+  // re-drives it (see `retryGroups`).
   useEffect(() => {
     if (!isOpen || sourceConnection === undefined) return;
     const version = probeVersionRef.current;
@@ -722,6 +827,24 @@ export function TrackerWizardModal({
   // -------------------------------------------------------------------------
   // Actions
   // -------------------------------------------------------------------------
+
+  /**
+   * Re-drive the group probe from the Map step itself. The only other caller of
+   * `ensureGroups` is a forward `goToStep`, which add-mapping mode cannot reach
+   * with an empty tree (nothing is mapped, so Continue is disabled) — without
+   * this the step is a dead end whose only live control is Close.
+   */
+  const retryGroups = async (): Promise<void> => {
+    setStepError(null);
+    setLoading(true);
+    try {
+      await ensureGroups();
+    } catch (err) {
+      setStepError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleAuthorize = async (): Promise<void> => {
     setValidating(true);
@@ -1086,6 +1209,40 @@ export function TrackerWizardModal({
           Project list unavailable — nothing can be mapped until it loads.
         </p>
       )}
+
+      {/* No tree and no fetch in flight: the probe failed and nothing else can
+          re-run it from here. Keyed off the missing tree rather than the step
+          error, which a rail click clears while the step stays empty. */}
+      {groupTree === null && !loading && (
+        <div
+          className={cn(CARD, 'flex items-center justify-between gap-3 px-3 py-4')}
+          data-testid="tracker-groups-retry"
+        >
+          <p className="text-xs text-text-tertiary">{meta.name} did not return its groups.</p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="rounded-none"
+            onClick={() => void retryGroups()}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {/* A project whose pusher is a live mapping outside this run: no radio is
+          offered, so say who keeps filing instead of implying the run decides. */}
+      {pushIncumbents.map(({ projectId: pid, sibling }) => (
+        <p
+          key={pid}
+          className={cn(CARD, 'px-3 py-2 text-xs text-text-tertiary')}
+          data-testid={`tracker-push-incumbent-${pid}`}
+        >
+          New cyboflow ideas in {projectName(pid)} keep pushing through {sibling.sourceLabel}.
+          Change that under Project mappings.
+        </p>
+      ))}
 
       {pushClusters.map((cluster) => (
         <fieldset key={cluster.projectId} className={cn(CARD, 'p-3')}>
