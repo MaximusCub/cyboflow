@@ -1252,7 +1252,7 @@ describe('runDeletionSweep', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 0 });
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 0, entityLocked: 0 });
     expect(ideas()[0].archived_at).toBeNull();
   });
 
@@ -1267,7 +1267,7 @@ describe('runDeletionSweep', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 0 });
+    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 0, entityLocked: 0 });
     expect(ideas()[0].archived_at).not.toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).not.toBeNull();
     expect(JSON.parse(conflicts()[0].payload_json ?? '{}')).toMatchObject({
@@ -1296,7 +1296,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1 });
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
     expect(ideas()[0].archived_at).toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
     expect(conflicts()).toHaveLength(0);
@@ -1314,7 +1314,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1 });
+    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
     expect(conflicts()).toHaveLength(0);
     expect(ideas()[0].archived_at).toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
@@ -1334,7 +1334,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 1 });
+    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
     const moved = getLinkByExternal(raw, 'conn-1', 'ext-1');
     const deleted = getLinkByExternal(raw, 'conn-1', 'ext-2');
     expect(moved?.orphaned_at).toBeNull();
@@ -2073,5 +2073,159 @@ describe('runInboundSync — importNewIssues: false (import direction held)', ()
     expect(held.importDeferred).toBe(0);
     expect(held.skipped).toBe(1);
     expect(reload().cursor_external_id).toBe('ext-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A locked local entity defers ONE item — it must never wedge the pass
+// ---------------------------------------------------------------------------
+
+/**
+ * TaskChangeRouter refuses a stage move (and an archive) on an entity that has
+ * a non-terminal run, for every actor but the orchestrator. A tracker actor is
+ * not the orchestrator, so a remote status change on anything currently in a
+ * live session draws 'active_runs' — the ORDINARY case, not an exotic one.
+ *
+ * These tests pin the blast radius. The rejection must defer that one item and
+ * let the rest of the batch through; before the fix it propagated out of the
+ * pass, pinned the cursor on the failing issue, and skipped every issue behind
+ * it AND the deletion sweep — so a single live run stopped the connection's
+ * whole inbound flow for as long as it ran.
+ *
+ * The run is REAL (a `workflow_runs` row), not a throwing router double, so the
+ * production guard is what these exercise.
+ */
+function seedLiveRun(taskId: string, runId = 'run-live'): void {
+  raw
+    .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`)
+    .run();
+  raw
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id)
+       VALUES (?, 'wf-1', 1, 'running', 'default', ?)`,
+    )
+    .run(runId, taskId);
+}
+
+describe('runInboundSync — a locked local entity', () => {
+  it('defers the refused stage move instead of failing the pass', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    const idea = ideas()[0];
+    const stageBefore = idea.stage_id;
+    seedLiveRun(idea.id);
+
+    // The remote moves to Done, which maps to the Done stage — a move the live
+    // run forbids.
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(deps, reload());
+
+    expect(report.entityLocked).toBe(1);
+    expect(ideas()[0].stage_id).toBe(stageBefore);
+    // Pinned on BOTH halves: the cursor holds at the FIRST pass's high-water
+    // mark so the issue is re-fetched, and the baseline's state half stays put
+    // so the delta is still there to re-apply.
+    expect(reload().cursor_updated_at).toBe('2026-07-30T10:00:00.000Z');
+    expect(baselineOf('ext-1').stateId).toBe('st-backlog');
+  });
+
+  it('re-applies the deferred move once the run reaches a terminal status', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    seedLiveRun(ideas()[0].id);
+
+    adapter.issues = [makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    expect((await runInboundSync(deps, reload())).entityLocked).toBe(1);
+
+    raw.prepare(`UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-live'`).run();
+    const after = await runInboundSync(deps, reload());
+
+    expect(after.entityLocked).toBe(0);
+    expect(ideas()[0].stage_id).not.toBe('stage-board-1-default-1');
+    expect(baselineOf('ext-1').stateId).toBe('st-done');
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it('still applies the CONTENT half of a refused merge', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+    seedLiveRun(ideas()[0].id);
+
+    adapter.issues = [
+      makeIssue({
+        title: 'Renamed remotely',
+        stateId: 'st-done',
+        updatedAt: '2026-07-30T11:00:00.000Z',
+      }),
+    ];
+    const report = await runInboundSync(deps, reload());
+
+    expect(report.entityLocked).toBe(1);
+    // The title landed even though the stage did not — re-running the whole
+    // item next pass would re-file its auto-resolution findings.
+    expect(ideas()[0].title).toBe('Renamed remotely');
+    expect(baselineOf('ext-1').title).toBe('Renamed remotely');
+    expect(baselineOf('ext-1').stateId).toBe('st-backlog');
+  });
+
+  it('keeps applying the issues BEHIND the locked one', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue(), makeIssue({ externalId: 'ext-2', identifier: 'CORE-143' })];
+    await runInboundSync(deps, connection);
+    const locked = ideas().find((i) => i.title === 'Ship the tracker sync');
+    seedLiveRun(locked?.id ?? '');
+
+    adapter.issues = [
+      makeIssue({ stateId: 'st-done', updatedAt: '2026-07-30T11:00:00.000Z' }),
+      makeIssue({
+        externalId: 'ext-2',
+        identifier: 'CORE-143',
+        title: 'Second issue, renamed',
+        updatedAt: '2026-07-30T11:01:00.000Z',
+      }),
+    ];
+    const report = await runInboundSync(deps, reload());
+
+    expect(report.entityLocked).toBe(1);
+    expect(ideas().some((i) => i.title === 'Second issue, renamed')).toBe(true);
+  });
+
+  it('rethrows a rejection that is NOT about the entity being busy', async () => {
+    const connection = makeConnection();
+    adapter.issues = [makeIssue()];
+    await runInboundSync(deps, connection);
+
+    // A router that fails for an unpredicted reason is a bug, not a deferral.
+    const exploding: EntityWriteRouter = {
+      applyChange: async () => {
+        throw new Error('boom');
+      },
+    };
+    adapter.issues = [makeIssue({ title: 'Renamed', updatedAt: '2026-07-30T11:00:00.000Z' })];
+
+    await expect(runInboundSync({ ...deps, router: exploding }, reload())).rejects.toThrow('boom');
+  });
+});
+
+describe('runDeletionSweep — a locked local entity', () => {
+  it('skips the locked link and sweeps the rest', async () => {
+    const connection = makeConnection({ conflict_mode: 'auto' });
+    adapter.issues = [makeIssue(), makeIssue({ externalId: 'ext-2', identifier: 'CORE-143' })];
+    await runInboundSync(deps, connection);
+    const locked = ideas().find((i) => i.title === 'Ship the tracker sync');
+    seedLiveRun(locked?.id ?? '');
+
+    // Both issues are gone remotely; only the unlocked one can be archived.
+    adapter.remoteIds = [];
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep.entityLocked).toBe(1);
+    expect(sweep.sweepArchived).toBe(1);
+    // Untouched: still active, no conflict row, so the next sweep retries it.
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
+    expect(conflicts()).toHaveLength(1);
   });
 });

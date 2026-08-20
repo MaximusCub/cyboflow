@@ -2370,6 +2370,12 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
       line: `${plural(report.importDeferred, 'new issue')} held — use Sync now`,
     });
   }
+  if (report.entityLocked > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(report.entityLocked, 'status change')} waiting on an active run`,
+    });
+  }
   if (report.archivedRemotely > 0) {
     entries.push({ marker: '·', line: `archived ${plural(report.archivedRemotely, 'remote item')}` });
   }
@@ -2385,6 +2391,12 @@ function appendSweepLines(entries: TrackerSyncLogEntry[], sweep: InboundSweepRep
   }
   if (sweep.outOfScope > 0) {
     entries.push({ marker: '·', line: `${plural(sweep.outOfScope, 'issue')} out of scope · left linked` });
+  }
+  if (sweep.entityLocked > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(sweep.entityLocked, 'deleted issue')} waiting on an active run`,
+    });
   }
   if (sweep.conflictsOpened > 0) {
     entries.push({ marker: '✎', line: `conflicts ${sweep.conflictsOpened}` });

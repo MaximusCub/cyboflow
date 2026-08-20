@@ -74,10 +74,20 @@
  * NON-BLOCKING review-queue finding carrying both values, through the optional
  * `reviewRouter` seam. See {@link fileAutoResolutionFinding}.
  *
- * ERRORS. A per-issue failure (a rejected applyChange — active runs, a
- * forbidden stage, a vanished entity) propagates out of runInboundSync. That
- * is intentional: the cursor has not advanced past the failing item, so the
- * next pass replays it. The service layer owns logging/backoff.
+ * ERRORS. An UNEXPECTED per-issue failure propagates out of runInboundSync.
+ * That is intentional: the cursor has not advanced past the failing item, so
+ * the next pass replays it. The service layer owns logging/backoff.
+ *
+ * The two EXPECTED rejections are handled per-item instead, because letting
+ * them propagate wedges the connection rather than delaying one row. A linked
+ * entity refuses a stage move while it has a live run ('active_runs') or when
+ * the target stage is orchestrator-derived ('forbidden_stage') — and in
+ * cyboflow the first is ordinary, not exotic: an item pulled into a session has
+ * a non-terminal run for as long as the session lasts. Propagating aborted the
+ * whole pass, left the cursor pinned on that item, and skipped every issue
+ * behind it AND the deletion sweep — so one live run stopped the connection's
+ * entire inbound flow until it ended. Both now defer the item exactly as a held
+ * direction does (see {@link isDeferrableRejection}).
  */
 import type Database from 'better-sqlite3';
 import type { EntityExternalLinkRow, TrackerConnectionRow } from '../../database/models';
@@ -275,6 +285,14 @@ export interface InboundSyncReport {
    * same reason: a held import must be delayed, never dropped.
    */
   importDeferred: number;
+  /**
+   * Remote changes recognized but NOT applied because the LOCAL entity refused
+   * the write — a live run owns its stage, or the mapped stage is
+   * orchestrator-derived. Pins the cursor like the other deferrals: the entity
+   * is unlocked by time, not by a user decision, so the change is re-offered
+   * every pass until one lands it. See {@link isDeferrableRejection}.
+   */
+  entityLocked: number;
   /** Filled in by {@link runDeletionSweep} when the service folds its result in. */
   sweepArchived?: number;
   /** External id the batch stopped at because our own write is still in flight. */
@@ -293,6 +311,12 @@ export interface InboundSweepReport {
    * them; the count exists so the sync log can say so.
    */
   outOfScope: number;
+  /**
+   * Links whose remote issue is gone but whose local entity refused the archive
+   * (a live run owns it). Nothing was written, so the link stays active and the
+   * next sweep retries it. See {@link isDeferrableRejection}.
+   */
+  entityLocked: number;
 }
 
 /** The connection is not configured well enough to sync (bad/absent source_json). */
@@ -674,6 +698,33 @@ function stampRemoteGroup(
   return next;
 }
 
+/**
+ * The two {@link TaskChangeError} codes that mean "not now" rather than
+ * "never": the local entity refused this write for a reason that is about the
+ * entity's CURRENT state, not about the change being wrong.
+ *
+ *   - 'active_runs'     — a non-terminal run owns the entity's stage, so a
+ *     non-orchestrator actor may not move it (TaskChangeRouter's stage-move and
+ *     archive guards). Ordinary in cyboflow: any item pulled into a session
+ *     holds one for the life of that session.
+ *   - 'forbidden_stage' — the target stage is orchestrator-derived.
+ *
+ * Matched STRUCTURALLY, on `code`, rather than with `instanceof`. This module
+ * depends on the router only through the {@link EntityWriteRouter} seam (module
+ * header), and a test double throwing its own shaped error must be recognized
+ * the same way the real router's is.
+ *
+ * Everything else still propagates — a rejection nobody predicted is a bug, and
+ * swallowing it here would hide it behind a counter.
+ */
+const DEFERRABLE_REJECTION_CODES: ReadonlySet<string> = new Set(['active_runs', 'forbidden_stage']);
+
+function isDeferrableRejection(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && DEFERRABLE_REJECTION_CODES.has(code);
+}
+
 // ---------------------------------------------------------------------------
 // runInboundSync
 // ---------------------------------------------------------------------------
@@ -696,6 +747,7 @@ export async function runInboundSync(
     archivedRemotely: 0,
     stageDeferred: 0,
     importDeferred: 0,
+    entityLocked: 0,
   };
 
   const selection = parseSourceSelection(connection);
@@ -761,6 +813,7 @@ export async function runInboundSync(
     if (outcome !== 'applied') {
       cursorAdvances = false;
       if (outcome === 'stage-deferred') report.stageDeferred++;
+      else if (outcome === 'entity-locked') report.entityLocked++;
       else report.importDeferred++;
     }
     if (cursorAdvances) advanceCursor(db, connection.id, issue.updatedAt, issue.externalId);
@@ -775,8 +828,11 @@ export async function runInboundSync(
  * recognized work and declined to do it — so the cursor must not move past it:
  *   - 'stage-deferred'  — a remote stage change the status direction is holding.
  *   - 'import-deferred' — a new issue the import direction is holding.
+ *   - 'entity-locked'   — a write the LOCAL entity refused; see
+ *     {@link isDeferrableRejection}. Held by a live run rather than by a
+ *     setting, but identical as far as the cursor is concerned.
  */
-type ApplyOutcome = 'applied' | 'stage-deferred' | 'import-deferred';
+type ApplyOutcome = 'applied' | 'stage-deferred' | 'import-deferred' | 'entity-locked';
 
 /** What the unresolved outbox makes untouchable this pass — see {@link collectOutboxBlockers}. */
 interface OutboxBlockers {
@@ -1259,20 +1315,45 @@ async function mergeLinkedIssue(
     );
   }
 
-  if (Object.keys(fields).length > 0 || stageMove !== undefined) {
+  /** The entity refused the stage move; content still landed. */
+  let entityLocked = false;
+  const hasFields = Object.keys(fields).length > 0;
+  if (hasFields || stageMove !== undefined) {
     // The stage move is ours to mirror, not to announce back — stamp where the
     // remote stands before the write-back listener sees the event.
     if (stageMove !== undefined) {
       baselineJson = stampRemoteGroup(ctx, link, baselineJson, remoteWriteBackGroup(ctx, issue));
     }
-    await ctx.router.applyChange(connection.project_id, {
-      actor: connection.provider,
-      entityType: link.entity_type,
-      taskId: link.entity_id,
-      ...(Object.keys(fields).length > 0 ? { fields } : {}),
-      ...(stageMove !== undefined ? { stageId: stageMove } : {}),
-    });
-    report.updated++;
+    try {
+      await ctx.router.applyChange(connection.project_id, {
+        actor: connection.provider,
+        entityType: link.entity_type,
+        taskId: link.entity_id,
+        ...(hasFields ? { fields } : {}),
+        ...(stageMove !== undefined ? { stageId: stageMove } : {}),
+      });
+      report.updated++;
+    } catch (err) {
+      // Only the STAGE half can draw these codes, so a rejection with no stage
+      // move in the request is somebody else's problem — rethrow it.
+      if (stageMove === undefined || !isDeferrableRejection(err)) throw err;
+      entityLocked = true;
+      // The content merge is independent of the stage and already has its
+      // conflicts recorded above; re-running the whole item next pass would
+      // file those findings a second time. So retry the half that CAN land.
+      if (hasFields) {
+        await ctx.router.applyChange(connection.project_id, {
+          actor: connection.provider,
+          entityType: link.entity_type,
+          taskId: link.entity_id,
+          fields,
+        });
+        report.updated++;
+      }
+      // The stamp written above is deliberately NOT rolled back: it says where
+      // the REMOTE stands, which is true whether or not we mirrored it (see
+      // {@link stampRemoteGroup}).
+    }
   }
 
   // The STATE half of the snapshot is pinned to the old baseline when the stage
@@ -1284,8 +1365,12 @@ async function mergeLinkedIssue(
   // ride along on a content update is exactly the cross-field clobber that has
   // bitten this function before.
   const snapshot = snapshotOf(issue);
-  if (!ctx.applyLinkedStage) snapshot.stateId = baseline.stateId;
+  // A refused move pins the state half for the SAME reason a held direction
+  // does: the remote change has not been mirrored, so it must stay "unseen" or
+  // the next pass would compute no delta and silently drop it.
+  if (!ctx.applyLinkedStage || entityLocked) snapshot.stateId = baseline.stateId;
   updateBaseline(db, link.id, composeBaselineJson(baselineJson, snapshot));
+  if (entityLocked) return 'entity-locked';
   return stageDeferred ? 'stage-deferred' : 'applied';
 }
 
@@ -1495,7 +1580,12 @@ export async function runDeletionSweep(
   connection: TrackerConnectionRow,
 ): Promise<InboundSweepReport> {
   const { db, adapter, router } = deps;
-  const sweep: InboundSweepReport = { sweepArchived: 0, conflictsOpened: 0, outOfScope: 0 };
+  const sweep: InboundSweepReport = {
+    sweepArchived: 0,
+    conflictsOpened: 0,
+    outOfScope: 0,
+    entityLocked: 0,
+  };
 
   const selection = parseSourceSelection(connection);
   const remoteIds = new Set(await adapter.listIssueIds(selection));
@@ -1531,12 +1621,21 @@ export async function runDeletionSweep(
       continue;
     }
 
-    await router.applyChange(connection.project_id, {
-      actor: connection.provider,
-      entityType: link.entity_type,
-      taskId: link.entity_id,
-      archived: true,
-    });
+    try {
+      await router.applyChange(connection.project_id, {
+        actor: connection.provider,
+        entityType: link.entity_type,
+        taskId: link.entity_id,
+        archived: true,
+      });
+    } catch (err) {
+      if (!isDeferrableRejection(err)) throw err;
+      // A live run owns the entity. Nothing below has run, so the link stays
+      // active, no conflict row is filed, and the next sweep retries it —
+      // whereas letting this propagate abandoned every link behind it.
+      sweep.entityLocked++;
+      continue;
+    }
     markOrphaned(db, link.id);
     const row = insertConflict(db, {
       connection_id: connection.id,
