@@ -30,6 +30,18 @@
  *
  * The API key lives in this component's state and leaves only inside the
  * `credentials` field of the calls above — nothing ever reads it back.
+ *
+ * ADD-MAPPING MODE (`sourceConnection` set). Re-entered from the connected
+ * view to hang another mapping off an authorization that already exists, so
+ * Step 0 is not merely pre-answered — it is GONE: the wizard opens on Map, the
+ * rail carries five steps, Back from Map has nowhere to go, and nothing ever
+ * asks for the key again. Every probe names the connection
+ * (`{ connectionId }`) instead of carrying credentials, `connect` passes
+ * `sourceConnectionId`, and main resolves the stored key on its side — so in
+ * this mode nothing key-shaped crosses IPC at all. The Map step additionally
+ * reads the connection's live siblings once and chips the groups they already
+ * cover; the chip is information, never a lock, because re-connecting an
+ * unchanged (scope → project) pair is idempotent.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
@@ -41,6 +53,7 @@ import { API } from '../../../utils/api';
 import type { Project } from '../../../types/project';
 import type {
   TrackerConflictMode,
+  TrackerConnectionSummary,
   TrackerCredentialsInput,
   TrackerDirectionMode,
   TrackerGroup,
@@ -54,6 +67,7 @@ import type {
   TrackerState,
   TrackerStateMapping,
   TrackerUserRef,
+  TrackerWizardSourceInput,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
@@ -140,6 +154,13 @@ export interface TrackerWizardModalProps {
   onClose: () => void;
   /** Fired after every mapping's `connect` resolves so the catalog can re-read its rows. */
   onConnected: () => void;
+  /**
+   * ADD-MAPPING MODE. Set to a live connection to hang further mappings off its
+   * existing authorization: Step 0 is dropped entirely, the probes and `connect`
+   * name this connection instead of carrying a key, and the Map step chips the
+   * groups its siblings already cover. Undefined = the ordinary paste-a-key run.
+   */
+  sourceConnection?: TrackerConnectionSummary;
 }
 
 export function TrackerWizardModal({
@@ -148,13 +169,21 @@ export function TrackerWizardModal({
   projectId,
   onClose,
   onConnected,
+  sourceConnection,
 }: TrackerWizardModalProps): React.JSX.Element {
   const meta = providerMeta(provider);
 
+  /**
+   * The first step this run owns. Add-mapping mode starts on Map because its
+   * authorization already happened — Step 0 is not skipped-but-present, it is
+   * absent, so every index-based guard below reads this rather than 0.
+   */
+  const firstStep = sourceConnection !== undefined ? MAP_STEP : 0;
+
   // ── Navigation ────────────────────────────────────────────────────────────
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(firstStep);
   /** Furthest step reached — the rail only navigates to steps already unlocked. */
-  const [maxStep, setMaxStep] = useState(0);
+  const [maxStep, setMaxStep] = useState(firstStep);
   const [loading, setLoading] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
 
@@ -173,6 +202,12 @@ export function TrackerWizardModal({
   const [mappings, setMappings] = useState<Record<string, number>>({});
   /** cyboflow project id → the groupId that may push new ideas out. */
   const [pushChoice, setPushChoice] = useState<Record<number, string>>({});
+  /**
+   * Add-mapping mode only: the source connection's live siblings, read once on
+   * mount so the Map step can chip the scopes already mapped. Empty in the
+   * ordinary run (a fresh authorization has no siblings to report).
+   */
+  const [existingMappings, setExistingMappings] = useState<TrackerConnectionSummary[]>([]);
 
   // ── Step 2 · selection ────────────────────────────────────────────────────
   const [issuesByGroup, setIssuesByGroup] = useState<Record<string, TrackerIssue[]>>({});
@@ -235,6 +270,42 @@ export function TrackerWizardModal({
     };
   }, [provider, apiKey, baseUrl, workspaceSlug, meta.defaultBaseUrl, meta.needsWorkspaceSlug]);
 
+  /**
+   * What every probe sends as its credential source — EXACTLY one key, which is
+   * what the router's refinement enforces. Add-mapping mode names the
+   * connection and sends nothing key-shaped; the paste path sends the key it
+   * validated.
+   */
+  const probeSource = useMemo<TrackerWizardSourceInput>(
+    () =>
+      sourceConnection !== undefined ? { connectionId: sourceConnection.id } : { credentials },
+    [sourceConnection, credentials],
+  );
+
+  /**
+   * The identity the header and Review card attribute this run to, and the gate
+   * `goToStep` reads: non-null means "authorized". Add-mapping mode inherits it
+   * from the connection it extends — that authorization was already probed, and
+   * re-probing it would ask the provider a question the row already answers.
+   *
+   * Only the two DISPLAYED fields, deliberately: a connection summary carries no
+   * `workspaceId`, and inventing one to satisfy `TrackerWorkspaceIdentity` would
+   * put a connection id behind a workspace-shaped name.
+   */
+  const shownIdentity = useMemo<Pick<
+    TrackerWorkspaceIdentity,
+    'workspaceName' | 'actorLabel'
+  > | null>(
+    () =>
+      sourceConnection === undefined
+        ? identity
+        : {
+            workspaceName: sourceConnection.workspaceName,
+            actorLabel: sourceConnection.actorLabel,
+          },
+    [sourceConnection, identity],
+  );
+
   /** Every group in tree order — the order mappings, probes and connects follow. */
   const allGroups = useMemo<TrackerGroup[]>(
     () => (groupTree?.sections ?? []).flatMap((s) => s.groups),
@@ -248,6 +319,24 @@ export function TrackerWizardModal({
 
   const projectName = (id: number): string =>
     projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
+
+  /**
+   * The source connection's siblings already covering a group's exact scope
+   * triple. Informational only — the row stays selectable, because re-connecting
+   * an unchanged (scope → project) pair is idempotent, and a group CAN honestly
+   * be mapped a second time into a different cyboflow project.
+   *
+   * A legacy row with no recorded `sourceScope` matches nothing rather than
+   * everything: an unknown scope is not evidence of coverage.
+   */
+  const mappedSiblingsFor = (group: TrackerGroup): TrackerConnectionSummary[] =>
+    existingMappings.filter(
+      (m) =>
+        m.sourceScope !== null &&
+        m.sourceScope.containerId === group.selection.containerId &&
+        m.sourceScope.narrowId === group.selection.narrowId &&
+        m.sourceScope.narrowKind === group.selection.narrowKind,
+    );
 
   /** Distinct target projects, first-mapped first. */
   const targetProjectIds = useMemo(() => {
@@ -444,14 +533,19 @@ export function TrackerWizardModal({
   // Editing a credential retires the validated identity AND the group tree: the
   // wizard past Step 0 is only meaningful for the key that was actually probed,
   // and a different key can name a different workspace.
+  //
+  // Inert in add-mapping mode: no credential input renders there, so the only
+  // time this could fire is the mount pass — where it would retire the inherited
+  // identity and clamp the rail behind a Step 0 that does not exist.
   useEffect(() => {
+    if (sourceConnection !== undefined) return;
     probeVersionRef.current += 1;
     setIdentity(null);
     setAuthError(null);
     setGroupTree(null);
     setMappings({});
     setMaxStep(0);
-  }, [apiKey, baseUrl, workspaceSlug]);
+  }, [apiKey, baseUrl, workspaceSlug, sourceConnection]);
 
   // The Map step's project list is a local read, loaded once per open. A failed
   // load leaves the list empty and the step unable to map anything.
@@ -495,13 +589,56 @@ export function TrackerWizardModal({
   }, [mode, assignees, manual]);
 
   // -------------------------------------------------------------------------
+  // Add-mapping mount probes
+  //
+  // DECLARED AFTER the invalidation effects on purpose: those bump
+  // `probeVersionRef` on the mount pass too, and an effect that claimed its
+  // version before that bump would discard its own response as superseded.
+  // -------------------------------------------------------------------------
+
+  // The wizard opens ON Map here, so the group tree that Step 0's Continue would
+  // have fetched is fetched on mount instead. A failure surfaces as the step
+  // error and leaves `groupTree` null, so Continue's `ensureGroups` retries it.
+  useEffect(() => {
+    if (!isOpen || sourceConnection === undefined) return;
+    const version = probeVersionRef.current;
+    setLoading(true);
+    void trpc.cyboflow.tracker.wizardGroups
+      .mutate({ connectionId: sourceConnection.id })
+      .then((tree) => {
+        if (probeVersionRef.current === version) setGroupTree(tree);
+      })
+      .catch((err: unknown) => setStepError(errorMessage(err)))
+      .finally(() => setLoading(false));
+  }, [isOpen, sourceConnection]);
+
+  // The connection's live siblings, for the Map step's "already mapped" chips.
+  // A local read of rows the catalog already owns — a failure costs a hint, not
+  // the step, so it degrades to no chips rather than blocking the wizard.
+  useEffect(() => {
+    if (!isOpen || sourceConnection === undefined) return;
+    let cancelled = false;
+    void trpc.cyboflow.tracker.mappings
+      .query({ connectionId: sourceConnection.id })
+      .then((rows) => {
+        if (!cancelled) setExistingMappings(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setExistingMappings([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, sourceConnection]);
+
+  // -------------------------------------------------------------------------
   // Probes
   // -------------------------------------------------------------------------
 
   const ensureGroups = async (): Promise<void> => {
     if (groupTree !== null) return;
     const version = probeVersionRef.current;
-    const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({ credentials });
+    const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({ ...probeSource });
     if (probeVersionRef.current !== version) return;
     setGroupTree(tree);
   };
@@ -514,7 +651,7 @@ export function TrackerWizardModal({
     const next: Record<string, TrackerIssue[]> = {};
     for (const group of mappedGroups) {
       next[group.id] = await trpc.cyboflow.tracker.wizardIssues.mutate({
-        credentials,
+        ...probeSource,
         selection: group.selection,
       });
     }
@@ -532,7 +669,7 @@ export function TrackerWizardModal({
       // Any group in the scope answers for all of them — that is what sharing a
       // scope key means, so only one probe per table is fired.
       const rows = await trpc.cyboflow.tracker.wizardStates.mutate({
-        credentials,
+        ...probeSource,
         selection: scope.groups[0].selection,
       });
       nextStates[scope.key] = rows;
@@ -601,9 +738,10 @@ export function TrackerWizardModal({
   };
 
   const goToStep = async (target: number): Promise<void> => {
-    if (target < 0 || target > LAST_STEP) return;
+    if (target < firstStep || target > LAST_STEP) return;
     // Step 0 is the gate: nothing downstream exists without a validated key.
-    if (target > 0 && identity === null) return;
+    // Add-mapping mode enters already past it, carrying the connection's identity.
+    if (target > firstStep && shownIdentity === null) return;
     setStepError(null);
 
     // Backwards navigation is pure — it never re-probes the provider.
@@ -703,7 +841,11 @@ export function TrackerWizardModal({
       try {
         await trpc.cyboflow.tracker.connect.mutate({
           projectId: pid,
-          credentials,
+          // Exactly one credential source, same rule as the probes: the pasted
+          // key, or the connection whose stored key main resolves on its side.
+          ...(sourceConnection !== undefined
+            ? { sourceConnectionId: sourceConnection.id }
+            : { credentials }),
           source: group.selection,
           sourceLabel: group.sourceLabel,
           selectionMode: mode,
@@ -874,6 +1016,12 @@ export function TrackerWizardModal({
           Every mapped group becomes its own connection. Several groups can feed the same cyboflow
           project; anything left on “Don&apos;t import” is ignored entirely.
         </p>
+        {sourceConnection !== undefined && (
+          <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-tertiary">
+            Groups this connection already covers carry their cyboflow project as a chip. Mapping
+            one again is allowed — re-connecting an unchanged pair changes nothing.
+          </p>
+        )}
       </div>
 
       {overlapWarnings.map((warning) => (
@@ -900,6 +1048,15 @@ export function TrackerWizardModal({
                 <span className="min-w-0 truncate text-xs font-bold text-text-primary">
                   {group.name}
                 </span>
+                {mappedSiblingsFor(group).map((sibling) => (
+                  <span
+                    key={sibling.id}
+                    className="flex-shrink-0 rounded-none border border-border-primary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary"
+                    data-testid={`tracker-group-mapped-${group.id}-${sibling.id}`}
+                  >
+                    mapped → {projectName(sibling.projectId)}
+                  </span>
+                ))}
                 <select
                   aria-label={`Cyboflow project for ${group.name}`}
                   value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
@@ -1494,6 +1651,16 @@ export function TrackerWizardModal({
       },
     ];
 
+    // Add-mapping mode never showed an "Authorized as …" card, so the identity
+    // these connections inherit is stated here instead of left implicit.
+    if (sourceConnection !== undefined && shownIdentity !== null) {
+      cards.push({
+        label: 'Authorization',
+        value: shownIdentity.workspaceName,
+        detail: `Reusing the key authorized as ${shownIdentity.actorLabel}`,
+      });
+    }
+
     return (
       <div className="space-y-4">
         <div>
@@ -1617,8 +1784,15 @@ export function TrackerWizardModal({
         <div className="flex flex-shrink-0 items-center gap-3 border-b border-border-primary bg-surface-secondary px-4 py-2.5">
           <Eyebrow className="text-text-primary">Integrations</Eyebrow>
           <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary">
-            / Connect {meta.name}
+            {sourceConnection !== undefined
+              ? `/ Add a ${meta.name} mapping`
+              : `/ Connect ${meta.name}`}
           </span>
+          {sourceConnection !== undefined && shownIdentity !== null && (
+            <span className="min-w-0 truncate text-[10px] uppercase tracking-[0.18em] text-text-tertiary">
+              / {shownIdentity.workspaceName} · {shownIdentity.actorLabel}
+            </span>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -1631,6 +1805,11 @@ export function TrackerWizardModal({
         {/* ── Step rail ───────────────────────────────────────────────────── */}
         <div className="flex flex-shrink-0 items-stretch gap-1 overflow-x-auto border-b border-border-primary bg-surface-secondary px-4">
           {STEP_LABELS.map((label, index) => {
+            // Add-mapping mode drops Step 0 from the rail entirely — the step
+            // does not exist for this run, so a disabled stub would misdescribe
+            // it as "not reached yet". Test ids stay ABSOLUTE indices so one
+            // vocabulary addresses the rail in both modes.
+            if (index < firstStep) return null;
             const active = index === step;
             const past = index < step;
             const reachable = index <= maxStep;
@@ -1660,7 +1839,7 @@ export function TrackerWizardModal({
                         : 'bg-surface-tertiary text-text-tertiary',
                   )}
                 >
-                  {index + 1}
+                  {index - firstStep + 1}
                 </span>
                 {label}
               </button>
@@ -1686,18 +1865,24 @@ export function TrackerWizardModal({
         {/* ── Footer nav (steps 1–5; Step 0 advances from its own card) ───── */}
         {step > 0 && (
           <div className="flex flex-shrink-0 items-center justify-between gap-3 border-t border-dashed border-border-primary bg-bg-primary px-6 py-3">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="rounded-none"
-              onClick={() => void goToStep(step - 1)}
-            >
-              Back
-            </Button>
+            {/* Back is omitted on the run's FIRST step — in add-mapping mode Map
+                has nothing behind it, and an inert button reads as a dead end. */}
+            {step > firstStep ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="rounded-none"
+                onClick={() => void goToStep(step - 1)}
+              >
+                Back
+              </Button>
+            ) : (
+              <span />
+            )}
             <div className="flex items-center gap-3">
               <span className="text-[10px] uppercase tracking-[0.12em] text-text-tertiary">
-                Step {step + 1} of {STEP_LABELS.length}
+                Step {step - firstStep + 1} of {STEP_LABELS.length - firstStep}
               </span>
               {step < LAST_STEP && (
                 <Button

@@ -16,11 +16,18 @@
  * reconcile probe per target project; the sequential per-mapping connect
  * payloads; and a partial failure that keeps the modal open and retries only
  * the row that failed.
+ *
+ * Plus ADD-MAPPING MODE (`sourceConnection` set), whose whole point is that no
+ * key is asked for or sent a second time: Step 0 is absent rather than
+ * pre-answered, every probe names the connection, `connect` carries
+ * `sourceConnectionId`, and the Map step chips the scopes its siblings cover
+ * without locking them.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  TrackerConnectionSummary,
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
@@ -38,6 +45,7 @@ vi.mock('../../../trpc/client', () => ({
         wizardStates: { mutate: vi.fn() },
         reconcilePreview: { mutate: vi.fn() },
         connect: { mutate: vi.fn() },
+        mappings: { query: vi.fn() },
       },
     },
   },
@@ -59,6 +67,7 @@ const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
 const mockReconcile = vi.mocked(trpc.cyboflow.tracker.reconcilePreview.mutate);
 const mockConnect = vi.mocked(trpc.cyboflow.tracker.connect.mutate);
+const mockMappings = vi.mocked(trpc.cyboflow.tracker.mappings.query);
 const mockProjectsGetAll = vi.mocked(API.projects.getAll);
 
 // ---------------------------------------------------------------------------
@@ -230,6 +239,44 @@ const RECONCILE_9: TrackerReconcileItem[] = [
   },
 ];
 
+/**
+ * The connection add-mapping mode extends: one live mapping of the whole
+ * Platform team into Cyboflow, on the authorization every probe then reuses.
+ */
+const SOURCE_CONNECTION: TrackerConnectionSummary = {
+  id: 'conn-src',
+  projectId: 7,
+  provider: 'linear',
+  status: 'active',
+  workspaceName: 'Acme',
+  actorLabel: 'J. Kesteva',
+  baseUrl: null,
+  sourceLabel: 'Platform · all open issues',
+  sourceScope: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+  selectionMode: 'all',
+  statusSyncMode: 'auto',
+  pullMode: 'auto',
+  pushMode: 'auto',
+  mirrorSubissues: true,
+  conflictMode: 'auto',
+  pushTarget: true,
+  stateMapping: {},
+  lastSyncAt: null,
+  lastSyncLog: [],
+  linkedCount: 4,
+  openConflictCount: 0,
+};
+
+/** A sibling on the SAME authorization, mapping Alpha into the Website project. */
+const ALPHA_SIBLING: TrackerConnectionSummary = {
+  ...SOURCE_CONNECTION,
+  id: 'conn-alpha',
+  projectId: 9,
+  sourceLabel: 'Core · Alpha',
+  sourceScope: { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+  pushTarget: false,
+};
+
 const onClose = vi.fn();
 const onConnected = vi.fn();
 
@@ -256,6 +303,9 @@ beforeEach(() => {
       Promise.resolve(projectId === 7 ? RECONCILE_7 : RECONCILE_9),
   );
   mockConnect.mockResolvedValue({ connectionId: 'conn-1' });
+  // The live siblings of the source connection — itself alone by default, which
+  // is what a connection with one mapping actually reports.
+  mockMappings.mockResolvedValue([SOURCE_CONNECTION]);
   mockProjectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
 });
 
@@ -273,6 +323,27 @@ function renderWizard(): void {
       onConnected={onConnected}
     />,
   );
+}
+
+/**
+ * Open the wizard in add-mapping mode and wait until the Map step is usable:
+ * BOTH async reads (the group tree and the project list) have to land before a
+ * select can be changed — a `fireEvent.change` to a value whose <option> has not
+ * rendered yet is silently a no-op.
+ */
+async function openAddMapping(): Promise<void> {
+  render(
+    <TrackerWizardModal
+      isOpen
+      provider="linear"
+      projectId={7}
+      sourceConnection={SOURCE_CONNECTION}
+      onClose={onClose}
+      onConnected={onConnected}
+    />,
+  );
+  await screen.findByLabelText('Cyboflow project for Alpha');
+  await screen.findAllByRole('option', { name: 'Cyboflow (Active)' });
 }
 
 /** Paste a key, authorize, and land on the Map step. */
@@ -714,5 +785,107 @@ describe('TrackerWizardModal — Review + connect', () => {
     );
     await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('TrackerWizardModal — add-mapping mode', () => {
+  it('opens on Map with no Connect step and never re-asks for the key', async () => {
+    await openAddMapping();
+
+    // Step 0 is ABSENT, not disabled: the run has no authorize step to reach.
+    expect(screen.queryByTestId('tracker-step-0')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Personal API key')).not.toBeInTheDocument();
+    expect(mockValidate).not.toHaveBeenCalled();
+
+    // Map is step 1 of the five that remain, and it is where the wizard landed.
+    expect(screen.getByTestId('tracker-step-1')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('Map Linear onto cyboflow projects')).toBeInTheDocument();
+    expect(screen.getByText('Step 1 of 5')).toBeInTheDocument();
+    // Nothing sits behind Map, so Back is not offered.
+    expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument();
+
+    // The group tree came from the connection, and the header attributes the
+    // run to the identity it inherited rather than one it probed.
+    expect(mockGroups).toHaveBeenCalledTimes(1);
+    expect(mockGroups).toHaveBeenCalledWith({ connectionId: 'conn-src' });
+    expect(screen.getByText('/ Add a Linear mapping')).toBeInTheDocument();
+    expect(screen.getByText('/ Acme · J. Kesteva')).toBeInTheDocument();
+  });
+
+  it('names the connection on every probe instead of carrying credentials', async () => {
+    await openAddMapping();
+    mapGroup('Alpha', 9);
+    mapGroup('Platform', 9);
+    await advance(2); // → Tasks → States
+
+    expect(mockIssues).toHaveBeenCalledWith({
+      connectionId: 'conn-src',
+      selection: { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+    });
+    expect(mockStates).toHaveBeenCalledWith({
+      connectionId: 'conn-src',
+      selection: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+    });
+
+    // The point of the mode: no probe on any step carries a key.
+    const probeInputs: unknown[] = [
+      ...mockGroups.mock.calls,
+      ...mockIssues.mock.calls,
+      ...mockStates.mock.calls,
+    ].map((call) => call[0]);
+    expect(probeInputs).toHaveLength(5);
+    for (const input of probeInputs) {
+      expect(input).not.toHaveProperty('credentials');
+    }
+  });
+
+  it('connects with sourceConnectionId and no credentials key', async () => {
+    await openAddMapping();
+    mapGroup('Alpha', 9);
+    await advance(4); // → Tasks → States → Reconcile → Review
+
+    // The inherited authorization is stated on Review, since no "Authorized as
+    // …" card was ever shown in this mode.
+    expect(screen.getByText('Reusing the key authorized as J. Kesteva')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+
+    const payload = mockConnect.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('credentials');
+    expect(payload).toMatchObject({
+      projectId: 9,
+      sourceConnectionId: 'conn-src',
+      source: { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+      sourceLabel: 'Core · Alpha',
+      pushTarget: true,
+    });
+    expect(onConnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('chips the scopes its siblings already cover, without locking them', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    await openAddMapping();
+
+    expect(mockMappings).toHaveBeenCalledWith({ connectionId: 'conn-src' });
+    // Each chip names the cyboflow project the sibling maps into.
+    expect(
+      await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('tracker-group-team-plat')).getByText('mapped → Cyboflow'),
+    ).toBeInTheDocument();
+    // Beta shares Alpha's container but not its narrow, so it is NOT covered.
+    expect(
+      within(screen.getByTestId('tracker-group-proj-beta')).queryByText(/^mapped →/),
+    ).not.toBeInTheDocument();
+
+    // Information, not a lock: a chipped group still maps, and re-mapping it to
+    // the same project is exactly the idempotent re-connect.
+    const alphaSelect = screen.getByLabelText('Cyboflow project for Alpha');
+    expect(alphaSelect).toBeEnabled();
+    fireEvent.change(alphaSelect, { target: { value: '9' } });
+    expect(alphaSelect).toHaveValue('9');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
   });
 });
