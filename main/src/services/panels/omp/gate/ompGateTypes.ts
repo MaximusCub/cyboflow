@@ -236,6 +236,17 @@ export interface OmpGateApprovalRequest {
   runId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  /**
+   * Which substrate is asking. Present ONLY on this lane; the interactive-Claude
+   * hook omits it and keeps the original semantics.
+   *
+   * The server branches the SOCKET-DIED disposition on it. For the interactive
+   * hook a dead socket means the subprocess died and nothing will ever read the
+   * verdict, so the approval is settled. For this gate it means OMP's 30s
+   * extension-handler cap forced us to stop waiting — the human has simply not
+   * answered yet — so the approval stays pending and a retry re-attaches to it.
+   */
+  substrate?: 'omp';
 }
 
 /**

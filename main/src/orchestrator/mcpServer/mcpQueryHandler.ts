@@ -912,6 +912,12 @@ export type McpQueryMessage =
       runId: string;
       toolName: string;
       toolInput: Record<string, unknown>;
+      /**
+       * Which substrate is asking. The interactive-Claude hook omits it; the OMP
+       * gate extension stamps 'omp'. Read ONLY by the socket-died disposition —
+       * see {@link McpQueryHandler.registerInFlightShellApproval}.
+       */
+      substrate?: 'omp';
     }
   | {
       /**
@@ -1326,6 +1332,58 @@ interface InFlightShellApproval {
 }
 
 /**
+ * One OMP tool call whose approval outlived its requester.
+ *
+ * The omp-sdk gate can only block for ~25s (OMP kills extension handlers at
+ * 30s), so its socket routinely goes away while the question is still worth
+ * asking. The approval stays pending — {@link ApprovalRouter.orphanPendingForRun}
+ * — and this entry is how the two halves find each other again:
+ *
+ *   - `client === null` while nobody is waiting; the verdict, when it lands, is
+ *     parked in `decision` instead of being written to a dead socket.
+ *   - the model's RETRY of the identical call re-attaches its fresh socket here
+ *     rather than opening a second approval, so one human answer maps to one
+ *     execution and the queue does not fill with duplicates of the same ask.
+ *
+ * `decision` is SINGLE-USE: consumed by the first matching retry and deleted.
+ * A human's "yes" authorizes the call they were shown, not every future call
+ * that happens to serialize identically.
+ */
+interface DeferredOmpApproval {
+  /** Live requester, or null while the approval is orphaned. */
+  client: net.Socket | null;
+  /** requestId of the CURRENT requester — a retry replaces it. */
+  requestId: string;
+  /** Verdict that arrived with no requester attached. Single-use. */
+  decision?: ApprovalDecision;
+}
+
+/**
+ * Identity of a tool call for retry matching: name + a key-ordered serialization
+ * of its arguments.
+ *
+ * Key-ORDERED rather than raw `JSON.stringify` because the retry is a fresh
+ * serialization from the model, and object key order is not guaranteed stable
+ * across turns; without the sort an identical call could miss its own orphaned
+ * approval and open a duplicate card. Recursive so nested argument objects sort
+ * too. Non-plain values fall back to their JSON form.
+ */
+function ompCallKey(toolName: string, toolInput: Record<string, unknown>): string {
+  return `${toolName}\u0000${stableJson(toolInput)}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/**
  * Callback deps this handler needs from main/src/services — ORCHESTRATOR
  * LAYERING RULE: mcpQueryHandler must NOT import from main/src/services, so
  * every such dependency is injected as a plain function rather than a
@@ -1524,6 +1582,12 @@ export class McpQueryHandler {
    * affordance the interactive manager calls before killing the PTY.
    */
   private readonly inFlightShellApprovals = new Map<string, Set<InFlightShellApproval>>();
+
+  /**
+   * Orphaned OMP approvals, keyed runId → {@link ompCallKey} → entry. Populated
+   * only on the omp-sdk lane; cleared with the run's in-flight sockets.
+   */
+  private readonly ompDeferredApprovals = new Map<string, Map<string, DeferredOmpApproval>>();
 
   /**
    * Lazily-opened, cached readonly sibling connection backing
@@ -5561,9 +5625,47 @@ export class McpQueryHandler {
       }
     }
 
+    // (c0) omp-sdk lane: does this call already have an approval in flight?
+    // A retry of an identical call must land on the ORIGINAL ask rather than
+    // opening a second one — see DeferredOmpApproval. Two hits are possible:
+    // a verdict that arrived while nobody was waiting (answer it now, single
+    // use), or an ask still sitting in the human's queue (re-attach and wait).
+    const ompKey = msg.substrate === 'omp' ? ompCallKey(msg.toolName, msg.toolInput) : null;
+    if (ompKey !== null) {
+      const deferred = this.ompDeferredApprovals.get(msg.runId)?.get(ompKey);
+      if (deferred?.decision !== undefined) {
+        const { decision } = deferred;
+        this.dropDeferredOmpApproval(msg.runId, ompKey);
+        this.logger?.debug(
+          '[Cyboflow MCP Query] omp retry matched a decided approval — replaying the human verdict',
+          { runId: msg.runId, toolName: msg.toolName, decision: decision.behavior },
+        );
+        this.writeShellVerdict(client, msg.requestId, decision);
+        return;
+      }
+      if (deferred !== undefined) {
+        // Still awaiting the human. Adopt the fresh socket as the requester and
+        // register it so ITS disconnect is observed too; no second approvals row.
+        deferred.client = client;
+        deferred.requestId = msg.requestId;
+        this.registerInFlightShellApproval(msg.runId, msg.requestId, client, msg.substrate);
+        this.logger?.debug(
+          '[Cyboflow MCP Query] omp retry re-attached to the pending approval',
+          { runId: msg.runId, toolName: msg.toolName },
+        );
+        return;
+      }
+      this.putDeferredOmpApproval(msg.runId, ompKey, { client, requestId: msg.requestId });
+    }
+
     // (c) Route through ApprovalRouter. Register the held-open socket FIRST so a
     // disconnect during the (async) requestApproval transaction is observed.
-    const entry = this.registerInFlightShellApproval(msg.runId, msg.requestId, client);
+    const entry = this.registerInFlightShellApproval(
+      msg.runId,
+      msg.requestId,
+      client,
+      msg.substrate,
+    );
 
     const router = ApprovalRouter.getInstance();
     void router
@@ -5576,6 +5678,13 @@ export class McpQueryHandler {
           // (Under the SDK path this closure is a no-op; the shell transport uses
           // it — load-bearing, held open across the human-decision window.)
           this.completeInFlightShellApproval(msg.runId, entry);
+          // On the omp lane the requester may have changed (a retry re-attached)
+          // or gone (budget expired), so the deferred entry — not this closure's
+          // captured socket — is the authority on where the verdict goes.
+          if (ompKey !== null) {
+            this.deliverDeferredOmpVerdict(msg.runId, ompKey, decision);
+            return;
+          }
           this.writeShellVerdict(client, msg.requestId, decision);
         },
         // P4: stamp the folded permission review_item with the interactive
@@ -5589,6 +5698,10 @@ export class McpQueryHandler {
         // fired). If the socketReply never ran (cancel/supersede path), settle
         // the held-open socket so the PTY does not hang.
         if (this.completeInFlightShellApproval(msg.runId, entry)) {
+          if (ompKey !== null) {
+            this.deliverDeferredOmpVerdict(msg.runId, ompKey, decision);
+            return;
+          }
           this.writeShellVerdict(client, msg.requestId, decision);
         }
       })
@@ -5609,10 +5722,14 @@ export class McpQueryHandler {
           });
         }
         if (this.completeInFlightShellApproval(msg.runId, entry)) {
-          this.writeShellVerdict(client, msg.requestId, {
+          const failClosed: ApprovalDecision = {
             behavior: 'deny',
             message: 'cyboflow approval precondition failed',
-          });
+          };
+          // A precondition failure is terminal for this ask: drop the deferred
+          // entry so a retry re-asks cleanly rather than replaying the deny.
+          if (ompKey !== null) this.dropDeferredOmpApproval(msg.runId, ompKey);
+          this.writeShellVerdict(client, msg.requestId, failClosed);
         }
       });
   }
@@ -5659,6 +5776,10 @@ export class McpQueryHandler {
         // best-effort close
       }
     }
+    // Run teardown ends every deferred ask too: the parked verdicts and
+    // still-pending entries are meaningless once the run is gone, and
+    // clearPendingForRun's DB sweep settles their rows.
+    this.ompDeferredApprovals.delete(runId);
     this.logger?.debug('[Cyboflow MCP Query] denied in-flight shell-approval sockets on cancel', {
       runId,
       count: entries.length,
@@ -5849,10 +5970,35 @@ export class McpQueryHandler {
     runId: string,
     requestId: string,
     client: net.Socket,
+    substrate?: 'omp',
   ): InFlightShellApproval {
     const onDisconnect = (): void => {
       // Socket died before a verdict (orchestrator-down / hook subprocess died).
       if (!this.completeInFlightShellApproval(runId, entry)) return;
+
+      // omp-sdk: the requester stopping is EXPECTED, not a death. OMP caps
+      // extension handlers at 30s, so the gate hangs up at 25s on every ask a
+      // human has not answered yet — settling here is what turned 17 live
+      // approvals into 17 system rejections on 2026-08-19. Keep the ask (and its
+      // review-queue card) alive, park the requester, and hand the run's gate
+      // back so the session keeps executing.
+      if (substrate === 'omp') {
+        this.detachDeferredOmpRequester(runId, client);
+        this.logger?.debug(
+          '[Cyboflow MCP Query] omp gate stopped waiting — approval stays pending for the human',
+          { runId },
+        );
+        try {
+          ApprovalRouter.getInstance().orphanPendingForRun(runId);
+        } catch (err) {
+          this.logger?.debug('[Cyboflow MCP Query] orphanPendingForRun on disconnect failed', {
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return;
+      }
+
       this.logger?.warn(
         '[Cyboflow MCP Query] shell-approval socket disconnected before verdict — clearing pending approval',
         { runId },
@@ -5907,6 +6053,66 @@ export class McpQueryHandler {
    *   (disconnect / cancel / a prior resolve) — the caller must then NOT write,
    *   preserving the exactly-once verdict contract.
    */
+  /** Record a fresh omp-lane ask so its retries and its verdict can find it. */
+  private putDeferredOmpApproval(runId: string, key: string, entry: DeferredOmpApproval): void {
+    let byKey = this.ompDeferredApprovals.get(runId);
+    if (!byKey) {
+      byKey = new Map<string, DeferredOmpApproval>();
+      this.ompDeferredApprovals.set(runId, byKey);
+    }
+    byKey.set(key, entry);
+  }
+
+  private dropDeferredOmpApproval(runId: string, key: string): void {
+    const byKey = this.ompDeferredApprovals.get(runId);
+    if (!byKey) return;
+    byKey.delete(key);
+    if (byKey.size === 0) this.ompDeferredApprovals.delete(runId);
+  }
+
+  /**
+   * Park the requester whose socket just died, WITHOUT touching the ask.
+   *
+   * Matched by socket identity, not by key: a retry may already have adopted
+   * this entry with a newer socket, and the older socket's late 'close' must not
+   * unhook the live one.
+   */
+  private detachDeferredOmpRequester(runId: string, client: net.Socket): void {
+    const byKey = this.ompDeferredApprovals.get(runId);
+    if (!byKey) return;
+    for (const entry of byKey.values()) {
+      if (entry.client === client) entry.client = null;
+    }
+  }
+
+  /**
+   * Deliver an omp-lane verdict to whoever is waiting — or to nobody.
+   *
+   * With a requester attached this writes the verdict and the ask is done. With
+   * none (the gate's budget expired and no retry has arrived yet) the decision
+   * is PARKED for the next identical call, so a human answering a minute late
+   * still authorizes the work instead of the model re-asking from scratch.
+   */
+  private deliverDeferredOmpVerdict(
+    runId: string,
+    key: string,
+    decision: ApprovalDecision,
+  ): void {
+    const entry = this.ompDeferredApprovals.get(runId)?.get(key);
+    if (!entry) return;
+    if (entry.client === null) {
+      entry.decision = decision;
+      this.logger?.debug(
+        '[Cyboflow MCP Query] omp verdict arrived with no requester — parked for the retry',
+        { runId, decision: decision.behavior },
+      );
+      return;
+    }
+    const { client, requestId } = entry;
+    this.dropDeferredOmpApproval(runId, key);
+    this.writeShellVerdict(client, requestId, decision);
+  }
+
   private completeInFlightShellApproval(runId: string, entry: InFlightShellApproval): boolean {
     const set = this.inFlightShellApprovals.get(runId);
     if (!set || !set.has(entry)) return false;

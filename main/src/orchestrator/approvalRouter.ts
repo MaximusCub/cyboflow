@@ -465,9 +465,22 @@ export class ApprovalRouter extends EventEmitter {
       const now = new Date().toISOString();
 
       if (decision.behavior === 'allow') {
+        // The status test is a LIVENESS proof, not a state machine step: it must
+        // pass for a run that is still going and fail for one that is canceled /
+        // completed / failed, because the point is never to revive a dead run.
+        //
+        // 'running' is accepted alongside 'awaiting_review' because
+        // {@link orphanPendingForRun} hands the gate back while the approval
+        // stays pending — the omp-sdk lane's whole premise. Under the older
+        // one-status test a human approving an orphaned ask read as "the run was
+        // canceled", and their YES was silently converted into a deny. No other
+        // caller can observe the widening: on every other transport the run is in
+        // 'awaiting_review' at respond() time, and before orphaning existed the
+        // only path to 'running' with a live pending entry was a cancel that
+        // settled the entry first.
         const updateStmt = this.db.prepare(
           `UPDATE workflow_runs SET status = 'running', updated_at = ?
-           WHERE id = ? AND status = 'awaiting_review'`,
+           WHERE id = ? AND status IN ('awaiting_review', 'running')`,
         );
         const info = updateStmt.run(now, request.runId) as { changes: number };
 
@@ -621,6 +634,56 @@ export class ApprovalRouter extends EventEmitter {
       restoreRunning: true,
       denyMessage: 'Approval requester disconnected before a decision was made',
     });
+  }
+
+  /**
+   * Hand the run's gate back WITHOUT settling its pending approvals.
+   *
+   * The third disposition, alongside {@link clearPendingForRun} (the run is
+   * gone) and {@link abandonPendingForRun} (the requester is gone AND the ask is
+   * void). Here the requester is gone but THE ASK IS STILL LIVE: the OMP gate's
+   * human-decision budget expired, and the human has simply not answered yet.
+   *
+   * WHY THIS EXISTS. `abandonPendingForRun` settles every pending approval as a
+   * system deny, which on the omp-sdk lane means the human is given ~25 seconds
+   * to answer before cyboflow answers "no" on their behalf — measured live on
+   * 2026-08-19 as 17 approvals, 17 system rejections, zero human verdicts. That
+   * is correct for a `preToolUseShellHook` subprocess that DIED (nothing will
+   * ever consume the verdict) and wrong for an OMP gate that merely stopped
+   * waiting: OMP's 30s extension-handler cap bounds how long the REQUESTER can
+   * block, not how long the QUESTION stays worth asking. This method keeps the
+   * approvals row `pending`, keeps the in-memory entry so a later `respond()`
+   * still resolves it, and keeps the folded review_item in the inbox — the card
+   * stays put until a human decides, which is the router's own documented
+   * invariant (§5: "Approvals do NOT auto-expire").
+   *
+   * WHAT IT DELIBERATELY GIVES UP. The single-pending-per-run model is a
+   * consequence of run status: `requestApproval`'s guarded UPDATE only INSERTs
+   * while the run is 'running', and a pending approval holds it in
+   * 'awaiting_review'. Restoring 'running' with a row still pending therefore
+   * lets a SECOND approval exist for the same run. That is the intended trade —
+   * the alternative is the wedge `abandonPendingForRun` documents, where no
+   * approval is ever INSERTed again — and the caller is responsible for not
+   * multiplying cards for the SAME call (mcpQueryHandler re-attaches a retry to
+   * the orphaned approval rather than opening a new one).
+   *
+   * Terminal cleanup is unchanged: `clearPendingForRun`'s DB sweep settles any
+   * row orphaned this way when the run finally ends, so nothing leaks.
+   */
+  orphanPendingForRun(runId: string): void {
+    // Guarded exactly like the restore in settlePendingForRun: a run that
+    // concurrently went canceled/completed/failed is never revived, and a DB
+    // error must not propagate into the socket-disconnect handler calling us.
+    try {
+      this.db.prepare(
+        `UPDATE workflow_runs SET status = 'running', updated_at = ?
+         WHERE id = ? AND status = 'awaiting_review'`,
+      ).run(new Date().toISOString(), runId);
+    } catch (err) {
+      console.warn(
+        `[ApprovalRouter] orphanPendingForRun: run-status restore failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

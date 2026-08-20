@@ -1450,6 +1450,10 @@ export function requestSocketDecision(opts: OmpGateSocketOptions): Promise<OmpGa
           type: 'shell-approval-request',
           requestId,
           runId,
+          // Tells the server this is the OMP lane, where a socket that dies
+          // before a verdict is a BUDGET EXPIRY, not a dead requester — see
+          // `OmpGateApprovalRequest.substrate`.
+          substrate: 'omp',
           // Claude-cased on the wire; the local logs keep OMP's own name so a
           // stderr line still matches what the model asked for.
           toolName: canonicalToolNameForOrchestrator(toolName),
@@ -1621,8 +1625,10 @@ export function createToolCallHandler(
         reason:
           `cyboflow surfaced \`${event.toolName}\` to the human for approval, but no decision ` +
           `arrived within ${Math.round(HUMAN_DECISION_BUDGET_MS / 1000)}s (OMP caps gate handlers ` +
-          'at 30s, so cyboflow cannot wait longer). The human can approve the request and ask you ' +
-          'to retry, or switch this session\'s permission mode.',
+          'at 30s, so cyboflow cannot wait longer). THE REQUEST IS STILL OPEN in the human\'s ' +
+          'review queue — it was not denied. Retrying this exact call is how you collect their ' +
+          'answer: the retry re-attaches to the same pending request, and once they decide it is ' +
+          'allowed through immediately. Do other work first if you have any, then retry.',
       };
     }
     return {
