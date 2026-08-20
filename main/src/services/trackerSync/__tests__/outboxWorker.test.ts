@@ -26,6 +26,8 @@
  *   - ambiguous recovery: Linear point-lookup (found -> adopted, missing ->
  *     pending), Plane client-key match (a same-title sibling is NOT ours), and
  *     update_state -> straight to pending.
+ *   - a push carrying `pushContainerId` (a Dart space group) reaches the
+ *     adapter with the concrete board its create must land in.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -39,6 +41,7 @@ import type {
   TrackerProvider,
   TrackerSourceNarrow,
   TrackerSourceSelection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
   TrackerWorkspaceIdentity,
@@ -103,6 +106,11 @@ interface CreateCall {
   clientKey: string;
   /** The source container a top-level create was filed into; null on a sub-issue. */
   containerId?: string | null;
+  /**
+   * The concrete container a Dart space group's create must be filed against —
+   * undefined for every selection whose own container is already one.
+   */
+  pushContainerId?: string;
 }
 
 /** Scriptable TrackerAdapter: records every call, throws whatever a test queues. */
@@ -131,6 +139,9 @@ class FakeAdapter implements TrackerAdapter {
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     return { workspaceId: 'ws-1', workspaceName: 'Acme', actorLabel: 'K.' };
+  }
+  async listGroups(): Promise<TrackerGroupTree> {
+    return { sections: [] };
   }
   async listContainers(): Promise<TrackerSourceTree> {
     return { containerLabel: 'Team', containers: [] };
@@ -171,6 +182,7 @@ class FakeAdapter implements TrackerAdapter {
     this.createCalls.push({
       parentExternalId: null,
       containerId: selection.containerId,
+      pushContainerId: selection.pushContainerId,
       draft,
       clientKey,
     });
@@ -335,6 +347,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     status_sync_mode: 'auto',
     pull_mode: 'auto',
     push_mode: 'auto',
+    push_target: 1,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -612,6 +625,29 @@ describe('drainOutbox — top-level issue creation (push)', () => {
     // Held, not consumed: still pending, still attempt 0.
     expect(fetchOutbox(push.id).state).toBe('pending');
     expect(fetchOutbox(push.id).attempts).toBe(0);
+  });
+
+  it("carries the stored pushContainerId through to the adapter — a Dart space's create needs a board", async () => {
+    // A space group's containerId is a space NAME no issue can be filed in, so
+    // the concrete board travels with the selection.
+    const connection = seedConnection({
+      provider: 'dart',
+      source_json: JSON.stringify({
+        containerId: 'Engineering',
+        narrowId: 'all',
+        narrowKind: 'space',
+        pushContainerId: 'Engineering/Sprint',
+      }),
+    });
+    seedIdea('ide_1');
+    enqueuePush(connection.id, 'ide_1', 'client-key-space');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'dart';
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.createCalls[0].containerId).toBe('Engineering');
+    expect(adapter.createCalls[0].pushContainerId).toBe('Engineering/Sprint');
   });
 
   it('parks an uncertain push as ambiguous on a provider without idempotent creates', async () => {

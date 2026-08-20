@@ -537,6 +537,15 @@ const PROVIDER_ACTORS: ReadonlySet<string> = new Set<string>(PROVIDERS);
  * Plus the ordinary dedupe: an unresolved `create_issue` already queued for
  * this idea means a replayed event adds nothing.
  *
+ * A FIFTH SKIP IS PER-CONNECTION: `push_target = 0`. Multi-project mapping
+ * (design doc "Multi-project mapping (rev 4)") gives one cyboflow project N
+ * sibling connection rows — one per mapped tracker group, all on the same
+ * workspace — and exactly one of them per provider is the push target. Without
+ * the flag every sibling would enqueue its own `create_issue` and one new idea
+ * would file N identical issues remotely. The ALREADY-LINKED skip cannot cover
+ * this: at enqueue time the idea carries no link for the provider yet, so every
+ * sibling reads it as unrepresented.
+ *
  * `mirror_subissues` is deliberately NOT consulted — it scopes the DECOMPOSITION
  * fan-out (whether an idea's tasks become children), which is a different
  * question from whether the idea itself is represented at all.
@@ -549,6 +558,7 @@ function handleIdeaPush(deps: WriteBackDeps, event: TaskChangedEvent): void {
 
   for (const connection of listConnections(db, event.projectId)) {
     if (connection.status !== 'active') continue;
+    if (connection.push_target === 0) continue;
     if (getLinkByEntity(db, 'idea', event.taskId, connection.provider) !== null) continue;
 
     const duplicate = listUnresolvedOutbox(db, connection.id).some(

@@ -957,14 +957,21 @@ class StateCache {
  * narrow), the same column inboundSync.parseSourceSelection reads. NOT
  * `selection_json`, which holds the Step-2 TASKS selection payload
  * (assignee/manual id lists) and never carries container/narrow ids.
+ *
+ * `pushContainerId` matters MOST here: it is what a Dart space group's create
+ * is filed against, since the selection's own `containerId` is a space name no
+ * issue can be created in. Dropping it would leave the adapter to guess a
+ * board.
  */
 function parseSelection(connection: TrackerConnectionRow): TrackerSourceSelection | null {
   const parsed = parseJsonObject(connection.source_json);
-  const { containerId, narrowId, narrowKind } = parsed;
+  const { containerId, narrowId, narrowKind, pushContainerId } = parsed;
   if (typeof containerId !== 'string' || typeof narrowId !== 'string' || typeof narrowKind !== 'string') {
     return null;
   }
-  return { containerId, narrowId, narrowKind } as TrackerSourceSelection;
+  const selection = { containerId, narrowId, narrowKind } as TrackerSourceSelection;
+  if (typeof pushContainerId === 'string') selection.pushContainerId = pushContainerId;
+  return selection;
 }
 
 /** Typed read of a `create_sub_issue` payload, or null when it is unusable. */

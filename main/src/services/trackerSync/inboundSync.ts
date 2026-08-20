@@ -104,6 +104,7 @@ import type {
 } from '../../../../shared/types/trackerSync';
 import {
   advanceCursor,
+  findSiblingLinkForExternal,
   getLinkByEntity,
   getLinkByExternal,
   hasOpenConflictForLink,
@@ -262,9 +263,10 @@ export interface InboundSyncReport {
   updated: number;
   /**
    * Fetched issues deliberately NOT applied: don't-import states, selection
-   * filtered out, an open conflict pausing the item, an orphaned link, a
-   * locally-deleted entity, or a first-pass baseline seed. Overlap-window
-   * replays are dropped BEFORE this loop and are not counted.
+   * filtered out, an issue a sibling mapping already owns, an open conflict
+   * pausing the item, an orphaned link, a locally-deleted entity, or a
+   * first-pass baseline seed. Overlap-window replays are dropped BEFORE this
+   * loop and are not counted.
    */
   skipped: number;
   /** Manual-mode conflict rows opened for the user this pass. */
@@ -273,6 +275,12 @@ export interface InboundSyncReport {
   autoResolved: number;
   /** Linked entities archived because the remote issue was archived. */
   archivedRemotely: number;
+  /**
+   * Unlinked issues another mapping on the same tracker identity already owns
+   * (see {@link isOwnedBySiblingMapping}). Also counted in {@link skipped} —
+   * this is the REASON breakdown of a permanent skip, not a separate outcome.
+   */
+  crossScopeSkips: number;
   /**
    * Remote stage changes recognized but NOT applied because the status
    * direction is held ({@link InboundSyncDeps.applyLinkedStage}). Each one also
@@ -455,11 +463,18 @@ function parseSourceSelection(connection: TrackerConnectionRow): TrackerSourceSe
   if (typeof candidate.containerId !== 'string' || typeof candidate.narrowId !== 'string') {
     throw new TrackerSyncConfigError(`connection ${connection.id} source_json is missing container/narrow ids`);
   }
-  return {
+  const selection: TrackerSourceSelection = {
     containerId: candidate.containerId,
     narrowId: candidate.narrowId,
     narrowKind: candidate.narrowKind ?? 'all',
   };
+  // Dart space groups only: the concrete board a CREATE is filed against. Read
+  // here so ONE parse serves the whole pass; nothing inbound uses it, and it is
+  // never invented — a selection without one simply has none.
+  if (typeof candidate.pushContainerId === 'string') {
+    selection.pushContainerId = candidate.pushContainerId;
+  }
+  return selection;
 }
 
 /** Parse `selection_json`; a missing/corrupt blob reads back as an empty selection. */
@@ -742,6 +757,7 @@ export async function runInboundSync(
     imported: 0,
     updated: 0,
     skipped: 0,
+    crossScopeSkips: 0,
     conflictsOpened: 0,
     autoResolved: 0,
     archivedRemotely: 0,
@@ -934,6 +950,14 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
       report.skipped++;
       return 'applied';
     }
+    // A sibling mapping already imported this issue. PERMANENT, so it is a skip
+    // rather than a deferral — and it deliberately sits AHEAD of the import
+    // hold below, which exists to delay work we will eventually do.
+    if (isOwnedBySiblingMapping(ctx, issue)) {
+      report.skipped++;
+      report.crossScopeSkips++;
+      return 'applied';
+    }
     if (!ctx.importNewIssues) {
       // Deferred, NOT skipped: the cursor holds so this issue is re-offered
       // until a pass may import it.
@@ -984,6 +1008,41 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
   }
 
   return await mergeLinkedIssue(ctx, issue, link, local, baseline);
+}
+
+/**
+ * Is this UNLINKED issue already owned by another mapping of the same tracker?
+ *
+ * Multi-project mapping (design doc "Multi-project mapping (rev 4)") gives one
+ * workspace N sibling connections, and their scopes legitimately OVERLAP: a
+ * Linear team group and a project group beneath it both fetch every issue in
+ * that project, and an issue MOVED remotely between two mapped groups is
+ * suddenly in-scope for a connection that never imported it. Both cases arrive
+ * here as "unlinked issue" — the link belongs to the sibling, so
+ * getLinkByExternal (scoped to one connection) cannot see it — and importing
+ * would mint a SECOND idea for one remote issue, with two connections then
+ * write-backing at it from different local entities.
+ *
+ * Scoped to the tracker IDENTITY rather than to the project, because the
+ * duplicate that matters is the remote one: the sibling's idea may live in an
+ * entirely different cyboflow project and still be the same issue.
+ *
+ * A connection whose `workspace_id` was never recorded owns no identity to
+ * compare, so it claims nothing and is claimed by nothing — the same reading
+ * store.connectionMatchesIdentity takes.
+ */
+function isOwnedBySiblingMapping(ctx: SyncContext, issue: TrackerIssue): boolean {
+  const { connection } = ctx;
+  if (connection.workspace_id === null) return false;
+  return (
+    findSiblingLinkForExternal(ctx.db, {
+      provider: connection.provider,
+      workspaceId: connection.workspace_id,
+      baseUrl: connection.base_url,
+      externalId: issue.externalId,
+      excludeConnectionId: connection.id,
+    }) !== null
+  );
 }
 
 /**

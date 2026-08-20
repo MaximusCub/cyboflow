@@ -15,7 +15,9 @@
  *   - paused / unlinked / epic entities ignored, and a MANUAL direction still
  *     enqueuing (the mode gates the drain, never the intent).
  *   - the IDEA PUSH trigger: a locally-created idea enqueues one create_issue
- *     per active connection, and each of its four skips.
+ *     per active connection, each of its four event-level skips, and the
+ *     per-connection `push_target = 0` skip that keeps sibling mapping rows
+ *     from filing the same idea N times.
  *   - decomposition: origin 'started' + one create_sub_issue per unlinked
  *     minted task, and NO creates when mirroring is off.
  *   - close_parent only once EVERY mirrored sibling is terminal — including
@@ -84,6 +86,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     status_sync_mode: 'auto',
     pull_mode: 'auto',
     push_mode: 'auto',
+    push_target: 1,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -738,6 +741,21 @@ describe('writeBack — idea push (create_issue)', () => {
 
     expect(outbox('conn-paused')).toHaveLength(0);
     expect(outbox(active)).toHaveLength(1);
+  });
+
+  it('files ONE issue when sibling mapping rows share the project — only push_target = 1 pushes', () => {
+    // Two mappings of the same Linear workspace onto one cyboflow project: the
+    // second is import-only, or the idea would be filed twice remotely.
+    seedConnection({ id: 'conn-team-a', push_target: 1 });
+    seedConnection({ id: 'conn-team-b', push_target: 0 });
+    seedIdea('ide_1', 'IDEA-1');
+
+    makeListener().handleTaskChanged(createdEvent('ide_1', {}, 'user'));
+
+    const pushed = outbox('conn-team-a');
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0].kind).toBe('create_issue');
+    expect(outbox('conn-team-b')).toHaveLength(0);
   });
 
   it('queues on a PUSH-MANUAL connection too — the drain is where the hold lives', () => {

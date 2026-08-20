@@ -29,6 +29,10 @@
  *     Manual.
  *   - import crash recovery: a pass killed between the create and the link
  *     write adopts the half-imported idea instead of duplicating it.
+ *   - the cross-scope duplicate guard: an issue a SIBLING mapping on the same
+ *     tracker identity already links is skipped permanently (the cursor moves),
+ *     while another workspace claims nothing and a half-import of this
+ *     connection's own is still repaired ahead of the guard.
  *   - deletion sweep in both conflict modes, including the scope-exit case —
  *     an issue absent from the SCOPED id listing but still alive on the point
  *     lookup is out of scope, not deleted.
@@ -55,6 +59,7 @@ import type {
   TrackerIssue,
   TrackerSourceNarrow,
   TrackerSourceSelection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
   TrackerWorkspaceIdentity,
@@ -65,6 +70,7 @@ import {
   insertConnection,
   getConnection,
   getLinkByExternal,
+  upsertLink,
   enqueueOutbox,
   updateBaseline,
   updateConnectionSettings,
@@ -134,6 +140,9 @@ class FakeAdapter implements TrackerAdapter {
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     throw new Error('not used');
+  }
+  async listGroups(): Promise<TrackerGroupTree> {
+    return { sections: [] };
   }
   async listContainers(): Promise<TrackerSourceTree> {
     throw new Error('not used');
@@ -273,6 +282,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     status_sync_mode: 'auto',
     pull_mode: 'auto',
     push_mode: 'auto',
+    push_target: 1,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -617,6 +627,94 @@ describe('runInboundSync — a half-import is repaired regardless of current eli
     expect(report.skipped).toBe(2);
     expect(ideas()).toHaveLength(0);
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-scope duplicate imports
+//
+// Multi-project mapping mints N sibling connections on one tracker identity,
+// and their scopes overlap by construction (a Linear team group and a project
+// group beneath it), so the SAME issue is fetched by two connections. To the
+// second one it looks unlinked — the link is the sibling's — and importing it
+// would mint a second idea for one remote issue.
+// ---------------------------------------------------------------------------
+
+describe('runInboundSync — an issue a sibling mapping already owns', () => {
+  /**
+   * A second mapping of the same workspace onto ANOTHER cyboflow project,
+   * already holding a link for `externalId` — the shape the wizard produces
+   * when two overlapping groups are mapped in one pass.
+   */
+  function seedSiblingMapping(
+    externalId: string,
+    overrides: Partial<NewConnectionRow> = {},
+  ): TrackerConnectionRow {
+    raw.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj 2', '/tmp/p2');
+    const sibling = makeConnection({
+      id: 'conn-sibling',
+      project_id: 2,
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+      ...overrides,
+    });
+    upsertLink(raw, {
+      connection_id: sibling.id,
+      entity_type: 'idea',
+      entity_id: 'ide_sibling',
+      provider: 'linear',
+      external_id: externalId,
+    });
+    return sibling;
+  }
+
+  it('skips it, counts it as cross-scope, and still advances the cursor', async () => {
+    const connection = makeConnection();
+    seedSiblingMapping('ext-1');
+    adapter.issues = [makeIssue()];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.imported).toBe(0);
+    expect(report.crossScopeSkips).toBe(1);
+    // The reason breakdown of a permanent skip, so it counts as skipped too.
+    expect(report.skipped).toBe(1);
+    expect(ideas()).toHaveLength(0);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).toBeNull();
+    // PERMANENT — the issue belongs to the sibling, so nothing is re-offered.
+    expect(reload().cursor_external_id).toBe('ext-1');
+  });
+
+  it('imports normally when the other connection is on a DIFFERENT workspace', async () => {
+    const connection = makeConnection();
+    seedSiblingMapping('ext-1', { workspace_id: 'ws-2' });
+    adapter.issues = [makeIssue()];
+
+    const report = await runInboundSync(deps, connection);
+
+    expect(report.imported).toBe(1);
+    expect(report.crossScopeSkips).toBe(0);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')).not.toBeNull();
+  });
+
+  it('still repairs THIS connection’s half-import — the guard sits behind the adoption', async () => {
+    // Precedence, deliberately: the local idea already exists, and the link is
+    // the only thing that stops it being an orphan forever. A guard that ran
+    // first would strand it the moment a sibling claimed the issue.
+    const connection = makeConnection();
+    const crashing = new CrashingRouter(router);
+    const crashDeps: InboundSyncDeps = { ...deps, router: crashing };
+    adapter.issues = [makeIssue()];
+    crashing.crashAfterCreate = true;
+    await expect(runInboundSync(crashDeps, connection)).rejects.toThrow('simulated crash');
+    crashing.crashAfterCreate = false;
+    const orphanId = ideas()[0].id;
+
+    seedSiblingMapping('ext-1');
+    const report = await runInboundSync(crashDeps, reload());
+
+    expect(report.crossScopeSkips).toBe(0);
+    expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.entity_id).toBe(orphanId);
+    expect(ideas()).toHaveLength(1);
   });
 });
 
