@@ -2387,6 +2387,32 @@ describe('ArtifactTabRenderer', () => {
     }
   });
 
+  it('SCROLLS the matrix sideways in a narrow pane instead of clipping a column', () => {
+    // Live-smoke finding: in an artifact pane the user has narrowed, five fixed
+    // status columns + the chevron overran the row — the STORY cell and the
+    // chevron were clipped away and the idea title squeezed to nothing. A hidden
+    // status cell reads as "no such component", the exact confusion this tab
+    // exists to end, so the matrix scrolls rather than truncating.
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    const doc = screen.getByTestId('artifact-idea-summaries-doc');
+    expect(doc).toHaveStyle({ overflowX: 'auto' });
+
+    // Heads and rows carry the SAME floor, so they scroll together and the
+    // column heads stay aligned over the cells they label.
+    const rows = screen.getByTestId('artifact-idea-summaries-row-IDEA-018').parentElement?.parentElement;
+    expect(rows).toHaveStyle({ minWidth: '400px' });
+    const heads = doc.firstElementChild as HTMLElement;
+    expect(heads).toHaveStyle({ minWidth: '400px' });
+
+    // The idea column keeps a floor of its own — without it the title, not the
+    // fixed-width cells, is what the flexbox squeezes to zero first.
+    const ideaColumn = screen.getByTestId('artifact-idea-summaries-row-IDEA-018')
+      .firstElementChild as HTMLElement;
+    expect(ideaColumn).toHaveStyle({ minWidth: '96px' });
+  });
+
   it('hides each row\'s deliverables until the row is expanded', () => {
     setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
     const specArt = makeArtifact({ id: 'art-spec', atype: 'idea-spec', sourceRef: 'IDEA-018', label: 'Spec' });

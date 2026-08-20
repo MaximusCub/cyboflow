@@ -420,6 +420,19 @@ const IDEA_SUMMARY_LEGEND: ReadonlyArray<{ glyph: string; color: string; label: 
 ];
 
 /** Short column heads for the matrix, paired with the full labels by key. */
+/**
+ * Floor width for one matrix row: the five fixed 54px status columns + the 14px
+ * chevron + the row's 10px padding either side + the idea column's own 96px
+ * minimum. Applied to the column heads and the row list so a narrowed artifact
+ * pane SCROLLS the matrix sideways instead of clipping the last column and
+ * squeezing the idea title out of existence — a hidden status cell reads as
+ * "no such component", which is exactly the confusion this tab exists to end.
+ */
+const IDEA_SUMMARY_MATRIX_MIN_WIDTH = 400;
+
+/** Floor width for the idea (ref + title) column, so the title never collapses to nothing. */
+const IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH = 96;
+
 const IDEA_SUMMARY_COLUMN_HEADS: Record<IdeaComponentKey, string> = {
   'idea-spec': 'SPEC',
   prototype: 'PROTO',
@@ -662,12 +675,15 @@ function IdeaSummariesMatrix({
         background: 'var(--color-surface-primary)',
         border: `1px solid ${HAIRLINE}`,
         padding: '30px 34px 34px',
+        // Heads + rows both carry IDEA_SUMMARY_MATRIX_MIN_WIDTH, so they scroll
+        // together here and stay column-aligned in a narrowed pane.
+        overflowX: 'auto',
       }}
     >
       {/* Column heads */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px 8px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px 8px', minWidth: IDEA_SUMMARY_MATRIX_MIN_WIDTH }}>
         <span
-          style={{ flex: 1, minWidth: 0, fontSize: '8px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: FAINT }}
+          style={{ flex: 1, minWidth: IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH, fontSize: '8px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: FAINT }}
         >
           Idea
         </span>
@@ -683,7 +699,7 @@ function IdeaSummariesMatrix({
         <span style={{ width: 14, flexShrink: 0 }} />
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: IDEA_SUMMARY_MATRIX_MIN_WIDTH }}>
         {entries.map(({ idea, components }) => {
           const open = expanded[idea.id] === true;
           return (
@@ -704,7 +720,15 @@ function IdeaSummariesMatrix({
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 3,
+                  }}
+                >
                   <span style={{ fontSize: '8.5px', fontWeight: 700, letterSpacing: '.16em', color: accent }}>
                     {idea.ref}
                   </span>
