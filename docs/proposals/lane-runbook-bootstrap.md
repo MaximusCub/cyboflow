@@ -454,7 +454,7 @@ stops paying.
   same ladder `resolveProvenRunbook` uses), and omitting it still resolves to the
   project root, which is the level the health badge's question is asked at.
 - **Phase 2 — the preflight.** ✅ *shipped.* Shared exported predicate
-  (`bootstrapEligibility.ts`), persisted stamp (migration 106 +
+  (`bootstrapEligibility.ts`), persisted stamp (migration 108 +
   `bootstrapStampStore.ts`), toggle + kill switch, degrade paths and findings.
   No agent yet; logs and falls through.
 
@@ -474,7 +474,7 @@ stops paying.
   step), controller validation + pathspec commit, the three typed rung-1
   operations (§8.1) with their denylist and separate commit, `registerDraft` +
   the `origin` stamp, the attestation-only proof via `awaitTerminal`, re-enqueue
-  on proven, bootstrap suppression (migration 107).
+  on proven, bootstrap suppression (migration 109).
 
   Three things the phase resolved beyond the list. **The drafting agent's Bash is
   an ALLOWLIST, not a denylist.** §7.2's dependency guard can be a denylist
@@ -522,7 +522,7 @@ stops paying.
   suppression keying actually matching the bucket the next request reads.
 - **Tripwire** — `bootstrap_proof` unreachable from `mcpQueryHandler`, in the style
   of the existing `setup_proof_not_authorized` tests.
-- **Migration** — `migration105.test.ts` plus pre-105 defensive-read degradation.
+- **Migration** — `migration107.test.ts` plus pre-107 defensive-read degradation.
 - **Integration** (`*.itest.ts`, mocked SDK) — preflight → draft → commit → prove →
   ordinary enqueue → lane verified; and every degrade path leaving the lane exactly
   where today's skip leaves it.
@@ -634,8 +634,8 @@ The fifth was an ordering race in a seam this proposal had already read once:
 
 Two serious defects were fixed alongside: `autoBootstrapRunbook` was read from a
 boot-time config snapshot, so the Settings toggle was inert until relaunch in
-both directions; and migrations 106/107 can only be renumbered as a pair, since
-107 ALTERs the table 106 creates and reordering them degrades a fresh database
+both directions; and migrations 108/109 can only be renumbered as a pair, since
+109 ALTERs the table 108 creates and reordering them degrades a fresh database
 silently rather than loudly.
 
 **What this says about the reviews in §15.** Both v1 reviews concluded rung 1
@@ -676,7 +676,7 @@ commit sha, and the fact that the change bought nothing and should probably be
 reverted. That is the review-backed control working on the failure path, which
 is the only path where it matters.
 
-**Confirmed live, beyond the above:** migrations 106+107 apply in order on a
+**Confirmed live, beyond the above:** migrations 108+109 apply in order on a
 fresh DB (`rung1_path`/`rung1_commit_sha` present); `cyboflow-runbook-bootstrap`
 ships in the sprint bundle byte-identical to source; the runbook commits land
 despite `.gitignore` excluding `.cyboflow/` (the `git add -f` path) and never

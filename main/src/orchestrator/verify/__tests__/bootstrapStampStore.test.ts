@@ -1,5 +1,5 @@
 /**
- * Unit tests for RunbookBootstrapStampStore + migration 106
+ * Unit tests for RunbookBootstrapStampStore + migration 108
  * (docs/proposals/lane-runbook-bootstrap.md §9).
  *
  * The stamp is a LOCK and a RESUME CURSOR at the same time, and the two roles
@@ -27,17 +27,17 @@ import type { DatabaseLike } from '../../types';
 const MIG_DIR = join(__dirname, '..', '..', '..', 'database', 'migrations');
 
 /**
- * `mig107` is a separate axis on purpose. Migration 107 adds the rung-1 columns
+ * `mig109` is a separate axis on purpose. Migration 109 adds the rung-1 columns
  * this store now reads and writes, and a 106-only DB is a REAL deployment state
  * — the one every binary is in between the two migrations landing. Both are
  * exercised below: the store must degrade to "no rung-1 edit" rather than losing
  * the whole stamp, because losing the stamp loses the resume cursor.
  */
-function buildDb(withMigration = true, mig107 = true): Database.Database {
+function buildDb(withMigration = true, mig109 = true): Database.Database {
   const db = new Database(':memory:');
   if (withMigration) {
-    db.exec(readFileSync(join(MIG_DIR, '106_runbook_bootstrap_stamp.sql'), 'utf-8'));
-    if (mig107) db.exec(readFileSync(join(MIG_DIR, '107_runbook_bootstrap_suppression.sql'), 'utf-8'));
+    db.exec(readFileSync(join(MIG_DIR, '108_runbook_bootstrap_stamp.sql'), 'utf-8'));
+    if (mig109) db.exec(readFileSync(join(MIG_DIR, '109_runbook_bootstrap_suppression.sql'), 'utf-8'));
   }
   return db;
 }
@@ -48,7 +48,7 @@ function makeStore(db: Database.Database): RunbookBootstrapStampStore {
 
 const KEY = { runId: 'run-1', projectId: 1, modality: 'web' as const };
 
-describe('migration 106', () => {
+describe('migration 108', () => {
   it('creates the stamp table keyed (run_id, project_id, modality)', () => {
     const db = buildDb();
     const pk = (db.prepare('PRAGMA table_info(verify_runbook_bootstrap)').all() as Array<{
@@ -64,7 +64,7 @@ describe('migration 106', () => {
 
   it('is idempotent (CREATE TABLE IF NOT EXISTS), unlike the ALTER-based files', () => {
     const db = buildDb();
-    expect(() => db.exec(readFileSync(join(MIG_DIR, '106_runbook_bootstrap_stamp.sql'), 'utf-8'))).not.toThrow();
+    expect(() => db.exec(readFileSync(join(MIG_DIR, '108_runbook_bootstrap_stamp.sql'), 'utf-8'))).not.toThrow();
     db.close();
   });
 

@@ -1,7 +1,7 @@
 /**
  * RunbookBootstrapStampStore — the run-scoped single-flight + resume cursor for
  * the lane runbook bootstrap (docs/proposals/lane-runbook-bootstrap.md §9),
- * persisted on migration 106's `verify_runbook_bootstrap` table.
+ * persisted on migration 108's `verify_runbook_bootstrap` table.
  *
  * THE ONE THING TO UNDERSTAND: `claim()` is the whole concurrency design. Five
  * sprint lanes reach `visual-verify` at unpredictable moments in the SAME
@@ -60,7 +60,7 @@ export interface BootstrapStamp {
   requestId: string | null;
   detail: string | null;
   /**
-   * The rung-1 edit this bootstrap applied (migration 107), or null on the
+   * The rung-1 edit this bootstrap applied (migration 109), or null on the
    * ordinary rung-0 path. The PATH is carried separately from the sha because
    * the two consumers are path-scoped rather than commit-scoped: the eval diff
    * drops that file's hunks (§11), and address-review is told not to touch it
@@ -282,7 +282,7 @@ export class RunbookBootstrapStampStore {
     runbookVersion?: number;
     requestId?: string;
     detail?: string;
-    /** The rung-1 edit's repo-relative path and its own commit (migration 107). */
+    /** The rung-1 edit's repo-relative path and its own commit (migration 109). */
     rung1Path?: string;
     rung1CommitSha?: string;
   }): boolean {

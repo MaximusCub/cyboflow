@@ -1,4 +1,4 @@
--- Migration 106: the run-scoped runbook-bootstrap STAMP
+-- Migration 108: the run-scoped runbook-bootstrap STAMP
 -- (docs/proposals/lane-runbook-bootstrap.md §9, §12 step 3).
 --
 -- WHY THIS IS PERSISTED AND NOT AN IN-MEMORY MUTEX. The bootstrap is a

@@ -1,5 +1,5 @@
 /**
- * Unit tests for the bootstrap suppression record + migration 107
+ * Unit tests for the bootstrap suppression record + migration 109
  * (docs/proposals/lane-runbook-bootstrap.md §10, §16 defect 8).
  *
  * v1's suppression was written under the DRAFT's runbook hash, into a capability
@@ -28,8 +28,8 @@ function buildDb(withMigration = true): Database.Database {
   const db = new Database(':memory:');
   if (withMigration) {
     // 106 first: 107 ALTERs the table 106 creates.
-    db.exec(readFileSync(join(MIG_DIR, '106_runbook_bootstrap_stamp.sql'), 'utf-8'));
-    db.exec(readFileSync(join(MIG_DIR, '107_runbook_bootstrap_suppression.sql'), 'utf-8'));
+    db.exec(readFileSync(join(MIG_DIR, '108_runbook_bootstrap_stamp.sql'), 'utf-8'));
+    db.exec(readFileSync(join(MIG_DIR, '109_runbook_bootstrap_suppression.sql'), 'utf-8'));
   }
   return db;
 }
@@ -41,7 +41,7 @@ function makeStore(db: Database.Database): BootstrapSuppressionStore {
 const KEY = { projectId: 1, modality: 'web' as const };
 const HASHES = { inputHash: 'input-a', hostFingerprint: 'host-a' };
 
-describe('migration 107', () => {
+describe('migration 109', () => {
   it('creates the suppression table keyed (project_id, modality)', () => {
     const db = buildDb();
     const pk = (
@@ -76,7 +76,7 @@ describe('migration 107', () => {
     // COLUMN IF NOT EXISTS), and runFileBasedMigrations treats exactly this
     // message as "already applied".
     const db = buildDb();
-    expect(() => db.exec(readFileSync(join(MIG_DIR, '107_runbook_bootstrap_suppression.sql'), 'utf-8'))).toThrow(
+    expect(() => db.exec(readFileSync(join(MIG_DIR, '109_runbook_bootstrap_suppression.sql'), 'utf-8'))).toThrow(
       /duplicate column name/,
     );
     db.close();

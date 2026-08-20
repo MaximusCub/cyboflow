@@ -1,7 +1,7 @@
 -- ORDERING CONSTRAINT — 106 AND 107 MOVE TOGETHER, ALWAYS.
 --
 -- The two ALTERs at the bottom of this file target `verify_runbook_bootstrap`,
--- which migration 106 creates. Migrations apply in numeric order, so renumbering
+-- which migration 108 creates. Migrations apply in numeric order, so renumbering
 -- 106 past 107 to resolve a collision — the obvious one-file fix — makes this
 -- file run first against a fresh database. "no such table" is not the
 -- duplicate-column signal the runner recovers from, so the WHOLE transaction
@@ -12,7 +12,7 @@
 --
 -- If either number has to change, change both and keep 106 < 107.
 
--- Migration 107: the bootstrap SUPPRESSION record + the rung-1 half of the
+-- Migration 109: the bootstrap SUPPRESSION record + the rung-1 half of the
 -- bootstrap stamp (docs/proposals/lane-runbook-bootstrap.md §10, §8.1, §11).
 --
 -- (1) verify_runbook_bootstrap_suppression — "stop paying for a project that

@@ -86,8 +86,8 @@ const FAIL: BootstrapProofOutcome = {
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
-  db.exec(readFileSync(join(MIG_DIR, '106_runbook_bootstrap_stamp.sql'), 'utf-8'));
-  db.exec(readFileSync(join(MIG_DIR, '107_runbook_bootstrap_suppression.sql'), 'utf-8'));
+  db.exec(readFileSync(join(MIG_DIR, '108_runbook_bootstrap_stamp.sql'), 'utf-8'));
+  db.exec(readFileSync(join(MIG_DIR, '109_runbook_bootstrap_suppression.sql'), 'utf-8'));
   return db;
 }
 

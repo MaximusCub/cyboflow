@@ -1,6 +1,6 @@
 /**
  * BootstrapSuppressionStore — "stop paying for a project that cannot be
- * bootstrapped" (docs/proposals/lane-runbook-bootstrap.md §10, migration 107).
+ * bootstrapped" (docs/proposals/lane-runbook-bootstrap.md §10, migration 109).
  *
  * THE COST THIS EXISTS TO STOP. A bootstrap that ends in `NOT-POSSIBLE` — no dev
  * server, a build nobody scripted, a surface this harness cannot stand up — still
