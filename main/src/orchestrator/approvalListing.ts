@@ -26,6 +26,11 @@ interface DbApprovalRow {
   rationale: string | null;
   createdAt: string;
   status: string;
+  /**
+   * SQLite has no boolean: the column is INTEGER 0/1. Typed as number here so
+   * the coercion to `Approval.awaited` happens in exactly one place below.
+   */
+  awaited: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +57,8 @@ export function selectPendingApprovals(db: DatabaseLike): Approval[] {
        a.tool_input_json AS payloadPreviewRaw,
        a.rationale   AS rationale,
        a.created_at  AS createdAt,
-       a.status      AS status
+       a.status      AS status,
+       a.awaited     AS awaited
      FROM approvals a
      JOIN workflow_runs r ON r.id = a.run_id
      JOIN workflows     w ON w.id = r.workflow_id
@@ -69,5 +75,8 @@ export function selectPendingApprovals(db: DatabaseLike): Approval[] {
     rationale: row.rationale,
     createdAt: new Date(row.createdAt).toISOString(),
     status: row.status as Approval['status'],
+    // Migration 110 backfills 1, so a row written before it (or by any transport
+    // that never touches the column) reads as awaited — the honest default.
+    awaited: row.awaited !== 0,
   }));
 }

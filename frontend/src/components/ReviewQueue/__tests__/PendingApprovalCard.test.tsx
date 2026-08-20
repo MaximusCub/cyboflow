@@ -75,6 +75,7 @@ const baseApproval: Approval = {
   rationale: null,
   createdAt: new Date(Date.now() - 120_000).toISOString(),
   status: 'pending',
+  awaited: true,
 };
 
 const singleItem: QueueItem = { kind: 'single', approval: baseApproval, isBlocking: false };
@@ -88,6 +89,7 @@ const groupApprovals: Approval[] = Array.from({ length: 3 }, (_, i) => ({
   rationale: null,
   createdAt: new Date(Date.now() - 120_000).toISOString(),
   status: 'pending' as const,
+  awaited: true,
 }));
 
 const groupItem: QueueItem = {
@@ -468,5 +470,29 @@ describe('PendingApprovalCard — baseline behavior', () => {
     await waitFor(() => {
       expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-group' });
     });
+  });
+});
+
+describe('PendingApprovalCard — standing (un-awaited) asks', () => {
+  it('labels an un-awaited approval as having no agent waiting, and never as blocked', () => {
+    // The card is still fully answerable: a decision on a standing ask is
+    // honored if the agent retries the same call, this turn or a later one.
+    // What must NOT appear is the red "blocked" badge, which asserts a halted
+    // agent that has in fact moved on.
+    const standing: QueueItem = {
+      kind: 'single',
+      approval: { ...baseApproval, awaited: false },
+      isBlocking: false,
+    };
+    render(<PendingApprovalCard item={standing} />);
+
+    expect(screen.getByText('no agent waiting')).toBeInTheDocument();
+    expect(screen.queryByText(/^blocked /)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /approve/i })).toBeEnabled();
+  });
+
+  it('says nothing extra for an ordinary awaited approval', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.queryByText('no agent waiting')).not.toBeInTheDocument();
   });
 });

@@ -132,6 +132,24 @@ function CardChrome({
             blocked {formatAge(representative.createdAt)}
           </span>
         )}
+        {/*
+          A standing ask: the omp-sdk gate stopped waiting (OMP kills an
+          extension handler at 30s) and the agent moved on, but the question is
+          still live — answering it authorizes the call if the agent asks again,
+          this turn or a later one. Said out loud because an unlabeled card with
+          no "blocked" badge reads as an oversight, and because the useful action
+          here is not urgent, just useful. Mutually exclusive with the blocked
+          badge by construction: partitionBlockingItems never marks an
+          un-awaited item blocking.
+        */}
+        {representative.awaited === false && (
+          <span
+            className="ml-1 text-xs font-medium text-text-muted"
+            title="The agent stopped waiting for this one. Answer it anyway — the decision is honored if it asks again."
+          >
+            no agent waiting
+          </span>
+        )}
         <span className="ml-auto text-xs text-text-muted">{formatAge(representative.createdAt)}</span>
       </div>
 

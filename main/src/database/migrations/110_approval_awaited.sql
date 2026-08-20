@@ -1,0 +1,41 @@
+-- Migration 110: is anyone actually waiting on this approval?
+--
+-- Until now "pending" carried two meanings at once, and the review queue
+-- rendered both as the louder one: an agent is HALTED on this call right now,
+-- versus the question is still worth answering but nothing is blocked on it.
+-- Every surface assumed the first — the card's red "blocked 4m" badge, the
+-- "N blocking" counter, the dock badge.
+--
+-- The second state did not exist before the omp-sdk lane. OMP hard-caps
+-- extension handlers at 30s (no knob), so cyboflow's gate must answer inside
+-- ~25s or be killed. It used to answer "deny" on the human's behalf, which is
+-- how a live run on 2026-08-19 produced 17 approvals, 17 system rejections and
+-- zero human verdicts. The fix was to stop settling: the gate hangs up, the ask
+-- stays pending, and a retry (this turn or a later one) collects the verdict.
+--
+-- That fix is what created this column's reason to exist. Between the hangup
+-- and the next retry NOBODY is waiting — and the model may never retry at all,
+-- having moved on to some other approach. A live smoke on 2026-08-20 ended with
+-- two such cards sitting in the queue claiming to block a run that had long
+-- since wandered off. `awaited` is that difference made explicit.
+--
+-- WHY NOT JUST EXPIRE THEM. A timer was the obvious reaper and it is the wrong
+-- tool. The whole point of keeping the row is that a verdict remains collectable
+-- later — the same smoke proved a human decision made ~5 minutes after the ask,
+-- with nothing attached, replayed to a retry in a LATER turn and executed the
+-- command. Any TTL short enough to keep the queue tidy is short enough to
+-- destroy that, and any TTL long enough to preserve it barely reaps. The
+-- router's own §5 invariant ("approvals do NOT auto-expire") is load-bearing,
+-- not incidental. So: keep the row, tell the truth about it.
+--
+-- DEFAULT 1 is the honest backfill. Every pre-existing pending row was created
+-- by a transport that blocks its requester for the whole decision window
+-- (SDK PreToolUse, the interactive shell hook), so "someone is waiting" is
+-- correct for all of them, and it keeps every non-OMP lane byte-identical:
+-- nothing but the OMP detach path ever writes 0.
+--
+-- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in
+-- a this.transaction(...) call. A re-run raises "duplicate column name: awaited",
+-- which the runner treats as an idempotent no-op.
+
+ALTER TABLE approvals ADD COLUMN awaited INTEGER NOT NULL DEFAULT 1;

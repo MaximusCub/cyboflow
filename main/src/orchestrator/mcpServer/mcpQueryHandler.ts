@@ -1356,6 +1356,16 @@ interface DeferredOmpApproval {
   requestId: string;
   /** Verdict that arrived with no requester attached. Single-use. */
   decision?: ApprovalDecision;
+  /**
+   * The approvals row this entry owns, once ApprovalRouter has minted it.
+   *
+   * Undefined only in the window between putDeferredOmpApproval and the
+   * onCreated callback — a window a socket death can land in, which is why the
+   * detach path re-checks rather than assuming it is set. Needed to mark the ask
+   * un-awaited when the gate stops waiting, and awaited again when a retry
+   * re-attaches.
+   */
+  approvalId?: string;
 }
 
 /**
@@ -5649,6 +5659,12 @@ export class McpQueryHandler {
         deferred.client = client;
         deferred.requestId = msg.requestId;
         this.registerInFlightShellApproval(msg.runId, msg.requestId, client, msg.substrate);
+        // Someone is blocked on this ask again — undo the un-awaited mark the
+        // previous hangup left, so the queue stops describing a live wait as a
+        // standing question.
+        if (deferred.approvalId !== undefined) {
+          this.setOmpApprovalAwaited(deferred.approvalId, true);
+        }
         this.logger?.debug(
           '[Cyboflow MCP Query] omp retry re-attached to the pending approval',
           { runId: msg.runId, toolName: msg.toolName },
@@ -5691,6 +5707,20 @@ export class McpQueryHandler {
         // substrate provenance. The co-write happens inside requestApproval's
         // transaction (commit 1); the socketReply closure above is unchanged.
         'approval:interactive',
+        // omp lane only: record which approval this deferred entry owns, so the
+        // ~25s hangup can mark it un-awaited. The entry may already be gone (a
+        // fail-closed catch dropped it); then there is nothing to record.
+        ompKey === null
+          ? undefined
+          : (approvalId) => {
+              const entry = this.ompDeferredApprovals.get(msg.runId)?.get(ompKey);
+              if (entry === undefined) return;
+              entry.approvalId = approvalId;
+              // The gate can hang up DURING requestApproval's transaction, which
+              // parks the entry before it ever learns its id. Reconcile here
+              // rather than leaving the card claiming a wait that already ended.
+              if (entry.client === null) this.setOmpApprovalAwaited(approvalId, false);
+            },
       )
       .then((decision) => {
         // requestApproval resolves with the SAME decision the socketReply got
@@ -6081,7 +6111,31 @@ export class McpQueryHandler {
     const byKey = this.ompDeferredApprovals.get(runId);
     if (!byKey) return;
     for (const entry of byKey.values()) {
-      if (entry.client === client) entry.client = null;
+      if (entry.client !== client) continue;
+      entry.client = null;
+      // Nothing is blocked on this ask any more. The row stays pending — a
+      // retry can still collect the verdict, even in a later turn — but the
+      // queue must stop painting it as a halted agent.
+      if (entry.approvalId !== undefined) this.setOmpApprovalAwaited(entry.approvalId, false);
+    }
+  }
+
+  /**
+   * Mark an omp approval awaited / un-awaited, fail-soft.
+   *
+   * Wrapped because both callers sit on hot, un-catchable paths — a socket
+   * 'close' listener and the router's own onCreated callback — where a throw
+   * would take down the disconnect handler or roll back a committed grab.
+   */
+  private setOmpApprovalAwaited(approvalId: string, awaited: boolean): void {
+    try {
+      ApprovalRouter.getInstance().setAwaited(approvalId, awaited);
+    } catch (err) {
+      this.logger?.debug('[Cyboflow MCP Query] setAwaited failed', {
+        approvalId,
+        awaited,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

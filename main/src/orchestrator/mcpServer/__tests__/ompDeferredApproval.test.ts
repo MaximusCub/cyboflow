@@ -99,6 +99,47 @@ function buildDb(): Database.Database {
 
   const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+  // The un-awaited mark writes BOTH halves of the truth — approvals.awaited and
+  // the folded review_item's blocking flag — so the fixture needs both or a
+  // half-written flip would pass. 110 is read from its file (a bare ALTER with
+  // no dependencies); review_items + entity_events are the documented-subset
+  // treatment registrySchema.ts uses, because execing migrations 015/016 whole
+  // drags in the entire board/idea/task graph to reach two tables the fold
+  // touches. Only the columns this path reads or writes are mirrored.
+  db.exec(`
+    CREATE TABLE review_items (
+      id TEXT PRIMARY KEY,
+      project_id INTEGER NOT NULL,
+      run_id TEXT,
+      entity_type TEXT,
+      entity_id TEXT,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      blocking BOOLEAN NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      body TEXT,
+      severity TEXT,
+      source TEXT,
+      payload_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      resolved_by TEXT,
+      resolution TEXT
+    );
+    CREATE TABLE entity_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      run_id TEXT,
+      changes_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (entity_type, entity_id, seq)
+    );
+  `);
+  db.exec(readFileSync(join(migDir, '110_approval_awaited.sql'), 'utf-8'));
   // resolveRunPermissionMode joins the owning session; this fixture predates the
   // migrations that add those columns, so add the minimal join surface. No mode
   // ⇒ null ⇒ every call routes to the router gate, which is what we are testing.
@@ -138,6 +179,19 @@ describe('omp-sdk deferred approvals', () => {
     db
       .prepare('SELECT id, status FROM approvals WHERE run_id = ? ORDER BY created_at')
       .all(RUN_ID) as Array<{ id: string; status: string }>;
+
+  const awaitedFlags = (): number[] =>
+    (db
+      .prepare('SELECT awaited FROM approvals WHERE run_id = ? ORDER BY created_at')
+      .all(RUN_ID) as Array<{ awaited: number }>).map((r) => r.awaited);
+
+  const permissionBlockingFlags = (): number[] =>
+    (db
+      .prepare(
+        `SELECT blocking FROM review_items
+          WHERE run_id = ? AND kind = 'permission' ORDER BY created_at`,
+      )
+      .all(RUN_ID) as Array<{ blocking: number }>).map((r) => r.blocking);
 
   const runStatus = (): string =>
     (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(RUN_ID) as { status: string })
@@ -271,6 +325,74 @@ describe('omp-sdk deferred approvals', () => {
     await settle();
 
     expect(approvalRows()).toHaveLength(2);
+  });
+
+  it('marks the ask un-awaited when the gate stops waiting, and awaited again on retry', async () => {
+    // The zombie fix. Keeping the row pending (above) is what lets a late human
+    // verdict still land; it is ALSO what left cards in the queue claiming to
+    // block a run the model had wandered off from. Pending and blocked are now
+    // two different facts, and both surfaces — the approvals row the cards read
+    // and the folded review_item the inbox counters read — must agree.
+    const first = makeSocketDouble();
+    handler.handleMessage(ask('r1', { substrate: 'omp' }), first.socket);
+    await settle();
+
+    expect(awaitedFlags()).toEqual([1]);
+    expect(permissionBlockingFlags()).toEqual([1]);
+
+    first.hangUp();
+    await settle();
+
+    expect(awaitedFlags()).toEqual([0]);
+    expect(permissionBlockingFlags()).toEqual([0]);
+    // Un-awaited is NOT settled: the row is still answerable, which is the
+    // distinction the whole design turns on.
+    expect(approvalRows()[0]?.status).toBe('pending');
+
+    const retry = makeSocketDouble();
+    handler.handleMessage(ask('r2', { substrate: 'omp' }), retry.socket);
+    await settle();
+
+    expect(awaitedFlags()).toEqual([1]);
+    expect(permissionBlockingFlags()).toEqual([1]);
+  });
+
+  it('leaves a parked verdict answerable — replay does not depend on the awaited mark', async () => {
+    const first = makeSocketDouble();
+    handler.handleMessage(ask('r1', { substrate: 'omp' }), first.socket);
+    await settle();
+    first.hangUp();
+    await settle();
+    expect(awaitedFlags()).toEqual([0]);
+
+    // A human answers the un-awaited card — the case the smoke on 2026-08-20
+    // exercised, where the verdict landed ~5 minutes after the gate hung up.
+    const approvalId = approvalRows()[0]?.id;
+    expect(approvalId).toBeDefined();
+    await ApprovalRouter.getInstance().respond(approvalId as string, { behavior: 'allow' });
+    await settle();
+
+    const retry = makeSocketDouble();
+    handler.handleMessage(ask('r2', { substrate: 'omp' }), retry.socket);
+    await settle();
+
+    expect(lastVerdict(retry.writes)?.permissionDecision).toBe('allow');
+  });
+
+  it('never writes the awaited mark on the interactive substrate', async () => {
+    // A hook subprocess blocks for the whole window, so `awaited` is true for
+    // its entire life and the disconnect settles rather than marks. Pinned so a
+    // future refactor cannot generalise the omp branch over every transport.
+    const hook = makeSocketDouble();
+    handler.handleMessage(ask('r1'), hook.socket);
+    await settle();
+    expect(awaitedFlags()).toEqual([1]);
+
+    hook.hangUp();
+    await settle();
+
+    expect(approvalRows()[0]?.status).toBe('rejected');
+    expect(awaitedFlags()).toEqual([1]);
   });
 
   it('still settles on disconnect for the interactive substrate', async () => {

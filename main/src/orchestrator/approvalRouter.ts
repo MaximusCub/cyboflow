@@ -54,6 +54,7 @@ import {
   resolvePermissionReviewItem,
   resolveReviewItemById,
   hasReviewItemsTable,
+  setPermissionReviewItemBlocking,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 
@@ -231,6 +232,17 @@ export class ApprovalRouter extends EventEmitter {
    *                       review_item (default 'approval'; the interactive shell
    *                       path passes 'approval:interactive'). Optional so every
    *                       existing SDK caller is unchanged.
+   * @param onCreated    - Invoked with the minted approvalId the moment the row
+   *                       is committed, so a caller that must ADDRESS the
+   *                       approval later can. Only the omp-sdk lane needs this:
+   *                       its gate hangs up at ~25s and must then mark the ask
+   *                       {@link setAwaited}(false), which requires the id. The
+   *                       promise this method returns carries only the decision,
+   *                       and 'approvalCreated' cannot be correlated back to one
+   *                       call without racing a concurrent sibling. Fired inside
+   *                       the queue task, before the event: a throw here would
+   *                       break the grab, so it is wrapped by the caller-facing
+   *                       contract "must not throw".
    */
   async requestApproval(
     runId: string,
@@ -238,6 +250,7 @@ export class ApprovalRouter extends EventEmitter {
     input: Record<string, unknown>,
     socketReply: (decision: ApprovalDecision) => void,
     source: string = 'approval',
+    onCreated?: (approvalId: string) => void,
   ): Promise<ApprovalDecision> {
     if (!this.db) throw new Error('ApprovalRouter db handle undefined');
 
@@ -341,6 +354,19 @@ export class ApprovalRouter extends EventEmitter {
             resolve: resolveDecision,
             reject: rejectDecision,
           });
+          // Hand the id to the caller BEFORE the event: the omp lane records it
+          // on its deferred entry, and its gate can hang up ~25s later, so the
+          // entry must already know which approval it owns. Fail-soft — a
+          // caller's bookkeeping error must never roll back a committed grab.
+          if (onCreated) {
+            try {
+              onCreated(approvalId);
+            } catch (err) {
+              console.warn(
+                `[ApprovalRouter] onCreated callback threw for approval ${approvalId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
           // Notify renderer subscribers (e.g. the review queue UI).
           this.emit('approvalCreated', request);
           return 'grabbed';
@@ -682,6 +708,64 @@ export class ApprovalRouter extends EventEmitter {
     } catch (err) {
       console.warn(
         `[ApprovalRouter] orphanPendingForRun: run-status restore failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Record whether anything is actually blocked on a pending approval.
+   *
+   * "Pending" used to mean one thing — an agent is halted right here — because
+   * every transport held its requester for the whole decision window. The
+   * omp-sdk lane broke that: OMP kills an extension handler at 30s, so the gate
+   * hangs up at ~25s and tells the model to retry, and from that moment until
+   * the next retry NOBODY is waiting. The row stays pending because the verdict
+   * is still collectable (a live smoke on 2026-08-20 had a human decision made
+   * ~5 minutes later replay into a retry in a LATER turn and execute), but the
+   * queue was still painting it as a halted agent — a red "blocked Nm" badge on
+   * a run that had long since moved on.
+   *
+   * This is the reason there is no expiry sweep here. A TTL was the obvious
+   * reaper and it is the wrong tool: short enough to keep the queue tidy is
+   * short enough to destroy the cross-turn replay, and long enough to preserve
+   * it barely reaps. §5's "approvals do NOT auto-expire" stands; what changes is
+   * only what the surfaces are told.
+   *
+   * Writes BOTH halves of the truth in one place — `approvals.awaited` (which
+   * feeds the approvals-derived cards) and the folded permission review_item's
+   * `blocking` flag (which feeds the inbox counters) — because they are read by
+   * different surfaces and disagreeing is worse than either being wrong.
+   *
+   * IDEMPOTENT and guarded on `status='pending'`: re-marking the current value
+   * writes nothing and emits nothing, so the model's retry storm (measured at
+   * one attempt every ~30s) cannot spam the renderer. A decided/vanished
+   * approval is a silent no-op.
+   */
+  setAwaited(approvalId: string, awaited: boolean): void {
+    if (!this.db) return;
+    try {
+      const now = new Date().toISOString();
+      const info = this.db
+        .prepare(
+          `UPDATE approvals SET awaited = ?
+            WHERE id = ? AND status = 'pending' AND awaited != ?`,
+        )
+        .run(awaited ? 1 : 0, approvalId, awaited ? 1 : 0) as { changes: number };
+      if (info.changes === 0) return;
+
+      const reviewItemId = setPermissionReviewItemBlocking(this.db, approvalId, awaited, now);
+      if (reviewItemId !== null) emitReviewItemChangedById(this.db, reviewItemId, 'mutated');
+
+      // Re-announce the approval so the review-queue store refreshes the row it
+      // already holds. There is no dedicated "approval updated" channel, and
+      // 'approvalCreated' is the one that carries a whole Approval — the store's
+      // addApproval upserts by id, and the bridge re-reads `awaited` from the
+      // row we just wrote, so the delta lands without a third subscription.
+      const entry = this.pending.get(approvalId);
+      if (entry) this.emit('approvalCreated', entry.request);
+    } catch (err) {
+      console.warn(
+        `[ApprovalRouter] setAwaited(${approvalId}, ${String(awaited)}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
