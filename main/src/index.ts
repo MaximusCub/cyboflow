@@ -166,6 +166,7 @@ import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
+import { DatabaseBackupService } from './services/databaseBackupService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
@@ -529,6 +530,13 @@ let mcpOrphanTripwire: McpOrphanTripwire | null = null;
 // initializeServices (it needs the sqlite handle plus TaskChangeRouter), so it is
 // null until boot finishes wiring.
 let trackerSyncService: TrackerSyncService | null = null;
+
+// Daily sessions.db backup service (7-day retention). Module-level so the
+// before-quit handler can stop it; constructed + started in initializeServices
+// (it needs the open sqlite handle), so it is null until boot finishes wiring,
+// and stays null in demo mode (demo.db is reset every launch — nothing worth
+// backing up).
+let databaseBackupService: DatabaseBackupService | null = null;
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -1562,6 +1570,19 @@ async function initializeServices(): Promise<boolean> {
   // cannot import it directly (standalone-typecheck invariant), so the bridge is
   // the seam. See main/src/orchestrator/trackerSyncBridge.ts.
   setTrackerSyncFacade(trackerSyncService);
+
+  // Daily sessions.db backup (7-day retention) — see databaseBackupService.ts
+  // for why hourly-tick + file-existence-guard rather than a 24h timer.
+  // Skipped in demo mode: demoBootEnv's database is a throwaway reset on every
+  // launch, so backing it up is pure waste.
+  if (!demoBootEnv) {
+    databaseBackupService = new DatabaseBackupService({
+      db: databaseService.getDb(),
+      backupsDir: path.join(path.dirname(dbPath), 'backups'),
+      logger: cyboflowLogger,
+    });
+    databaseBackupService.start();
+  }
 
   // Sprint-lane write chokepoint (feat/parallel-sprint, migrations 022 + 023).
   // The single serialized writer for `sprint_batches`/`sprint_batch_tasks`;
@@ -5736,6 +5757,10 @@ app.on('before-quit', async (event) => {
   // unref'd (never holds the event loop open on its own), so this is cleanup
   // for tidiness rather than a shutdown-correctness requirement.
   mcpOrphanTripwire?.stop();
+
+  // Stop the daily database-backup tick. Its interval is already unref'd, so
+  // this is cleanup for tidiness rather than a shutdown-correctness requirement.
+  databaseBackupService?.stop();
 
   // Stop orchestrator (drains run queues)
   if (orchestrator) {
