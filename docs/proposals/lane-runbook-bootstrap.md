@@ -768,3 +768,82 @@ declares `portEnv`, so its port binding becomes genuinely correct. Its nonce
 binding does not: no runbook written before this release declares `nonceEnv`, so
 those records still depend on the agent reading `notes`. Re-derivation is the fix
 for them, and the feature being default-OFF is why that costs nothing today.
+
+## 19. Second live smoke (2026-08-20) — and the bug it found
+
+Two fresh fixtures with the round-3 shape (port literal in a root config, an
+identity marker the build stamps from an env var): `meterboard` (round 4, the
+lever fix alone) and `panelboard` (round 5, both fixes).
+
+### The lever fix works, and it is reproducible
+
+Both drafting agents emitted BOTH levers as structured data — `portEnv: "PORT"`
+plus `nonceEnv: "<PROJECT>_BUILD_ID"` — where round 3's agent had declared only
+the (then-dead) `portEnv` and buried the nonce mechanism in prose. Round 5's
+`levers.notes` states the contract in the prompt's own terms: "the port-from-env
+operation teaches that file to read PORT", "binding it per-request makes the
+data-build attribute carry this request's nonce".
+
+Both proofs passed with a discriminating build id (`mb-aff49a53-…`,
+`pb-…`) rather than the fixture default, and both records went `proven`.
+
+The export is load-bearing, not decoration. Round 5's lane agent PROBED the
+variable instead of setting it:
+
+    $ echo "PANELBOARD_BUILD_ID=${PANELBOARD_BUILD_ID:-<unset>}"
+    PANELBOARD_BUILD_ID=9a4914fe-a94c-4a1d-8eb5-b5074e96c7eb
+    MATCH: build id == attest nonce
+
+and reported that "the harness had pre-seeded PANELBOARD_BUILD_ID with this
+request's nonce, so the task's own UNMODIFIED build stamps it". That is the
+round-3 failure mode closed: the fact now arrives whether or not the agent
+thinks to arrange it.
+
+### The bug round 4 found
+
+Round 4's bootstrap proved its runbook and its LANE VERIFICATION THEN FAILED
+(`ambiguous`), on a deliverable whose behaviors both passed. The branch says why:
+
+    05c209d  chore: derive a web verification runbook   ← proof snapshot
+    df63cd2  chore: port-from-env on app.config.mjs     ← the enabling edit
+    1f2330b  test: cover the Latency widget             ← LANE snapshot
+
+`enqueueTaskVerification` captured the snapshot sha at the top of the function,
+before the bootstrap ran — so the lane was pinned BELOW the two commits the
+bootstrap had just written. At `1f2330b` the port is still a literal, the
+exported `portEnv` is read by nothing, the server binds its default, and the
+serve-identity probe finds no listener on the leased port. Every first lane
+verification on a project needing a rung-1 edit would have failed this way, and
+the feature's own success would have been the trigger.
+
+Fixed by moving the capture below the bootstrap (a pure reordering — nothing
+between the two positions consumes the sha). Round 5 confirms it live: the lane
+request pins `8a23383b`, the same post-bootstrap sha as the proof, and
+
+    BOOTSTRAP proven  rung1=app.config.mjs  commit=8a23383b
+    REQ …ef93ccb passed proof=1 snap=8a23383b
+    REQ …b85522c passed proof=0 snap=8a23383b
+    LANE integrated
+
+which is the first time the full loop has run to an INTEGRATED lane on a project
+that needed a config change. Round 1 proved a runbook; round 5 shipped a task
+through one.
+
+### Review surface, unchanged and correct
+
+Round 4 filed the §15A config-edit finding naming `app.config.mjs`
+(non-blocking, source `runbook-bootstrap`) and escalated the verification failure
+as BLOCKING — which is how the ordering bug reached a human rather than passing
+quietly. Both are the designed behavior.
+
+### Still open
+
+The round-5 lane agent prefixed the serve string (`PORT=$VERIFY_PORT npm run
+preview`) even though the harness had already exported `PORT`, so this smoke does
+not independently discriminate the port half of the export the way it does the
+nonce half; the unit tests cover it. Worth noting separately that a deviation
+from the verbatim serve string passed the §7.1 identity binding, because the
+binding checks process-group membership rather than the string — correct by
+design, but not the guarantee the prompt's wording implies.
+
+Still not done: no `*.itest.ts` end-to-end (§14).
