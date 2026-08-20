@@ -13,6 +13,8 @@
  *   conflict rulings -> cyboflow.tracker.resolveConflict
  *   Disconnect       -> cyboflow.tracker.disconnect (inline confirm first)
  *   Reconnect        -> cyboflow.tracker.updateCredentials (paused connections only)
+ *   Make push target -> cyboflow.tracker.setPushTarget (arms a mapping row, demotes its siblings)
+ *   Remove mapping   -> cyboflow.tracker.disconnect (same procedure as header Disconnect, per row)
  *
  * Toggle state is mirrored locally so a row flips immediately and the summary
  * re-read (driven by the parent's onTrackerChanged subscription) reconciles it.
@@ -21,6 +23,13 @@
  * mapping means re-running the wizard. `pushTarget` is read straight off the
  * summary (no local mirror, no toggle) — it is set by the wizard's Map step
  * when several sibling connections share a cyboflow project.
+ *
+ * The "Project mappings" card lists every LIVE sibling of this connection's
+ * workspace identity (across cyboflow projects — cyboflow.tracker.mappings),
+ * so a multi-project rev-4 wizard run has one place to see and manage the whole
+ * group: arm a different pusher, remove a mapping, or jump into the wizard's
+ * add-mapping mode via `onAddMapping`. It re-reads on every fresh `connection`
+ * prop, same cadence as the rest of the view.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { inferRouterInputs } from '@trpc/server';
@@ -33,6 +42,7 @@ import type { AppRouter } from '../../../../../shared/types/trpc';
 import type {
   TrackerConflictMode,
   TrackerConflictSummary,
+  TrackerConnectionStatus,
   TrackerConnectionSummary,
   TrackerDirectionMode,
   TrackerMappingTarget,
@@ -66,6 +76,23 @@ const SELECTION_LABEL: Record<TrackerConnectionSummary['selectionMode'], string>
   manual: 'Hand-picked',
 };
 
+/**
+ * Compact status presentation for a mappings-card row — honest tones only, so a
+ * paused sibling never reads as green just because it is still "live".
+ */
+const MAPPING_STATUS_META: Record<
+  TrackerConnectionStatus,
+  { label: string; dotClass: string; textClass: string }
+> = {
+  active: { label: 'Connected', dotClass: 'bg-status-success', textClass: 'text-status-success' },
+  paused: { label: 'Paused', dotClass: 'bg-status-warning', textClass: 'text-status-warning' },
+  disconnected: {
+    label: 'Disconnected',
+    dotClass: 'bg-text-tertiary',
+    textClass: 'text-text-tertiary',
+  },
+};
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -83,6 +110,10 @@ export interface TrackerConnectedViewProps {
   onClose: () => void;
   /** Fired after any write so the catalog re-reads its connection rows. */
   onChanged: () => void;
+  /** Resolve a mapping row's `projectId` to its display name for the mappings card. */
+  projectName: (id: number) => string;
+  /** Opens the wizard in add-mapping mode, seeded from this connection. */
+  onAddMapping: () => void;
 }
 
 export function TrackerConnectedView({
@@ -90,6 +121,8 @@ export function TrackerConnectedView({
   connection,
   onClose,
   onChanged,
+  projectName,
+  onAddMapping,
 }: TrackerConnectedViewProps): React.JSX.Element {
   const meta = providerMeta(connection.provider);
 
@@ -151,6 +184,55 @@ export function TrackerConnectedView({
   useEffect(() => {
     loadConflicts();
   }, [loadConflicts, connection.openConflictCount]);
+
+  // Project mappings card: every live sibling of this connection's workspace
+  // identity, across cyboflow projects.
+  const [mappings, setMappings] = useState<TrackerConnectionSummary[]>([]);
+  const [confirmingRemoveId, setConfirmingRemoveId] = useState<string | null>(null);
+
+  const refetchMappings = (): void => {
+    void trpc.cyboflow.tracker.mappings
+      .query({ connectionId: connection.id })
+      .then(setMappings)
+      .catch((err: unknown) => setError(errorMessage(err)));
+  };
+
+  // Keyed on the whole `connection` prop, not just its id: the parent re-reads
+  // summaries on every tracker event, so a fresh prop identity means a sibling's
+  // status/linkedCount/pushTarget may have changed too, not only this row's own.
+  useEffect(() => {
+    refetchMappings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection]);
+
+  const handleSetPushTarget = (rowId: string): void => {
+    setError(null);
+    void trpc.cyboflow.tracker.setPushTarget
+      .mutate({ connectionId: rowId })
+      .then(() => {
+        refetchMappings();
+        onChanged();
+      })
+      .catch((err: unknown) => setError(errorMessage(err)));
+  };
+
+  const handleRemoveMapping = (rowId: string): void => {
+    setError(null);
+    void trpc.cyboflow.tracker.disconnect
+      .mutate({ connectionId: rowId })
+      .then(() => {
+        setConfirmingRemoveId(null);
+        if (rowId === connection.id) {
+          // This is the row the modal is open on — nothing left to show here.
+          onChanged();
+          onClose();
+        } else {
+          refetchMappings();
+          onChanged();
+        }
+      })
+      .catch((err: unknown) => setError(errorMessage(err)));
+  };
 
   const patchSettings = (patch: UpdateSettingsInput): void => {
     setError(null);
@@ -420,6 +502,119 @@ export function TrackerConnectedView({
                   </p>
                 </div>
               ))}
+            </div>
+
+            {/* Project mappings */}
+            <div className={CARD} data-testid="tracker-mappings-card">
+              <div className="flex items-center justify-between gap-3 border-b border-border-primary bg-surface-secondary px-3 py-2">
+                <Eyebrow>Project mappings</Eyebrow>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="rounded-none"
+                  data-testid="tracker-add-mapping"
+                  onClick={onAddMapping}
+                >
+                  Add mapping
+                </Button>
+              </div>
+              <div className="divide-y divide-border-primary">
+                {mappings.map((row) => {
+                  const status = MAPPING_STATUS_META[row.status];
+                  const isCurrent = row.id === connection.id;
+                  const confirmingRemove = confirmingRemoveId === row.id;
+                  return (
+                    <div
+                      key={row.id}
+                      data-testid="tracker-mapping-row"
+                      className={cn(
+                        'flex items-center gap-3 px-3 py-2.5',
+                        isCurrent && 'bg-surface-secondary',
+                      )}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-semibold text-text-primary">
+                          {row.sourceLabel}
+                          <span className="mx-1.5 text-text-tertiary">·</span>
+                          <span className="text-text-secondary">{projectName(row.projectId)}</span>
+                        </p>
+                        <p className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className={cn('flex items-center gap-1.5 font-semibold', status.textClass)}>
+                            <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full', status.dotClass)} />
+                            {status.label}
+                          </span>
+                          <span className="text-text-tertiary">{row.linkedCount} linked</span>
+                          {row.pushTarget && (
+                            <span className="flex-shrink-0 rounded-none border border-status-success px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-status-success">
+                              Pushes
+                            </span>
+                          )}
+                          {isCurrent && (
+                            <span className="text-[10px] uppercase tracking-[0.12em] text-text-tertiary">
+                              viewing
+                            </span>
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="ml-auto flex flex-shrink-0 items-center gap-2">
+                        {confirmingRemove ? (
+                          <>
+                            <span className="text-[11px] text-text-secondary">
+                              Remove this mapping? Existing links stay.
+                            </span>
+                            <Button
+                              type="button"
+                              variant="danger"
+                              size="sm"
+                              className="rounded-none"
+                              onClick={() => handleRemoveMapping(row.id)}
+                            >
+                              Confirm
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="rounded-none"
+                              onClick={() => setConfirmingRemoveId(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            {!row.pushTarget && (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="rounded-none"
+                                onClick={() => handleSetPushTarget(row.id)}
+                              >
+                                Make push target
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              className="rounded-none"
+                              onClick={() => setConfirmingRemoveId(row.id)}
+                            >
+                              Remove
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {mappings.length === 0 && (
+                  <p className="px-3 py-4 text-xs text-text-tertiary">Loading mappings…</p>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

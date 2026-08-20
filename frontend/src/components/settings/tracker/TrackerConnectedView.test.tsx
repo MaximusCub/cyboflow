@@ -9,7 +9,10 @@
  * renders the summary's entries verbatim; "Sync now" swaps in the pass's log;
  * the conflicts card appears for Manual mode / a non-zero count and its two
  * buttons resolve with the right choice; Disconnect confirms inline first; the
- * push-target note appears only when this mapping is not the pusher.
+ * push-target note appears only when this mapping is not the pusher; and the
+ * "Project mappings" card lists sibling mappings (project names, Pushes chip,
+ * current-row highlight), arms a new push target, and removes a mapping —
+ * closing the view when the removed row is the one being viewed.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -24,6 +27,8 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       tracker: {
         conflicts: { query: vi.fn() },
+        mappings: { query: vi.fn() },
+        setPushTarget: { mutate: vi.fn() },
         updateSettings: { mutate: vi.fn() },
         syncNow: { mutate: vi.fn() },
         resolveConflict: { mutate: vi.fn() },
@@ -39,6 +44,8 @@ import { TrackerConnectedView } from './TrackerConnectedView';
 import { trpc } from '../../../trpc/client';
 
 const mockConflicts = vi.mocked(trpc.cyboflow.tracker.conflicts.query);
+const mockMappings = vi.mocked(trpc.cyboflow.tracker.mappings.query);
+const mockSetPushTarget = vi.mocked(trpc.cyboflow.tracker.setPushTarget.mutate);
 const mockUpdate = vi.mocked(trpc.cyboflow.tracker.updateSettings.mutate);
 const mockSyncNow = vi.mocked(trpc.cyboflow.tracker.syncNow.mutate);
 const mockResolve = vi.mocked(trpc.cyboflow.tracker.resolveConflict.mutate);
@@ -47,6 +54,12 @@ const mockUpdateCredentials = vi.mocked(trpc.cyboflow.tracker.updateCredentials.
 
 const onClose = vi.fn();
 const onChanged = vi.fn();
+const onAddMapping = vi.fn();
+
+// Deliberately unrelated to any `sourceLabel` used below, so a row's project
+// name and its source label never collide as substrings of one another.
+const PROJECT_NAMES: Record<number, string> = { 7: 'Core Product', 9: 'Marketing Site' };
+const projectName = (id: number): string => PROJECT_NAMES[id] ?? `Project ${id}`;
 
 function makeConnection(
   overrides: Partial<TrackerConnectionSummary> = {},
@@ -60,6 +73,7 @@ function makeConnection(
     actorLabel: 'J. Kesteva',
     baseUrl: null,
     sourceLabel: 'Core · Current cycle',
+    sourceScope: { containerId: 'team-1', narrowId: 'cycle-12', narrowKind: 'cycle' },
     selectionMode: 'all',
     statusSyncMode: 'auto',
     pullMode: 'auto',
@@ -98,6 +112,8 @@ function renderView(connection = makeConnection()): void {
       connection={connection}
       onClose={onClose}
       onChanged={onChanged}
+      projectName={projectName}
+      onAddMapping={onAddMapping}
     />,
   );
 }
@@ -105,6 +121,8 @@ function renderView(connection = makeConnection()): void {
 beforeEach(() => {
   vi.clearAllMocks();
   mockConflicts.mockResolvedValue([]);
+  mockMappings.mockResolvedValue([makeConnection()]);
+  mockSetPushTarget.mockResolvedValue({ ok: true });
   mockUpdate.mockResolvedValue({ ok: true });
   mockResolve.mockResolvedValue({ ok: true });
   mockDisconnect.mockResolvedValue({ ok: true });
@@ -186,20 +204,23 @@ describe('TrackerConnectedView — sync settings', () => {
 });
 
 describe('TrackerConnectedView — push target', () => {
-  it('shows the muted note when this mapping does not push', () => {
+  it('shows the muted note when this mapping does not push', async () => {
     renderView(makeConnection({ pushTarget: false }));
 
     expect(
       screen.getByText('New ideas push · off — another mapping for this project pushes'),
     ).toBeInTheDocument();
+    // Settles the mappings-card fetch fired on mount before the test returns.
+    await screen.findAllByTestId('tracker-mapping-row');
   });
 
-  it('hides the note when this mapping is the pusher', () => {
+  it('hides the note when this mapping is the pusher', async () => {
     renderView(makeConnection({ pushTarget: true }));
 
     expect(
       screen.queryByText('New ideas push · off — another mapping for this project pushes'),
     ).not.toBeInTheDocument();
+    await screen.findAllByTestId('tracker-mapping-row');
   });
 });
 
@@ -219,11 +240,12 @@ describe('TrackerConnectedView — sync log', () => {
 });
 
 describe('TrackerConnectedView — conflicts', () => {
-  it('stays hidden while auto-resolution has nothing open', () => {
+  it('stays hidden while auto-resolution has nothing open', async () => {
     renderView();
 
     expect(screen.queryByTestId('tracker-conflicts-card')).not.toBeInTheDocument();
     expect(mockConflicts).not.toHaveBeenCalled();
+    await screen.findAllByTestId('tracker-mapping-row');
   });
 
   it('lists open conflicts and resolves per side', async () => {
@@ -257,9 +279,10 @@ describe('TrackerConnectedView — conflicts', () => {
 });
 
 describe('TrackerConnectedView — paused reconnect', () => {
-  it('hides the banner while the connection is active', () => {
+  it('hides the banner while the connection is active', async () => {
     renderView();
     expect(screen.queryByTestId('tracker-reconnect-banner')).not.toBeInTheDocument();
+    await screen.findAllByTestId('tracker-mapping-row');
   });
 
   it('shows the banner and submits the typed key when paused', async () => {
@@ -337,5 +360,90 @@ describe('TrackerConnectedView — disconnect', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('TrackerConnectedView — project mappings', () => {
+  const SIBLING: TrackerConnectionSummary = makeConnection({
+    id: 'conn-2',
+    projectId: 9,
+    status: 'paused',
+    pushTarget: false,
+    linkedCount: 3,
+    sourceLabel: 'Growth · Sprint 4',
+  });
+
+  it('lists sibling rows with project names and a Pushes chip, highlighting the current row', async () => {
+    mockMappings.mockResolvedValue([makeConnection(), SIBLING]);
+    renderView();
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    expect(rows).toHaveLength(2);
+    const [currentRow, siblingRow] = rows;
+
+    expect(within(currentRow).getByText('Core Product')).toBeInTheDocument();
+    expect(within(currentRow).getByText('Pushes')).toBeInTheDocument();
+    expect(within(currentRow).getByText('viewing')).toBeInTheDocument();
+    expect(within(currentRow).getByText('Connected')).toBeInTheDocument();
+    expect(within(currentRow).getByText('12 linked')).toBeInTheDocument();
+
+    expect(within(siblingRow).getByText('Marketing Site')).toBeInTheDocument();
+    expect(within(siblingRow).queryByText('Pushes')).not.toBeInTheDocument();
+    expect(within(siblingRow).queryByText('viewing')).not.toBeInTheDocument();
+    expect(within(siblingRow).getByText('Paused')).toBeInTheDocument();
+    expect(within(siblingRow).getByText('3 linked')).toBeInTheDocument();
+  });
+
+  it('arms a sibling as the push target and refetches', async () => {
+    mockMappings.mockResolvedValue([makeConnection(), SIBLING]);
+    renderView();
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    fireEvent.click(within(rows[1]).getByRole('button', { name: 'Make push target' }));
+
+    await waitFor(() =>
+      expect(mockSetPushTarget).toHaveBeenCalledWith({ connectionId: 'conn-2' }),
+    );
+    await waitFor(() => expect(mockMappings).toHaveBeenCalledTimes(2));
+    expect(onChanged).toHaveBeenCalled();
+
+    // The current row already pushes, so it never offers the button.
+    expect(within(rows[0]).queryByRole('button', { name: 'Make push target' })).not.toBeInTheDocument();
+  });
+
+  it('removes a sibling mapping, keeping the view open', async () => {
+    mockMappings.mockResolvedValue([makeConnection(), SIBLING]);
+    renderView();
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    fireEvent.click(within(rows[1]).getByRole('button', { name: 'Remove' }));
+    expect(mockDisconnect).not.toHaveBeenCalled();
+    fireEvent.click(within(rows[1]).getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-2' }));
+    await waitFor(() => expect(mockMappings).toHaveBeenCalledTimes(2));
+    expect(onChanged).toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('removes the current mapping and closes the view', async () => {
+    mockMappings.mockResolvedValue([makeConnection(), SIBLING]);
+    renderView();
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    fireEvent.click(within(rows[0]).getByRole('button', { name: 'Remove' }));
+    fireEvent.click(within(rows[0]).getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it('calls onAddMapping from the card header button', async () => {
+    renderView();
+    await screen.findAllByTestId('tracker-mapping-row');
+
+    fireEvent.click(screen.getByTestId('tracker-add-mapping'));
+    expect(onAddMapping).toHaveBeenCalledTimes(1);
   });
 });
