@@ -99,7 +99,7 @@ a strict parser that rejects on the first structural problem:
   modalities: {                    // ONLY these three keys exist
     "web"?: ModalityEntry, "cdp-app"?: ModalityEntry, "native-screen"?: ModalityEntry,
   },
-  levers?: { portEnv?: string, dataDirEnv?: string, cdpPortFlag?: string, notes?: string },
+  levers?: { portEnv?: string, nonceEnv?: string, dataDirEnv?: string, cdpPortFlag?: string, notes?: string },
 }
 
 ModalityEntry = {
@@ -123,6 +123,34 @@ Host-specific values are **placeholders, never resolved values**: `${PORT}` for 
 leased web port, `$VERIFY_DRIVER_PORT` for a debugging port in attach mode,
 `$VERIFY_ARTIFACTS_DIR` for a scratch dir. A literal port number in a committed
 runbook is a promise about someone else's machine.
+
+## The two levers the harness binds for you
+
+Every request leases its own port and mints its own attestation nonce, and the
+harness exports both: `$VERIFY_PORT`, `$VERIFY_ATTEST_NONCE`, plus `${PORT}`
+substituted inside your `serve.cmd`. That covers a project whose serve command
+takes the port as a flag.
+
+It does **not** cover a project whose own code reads some other name — a server
+that does `process.env.PORT`, or a build that stamps its marker from
+`process.env.APP_BUILD_ID`. Name those, and the harness exports them too, bound
+to this request's values:
+
+- `levers.portEnv` — the env var the **serve** step reads the leased port from.
+- `levers.nonceEnv` — the env var the **build or serve** step reads this
+  request's nonce from, so the attestation marker is per-request rather than a
+  fixed default like `dev`.
+
+**Declare every name the project actually reads.** This is what makes a runbook
+self-sufficient. Leave it out and whether the surface binds the leased port and
+carries the right nonce depends on what the verification agent infers from your
+`notes` — which is not reproducible: the same project has proven on one run and
+failed on the next purely on that guess, and the bad direction marks a runbook
+proven that only works when the agent embellishes it.
+
+Two names are refused: one the harness already owns (anything `VERIFY_*` it has
+set) and one that configures execution rather than the deliverable (`PATH`,
+`NODE_OPTIONS`, `DYLD_*`, `LD_*`).
 
 ## Attestation is required, and it is not readiness
 
@@ -154,6 +182,11 @@ You do not write a diff; the harness applies the operation structurally:
 { "kind": "port-from-env",    "file": "vite.config.ts", "port": 5173, "envVar": "PORT" }
 { "kind": "relax-strict-port","file": "vite.config.ts", "setting": "strictPort" }
 ```
+
+`port-from-env` and `levers.portEnv` are two halves of one change: the operation
+teaches the code to READ the variable, the lever is what makes that variable
+EXIST at verification time. Proposing the operation above without also declaring
+`levers: { portEnv: "PORT" }` produces a config edit a human reviews for nothing.
 
 - `add-script` **never overwrites** an existing script — proposing one that
   already exists is refused.
