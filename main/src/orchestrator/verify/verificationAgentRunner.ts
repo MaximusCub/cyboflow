@@ -68,7 +68,9 @@ import type { PinnedRunbookRecord } from './runbookStore';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
+  VerifyRunbookV1,
 } from '../../../../shared/types/verifyRunbook';
+import { resolveLeverEnv } from './runbookLevers';
 import { canonicalJsonStringify } from '../agentThread/specHash';
 import {
   createDefaultDriverDeps,
@@ -1991,6 +1993,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     // env-class terminal ADVANCES the lane without incrementing its attempt
     // counter. The setup flow's re-proof, not the lane's implement-retry, is the
     // fix for a drifted runbook.
+    //
+    // The resolved record is HOISTED out of this block on purpose: its `levers`
+    // are the runbook's half of the env contract (`resolveLeverEnv`), and the
+    // env is not built until after provisioning, ~150 lines down. Only a record
+    // that PASSED the pin check is kept — executing a rejected revision's levers
+    // would bind values from a runbook this request already refused to run.
+    let pinnedLevers: VerifyRunbookV1['levers'];
     const resolveRunbookByHash = this.deps.resolveRunbookByHash;
     if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
       const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
@@ -2016,6 +2025,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           fileNames: [],
         };
       }
+      pinnedLevers = record?.runbook.levers;
     }
 
     const resolved = this.deps.resolveVerifyAgent(req.runId);
@@ -2156,6 +2166,28 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // there would screenshot the wrong surface). driverCore honors this flag.
         ...(req.task.serve?.attach === 'cdp' ? { VERIFY_DRIVER_ATTACH_ONLY: '1' } : {}),
       };
+
+      // The runbook's declared levers, bound to this request's leased values and
+      // layered OVER the harness env (never under it — see `resolveLeverEnv`
+      // rule 1). This is what lets a project whose serve command reads `PORT`,
+      // or whose build stamps a marker from `APP_BUILD_ID`, satisfy the port
+      // lease and the attestation nonce without the verification agent having to
+      // infer either from the runbook's prose. Dropped levers are logged rather
+      // than raised: a lever that does not take effect shows up downstream as an
+      // honest attestation failure, which is the outcome we want over a pass.
+      const leverEnv = resolveLeverEnv(env, pinnedLevers, {
+        port: req.verifyPort !== null ? String(req.verifyPort) : null,
+        nonce: attestNonce,
+      });
+      if (leverEnv.dropped.length > 0) {
+        logger?.warn('[VerificationAgentRunner] runbook lever(s) not exported', {
+          runId: req.runId,
+          requestId: req.requestId,
+          modality,
+          dropped: leverEnv.dropped,
+        });
+      }
+      env = { ...env, ...leverEnv.additions };
 
       if (controller.signal.aborted) {
         return {
