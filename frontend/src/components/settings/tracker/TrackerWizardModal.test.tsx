@@ -3,24 +3,28 @@
  *
  * Same harness as IntegrationsSettings.test.tsx (render the real component over
  * a module mock of its dependency), with every `cyboflow.tracker.wizard*` probe
- * stubbed so the seven steps can be walked without a provider.
+ * stubbed so the six steps can be walked without a provider.
  *
- * Coverage: the Step-0 gate (no forward navigation before a successful
- * validate); the Step-1 target-project picker (seeded from the active project,
- * a retarget threads through reconcile + connect); the two Step-3 footer guards
- * (by-assignee with nobody picked, manual with nothing ticked); the Step-4
- * mapping table seeded from the canonical state groups; the Step-5 defaults (a
- * row with a suggestion starts on Link, everything else on Keep); and the
- * payload `connect` finally receives.
+ * The fixture maps a workspace of three groups onto two cyboflow projects — two
+ * groups sharing one project, one group on its own — because that is the shape
+ * every rev-4 behaviour keys off: the push-target radio, the per-scope state
+ * tables, the per-project reconcile previews, and the routing of a link decision
+ * to the one mapping whose issue set holds it.
+ *
+ * Coverage: the Step-0 gate; the Map step (group rows, N:1 push-target radio);
+ * per-mapping issue probes; one states probe per distinct scope key; one
+ * reconcile probe per target project; the sequential per-mapping connect
+ * payloads; and a partial failure that keeps the modal open and retries only
+ * the row that failed.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
-  TrackerSourceNarrow,
-  TrackerSourceTree,
+  TrackerSourceSelection,
   TrackerState,
 } from '../../../../../shared/types/trackerSync';
 
@@ -29,8 +33,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       tracker: {
         wizardValidate: { mutate: vi.fn() },
-        wizardContainers: { mutate: vi.fn() },
-        wizardNarrows: { mutate: vi.fn() },
+        wizardGroups: { mutate: vi.fn() },
         wizardIssues: { mutate: vi.fn() },
         wizardStates: { mutate: vi.fn() },
         reconcilePreview: { mutate: vi.fn() },
@@ -40,7 +43,7 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
-// The Step-1 project list comes over IPC, not tRPC — same module-mock pattern.
+// The Map step's project list comes over IPC, not tRPC — same module-mock pattern.
 vi.mock('../../../utils/api', () => ({
   API: { projects: { getAll: vi.fn() } },
 }));
@@ -51,8 +54,7 @@ import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 
 const mockValidate = vi.mocked(trpc.cyboflow.tracker.wizardValidate.mutate);
-const mockContainers = vi.mocked(trpc.cyboflow.tracker.wizardContainers.mutate);
-const mockNarrows = vi.mocked(trpc.cyboflow.tracker.wizardNarrows.mutate);
+const mockGroups = vi.mocked(trpc.cyboflow.tracker.wizardGroups.mutate);
 const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
 const mockReconcile = vi.mocked(trpc.cyboflow.tracker.reconcilePreview.mutate);
@@ -82,18 +84,56 @@ const PROJECTS = [
   },
 ];
 
-const TREE: TrackerSourceTree = {
-  containerLabel: 'Team',
-  containers: [
-    { id: 'core', name: 'Core', key: 'COR', openIssueCount: 24 },
-    { id: 'plat', name: 'Platform', key: 'PLT', openIssueCount: 17 },
+/**
+ * Two Linear projects under the SAME team (so they share a state scope) plus a
+ * whole-team group under a second team.
+ */
+const GROUPS: TrackerGroupTree = {
+  sections: [
+    {
+      label: 'Projects',
+      groups: [
+        {
+          id: 'proj-alpha',
+          name: 'Alpha',
+          key: 'COR',
+          sourceLabel: 'Core · Alpha',
+          selection: { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+          stateScopeKey: 'core',
+        },
+        {
+          id: 'proj-beta',
+          name: 'Beta',
+          key: 'COR',
+          sourceLabel: 'Core · Beta',
+          selection: { containerId: 'core', narrowId: 'beta', narrowKind: 'project' },
+          stateScopeKey: 'core',
+        },
+      ],
+    },
+    {
+      label: 'Whole teams',
+      groups: [
+        {
+          id: 'team-core',
+          name: 'Core',
+          key: 'COR',
+          sourceLabel: 'Core · all open issues',
+          selection: { containerId: 'core', narrowId: 'all', narrowKind: 'all' },
+          stateScopeKey: 'core',
+        },
+        {
+          id: 'team-plat',
+          name: 'Platform',
+          key: 'PLT',
+          sourceLabel: 'Platform · all open issues',
+          selection: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+          stateScopeKey: 'plat',
+        },
+      ],
+    },
   ],
 };
-
-const NARROWS: TrackerSourceNarrow[] = [
-  { id: 'all', kind: 'all', name: 'Whole team · all open issues', issueCount: 24 },
-  { id: 'cyc-12', kind: 'cycle', name: 'Current cycle', issueCount: 8 },
-];
 
 function makeIssue(overrides: Partial<TrackerIssue> & Pick<TrackerIssue, 'externalId'>): TrackerIssue {
   return {
@@ -112,7 +152,7 @@ function makeIssue(overrides: Partial<TrackerIssue> & Pick<TrackerIssue, 'extern
   };
 }
 
-const ISSUES: TrackerIssue[] = [
+const ALPHA_ISSUES: TrackerIssue[] = [
   makeIssue({
     externalId: 'iss-1',
     identifier: 'CORE-138',
@@ -121,6 +161,9 @@ const ISSUES: TrackerIssue[] = [
     assignee: { id: 'jk', name: 'Jaya Kesteva', initials: 'JK' },
     estimate: 3,
   }),
+];
+
+const BETA_ISSUES: TrackerIssue[] = [
   makeIssue({
     externalId: 'iss-2',
     identifier: 'CORE-118',
@@ -130,7 +173,22 @@ const ISSUES: TrackerIssue[] = [
   }),
 ];
 
-const STATES: TrackerState[] = [
+const PLAT_ISSUES: TrackerIssue[] = [
+  makeIssue({
+    externalId: 'iss-3',
+    identifier: 'PLT-9',
+    title: 'Ship the installer',
+    stateId: 'todo',
+    assignee: { id: 'jk', name: 'Jaya Kesteva', initials: 'JK' },
+  }),
+];
+
+const ISSUES_BY_CONTAINER: Record<string, Record<string, TrackerIssue[]>> = {
+  core: { alpha: ALPHA_ISSUES, beta: BETA_ISSUES },
+  plat: { all: PLAT_ISSUES },
+};
+
+const CORE_STATES: TrackerState[] = [
   { id: 'triage', name: 'Triage', color: null, group: 'triage' },
   { id: 'backlog', name: 'Backlog', color: null, group: 'backlog' },
   { id: 'todo', name: 'Todo', color: null, group: 'unstarted' },
@@ -139,19 +197,35 @@ const STATES: TrackerState[] = [
   { id: 'cancel', name: 'Canceled', color: null, group: 'cancelled' },
 ];
 
-const RECONCILE: TrackerReconcileItem[] = [
+const PLAT_STATES: TrackerState[] = [
+  { id: 'plat-todo', name: 'Todo', color: null, group: 'unstarted' },
+  { id: 'plat-done', name: 'Shipped', color: null, group: 'completed' },
+];
+
+/** The Cyboflow project's pre-existing backlog; its one suggestion is a Beta issue. */
+const RECONCILE_7: TrackerReconcileItem[] = [
   {
     entityType: 'idea',
     entityId: 'idea-4',
     ref: 'IDEA-004',
-    title: 'Add token budget alerts',
-    suggestedExternalId: 'iss-1',
+    title: 'Diff gutter spacing',
+    suggestedExternalId: 'iss-2',
   },
   {
     entityType: 'task',
     entityId: 'task-7',
     ref: 'TASK-007',
     title: 'Refactor executor retry loop',
+    suggestedExternalId: null,
+  },
+];
+
+const RECONCILE_9: TrackerReconcileItem[] = [
+  {
+    entityType: 'idea',
+    entityId: 'idea-9',
+    ref: 'IDEA-009',
+    title: 'Website backlog item',
     suggestedExternalId: null,
   },
 ];
@@ -166,11 +240,21 @@ beforeEach(() => {
     workspaceName: 'Acme',
     actorLabel: 'J. Kesteva',
   });
-  mockContainers.mockResolvedValue(TREE);
-  mockNarrows.mockResolvedValue(NARROWS);
-  mockIssues.mockResolvedValue(ISSUES);
-  mockStates.mockResolvedValue(STATES);
-  mockReconcile.mockResolvedValue(RECONCILE);
+  mockGroups.mockResolvedValue(GROUPS);
+  // Issues + states are answered from the SELECTION, since the wizard fires one
+  // call per mapping and a call-index stub would encode probe order as fact.
+  mockIssues.mockImplementation(
+    ({ selection }: { selection: TrackerSourceSelection }): Promise<TrackerIssue[]> =>
+      Promise.resolve(ISSUES_BY_CONTAINER[selection.containerId]?.[selection.narrowId] ?? []),
+  );
+  mockStates.mockImplementation(
+    ({ selection }: { selection: TrackerSourceSelection }): Promise<TrackerState[]> =>
+      Promise.resolve(selection.containerId === 'core' ? CORE_STATES : PLAT_STATES),
+  );
+  mockReconcile.mockImplementation(
+    ({ projectId }: { projectId: number }): Promise<TrackerReconcileItem[]> =>
+      Promise.resolve(projectId === 7 ? RECONCILE_7 : RECONCILE_9),
+  );
   mockConnect.mockResolvedValue({ connectionId: 'conn-1' });
   mockProjectsGetAll.mockResolvedValue({ success: true, data: PROJECTS });
 });
@@ -191,11 +275,26 @@ function renderWizard(): void {
   );
 }
 
-/** Paste a key, authorize, and land on Step 1. */
+/** Paste a key, authorize, and land on the Map step. */
 async function authorize(): Promise<void> {
   fireEvent.change(screen.getByLabelText('Personal API key'), { target: { value: 'lin_api_x' } });
   fireEvent.click(screen.getByRole('button', { name: 'Authorize' }));
   await screen.findByTestId('tracker-authorized-card');
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+  await screen.findByText('Map Linear onto cyboflow projects');
+}
+
+function mapGroup(groupName: string, projectId: number): void {
+  fireEvent.change(screen.getByLabelText(`Cyboflow project for ${groupName}`), {
+    target: { value: String(projectId) },
+  });
+}
+
+/** The default fixture mapping: Alpha + Beta → Cyboflow (7), Platform → Website (9). */
+function mapDefaults(): void {
+  mapGroup('Alpha', 7);
+  mapGroup('Beta', 7);
+  mapGroup('Platform', 9);
 }
 
 /**
@@ -203,7 +302,7 @@ async function authorize(): Promise<void> {
  * button, settling on the rail's `aria-current` rather than the button itself
  * (the clicked node is unmounted mid-transition and keeps its stale attributes).
  */
-async function advance(count: number, from = 0): Promise<void> {
+async function advance(count: number, from = 1): Promise<void> {
   for (let i = 0; i < count; i += 1) {
     const label = screen.queryByRole('button', { name: 'Continue' }) !== null ? 'Continue' : 'Review';
     fireEvent.click(screen.getByRole('button', { name: label }));
@@ -220,7 +319,7 @@ describe('TrackerWizardModal — Step 0 gate', () => {
   it('locks every later step until the key validates', async () => {
     renderWizard();
 
-    for (const index of [1, 2, 3, 4, 5, 6]) {
+    for (const index of [1, 2, 3, 4, 5]) {
       expect(screen.getByTestId(`tracker-step-${index}`)).toBeDisabled();
     }
     // Nothing to authorize with yet.
@@ -231,29 +330,25 @@ describe('TrackerWizardModal — Step 0 gate', () => {
 
     // A rail click before validating is inert — no probe fires, step 0 stays.
     fireEvent.click(screen.getByTestId('tracker-step-1'));
-    expect(mockContainers).not.toHaveBeenCalled();
+    expect(mockGroups).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Authorize' }));
     expect(await screen.findByText('Authorized as J. Kesteva')).toBeInTheDocument();
     expect(screen.getByText('workspace Acme')).toBeInTheDocument();
 
-    // The card's Continue lands on the local Project step — no provider probe.
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(
-      await screen.findByText('Which cyboflow project does this sync into?'),
-    ).toBeInTheDocument();
-    expect(mockContainers).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(await screen.findByText(/Pick a team/)).toBeInTheDocument();
-    expect(mockContainers).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('Map Linear onto cyboflow projects')).toBeInTheDocument();
+    expect(mockGroups).toHaveBeenCalledTimes(1);
   });
 
   it('retires the validated identity when the key is edited', async () => {
     renderWizard();
     await authorize();
 
-    fireEvent.change(screen.getByLabelText('Personal API key'), { target: { value: 'lin_other' } });
+    fireEvent.click(screen.getByTestId('tracker-step-0'));
+    fireEvent.change(await screen.findByLabelText('Personal API key'), {
+      target: { value: 'lin_other' },
+    });
 
     await waitFor(() =>
       expect(screen.queryByTestId('tracker-authorized-card')).not.toBeInTheDocument(),
@@ -275,40 +370,114 @@ describe('TrackerWizardModal — Step 0 gate', () => {
   });
 });
 
-describe('TrackerWizardModal — Step 1 target project', () => {
-  it('seeds the active project and threads a retarget through reconcile + connect', async () => {
+describe('TrackerWizardModal — Map step', () => {
+  it('renders every section and blocks Continue until something is mapped', async () => {
     renderWizard();
     await authorize();
-    await advance(1); // → Project
 
-    // Seeded from the active project, with its row marked.
-    const active = await screen.findByRole('button', { name: /Cyboflow/ });
-    expect(active).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Projects')).toBeInTheDocument();
+    expect(screen.getByText('Whole teams')).toBeInTheDocument();
+    for (const name of ['Alpha', 'Beta', 'Platform']) {
+      expect(screen.getByLabelText(`Cyboflow project for ${name}`)).toHaveValue('');
+    }
+    // The active project is marked in every select.
+    expect(
+      within(screen.getByLabelText('Cyboflow project for Alpha')).getByRole('option', {
+        name: 'Cyboflow (Active)',
+      }),
+    ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Website/ }));
-    expect(screen.getByRole('button', { name: /Website/ })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    mapGroup('Alpha', 7);
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+  });
 
-    await advance(5, 1); // → Source → Tasks → States → Reconcile → Review
-    expect(mockReconcile).toHaveBeenCalledWith({ projectId: 9, issues: ISSUES });
-    expect(screen.getByText('Website')).toBeInTheDocument();
+  it('offers a push-target radio only where two groups share one project', async () => {
+    renderWizard();
+    await authorize();
 
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenCalledWith(expect.objectContaining({ projectId: 9 }));
+    mapGroup('Platform', 9);
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+
+    mapGroup('Alpha', 7);
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+
+    mapGroup('Beta', 7);
+    expect(screen.getByText('New cyboflow ideas in Cyboflow push to:')).toBeInTheDocument();
+    // The first mapped group of the cluster is the default pusher.
+    expect(screen.getByRole('radio', { name: 'Alpha' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Beta' })).not.toBeChecked();
+    // Website has a single mapping, so it gets no cluster of its own.
+    expect(screen.queryByText('New cyboflow ideas in Website push to:')).not.toBeInTheDocument();
+  });
+
+  it('warns when a whole-team mapping subsumes a mapped project under it', async () => {
+    renderWizard();
+    await authorize();
+
+    mapGroup('Alpha', 7);
+    const warning =
+      'Issues in Alpha would import via both — the whole-team mapping wins; the duplicate is skipped.';
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+
+    // Platform is a different team, so it subsumes nothing.
+    mapGroup('Platform', 9);
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+
+    // The whole Core team does subsume Alpha — including across projects, since
+    // the engine's guard is keyed by external id, not by target project.
+    mapGroup('Core', 9);
+    expect(screen.getByText(warning)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Cyboflow project for Core'), {
+      target: { value: '' },
+    });
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
   });
 });
 
-describe('TrackerWizardModal — Step 3 guards', () => {
+describe('TrackerWizardModal — Tasks step', () => {
+  it('fetches issues per mapping and unions the assignee roster', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(1); // → Tasks
+
+    expect(mockIssues).toHaveBeenCalledTimes(3);
+    for (const selection of [
+      { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+      { containerId: 'core', narrowId: 'beta', narrowKind: 'project' },
+      { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+    ]) {
+      expect(mockIssues).toHaveBeenCalledWith({
+        credentials: { provider: 'linear', apiKey: 'lin_api_x' },
+        selection,
+      });
+    }
+
+    // Rows are grouped per mapping, each under its target project.
+    expect(
+      within(screen.getByTestId('tracker-issues-proj-alpha')).getByText('Token budget alerts'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('tracker-issues-team-plat')).getByText('Ship the installer'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Platform → Website')).toBeInTheDocument();
+    expect(screen.getByText('3 issues will sync')).toBeInTheDocument();
+
+    // One roster across all three mappings, deduped by assignee id — Jaya is
+    // assigned in two different mappings and appears once, with both counted.
+    fireEvent.click(screen.getByRole('button', { name: 'By assignee' }));
+    expect(screen.getByRole('button', { name: /Jaya Kesteva/ })).toHaveTextContent('JKJaya Kesteva2');
+    expect(screen.getByRole('button', { name: /Mira Rao/ })).toHaveTextContent('MRMira Rao1');
+  });
+
   it('blocks by-assignee with nobody picked and manual with nothing ticked', async () => {
     renderWizard();
     await authorize();
-    await advance(3); // → Project → Source → Tasks
+    mapDefaults();
+    await advance(1); // → Tasks
 
-    expect(await screen.findByText('Which issues come in?')).toBeInTheDocument();
-    // "All tasks" imports everything, so Continue is live.
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'By assignee' }));
@@ -324,251 +493,226 @@ describe('TrackerWizardModal — Step 3 guards', () => {
   });
 });
 
-describe('TrackerWizardModal — Step 4 mapping', () => {
-  it('seeds each tracker state from its canonical group', async () => {
+describe('TrackerWizardModal — States step', () => {
+  it('fetches one table per distinct state scope, not per mapping', async () => {
     renderWizard();
     await authorize();
-    await advance(4); // → Project → Source → Tasks → States
+    mapDefaults();
+    await advance(2); // → Tasks → States
 
-    expect(await screen.findByText('Map Linear states to cyboflow')).toBeInTheDocument();
-    const seeded: Record<string, string> = {
-      Triage: 'dont',
-      Backlog: 'idea',
-      Todo: 'ready',
-      'In Progress': 'ready',
-      Done: 'done',
-      Canceled: 'wontdo',
-    };
-    for (const [state, target] of Object.entries(seeded)) {
-      expect(screen.getByLabelText(`Cyboflow state for ${state}`)).toHaveValue(target);
-    }
-  });
+    // Three mappings, two scopes: Alpha and Beta share the Core team's states.
+    expect(mockStates).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('tracker-state-scope-core')).toBeInTheDocument();
+    expect(screen.getByTestId('tracker-state-scope-plat')).toBeInTheDocument();
+    expect(screen.getByText('Alpha, Beta')).toBeInTheDocument();
 
-  it('offers the one-way In-development target, labelled as such', async () => {
-    renderWizard();
-    await authorize();
-    await advance(4);
+    // Each table is seeded from its own canonical groups, and the labels carry
+    // the scope because "Todo" exists in both.
+    expect(screen.getByLabelText('Cyboflow state for Todo in Alpha, Beta')).toHaveValue('ready');
+    expect(screen.getByLabelText('Cyboflow state for Shipped in Platform')).toHaveValue('done');
 
-    await screen.findByText('Map Linear states to cyboflow');
-    const select = screen.getByLabelText('Cyboflow state for In Progress');
-    const labels = within(select)
-      .getAllByRole('option')
-      .map((o) => o.textContent);
-    // The "(one way)" qualifier is part of the option text, not a tooltip: the
-    // asymmetry has to be visible BEFORE the user picks it.
-    expect(labels).toContain('In development (one way)');
-    // Board order, so the picker reads like the board.
-    expect(labels).toEqual([
-      "— Don't import",
-      'Idea',
-      'Ready for development',
-      'In development (one way)',
-      'Done',
-      "Won't do",
-    ]);
-  });
-
-  it('explains the asymmetry inline only once In development is selected', async () => {
-    renderWizard();
-    await authorize();
-    await advance(4);
-
-    await screen.findByText('Map Linear states to cyboflow');
-    const note = 'One way only — pushed to Linear, never imported.';
-    expect(screen.queryByText(note)).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('Cyboflow state for In Progress'), {
-      target: { value: 'indev' },
-    });
-
-    expect(screen.getByText(note)).toBeInTheDocument();
-    // Scoped to the row that was changed, not the whole table.
-    expect(screen.getAllByText(note)).toHaveLength(1);
-  });
-
-  it('always shows mirroring + conflict mode alongside the three direction rows', async () => {
-    renderWizard();
-    await authorize();
-    await advance(4);
-
-    await screen.findByText('Map Linear states to cyboflow');
-    expect(screen.getByRole('group', { name: 'Sync task status' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Pull from Linear' })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Push to Linear' })).toBeInTheDocument();
+    // Direction / mirroring / conflict mode stay global, rendered once.
+    expect(screen.getAllByRole('group', { name: 'Sync task status' })).toHaveLength(1);
     expect(
       screen.getByRole('switch', { name: 'Mirror task breakdowns as sub-issues' }),
     ).toBeChecked();
-    expect(screen.getByRole('group', { name: 'Conflict mode' })).toBeInTheDocument();
+  });
 
-    // Flipping a direction row leaves the other rows untouched and visible.
-    fireEvent.click(
-      within(screen.getByRole('group', { name: 'Pull from Linear' })).getByRole('button', {
-        name: 'Manual',
-      }),
-    );
-    expect(
-      screen.getByRole('switch', { name: 'Mirror task breakdowns as sub-issues' }),
-    ).toBeChecked();
-    expect(screen.getByRole('group', { name: 'Conflict mode' })).toBeInTheDocument();
+  it('drops both tables when a mapping changes', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+    expect(mockStates).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByTestId('tracker-step-1'));
+    await screen.findByText('Map Linear onto cyboflow projects');
+    mapGroup('Beta', 9);
+
+    // The rail clamps back to Map, so States is re-probed on the way forward.
+    await waitFor(() => expect(screen.getByTestId('tracker-step-3')).toBeDisabled());
+    await advance(2);
+    expect(mockStates).toHaveBeenCalledTimes(4);
   });
 });
 
-describe('TrackerWizardModal — Step 5 reconcile', () => {
-  it('defaults a suggested row to Link and everything else to Keep', async () => {
+describe('TrackerWizardModal — Reconcile step', () => {
+  it('previews each target project once and groups the rows under it', async () => {
     renderWizard();
     await authorize();
-    await advance(5); // → Project → Source → Tasks → States → Reconcile
+    mapDefaults();
+    await advance(3); // → Tasks → States → Reconcile
 
-    expect(await screen.findByText('Your existing cyboflow backlog')).toBeInTheDocument();
-    expect(mockReconcile).toHaveBeenCalledWith({ projectId: 7, issues: ISSUES });
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+    expect(mockReconcile).toHaveBeenCalledWith({
+      projectId: 7,
+      issues: [...ALPHA_ISSUES, ...BETA_ISSUES],
+    });
+    expect(mockReconcile).toHaveBeenCalledWith({ projectId: 9, issues: PLAT_ISSUES });
 
+    expect(
+      within(screen.getByTestId('tracker-reconcile-7')).getByText('Diff gutter spacing'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('tracker-reconcile-9')).getByText('Website backlog item'),
+    ).toBeInTheDocument();
+
+    // A suggested row starts on Link, pre-filled; the rest start on Keep.
     const suggested = screen.getByRole('group', { name: 'Action for IDEA-004' });
     expect(within(suggested).getByRole('button', { name: 'Link' })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
-    // The link target pre-fills with the suggestion.
-    expect(screen.getByLabelText('Merge IDEA-004 into')).toHaveValue('iss-1');
-
-    const unsuggested = screen.getByRole('group', { name: 'Action for TASK-007' });
-    expect(within(unsuggested).getByRole('button', { name: 'Keep' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
-    expect(screen.getByText(/1 kept/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Merge IDEA-004 into')).toHaveValue('iss-2');
+    expect(screen.getByText(/2 kept/)).toBeInTheDocument();
   });
+});
 
-  it('hands the review step and connect the accumulated decisions', async () => {
+describe('TrackerWizardModal — Review + connect', () => {
+  it('connects each mapping sequentially with its own source, states and decisions', async () => {
     renderWizard();
     await authorize();
-    await advance(6); // → … → Review
+    mapDefaults();
+    // Beta pushes for Cyboflow instead of Alpha, so Alpha lands pushTarget=false.
+    fireEvent.click(screen.getByRole('radio', { name: 'Beta' }));
+    await advance(4); // → Tasks → States → Reconcile → Review
 
-    expect(await screen.findByText('Review the connection')).toBeInTheDocument();
-    expect(screen.getByText('Core · Whole team · all open issues')).toBeInTheDocument();
+    expect(await screen.findByText('Review the connections')).toBeInTheDocument();
+    expect(screen.getByText('Core · Alpha → Cyboflow')).toBeInTheDocument();
+    expect(screen.getByText('Platform · all open issues → Website')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 3 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(3));
 
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenCalledWith(
+    const CORE_MAPPING = {
+      triage: 'dont',
+      backlog: 'idea',
+      todo: 'ready',
+      inprog: 'ready',
+      done: 'done',
+      cancel: 'wontdo',
+    };
+
+    // Alpha: the project's first mapping, so it carries the non-link decision —
+    // but not the link, whose issue belongs to Beta.
+    expect(mockConnect).toHaveBeenNthCalledWith(1, {
+      projectId: 7,
+      credentials: { provider: 'linear', apiKey: 'lin_api_x' },
+      source: { containerId: 'core', narrowId: 'alpha', narrowKind: 'project' },
+      sourceLabel: 'Core · Alpha',
+      selectionMode: 'all',
+      selectionJson: null,
+      stateMapping: CORE_MAPPING,
+      statusSyncMode: 'auto',
+      pullMode: 'auto',
+      pushMode: 'auto',
+      mirrorSubissues: true,
+      conflictMode: 'auto',
+      reconcile: [{ entityType: 'task', entityId: 'task-7', action: 'keep' }],
+      pushTarget: false,
+    });
+
+    // Beta: same scope table, the chosen pusher, and the owner of the link.
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         projectId: 7,
-        credentials: { provider: 'linear', apiKey: 'lin_api_x' },
-        source: { containerId: 'core', narrowId: 'all', narrowKind: 'all' },
-        sourceLabel: 'Core · Whole team · all open issues',
-        selectionMode: 'all',
-        selectionJson: null,
-        statusSyncMode: 'auto',
-        pullMode: 'auto',
-        pushMode: 'auto',
-        mirrorSubissues: true,
-        conflictMode: 'auto',
-        stateMapping: {
-          triage: 'dont',
-          backlog: 'idea',
-          todo: 'ready',
-          inprog: 'ready',
-          done: 'done',
-          cancel: 'wontdo',
-        },
+        source: { containerId: 'core', narrowId: 'beta', narrowKind: 'project' },
+        sourceLabel: 'Core · Beta',
+        stateMapping: CORE_MAPPING,
+        pushTarget: true,
         reconcile: [
           {
             entityType: 'idea',
             entityId: 'idea-4',
             action: 'link',
-            linkExternalId: 'iss-1',
-            linkIdentifier: 'CORE-138',
+            linkExternalId: 'iss-2',
+            linkIdentifier: 'CORE-118',
             linkUrl: 'https://linear.app/x/CORE-1',
           },
-          { entityType: 'task', entityId: 'task-7', action: 'keep' },
         ],
       }),
     );
+
+    // Platform: its own project, its own state table, sole pusher there.
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        projectId: 9,
+        source: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+        stateMapping: { 'plat-todo': 'ready', 'plat-done': 'done' },
+        pushTarget: true,
+        reconcile: [{ entityType: 'idea', entityId: 'idea-9', action: 'keep' }],
+      }),
+    );
+
     expect(onConnected).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('discards a stale reconcile response after the target project changes mid-request', async () => {
+  it('gives each mapping its OWN manual picks in selectionJson', async () => {
     renderWizard();
     await authorize();
-    await advance(4); // → Project → Source → Tasks → States
+    mapDefaults();
+    await advance(1); // → Tasks
 
-    // Project A (7, the seeded active project) starts a reconcile fetch that
-    // will not resolve until resolveA is called below.
-    let resolveA: (rows: TrackerReconcileItem[]) => void = () => {};
-    mockReconcile.mockReturnValueOnce(
-      new Promise<TrackerReconcileItem[]>((resolve) => {
-        resolveA = resolve;
-      }),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await waitFor(() =>
-      expect(mockReconcile).toHaveBeenCalledWith({ projectId: 7, issues: ISSUES }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: 'Manual' }));
+    fireEvent.click(screen.getByRole('button', { name: /CORE-138/ }));
+    fireEvent.click(screen.getByRole('button', { name: /PLT-9/ }));
 
-    // The step rail stays usable while that request is pending — jump back to
-    // Project and retarget to B before A's response ever arrives.
-    fireEvent.click(screen.getByTestId('tracker-step-1'));
-    await screen.findByText('Which cyboflow project does this sync into?');
-    fireEvent.click(screen.getByRole('button', { name: /Website/ }));
-
-    const RECONCILE_B: TrackerReconcileItem[] = [
-      {
-        entityType: 'idea',
-        entityId: 'idea-9',
-        ref: 'IDEA-009',
-        title: 'Website backlog item',
-        suggestedExternalId: null,
-      },
-    ];
-    mockReconcile.mockResolvedValue(RECONCILE_B);
-
-    // A's response finally arrives — it must not be installed for B.
-    resolveA(RECONCILE);
-    await waitFor(() =>
-      expect(screen.queryByText('Add token budget alerts')).not.toBeInTheDocument(),
-    );
-    expect(screen.getByText(/Nothing was in this project/)).toBeInTheDocument();
-
-    // Reaching Review re-fetches reconcile because it was never marked loaded
-    // for B, proving A's stale response did not silently satisfy the guard.
-    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
-    await waitFor(() =>
-      expect(mockReconcile).toHaveBeenLastCalledWith({ projectId: 9, issues: ISSUES }),
-    );
-    expect(await screen.findByText('Review the connection')).toBeInTheDocument();
-
+    await advance(3, 2); // → States → Reconcile → Review
     fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenCalledWith(
-      expect.objectContaining({
-        projectId: 9,
-        reconcile: [{ entityType: 'idea', entityId: 'idea-9', action: 'keep' }],
-      }),
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(3));
+
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ selectionMode: 'manual', selectionJson: { issueIds: ['iss-1'] } }),
+    );
+    // Beta contributed nothing to the manual pick, so its list is empty.
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ selectionJson: { issueIds: [] } }),
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ selectionJson: { issueIds: ['iss-3'] } }),
     );
   });
 
-  it('carries a flipped direction mode through to the connect payload', async () => {
+  it('keeps the modal open on a partial failure and retries only the failed mapping', async () => {
     renderWizard();
     await authorize();
-    await advance(4); // → Project → Source → Tasks → States
+    mapDefaults();
+    await advance(4); // → … → Review
 
-    await screen.findByText('Map Linear states to cyboflow');
-    fireEvent.click(
-      within(screen.getByRole('group', { name: 'Push to Linear' })).getByRole('button', {
-        name: 'Manual',
-      }),
+    mockConnect
+      .mockResolvedValueOnce({ connectionId: 'conn-a' })
+      .mockRejectedValueOnce(new Error('Linear returned 500.'))
+      .mockResolvedValueOnce({ connectionId: 'conn-c' });
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 3 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(3));
+
+    // The modal stays open with the failure attributed to its own row.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(
+      within(screen.getByTestId('tracker-mapping-proj-beta')).getByText('Linear returned 500.'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('tracker-mapping-proj-alpha')).getByText('Connected'),
+    ).toBeInTheDocument();
+
+    mockConnect.mockResolvedValue({ connectionId: 'conn-b' });
+    fireEvent.click(await screen.findByRole('button', { name: /Retry 1 failed/ }));
+
+    // Only Beta is re-sent; the two that succeeded are filtered out client-side.
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(4));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      4,
+      expect.objectContaining({ sourceLabel: 'Core · Beta' }),
     );
-
-    await advance(2, 4); // → Reconcile → Review
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
-
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenCalledWith(
-      expect.objectContaining({
-        statusSyncMode: 'auto',
-        pullMode: 'auto',
-        pushMode: 'manual',
-      }),
-    );
+    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
