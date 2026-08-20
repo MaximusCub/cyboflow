@@ -102,6 +102,9 @@ describe('Migration 105: dart as a third tracker provider', () => {
       'conflict_mode', 'cursor_updated_at', 'cursor_external_id', 'last_sync_at',
       'last_sync_log_json', 'created_at', 'updated_at', 'status_sync_mode',
       'pull_mode', 'push_mode',
+      // Appended by 109 after the recreate — the full chain runs here, so the
+      // later file's column is visible; asserted for real in migration109.test.ts.
+      'push_target',
     ]);
     expect(columnNames(raw, 'entity_external_links')).toEqual([
       'id', 'connection_id', 'entity_type', 'entity_id', 'provider', 'external_id',
