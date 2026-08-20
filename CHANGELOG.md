@@ -6,6 +6,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Multi-idea idea summaries collapse into one tab.** A planner run owning several ideas minted one idea-summary artifact per idea, all labelled "Idea summary", so the tab strip carried N indistinguishable tabs and each screen covered a single idea. A batch now mints one combined tab — following the same pattern the combined "Idea specs" tab already used — rendering a compact matrix: one row per idea against the five ledger components as columns, each row expanding to that idea's own deliverable links. Status is carried by shape as well as colour, with a legend. Single-idea runs are unchanged. Also fixes the per-idea "Idea spec" link, which pointed at a live tab for the batch's first idea only and read "not yet" for every other idea.
+
 ## [0.2.4] — 2026-08-19
 
 ### Added
