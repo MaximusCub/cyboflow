@@ -720,3 +720,51 @@ with anything else on it, including a concurrent verification. Observed directly
 round 2's proof server held 4300 and answered a probe meant for another project.
 
 Still not done: no `*.itest.ts` end-to-end (§14).
+
+## 18. Making the levers real (2026-08-20)
+
+§17's open item — "the verification agent is not reproducible, and that decides
+bootstrap outcomes" — had a cause underneath it that is not about the agent at
+all. Both runbooks the smoke produced declared `levers.portEnv: "PORT"`, and
+both described their build-time nonce variable in `levers.notes` as prose. The
+harness read neither: `levers` was parsed, hashed, and documented in four
+prompts while `verificationAgentRunner` exported only its own `VERIFY_*` set.
+
+So the two facts a web verification actually turns on — does the served surface
+bind the LEASED port, and does it carry THIS request's nonce — were left to what
+the verification agent inferred from a `notes` string. Round 1's agent inferred
+both and proved the runbook. Round 3's ran the serve command verbatim, as its
+own contract instructs ("the serve command must be the task's, exactly"), and
+failed. The reproducibility gap was real, but it was the harness that left the
+decision there to be made.
+
+**The fix is that declaring a lever now binds it.** `resolveLeverEnv`
+(`main/src/orchestrator/verify/runbookLevers.ts`) layers the runbook's declared
+names over the harness env after provisioning, so build and serve alike inherit
+them:
+
+- `levers.portEnv` → the leased port. This is the mechanism `port-from-env`
+  (rung 1) was designed around: the operation teaches the project's code to READ
+  the variable, and the lever is what makes it EXIST at verification time. Before
+  this, the two halves never met, and the only spelling that could have worked
+  was `envVar: "VERIFY_PORT"` — which nothing in any prompt suggested.
+- `levers.nonceEnv` → this request's attestation nonce. New field. Without it a
+  runbook has no structured way to say "stamp your identity marker from here",
+  and a `dom-marker` attestation reads whatever fixed default the build uses.
+
+Two rules, both because a runbook is machine-authored: a lever may never shadow a
+variable the harness owns (base env wins; a lever naming an already-correct
+harness var is a silent no-op), and a name that configures execution rather than
+the deliverable — `PATH`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`, `IFS` — is dropped
+rather than exported. A dropped lever is logged, and surfaces downstream as an
+honest attestation failure rather than a pass.
+
+Both bootstrap prompts and Verify Setup now teach the levers, including the rule
+that `port-from-env` without a matching `levers.portEnv` is a config edit a human
+reviews for nothing.
+
+**What this does NOT retroactively fix.** Widgetboard's already-`proven` record
+declares `portEnv`, so its port binding becomes genuinely correct. Its nonce
+binding does not: no runbook written before this release declares `nonceEnv`, so
+those records still depend on the agent reading `notes`. Re-derivation is the fix
+for them, and the feature being default-OFF is why that costs nothing today.
