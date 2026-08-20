@@ -8,6 +8,8 @@
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
  *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
  *   connections                   : query        -> TrackerConnectionSummary[]
+ *   mappings                      : query        -> TrackerConnectionSummary[] (one identity's siblings, ACROSS projects)
+ *   setPushTarget                 : mutation     -> { ok } (arm this mapping as its pair's pusher)
  *   updateSettings / disconnect   : mutations    -> void
  *   syncNow                       : mutation     -> TrackerSyncPassSummary ("Sync now")
  *   conflicts                     : query        -> TrackerConflictSummary[]
@@ -26,7 +28,11 @@
  *
  * SECRETS: `credentials` travels renderer -> main on the wizard/connect calls
  * and stops there (the service encrypts before sqlite). NOTHING this router
- * RETURNS carries key material — see shared/types/trackerSync.ts.
+ * RETURNS carries key material — see shared/types/trackerSync.ts. The mapping-
+ * management path carries even less: it names an existing `connectionId` and the
+ * service resolves that row's stored key, so no key crosses IPC in either
+ * direction — which is exactly why the three probes that path re-enters accept
+ * `credentials` XOR `connectionId` rather than requiring a paste.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*. That is exactly why the facade + its emitter live in
@@ -163,6 +169,27 @@ const credentialsSchema = z.object({
   workspaceSlug: z.string().min(1).optional(),
 });
 
+/**
+ * A wizard probe's CREDENTIAL SOURCE (TrackerWizardSourceInput): a pasted key, or
+ * the id of a connection whose stored key main resolves itself. Exactly one — a
+ * payload carrying both is ambiguous about which key it meant, and one carrying
+ * neither cannot probe anything, so both are BAD_REQUEST here rather than a
+ * silent precedence rule invented at this seam.
+ *
+ * Spread into each probe's own object schema rather than nested, so the wire
+ * shape stays `{ credentials?, connectionId?, … }` — the flat shape the renderer
+ * already sends for the paste path.
+ */
+const wizardSourceShape = {
+  credentials: credentialsSchema.optional(),
+  connectionId: z.string().min(1).optional(),
+};
+
+/** The exactly-one rule, as a refinement both the probes and `connect` apply. */
+function exactlyOneCredentialSource(credentials: unknown, connectionId: unknown): boolean {
+  return (credentials !== undefined) !== (connectionId !== undefined);
+}
+
 const narrowKindSchema = z.enum(['all', 'project', 'view', 'cycle', 'module', 'space']);
 
 const sourceSelectionSchema = z.object({
@@ -255,14 +282,27 @@ export const trackerRouter = router({
   /**
    * Map step — the mappable tracker groups (Linear projects × teams + whole
    * teams, Plane projects, Dart spaces), each carrying its ready-made source
-   * selection. A mutation for the same reason its siblings are: it carries a key
-   * and makes a live call, so it must never be cached or re-fetched.
+   * selection. A mutation for the same reason its siblings are: it makes a live
+   * call (and on the paste path carries a key), so it must never be cached or
+   * re-fetched.
+   *
+   * Takes a credential SOURCE: mapping management re-enters this step from an
+   * existing connection and names it instead of pasting a key.
    */
   wizardGroups: protectedProcedure
-    .input(z.object({ credentials: credentialsSchema }))
+    .input(
+      z
+        .object(wizardSourceShape)
+        .refine((v) => exactlyOneCredentialSource(v.credentials, v.connectionId), {
+          message: 'exactly one of credentials / connectionId',
+        }),
+    )
     .mutation(async ({ input }): Promise<TrackerGroupTree> => {
       try {
-        return await getTrackerSyncFacade().wizardGroups(input.credentials);
+        return await getTrackerSyncFacade().wizardGroups({
+          credentials: input.credentials,
+          connectionId: input.connectionId,
+        });
       } catch (err) {
         rethrowAsTRPCError(err);
       }
@@ -290,23 +330,47 @@ export const trackerRouter = router({
       }
     }),
 
-  /** Step 3 — the source's states (with canonical groups) for the mapping table. */
+  /**
+   * Step 3 — the source's states (with canonical groups) for the mapping table.
+   * Credential SOURCE, like `wizardGroups`.
+   */
   wizardStates: protectedProcedure
-    .input(z.object({ credentials: credentialsSchema, selection: sourceSelectionSchema }))
+    .input(
+      z
+        .object({ ...wizardSourceShape, selection: sourceSelectionSchema })
+        .refine((v) => exactlyOneCredentialSource(v.credentials, v.connectionId), {
+          message: 'exactly one of credentials / connectionId',
+        }),
+    )
     .mutation(async ({ input }): Promise<TrackerState[]> => {
       try {
-        return await getTrackerSyncFacade().wizardStates(input.credentials, input.selection);
+        return await getTrackerSyncFacade().wizardStates(
+          { credentials: input.credentials, connectionId: input.connectionId },
+          input.selection,
+        );
       } catch (err) {
         rethrowAsTRPCError(err);
       }
     }),
 
-  /** Step 2 — every issue in the chosen source (assignee/manual pickers + Reconcile). */
+  /**
+   * Step 2 — every issue in the chosen source (assignee/manual pickers +
+   * Reconcile). Credential SOURCE, like `wizardGroups`.
+   */
   wizardIssues: protectedProcedure
-    .input(z.object({ credentials: credentialsSchema, selection: sourceSelectionSchema }))
+    .input(
+      z
+        .object({ ...wizardSourceShape, selection: sourceSelectionSchema })
+        .refine((v) => exactlyOneCredentialSource(v.credentials, v.connectionId), {
+          message: 'exactly one of credentials / connectionId',
+        }),
+    )
     .mutation(async ({ input }): Promise<TrackerIssue[]> => {
       try {
-        return await getTrackerSyncFacade().wizardIssues(input.credentials, input.selection);
+        return await getTrackerSyncFacade().wizardIssues(
+          { credentials: input.credentials, connectionId: input.connectionId },
+          input.selection,
+        );
       } catch (err) {
         rethrowAsTRPCError(err);
       }
@@ -342,12 +406,18 @@ export const trackerRouter = router({
    * decisions (link / discard), and a fire-and-forget first sync pass. Returns
    * as soon as the row is durable; the first pass reports through the
    * `onTrackerChanged` subscription.
+   *
+   * The key is pasted (`credentials`) or borrowed from a connection already
+   * authorized for this workspace (`sourceConnectionId`) — exactly one, same rule
+   * as the probes; adding a mapping to an existing connection takes the latter.
    */
   connect: protectedProcedure
     .input(
       z.object({
         projectId: z.number().int().positive(),
-        credentials: credentialsSchema,
+        credentials: credentialsSchema.optional(),
+        /** Reuse a live connection's stored key + identity instead of pasting one. */
+        sourceConnectionId: z.string().min(1).optional(),
         source: sourceSelectionSchema,
         sourceLabel: z.string(),
         selectionMode: selectionModeSchema,
@@ -361,6 +431,9 @@ export const trackerRouter = router({
         reconcile: z.array(reconcileDecisionSchema),
         /** Omitted = true; false on every sibling mapping but the pushing one. */
         pushTarget: z.boolean().optional(),
+      })
+      .refine((v) => exactlyOneCredentialSource(v.credentials, v.sourceConnectionId), {
+        message: 'exactly one of credentials / connectionId',
       }),
     )
     .mutation(async ({ input }): Promise<{ connectionId: string }> => {
@@ -401,6 +474,46 @@ export const trackerRouter = router({
     .query(async ({ input }): Promise<TrackerConnectionSummary[]> => {
       try {
         return await getTrackerSyncFacade().connections(input.projectId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Every LIVE mapping sharing this connection's tracker identity — provider,
+   * workspace, instance — ACROSS projects, which is what `connections` (scoped to
+   * one project) structurally cannot return: a rev-4 wizard run mints one sibling
+   * row per (tracker group -> cyboflow project) pair on ONE authorization, and
+   * the management view's object is that authorization.
+   *
+   * A QUERY, unlike its wizard neighbours: it is a pure read of local rows with
+   * no key in flight and no network call, so caching and re-fetching it is
+   * exactly right. NOT_FOUND for an unknown id; a retired connection still
+   * answers (with itself leading the list).
+   */
+  mappings: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .query(async ({ input }): Promise<TrackerConnectionSummary[]> => {
+      try {
+        return await getTrackerSyncFacade().mappings(input.connectionId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Arm this mapping as the one its (project, provider) pair files new ideas
+   * through, demoting whichever sibling held the flag. The invariant is enforced
+   * in ONE store statement rather than as two per-row writes, so there is no
+   * window in which a project has two pushers (one idea, two remote issues) or
+   * none. NOT_FOUND for an unknown or disconnected id.
+   */
+  setPushTarget: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<{ ok: true }> => {
+      try {
+        await getTrackerSyncFacade().setPushTarget(input.connectionId);
+        return { ok: true };
       } catch (err) {
         rethrowAsTRPCError(err);
       }

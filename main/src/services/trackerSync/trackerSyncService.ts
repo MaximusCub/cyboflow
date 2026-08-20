@@ -92,6 +92,7 @@ import type {
   TrackerEntityType,
   TrackerGroupTree,
   TrackerIssue,
+  TrackerNarrowKind,
   TrackerProvider,
   TrackerReconcileItem,
   TrackerSettingsPatch,
@@ -101,6 +102,7 @@ import type {
   TrackerState,
   TrackerSyncLogEntry,
   TrackerSyncPassSummary,
+  TrackerWizardSourceInput,
   TrackerWorkspaceIdentity,
 } from '../../../../shared/types/trackerSync';
 import type { LoggerLike } from '../../orchestrator/types';
@@ -1181,6 +1183,78 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return this.adapterFactory(scratch, credentials.apiKey);
   }
 
+  /**
+   * The credentials an EXISTING connection already holds, decrypted — the
+   * "add another mapping to this connection" path's answer to "where is the key".
+   *
+   * Mapping management re-enters the wizard from a connection the user has
+   * already authorized, so re-asking for the key would be a worse question than
+   * not asking: the same key is sitting encrypted on the row, and every probe the
+   * wizard makes is against that same workspace and instance. Addressing
+   * (`baseUrl`) and Plane's slug (`workspaceSlug`) come off the ROW rather than
+   * from anything the renderer sends — this resolves a key, it never re-points a
+   * connection at a different instance.
+   *
+   * A DISCONNECTED row is treated as absent: `disconnect` deliberately clears the
+   * ciphertext, so there is no key to reuse and "not found" is the honest answer
+   * rather than an auth failure the user cannot act on.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown or retired connection id.
+   * @throws {TrackerAuthError} the stored key is missing or undecryptable
+   *   (mapped to UNAUTHORIZED — the actionable fix is pasting a fresh key).
+   */
+  private credentialsForConnection(connectionId: string): TrackerCredentialsInput {
+    const row = getConnection(this.db, connectionId);
+    if (row === null || row.status === 'disconnected') {
+      throw new TrackerConnectionNotFoundError(connectionId);
+    }
+    const cipher = readSecret(this.db, connectionId);
+    if (cipher === null || cipher.length === 0) {
+      throw new TrackerAuthError(
+        row.provider,
+        'stored API key for this connection is unusable — reconnect with a fresh key',
+      );
+    }
+    let secret: string;
+    try {
+      secret = decryptTrackerSecret(cipher);
+    } catch {
+      throw new TrackerAuthError(
+        row.provider,
+        'stored API key for this connection is unusable — reconnect with a fresh key',
+      );
+    }
+    return {
+      provider: row.provider,
+      apiKey: secret,
+      baseUrl: row.base_url ?? undefined,
+      workspaceSlug: row.workspace_id ?? undefined,
+    };
+  }
+
+  /**
+   * Resolve a wizard probe's credential SOURCE — a pasted key or an existing
+   * connection's stored one — into the credentials the probe runs with.
+   *
+   * EXACTLY ONE, enforced rather than defaulted: the two keys answer the same
+   * question, so a payload carrying both is a caller bug (which key did it mean?)
+   * and one carrying neither cannot probe anything. A plain Error, because there
+   * is no renderer-actionable distinction to make — the tRPC layer refines the
+   * same rule and rejects it as BAD_REQUEST before it reaches here.
+   */
+  private credentialsFromSource(source: TrackerWizardSourceInput): TrackerCredentialsInput {
+    if (source.credentials !== undefined) {
+      if (source.connectionId !== undefined) {
+        throw new Error('exactly one of credentials / connectionId');
+      }
+      return source.credentials;
+    }
+    if (source.connectionId === undefined) {
+      throw new Error('exactly one of credentials / connectionId');
+    }
+    return this.credentialsForConnection(source.connectionId);
+  }
+
   /** Live credential probe — the wizard's "Authorized as …" card. */
   async wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
     return this.adapterForCredentials(credentials).validateCredentials();
@@ -1190,9 +1264,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * The Map step's groups — every tracker grouping that can be mapped onto a
    * cyboflow project, each carrying the source selection a `connect` for it
    * would persist.
+   *
+   * Takes a credential SOURCE rather than credentials: mapping management
+   * re-enters this step from an already-authorized connection, and that run has
+   * no pasted key to offer (see {@link credentialsForConnection}).
    */
-  async wizardGroups(credentials: TrackerCredentialsInput): Promise<TrackerGroupTree> {
-    return this.adapterForCredentials(credentials).listGroups();
+  async wizardGroups(source: TrackerWizardSourceInput): Promise<TrackerGroupTree> {
+    return this.adapterForCredentials(this.credentialsFromSource(source)).listGroups();
   }
 
   /** Wizard Step 1, top level (Linear teams / Plane projects). */
@@ -1208,24 +1286,27 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return this.adapterForCredentials(credentials).listNarrows(containerId);
   }
 
-  /** Wizard Step 3 — the source's states, with canonical groups for the mapping table. */
+  /**
+   * Wizard Step 3 — the source's states, with canonical groups for the mapping
+   * table. Credential SOURCE, like {@link wizardGroups}.
+   */
   async wizardStates(
-    credentials: TrackerCredentialsInput,
+    source: TrackerWizardSourceInput,
     selection: TrackerSourceSelection,
   ): Promise<TrackerState[]> {
-    return this.adapterForCredentials(credentials).listStates(selection);
+    return this.adapterForCredentials(this.credentialsFromSource(source)).listStates(selection);
   }
 
   /**
    * Wizard Step 2 — every issue in the chosen source (no `since` bound: the
    * wizard's pickers and the Reconcile suggestions need the full set, not an
-   * incremental slice).
+   * incremental slice). Credential SOURCE, like {@link wizardGroups}.
    */
   async wizardIssues(
-    credentials: TrackerCredentialsInput,
+    source: TrackerWizardSourceInput,
     selection: TrackerSourceSelection,
   ): Promise<TrackerIssue[]> {
-    return this.adapterForCredentials(credentials).listIssues(selection);
+    return this.adapterForCredentials(this.credentialsFromSource(source)).listIssues(selection);
   }
 
   // -------------------------------------------------------------------------
@@ -1299,9 +1380,20 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      and connect then failed with no connection to show for them.
    *   4. Kick the first pass fire-and-forget: the wizard closes on the mutation's
    *      return, and the first pass is a full network round-trip.
+   *
+   * THE KEY may be pasted (`credentials`) or borrowed from a connection the user
+   * already authorized (`sourceConnectionId` — mapping management adding a second
+   * group to an existing connection). Exactly one, resolved once here; from that
+   * line on this method cannot tell which it was, so every behaviour below —
+   * the live probe, the idempotent re-submit, the revival, claimPushTarget — is
+   * byte-for-byte what a pasted key always did.
    */
   async connect(payload: TrackerConnectPayload): Promise<{ connectionId: string }> {
-    const identity = await this.adapterForCredentials(payload.credentials).validateCredentials();
+    const credentials = this.credentialsFromSource({
+      credentials: payload.credentials,
+      connectionId: payload.sourceConnectionId,
+    });
+    const identity = await this.adapterForCredentials(credentials).validateCredentials();
 
     // IDEMPOTENT RE-SUBMIT. The multi-mapping wizard calls connect once per
     // mapping, sequentially, and offers a retry when one of them fails — so the
@@ -1322,7 +1414,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // it and kick a pass), and the push-target choice (the wizard recomputes it
     // from the live radio, so a retry after re-picking must land the new
     // choice; the early return used to drop it, leaving two armed siblings).
-    const cipher = encryptTrackerSecret(payload.credentials.apiKey);
+    const cipher = encryptTrackerSecret(credentials.apiKey);
     const incomingScope: StoredSourceScope = {
       containerId: payload.source.containerId,
       narrowId: payload.source.narrowId,
@@ -1330,9 +1422,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     };
     const existing = listConnectionsByIdentity(
       this.db,
-      payload.credentials.provider,
+      credentials.provider,
       identity.workspaceId,
-      payload.credentials.baseUrl ?? null,
+      credentials.baseUrl ?? null,
     ).find(
       (row) =>
         row.project_id === payload.projectId &&
@@ -1343,7 +1435,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       if (payload.pushTarget === false) {
         updateConnectionSettings(this.db, existing.id, { push_target: 0 });
       } else {
-        claimPushTarget(this.db, payload.projectId, payload.credentials.provider, existing.id);
+        claimPushTarget(this.db, payload.projectId, credentials.provider, existing.id);
       }
       if (existing.status === 'paused') {
         updateConnectionSettings(this.db, existing.id, {
@@ -1366,12 +1458,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // re-connect path below cannot drift apart.
     const row: Omit<NewConnectionRow, 'id'> = {
       project_id: payload.projectId,
-      provider: payload.credentials.provider,
+      provider: credentials.provider,
       status: 'active',
       workspace_id: identity.workspaceId,
       workspace_name: identity.workspaceName,
       actor_label: identity.actorLabel,
-      base_url: payload.credentials.baseUrl ?? null,
+      base_url: credentials.baseUrl ?? null,
       // Written by storeSecret below, never inline — the plaintext-never-touches
       // -sqlite invariant lives in exactly one call site.
       secret_ciphertext: null,
@@ -1427,9 +1519,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const revivable = findDisconnectedConnection(
       this.db,
       payload.projectId,
-      payload.credentials.provider,
+      credentials.provider,
       identity.workspaceId,
-      payload.credentials.baseUrl ?? null,
+      credentials.baseUrl ?? null,
       incomingScope,
     );
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
@@ -1442,7 +1534,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // the earlier row is still armed — the newest choice wins and the sibling
     // is demoted, else one new idea would file one remote issue per armed row.
     if (payload.pushTarget !== false) {
-      claimPushTarget(this.db, payload.projectId, payload.credentials.provider, connectionId);
+      claimPushTarget(this.db, payload.projectId, credentials.provider, connectionId);
     }
 
     // OWNERSHIP FIRST. A reconcile decision names an entity by bare id, and the
@@ -1514,7 +1606,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
           connection_id: connectionId,
           entity_type: decision.entityType,
           entity_id: decision.entityId,
-          provider: payload.credentials.provider,
+          provider: credentials.provider,
           external_id: externalId,
           // BASELINE LEFT NULL on purpose: we hold no remote snapshot here, and
           // inbound's first pass ADOPTS the issue's current snapshot for a
@@ -1653,6 +1745,72 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return listConnections(this.db, projectId).map((row) => this.summarizeConnection(row));
   }
 
+  /**
+   * Every LIVE mapping sharing this connection's tracker identity — `(provider,
+   * workspace_id, base_url)` — ACROSS PROJECTS, which is what makes it a
+   * different question from {@link connections}.
+   *
+   * The management view's model. A rev-4 wizard run mints one sibling row per
+   * (tracker group -> cyboflow project) pair, all on one authorization, and the
+   * user's mental object is that authorization, not any one row: "which groups
+   * am I syncing, into which projects, and which one pushes?" A per-project
+   * listing can never answer it, because the siblings are in OTHER projects by
+   * construction.
+   *
+   * The NAMED row is always in the result, even retired: `listConnectionsByIdentity`
+   * deliberately skips disconnected rows (a rotation must not re-arm one), but a
+   * user who navigated to this connection is owed its own card back. It leads the
+   * list in that case; otherwise the store's own oldest-first order stands.
+   *
+   * A row whose `workspace_id` was never recorded has no identity to fan out on
+   * (see {@link connectionMatchesIdentity}: an identity we never learned cannot be
+   * claimed BY identity), so it is a mapping set of exactly itself.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id. A DISCONNECTED
+   *   one is allowed through — it is a real row with a real mapping set.
+   */
+  async mappings(connectionId: string): Promise<TrackerConnectionSummary[]> {
+    const row = getConnection(this.db, connectionId);
+    if (row === null) throw new TrackerConnectionNotFoundError(connectionId);
+    if (row.workspace_id === null) return [this.summarizeConnection(row)];
+
+    const siblings = listConnectionsByIdentity(
+      this.db,
+      row.provider,
+      row.workspace_id,
+      row.base_url,
+    ).map((sibling) => this.summarizeConnection(sibling));
+    return row.status === 'disconnected'
+      ? [this.summarizeConnection(row), ...siblings]
+      : siblings;
+  }
+
+  /**
+   * ARM this mapping as its (project, provider) pair's one push target, demoting
+   * whichever sibling held it.
+   *
+   * The management view's edit for the choice the wizard's Map step makes once
+   * and then has no way to revisit: which of N mappings into one project files a
+   * locally-created idea as a new tracker issue. Enforced through the same
+   * {@link claimPushTarget} statement connect uses, so the "at most one pusher
+   * per (project, provider)" invariant has exactly one implementation — an
+   * `updateSettings`-style per-row write could leave two armed rows, and one new
+   * idea would file two remote issues.
+   *
+   * A DISCONNECTED row is refused: it has no key and syncs nothing, so arming it
+   * would leave the project with no live pusher at all.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown or retired connection id.
+   */
+  async setPushTarget(connectionId: string): Promise<void> {
+    const row = getConnection(this.db, connectionId);
+    if (row === null || row.status === 'disconnected') {
+      throw new TrackerConnectionNotFoundError(connectionId);
+    }
+    claimPushTarget(this.db, row.project_id, row.provider, row.id);
+    this.emitTrackerChange(row.project_id, row.id, 'connection');
+  }
+
   /** Project one connection row onto its renderer-visible summary (never the key). */
   private summarizeConnection(row: TrackerConnectionRow): TrackerConnectionSummary {
     return {
@@ -1664,6 +1822,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       actorLabel: row.actor_label ?? '',
       baseUrl: row.base_url,
       sourceLabel: readSourceLabel(row),
+      sourceScope: readSourceScope(row),
       selectionMode: row.selection_mode,
       statusSyncMode: row.status_sync_mode,
       pullMode: row.pull_mode,
@@ -2610,6 +2769,33 @@ function readSourceLabel(connection: TrackerConnectionRow): string {
   if (typeof parsed.narrowId === 'string' && parsed.narrowId.length > 0) return parsed.narrowId;
   if (typeof parsed.containerId === 'string') return parsed.containerId;
   return '';
+}
+
+/** The narrow kinds the wire type admits, as a runtime set. */
+const NARROW_KINDS: readonly TrackerNarrowKind[] = [
+  'all',
+  'project',
+  'view',
+  'cycle',
+  'module',
+  'space',
+];
+
+/**
+ * The connected view's source SCOPE, read back off `source_json` — the mapping
+ * identity the management view groups and de-duplicates rows by, where
+ * {@link readSourceLabel} is only what it prints.
+ *
+ * `storedSourceScope` types `narrowKind` as a bare string on purpose (it is
+ * parsing an arbitrary persisted blob), so an unrecognized value is normalized
+ * to 'all' rather than cast: 'all' is the same fallback parseSourceSelection
+ * applies, and a scope that lies about its kind would be worse than a wide one.
+ */
+function readSourceScope(row: TrackerConnectionRow): TrackerConnectionSummary['sourceScope'] {
+  const scope = storedSourceScope(row);
+  if (scope === null) return null;
+  const narrowKind = NARROW_KINDS.find((kind) => kind === scope.narrowKind) ?? 'all';
+  return { containerId: scope.containerId, narrowId: scope.narrowId, narrowKind };
 }
 
 /** An entity's display identity + body, for conflict rows and description merges. */

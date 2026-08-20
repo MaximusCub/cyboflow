@@ -24,6 +24,20 @@ export interface TrackerCredentialsInput {
   workspaceSlug?: string;
 }
 
+/**
+ * Wizard probe credential source: exactly one of the two keys.
+ *
+ * `credentials` is the pasted-key path every pre-mapping-management wizard run
+ * takes. `connectionId` is the MANAGEMENT path — "add another mapping to this
+ * connection" — where the key already lives encrypted beside the connection and
+ * asking the user to paste it again would be a worse question than not asking:
+ * main resolves it from the named row, so nothing key-shaped crosses IPC at all.
+ */
+export interface TrackerWizardSourceInput {
+  credentials?: TrackerCredentialsInput;
+  connectionId?: string;
+}
+
 /** Result of a successful credential validation ("Authorized as …" card). */
 export interface TrackerWorkspaceIdentity {
   workspaceId: string;
@@ -277,6 +291,8 @@ export interface TrackerConnectionSummary {
   baseUrl: string | null;
   /** Human label for the wizard's Step-1 choice, e.g. "Core · Cycle 12". */
   sourceLabel: string;
+  /** The mapping's source scope (parsed from source_json); null on legacy rows with no recorded scope. */
+  sourceScope: { containerId: string; narrowId: string; narrowKind: TrackerNarrowKind } | null;
   selectionMode: TrackerSelectionMode;
   statusSyncMode: TrackerDirectionMode;
   pullMode: TrackerDirectionMode;
@@ -358,7 +374,12 @@ export interface TrackerSelectionJson {
 /** Everything the wizard's final Review step hands to `connect`. */
 export interface TrackerConnectPayload {
   projectId: number;
-  credentials: TrackerCredentialsInput;
+  credentials?: TrackerCredentialsInput;
+  /**
+   * Reuse an existing live connection's stored key + identity instead of pasting
+   * one. Exactly one of credentials / sourceConnectionId must be set.
+   */
+  sourceConnectionId?: string;
   source: TrackerSourceSelection;
   sourceLabel: string;
   selectionMode: TrackerSelectionMode;

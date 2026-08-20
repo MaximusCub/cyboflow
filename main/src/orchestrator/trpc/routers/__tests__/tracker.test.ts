@@ -31,6 +31,7 @@ import type {
   TrackerSourceTree,
   TrackerState,
   TrackerSyncPassSummary,
+  TrackerWizardSourceInput,
   TrackerWorkspaceIdentity,
 } from '../../../../../../shared/types/trackerSync';
 import type { TrackerSyncFacade } from '../../../trackerSyncBridge';
@@ -53,7 +54,7 @@ class UnusedFacade implements TrackerSyncFacade {
   wizardValidate(_c: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
     throw new Error('not used');
   }
-  wizardGroups(_c: TrackerCredentialsInput): Promise<TrackerGroupTree> {
+  wizardGroups(_s: TrackerWizardSourceInput): Promise<TrackerGroupTree> {
     throw new Error('not used');
   }
   wizardContainers(_c: TrackerCredentialsInput): Promise<TrackerSourceTree> {
@@ -63,13 +64,13 @@ class UnusedFacade implements TrackerSyncFacade {
     throw new Error('not used');
   }
   wizardStates(
-    _c: TrackerCredentialsInput,
+    _src: TrackerWizardSourceInput,
     _s: TrackerSourceSelection,
   ): Promise<TrackerState[]> {
     throw new Error('not used');
   }
   wizardIssues(
-    _c: TrackerCredentialsInput,
+    _src: TrackerWizardSourceInput,
     _s: TrackerSourceSelection,
   ): Promise<TrackerIssue[]> {
     throw new Error('not used');
@@ -84,6 +85,12 @@ class UnusedFacade implements TrackerSyncFacade {
     throw new Error('not used');
   }
   connections(_p: number): Promise<TrackerConnectionSummary[]> {
+    throw new Error('not used');
+  }
+  mappings(_id: string): Promise<TrackerConnectionSummary[]> {
+    throw new Error('not used');
+  }
+  setPushTarget(_id: string): Promise<void> {
     throw new Error('not used');
   }
   updateSettings(_id: string, _patch: TrackerSettingsPatch): Promise<void> {
