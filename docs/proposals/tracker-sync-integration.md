@@ -163,7 +163,83 @@ Where the build refined the design above — the spec stands, these are the delt
 - **Plane flags for the live smoke**: docs are mid-rename `/issues/` → `/work-items/` (adapter uses `/issues/`; one-line segment swap if a real instance disagrees); assignees need `expand=assignees`; the workspace slug is part of credentials.
 - **Local-delete flow (shipped, staged-ruling design)**: archiving/deleting a linked entity from the board's card menu interposes a two-choice dialog — "Keep in <provider>" or "Cancel in <provider>" — that only STAGES the ruling (10-minute in-memory TTL, mutates nothing). The real delete/archive event consumes it server-side: cascade members inherit the root's ruling (cancel enqueues before each orphan), an inbound-applied archive never stages so provider actors can't trigger it, and a zombie sweep orphans any link whose entity vanished without an event. Backing out of the final confirm leaves everything untouched. The cancel choice enqueues like any other write — a direct per-issue instruction recorded as durable intent, drained under the status direction's mode. Known residual: an unlinked epic with linked mirrored children cleans their links on cascade but offers no cancel/keep prompt for them.
 
+## Multi-project mapping (rev 4, 2026-08-20)
+
+Replaces the wizard's single "target cyboflow project" pick (old Step 1) and single source
+pick (old Step 2) with one **Map** step: the tracker's project-level groupings map N:1 onto
+cyboflow projects, so one connect flow routes issues into several cyboflow projects. The
+grouping unit per provider (Krishna's ruling): **Linear → projects** (plus whole teams as a
+fallback section, since many Linear workspaces don't use projects), **Plane → projects**,
+**Dart → spaces**.
+
+### Shape: N sibling connection rows, not a join table
+
+A mapping is persisted as **one `tracker_connections` row per (tracker group → cyboflow
+project) pair**, minted by the wizard in one pass, all sharing the same credentials (each row
+stores its own safeStorage blob). This was chosen over a `tracker_project_mappings` join table
+because every durability seam — the compound crash-safe cursor, outbox scoping and ambiguous
+recovery, StateCache, the deletion sweep's remote-id set, the zombie-link sweep (which cannot
+read a project off a deleted entity), echo suppression, and revival identity — keys off one
+connection row = one (project, source) pair. N rows preserve all of those invariants per
+mapping for free, give per-group state mappings (Linear states are per-team, Plane per-project),
+and require **zero data migration for existing connections** — they already ARE the new model
+with one mapping.
+
+### Groups (adapter seam)
+
+New `TrackerAdapter.listGroups(): Promise<TrackerGroupTree>` — sections of
+`TrackerGroup { id, name, key, sourceLabel, selection, stateScopeKey, pushContainerId? }`.
+The group carries its READY-MADE `TrackerSourceSelection`, so the engine consumes it with no
+new scope concepts except Dart's:
+
+- **Linear**: "Projects" section from a new root `projects` query with `teams` — one group per
+  (project × team) pair when a project spans teams (selection `{containerId: teamId,
+  narrowId: projectId, narrowKind: 'project'}` — the existing team+project filter, so no
+  engine change and no cross-team state ambiguity); "Whole teams" section (`narrowKind: 'all'`).
+  `stateScopeKey` = team id. Issues in no project only import via a team group.
+- **Plane**: one group per project (existing container), `stateScopeKey` = project id.
+- **Dart**: spaces derived from the `/config` dartboard-title prefix before the first `/`
+  (`"Engineering/Sprint"` → space `Engineering`); a title with no `/` becomes its own
+  single-board group with the plain dartboard selection. Space groups use the new
+  `narrowKind: 'space'`: the adapter resolves member boards from `/config` at call time and
+  unions per-board fetches (list/ids/recovery); `assertContainerExists` becomes "space still
+  has ≥1 board". Creates need a concrete board, so the group carries `pushContainerId`
+  (default: the space's first board), persisted inside `source_json` and threaded through
+  `TrackerSourceSelection.pushContainerId?`. NOTE: the `/`-prefix convention is observed, not
+  documented by Dart — degrades gracefully to per-board groups.
+
+### Engine deltas (small, additive)
+
+- `tracker_connections.push_target INTEGER NOT NULL DEFAULT 1` (migration; ALTER ADD COLUMN,
+  replay-safe). When several mappings target the same cyboflow project, exactly one row per
+  provider has it set; `handleIdeaPush` skips rows with `push_target = 0` — otherwise a new
+  idea would enqueue one `create_issue` per sibling row and duplicate remotely.
+- **Cross-row duplicate-import guard**: before `importIssueAsIdea`, skip (with a log line) any
+  issue whose `external_id` is already linked by another connection with the same
+  (provider, workspace_id, base_url) — covers overlapping scopes (a Linear team group + a
+  project group under it) and issues moved between mapped groups remotely.
+- **Revival identity gains the source**: `findDisconnectedConnection` also matches
+  `source_json.containerId`, so reviving one mapping can't grab a sibling's row.
+- **`updateCredentials` fans out** to every row sharing (provider, workspace_id, base_url)
+  after the identity probe passes — one paste resumes all mappings.
+- **`connect()` idempotency**: an active row matching (project, provider, workspace, source
+  containerId) makes `connect` a no-op returning the existing id, so re-submitting a partially
+  failed multi-mapping wizard never duplicates rows.
+
+### Wizard (Connect · Map · Tasks · States · Reconcile · Review)
+
+Map lists `wizardGroups` sections with a cyboflow-project select per group (default unmapped =
+don't import) and a push-target radio where N groups share a project. Tasks keeps the three
+selection modes chosen once, with issues fetched per mapping (`wizardIssues` per selection) and
+manual picks grouped by mapping. States renders one table per distinct `stateScopeKey`.
+Reconcile runs `reconcilePreview` per mapped cyboflow project; a link decision routes to the
+mapping whose issue set contains it. Review calls the existing `connect` once per mapping,
+sequentially, with per-mapping progress and retry (safe via connect idempotency). Narrow
+filters (Linear views/cycles, Plane cycles/modules) are not offered by the Map step; existing
+narrowed connections keep working untouched.
+
 ## V2 (explicitly out of v1 scope)
 
 - **Smart import**: an agent classifies incoming issues (idea vs. task, nesting, epic assignment) instead of ideas-by-default.
 - OAuth flows (hosted token exchange), further providers (Jira, GitHub — Dart has since landed), assignee/estimate/priority mapping (v1 imports them as display metadata only), configurable cadence, real-time webhooks.
+- Multi-project mapping follow-ups: an "Add mapping" flow on an existing connection group (today: run Connect again), grouping sibling rows into one card in the catalog, per-mapping direction modes, a Linear "no project" pseudo-group.
