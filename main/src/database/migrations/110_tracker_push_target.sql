@@ -1,10 +1,10 @@
--- Migration 109: tracker_connections.push_target — which mapping row may CREATE
+-- Migration 110: tracker_connections.push_target — which mapping row may CREATE
 -- new tracker issues.
 --
--- Numbering: 107/108 are left alone because an in-flight worktree (bright-sparrow,
--- the verification-runbook bootstrap) has claimed them as a PAIR and has not
--- landed on this branch; 109 is the next free prefix, the same next-free-prefix
--- convention 093 and 105 record in their own headers.
+-- Numbering: originally minted as 109 while the verification-runbook bootstrap
+-- worktree still held 107/108 in flight; that work landed on main claiming
+-- 107-109, so this file was renumbered to 110 at rebase time — the same
+-- next-free-prefix convention 093 and 105 record in their own headers.
 --
 -- WHY THE COLUMN EXISTS. Multi-project mapping (docs/proposals/
 -- tracker-sync-integration.md → "Multi-project mapping (rev 4)") persists one

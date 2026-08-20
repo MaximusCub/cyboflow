@@ -98,8 +98,8 @@ describe('Migration 093: tracker-sync data model', () => {
       'status_sync_mode',
       'pull_mode',
       'push_mode',
-      // Appended by 109 (multi-project mapping's per-connection push flag),
-      // asserted for real in migration109.test.ts.
+      // Appended by 110 (multi-project mapping's per-connection push flag),
+      // asserted for real in migration110.test.ts.
       'push_target',
     ]);
 

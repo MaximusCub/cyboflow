@@ -1,9 +1,9 @@
 /**
- * Migration 109_tracker_push_target.sql — tracker_connections.push_target.
+ * Migration 110_tracker_push_target.sql — tracker_connections.push_target.
  *
  * Exercises the REAL upgrade path (mirrors migration104.test.ts's two-boot
  * pattern): a DB is migrated by a DatabaseService whose migrations dir omits
- * 109, a connection row is seeded in the pre-109 shape, and a second
+ * 110, a connection row is seeded in the pre-110 shape, and a second
  * DatabaseService pointed at the full dir boots on the same file — exactly what
  * happens when a user updates the app.
  *
@@ -28,13 +28,13 @@ import { join } from 'node:path';
 import { DatabaseService } from '../database';
 
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
-const MIGRATION_109 = '109_tracker_push_target.sql';
+const MIGRATION_110 = '110_tracker_push_target.sql';
 
 let tmpDir: string;
 let dbPath: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration109-'));
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration110-'));
   dbPath = join(tmpDir, 'test.db');
 });
 
@@ -42,12 +42,12 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 109 — i.e. the pre-109 app. */
-function migrationsDirWithout109(): string {
-  const dir = join(tmpDir, 'migrations-pre-109');
+/** A migrations dir holding every real migration except 110 — i.e. the pre-110 app. */
+function migrationsDirWithout110(): string {
+  const dir = join(tmpDir, 'migrations-pre-110');
   mkdirSync(dir);
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_109) continue;
+    if (name === MIGRATION_110) continue;
     if (!/^\d{3}_.*\.sql$/.test(name)) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
@@ -62,7 +62,7 @@ function openAt(migrationsDir: string): DatabaseService {
 }
 
 function seedProjectAndConnection(db: Database.Database, id: string): void {
-  db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p109')`).run();
+  db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p110')`).run();
   db.prepare(
     `INSERT INTO tracker_connections (id, project_id, provider) VALUES (?, 1, 'linear')`,
   ).run(id);
@@ -89,10 +89,10 @@ function wipeLedger(path: string): void {
   raw.close();
 }
 
-describe('Migration 109: tracker_connections.push_target', () => {
-  it('(a) adds the column and defaults every pre-109 connection to 1', () => {
-    const pre109 = migrationsDirWithout109();
-    const pre = openAt(pre109);
+describe('Migration 110: tracker_connections.push_target', () => {
+  it('(a) adds the column and defaults every pre-110 connection to 1', () => {
+    const pre110 = migrationsDirWithout110();
+    const pre = openAt(pre110);
     expect(columnNames(pre.getDb(), 'tracker_connections')).not.toContain('push_target');
     seedProjectAndConnection(pre.getDb(), 'conn-legacy');
     pre.close();
@@ -150,7 +150,7 @@ describe('Migration 109: tracker_connections.push_target', () => {
     expect(
       db
         .prepare(
-          "SELECT value FROM user_preferences WHERE key = 'file_migration_applied:109_tracker_push_target.sql'",
+          "SELECT value FROM user_preferences WHERE key = 'file_migration_applied:110_tracker_push_target.sql'",
         )
         .get(),
     ).toEqual({ value: 'true' });

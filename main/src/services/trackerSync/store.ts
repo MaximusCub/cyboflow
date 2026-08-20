@@ -127,7 +127,7 @@ export interface ConnectionSettingsPatch {
   status_sync_mode?: TrackerConnectionRow['status_sync_mode'];
   pull_mode?: TrackerConnectionRow['pull_mode'];
   push_mode?: TrackerConnectionRow['push_mode'];
-  /** 0 | 1 — see TrackerConnectionRow.push_target (migration 109). */
+  /** 0 | 1 — see TrackerConnectionRow.push_target (migration 110). */
   push_target?: number;
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];
@@ -453,9 +453,9 @@ export function claimPushTarget(
 /**
  * Every (project, provider) pair holding MORE THAN ONE armed push target among
  * its live rows — a state no connect() leaves behind, but one a ledger-wiped
- * migration replay can manufacture: 105's table recreate predates 109, so a
- * full replay drops push_target and 109 re-adds it at DEFAULT 1 on every row
- * (see 109's header). Boot reconciliation reads this and demotes all but the
+ * migration replay can manufacture: 105's table recreate predates 110, so a
+ * full replay drops push_target and 110 re-adds it at DEFAULT 1 on every row
+ * (see 110's header). Boot reconciliation reads this and demotes all but the
  * oldest row per pair.
  */
 export function listDuplicatePushTargets(
