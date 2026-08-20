@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { Event, Breadcrumb } from '@sentry/electron/main';
+import type { Event, Breadcrumb, StackFrame } from '@sentry/electron/main';
 import {
   scrubSentryEvent,
   scrubBreadcrumb,
@@ -45,6 +45,34 @@ describe('scrubSentryEvent', () => {
     // Windows-style separators also collapse to basename.
     expect(frames?.[1].filename).toBe('index.ts');
     expect(frames?.[1].abs_path).toBe('index.ts');
+  });
+
+  // Native minidump frames carry their path on `package` and leave
+  // filename/abs_path unset, so the basename rules for JS frames never saw
+  // them: real events shipped '/Users/<name>/.nvm/.../bin/node' to Sentry.
+  it('reduces native frame package paths to basenames', () => {
+    // The SDK's StackFrame type omits `package`; the event protocol defines it
+    // for native frames and that is what a minidump actually sends.
+    type FrameWithPackage = StackFrame & { package?: string };
+    const nativeFrames: FrameWithPackage[] = [
+      { package: '/Users/alice/.nvm/versions/node/v22.15.1/bin/node' },
+      { package: '/usr/lib/system/libdispatch.dylib' },
+      { package: '/Applications/Cyboflow.app/Contents/Resources/bin/peekaboo' },
+    ];
+    const event: Event = {
+      platform: 'native',
+      exception: {
+        values: [{ type: 'Error', stacktrace: { frames: nativeFrames } }],
+      },
+    };
+    const scrubbed = scrubSentryEvent(event)?.exception?.values?.[0]?.stacktrace
+      ?.frames as FrameWithPackage[] | undefined;
+    // The binary name survives — it is what identifies the crashing process
+    // and what server-side grouping rules match on.
+    expect(scrubbed?.[0].package).toBe('node');
+    expect(scrubbed?.[1].package).toBe('libdispatch.dylib');
+    expect(scrubbed?.[2].package).toBe('peekaboo');
+    expect(scrubbed?.[0].package).not.toContain('alice');
   });
 
   it('redacts absolute home paths in message and exception value', () => {

@@ -1,4 +1,4 @@
-import type { Event, Breadcrumb } from '@sentry/electron/main';
+import type { Event, Breadcrumb, StackFrame } from '@sentry/electron/main';
 
 /**
  * Privacy scrubbing for Sentry payloads.
@@ -8,7 +8,8 @@ import type { Event, Breadcrumb } from '@sentry/electron/main';
  * Sentry's `beforeSend` / `beforeBreadcrumb` hooks to strip:
  *   - server/host names
  *   - the `extra` and `user` bags (may carry prompts / PII)
- *   - directory components of stack-frame paths (basename only)
+ *   - directory components of stack-frame paths, JS (filename/abs_path) and
+ *     native (package) alike (basename only)
  *   - absolute home paths inside messages / exception values (-> '~/')
  *   - console breadcrumbs entirely (they contain code/prompts)
  *
@@ -113,6 +114,17 @@ export function tagCrashSource<T extends Event>(event: T): T {
   return event;
 }
 
+/**
+ * A stack frame as it actually arrives from a NATIVE minidump.
+ *
+ * The SDK's `StackFrame` models JS frames and omits `package`, but the Sentry
+ * event protocol defines it for native frames — it is the path to the owning
+ * binary or dylib, and on a minidump it is the ONLY path field set
+ * (filename/abs_path stay undefined). Observed live on CYBOFLOW-APP-J:
+ * `/Users/<name>/.nvm/versions/node/<ver>/bin/node`.
+ */
+type FrameWithPackage = StackFrame & { package?: string };
+
 /** Return the final path segment, splitting on both POSIX and Windows separators. */
 function basename(p: string): string {
   // Split on '/' or '\' and take the last non-empty segment.
@@ -180,6 +192,17 @@ export function scrubSentryEvent<T extends Event>(event: T): T | null {
           }
           if (typeof frame.abs_path === 'string') {
             frame.abs_path = basename(frame.abs_path);
+          }
+          // NATIVE frames carry their path on `package` (the owning binary or
+          // dylib) and leave filename/abs_path unset, so the two rules above
+          // never reach them — minidump frames were shipping absolute paths
+          // like '/Users/<name>/.nvm/.../bin/node' intact. Basename keeps the
+          // whole diagnostic value (the module name is what identifies the
+          // crashing binary, and what server-side grouping rules match on)
+          // while dropping the home directory and toolchain layout.
+          const nativeFrame = frame as FrameWithPackage;
+          if (typeof nativeFrame.package === 'string') {
+            nativeFrame.package = basename(nativeFrame.package);
           }
         }
       }
