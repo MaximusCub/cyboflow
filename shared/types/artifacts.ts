@@ -428,6 +428,40 @@ export function isPerEntityArtifact(atype: ArtifactType): boolean {
 }
 
 /**
+ * The `payload_json` a per-entity atype carries when a MULTI-IDEA batch collapsed
+ * its N per-idea tabs into ONE combined, run-scoped tab (idea-spec's "Idea specs
+ * · N ideas", idea-summary's "Idea summaries · N ideas").
+ *
+ * Such a row's `source_ref` is an IDENTITY ANCHOR ONLY — the batch's first owned
+ * idea, chosen so the (run_id, atype, source_ref) UPSERT adopts the row minted
+ * while the batch was still size 1 rather than orphaning it. It is NOT the data
+ * source: the renderer re-derives the whole batch from the run.
+ *
+ * Both ends live here so the writer (orchestrator auto-mint) and the reader
+ * (useArtifactData / ArtifactTabRenderer) can never disagree on the marker.
+ */
+export const COMBINED_BATCH_PAYLOAD_JSON = JSON.stringify({ combined: true });
+
+/**
+ * True when a `payload_json` carries the combined-batch marker above. Tolerant of
+ * null/empty/invalid JSON (a payload is per-atype and free-form), which all read
+ * as "not combined".
+ */
+export function isCombinedBatchArtifact(payloadJson: string | null | undefined): boolean {
+  if (!payloadJson) return false;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>)['combined'] === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The atypes an agent may report via `cyboflow_report_artifact` — DERIVED from
  * the `reportable` flag, in registry insertion order. The MCP tool's schema enum
  * and its CallTool `validAtypes` guard both read this ONE list, so a new

@@ -30,7 +30,10 @@ import { listApproveIdeasBatchRows, listRunOwnedOrBatchIdeaIds } from './runEnti
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
-import { extractArchDesignSection } from '../../../shared/types/artifacts';
+import {
+  COMBINED_BATCH_PAYLOAD_JSON,
+  extractArchDesignSection,
+} from '../../../shared/types/artifacts';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 import type {
   ApproveIdeasArtifactPayload,
@@ -453,7 +456,7 @@ async function mintIdeaSpecForOwnedIdeas(
     label: 'Idea specs · ' + pluralize(withContent, 'idea'),
     sourceRef: ideaIds[0],
     stepOrigin,
-    payloadJson: JSON.stringify({ combined: true }),
+    payloadJson: COMBINED_BATCH_PAYLOAD_JSON,
     isNew: true,
     actor: 'orchestrator',
   });
@@ -708,7 +711,7 @@ async function mintIdeaSummaryForOwnedIdeas(
     label: IDEA_SUMMARIES_LABEL + ' · ' + pluralize(rendered, 'idea'),
     sourceRef: ideaIds[0],
     stepOrigin,
-    payloadJson: JSON.stringify({ combined: true }),
+    payloadJson: COMBINED_BATCH_PAYLOAD_JSON,
     isNew: true,
     actor: 'orchestrator',
   });

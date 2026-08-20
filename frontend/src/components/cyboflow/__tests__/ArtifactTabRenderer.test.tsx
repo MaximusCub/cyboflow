@@ -2322,4 +2322,155 @@ describe('ArtifactTabRenderer', () => {
       expect.objectContaining({ atype: 'idea-spec', artifactId: 'art-spec' }),
     );
   });
+
+  // --- idea-summary, COMBINED multi-idea matrix --------------------------------
+
+  /** A second idea for the batch, with a DIFFERENT status in every column. */
+  const IDEA_B = makeIdea({ id: 'IDEA-019', ref: 'IDEA-019', title: 'Second idea', summary: null });
+
+  const COMBINED_ENTRIES = [
+    { idea: makeIdea(), components: IDEA_SUMMARY_COMPONENTS },
+    { idea: IDEA_B, components: [] },
+  ];
+
+  /** The COMBINED artifact — kind 'idea-summaries' is what routes the matrix. */
+  const combinedArtifact = (): Artifact =>
+    makeArtifact({
+      atype: 'idea-summary',
+      label: 'Idea summaries · 2 ideas',
+      payloadJson: JSON.stringify({ combined: true }),
+      sourceRef: 'IDEA-018',
+    });
+
+  it('renders ONE matrix row per idea in the batch, not one screen per idea', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-idea-summaries-doc')).toBeInTheDocument();
+    expect(screen.getByTestId('artifact-idea-summaries-row-IDEA-018')).toHaveTextContent('IDEA-018');
+    expect(screen.getByTestId('artifact-idea-summaries-row-IDEA-019')).toHaveTextContent('Second idea');
+    // The single-idea doc must NOT also render.
+    expect(screen.queryByTestId('artifact-idea-summary-doc')).not.toBeInTheDocument();
+  });
+
+  it('renders the header meta as the batch count, not the sourceRef anchor', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    // The anchor is idea #1's id; showing it would read as a single-idea tab.
+    expect(screen.getByTestId('artifact-meta')).toHaveTextContent('2 ideas');
+    expect(screen.getByTestId('artifact-meta')).not.toHaveTextContent('IDEA-018');
+  });
+
+  it('carries each status by SHAPE as well as color, and names all four in the legend', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    const cell = (ideaId: string, key: string): HTMLElement =>
+      screen.getByTestId(`artifact-idea-summaries-cell-${ideaId}-${key}`);
+
+    // Same four-way ladder the single-idea chips show, one glyph per state.
+    expect(cell('IDEA-018', 'idea-spec')).toHaveTextContent('✓');
+    expect(cell('IDEA-018', 'idea-spec')).toHaveAttribute('aria-label', 'Idea spec: Complete');
+    expect(cell('IDEA-018', 'prototype')).toHaveTextContent('⟳');
+    expect(cell('IDEA-018', 'prototype')).toHaveAttribute('aria-label', 'Prototype: Needs review');
+    expect(cell('IDEA-018', 'architecture')).toHaveTextContent('·');
+    expect(cell('IDEA-018', 'epics')).toHaveTextContent('–');
+    expect(cell('IDEA-018', 'epics')).toHaveAttribute('aria-label', 'Epics: Skipped');
+    // No ledger row at all -> the same "Not started" fallback as the chips.
+    expect(cell('IDEA-018', 'stories')).toHaveAttribute('aria-label', 'Stories: Not started');
+    // An idea with an EMPTY ledger reads as five "not started" cells, not a gap.
+    expect(cell('IDEA-019', 'idea-spec')).toHaveTextContent('·');
+
+    for (const label of ['complete', 'needs review', 'not started', 'skipped']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('hides each row\'s deliverables until the row is expanded', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    const specArt = makeArtifact({ id: 'art-spec', atype: 'idea-spec', sourceRef: 'IDEA-018', label: 'Spec' });
+    setRunArtifacts({ artifacts: [specArt], loaded: true });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    const row = screen.getByTestId('artifact-idea-summaries-row-IDEA-018');
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('artifact-idea-summaries-detail-IDEA-018')).not.toBeInTheDocument();
+
+    fireEvent.click(row);
+
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('artifact-idea-summaries-detail-IDEA-018')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('artifact-idea-summaries-link-IDEA-018-idea-spec'),
+    ).toHaveTextContent('open →');
+    expect(
+      screen.getByTestId('artifact-idea-summaries-link-IDEA-018-prototype'),
+    ).toHaveTextContent('not yet');
+    // Expansion is PER ROW — opening one must not open its sibling.
+    expect(screen.queryByTestId('artifact-idea-summaries-detail-IDEA-019')).not.toBeInTheDocument();
+
+    fireEvent.click(row);
+    expect(screen.queryByTestId('artifact-idea-summaries-detail-IDEA-018')).not.toBeInTheDocument();
+  });
+
+  it('points EVERY idea at the COMBINED idea-spec tab, not just the anchor idea', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    // The batch's ONE idea-spec artifact, anchored on idea #1. A per-idea
+    // sourceRef lookup would report "not yet" for IDEA-019 — a dead link on the
+    // very tab whose job is to cover the whole batch.
+    const combinedSpec = makeArtifact({
+      id: 'art-specs',
+      atype: 'idea-spec',
+      sourceRef: 'IDEA-018',
+      label: 'Idea specs · 2 ideas',
+      payloadJson: JSON.stringify({ combined: true }),
+      committed: false,
+    });
+    setRunArtifacts({ artifacts: [combinedSpec], loaded: true });
+    const spy = vi.spyOn(useCenterPaneStore.getState(), 'openArtifactTab');
+
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+    fireEvent.click(screen.getByTestId('artifact-idea-summaries-row-IDEA-019'));
+
+    const link = screen.getByTestId('artifact-idea-summaries-link-IDEA-019-idea-spec');
+    expect(link).toHaveTextContent('open →');
+    expect(link).not.toBeDisabled();
+
+    fireEvent.click(link);
+    expect(spy).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ atype: 'idea-spec', artifactId: 'art-specs' }),
+    );
+  });
+
+  it('keeps arch-design per-idea: the anchor\'s section does not leak to its sibling', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: COMBINED_ENTRIES } });
+    const archArt = makeArtifact({
+      id: 'art-arch',
+      atype: 'arch-design',
+      sourceRef: 'IDEA-018',
+      label: 'Architecture design',
+    });
+    setRunArtifacts({ artifacts: [archArt], loaded: true });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    fireEvent.click(screen.getByTestId('artifact-idea-summaries-row-IDEA-018'));
+    fireEvent.click(screen.getByTestId('artifact-idea-summaries-row-IDEA-019'));
+
+    expect(
+      screen.getByTestId('artifact-idea-summaries-link-IDEA-018-architecture'),
+    ).toHaveTextContent('open →');
+    expect(
+      screen.getByTestId('artifact-idea-summaries-link-IDEA-019-architecture'),
+    ).toHaveTextContent('not yet');
+  });
+
+  it('shows the empty state when the batch resolves to no ideas', () => {
+    setHook({ loading: false, error: null, data: { kind: 'idea-summaries', entries: [] } });
+    render(<ArtifactTabRenderer artifact={combinedArtifact()} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-idea-summary-empty')).toHaveTextContent('No idea to summarize.');
+    expect(screen.queryByTestId('artifact-idea-summaries-doc')).not.toBeInTheDocument();
+  });
 });

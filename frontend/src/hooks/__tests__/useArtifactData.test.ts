@@ -25,7 +25,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem, TaskChangedEvent } from '../../../../shared/types/tasks';
-import type { IdeaComponentChangedEvent, IdeaComponentState } from '../../../../shared/types/ideaComponents';
+import type {
+  IdeaComponentChangedEvent,
+  IdeaComponentState,
+  IdeaComponentsForIdea,
+} from '../../../../shared/types/ideaComponents';
 
 const getQuerySpy = vi.fn();
 const runDecompositionQuerySpy = vi.fn();
@@ -37,6 +41,7 @@ let taskChangedHandler: ((event: TaskChangedEvent) => void) | null = null;
 // idea-summary's second fetch (the ledger's merged hybrid view) + its own live
 // channel — separate spies/handler from the task ones above.
 const ideaComponentsGetQuerySpy = vi.fn();
+const ideaComponentsGetManyQuerySpy = vi.fn();
 const componentsUnsubscribeSpy = vi.fn();
 let componentsChangedHandler: ((event: IdeaComponentChangedEvent) => void) | null = null;
 
@@ -61,6 +66,10 @@ vi.mock('../../trpc/client', () => ({
         get: {
           query: (...args: unknown[]) => ideaComponentsGetQuerySpy(...args) as Promise<IdeaComponentState[]>,
         },
+        getMany: {
+          query: (...args: unknown[]) =>
+            ideaComponentsGetManyQuerySpy(...args) as Promise<IdeaComponentsForIdea[]>,
+        },
         onComponentsChanged: {
           subscribe: (_input: unknown, handlers: { onData: (e: IdeaComponentChangedEvent) => void }) => {
             componentsChangedHandler = handlers.onData;
@@ -74,7 +83,20 @@ vi.mock('../../trpc/client', () => ({
 
 import { useArtifactData } from '../useArtifactData';
 
-const IDEA = { id: 'idea-1', title: 'Idea', body: '## Architecture design\n\nx' } as unknown as BacklogTaskItem;
+const IDEA = {
+  id: 'idea-1',
+  title: 'Idea',
+  body: '## Architecture design\n\nx',
+  archived_at: null,
+} as unknown as BacklogTaskItem;
+
+/** A second owned idea, for the COMBINED multi-idea batch path. */
+const IDEA_B = {
+  id: 'idea-2',
+  title: 'Second idea',
+  body: null,
+  archived_at: null,
+} as unknown as BacklogTaskItem;
 
 function makeArtifact(overrides: Partial<Artifact>): Artifact {
   return {
@@ -95,6 +117,25 @@ function makeArtifact(overrides: Partial<Artifact>): Artifact {
     ...overrides,
   };
 }
+
+/** The COMBINED multi-idea idea-summary artifact — payload marks the batch. */
+const COMBINED_SUMMARY: Artifact = {
+  id: 'art-sum',
+  runId: 'run-1',
+  sessionId: null,
+  atype: 'idea-summary',
+  label: 'Idea summaries · 2 ideas',
+  stepOrigin: null,
+  mode: 'template',
+  committed: false,
+  sessionOnly: true,
+  isNew: false,
+  payloadJson: JSON.stringify({ combined: true }),
+  // An identity ANCHOR (the batch's first idea), never the data source.
+  sourceRef: 'idea-1',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  committedAt: null,
+};
 
 /** A minimal TaskChangedEvent for the live-refresh tests. */
 function taskEvent(task: Partial<BacklogTaskItem>): TaskChangedEvent {
@@ -126,6 +167,9 @@ beforeEach(() => {
   unsubscribeSpy.mockReset();
   taskChangedHandler = null;
   ideaComponentsGetQuerySpy.mockReset().mockResolvedValue(COMPONENTS);
+  ideaComponentsGetManyQuerySpy
+    .mockReset()
+    .mockResolvedValue([{ ideaId: 'idea-1', states: COMPONENTS }]);
   componentsUnsubscribeSpy.mockReset();
   componentsChangedHandler = null;
 });
@@ -253,6 +297,72 @@ describe('useArtifactData', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toBe('Source entity not found.');
     expect(result.current.data).toBeNull();
+  });
+
+  // --- idea-summary, COMBINED multi-idea batch --------------------------
+
+  it("routes a COMBINED 'idea-summary' through runDecomposition + getMany, yielding kind 'idea-summaries'", async () => {
+    runDecompositionQuerySpy.mockResolvedValue([IDEA, IDEA_B]);
+    ideaComponentsGetManyQuerySpy.mockResolvedValue([
+      { ideaId: 'idea-1', states: COMPONENTS },
+      { ideaId: 'idea-2', states: [] },
+    ]);
+    const { result } = renderHook(() => useArtifactData(COMBINED_SUMMARY, null));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // RUN-scoped: keyed by runId, NOT the sourceRef identity anchor.
+    expect(runDecompositionQuerySpy).toHaveBeenCalledWith({ runId: 'run-1' });
+    expect(ideaComponentsGetManyQuerySpy).toHaveBeenCalledWith({ ideaIds: ['idea-1', 'idea-2'] });
+    // The per-idea reads must NOT fire on this path.
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(ideaComponentsGetQuerySpy).not.toHaveBeenCalled();
+    expect(result.current.data).toEqual({
+      kind: 'idea-summaries',
+      entries: [
+        { idea: IDEA, components: COMPONENTS },
+        { idea: IDEA_B, components: [] },
+      ],
+    });
+  });
+
+  it("drops ARCHIVED ideas BEFORE the getMany call, so ideas and ledgers stay aligned", async () => {
+    const archived = { ...IDEA_B, archived_at: '2026-01-02T00:00:00.000Z' } as BacklogTaskItem;
+    runDecompositionQuerySpy.mockResolvedValue([archived, IDEA]);
+    ideaComponentsGetManyQuerySpy.mockResolvedValue([{ ideaId: 'idea-1', states: COMPONENTS }]);
+    const { result } = renderHook(() => useArtifactData(COMBINED_SUMMARY, null));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // Filtering AFTER the call would have zipped idea-1 against the ARCHIVED
+    // idea's ledger row — the silent misalignment the ordering guards against.
+    expect(ideaComponentsGetManyQuerySpy).toHaveBeenCalledWith({ ideaIds: ['idea-1'] });
+    expect(result.current.data).toEqual({
+      kind: 'idea-summaries',
+      entries: [{ idea: IDEA, components: COMPONENTS }],
+    });
+  });
+
+  it('resolves a COMBINED tab whose run owns no idea to an empty entry list, not an error', async () => {
+    runDecompositionQuerySpy.mockResolvedValue([]);
+    const { result } = renderHook(() => useArtifactData(COMBINED_SUMMARY, null));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(ideaComponentsGetManyQuerySpy).not.toHaveBeenCalled();
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({ kind: 'idea-summaries', entries: [] });
+  });
+
+  it('a COMBINED tab does NOT require sourceRef (its anchor is not the data source)', async () => {
+    runDecompositionQuerySpy.mockResolvedValue([IDEA]);
+    const { result } = renderHook(() =>
+      useArtifactData({ ...COMBINED_SUMMARY, sourceRef: null }, null),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({
+      kind: 'idea-summaries',
+      entries: [{ idea: IDEA, components: COMPONENTS }],
+    });
   });
 
   it("resolves canvas atypes synchronously from payload_json (no fetch)", () => {
@@ -564,6 +674,47 @@ describe('useArtifactData', () => {
 
     expect(ideaComponentsGetQuerySpy).toHaveBeenCalledTimes(1);
     expect(getQuerySpy).toHaveBeenCalledTimes(1);
+  });
+
+  // --- COMBINED idea-summary live refresh --------------------------------
+
+  it('live-refreshes the COMBINED tab on ANY task change (the run\'s idea set can move)', async () => {
+    runDecompositionQuerySpy.mockResolvedValue([IDEA]);
+    const { result } = renderHook(() => useArtifactData(COMBINED_SUMMARY, 7));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(runDecompositionQuerySpy).toHaveBeenCalledTimes(1);
+
+    // An UNRELATED idea — the single-idea path filters this out, the combined
+    // path must not: a new idea joining the run arrives exactly like this.
+    act(() => {
+      taskChangedHandler?.(taskEvent({ id: 'some-other-idea' }));
+    });
+
+    await waitFor(() => expect(runDecompositionQuerySpy).toHaveBeenCalledTimes(2));
+  });
+
+  it('live-refreshes the COMBINED tab on a ledger change to ANY idea', async () => {
+    runDecompositionQuerySpy.mockResolvedValue([IDEA, IDEA_B]);
+    const { result } = renderHook(() => useArtifactData(COMBINED_SUMMARY, 7));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(ideaComponentsGetManyQuerySpy).toHaveBeenCalledTimes(1);
+
+    // idea-2 is in the batch but is NOT the tab's sourceRef anchor; the
+    // single-idea path would ignore this event, the combined path must not.
+    act(() => {
+      componentsChangedHandler?.({ projectId: 7, ideaId: 'idea-2', states: COMPONENTS });
+    });
+
+    await waitFor(() => expect(ideaComponentsGetManyQuerySpy).toHaveBeenCalledTimes(2));
+  });
+
+  it('tears down BOTH COMBINED subscriptions on unmount', async () => {
+    runDecompositionQuerySpy.mockResolvedValue([IDEA]);
+    const { result, unmount } = renderHook(() => useArtifactData(COMBINED_SUMMARY, 7));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    unmount();
+    expect(unsubscribeSpy).toHaveBeenCalled();
+    expect(componentsUnsubscribeSpy).toHaveBeenCalled();
   });
 
   it("tears down BOTH idea-summary subscriptions on unmount", async () => {
