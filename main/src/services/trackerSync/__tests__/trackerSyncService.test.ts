@@ -67,6 +67,7 @@ import type {
   TrackerIssue,
   TrackerSourceNarrow,
   TrackerSourceSelection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
   TrackerWorkspaceIdentity,
@@ -155,6 +156,9 @@ class FakeAdapter implements TrackerAdapter {
     this.calls.push('validateCredentials');
     return { workspaceId: 'ws-1', workspaceName: 'Acme', actorLabel: 'K.' };
   }
+  async listGroups(): Promise<TrackerGroupTree> {
+    return { sections: [] };
+  }
   async listContainers(): Promise<TrackerSourceTree> {
     this.calls.push('listContainers');
     return { containerLabel: 'Team', containers: [] };
@@ -241,6 +245,9 @@ class PlaneLikeAdapter implements TrackerAdapter {
 
   async validateCredentials(): Promise<TrackerWorkspaceIdentity> {
     throw new Error('not used');
+  }
+  async listGroups(): Promise<TrackerGroupTree> {
+    return { sections: [] };
   }
   async listContainers(): Promise<TrackerSourceTree> {
     throw new Error('not used');
@@ -372,6 +379,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     status_sync_mode: 'auto',
     pull_mode: 'auto',
     push_mode: 'auto',
+    push_target: 1,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,

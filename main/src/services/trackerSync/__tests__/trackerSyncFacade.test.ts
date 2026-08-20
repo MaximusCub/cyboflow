@@ -23,8 +23,14 @@
  *     the same workspace slug on a DIFFERENT tracker instance mints a new
  *     connection, while the same instance spelled with a trailing slash (or left
  *     on the provider's default origin) revives the retired row.
- *   - connections(): the summary's counts, source label, mapping and
- *     defensively-parsed log.
+ *   - MULTI-PROJECT MAPPING: connect is an idempotent no-op for a mapping that
+ *     already exists (the Map step retries failed connects by re-submitting the
+ *     set), a different source container mints a SIBLING row instead, push_target
+ *     defaults to 1 and is written 0 for a non-pushing sibling — and
+ *     updateCredentials FANS OUT across every live row sharing the key, so one
+ *     paste resumes all the mappings without re-arming a retired one.
+ *   - connections(): the summary's counts, source label, mapping, push target
+ *     and defensively-parsed log.
  *   - resolveConflictChoice: all four branches (field remote / field local /
  *     remote_deleted remote / remote_deleted local), plus the description
  *     branch's provenance-footer preservation.
@@ -97,6 +103,7 @@ import type {
 import type {
   TrackerConnectPayload,
   TrackerCredentialsInput,
+  TrackerGroupTree,
   TrackerIssue,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -147,6 +154,24 @@ const STATES: TrackerState[] = [
 
 const SOURCE: TrackerSourceSelection = { containerId: 'team-1', narrowId: 'all', narrowKind: 'all' };
 
+const GROUPS: TrackerGroupTree = {
+  sections: [
+    {
+      label: 'Projects',
+      groups: [
+        {
+          id: 'team-1/proj-1',
+          name: 'Platform',
+          key: 'COR',
+          sourceLabel: 'Platform · Core',
+          selection: { containerId: 'team-1', narrowId: 'proj-1', narrowKind: 'project' },
+          stateScopeKey: 'team-1',
+        },
+      ],
+    },
+  ],
+};
+
 const CREDENTIALS: TrackerCredentialsInput = { provider: 'linear', apiKey: API_KEY };
 
 /** Fake adapter recording what the facade asked of it. */
@@ -167,6 +192,7 @@ class FakeAdapter implements TrackerAdapter {
   }> = [];
   states: TrackerState[] = STATES;
   issues: TrackerIssue[] = [];
+  groups: TrackerGroupTree = GROUPS;
   /** Scripted failure for validateCredentials (the auth-error path). */
   failValidate: Error | null = null;
   /** The workspace the live probe reports — the reconnect identity key. */
@@ -176,6 +202,10 @@ class FakeAdapter implements TrackerAdapter {
     this.calls.push('validateCredentials');
     if (this.failValidate !== null) throw this.failValidate;
     return { workspaceId: this.workspaceId, workspaceName: 'Acme', actorLabel: 'K. Esteva' };
+  }
+  async listGroups(): Promise<TrackerGroupTree> {
+    this.calls.push('listGroups');
+    return this.groups;
   }
   async listContainers(): Promise<TrackerSourceTree> {
     this.calls.push('listContainers');
@@ -312,6 +342,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     status_sync_mode: 'auto',
     pull_mode: 'auto',
     push_mode: 'auto',
+    push_target: 1,
     mirror_subissues: 1,
     conflict_mode: 'manual',
     cursor_updated_at: null,
@@ -453,6 +484,8 @@ describe('TrackerSyncService wizard probes', () => {
     });
     await expect(service.wizardNarrows(CREDENTIALS, 'team-1')).resolves.toHaveLength(1);
     await expect(service.wizardStates(CREDENTIALS, SOURCE)).resolves.toEqual(STATES);
+    // The Map step's groups, each carrying the selection a connect would persist.
+    await expect(service.wizardGroups(CREDENTIALS)).resolves.toEqual(GROUPS);
 
     adapter.issues = [makeIssue()];
     await expect(service.wizardIssues(CREDENTIALS, SOURCE)).resolves.toHaveLength(1);
@@ -461,6 +494,7 @@ describe('TrackerSyncService wizard probes', () => {
       'listContainers',
       'listNarrows:team-1',
       'listStates',
+      'listGroups',
       'listIssues',
     ]);
   });
@@ -805,6 +839,59 @@ describe('TrackerSyncService.connect', () => {
 // updateCredentials — rotating a key in place
 // ---------------------------------------------------------------------------
 
+describe('TrackerSyncService.connect — multi-project mapping', () => {
+  it('is an IDEMPOTENT no-op when this exact mapping is already connected', async () => {
+    // The Map step connects one mapping at a time and offers a retry, so a
+    // partially-failed submit re-runs the mappings that already succeeded.
+    const discardId = await createEntity('idea', { title: 'Discard me' });
+    const first = await service.connect(
+      connectPayload({
+        reconcile: [{ entityType: 'idea', entityId: discardId, action: 'discard' }],
+      }),
+    );
+    // Restoring it proves the second call does not re-apply the decisions.
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: discardId,
+      archived: false,
+    });
+
+    const again = await service.connect(
+      connectPayload({
+        reconcile: [{ entityType: 'idea', entityId: discardId, action: 'discard' }],
+      }),
+    );
+
+    expect(again.connectionId).toBe(first.connectionId);
+    const rows = raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number };
+    expect(rows.n).toBe(1);
+    expect(readIdea(discardId).archived_at).toBeNull();
+  });
+
+  it('mints a SIBLING row for a different source container in the same project', async () => {
+    const first = await service.connect(connectPayload());
+    const second = await service.connect(
+      connectPayload({
+        source: { containerId: 'team-2', narrowId: 'all', narrowKind: 'all' },
+        sourceLabel: 'Web · Whole team',
+        // Only one row per provider may push, or one filed idea becomes two
+        // tracker issues.
+        pushTarget: false,
+      }),
+    );
+
+    expect(second.connectionId).not.toBe(first.connectionId);
+    expect(getConnection(raw, first.connectionId)?.push_target).toBe(1);
+    expect(getConnection(raw, second.connectionId)?.push_target).toBe(0);
+  });
+
+  it('defaults push_target to 1 when the payload omits it (every pre-rev-4 connect)', async () => {
+    const { connectionId } = await service.connect(connectPayload());
+    expect(getConnection(raw, connectionId)?.push_target).toBe(1);
+  });
+});
+
 describe('TrackerSyncService.updateCredentials', () => {
   it('probes, stores encrypted, RESUMES a paused connection, and kicks a pass', async () => {
     // The reconnect path `connect` cannot serve: against a connection that is
@@ -874,6 +961,33 @@ describe('TrackerSyncService.updateCredentials', () => {
       name: 'TrackerConnectionNotFoundError',
     });
   });
+
+  it('FANS OUT to every sibling mapping sharing the key, and leaves a retired row alone', async () => {
+    // One wizard run mints N rows, each holding its own copy of the same key —
+    // so rotating only the named one leaves the rest paused on a dead key with
+    // no affordance but re-pasting it per mapping.
+    makeConnection({ status: 'paused' });
+    makeConnection({
+      id: 'conn-sibling',
+      status: 'paused',
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+    // Not a sibling: a DIFFERENT workspace on the same provider.
+    makeConnection({ id: 'conn-other-ws', status: 'paused', workspace_id: 'ws-2' });
+    // Not a sibling either: retired, and its secret was deliberately cleared.
+    makeConnection({ id: 'conn-retired', status: 'disconnected', secret_ciphertext: null });
+
+    await service.updateCredentials(CONN_ID, 'lin_rotated_key');
+
+    for (const id of [CONN_ID, 'conn-sibling']) {
+      expect(getConnection(raw, id)?.status).toBe('active');
+      expect((readSecret(raw, id) as Buffer).toString('utf-8')).toBe('lin_rotated_key');
+    }
+    expect(getConnection(raw, 'conn-other-ws')?.status).toBe('paused');
+    expect((readSecret(raw, 'conn-other-ws') as Buffer).toString('utf-8')).toBe(API_KEY);
+    expect(getConnection(raw, 'conn-retired')?.status).toBe('disconnected');
+    expect(readSecret(raw, 'conn-retired')).toBeNull();
+  });
 });
 
 describe('TrackerSyncService.connections', () => {
@@ -933,12 +1047,19 @@ describe('TrackerSyncService.connections', () => {
     expect(summary.pushMode).toBe('auto');
     expect(summary.mirrorSubissues).toBe(true);
     expect(summary.conflictMode).toBe('manual');
+    expect(summary.pushTarget).toBe(true);
     // The unknown mapping target is dropped, the valid one survives.
     expect(summary.stateMapping).toEqual({ 'state-backlog': 'idea' });
     expect(summary.lastSyncAt).toBe('2026-07-30 11:59:00');
     expect(summary.lastSyncLog).toEqual([{ marker: '✓', line: 'sync complete' }]);
     expect(summary.linkedCount).toBe(1);
     expect(summary.openConflictCount).toBe(1);
+  });
+
+  it('reports a non-pushing sibling mapping as pushTarget false', async () => {
+    makeConnection({ push_target: 0 });
+    const [summary] = await service.connections(PROJECT_ID);
+    expect(summary.pushTarget).toBe(false);
   });
 
   it('applies a settings patch key-by-key and broadcasts the change', async () => {

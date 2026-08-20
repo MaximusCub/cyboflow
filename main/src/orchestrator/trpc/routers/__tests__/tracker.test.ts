@@ -27,6 +27,7 @@ import type {
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
   TrackerSyncPassSummary,
@@ -50,6 +51,9 @@ const IDENTITY: TrackerWorkspaceIdentity = {
  */
 class UnusedFacade implements TrackerSyncFacade {
   wizardValidate(_c: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  wizardGroups(_c: TrackerCredentialsInput): Promise<TrackerGroupTree> {
     throw new Error('not used');
   }
   wizardContainers(_c: TrackerCredentialsInput): Promise<TrackerSourceTree> {

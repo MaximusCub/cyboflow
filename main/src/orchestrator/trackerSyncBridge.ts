@@ -25,6 +25,7 @@ import type {
   TrackerCredentialsInput,
   TrackerEntityLinkRef,
   TrackerEntityType,
+  TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
   TrackerSettingsPatch,
@@ -45,13 +46,15 @@ import type {
  * TrackerSyncService implements this directly (structurally AND nominally — it
  * declares `implements TrackerSyncFacade`).
  *
- * The five `wizard*` methods are STATELESS probes: they build a throwaway
+ * The six `wizard*` methods are STATELESS probes: they build a throwaway
  * provider client from the credentials in hand, persist nothing, and are the
  * only methods that run before a connection row exists.
  */
 export interface TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. Persists nothing. */
   wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity>;
+  /** The Map step's mappable tracker groups (Linear projects/teams, Plane projects, Dart spaces). */
+  wizardGroups(credentials: TrackerCredentialsInput): Promise<TrackerGroupTree>;
   /** Wizard Step 1, top level (Linear teams / Plane projects). */
   wizardContainers(credentials: TrackerCredentialsInput): Promise<TrackerSourceTree>;
   /** Wizard Step 1, second level for one container (always includes 'all'). */

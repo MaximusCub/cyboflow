@@ -2,8 +2,8 @@
  * cyboflow.tracker sub-router — the Settings > Integrations surface for the
  * Linear/Plane sync feature. Design: docs/proposals/tracker-sync-integration.md.
  *
- *   wizardValidate / wizardContainers / wizardNarrows / wizardStates /
- *   wizardIssues                  : mutations    -> stateless provider probes (persist nothing)
+ *   wizardValidate / wizardGroups / wizardContainers / wizardNarrows /
+ *   wizardStates / wizardIssues   : mutations    -> stateless provider probes (persist nothing)
  *   reconcilePreview              : mutation     -> TrackerReconcileItem[] (wizard Step 4)
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
  *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
@@ -49,6 +49,7 @@ import type {
   TrackerConflictSummary,
   TrackerConnectionSummary,
   TrackerEntityLinkRef,
+  TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
   TrackerSourceNarrow,
@@ -162,12 +163,14 @@ const credentialsSchema = z.object({
   workspaceSlug: z.string().min(1).optional(),
 });
 
-const narrowKindSchema = z.enum(['all', 'project', 'view', 'cycle', 'module']);
+const narrowKindSchema = z.enum(['all', 'project', 'view', 'cycle', 'module', 'space']);
 
 const sourceSelectionSchema = z.object({
   containerId: z.string().min(1),
   narrowId: z.string().min(1),
   narrowKind: narrowKindSchema,
+  /** Dart space groups only — the concrete dartboard a create is filed on. */
+  pushContainerId: z.string().min(1).optional(),
 });
 
 const mappingTargetSchema = z.enum(['dont', 'idea', 'ready', 'done', 'wontdo', 'indev']);
@@ -244,6 +247,22 @@ export const trackerRouter = router({
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().wizardValidate(input.credentials);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Map step — the mappable tracker groups (Linear projects × teams + whole
+   * teams, Plane projects, Dart spaces), each carrying its ready-made source
+   * selection. A mutation for the same reason its siblings are: it carries a key
+   * and makes a live call, so it must never be cached or re-fetched.
+   */
+  wizardGroups: protectedProcedure
+    .input(z.object({ credentials: credentialsSchema }))
+    .mutation(async ({ input }): Promise<TrackerGroupTree> => {
+      try {
+        return await getTrackerSyncFacade().wizardGroups(input.credentials);
       } catch (err) {
         rethrowAsTRPCError(err);
       }
@@ -340,6 +359,8 @@ export const trackerRouter = router({
         mirrorSubissues: z.boolean(),
         conflictMode: conflictModeSchema,
         reconcile: z.array(reconcileDecisionSchema),
+        /** Omitted = true; false on every sibling mapping but the pushing one. */
+        pushTarget: z.boolean().optional(),
       }),
     )
     .mutation(async ({ input }): Promise<{ connectionId: string }> => {

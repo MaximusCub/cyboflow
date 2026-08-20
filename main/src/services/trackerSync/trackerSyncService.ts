@@ -90,6 +90,7 @@ import type {
   TrackerDirectionMode,
   TrackerEntityLinkRef,
   TrackerEntityType,
+  TrackerGroupTree,
   TrackerIssue,
   TrackerProvider,
   TrackerReconcileItem,
@@ -133,6 +134,7 @@ import {
   insertConnection,
   listActiveLinksWithoutEntity,
   listConnections,
+  listConnectionsByIdentity,
   listLinks,
   listOpenConflicts,
   listUnresolvedOutbox,
@@ -142,6 +144,7 @@ import {
   requeueInFlightAsAmbiguous,
   resolveConflict,
   storeSecret,
+  storedSourceContainerId,
   supersedeQueuedStateWrites,
   updateBaseline,
   updateConnectionSettings,
@@ -1129,6 +1132,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       status_sync_mode: 'manual',
       pull_mode: 'manual',
       push_mode: 'manual',
+      push_target: 0,
       mirror_subissues: 0,
       conflict_mode: 'auto',
       cursor_updated_at: null,
@@ -1144,6 +1148,15 @@ export class TrackerSyncService implements TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. */
   async wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
     return this.adapterForCredentials(credentials).validateCredentials();
+  }
+
+  /**
+   * The Map step's groups — every tracker grouping that can be mapped onto a
+   * cyboflow project, each carrying the source selection a `connect` for it
+   * would persist.
+   */
+  async wizardGroups(credentials: TrackerCredentialsInput): Promise<TrackerGroupTree> {
+    return this.adapterForCredentials(credentials).listGroups();
   }
 
   /** Wizard Step 1, top level (Linear teams / Plane projects). */
@@ -1226,7 +1239,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * Persist a connection from the wizard's Review step and start syncing it.
    *
    * ORDER IS DELIBERATE:
-   *   1. Probe the key live, then encrypt it. The wizard validated it in Step 0,
+   *   0. Probe the key live, and if this exact mapping is ALREADY connected,
+   *      return its id and do nothing else — the multi-mapping wizard retries
+   *      failed connects by re-submitting the whole set (see below).
+   *   1. Then encrypt the key. The wizard validated it in Step 0,
    *      but the row's identity columns — and Plane's addressing slug — come
    *      from the LIVE identity, not from anything the renderer typed; and a
    *      safeStorage refusal must be known before anything is written.
@@ -1250,6 +1266,32 @@ export class TrackerSyncService implements TrackerSyncFacade {
    */
   async connect(payload: TrackerConnectPayload): Promise<{ connectionId: string }> {
     const identity = await this.adapterForCredentials(payload.credentials).validateCredentials();
+
+    // IDEMPOTENT RE-SUBMIT. The multi-mapping wizard calls connect once per
+    // mapping, sequentially, and offers a retry when one of them fails — so the
+    // retry re-runs the mappings that already SUCCEEDED. Without this, each
+    // re-run would mint a second row for the same (project, source) pair: two
+    // connections polling one scope, each importing the other's issues as new
+    // ideas, and each pushing its own copy back.
+    //
+    // The match is the mapping's full identity — project, provider, workspace,
+    // instance, source container — so it recognizes only a row this same submit
+    // would have created. Everything downstream is skipped, not re-run: the
+    // reconcile decisions were applied by the successful call and re-applying
+    // them would re-archive rows the user has since restored, and the first pass
+    // is already scheduled or done.
+    const existing = listConnectionsByIdentity(
+      this.db,
+      payload.credentials.provider,
+      identity.workspaceId,
+      payload.credentials.baseUrl ?? null,
+    ).find(
+      (row) =>
+        row.project_id === payload.projectId &&
+        storedSourceContainerId(row) === payload.source.containerId,
+    );
+    if (existing !== undefined) return { connectionId: existing.id };
+
     const cipher = encryptTrackerSecret(payload.credentials.apiKey);
 
     // The row the wizard just described, composed ONCE so the insert and the
@@ -1277,6 +1319,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       status_sync_mode: payload.statusSyncMode,
       pull_mode: payload.pullMode,
       push_mode: payload.pushMode,
+      // Omitted = the push target, which is what a single-mapping connect (every
+      // pre-rev-4 one) means. Only the Map step's sibling mappings send false.
+      push_target: payload.pushTarget === false ? 0 : 1,
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -1302,19 +1347,22 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // different workspace, a different INSTANCE of the same workspace slug, or
     // one whose identity was never recorded, still mints.
     //
-    // A different SOURCE (team/project/cycle) on the SAME workspace+instance is
+    // A different NARROW (cycle/module) under the same source container is
     // deliberately still a revival, because a narrowed scope cannot strand a
     // link: the cursor reset re-fetches the new scope from the beginning, and a
     // link whose issue now falls OUTSIDE it is protected by the deletion sweep's
     // selection-independent point lookup — absence from a scoped listing is
     // confirmed against getIssue before anything is archived, so out-of-scope
-    // reads as out-of-scope, not as deleted (see runDeletionSweep).
+    // reads as out-of-scope, not as deleted (see runDeletionSweep). A different
+    // CONTAINER is a different MAPPING under multi-project mapping and mints its
+    // own row, which is why the container joins the revival key.
     const revivable = findDisconnectedConnection(
       this.db,
       payload.projectId,
       payload.credentials.provider,
       identity.workspaceId,
       payload.credentials.baseUrl ?? null,
+      payload.source.containerId,
     );
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
     if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
@@ -1457,6 +1505,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      (outboxWorker.pauseConnection), which now replays in order.
    *   5. Kick a pass fire-and-forget, like connect, so the user sees it work.
    *
+   * Steps 3-5 run for EVERY live row sharing this key's (provider, workspace,
+   * instance) — the sibling mappings a multi-project connect minted — so one
+   * paste resumes all of them; see the fan-out note at the store call.
+   *
    * @throws {TrackerConnectionNotFoundError} unknown connection id.
    * @throws {TrackerIdentityMismatchError} the key authorizes another workspace.
    */
@@ -1478,22 +1530,44 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
 
     const cipher = encryptTrackerSecret(apiKey);
-    storeSecret(this.db, connectionId, cipher);
-    updateConnectionSettings(this.db, connectionId, {
-      status: 'active',
-      // The authorizing user can legitimately change with the key; the workspace
-      // cannot (step 2 just proved it).
-      workspace_name: identity.workspaceName,
-      actor_label: identity.actorLabel,
-    });
-    this.emitTrackerChange(connection.project_id, connectionId, 'connection');
-
-    void this.syncNow(connectionId).catch((err: unknown) => {
-      this.logger?.error('[trackerSync] sync after a credential rotation failed', {
-        connectionId,
-        error: describeError(err),
+    // FAN OUT ACROSS THE SIBLING MAPPINGS. Multi-project mapping mints one row
+    // per (tracker group -> cyboflow project) pair, each holding its OWN copy of
+    // the same encrypted key — so a rotation applied to the named row alone
+    // would leave every sibling paused on a key that no longer works, with the
+    // connected view offering no way to fix them but re-pasting the key once per
+    // mapping. The identity probe above already proved this key for the shared
+    // (provider, workspace, instance); each row gets exactly the treatment the
+    // single-row path always gave it.
+    //
+    // The NAMED row leads the list unconditionally, rather than being taken from
+    // the lookup: `listConnectionsByIdentity` skips disconnected rows (a
+    // rotation must not silently re-arm a connection someone retired), and the
+    // caller named this one explicitly.
+    const siblings = listConnectionsByIdentity(
+      this.db,
+      connection.provider,
+      identity.workspaceId,
+      connection.base_url,
+    );
+    const rotating = [connection, ...siblings.filter((row) => row.id !== connection.id)];
+    for (const sibling of rotating) {
+      storeSecret(this.db, sibling.id, cipher);
+      updateConnectionSettings(this.db, sibling.id, {
+        status: 'active',
+        // The authorizing user can legitimately change with the key; the
+        // workspace cannot (step 2 just proved it).
+        workspace_name: identity.workspaceName,
+        actor_label: identity.actorLabel,
       });
-    });
+      this.emitTrackerChange(sibling.project_id, sibling.id, 'connection');
+
+      void this.syncNow(sibling.id).catch((err: unknown) => {
+        this.logger?.error('[trackerSync] sync after a credential rotation failed', {
+          connectionId: sibling.id,
+          error: describeError(err),
+        });
+      });
+    }
 
     return identity;
   }
@@ -1520,6 +1594,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       pushMode: row.push_mode,
       mirrorSubissues: row.mirror_subissues === 1,
       conflictMode: row.conflict_mode,
+      pushTarget: row.push_target !== 0,
       // resolveEffectiveMapping over an EMPTY state list is exactly "the stored
       // overlay, filtered to valid targets" — the defensive parse we want, with
       // no network round-trip for the provider's live state list.
@@ -2358,6 +2433,12 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
   }
   const conflicts = report.conflictsOpened + report.autoResolved;
   if (conflicts > 0) entries.push({ marker: '✎', line: `conflicts ${conflicts}` });
+  if (report.crossScopeSkips > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(report.crossScopeSkips, 'cross-scope duplicate')} skipped`,
+    });
+  }
   if (report.stageDeferred > 0) {
     entries.push({
       marker: '·',
