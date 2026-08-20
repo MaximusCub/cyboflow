@@ -1333,6 +1333,43 @@ describe('TrackerSyncService.setPushTarget', () => {
     });
     expect(getConnection(raw, CONN_ID)?.push_target).toBe(1);
   });
+
+  it('refuses to move the role off an ACTIVE pusher onto a PAUSED row', async () => {
+    // A paused row enqueues nothing (write-back skips on status before
+    // push_target) and creates are never back-filled, so accepting the swap
+    // would silently drop every idea filed until the row reconnects.
+    makeConnection();
+    makeConnection({
+      id: 'conn-paused',
+      status: 'paused',
+      push_target: 0,
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+
+    await expect(service.setPushTarget('conn-paused')).rejects.toMatchObject({
+      name: 'TrackerConnectionPausedError',
+    });
+    // The working pusher kept the role.
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(1);
+    expect(getConnection(raw, 'conn-paused')?.push_target).toBe(0);
+  });
+
+  it('allows PRE-DESIGNATING a paused row when nothing in the pair is active', async () => {
+    // The all-paused-after-key-expiry case: a hard refusal would trap the user.
+    // The arm costs nothing now and takes effect the moment a fresh key lands.
+    makeConnection({ status: 'paused' });
+    makeConnection({
+      id: 'conn-paused-2',
+      status: 'paused',
+      push_target: 0,
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+
+    await service.setPushTarget('conn-paused-2');
+
+    expect(getConnection(raw, 'conn-paused-2')?.push_target).toBe(1);
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(0);
+  });
 });
 
 describe('TrackerSyncService.updateCredentials', () => {
@@ -1565,6 +1602,57 @@ describe('TrackerSyncService.disconnect', () => {
       connectionId: CONN_ID,
       kind: 'connection',
     });
+  });
+
+  it('promotes the oldest surviving sibling when the ARMED mapping is removed', async () => {
+    // Without the promotion, writeBack.handleIdeaPush (which skips every
+    // push_target = 0 row) would file NO new idea for this (project, provider)
+    // ever again — silently, with the boot repair structurally blind to it
+    // (it only fixes DUPLICATE claims).
+    makeConnection(); // CONN_ID, push_target = 1 — the armed pusher
+    makeConnection({
+      id: 'conn-heir',
+      push_target: 0,
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+    makeConnection({
+      id: 'conn-younger',
+      push_target: 0,
+      source_json: JSON.stringify({ containerId: 'team-3', narrowId: 'all', narrowKind: 'all' }),
+    });
+    // NewConnectionRow omits created_at (the store stamps it), so age is forced
+    // directly: conn-younger must genuinely postdate conn-heir for the
+    // oldest-first assertion to test ordering rather than id tie-break alone.
+    raw
+      .prepare(`UPDATE tracker_connections SET created_at = '2030-01-01 00:00:00' WHERE id = ?`)
+      .run('conn-younger');
+
+    await service.disconnect(CONN_ID);
+
+    // The retired row's stale claim is cleared with it…
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(0);
+    // …and the OLDEST survivor inherits the role (same tie-break as boot repair).
+    expect(getConnection(raw, 'conn-heir')?.push_target).toBe(1);
+    expect(getConnection(raw, 'conn-younger')?.push_target).toBe(0);
+    expect(broadcasts).toContainEqual({
+      projectId: PROJECT_ID,
+      connectionId: 'conn-heir',
+      kind: 'connection',
+    });
+  });
+
+  it('removing a DEMOTED mapping leaves the armed sibling untouched', async () => {
+    makeConnection(); // armed
+    makeConnection({
+      id: 'conn-demoted',
+      push_target: 0,
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+
+    await service.disconnect('conn-demoted');
+
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(1);
+    expect(getConnection(raw, 'conn-demoted')?.status).toBe('disconnected');
   });
 });
 

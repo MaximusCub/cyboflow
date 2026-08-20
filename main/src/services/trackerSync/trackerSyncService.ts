@@ -118,6 +118,7 @@ import type { StoredSourceScope } from './store';
 import {
   TrackerAuthError,
   TrackerConnectionNotFoundError,
+  TrackerConnectionPausedError,
   TrackerIdentityMismatchError,
 } from './errors';
 import { LinearAdapter } from './linearAdapter';
@@ -1800,12 +1801,27 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * A DISCONNECTED row is refused: it has no key and syncs nothing, so arming it
    * would leave the project with no live pusher at all.
    *
+   * A PAUSED row is refused only while an ACTIVE sibling is carrying the role:
+   * the paused row enqueues nothing (write-back skips on status before
+   * push_target) and a locally-created idea is pushed exactly once, at creation
+   * — never back-filled — so the swap would drop every idea filed until the row
+   * reconnects. With NO active sibling (a key expiry paused the whole pair)
+   * the arm is allowed as pre-designation: it costs nothing now and self-heals
+   * the moment a fresh key lands.
+   *
    * @throws {TrackerConnectionNotFoundError} unknown or retired connection id.
+   * @throws {TrackerConnectionPausedError} paused row while an active sibling pushes.
    */
   async setPushTarget(connectionId: string): Promise<void> {
     const row = getConnection(this.db, connectionId);
     if (row === null || row.status === 'disconnected') {
       throw new TrackerConnectionNotFoundError(connectionId);
+    }
+    if (row.status !== 'active') {
+      const live = listConnectionsForProviderProject(this.db, row.project_id, row.provider);
+      if (live.some((sibling) => sibling.id !== row.id && sibling.status === 'active')) {
+        throw new TrackerConnectionPausedError(connectionId);
+      }
     }
     claimPushTarget(this.db, row.project_id, row.provider, row.id);
     this.emitTrackerChange(row.project_id, row.id, 'connection');
@@ -1892,13 +1908,35 @@ export class TrackerSyncService implements TrackerSyncFacade {
   async disconnect(connectionId: string): Promise<void> {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) return;
-    updateConnectionSettings(this.db, connectionId, { status: 'disconnected' });
+    // push_target cleared with the retirement so a later revival cannot
+    // resurrect a stale claim; the survivor promotion below is what keeps the
+    // (project, provider) pair pushing in the meantime.
+    updateConnectionSettings(this.db, connectionId, { status: 'disconnected', push_target: 0 });
     const timer = this.drainTimers.get(connectionId);
     if (timer !== undefined) {
       clearTimeout(timer);
       this.drainTimers.delete(connectionId);
     }
     clearSecret(this.db, connectionId);
+
+    // Retiring the ARMED mapping must not leave its (project, provider) pair
+    // with live rows and no pusher: writeBack.handleIdeaPush skips every
+    // push_target = 0 row, so the project would silently stop filing new ideas
+    // — no error, no repair (the boot reconciliation only fixes DUPLICATE
+    // claims). The oldest surviving live sibling inherits the flag, the same
+    // tie-break the boot repair uses; with no survivors this is a no-op.
+    if (connection.push_target === 1) {
+      const survivors = listConnectionsForProviderProject(
+        this.db,
+        connection.project_id,
+        connection.provider,
+      );
+      if (survivors.length > 0) {
+        claimPushTarget(this.db, connection.project_id, connection.provider, survivors[0].id);
+        this.emitTrackerChange(connection.project_id, survivors[0].id, 'connection');
+      }
+    }
+
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
   }
 

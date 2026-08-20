@@ -545,9 +545,18 @@ export function TrackerConnectedView({
                             {status.label}
                           </span>
                           <span className="text-text-tertiary">{row.linkedCount} linked</span>
+                          {/* Honest chip: a paused row holds the flag but enqueues
+                              nothing until reconnected — never a green claim. */}
                           {row.pushTarget && (
-                            <span className="flex-shrink-0 rounded-none border border-status-success px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-status-success">
-                              Pushes
+                            <span
+                              className={cn(
+                                'flex-shrink-0 rounded-none border px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em]',
+                                row.status === 'active'
+                                  ? 'border-status-success text-status-success'
+                                  : 'border-status-warning text-status-warning',
+                              )}
+                            >
+                              {row.status === 'active' ? 'Pushes' : 'Pushes when reconnected'}
                             </span>
                           )}
                           {isCurrent && (
@@ -585,7 +594,18 @@ export function TrackerConnectedView({
                           </>
                         ) : (
                           <>
-                            {!row.pushTarget && (
+                            {/* Offered only where the server would accept it: a
+                                paused row cannot take the role away from an
+                                ACTIVE same-project sibling (it would silently
+                                drop every idea filed until it reconnects). */}
+                            {!row.pushTarget &&
+                              (row.status === 'active' ||
+                                !mappings.some(
+                                  (m) =>
+                                    m.id !== row.id &&
+                                    m.projectId === row.projectId &&
+                                    m.status === 'active',
+                                )) && (
                               <Button
                                 type="button"
                                 variant="secondary"

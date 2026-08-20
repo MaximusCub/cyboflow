@@ -446,4 +446,39 @@ describe('TrackerConnectedView — project mappings', () => {
     fireEvent.click(screen.getByTestId('tracker-add-mapping'));
     expect(onAddMapping).toHaveBeenCalledTimes(1);
   });
+
+  it('labels a PAUSED pusher honestly — it pushes only when reconnected', async () => {
+    // A paused row holds the flag but enqueues nothing (write-back skips on
+    // status first), so a green "Pushes" would claim a sync that is not happening.
+    mockMappings.mockResolvedValue([
+      makeConnection({ id: 'conn-paused', status: 'paused', pushTarget: true }),
+    ]);
+    renderView(makeConnection({ id: 'conn-paused', status: 'paused', pushTarget: true }));
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    expect(within(rows[0]).getByText('Pushes when reconnected')).toBeInTheDocument();
+    expect(within(rows[0]).queryByText('Pushes')).not.toBeInTheDocument();
+  });
+
+  it('never offers Make push target on a paused row while an ACTIVE same-project sibling exists', async () => {
+    // The server refuses that swap (it would silently drop every idea filed
+    // until the paused row reconnects), so the button is not offered either.
+    mockMappings.mockResolvedValue([
+      makeConnection(), // active, same project, the working pusher
+      makeConnection({
+        id: 'conn-paused-sib',
+        status: 'paused',
+        pushTarget: false,
+        sourceLabel: 'Growth · Sprint 4',
+      }),
+    ]);
+    renderView();
+
+    const rows = await screen.findAllByTestId('tracker-mapping-row');
+    expect(
+      within(rows[1]).queryByRole('button', { name: 'Make push target' }),
+    ).not.toBeInTheDocument();
+    // A paused sibling in a DIFFERENT project keeps the affordance (SIBLING
+    // above, projectId 9) — covered by the arming test.
+  });
 });

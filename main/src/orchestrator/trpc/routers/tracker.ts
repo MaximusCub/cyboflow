@@ -86,6 +86,7 @@ function isErrorNamed(err: unknown, name: string): boolean {
  *
  *   TrackerAuthError                -> UNAUTHORIZED       (the key is bad — re-connect)
  *   TrackerConnectionNotFoundError  -> NOT_FOUND          (unknown connection id)
+ *   TrackerConnectionPausedError    -> CONFLICT           (arming a paused row over an active pusher)
  *   TrackerIdentityMismatchError    -> CONFLICT           (right key, wrong workspace)
  *   TrackerSecretsUnavailableError  -> PRECONDITION_FAILED (no OS keychain on this host)
  *   TrackerSyncNotInitializedError  -> PRECONDITION_FAILED (called before boot wired the facade)
@@ -98,6 +99,14 @@ function rethrowAsTRPCError(err: unknown): never {
     throw new TRPCError({
       code: 'NOT_FOUND',
       message: err instanceof Error ? err.message : 'tracker connection not found',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerConnectionPausedError')) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      // Verbatim: the message carries the actionable fix (reconnect first).
+      message: err instanceof Error ? err.message : 'this connection is paused',
       cause: err,
     });
   }
