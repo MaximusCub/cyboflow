@@ -108,6 +108,21 @@ export interface IdeaComponentState {
 }
 
 /**
+ * One idea's merged component snapshot, paired with the id it was resolved for
+ * — the row shape `cyboflow.ideaComponents.getMany` returns, one per REQUESTED
+ * id in the requested order.
+ *
+ * The pairing is load-bearing: the combined multi-idea idea-summary tab zips
+ * this against its own idea list, and an unknown/duplicated id still yields an
+ * entry (`resolveIdeaComponents` is total over the five keys), so the two lists
+ * always line up positionally rather than by a lookup that can miss.
+ */
+export interface IdeaComponentsForIdea {
+  ideaId: string;
+  states: IdeaComponentState[];
+}
+
+/**
  * Human-facing label per component key. The ONE source both the backlog card
  * chips and the artifact renderer read, so the two surfaces can never drift
  * on wording.

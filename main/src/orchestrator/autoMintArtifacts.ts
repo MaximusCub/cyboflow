@@ -36,7 +36,10 @@ import type {
   ApproveIdeasArtifactPayload,
   ApproveDesignsArtifactPayload,
 } from '../../../shared/types/artifacts';
-import { resolveIdeaComponents } from './ideaComponents/resolveIdeaComponents';
+import {
+  resolveIdeaComponents,
+  resolveIdeaComponentsBatch,
+} from './ideaComponents/resolveIdeaComponents';
 import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
 
 // ---------------------------------------------------------------------------
@@ -671,9 +674,12 @@ async function mintIdeaSummaryForOwnedIdeas(
     return;
   }
 
-  // CONTENT GATE + label count in one pass: `withState` gates the tab (at least
-  // one real ledger state anywhere in the batch), `rendered` is the row count the
-  // renderer will show (non-archived owned ideas) and so the count in the label.
+  // CONTENT GATE + label count: `withState` gates the tab (at least one real
+  // ledger state anywhere in the batch), `rendered` is the row count the renderer
+  // will show (non-archived owned ideas) and so the count in the label. The
+  // ledgers come from the GROUPED resolveIdeaComponentsBatch rather than a
+  // resolve per idea — this runs on every entity write of a planner run.
+  const ledgers = resolveIdeaComponentsBatch(db, ideaIds);
   let withState = 0;
   let rendered = 0;
   for (const ideaId of ideaIds) {
@@ -682,7 +688,7 @@ async function mintIdeaSummaryForOwnedIdeas(
       | undefined;
     if (!row) continue;
     if (row.archivedAt === null || row.archivedAt === undefined) rendered += 1;
-    if (hasMeaningfulComponentState(resolveIdeaComponents(db, ideaId))) withState += 1;
+    if (hasMeaningfulComponentState(ledgers.get(ideaId) ?? [])) withState += 1;
   }
   if (withState === 0) {
     logger?.debug('[autoMintArtifacts] combined idea-summary skipped — no idea has a meaningful ledger yet', {

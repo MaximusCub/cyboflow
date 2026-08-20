@@ -4,6 +4,7 @@
  * `../../ideaComponents/ideaComponentRouter.ts`).
  *
  *   get                  : query        -> IdeaComponentState[] (merged hybrid view)
+ *   getMany              : query        -> IdeaComponentsForIdea[] (the same view, batched)
  *   setState             : mutation     -> IdeaComponentState[] (the card's manual-override path)
  *   onComponentsChanged  : subscription -> IdeaComponentChangedEvent (project-scoped)
  *
@@ -27,14 +28,21 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { DatabaseLike } from '../../types';
 import { IDEA_COMPONENT_KEYS } from '../../../../../shared/types/ideaComponents';
-import type { IdeaComponentChangedEvent, IdeaComponentState } from '../../../../../shared/types/ideaComponents';
+import type {
+  IdeaComponentChangedEvent,
+  IdeaComponentState,
+  IdeaComponentsForIdea,
+} from '../../../../../shared/types/ideaComponents';
 import {
   IdeaComponentRouter,
   IdeaComponentError,
   ideaComponentChangeEvents,
   ideaComponentProjectChannel,
 } from '../../ideaComponents/ideaComponentRouter';
-import { resolveIdeaComponents } from '../../ideaComponents/resolveIdeaComponents';
+import {
+  resolveIdeaComponents,
+  resolveIdeaComponentsBatch,
+} from '../../ideaComponents/resolveIdeaComponents';
 import { eventToAsyncIterable } from './events';
 import type { IdeaComponentErrorCode } from '../../ideaComponents/ideaComponentRouter';
 
@@ -86,6 +94,31 @@ export const ideaComponentsRouter = router({
     .query(async ({ input, ctx }): Promise<IdeaComponentState[]> => {
       const db = requireDb(ctx.db, 'get');
       return resolveIdeaComponents(db, input.ideaId);
+    }),
+
+  /**
+   * The same merged hybrid view for SEVERAL ideas in one round trip — the read
+   * behind the COMBINED multi-idea idea-summary tab, which renders one row per
+   * idea the run owns and would otherwise fan out N `get` calls over IPC on
+   * every live refresh (and it re-fetches on ANY project task change, because a
+   * run's idea set is not cheaply knowable renderer-side).
+   *
+   * Backed by `resolveIdeaComponentsBatch` — a bounded number of GROUPED queries
+   * rather than a resolve per idea (the same read the backlog list render uses).
+   *
+   * Returns one entry per REQUESTED id, in the requested order, so the caller can
+   * zip it against its own idea list without a lookup miss: an unknown id yields
+   * the same all-derived five-component snapshot `get` would return for it (the
+   * resolver is total over the five keys and deliberately does not omit unknown
+   * ids), never a dropped row. Duplicate ids are resolved once and echoed for
+   * each occurrence.
+   */
+  getMany: protectedProcedure
+    .input(z.object({ ideaIds: z.array(z.string().min(1)).max(200) }))
+    .query(async ({ input, ctx }): Promise<IdeaComponentsForIdea[]> => {
+      const db = requireDb(ctx.db, 'getMany');
+      const resolved = resolveIdeaComponentsBatch(db, input.ideaIds);
+      return input.ideaIds.map((ideaId) => ({ ideaId, states: resolved.get(ideaId) ?? [] }));
     }),
 
   /**
