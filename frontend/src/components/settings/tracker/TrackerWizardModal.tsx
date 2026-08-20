@@ -32,22 +32,24 @@
  * `credentials` field of the calls above — nothing ever reads it back.
  *
  * ADD-MAPPING MODE (`sourceConnection` set). Re-entered from the connected
- * view to hang another mapping off an authorization that already exists, so
- * Step 0 is not merely pre-answered — it is GONE: the wizard opens on Map, the
- * rail carries five steps, Back from Map has nowhere to go, and nothing ever
- * asks for the key again. Every probe names the connection
- * (`{ connectionId }`) instead of carrying credentials, `connect` passes
- * `sourceConnectionId`, and main resolves the stored key on its side — so in
- * this mode nothing key-shaped crosses IPC at all. The Map step additionally
- * reads the connection's live siblings once, PRE-SELECTS every group they
- * already cover onto the project it maps to, and chips it; neither is a lock,
- * because re-connecting an unchanged (scope → project) pair is idempotent and
- * clearing a select only takes the group out of THIS run.
+ * view to manage an authorization that already exists, so Step 0 is not merely
+ * pre-answered — it is GONE: the wizard opens on Map, the rail carries five
+ * steps, Back from Map has nowhere to go, and nothing ever asks for the key
+ * again. Every probe names the connection (`{ connectionId }`) instead of
+ * carrying credentials, `connect` passes `sourceConnectionId`, and main
+ * resolves the stored key on its side — so in this mode nothing key-shaped
+ * crosses IPC at all.
  *
- * Those siblings are also what keeps the mode honest about the two things a run
- * can only see with them: the push target (a project a sibling already pushes
- * for is left alone — no radio, no claim) and scope overlap (a sibling covering
- * the same container warns exactly as a second in-run mapping would).
+ * Its Map step is a MAPPING EDITOR in two halves. The connection's live
+ * siblings are listed first, each with an Unlink that STAGES a disconnect
+ * locally; below them, only the groups no kept sibling covers are offered a
+ * project select — so a scope is either linked or mappable, never both, and
+ * moving one is unlink-then-map rather than a second row on the same scope.
+ *
+ * Everything sibling-derived reads PAST a staged unlink (the push target it
+ * holds, the container it covers), because Submit disconnects before it
+ * connects; and a run that only unlinks skips Tasks/States/Reconcile entirely,
+ * since those steps describe mapped groups it does not have.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
@@ -230,11 +232,19 @@ export function TrackerWizardModal({
   /** cyboflow project id → the groupId that may push new ideas out. */
   const [pushChoice, setPushChoice] = useState<Record<number, string>>({});
   /**
-   * Add-mapping mode only: the source connection's live siblings, read once on
-   * mount so the Map step can chip the scopes already mapped. Empty in the
-   * ordinary run (a fresh authorization has no siblings to report).
+   * Add-mapping mode only: the connection's live siblings, read once on mount.
+   * They are the Map step's LINKED section — what this authorization already
+   * covers — and the reason its group list only offers what is not covered yet.
+   * Empty in the ordinary run (a fresh authorization has no siblings).
    */
   const [existingMappings, setExistingMappings] = useState<TrackerConnectionSummary[]>([]);
+  /**
+   * Connection ids STAGED for unlink. Staging is local and free: nothing is
+   * disconnected until Submit runs, and closing the wizard forgets it. Every
+   * sibling-derived answer below reads past these, because by the time a
+   * `connect` in this run executes they will already be retired.
+   */
+  const [unlinkIds, setUnlinkIds] = useState<Set<string>>(() => new Set());
 
   // ── Step 2 · selection ────────────────────────────────────────────────────
   const [issuesByGroup, setIssuesByGroup] = useState<Record<string, TrackerIssue[]>>({});
@@ -275,16 +285,17 @@ export function TrackerWizardModal({
    * the caches cannot re-install data computed for the previous mapping set.
    */
   const probeVersionRef = useRef(0);
-  /**
-   * Whether the add-mapping seed below has already run for this open. A ref
-   * rather than state: it has to gate the very pass that seeds, and nothing
-   * renders from it.
-   */
-  const seededRef = useRef(false);
 
   // ── Step 5 · submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
   const [progress, setProgress] = useState<Record<string, MappingProgress>>({});
+  /**
+   * Per-staged-unlink submit state, keyed by connection id (see `progress`).
+   * Deliberately NOT cleared when the mappings change: a disconnect that already
+   * landed cannot be undone by editing the map, and re-sending it would only
+   * fail on a row that no longer exists.
+   */
+  const [unlinkProgress, setUnlinkProgress] = useState<Record<string, MappingProgress>>({});
 
   // -------------------------------------------------------------------------
   // Derived
@@ -354,18 +365,78 @@ export function TrackerWizardModal({
     projects.find((p) => p.id === id)?.name ?? `Project ${id}`;
 
   /**
-   * The source connection's siblings already covering a group's exact scope
-   * triple. Informational only — the row stays selectable, because re-connecting
-   * an unchanged (scope → project) pair is idempotent, and a group CAN honestly
-   * be mapped a second time into a different cyboflow project.
+   * The siblings this run is KEEPING — the Map step's linked rows, and the only
+   * ones every sibling-derived answer below may consider. A staged unlink is
+   * already gone as far as this run is concerned: its disconnect runs before any
+   * connect does, so the push target it holds and the scope it covers are the
+   * run's to take.
+   */
+  const liveMappings = useMemo(
+    () => existingMappings.filter((m) => !unlinkIds.has(m.id)),
+    [existingMappings, unlinkIds],
+  );
+
+  /** Siblings staged for unlink, in the order the connection reports them. */
+  const stagedUnlinks = useMemo(
+    () => existingMappings.filter((m) => unlinkIds.has(m.id)),
+    [existingMappings, unlinkIds],
+  );
+
+  /**
+   * The connection whose stored key this run's `connect` calls ride on. Nothing
+   * key-shaped exists in add-mapping mode: main resolves one from the row the
+   * payload names, and `disconnect` CLEARS that row's key — so the carrier has
+   * to be a row the run is keeping. Any of them will do; they are all the same
+   * authorization.
+   */
+  const credentialCarrierId: string | undefined =
+    sourceConnection === undefined
+      ? undefined
+      : !unlinkIds.has(sourceConnection.id)
+        ? sourceConnection.id
+        : (liveMappings[0]?.id ?? sourceConnection.id);
+
+  /**
+   * The one staged unlink that must run AFTER the connects instead of before
+   * them: the run retires every sibling, so the key the connects need belongs
+   * to a row that is itself on the way out. Ordering it last keeps the run
+   * working; the cost is that a new mapping re-using its exact scope imports on
+   * the next sync pass rather than immediately, because the old row still owns
+   * those links while the connect runs.
+   */
+  const deferredUnlinkId: string | null =
+    credentialCarrierId !== undefined &&
+    unlinkIds.has(credentialCarrierId) &&
+    mappedGroups.length > 0
+      ? credentialCarrierId
+      : null;
+
+  /**
+   * The kept siblings covering a group's exact scope triple. A group with any
+   * of them is LINKED: it is shown as a linked row and offers no select at all,
+   * which is what keeps one scope from being mapped into two projects at once.
    *
    * A legacy row with no recorded `sourceScope` matches nothing rather than
    * everything: an unknown scope is not evidence of coverage.
    */
   const mappedSiblingsFor = (group: TrackerGroup): TrackerConnectionSummary[] =>
-    existingMappings.filter(
-      (m) => m.sourceScope !== null && sameScope(m.sourceScope, group.selection),
-    );
+    liveMappings.filter((m) => m.sourceScope !== null && sameScope(m.sourceScope, group.selection));
+
+  /** Groups still free to map — everything no kept sibling already covers. */
+  const availableGroups = (groups: TrackerGroup[]): TrackerGroup[] =>
+    groups.filter((g) => mappedSiblingsFor(g).length === 0);
+
+  /**
+   * What to call a sibling's scope. The tree's own name where the scope is still
+   * offered as a group; the stored label otherwise — a scope the provider no
+   * longer lists (a deleted team, a legacy row) still has to be nameable, and
+   * inventing one from the id would read as a group that exists.
+   */
+  const siblingLabel = (m: TrackerConnectionSummary): string => {
+    const scope = m.sourceScope;
+    const group = scope === null ? undefined : allGroups.find((g) => sameScope(scope, g.selection));
+    return group?.name ?? m.sourceLabel;
+  };
 
   /** Distinct target projects, first-mapped first. */
   const targetProjectIds = useMemo(() => {
@@ -392,27 +463,33 @@ export function TrackerWizardModal({
    * declines instead: no radio, `pushGroupIdFor` → null, `pushTarget: false` on
    * every mapping into the project, and the incumbent keeps filing.
    *
-   * The same-scope exclusion is load-bearing. Re-mapping the incumbent's own
-   * scope into its own project is the idempotent re-connect, and `pushTarget:
-   * false` there takes main's existing-row branch and DISARMS the project
-   * outright, leaving it with no pusher at all. Empty outside add-mapping mode
-   * (`existingMappings` is [] there), so the paste-a-key run is unchanged.
+   * Reads KEPT siblings only: unlink the pusher and the project is left with
+   * none, so the run claims it normally — the disconnect runs first, and main
+   * hands the flag on from there.
+   *
+   * The same-scope exclusion is belt and braces. The Map step no longer offers a
+   * select for a scope a kept sibling covers, so a run cannot contain the
+   * incumbent's own scope today; the term keeps the rule true of the payload
+   * rather than of the current step layout, because `pushTarget: false` on the
+   * incumbent's own row takes main's existing-row branch and DISARMS the project
+   * outright. Empty outside add-mapping mode, so the paste-a-key run is
+   * unchanged.
    */
   const pushIncumbents = useMemo<{ projectId: number; sibling: TrackerConnectionSummary }[]>(() => {
     const out: { projectId: number; sibling: TrackerConnectionSummary }[] = [];
     for (const pid of targetProjectIds) {
       const runScopes = mappedGroups.filter((g) => mappings[g.id] === pid).map((g) => g.selection);
-      const sibling = existingMappings.find((m) => {
+      const sibling = liveMappings.find((m) => {
         const scope = m.sourceScope;
         // A legacy row with no recorded scope is not evidence of anything, same
-        // rule the chips follow — an unknown scope claims no coverage.
+        // rule the linked rows follow — an unknown scope claims no coverage.
         if (m.projectId !== pid || !m.pushTarget || scope === null) return false;
         return !runScopes.some((selection) => sameScope(scope, selection));
       });
       if (sibling !== undefined) out.push({ projectId: pid, sibling });
     }
     return out;
-  }, [targetProjectIds, mappedGroups, mappings, existingMappings]);
+  }, [targetProjectIds, mappedGroups, mappings, liveMappings]);
 
   const pushIncumbentFor = (pid: number): TrackerConnectionSummary | undefined =>
     pushIncumbents.find((i) => i.projectId === pid)?.sibling;
@@ -461,10 +538,11 @@ export function TrackerWizardModal({
    * the project's issues; the engine's cross-row guard skips the second. Say so
    * here rather than letting the user discover it after the first sync.
    *
-   * The overlap is with every LIVE mapping, not just this run's: in add-mapping
+   * The overlap is with every KEPT mapping, not just this run's: in add-mapping
    * mode the run owns only part of the connection's set, and a sibling covers
    * exactly as much as an in-run row would. Both directions are checked, because
-   * the subsuming half can sit on either side.
+   * the subsuming half can sit on either side — and a sibling staged for unlink
+   * covers nothing, since it is retired before the first sync.
    */
   const overlapWarnings = useMemo<string[]>(() => {
     // Honest about the engine's guarantee: the cross-scope guard imports each
@@ -474,13 +552,13 @@ export function TrackerWizardModal({
       `Issues in ${name} are covered by both mappings — each imports once, under whichever mapping syncs it first.`;
 
     // Containers some whole-container mapping already covers — this run's plus
-    // the source connection's live siblings. A legacy row with no recorded
-    // scope covers nothing, same rule the chips follow.
+    // the connection's kept siblings. A legacy row with no recorded scope
+    // covers nothing, same rule the linked rows follow.
     const covered = new Set<string>();
     for (const g of mappedGroups) {
       if (g.selection.narrowKind === 'all') covered.add(g.selection.containerId);
     }
-    for (const m of existingMappings) {
+    for (const m of liveMappings) {
       if (m.sourceScope !== null && m.sourceScope.narrowKind === 'all') {
         covered.add(m.sourceScope.containerId);
       }
@@ -494,7 +572,7 @@ export function TrackerWizardModal({
       } else if (
         // Whole-container here, subsuming a sibling narrowed under it — the
         // direction a this-run-only scan can never see.
-        existingMappings.some(
+        liveMappings.some(
           (m) =>
             m.sourceScope !== null &&
             m.sourceScope.narrowKind !== 'all' &&
@@ -505,7 +583,7 @@ export function TrackerWizardModal({
       }
     }
     return out;
-  }, [mappedGroups, existingMappings]);
+  }, [mappedGroups, liveMappings]);
 
   /** Every fetched issue across the mapped groups, in mapping order. */
   const allIssues = useMemo(
@@ -621,17 +699,35 @@ export function TrackerWizardModal({
   }, [decidedRows]);
 
   const failedCount = useMemo(
-    () => mappedGroups.filter((g) => progress[g.id]?.status === 'error').length,
-    [mappedGroups, progress],
+    () =>
+      mappedGroups.filter((g) => progress[g.id]?.status === 'error').length +
+      stagedUnlinks.filter((m) => unlinkProgress[m.id]?.status === 'error').length,
+    [mappedGroups, progress, stagedUnlinks, unlinkProgress],
   );
 
   /**
-   * Footer guards. Map cannot advance without at least one mapped group (there
-   * is nothing to probe), and the two selection modes cannot advance while they
-   * resolve to an empty set.
+   * A run that only unlinks. Tasks, States and Reconcile all describe MAPPED
+   * groups — with none there is no issue set to filter, no state table to build
+   * and no backlog to reconcile against — so those three steps have nothing to
+   * say and the run's one forward move is Review.
+   */
+  const unlinkOnly = mappedGroups.length === 0 && stagedUnlinks.length > 0;
+
+  /** Where Continue goes from `from`, honouring the unlink-only jump. */
+  const nextStepFrom = (from: number): number =>
+    from === MAP_STEP && unlinkOnly ? LAST_STEP : from + 1;
+
+  /** Where Back goes from `from` — the mirror of the jump above. */
+  const prevStepFrom = (from: number): number =>
+    from === LAST_STEP && mappedGroups.length === 0 ? MAP_STEP : from - 1;
+
+  /**
+   * Footer guards. Map cannot advance with nothing staged either way (no group
+   * to probe, no unlink to run), and the two selection modes cannot advance
+   * while they resolve to an empty set.
    */
   const nextBlocked =
-    (step === 1 && mappedGroups.length === 0) ||
+    (step === MAP_STEP && mappedGroups.length === 0 && stagedUnlinks.length === 0) ||
     (step === 2 && mode === 'assignee' && selectedAssigneeIds.length === 0) ||
     (step === 2 && mode === 'manual' && includedIssues.length === 0);
 
@@ -742,77 +838,6 @@ export function TrackerWizardModal({
       cancelled = true;
     };
   }, [isOpen, sourceConnection]);
-
-  /**
-   * PRE-SELECT what the connection already maps, once both mount reads have
-   * landed. Otherwise the covered groups open on “Don't import” next to a chip
-   * saying they are mapped — two answers to the same question, and the one the
-   * select gives is the one `connect` would act on. Seeded, the step describes
-   * the connection as it stands and the user edits a truthful starting point.
-   *
-   * The push choice rides along, for the project whose armed row this run now
-   * carries: without it an untouched re-submit would fall back to "the
-   * project's first mapping" and move the push target onto a row that never
-   * held it. (`pushIncumbents` deliberately ignores a sibling whose scope IS in
-   * the run, precisely so this claim lands on the incumbent's own group.)
-   *
-   * Once per open, and never over an answer the user already gave: the ref
-   * gates the re-run, and the merge only fills groups with no value yet — which
-   * matters if the sibling read lands after the user has started mapping.
-   *
-   * Seeding writes `mappings`, so the invalidation effect above bumps
-   * `probeVersionRef` — harmless here, because this cannot run before the group
-   * probe has already installed its tree, and no other probe is in flight while
-   * the run is still sitting on Map.
-   */
-  useEffect(() => {
-    if (!isOpen || sourceConnection === undefined) return;
-    if (seededRef.current || groupTree === null || existingMappings.length === 0) return;
-
-    const seedMappings: Record<string, number> = {};
-    for (const group of allGroups) {
-      // A group covered in SEVERAL projects seeds the first of them; the chips
-      // still name every one, which is the honest way to show a fan-out a
-      // single select cannot express.
-      const sibling = existingMappings.find(
-        (m) => m.sourceScope !== null && sameScope(m.sourceScope, group.selection),
-      );
-      if (sibling !== undefined) seedMappings[group.id] = sibling.projectId;
-    }
-    if (Object.keys(seedMappings).length === 0) return;
-
-    const seedPush: Record<number, string> = {};
-    for (const m of existingMappings) {
-      const scope = m.sourceScope;
-      if (!m.pushTarget || scope === null) continue;
-      const armed = allGroups.find(
-        (g) => sameScope(scope, g.selection) && seedMappings[g.id] === m.projectId,
-      );
-      if (armed !== undefined) seedPush[m.projectId] = armed.id;
-    }
-
-    seededRef.current = true;
-    setMappings((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const [groupId, pid] of Object.entries(seedMappings)) {
-        if (next[groupId] !== undefined) continue;
-        next[groupId] = pid;
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-    setPushChoice((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const [pid, groupId] of Object.entries(seedPush)) {
-        if (next[Number(pid)] !== undefined) continue;
-        next[Number(pid)] = groupId;
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [isOpen, sourceConnection, groupTree, allGroups, existingMappings]);
 
   // -------------------------------------------------------------------------
   // Probes
@@ -943,6 +968,10 @@ export function TrackerWizardModal({
     // Step 0 is the gate: nothing downstream exists without a validated key.
     // Add-mapping mode enters already past it, carrying the connection's identity.
     if (target > firstStep && shownIdentity === null) return;
+    // The three middle steps describe mapped groups; with none they are not
+    // enterable in EITHER direction, which is also what makes Back from Review
+    // land on Map rather than on an empty Reconcile (see `prevStepFrom`).
+    if (mappedGroups.length === 0 && target > MAP_STEP && target < LAST_STEP) return;
     setStepError(null);
 
     // Backwards navigation is pure — it never re-probes the provider.
@@ -954,12 +983,16 @@ export function TrackerWizardModal({
     setLoading(true);
     try {
       if (target >= 1) await ensureGroups();
-      if (target >= 2) {
-        if (mappedGroups.length === 0) throw new Error('Map at least one group before continuing.');
-        await ensureIssues();
+      if (mappedGroups.length > 0) {
+        if (target >= 2) await ensureIssues();
+        if (target >= 3) await ensureStates();
+        if (target >= 4) await ensureReconcile();
+      } else if (target > MAP_STEP && stagedUnlinks.length === 0) {
+        // Past Map with nothing mapped and nothing staged — Review would have no
+        // run to show. (Map itself is always enterable; that is where the run is
+        // assembled.)
+        throw new Error('Map a group or unlink one before continuing.');
       }
-      if (target >= 3) await ensureStates();
-      if (target >= 4) await ensureReconcile();
       setStep(target);
       setMaxStep((m) => Math.max(m, target));
     } catch (err) {
@@ -967,6 +1000,20 @@ export function TrackerWizardModal({
     } finally {
       setLoading(false);
     }
+  };
+
+  /**
+   * Stage a live mapping for unlink. Local only — the disconnect runs at Submit,
+   * so nothing is destroyed by a wizard the user closes, and the group it covers
+   * drops straight into the mappable list below.
+   */
+  const stageUnlink = (connectionId: string): void => {
+    setUnlinkIds((prev) => {
+      if (prev.has(connectionId)) return prev;
+      const next = new Set(prev);
+      next.add(connectionId);
+      return next;
+    });
   };
 
   const handleMap = (groupId: string, value: string): void => {
@@ -1019,56 +1066,98 @@ export function TrackerWizardModal({
   };
 
   /**
-   * Connect the mappings that have not already succeeded, one at a time. A
-   * partial failure leaves the modal open with per-row errors so Submit can
-   * retry just those — `connect` is idempotent, but re-sending a succeeded
-   * mapping would still re-run its reconcile decisions.
+   * Apply the run: staged UNLINKS first, then the connects, each one at a time.
+   *
+   * The order is load-bearing. A disconnect retires the old row's claim on its
+   * issues — `findSiblingLinkForExternal` ignores disconnected connections — so
+   * unlinking before connecting is what lets the same scope land in a new
+   * project with a full fresh import instead of a silent cross-scope skip. It
+   * is also how main hands the push target on: `disconnect` promotes a
+   * surviving sibling, and the connect that follows claims from a clean slate.
+   *
+   * A failed disconnect therefore STOPS the connects: the row it should have
+   * retired is still live, and connecting over it would import nothing. Retry
+   * re-runs the failure first, then everything still pending — `connect` is
+   * idempotent, but re-sending a mapping that already succeeded would re-run
+   * its reconcile decisions, so those are filtered out.
    */
-  const handleConnect = async (): Promise<void> => {
-    const pending = mappedGroups.filter((g) => progress[g.id]?.status !== 'ok');
-    if (pending.length === 0) return;
+  const handleSubmit = async (): Promise<void> => {
+    const pendingUnlinks = stagedUnlinks.filter((m) => unlinkProgress[m.id]?.status !== 'ok');
+    const pendingConnects = mappedGroups.filter((g) => progress[g.id]?.status !== 'ok');
+    if (pendingUnlinks.length === 0 && pendingConnects.length === 0) return;
 
     setSubmitting(true);
     setStepError(null);
     let allOk = true;
-    for (const group of pending) {
-      const pid = mappings[group.id];
-      let selectionJson: TrackerSelectionJson | null = null;
-      if (mode === 'assignee') selectionJson = { assigneeIds: selectedAssigneeIds };
-      if (mode === 'manual') {
-        selectionJson = { issueIds: (includedByGroup[group.id] ?? []).map((i) => i.externalId) };
-      }
-      setProgress((prev) => ({ ...prev, [group.id]: { status: 'connecting', error: null } }));
+
+    const runUnlink = async (m: TrackerConnectionSummary): Promise<boolean> => {
+      setUnlinkProgress((prev) => ({ ...prev, [m.id]: { status: 'connecting', error: null } }));
       try {
-        await trpc.cyboflow.tracker.connect.mutate({
-          projectId: pid,
-          // Exactly one credential source, same rule as the probes: the pasted
-          // key, or the connection whose stored key main resolves on its side.
-          ...(sourceConnection !== undefined
-            ? { sourceConnectionId: sourceConnection.id }
-            : { credentials }),
-          source: group.selection,
-          sourceLabel: group.sourceLabel,
-          selectionMode: mode,
-          selectionJson,
-          stateMapping: mappingByScope[group.stateScopeKey] ?? {},
-          statusSyncMode,
-          pullMode,
-          pushMode,
-          mirrorSubissues,
-          conflictMode,
-          reconcile: reconcileForGroup(group),
-          pushTarget: pushGroupIdFor(pid) === group.id,
-        });
-        setProgress((prev) => ({ ...prev, [group.id]: { status: 'ok', error: null } }));
+        await trpc.cyboflow.tracker.disconnect.mutate({ connectionId: m.id });
+        setUnlinkProgress((prev) => ({ ...prev, [m.id]: { status: 'ok', error: null } }));
+        return true;
       } catch (err) {
-        allOk = false;
-        setProgress((prev) => ({
+        setUnlinkProgress((prev) => ({
           ...prev,
-          [group.id]: { status: 'error', error: errorMessage(err) },
+          [m.id]: { status: 'error', error: errorMessage(err) },
         }));
+        return false;
+      }
+    };
+
+    for (const m of pendingUnlinks) {
+      // The carrier's own unlink is the one exception to the order — see
+      // `deferredUnlinkId`; it runs after the connects that need its key.
+      if (m.id === deferredUnlinkId) continue;
+      if (!(await runUnlink(m))) allOk = false;
+    }
+
+    if (allOk) {
+      for (const group of pendingConnects) {
+        const pid = mappings[group.id];
+        let selectionJson: TrackerSelectionJson | null = null;
+        if (mode === 'assignee') selectionJson = { assigneeIds: selectedAssigneeIds };
+        if (mode === 'manual') {
+          selectionJson = { issueIds: (includedByGroup[group.id] ?? []).map((i) => i.externalId) };
+        }
+        setProgress((prev) => ({ ...prev, [group.id]: { status: 'connecting', error: null } }));
+        try {
+          await trpc.cyboflow.tracker.connect.mutate({
+            projectId: pid,
+            // Exactly one credential source, same rule as the probes: the pasted
+            // key, or the connection whose stored key main resolves on its side.
+            ...(credentialCarrierId !== undefined
+              ? { sourceConnectionId: credentialCarrierId }
+              : { credentials }),
+            source: group.selection,
+            sourceLabel: group.sourceLabel,
+            selectionMode: mode,
+            selectionJson,
+            stateMapping: mappingByScope[group.stateScopeKey] ?? {},
+            statusSyncMode,
+            pullMode,
+            pushMode,
+            mirrorSubissues,
+            conflictMode,
+            reconcile: reconcileForGroup(group),
+            pushTarget: pushGroupIdFor(pid) === group.id,
+          });
+          setProgress((prev) => ({ ...prev, [group.id]: { status: 'ok', error: null } }));
+        } catch (err) {
+          allOk = false;
+          setProgress((prev) => ({
+            ...prev,
+            [group.id]: { status: 'error', error: errorMessage(err) },
+          }));
+        }
       }
     }
+
+    if (allOk && deferredUnlinkId !== null) {
+      const deferred = pendingUnlinks.find((m) => m.id === deferredUnlinkId);
+      if (deferred !== undefined && !(await runUnlink(deferred))) allOk = false;
+    }
+
     setSubmitting(false);
     if (allOk) {
       onConnected();
@@ -1219,10 +1308,9 @@ export function TrackerWizardModal({
         </p>
         {sourceConnection !== undefined && (
           <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-tertiary">
-            Groups this connection already covers open on the project they map to, and carry it as
-            a chip. Leaving one as it is re-connects an unchanged pair, which changes nothing;
-            putting one back on “Don&apos;t import” only means this run leaves it alone — the
-            mapping itself stays live under Project mappings.
+            What this connection already covers is listed first. Unlink one to stop syncing it —
+            that runs when this wizard finishes, and the group drops into the list below, free to
+            map somewhere else.
           </p>
         )}
       </div>
@@ -1233,56 +1321,111 @@ export function TrackerWizardModal({
         </p>
       ))}
 
-      {(groupTree?.sections ?? []).map((section) => (
-        <div key={section.label}>
-          <Eyebrow className="mb-2">{section.label}</Eyebrow>
+      {sourceConnection !== undefined && liveMappings.length > 0 && (
+        <div data-testid="tracker-linked-section">
+          <Eyebrow className="mb-2">Linked</Eyebrow>
           <div className="space-y-1.5">
-            {section.groups.map((group) => (
+            {liveMappings.map((sibling) => (
               <div
-                key={group.id}
+                key={sibling.id}
                 className={cn(CARD, 'flex items-center gap-3 px-3 py-2')}
-                data-testid={`tracker-group-${group.id}`}
+                data-testid={`tracker-linked-${sibling.id}`}
               >
-                {group.key !== null && (
-                  <span className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
-                    {group.key}
+                <span className="min-w-0 truncate text-xs font-bold text-text-primary">
+                  {siblingLabel(sibling)} → {projectName(sibling.projectId)}
+                </span>
+                {sibling.pushTarget && (
+                  <span className="flex-shrink-0 rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+                    Pushes
                   </span>
                 )}
-                <span className="min-w-0 truncate text-xs font-bold text-text-primary">
-                  {group.name}
-                </span>
-                {mappedSiblingsFor(group).map((sibling) => (
-                  <span
-                    key={sibling.id}
-                    className="flex-shrink-0 rounded-none border border-border-primary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary"
-                    data-testid={`tracker-group-mapped-${group.id}-${sibling.id}`}
-                  >
-                    mapped → {projectName(sibling.projectId)}
+                {sibling.status === 'paused' && (
+                  <span className="flex-shrink-0 rounded-none border border-border-primary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+                    Paused
                   </span>
-                ))}
-                <select
-                  aria-label={`Cyboflow project for ${group.name}`}
-                  value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
-                  onChange={(e) => handleMap(group.id, e.target.value)}
-                  className={cn(trackerSelectClass, 'ml-auto max-w-[240px]')}
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto rounded-none"
+                  data-testid={`tracker-unlink-${sibling.id}`}
+                  onClick={() => stageUnlink(sibling.id)}
                 >
-                  <option value="">— Don&apos;t import</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={String(p.id)}>
-                      {p.id === projectId ? `${p.name} (Active)` : p.name}
-                    </option>
-                  ))}
-                </select>
+                  Unlink
+                </Button>
               </div>
             ))}
-            {section.groups.length === 0 && (
-              <p className={cn(CARD, 'px-3 py-4 text-xs text-text-tertiary')}>
-                {meta.name} returned nothing in this section.
-              </p>
-            )}
           </div>
+          <p className="mt-1.5 text-[11px] text-text-tertiary">
+            Nothing is disconnected yet — unlinking is applied when this run finishes, and closing
+            the wizard forgets it.
+          </p>
         </div>
-      ))}
+      )}
+
+      {sourceConnection !== undefined && availableGroups(allGroups).length > 0 && (
+        <Eyebrow>Available to map</Eyebrow>
+      )}
+
+      {(groupTree?.sections ?? []).map((section) => {
+        // Add-mapping mode lists only what is still free: a covered scope has a
+        // linked row above instead, so one group cannot be pointed at two
+        // projects from here.
+        const rows = availableGroups(section.groups);
+        if (section.groups.length > 0 && rows.length === 0) return null;
+        return (
+          <div key={section.label}>
+            <Eyebrow className="mb-2">{section.label}</Eyebrow>
+            <div className="space-y-1.5">
+              {rows.map((group) => (
+                <div
+                  key={group.id}
+                  className={cn(CARD, 'flex items-center gap-3 px-3 py-2')}
+                  data-testid={`tracker-group-${group.id}`}
+                >
+                  {group.key !== null && (
+                    <span className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+                      {group.key}
+                    </span>
+                  )}
+                  <span className="min-w-0 truncate text-xs font-bold text-text-primary">
+                    {group.name}
+                  </span>
+                  <select
+                    aria-label={`Cyboflow project for ${group.name}`}
+                    value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
+                    onChange={(e) => handleMap(group.id, e.target.value)}
+                    className={cn(trackerSelectClass, 'ml-auto max-w-[240px]')}
+                  >
+                    <option value="">— Don&apos;t import</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={String(p.id)}>
+                        {p.id === projectId ? `${p.name} (Active)` : p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+              {section.groups.length === 0 && (
+                <p className={cn(CARD, 'px-3 py-4 text-xs text-text-tertiary')}>
+                  {meta.name} returned nothing in this section.
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      {sourceConnection !== undefined &&
+        groupTree !== null &&
+        allGroups.length > 0 &&
+        availableGroups(allGroups).length === 0 && (
+          <p className={cn(CARD, 'px-3 py-4 text-xs text-text-tertiary')}>
+            Every group this authorization offers is already linked. Unlink one above to map it
+            somewhere else.
+          </p>
+        )}
 
       {projects.length === 0 && (
         <p className={cn(CARD, 'px-3 py-4 text-xs text-text-tertiary')}>
@@ -1860,33 +2003,47 @@ export function TrackerWizardModal({
           ? `${selectedAssigneeIds.length} assignees`
           : `${includedIssues.length} hand-picked issues`;
 
-    const cards: { label: string; value: string; detail: string }[] = [
-      {
-        label: 'Mappings',
-        value: `${mappedGroups.length} → ${targetProjectIds.length} cyboflow projects`,
-        detail: 'Each mapping is its own connection',
-      },
-      {
-        label: 'Selection',
-        value: MODE_OPTIONS.find((m) => m.value === mode)?.label ?? mode,
-        detail: selectionDetail,
-      },
-      {
-        label: 'Direction',
-        value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
-        detail: `${mirrorSubissues ? 'Sub-issue mirroring on' : 'Sub-issue mirroring off'} · conflicts ${
-          conflictMode === 'auto' ? 'auto-resolve' : 'queue for review'
-        }`,
-      },
-      {
-        label: 'Mapping',
-        value: `${mappedStates.length - skippedStates.length} of ${mappedStates.length} states mapped`,
-        detail:
-          skippedStates.length === 0
-            ? 'Nothing skipped'
-            : `Skipped: ${skippedStates.map((s) => s.name).join(', ')}`,
-      },
-    ];
+    const cards: { label: string; value: string; detail: string }[] = [];
+
+    if (stagedUnlinks.length > 0) {
+      cards.push({
+        label: 'Unlinking',
+        value: `${stagedUnlinks.length} mapping${stagedUnlinks.length === 1 ? '' : 's'}`,
+        detail: 'Disconnected first, before anything else runs',
+      });
+    }
+
+    // An unlink-only run never visited Tasks, States or Reconcile, so the cards
+    // describing those answers would be reporting on nothing.
+    if (mappedGroups.length > 0) {
+      cards.push(
+        {
+          label: 'Mappings',
+          value: `${mappedGroups.length} → ${targetProjectIds.length} cyboflow projects`,
+          detail: 'Each mapping is its own connection',
+        },
+        {
+          label: 'Selection',
+          value: MODE_OPTIONS.find((m) => m.value === mode)?.label ?? mode,
+          detail: selectionDetail,
+        },
+        {
+          label: 'Direction',
+          value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
+          detail: `${mirrorSubissues ? 'Sub-issue mirroring on' : 'Sub-issue mirroring off'} · conflicts ${
+            conflictMode === 'auto' ? 'auto-resolve' : 'queue for review'
+          }`,
+        },
+        {
+          label: 'Mapping',
+          value: `${mappedStates.length - skippedStates.length} of ${mappedStates.length} states mapped`,
+          detail:
+            skippedStates.length === 0
+              ? 'Nothing skipped'
+              : `Skipped: ${skippedStates.map((s) => s.name).join(', ')}`,
+        },
+      );
+    }
 
     // Add-mapping mode never showed an "Authorized as …" card, so the identity
     // these connections inherit is stated here instead of left implicit.
@@ -1902,10 +2059,21 @@ export function TrackerWizardModal({
       <div className="space-y-4">
         <div>
           <Eyebrow>{STEP_EYEBROWS[5]}</Eyebrow>
-          <h3 className="mt-1.5 text-lg font-bold text-text-primary">Review the connections</h3>
+          <h3 className="mt-1.5 text-lg font-bold text-text-primary">
+            {unlinkOnly ? 'Review the unlinks' : 'Review the connections'}
+          </h3>
           <p className="mt-1.5 text-xs text-text-secondary">
-            {includedIssues.length} issues will import as ideas now. Ongoing changes sync every 5
-            minutes.
+            {unlinkOnly ? (
+              <>
+                Nothing new imports — this run only unlinks, and those mappings stop syncing as
+                soon as it finishes. What they already imported stays in cyboflow.
+              </>
+            ) : (
+              <>
+                {includedIssues.length} issues will import as ideas now. Ongoing changes sync every
+                5 minutes.
+              </>
+            )}
           </p>
         </div>
 
@@ -1919,6 +2087,54 @@ export function TrackerWizardModal({
           ))}
         </div>
 
+        {stagedUnlinks.length > 0 && (
+          <div className={CARD} data-testid="tracker-unlink-list">
+            <div className="border-b border-border-primary bg-surface-secondary px-3 py-2">
+              <Eyebrow>Unlink first</Eyebrow>
+            </div>
+            <div className="divide-y divide-border-primary">
+              {stagedUnlinks.map((sibling) => {
+                const row = unlinkProgress[sibling.id];
+                return (
+                  <div
+                    key={sibling.id}
+                    className="flex items-center gap-3 px-3 py-2"
+                    data-testid={`tracker-unlink-row-${sibling.id}`}
+                  >
+                    <span className="min-w-0 flex-1 truncate text-xs text-text-primary">
+                      Unlink {siblingLabel(sibling)} from {projectName(sibling.projectId)}
+                    </span>
+                    <span
+                      className={cn(
+                        'flex-shrink-0 text-[11px]',
+                        row?.status === 'ok' && 'text-status-success',
+                        row?.status === 'error' && 'text-status-error',
+                        (row === undefined || row.status === 'connecting') && 'text-text-tertiary',
+                      )}
+                    >
+                      {row === undefined
+                        ? 'Pending'
+                        : row.status === 'connecting'
+                          ? 'Unlinking…'
+                          : row.status === 'ok'
+                            ? 'Unlinked'
+                            : (row.error ?? 'Failed')}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            {deferredUnlinkId !== null && (
+              <p className="border-t border-dashed border-border-primary px-3 py-2 text-[11px] text-text-tertiary">
+                {siblingLabel(stagedUnlinks.find((m) => m.id === deferredUnlinkId) ?? stagedUnlinks[0])}{' '}
+                is unlinked last — its stored key is what authorizes the new mappings. Issues it
+                still holds may take one sync pass to arrive under their new project.
+              </p>
+            )}
+          </div>
+        )}
+
+        {mappedGroups.length > 0 && (
         <div className={CARD}>
           <div className="border-b border-border-primary bg-surface-secondary px-3 py-2">
             <Eyebrow>Connections to create</Eyebrow>
@@ -1962,14 +2178,17 @@ export function TrackerWizardModal({
             })}
           </div>
         </div>
+        )}
 
-        <div className={cn(CARD, 'p-3')}>
-          <Eyebrow>Existing backlog</Eyebrow>
-          <p className="mt-1.5 text-xs text-text-primary">
-            {tally.keep} kept in cyboflow · {tally.link} linked to {meta.name} · {tally.discard}{' '}
-            discarded
-          </p>
-        </div>
+        {mappedGroups.length > 0 && (
+          <div className={cn(CARD, 'p-3')}>
+            <Eyebrow>Existing backlog</Eyebrow>
+            <p className="mt-1.5 text-xs text-text-primary">
+              {tally.keep} kept in cyboflow · {tally.link} linked to {meta.name} · {tally.discard}{' '}
+              discarded
+            </p>
+          </div>
+        )}
 
         <div className="flex justify-end">
           <Button
@@ -1978,12 +2197,16 @@ export function TrackerWizardModal({
             size="sm"
             className="rounded-none"
             loading={submitting}
-            loadingText="Connecting…"
-            onClick={() => void handleConnect()}
+            loadingText={unlinkOnly ? 'Unlinking…' : 'Connecting…'}
+            onClick={() => void handleSubmit()}
           >
             {failedCount > 0
               ? `Retry ${failedCount} failed`
-              : `Connect & sync ${includedIssues.length} issues`}
+              : unlinkOnly
+                ? `Unlink ${stagedUnlinks.length} mapping${stagedUnlinks.length === 1 ? '' : 's'}`
+                : stagedUnlinks.length > 0
+                  ? `Unlink ${stagedUnlinks.length} · connect & sync ${includedIssues.length} issues`
+                  : `Connect & sync ${includedIssues.length} issues`}
           </Button>
         </div>
       </div>
@@ -2049,12 +2272,17 @@ export function TrackerWizardModal({
             if (index < firstStep) return null;
             const active = index === step;
             const past = index < step;
-            const reachable = index <= maxStep;
+            // A run with nothing mapped skips the three middle steps — they are
+            // shown rather than hidden (the run still HAS six steps; these three
+            // simply have nothing to describe) and say so on hover.
+            const skipped = mappedGroups.length === 0 && index > MAP_STEP && index < LAST_STEP;
+            const reachable = index <= maxStep && !skipped;
             return (
               <button
                 key={label}
                 type="button"
                 disabled={!reachable}
+                title={skipped ? 'Nothing mapped — this run only unlinks.' : undefined}
                 aria-current={active ? 'step' : undefined}
                 data-testid={`tracker-step-${index}`}
                 onClick={() => void goToStep(index)}
@@ -2110,7 +2338,7 @@ export function TrackerWizardModal({
                 variant="ghost"
                 size="sm"
                 className="rounded-none"
-                onClick={() => void goToStep(step - 1)}
+                onClick={() => void goToStep(prevStepFrom(step))}
               >
                 Back
               </Button>
@@ -2129,9 +2357,9 @@ export function TrackerWizardModal({
                   className="rounded-none"
                   disabled={nextBlocked || loading}
                   loading={loading}
-                  onClick={() => void goToStep(step + 1)}
+                  onClick={() => void goToStep(nextStepFrom(step))}
                 >
-                  {step === LAST_STEP - 1 ? 'Review' : 'Continue'}
+                  {nextStepFrom(step) === LAST_STEP ? 'Review' : 'Continue'}
                 </Button>
               )}
             </div>

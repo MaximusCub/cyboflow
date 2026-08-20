@@ -19,15 +19,16 @@
  *
  * Plus ADD-MAPPING MODE (`sourceConnection` set), whose whole point is that no
  * key is asked for or sent a second time: Step 0 is absent rather than
- * pre-answered, every probe names the connection, `connect` carries
- * `sourceConnectionId`, and the Map step chips the scopes its siblings cover
- * without locking them.
+ * pre-answered, every probe names the connection, and `connect` carries
+ * `sourceConnectionId`.
  *
- * That mode's three sibling-aware behaviours are covered alongside it, because
- * each is invisible to a run that only reads its own mappings: the push target
- * a live sibling already holds is never claimed, a failed mount groups probe
- * offers a Retry instead of stranding the step, and scope overlap is computed
- * against the siblings too, in both directions.
+ * Its Map step is a mapping EDITOR, so the tests below drive it as one: linked
+ * rows on top with an Unlink that only stages, the mappable list underneath
+ * holding exactly what no kept sibling covers, unlink-before-connect ordering at
+ * submit, and the unlink-only run that jumps straight to Review. The
+ * sibling-aware answers ride on the same data — the push target a kept sibling
+ * holds is never claimed (and a staged unlink releases it), and scope overlap is
+ * computed against the kept siblings in both directions.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -51,6 +52,7 @@ vi.mock('../../../trpc/client', () => ({
         wizardStates: { mutate: vi.fn() },
         reconcilePreview: { mutate: vi.fn() },
         connect: { mutate: vi.fn() },
+        disconnect: { mutate: vi.fn() },
         mappings: { query: vi.fn() },
       },
     },
@@ -73,6 +75,7 @@ const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
 const mockReconcile = vi.mocked(trpc.cyboflow.tracker.reconcilePreview.mutate);
 const mockConnect = vi.mocked(trpc.cyboflow.tracker.connect.mutate);
+const mockDisconnect = vi.mocked(trpc.cyboflow.tracker.disconnect.mutate);
 const mockMappings = vi.mocked(trpc.cyboflow.tracker.mappings.query);
 const mockProjectsGetAll = vi.mocked(API.projects.getAll);
 
@@ -324,6 +327,7 @@ beforeEach(() => {
       Promise.resolve(projectId === 7 ? RECONCILE_7 : RECONCILE_9),
   );
   mockConnect.mockResolvedValue({ connectionId: 'conn-1' });
+  mockDisconnect.mockResolvedValue({ ok: true });
   // The live siblings of the source connection — itself alone by default, which
   // is what a connection with one mapping actually reports.
   mockMappings.mockResolvedValue([SOURCE_CONNECTION]);
@@ -365,9 +369,11 @@ function renderAddMapping(): void {
   );
 }
 
-async function openAddMapping(): Promise<void> {
+async function openAddMapping(readyGroup = 'Alpha'): Promise<void> {
   renderAddMapping();
-  await screen.findByLabelText('Cyboflow project for Alpha');
+  // `readyGroup` names a group the fixture leaves MAPPABLE — a linked scope has
+  // no select at all, so a test whose siblings cover Alpha waits on another one.
+  await screen.findByLabelText(`Cyboflow project for ${readyGroup}`);
   await screen.findAllByRole('option', { name: 'Cyboflow (Active)' });
 }
 
@@ -387,14 +393,11 @@ function mapGroup(groupName: string, projectId: number): void {
 }
 
 /**
- * Put a group back on "Don't import". In add-mapping mode that is a real edit,
- * not a reset: the covered groups open PRE-SELECTED to the project they already
- * map to, so this is how a run declines to carry one of them.
+ * Stage a linked mapping for unlink. Local only — nothing is disconnected until
+ * Submit, and the group it covered drops into the mappable list immediately.
  */
-function unmapGroup(groupName: string): void {
-  fireEvent.change(screen.getByLabelText(`Cyboflow project for ${groupName}`), {
-    target: { value: '' },
-  });
+function unlinkSibling(connectionId: string): void {
+  fireEvent.click(screen.getByTestId(`tracker-unlink-${connectionId}`));
 }
 
 /** The default fixture mapping: Alpha + Beta → Cyboflow (7), Platform → Website (9). */
@@ -851,6 +854,8 @@ describe('TrackerWizardModal — add-mapping mode', () => {
   it('names the connection on every probe instead of carrying credentials', async () => {
     await openAddMapping();
     mapGroup('Alpha', 9);
+    // Platform is linked, so it has no select until this run releases it.
+    unlinkSibling('conn-src');
     mapGroup('Platform', 9);
     await advance(2); // → Tasks → States
 
@@ -877,10 +882,6 @@ describe('TrackerWizardModal — add-mapping mode', () => {
 
   it('connects with sourceConnectionId and no credentials key', async () => {
     await openAddMapping();
-    // Platform opens pre-selected (conn-src already maps it); dropping it keeps
-    // this test on the ONE new mapping whose payload shape it is about — the
-    // pre-seeded row's own re-submit is covered by the seeding tests below.
-    unmapGroup('Platform');
     mapGroup('Alpha', 9);
     await advance(4); // → Tasks → States → Reconcile → Review
 
@@ -902,96 +903,53 @@ describe('TrackerWizardModal — add-mapping mode', () => {
     });
     expect(onConnected).toHaveBeenCalledTimes(1);
   });
-
-  it('chips the scopes its siblings already cover, without locking them', async () => {
-    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
-    await openAddMapping();
-
-    expect(mockMappings).toHaveBeenCalledWith({ connectionId: 'conn-src' });
-    // Each chip names the cyboflow project the sibling maps into.
-    expect(
-      await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website'),
-    ).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId('tracker-group-team-plat')).getByText('mapped → Cyboflow'),
-    ).toBeInTheDocument();
-    // Beta shares Alpha's container but not its narrow, so it is NOT covered.
-    expect(
-      within(screen.getByTestId('tracker-group-proj-beta')).queryByText(/^mapped →/),
-    ).not.toBeInTheDocument();
-
-    // Information, not a lock: a chipped group still maps, and re-mapping it to
-    // the same project is exactly the idempotent re-connect.
-    const alphaSelect = screen.getByLabelText('Cyboflow project for Alpha');
-    expect(alphaSelect).toBeEnabled();
-    fireEvent.change(alphaSelect, { target: { value: '9' } });
-    expect(alphaSelect).toHaveValue('9');
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
-  });
 });
 
 /**
- * The Map step opens describing the connection AS IT STANDS: a group its
- * siblings already cover is pre-selected onto that project, not left on "Don't
- * import" beside a chip claiming the opposite.
+ * The Map step is a MAPPING EDITOR: what the connection already covers is listed
+ * first with an Unlink, and only what it does not cover is offered a project
+ * select. Unlinking is staged — nothing is disconnected until Submit — and it
+ * moves the group straight into the mappable list below.
  */
-describe('TrackerWizardModal — add-mapping mode · pre-selection', () => {
-  it('opens with every covered group pre-selected to the project it maps to', async () => {
+describe('TrackerWizardModal — add-mapping mode · linked rows', () => {
+  it('lists the live mappings on top, with no select of their own', async () => {
     mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
-    await openAddMapping();
+    await openAddMapping('Beta');
 
-    await waitFor(() =>
-      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
-    );
-    expect(screen.getByLabelText('Cyboflow project for Alpha')).toHaveValue('9');
-    // The select now agrees with the chip instead of contradicting it.
+    expect(mockMappings).toHaveBeenCalledWith({ connectionId: 'conn-src' });
+    const platRow = await screen.findByTestId('tracker-linked-conn-src');
+    // Named by the tree's group name, pointed at its cyboflow project, and the
+    // armed row says so.
+    expect(within(platRow).getByText('Platform → Cyboflow')).toBeInTheDocument();
+    expect(within(platRow).getByText('Pushes')).toBeInTheDocument();
     expect(
-      within(screen.getByTestId('tracker-group-proj-alpha')).getByText('mapped → Website'),
+      within(screen.getByTestId('tracker-linked-conn-alpha')).getByText('Alpha → Website'),
     ).toBeInTheDocument();
 
-    // Nothing covers Beta or the whole Core team, so they stay unmapped.
-    expect(screen.getByLabelText('Cyboflow project for Beta')).toHaveValue('');
-    expect(screen.getByLabelText('Cyboflow project for Core')).toHaveValue('');
+    // A linked scope is not mappable — that is what keeps one group out of two
+    // projects — while everything uncovered still is.
+    expect(screen.queryByLabelText('Cyboflow project for Platform')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Cyboflow project for Alpha')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Cyboflow project for Beta')).toBeInTheDocument();
+    expect(screen.getByLabelText('Cyboflow project for Core')).toBeInTheDocument();
+
+    // Nothing to submit yet: a run has to map or unlink something first.
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   });
 
-  it('never overwrites an answer the user already gave', async () => {
-    // The sibling read lands AFTER the tree, so the user can map before it does.
-    let resolveMappings: (rows: TrackerConnectionSummary[]) => void = () => undefined;
-    mockMappings.mockImplementationOnce(
-      () =>
-        new Promise<TrackerConnectionSummary[]>((resolve) => {
-          resolveMappings = resolve;
-        }),
-    );
+  it('moves an unlinked group into the mappable list without disconnecting anything', async () => {
     await openAddMapping();
+    await screen.findByTestId('tracker-linked-conn-src');
 
-    mapGroup('Platform', 9);
-    resolveMappings([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    unlinkSibling('conn-src');
 
-    // Alpha seeds, because the user never answered for it; Platform does not.
-    await waitFor(() => expect(screen.getByLabelText('Cyboflow project for Alpha')).toHaveValue('9'));
-    expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('9');
-  });
-
-  it('drops a pre-selected group from the run when it is set back to Don’t import', async () => {
-    await openAddMapping();
-    await waitFor(() =>
-      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
-    );
-
-    unmapGroup('Platform');
-    mapGroup('Alpha', 9);
-    await advance(4);
-
-    // Only the mapping the run still carries is submitted — the dropped one is
-    // untouched, and its live row is not this wizard's to delete.
-    expect(screen.queryByTestId('tracker-mapping-team-plat')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ projectId: 9, sourceLabel: 'Core · Alpha' }),
-    );
+    // The staging is local — the row is gone from Linked, the group has a select,
+    // and the server has not been told a thing.
+    expect(screen.queryByTestId('tracker-linked-conn-src')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('');
+    expect(mockDisconnect).not.toHaveBeenCalled();
+    // A staged unlink is itself a change, so the run can go on.
+    expect(screen.getByRole('button', { name: 'Review' })).toBeEnabled();
   });
 });
 
@@ -1005,10 +963,9 @@ describe('TrackerWizardModal — add-mapping mode · pre-selection', () => {
 describe('TrackerWizardModal — add-mapping mode · push target', () => {
   it('declines the push target a live sibling already holds', async () => {
     // The default siblings: conn-src maps Platform into Cyboflow (7) and pushes.
-    // Dropping it from the run is what leaves that row OUTSIDE this run — the
-    // shape where a naive cluster default would silently claim over it.
+    // This run keeps that row and adds a second mapping into the same project —
+    // the shape where a naive cluster default would silently claim over it.
     await openAddMapping();
-    unmapGroup('Platform');
     mapGroup('Alpha', 7);
 
     // No radio — this run makes no push-target choice for that project. It says
@@ -1036,7 +993,6 @@ describe('TrackerWizardModal — add-mapping mode · push target', () => {
 
   it('declines it for EVERY mapping into that project, cluster or not', async () => {
     await openAddMapping();
-    unmapGroup('Platform');
     mapGroup('Alpha', 7);
     mapGroup('Beta', 7);
 
@@ -1052,15 +1008,22 @@ describe('TrackerWizardModal — add-mapping mode · push target', () => {
     }
   });
 
-  it('still claims it when this run re-connects the pusher’s own scope', async () => {
-    // Re-mapping Platform into Cyboflow IS the armed row: sending false here
-    // would take main's existing-row branch and disarm the project entirely.
+  it('claims it once the incumbent is staged for unlink', async () => {
+    // A staged unlink is already gone as far as the run is concerned: its
+    // disconnect runs first, and main hands the flag on from there — so the new
+    // mapping claims normally instead of deferring to a row about to retire.
     await openAddMapping();
-    mapGroup('Platform', 7);
+    await screen.findByTestId('tracker-linked-conn-src');
+    unlinkSibling('conn-src');
+    mapGroup('Alpha', 7);
 
     expect(screen.queryByTestId('tracker-push-incumbent-7')).not.toBeInTheDocument();
     await advance(4);
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    expect(
+      within(screen.getByTestId('tracker-mapping-proj-alpha')).getByText('Push target'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Unlink 1 · connect & sync 1 issues/ }));
     await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
     expect(mockConnect).toHaveBeenNthCalledWith(
       1,
@@ -1068,61 +1031,8 @@ describe('TrackerWizardModal — add-mapping mode · push target', () => {
     );
   });
 
-  it('keeps the push target on its own row when a pre-seeded run submits unchanged', async () => {
-    // Touch nothing: the run carries exactly what the connection already maps.
-    await openAddMapping();
-    await waitFor(() =>
-      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
-    );
-    expect(screen.queryByTestId('tracker-push-incumbent-7')).not.toBeInTheDocument();
-
-    await advance(4);
-    expect(
-      within(screen.getByTestId('tracker-mapping-team-plat')).getByText('Push target'),
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
-    expect(mockConnect).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        projectId: 7,
-        source: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
-        pushTarget: true,
-      }),
-    );
-  });
-
-  it('defaults the radio to the incumbent when a group joins its project', async () => {
-    await openAddMapping();
-    await waitFor(() =>
-      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
-    );
-
-    // Cyboflow now has two mappings in this run, so the choice IS the run's —
-    // but its default must be the row already filing, not "the first group".
-    mapGroup('Alpha', 7);
-    expect(screen.getByText('New cyboflow ideas in Cyboflow push to:')).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: 'Platform' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: 'Alpha' })).not.toBeChecked();
-
-    await advance(4);
-    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
-    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(2));
-    expect(mockConnect).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ sourceLabel: 'Core · Alpha', pushTarget: false }),
-    );
-    expect(mockConnect).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ sourceLabel: 'Platform · all open issues', pushTarget: true }),
-    );
-  });
-
   it('keeps the radio where the run genuinely decides — a project with no pusher', async () => {
     await openAddMapping();
-    // Platform (pre-selected into Cyboflow) is not what this test is about.
-    unmapGroup('Platform');
     mapGroup('Alpha', 9);
     mapGroup('Beta', 9);
 
@@ -1210,8 +1120,8 @@ describe('TrackerWizardModal — add-mapping mode · overlap with live siblings'
 
   it('warns in the reverse direction — a whole team mapped over a narrowed sibling', async () => {
     mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
-    await openAddMapping();
-    await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website');
+    await openAddMapping('Beta');
+    await screen.findByTestId('tracker-linked-conn-alpha');
 
     // Beta shares Alpha's container but not its narrow — nothing subsumes it.
     mapGroup('Beta', 9);
@@ -1222,16 +1132,159 @@ describe('TrackerWizardModal — add-mapping mode · overlap with live siblings'
     expect(screen.getByText(overlapText('Core'))).toBeInTheDocument();
   });
 
-  it('never warns on the idempotent re-connect of a sibling’s own scope', async () => {
-    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+  it('stops warning about a sibling this run unlinks', async () => {
+    // The sibling covers the whole Core team, so mapping Alpha under it overlaps
+    // — until the run stages that sibling's unlink, after which it covers
+    // nothing: it is disconnected before the new mapping ever syncs.
+    mockMappings.mockResolvedValue([CORE_TEAM_SIBLING]);
     await openAddMapping();
-    await within(screen.getByTestId('tracker-group-proj-alpha')).findByText('mapped → Website');
+    mapGroup('Alpha', 7);
+    expect(await screen.findByText(overlapText('Alpha'))).toBeInTheDocument();
 
-    // Both scopes are already live on this connection; re-mapping either one
-    // changes nothing, so neither arm may fire.
-    mapGroup('Alpha', 9);
-    mapGroup('Platform', 7);
+    unlinkSibling('conn-core');
     expect(screen.queryByText(overlapText('Alpha'))).not.toBeInTheDocument();
-    expect(screen.queryByText(overlapText('Platform'))).not.toBeInTheDocument();
+    // And the group it covered is mappable now.
+    expect(screen.getByLabelText('Cyboflow project for Core')).toBeInTheDocument();
+  });
+});
+
+/**
+ * Submit applies the run in ONE order, and it is load-bearing: every staged
+ * disconnect runs before the connects, because a retired row stops claiming its
+ * issues (so the new mapping imports them) and main promotes a surviving push
+ * target as part of retiring it.
+ */
+describe('TrackerWizardModal — add-mapping mode · submit', () => {
+  it('disconnects the old mapping before connecting the new pair', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    await openAddMapping('Beta');
+    await screen.findByTestId('tracker-linked-conn-alpha');
+
+    // Move Alpha from Website to Cyboflow: unlink the old row, map the freed
+    // group somewhere else. conn-src stays live, so it carries the key.
+    unlinkSibling('conn-alpha');
+    mapGroup('Alpha', 7);
+    await advance(4);
+
+    expect(
+      within(screen.getByTestId('tracker-unlink-row-conn-alpha')).getByText(
+        'Unlink Alpha from Website',
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Unlink 1 · connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+
+    expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-alpha' });
+    expect(mockDisconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      mockConnect.mock.invocationCallOrder[0],
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ projectId: 7, sourceConnectionId: 'conn-src' }),
+    );
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs an unlink-only run straight to Review and connects nothing', async () => {
+    await openAddMapping();
+    await screen.findByTestId('tracker-linked-conn-src');
+    unlinkSibling('conn-src');
+
+    // Tasks/States/Reconcile describe mapped groups; this run has none, so the
+    // rail shows them as unreachable and Continue reads Review.
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('tracker-step-5')).toHaveAttribute('aria-current', 'step'),
+    );
+    for (const index of [2, 3, 4]) {
+      expect(screen.getByTestId(`tracker-step-${index}`)).toBeDisabled();
+    }
+    expect(mockIssues).not.toHaveBeenCalled();
+    expect(mockStates).not.toHaveBeenCalled();
+    expect(mockReconcile).not.toHaveBeenCalled();
+    expect(screen.getByText('Review the unlinks')).toBeInTheDocument();
+
+    // Back from Review returns to Map, not to the steps it skipped.
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('tracker-step-1')).toHaveAttribute('aria-current', 'step'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    await screen.findByText('Review the unlinks');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink 1 mapping' }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledTimes(1));
+    expect(mockDisconnect).toHaveBeenCalledWith({ connectionId: 'conn-src' });
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Continue blocked while the run changes nothing', async () => {
+    await openAddMapping();
+    await screen.findByTestId('tracker-linked-conn-src');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  });
+
+  it('holds the connects back when a staged disconnect fails, and retries both', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    mockDisconnect.mockRejectedValueOnce(new Error('Linear returned 500.'));
+    await openAddMapping('Beta');
+    await screen.findByTestId('tracker-linked-conn-alpha');
+
+    unlinkSibling('conn-alpha');
+    mapGroup('Alpha', 7);
+    await advance(4);
+    fireEvent.click(screen.getByRole('button', { name: /Unlink 1 · connect & sync 1 issues/ }));
+
+    // The row it should have retired is still live, so connecting over it would
+    // import nothing — the connect stays Pending until the unlink lands.
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('tracker-unlink-row-conn-alpha')).getByText(
+          'Linear returned 500.',
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(
+      within(screen.getByTestId('tracker-mapping-proj-alpha')).getByText('Pending'),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Retry 1 failed/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    expect(mockDisconnect.mock.invocationCallOrder[1]).toBeLessThan(
+      mockConnect.mock.invocationCallOrder[0],
+    );
+    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+  });
+
+  it('unlinks the key’s own row LAST when nothing else can carry it', async () => {
+    // Only one sibling exists, and the run retires it while creating a new
+    // mapping: `connect` resolves its key from that row, and `disconnect` clears
+    // it — so this one disconnect has to wait for the connects.
+    await openAddMapping();
+    await screen.findByTestId('tracker-linked-conn-src');
+    unlinkSibling('conn-src');
+    mapGroup('Platform', 9);
+    await advance(4);
+
+    expect(screen.getByTestId('tracker-unlink-list')).toHaveTextContent(
+      'Platform is unlinked last — its stored key is what authorizes the new mappings.',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Unlink 1 · connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDisconnect.mock.invocationCallOrder[0],
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ projectId: 9, sourceConnectionId: 'conn-src' }),
+    );
   });
 });
