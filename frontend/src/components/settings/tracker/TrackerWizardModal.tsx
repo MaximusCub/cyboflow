@@ -39,9 +39,10 @@
  * (`{ connectionId }`) instead of carrying credentials, `connect` passes
  * `sourceConnectionId`, and main resolves the stored key on its side — so in
  * this mode nothing key-shaped crosses IPC at all. The Map step additionally
- * reads the connection's live siblings once and chips the groups they already
- * cover; the chip is information, never a lock, because re-connecting an
- * unchanged (scope → project) pair is idempotent.
+ * reads the connection's live siblings once, PRE-SELECTS every group they
+ * already cover onto the project it maps to, and chips it; neither is a lock,
+ * because re-connecting an unchanged (scope → project) pair is idempotent and
+ * clearing a select only takes the group out of THIS run.
  *
  * Those siblings are also what keeps the mode honest about the two things a run
  * can only see with them: the push target (a project a sibling already pushes
@@ -274,6 +275,12 @@ export function TrackerWizardModal({
    * the caches cannot re-install data computed for the previous mapping set.
    */
   const probeVersionRef = useRef(0);
+  /**
+   * Whether the add-mapping seed below has already run for this open. A ref
+   * rather than state: it has to gate the very pass that seeds, and nothing
+   * renders from it.
+   */
+  const seededRef = useRef(false);
 
   // ── Step 5 · submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -736,6 +743,77 @@ export function TrackerWizardModal({
     };
   }, [isOpen, sourceConnection]);
 
+  /**
+   * PRE-SELECT what the connection already maps, once both mount reads have
+   * landed. Otherwise the covered groups open on “Don't import” next to a chip
+   * saying they are mapped — two answers to the same question, and the one the
+   * select gives is the one `connect` would act on. Seeded, the step describes
+   * the connection as it stands and the user edits a truthful starting point.
+   *
+   * The push choice rides along, for the project whose armed row this run now
+   * carries: without it an untouched re-submit would fall back to "the
+   * project's first mapping" and move the push target onto a row that never
+   * held it. (`pushIncumbents` deliberately ignores a sibling whose scope IS in
+   * the run, precisely so this claim lands on the incumbent's own group.)
+   *
+   * Once per open, and never over an answer the user already gave: the ref
+   * gates the re-run, and the merge only fills groups with no value yet — which
+   * matters if the sibling read lands after the user has started mapping.
+   *
+   * Seeding writes `mappings`, so the invalidation effect above bumps
+   * `probeVersionRef` — harmless here, because this cannot run before the group
+   * probe has already installed its tree, and no other probe is in flight while
+   * the run is still sitting on Map.
+   */
+  useEffect(() => {
+    if (!isOpen || sourceConnection === undefined) return;
+    if (seededRef.current || groupTree === null || existingMappings.length === 0) return;
+
+    const seedMappings: Record<string, number> = {};
+    for (const group of allGroups) {
+      // A group covered in SEVERAL projects seeds the first of them; the chips
+      // still name every one, which is the honest way to show a fan-out a
+      // single select cannot express.
+      const sibling = existingMappings.find(
+        (m) => m.sourceScope !== null && sameScope(m.sourceScope, group.selection),
+      );
+      if (sibling !== undefined) seedMappings[group.id] = sibling.projectId;
+    }
+    if (Object.keys(seedMappings).length === 0) return;
+
+    const seedPush: Record<number, string> = {};
+    for (const m of existingMappings) {
+      const scope = m.sourceScope;
+      if (!m.pushTarget || scope === null) continue;
+      const armed = allGroups.find(
+        (g) => sameScope(scope, g.selection) && seedMappings[g.id] === m.projectId,
+      );
+      if (armed !== undefined) seedPush[m.projectId] = armed.id;
+    }
+
+    seededRef.current = true;
+    setMappings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [groupId, pid] of Object.entries(seedMappings)) {
+        if (next[groupId] !== undefined) continue;
+        next[groupId] = pid;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setPushChoice((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [pid, groupId] of Object.entries(seedPush)) {
+        if (next[Number(pid)] !== undefined) continue;
+        next[Number(pid)] = groupId;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [isOpen, sourceConnection, groupTree, allGroups, existingMappings]);
+
   // -------------------------------------------------------------------------
   // Probes
   // -------------------------------------------------------------------------
@@ -1141,8 +1219,10 @@ export function TrackerWizardModal({
         </p>
         {sourceConnection !== undefined && (
           <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-tertiary">
-            Groups this connection already covers carry their cyboflow project as a chip. Mapping
-            one again is allowed — re-connecting an unchanged pair changes nothing.
+            Groups this connection already covers open on the project they map to, and carry it as
+            a chip. Leaving one as it is re-connects an unchanged pair, which changes nothing;
+            putting one back on “Don&apos;t import” only means this run leaves it alone — the
+            mapping itself stays live under Project mappings.
           </p>
         )}
       </div>

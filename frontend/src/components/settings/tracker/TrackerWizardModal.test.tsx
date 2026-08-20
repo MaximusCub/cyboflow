@@ -386,6 +386,17 @@ function mapGroup(groupName: string, projectId: number): void {
   });
 }
 
+/**
+ * Put a group back on "Don't import". In add-mapping mode that is a real edit,
+ * not a reset: the covered groups open PRE-SELECTED to the project they already
+ * map to, so this is how a run declines to carry one of them.
+ */
+function unmapGroup(groupName: string): void {
+  fireEvent.change(screen.getByLabelText(`Cyboflow project for ${groupName}`), {
+    target: { value: '' },
+  });
+}
+
 /** The default fixture mapping: Alpha + Beta → Cyboflow (7), Platform → Website (9). */
 function mapDefaults(): void {
   mapGroup('Alpha', 7);
@@ -866,6 +877,10 @@ describe('TrackerWizardModal — add-mapping mode', () => {
 
   it('connects with sourceConnectionId and no credentials key', async () => {
     await openAddMapping();
+    // Platform opens pre-selected (conn-src already maps it); dropping it keeps
+    // this test on the ONE new mapping whose payload shape it is about — the
+    // pre-seeded row's own re-submit is covered by the seeding tests below.
+    unmapGroup('Platform');
     mapGroup('Alpha', 9);
     await advance(4); // → Tasks → States → Reconcile → Review
 
@@ -916,6 +931,71 @@ describe('TrackerWizardModal — add-mapping mode', () => {
 });
 
 /**
+ * The Map step opens describing the connection AS IT STANDS: a group its
+ * siblings already cover is pre-selected onto that project, not left on "Don't
+ * import" beside a chip claiming the opposite.
+ */
+describe('TrackerWizardModal — add-mapping mode · pre-selection', () => {
+  it('opens with every covered group pre-selected to the project it maps to', async () => {
+    mockMappings.mockResolvedValue([SOURCE_CONNECTION, ALPHA_SIBLING]);
+    await openAddMapping();
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
+    );
+    expect(screen.getByLabelText('Cyboflow project for Alpha')).toHaveValue('9');
+    // The select now agrees with the chip instead of contradicting it.
+    expect(
+      within(screen.getByTestId('tracker-group-proj-alpha')).getByText('mapped → Website'),
+    ).toBeInTheDocument();
+
+    // Nothing covers Beta or the whole Core team, so they stay unmapped.
+    expect(screen.getByLabelText('Cyboflow project for Beta')).toHaveValue('');
+    expect(screen.getByLabelText('Cyboflow project for Core')).toHaveValue('');
+  });
+
+  it('never overwrites an answer the user already gave', async () => {
+    // The sibling read lands AFTER the tree, so the user can map before it does.
+    let resolveMappings: (rows: TrackerConnectionSummary[]) => void = () => undefined;
+    mockMappings.mockImplementationOnce(
+      () =>
+        new Promise<TrackerConnectionSummary[]>((resolve) => {
+          resolveMappings = resolve;
+        }),
+    );
+    await openAddMapping();
+
+    mapGroup('Platform', 9);
+    resolveMappings([SOURCE_CONNECTION, ALPHA_SIBLING]);
+
+    // Alpha seeds, because the user never answered for it; Platform does not.
+    await waitFor(() => expect(screen.getByLabelText('Cyboflow project for Alpha')).toHaveValue('9'));
+    expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('9');
+  });
+
+  it('drops a pre-selected group from the run when it is set back to Don’t import', async () => {
+    await openAddMapping();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
+    );
+
+    unmapGroup('Platform');
+    mapGroup('Alpha', 9);
+    await advance(4);
+
+    // Only the mapping the run still carries is submitted — the dropped one is
+    // untouched, and its live row is not this wizard's to delete.
+    expect(screen.queryByTestId('tracker-mapping-team-plat')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ projectId: 9, sourceLabel: 'Core · Alpha' }),
+    );
+  });
+});
+
+/**
  * `connect` claims the push target across wizard runs — main demotes every other
  * armed row of the (project, provider) pair unless the payload says
  * `pushTarget: false`. The wizard's own cluster only knows THIS run's mappings,
@@ -925,7 +1005,10 @@ describe('TrackerWizardModal — add-mapping mode', () => {
 describe('TrackerWizardModal — add-mapping mode · push target', () => {
   it('declines the push target a live sibling already holds', async () => {
     // The default siblings: conn-src maps Platform into Cyboflow (7) and pushes.
+    // Dropping it from the run is what leaves that row OUTSIDE this run — the
+    // shape where a naive cluster default would silently claim over it.
     await openAddMapping();
+    unmapGroup('Platform');
     mapGroup('Alpha', 7);
 
     // No radio — this run makes no push-target choice for that project. It says
@@ -953,6 +1036,7 @@ describe('TrackerWizardModal — add-mapping mode · push target', () => {
 
   it('declines it for EVERY mapping into that project, cluster or not', async () => {
     await openAddMapping();
+    unmapGroup('Platform');
     mapGroup('Alpha', 7);
     mapGroup('Beta', 7);
 
@@ -984,8 +1068,61 @@ describe('TrackerWizardModal — add-mapping mode · push target', () => {
     );
   });
 
+  it('keeps the push target on its own row when a pre-seeded run submits unchanged', async () => {
+    // Touch nothing: the run carries exactly what the connection already maps.
+    await openAddMapping();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
+    );
+    expect(screen.queryByTestId('tracker-push-incumbent-7')).not.toBeInTheDocument();
+
+    await advance(4);
+    expect(
+      within(screen.getByTestId('tracker-mapping-team-plat')).getByText('Push target'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 1 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(1));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        projectId: 7,
+        source: { containerId: 'plat', narrowId: 'all', narrowKind: 'all' },
+        pushTarget: true,
+      }),
+    );
+  });
+
+  it('defaults the radio to the incumbent when a group joins its project', async () => {
+    await openAddMapping();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Cyboflow project for Platform')).toHaveValue('7'),
+    );
+
+    // Cyboflow now has two mappings in this run, so the choice IS the run's —
+    // but its default must be the row already filing, not "the first group".
+    mapGroup('Alpha', 7);
+    expect(screen.getByText('New cyboflow ideas in Cyboflow push to:')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Platform' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Alpha' })).not.toBeChecked();
+
+    await advance(4);
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 2 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(2));
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ sourceLabel: 'Core · Alpha', pushTarget: false }),
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sourceLabel: 'Platform · all open issues', pushTarget: true }),
+    );
+  });
+
   it('keeps the radio where the run genuinely decides — a project with no pusher', async () => {
     await openAddMapping();
+    // Platform (pre-selected into Cyboflow) is not what this test is about.
+    unmapGroup('Platform');
     mapGroup('Alpha', 9);
     mapGroup('Beta', 9);
 
