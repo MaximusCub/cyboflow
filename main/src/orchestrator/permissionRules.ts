@@ -1,7 +1,7 @@
 /**
- * permissionRules — pure matcher + loader for Claude Code permission allow/deny
- * rules, used to honor user/project `permissions.allow` grants inside the
- * PreToolUse hook.
+ * permissionRules — pure matcher + loader for Claude Code permission
+ * allow/deny/ask rules, used to honor user/project `permissions.allow` grants
+ * inside the PreToolUse hook.
  *
  * ## Why this exists
  *
@@ -30,6 +30,15 @@
  * ApprovalRouter where the user can still reject) — they are not turned into a
  * hard SDK deny, matching cyboflow's existing "ask for everything" baseline.
  *
+ * ask rules suppress an auto-allow the same way, and for the same reason. A
+ * user who writes `ask: ["Bash(git push:*)"]` alongside a broader
+ * `allow: ["Bash(git:*)"]` has stated that this narrower case must reach a
+ * human; because the hook preempts the CLI's own rule evaluation (above), the
+ * CLI can no longer enforce that for us. Without this, the broad allow silently
+ * swallowed the narrower ask — auto-allowing exactly what the user asked to be
+ * asked about, which inverts the safety posture stated below. Routing an ask
+ * match to ApprovalRouter satisfies the user's intent precisely: a human decides.
+ *
  * Unsupported specifier kinds (e.g. Read/Edit path globs) intentionally do NOT
  * auto-allow in v1 — they keep prompting, which is no worse than today.
  *
@@ -47,10 +56,17 @@ export interface ParsedRule {
   content?: string;
 }
 
-/** Merged allow/deny rule strings from user + project settings. */
+/**
+ * Merged allow/deny/ask rule strings from user + project settings.
+ *
+ * `ask` is REQUIRED, not optional, deliberately: it guards the "never
+ * auto-allow when it should have asked" invariant, and a construction site that
+ * forgets it should fail the build rather than silently fall open.
+ */
 export interface MergedPermissionRules {
   allow: string[];
   deny: string[];
+  ask: string[];
 }
 
 /** Shell control operators that separate independently-evaluated commands. */
@@ -159,6 +175,24 @@ function bashCommandAllowed(command: string, bashContents: string[]): boolean {
   });
 }
 
+/**
+ * True if ANY segment of `command` matches a Bash suppressor (deny/ask) rule.
+ *
+ * The quantifier is the whole point, and it is the OPPOSITE of
+ * bashCommandAllowed's. A grant must cover EVERY segment to be safe; a
+ * suppressor must fire if it touches ANY segment. Sharing the `every` matcher
+ * for both — which is what this module used to do — let a compound command slip
+ * a suppressed segment past its own rule: with `allow: ["Bash(git:*)"]` and
+ * `deny: ["Bash(git push:*)"]`, the command `git add . && git push` did not
+ * match deny (the `git add .` segment isn't a push) yet DID match allow (both
+ * segments are `git`), so it auto-allowed the very push the user denied.
+ */
+function bashCommandSuppressed(command: string, bashContents: string[]): boolean {
+  return splitShellSegments(command).some((segment) =>
+    bashContents.some((content) => matchBashSpecifier(content, segment)),
+  );
+}
+
 /** Extract the registrable domain (host) from a URL string, or null. */
 function urlDomain(url: string): string | null {
   try {
@@ -173,23 +207,31 @@ function urlDomain(url: string): string | null {
  *
  * Handles: bare tool-name rules, Bash specifiers (prefix/exact, compound-safe),
  * and WebFetch(domain:X). Other specifier kinds do not match (conservative).
+ *
+ * `mode` selects the Bash quantifier over a compound command's segments:
+ * 'grant' requires EVERY segment to match (used for allow), 'suppress' requires
+ * only SOME segment to match (used for deny and ask). See bashCommandSuppressed.
+ * It is inert for every non-Bash tool, whose rules match a single subject.
  */
 function matchesAny(
   toolName: string,
   input: Record<string, unknown>,
   rules: ParsedRule[],
+  mode: 'grant' | 'suppress' = 'grant',
 ): boolean {
   const forTool = rules.filter((r) => r.toolName === toolName);
   if (forTool.length === 0) return false;
 
-  // Bare tool-name rule grants the whole tool.
+  // Bare tool-name rule covers the whole tool.
   if (forTool.some((r) => r.content === undefined)) return true;
 
   if (toolName === 'Bash') {
     const command = typeof input.command === 'string' ? input.command.trim() : '';
     if (command.length === 0) return false;
     const contents = forTool.map((r) => r.content).filter((c): c is string => c !== undefined);
-    return bashCommandAllowed(command, contents);
+    return mode === 'suppress'
+      ? bashCommandSuppressed(command, contents)
+      : bashCommandAllowed(command, contents);
   }
 
   if (toolName === 'WebFetch') {
@@ -210,24 +252,24 @@ function matchesAny(
 /**
  * Decide whether a tool call is pre-approved by the merged allow rules.
  *
- * Returns true only when the call matches an allow rule AND does not match a
- * deny rule. A true result means "skip ApprovalRouter, auto-allow". A false
- * result means "route to ApprovalRouter as usual".
+ * Returns true only when the call matches an allow rule AND matches neither a
+ * deny nor an ask rule. A true result means "skip ApprovalRouter, auto-allow".
+ * A false result means "route to ApprovalRouter as usual".
+ *
+ * deny and ask are both auto-allow SUPPRESSORS and are checked first, so a
+ * narrow suppressor always beats a broad allow regardless of rule order.
  */
 export function isToolAllowed(
   toolName: string,
   input: Record<string, unknown>,
   rules: MergedPermissionRules,
 ): boolean {
-  const allow = rules.allow
-    .map(parsePermissionRule)
-    .filter((r): r is ParsedRule => r !== null);
-  const deny = rules.deny
-    .map(parsePermissionRule)
-    .filter((r): r is ParsedRule => r !== null);
+  const parse = (raw: string[]): ParsedRule[] =>
+    raw.map(parsePermissionRule).filter((r): r is ParsedRule => r !== null);
 
-  if (matchesAny(toolName, input, deny)) return false;
-  return matchesAny(toolName, input, allow);
+  if (matchesAny(toolName, input, parse(rules.deny), 'suppress')) return false;
+  if (matchesAny(toolName, input, parse(rules.ask), 'suppress')) return false;
+  return matchesAny(toolName, input, parse(rules.allow), 'grant');
 }
 
 // ---------------------------------------------------------------------------
@@ -238,10 +280,11 @@ interface SettingsFileShape {
   permissions?: {
     allow?: unknown;
     deny?: unknown;
+    ask?: unknown;
   };
 }
 
-function readRuleArray(filePath: string, key: 'allow' | 'deny'): string[] {
+function readRuleArray(filePath: string, key: 'allow' | 'deny' | 'ask'): string[] {
   try {
     const raw = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw) as SettingsFileShape;
@@ -255,13 +298,14 @@ function readRuleArray(filePath: string, key: 'allow' | 'deny'): string[] {
 }
 
 /**
- * Load and merge `permissions.allow` / `permissions.deny` from the user
- * (`~/.claude/settings.json`) and project (`<projectDir>/.claude/settings.json`
- * and `.claude/settings.local.json`) settings files.
+ * Load and merge `permissions.allow` / `permissions.deny` / `permissions.ask`
+ * from the user (`~/.claude/settings.json`) and project
+ * (`<projectDir>/.claude/settings.json` and `.claude/settings.local.json`)
+ * settings files.
  *
  * Mirrors the SDK's `settingSources: ['user','project']`. Merge is a union of
- * allow and a union of deny across all present files; missing files contribute
- * nothing. Results are de-duplicated to keep the matcher cheap.
+ * each list across all present files; missing files contribute nothing. Results
+ * are de-duplicated to keep the matcher cheap.
  *
  * @param projectDir - The session cwd (worktree path) whose `.claude/` is read.
  * @param homeDir    - Override for the user home dir (tests). Defaults to os.homedir().
@@ -278,10 +322,12 @@ export function loadMergedPermissionRules(
 
   const allow = new Set<string>();
   const deny = new Set<string>();
+  const ask = new Set<string>();
   for (const file of files) {
     for (const r of readRuleArray(file, 'allow')) allow.add(r);
     for (const r of readRuleArray(file, 'deny')) deny.add(r);
+    for (const r of readRuleArray(file, 'ask')) ask.add(r);
   }
 
-  return { allow: [...allow], deny: [...deny] };
+  return { allow: [...allow], deny: [...deny], ask: [...ask] };
 }

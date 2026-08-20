@@ -10,15 +10,23 @@
  *  - unsupported specifier kinds (path globs) do not auto-allow;
  *  - deny suppresses an otherwise-matching allow.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   parsePermissionRule,
   splitShellSegments,
   isToolAllowed,
+  loadMergedPermissionRules,
   type MergedPermissionRules,
 } from '../permissionRules';
 
-const rules = (allow: string[], deny: string[] = []): MergedPermissionRules => ({ allow, deny });
+const rules = (
+  allow: string[],
+  deny: string[] = [],
+  ask: string[] = [],
+): MergedPermissionRules => ({ allow, deny, ask });
 const bash = (command: string) => ({ command });
 
 describe('parsePermissionRule', () => {
@@ -151,5 +159,119 @@ describe('isToolAllowed — deny suppresses allow', () => {
   it('still allows when deny targets a different command', () => {
     const r = rules(['Bash(git add:*)'], ['Bash(rm:*)']);
     expect(isToolAllowed('Bash', bash('git add .'), r)).toBe(true);
+  });
+});
+
+describe('isToolAllowed — ask suppresses allow', () => {
+  it('does not auto-allow when a narrower ask rule matches a broader allow', () => {
+    // The regression this guards: `allow: Bash(git:*)` + `ask: Bash(git push:*)`
+    // must NOT auto-approve a push. The user explicitly asked to be asked.
+    const r = rules(['Bash(git:*)'], [], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git push origin main'), r)).toBe(false);
+  });
+
+  it('leaves the rest of the broader allow intact', () => {
+    const r = rules(['Bash(git:*)'], [], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git status -s'), r)).toBe(true);
+  });
+
+  it('suppresses regardless of rule order (ask is checked before allow)', () => {
+    const r = rules(['Bash(git push:*)', 'Bash(git:*)'], [], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git push'), r)).toBe(false);
+  });
+
+  it('an ask rule for a different command does not suppress', () => {
+    const r = rules(['Bash(git add:*)'], [], ['Bash(rm:*)']);
+    expect(isToolAllowed('Bash', bash('git add .'), r)).toBe(true);
+  });
+
+  it('a compound command is suppressed when ANY segment matches an ask rule', () => {
+    const r = rules(['Bash(git:*)'], [], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git add . && git push'), r)).toBe(false);
+  });
+
+  it('an empty ask list changes nothing', () => {
+    const r = rules(['Bash(git:*)'], [], []);
+    expect(isToolAllowed('Bash', bash('git push'), r)).toBe(true);
+  });
+});
+
+describe('isToolAllowed — a suppressor fires on ANY segment of a compound command', () => {
+  // Regression: suppressors used the grant quantifier (EVERY segment), so a
+  // suppressed segment rode along inside a compound command that a broader
+  // allow rule covered end-to-end.
+  it('deny suppresses when only one segment matches it', () => {
+    const r = rules(['Bash(git:*)'], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git add . && git push'), r)).toBe(false);
+  });
+
+  it('ask suppresses when only one segment matches it', () => {
+    const r = rules(['Bash(git:*)'], [], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git add . && git push'), r)).toBe(false);
+  });
+
+  it('suppresses on a piped segment too, not just &&', () => {
+    const r = rules(['Bash(git:*)'], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git status | git push'), r)).toBe(false);
+  });
+
+  it('a compound command with no suppressed segment still auto-allows', () => {
+    const r = rules(['Bash(git:*)'], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git add . && git status'), r)).toBe(true);
+  });
+
+  it('a quoted separator does not split a segment into a false suppressor match', () => {
+    const r = rules(['Bash(git:*)'], ['Bash(git push:*)']);
+    expect(isToolAllowed('Bash', bash('git commit -m "x && git push"'), r)).toBe(true);
+  });
+});
+
+describe('loadMergedPermissionRules — ask list', () => {
+  const write = (dir: string, rel: string, body: unknown): void => {
+    const full = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, JSON.stringify(body), 'utf8');
+  };
+
+  let tmp: string;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-permrules-'));
+  });
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('reads permissions.ask and unions it across user + project files', () => {
+    const home = path.join(tmp, 'home');
+    const project = path.join(tmp, 'project');
+    write(home, '.claude/settings.json', {
+      permissions: { allow: ['Bash(git:*)'], ask: ['Bash(git push:*)'] },
+    });
+    write(project, '.claude/settings.json', { permissions: { ask: ['WebFetch'] } });
+
+    const merged = loadMergedPermissionRules(project, home);
+    expect(merged.ask.sort()).toEqual(['Bash(git push:*)', 'WebFetch']);
+    expect(merged.allow).toEqual(['Bash(git:*)']);
+    expect(merged.deny).toEqual([]);
+  });
+
+  it('yields an empty ask list when no settings file declares one', () => {
+    const home = path.join(tmp, 'home');
+    const project = path.join(tmp, 'project');
+    write(home, '.claude/settings.json', { permissions: { allow: ['Bash(ls:*)'] } });
+
+    expect(loadMergedPermissionRules(project, home).ask).toEqual([]);
+  });
+
+  it('loaded ask rules actually suppress a loaded allow rule end to end', () => {
+    const home = path.join(tmp, 'home');
+    const project = path.join(tmp, 'project');
+    write(home, '.claude/settings.json', {
+      permissions: { allow: ['Bash(git:*)'], ask: ['Bash(git push:*)'] },
+    });
+
+    const merged = loadMergedPermissionRules(project, home);
+    expect(isToolAllowed('Bash', bash('git push origin main'), merged)).toBe(false);
+    expect(isToolAllowed('Bash', bash('git status'), merged)).toBe(true);
   });
 });

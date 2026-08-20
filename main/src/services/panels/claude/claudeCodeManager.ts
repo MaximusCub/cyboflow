@@ -3648,7 +3648,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * tool `input` unchanged:
    *   - AskUserQuestion → QuestionRouter (see below), NEVER ApprovalRouter;
    *   - allowlist short-circuit (defense-in-depth: honor user/project grants even on
-   *     the auto path) → { behavior: 'allow', updatedInput: input };
+   *     the auto path) → { behavior: 'allow', updatedInput: input } — SKIPPED when
+   *     `opts.matchedAskRule` is set, i.e. a user `permissions.ask` rule forced this
+   *     prompt, which the SDK contract says a host-side auto-approver must respect;
    *   - allow → { behavior: 'allow', updatedInput: decision.updatedInput ?? input };
    *   - deny  → { behavior: 'deny', message } (message is MANDATORY on deny);
    *   - RunNotRunningError → { behavior: 'deny', message: 'Run not active' };
@@ -3733,7 +3735,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // `updatedInput: input` echoes the original tool input unchanged — MANDATORY
       // on the allow branch (the CLI's can_use_tool response schema requires a
       // record; a bare `{ behavior: 'allow' }` ZodErrors → see makeCanUseTool doc).
-      if (isToolAllowed(toolName, input, allowRules)) {
+      //
+      // `matchedAskRule` (agent-sdk 0.3.224+) VETOES that shortcut. The CLI sets it
+      // when a user-configured `permissions.ask` rule forced this prompt, and the
+      // SDK contract is explicit that a host running its own auto-approval must
+      // treat such an ask as rule-forced — the user's stated intent IS a human
+      // prompt. Our own `ask` handling in isToolAllowed covers the rules this
+      // module can parse; this covers the rest (path globs and any future
+      // specifier kind the CLI understands and we do not), so an ask the CLI
+      // recognized can never be swallowed by a broader local allow rule.
+      if (opts.matchedAskRule === undefined && isToolAllowed(toolName, input, allowRules)) {
         return { behavior: 'allow', updatedInput: pinDispatchInput(input) };
       }
       try {
