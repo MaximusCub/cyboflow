@@ -206,6 +206,13 @@ export function TrackerWizardModal({
    * mappings/selection.
    */
   const reconcileRequestIdRef = useRef(0);
+  /**
+   * Version stamp for the group/issues/states probes, bumped by every
+   * credential or mapping edit: a probe claimed under an older version abandons
+   * its install, so a response landing AFTER the invalidation effect cleared
+   * the caches cannot re-install data computed for the previous mapping set.
+   */
+  const probeVersionRef = useRef(0);
 
   // ── Step 5 · submit ───────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -295,7 +302,10 @@ export function TrackerWizardModal({
       .filter((g) => g.selection.narrowKind !== 'all' && covered.has(g.selection.containerId))
       .map(
         (g) =>
-          `Issues in ${g.name} would import via both — the whole-team mapping wins; the duplicate is skipped.`,
+          // Honest about the engine's guarantee: the cross-scope guard imports
+          // each issue ONCE, under whichever mapping fetches it first — not
+          // deterministically under either row.
+          `Issues in ${g.name} are covered by both mappings — each imports once, under whichever mapping syncs it first.`,
       );
   }, [mappedGroups]);
 
@@ -435,6 +445,7 @@ export function TrackerWizardModal({
   // wizard past Step 0 is only meaningful for the key that was actually probed,
   // and a different key can name a different workspace.
   useEffect(() => {
+    probeVersionRef.current += 1;
     setIdentity(null);
     setAuthError(null);
     setGroupTree(null);
@@ -459,6 +470,7 @@ export function TrackerWizardModal({
   // so its late response cannot install itself under the new mappings.
   useEffect(() => {
     reconcileRequestIdRef.current += 1;
+    probeVersionRef.current += 1;
     setIssuesByGroup({});
     setIssuesLoaded(false);
     setAssignees({});
@@ -488,13 +500,17 @@ export function TrackerWizardModal({
 
   const ensureGroups = async (): Promise<void> => {
     if (groupTree !== null) return;
-    setGroupTree(await trpc.cyboflow.tracker.wizardGroups.mutate({ credentials }));
+    const version = probeVersionRef.current;
+    const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({ credentials });
+    if (probeVersionRef.current !== version) return;
+    setGroupTree(tree);
   };
 
   // Issues are fetched one mapping at a time: each call is a live provider
   // request carrying the key, and a mapped workspace can hold dozens of groups.
   const ensureIssues = async (): Promise<void> => {
     if (issuesLoaded) return;
+    const version = probeVersionRef.current;
     const next: Record<string, TrackerIssue[]> = {};
     for (const group of mappedGroups) {
       next[group.id] = await trpc.cyboflow.tracker.wizardIssues.mutate({
@@ -502,12 +518,14 @@ export function TrackerWizardModal({
         selection: group.selection,
       });
     }
+    if (probeVersionRef.current !== version) return;
     setIssuesByGroup(next);
     setIssuesLoaded(true);
   };
 
   const ensureStates = async (): Promise<void> => {
     if (statesLoaded) return;
+    const version = probeVersionRef.current;
     const nextStates: Record<string, TrackerState[]> = {};
     const nextMapping: Record<string, TrackerStateMapping> = {};
     for (const scope of stateScopes) {
@@ -520,6 +538,7 @@ export function TrackerWizardModal({
       nextStates[scope.key] = rows;
       nextMapping[scope.key] = seedStateMapping(rows, mappingByScope[scope.key]);
     }
+    if (probeVersionRef.current !== version) return;
     setStatesByScope(nextStates);
     setMappingByScope(nextMapping);
     setStatesLoaded(true);

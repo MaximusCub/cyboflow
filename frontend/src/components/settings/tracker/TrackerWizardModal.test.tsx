@@ -417,7 +417,7 @@ describe('TrackerWizardModal — Map step', () => {
 
     mapGroup('Alpha', 7);
     const warning =
-      'Issues in Alpha would import via both — the whole-team mapping wins; the duplicate is skipped.';
+      'Issues in Alpha are covered by both mappings — each imports once, under whichever mapping syncs it first.';
     expect(screen.queryByText(warning)).not.toBeInTheDocument();
 
     // Platform is a different team, so it subsumes nothing.
