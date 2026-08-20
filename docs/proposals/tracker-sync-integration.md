@@ -222,9 +222,16 @@ new scope concepts except Dart's:
   `source_json.containerId`, so reviving one mapping can't grab a sibling's row.
 - **`updateCredentials` fans out** to every row sharing (provider, workspace_id, base_url)
   after the identity probe passes — one paste resumes all mappings.
-- **`connect()` idempotency**: an active row matching (project, provider, workspace, source
-  containerId) makes `connect` a no-op returning the existing id, so re-submitting a partially
-  failed multi-mapping wizard never duplicates rows.
+- **`connect()` idempotency**: a live row matching (project, provider, workspace, and the FULL
+  source scope — containerId + narrowId + narrowKind, since every Linear project group under one
+  team shares the team's containerId) makes `connect` a no-op returning the existing id, so
+  re-submitting a partially failed multi-mapping wizard never duplicates rows. The no-op still
+  applies what a re-submit legitimately carries fresh: the just-validated key (resuming a paused
+  row) and the push-target choice. Revival matches the same scope, widening-only (a
+  whole-container scope claims its narrows; a Dart space claims member boards), so legacy rows
+  revive without sibling capture. `connect` claims the push target atomically per (project,
+  provider) — demoting armed siblings across wizard runs — and boot demotes replay-manufactured
+  duplicates.
 
 ### Wizard (Connect · Map · Tasks · States · Reconcile · Review)
 
