@@ -384,20 +384,6 @@ export async function enqueueTaskVerification(
   // in FALLBACK_CHAINS order. An empty intersection still enqueues (scheduler SKIP).
   const chain = FALLBACK_CHAINS[type].filter((backend) => stampedChain.includes(backend));
 
-  // (2) Snapshot sha (§5.5) — captured at enqueue time. A capture failure falls back
-  // to null and STILL enqueues (the provisioner's dirty-worktree fallback bucket).
-  let snapshotSha: string | null = null;
-  try {
-    snapshotSha = await captureSnapshotSha(worktreePath);
-  } catch (err) {
-    logger?.warn('[enqueueTaskVerification] snapshot sha capture failed; enqueuing without a snapshot', {
-      runId,
-      worktreePath,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    snapshotSha = null;
-  }
-
   // (3) FORCE lane identity: laneTaskRef is authoritative for gate attribution, so
   // it overrides task.taskRef AND drives the derived legacy input — both persisted
   // columns then carry the SAME ref regardless of what the composing agent wrote.
@@ -455,6 +441,37 @@ export async function enqueueTaskVerification(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // (3a1) Snapshot sha (§5.5) — captured AFTER the bootstrap, deliberately.
+  //
+  // The bootstrap writes up to TWO commits onto this branch: the rung-1 config
+  // edit (§8.1 gives it its own commit) and the runbook itself. Capturing the
+  // sha before them pinned the verification to a tree in which the runbook's own
+  // ENABLING EDIT does not exist — so the request would execute a runbook
+  // describing a project that only starts at the commit after the snapshot.
+  //
+  // Live-observed 2026-08-20: a lane whose bootstrap derived `port-from-env` on
+  // `app.config.mjs` then verified against the pre-edit sha, where the port was
+  // still a literal. The harness exported the declared `portEnv`, the config read
+  // it nowhere, the server bound its hardcoded default, and the serve-identity
+  // probe found no listener on the leased port — a `failed`/`ambiguous` terminal
+  // for a deliverable that was fine. Every first lane verification on a project
+  // needing a rung-1 edit would have failed this way.
+  //
+  // Nothing between here and the old position consumed the sha, and the bootstrap
+  // does not read it, so this is a pure reordering. A capture failure still falls
+  // back to null and STILL enqueues (the provisioner's dirty-worktree bucket).
+  let snapshotSha: string | null = null;
+  try {
+    snapshotSha = await captureSnapshotSha(worktreePath);
+  } catch (err) {
+    logger?.warn('[enqueueTaskVerification] snapshot sha capture failed; enqueuing without a snapshot', {
+      runId,
+      worktreePath,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    snapshotSha = null;
   }
 
   // (3b) The SHARED enqueue-time rules (§7.2 guard + §5.2 seam-3 injection). Runs

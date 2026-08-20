@@ -10,7 +10,7 @@
  * verification_requests) — the only rows this seam reads/writes; the scheduler's
  * backends/judge are empty/fake (nothing is drained during the test).
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -216,6 +216,45 @@ function readRow(id: string): {
     )
     .get(id) as ReturnType<typeof readRow>;
 }
+
+describe('enqueueTaskVerification — the snapshot sha is captured AFTER the bootstrap', () => {
+  // The bootstrap writes up to TWO commits onto the lane's branch: the rung-1
+  // config edit and the runbook. Capturing the sha before them pinned the request
+  // to a tree where the runbook's own enabling edit does not exist — live-observed
+  // as a `failed`/`ambiguous` terminal for a deliverable that was fine, because
+  // the exported `portEnv` was read by a config that had not been edited yet.
+  it('pins the sha the bootstrap left behind, not the one it started from', async () => {
+    seedRun(db, { runId: 'run-snap', enabled: true });
+    initScheduler(db);
+
+    const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: gitRepo }).toString().trim();
+    const spy = vi
+      .spyOn(VerificationScheduler.getInstance(), 'maybeBootstrapRunbook')
+      .mockImplementation(async () => {
+        // Stands in for §8.1's config-edit commit + the runbook commit.
+        writeFileSync(join(gitRepo, 'app.config.mjs'), 'export default { port: Number(process.env.PORT ?? 4320) };\n');
+        execFileSync('git', ['add', '.'], { cwd: gitRepo });
+        execFileSync('git', ['commit', '-q', '-m', 'chore: port-from-env'], { cwd: gitRepo });
+        return { kind: 'not-attempted' } as Awaited<ReturnType<VerificationScheduler['maybeBootstrapRunbook']>>;
+      });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-snap',
+      task,
+      laneTaskRef: 'TASK-001',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe('enqueued');
+    const after = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: gitRepo }).toString().trim();
+    expect(after).not.toBe(before);
+    expect(result.outcome === 'enqueued' && readRow(result.requestId).snapshot_sha).toBe(after);
+    spy.mockRestore();
+  });
+});
 
 describe('enqueueTaskVerification', () => {
   it('a disabled run → skipped(verification-disabled), enqueues nothing', async () => {
