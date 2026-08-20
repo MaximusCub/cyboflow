@@ -35,6 +35,7 @@ import {
 import { RunbookBootstrapStampStore } from '../bootstrapStampStore';
 import { BootstrapSuppressionStore } from '../bootstrapSuppressionStore';
 import type { DatabaseLike } from '../../types';
+import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 
 /** Recorders for the two optional reporting seams, typed off the deps themselves. */
@@ -811,6 +812,33 @@ describe('runRunbookBootstrap — the human-facing surfaces', () => {
       },
     });
     await expect(runRunbookBootstrap(ARGS, h.deps)).resolves.toMatchObject({ kind: 'proven' });
+    h.db.close();
+  });
+
+  it('publishes when a LATER round refuses after an earlier one already committed', async () => {
+    // The live sequence from the 2026-08-19 smoke, and the one the FAILED-path
+    // test above does NOT reach: round 1 derives and COMMITS a runbook, its
+    // proof fails, and round 2 answers `not-possible`. That exits through
+    // `refuse` → `publishAbandoned` rather than the round-cap path, and keying
+    // the publish on `rung1` alone dropped it — leaving a machine-authored
+    // commit on a human's branch mentioned only in a log line. Rung 0 commits
+    // one file too; §8.1 merely gives the rung-1 edit a SECOND commit.
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({
+      proofs: [FAIL],
+      reportArtifact: artifact.fn,
+      draftResults: [
+        { decision: 'runbook', modality: 'web', runbook: RUNBOOK },
+        { decision: 'not-possible', reason: 'the port literal lives under scripts/, denied for every operation' },
+      ],
+    });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(artifact.calls).toHaveLength(1);
+    expect(artifact.calls[0].markdown).toContain('NOT PROVEN');
+    // It must name the commit it left behind — that is the whole point of
+    // publishing, and an artifact that omitted it would be worse than none.
+    expect(artifact.calls[0].markdown).toContain(VERIFY_RUNBOOK_RELATIVE_PATH);
+    expect(artifact.calls[0].markdown).toContain('unproven draft');
     h.db.close();
   });
 

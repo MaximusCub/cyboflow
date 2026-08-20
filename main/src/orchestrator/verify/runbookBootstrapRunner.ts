@@ -343,6 +343,16 @@ function newProgress(): BootstrapProgress {
  * Publish the surfaces for a bootstrap that ENDED BADLY, when it had already
  * changed the branch. A no-op when it had not — a bootstrap that declined before
  * committing anything owes a human nothing.
+ *
+ * "CHANGED THE BRANCH" IS EITHER COMMIT, NOT JUST THE RUNG-1 ONE. §8.1 splits the
+ * rung-1 config edit into its own commit, so a rung-0 bootstrap still leaves one
+ * machine-authored commit behind: the runbook itself. Keying this on `rung1`
+ * alone was the §15A mistake one level down — it surfaced the edit whose review
+ * the rung is conditioned on, and silently dropped every rung-0 bootstrap that
+ * committed a runbook and then failed to prove it. Observed live 2026-08-19: a
+ * project whose only port literal sat under `scripts/` (denied for every
+ * operation) got its runbook committed, its proof failed on the leased port, and
+ * NOTHING published — the commit was mentioned only in a log line.
  */
 async function publishAbandoned(
   args: RunbookBootstrapArgs,
@@ -350,7 +360,8 @@ async function publishAbandoned(
   progress: BootstrapProgress,
   failureDetail: string,
 ): Promise<void> {
-  if (progress.rung1 === null || progress.modality === null) return;
+  if (progress.modality === null) return;
+  if (progress.rung1 === null && progress.commitSha === null) return;
   await publishSurfaces({ ...args, modality: progress.modality }, deps, {
     proven: false,
     runbookJson: progress.runbookJson,
