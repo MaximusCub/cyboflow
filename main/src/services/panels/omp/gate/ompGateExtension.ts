@@ -255,11 +255,28 @@ export interface OmpGateLogger {
   error(message: string): void;
 }
 
-const stderrLogger: OmpGateLogger = {
-  debug: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
-  warn: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
-  error: (m: string) => void process.stderr.write(`[cyboflow-omp-gate] ${m}\n`),
-};
+/**
+ * Per-process instance counter, used to tell one loaded gate from another.
+ *
+ * OMP's extension API hands the factory nothing that identifies WHO it is
+ * gating — no session id, no agent name, only `on` and `setLabel`. That is
+ * survivable while one process means one agent, and stops being survivable the
+ * moment subagents enter the picture: the binary initializes an extension
+ * runner per task, so several gates can be live in one pid at once and every
+ * line they write is indistinguishable. A pid plus an ordinal is the most
+ * identity available here, and it is enough to answer the question that
+ * actually matters when reading a log — did THIS agent's call reach a gate, or
+ * did no gate see it at all.
+ */
+let gateInstanceSeq = 0;
+
+function makeStderrLogger(tag: string): OmpGateLogger {
+  const write = (m: string): void => void process.stderr.write(`[cyboflow-omp-gate ${tag}] ${m}\n`);
+  return { debug: write, warn: write, error: write };
+}
+
+/** Untagged sink for tests and for {@link resolveGateRuntime}'s default. */
+const stderrLogger: OmpGateLogger = makeStderrLogger('-');
 
 // ---------------------------------------------------------------------------
 // Config parsing — defensive, never fails open
@@ -1673,7 +1690,11 @@ export function resolveGateRuntime(
  * file is not such an action.
  */
 export default function cyboflowOmpGate(pi: OmpExtensionApi): void {
-  const logger = stderrLogger;
+  // Stamped per LOAD, not per process: a second instance in the same pid means
+  // a second agent (a subagent's extension runner), and without the ordinal the
+  // two are unreadable in a shared stderr stream.
+  gateInstanceSeq += 1;
+  const logger = makeStderrLogger(`p${process.pid}#${gateInstanceSeq}`);
   const runtime = resolveGateRuntime(process.env, logger);
 
   pi.setLabel?.('cyboflow gate');
