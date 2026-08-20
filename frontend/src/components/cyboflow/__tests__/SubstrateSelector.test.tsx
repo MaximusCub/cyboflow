@@ -191,6 +191,44 @@ describe('SubstrateSelector — provider access toggles', () => {
     expect(screen.getByRole('option', { name: /OMP Fleet/i })).not.toBeDisabled();
   });
 
+  // The gap that made the feature look broken: Aria mode hides the LOCAL OMP
+  // runtimes by design, so hiding omp-fleet too (for a missing bridge) left an
+  // Aria install with no OMP row at all — and the hidden-runtimes note counts
+  // against the flavor list, so nothing on screen said why.
+  it('offers OMP Fleet DISABLED, naming the reason, when Aria is on but no bridge is configured', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const fleet = screen.getByRole('option', { name: /OMP fleet.*\(bridge not configured\)/i });
+    expect(fleet).toBeInTheDocument();
+    expect(fleet).toBeDisabled();
+    // The local runtimes stay hidden — the two flavors are still alternatives.
+    expect(screen.queryByRole('option', { name: /^OMP$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /OMP \(CLI\)/ })).not.toBeInTheDocument();
+  });
+
+  it('drops the reason once the bridge is configured', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true });
+    mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const fleet = screen.getByRole('option', { name: /^OMP fleet/ });
+    expect(fleet).not.toBeDisabled();
+    expect(fleet.textContent).not.toMatch(/bridge not configured/);
+  });
+
+  // A disabled row must not become the value the picker snaps to when the
+  // current selection's provider is switched off.
+  it('never falls back to an unavailable runtime', () => {
+    setProviderAccess({ claude: false, codex: false, omp: true });
+    mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
+    const onChange = vi.fn();
+    render(<SubstrateSelector value="claude-sdk" onChange={onChange} runtimeScope="session" />);
+
+    for (const [next] of onChange.mock.calls) expect(next).not.toBe('omp-fleet');
+  });
+
   it('hides OMP Fleet when the omp provider toggle is off even if the bridge is configured', () => {
     setProviderAccess({ claude: true, codex: true, omp: false });
     mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
@@ -337,16 +375,21 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
   });
 
-  // Aria mode ON but the bridge is not usable yet (e.g. the toggle was flipped
-  // and the app has not relaunched): the local rows are gone because this is a
-  // fleet install, and omp-fleet is not offered because it would fail closed.
-  it('offers no OMP row at all when Aria mode is on but the fleet is not launchable', () => {
+  // Aria mode ON but the bridge is not usable yet. This case USED to offer no
+  // OMP row at all — the local rows hidden because it is a fleet install, the
+  // fleet row hidden because it would fail closed — which left a picker with no
+  // OMP while Settings → Integrations still reported the provider enabled, and
+  // no note explaining it. The fleet row is now offered and DISABLED, carrying
+  // the reason, so the state is self-describing.
+  it('offers the fleet row disabled, and still no local rows, when the fleet is not launchable', () => {
     mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
     setProviderAccess({ claude: true, codex: true, omp: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     const offered = screen.getAllByRole('option').map((o) => o.getAttribute('value'));
-    expect(offered).not.toContain('omp-fleet');
+    expect(offered).toContain('omp-fleet');
+    expect(screen.getByRole('option', { name: /OMP fleet.*\(bridge not configured\)/i })).toBeDisabled();
+    // The flavors are still alternatives — Aria mode means no local OMP.
     expect(offered).not.toContain('omp-sdk');
     expect(offered).not.toContain('omp-pty');
   });

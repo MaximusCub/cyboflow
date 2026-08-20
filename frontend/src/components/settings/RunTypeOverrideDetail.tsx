@@ -46,6 +46,7 @@ import {
   RUN_TYPE_MODEL_OPTIONS,
   RUN_TYPE_FIELD_LABELS,
   agentRuntimePickerOptions,
+  runtimeUnavailableReason,
   baselineValueFor,
   coerceDraftForModel,
   coerceDraftForRuntime,
@@ -447,6 +448,12 @@ interface FieldOption {
   id: string;
   label: string;
   /**
+   * Offered but not selectable on this machine — the label already names why
+   * (e.g. an omp-fleet row with no bridge configured). Distinct from an absent
+   * option: the row exists so the setting explains itself.
+   */
+  disabled?: boolean;
+  /**
    * Optional section heading. Only OMP sets it — its catalog fronts many
    * vendors (495 rows across anthropic / openai-codex / openrouter on the
    * author's host), so a flat list is unnavigable. Consecutive options sharing
@@ -464,7 +471,7 @@ function renderFieldOptions(options: readonly FieldOption[]): React.JSX.Element[
     if (group === undefined) {
       const option = options[index]!;
       nodes.push(
-        <option key={option.id} value={option.id}>
+        <option key={option.id} value={option.id} disabled={option.disabled === true}>
           {option.label}
         </option>,
       );
@@ -479,7 +486,7 @@ function renderFieldOptions(options: readonly FieldOption[]): React.JSX.Element[
     nodes.push(
       <optgroup key={group} label={group}>
         {run.map((option) => (
-          <option key={option.id} value={option.id}>
+          <option key={option.id} value={option.id} disabled={option.disabled === true}>
             {option.label}
           </option>
         ))}
@@ -528,7 +535,13 @@ function fieldOptions(
     case 'substrate':
       return provider === 'claude' ? labelled(field, ['sdk', 'interactive']) : [];
     case 'agentRuntime':
-      return labelled(field, agentRuntimePickerOptions(runTypeKey, omp, currentRuntime));
+      return agentRuntimePickerOptions(runTypeKey, omp, currentRuntime).map((runtime) => {
+        const reason = runtimeUnavailableReason(runtime, omp);
+        const base = runTypeValueLabel(field, runtime);
+        return reason === null
+          ? { id: runtime, label: base }
+          : { id: runtime, label: `${base} (${reason})`, disabled: true };
+      });
     case 'permissionMode':
       return labelled(field, PERMISSION_MODE_OPTIONS.map((o) => o.id));
   }

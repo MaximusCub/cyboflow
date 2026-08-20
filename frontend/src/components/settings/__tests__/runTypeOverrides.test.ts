@@ -13,6 +13,7 @@ import {
   RUN_TYPE_FIELD_ORDER,
   agentRuntimeOptions,
   agentRuntimePickerOptions,
+  runtimeUnavailableReason,
   baselineValueFor,
   buildRunTypeGroups,
   coerceDraftForModel,
@@ -388,13 +389,23 @@ describe('agentRuntimePickerOptions', () => {
     expect(offered).not.toContain('omp-pty');
   });
 
-  // Aria mode is necessary but not sufficient: a stored preference for a
-  // runtime with no bridge behind it is the same defect here as on the launch
-  // picker, which requires both.
-  it('withholds the fleet supervisor when Aria mode is on but nothing is launchable', () => {
+  // Aria mode ALONE offers the row. Requiring `launchable` too used to leave an
+  // Aria install with no OMP row at all — the local runtimes are hidden
+  // precisely because Aria is on — so the setting silently lost its whole
+  // family. The caller renders it disabled with the reason instead.
+  it('offers the fleet supervisor under Aria mode even when nothing is launchable', () => {
     expect(
       agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, { launchable: false, ariaMode: true }),
-    ).not.toContain('omp-fleet');
+    ).toContain('omp-fleet');
+  });
+
+  it('names why an offered fleet row cannot be selected', () => {
+    expect(runtimeUnavailableReason('omp-fleet', { launchable: false, ariaMode: true })).toBe(
+      'bridge not configured',
+    );
+    expect(runtimeUnavailableReason('omp-fleet', { launchable: true, ariaMode: true })).toBeNull();
+    // Nothing else is ever gated this way.
+    expect(runtimeUnavailableReason('omp-sdk', { launchable: false, ariaMode: false })).toBeNull();
   });
 
   // Flipping the toggle changes what you can PICK, never what is stored: a
