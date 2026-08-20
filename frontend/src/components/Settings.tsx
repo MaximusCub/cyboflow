@@ -57,8 +57,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [forceAskUserQuestionGateFailure, setForceAskUserQuestionGateFailure] = useState(false);
   // Aria mode: supervise a REMOTE OMP fleet instead of running OMP locally.
   // Enforced per command (OmpSupervisedAdapter holds the principal THUNK), so a
-  // change lands on the next call — no relaunch. A launch picker already on
-  // screen keeps its old list until remount, which is what the copy calls out.
+  // change lands on the next call — no relaunch. Pickers read the flavor from
+  // the config store (useOmpAvailability), so they swap on save without a
+  // remount either.
   const [ariaMode, setAriaMode] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   // demoMode is read once at app startup, so the saved value only takes effect
@@ -648,8 +649,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   Turning this on also authorizes Cyboflow to spawn and stop remote workers on your behalf.
                   It needs the OMP provider enabled in Integrations and a configured bridge
                   (<code>OMP_BRIDGE_TOKEN_FILE</code> and <code>OMP_BRIDGE_SESSION_ID</code>); without those,
-                  OMP fleet stays hidden. Changes take effect right away — reopen a launch picker that is
-                  already on screen to see the new list.
+                  OMP fleet stays hidden. Changes take effect right away — no restart needed.
                 </p>
               </SettingsSection>
 

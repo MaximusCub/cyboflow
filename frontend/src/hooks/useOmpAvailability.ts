@@ -14,12 +14,22 @@
  * the enforcement: a launch that names a half-configured bridge still fails
  * closed on the main side.
  *
- * A transport failure floors BOTH to `false` (the honest answer — we cannot
- * prove anything), never a stale `true`. Flooring `ariaMode` to false is the
- * conservative direction: it shows the LOCAL runtimes, which need no bridge.
+ * A transport failure floors `launchable` to `false` (the honest answer — we
+ * cannot prove anything), never a stale `true`.
+ *
+ * WHY ariaMode COMES FROM THE CONFIG STORE, NOT THE QUERY. Both read the same
+ * config.json, but the query answers ONCE per mount and never refetches — so a
+ * picker that was already on screen when the toggle flipped kept the old flavor
+ * and silently offered the wrong OMP family (or none). Reading the store makes
+ * the swap reactive, because every Settings save already refreshes it.
+ *
+ * `launchable` still has to come from the main side (only it knows whether the
+ * bridge resolved), so it is REFETCHED whenever ariaMode changes — the
+ * supervise capability is derived from Aria mode, so the answer moves with it.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { trpc } from '../trpc/client';
+import { useConfigStore } from '../stores/configStore';
 
 export interface OmpAvailability {
   /** A remote worker can actually be spawned right now. */
@@ -28,10 +38,12 @@ export interface OmpAvailability {
   ariaMode: boolean;
 }
 
-const UNAVAILABLE: OmpAvailability = { launchable: false, ariaMode: false };
-
 export function useOmpAvailability(): OmpAvailability {
-  const [availability, setAvailability] = useState<OmpAvailability>(UNAVAILABLE);
+  // Reactive: the flavor swaps the moment the toggle is saved, on every picker
+  // currently mounted. An unloaded config floors to false — the LOCAL runtimes,
+  // which need no bridge.
+  const ariaMode = useConfigStore((s) => s.config?.ariaMode === true);
+  const [launchable, setLaunchable] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,24 +51,24 @@ export function useOmpAvailability(): OmpAvailability {
     // a missing router means "cannot prove anything", which is exactly the floor.
     const availabilityQuery = trpc.cyboflow?.omp?.availability?.query;
     if (typeof availabilityQuery !== 'function') {
-      setAvailability(UNAVAILABLE);
+      setLaunchable(false);
       return () => {
         cancelled = true;
       };
     }
     availabilityQuery()
       .then((res) => {
-        if (!cancelled) {
-          setAvailability({ launchable: res.launchable === true, ariaMode: res.ariaMode === true });
-        }
+        if (!cancelled) setLaunchable(res.launchable === true);
       })
       .catch(() => {
-        if (!cancelled) setAvailability(UNAVAILABLE);
+        if (!cancelled) setLaunchable(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+    // Refetched on an Aria change: `launchable` ANDs the supervise capability,
+    // which Aria mode grants, so the previous answer is stale by definition.
+  }, [ariaMode]);
 
-  return availability;
+  return useMemo(() => ({ launchable, ariaMode }), [launchable, ariaMode]);
 }

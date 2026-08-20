@@ -1007,8 +1007,10 @@ describe('RunTypeOverridesSection — detail screen', () => {
   // has to reach every surface that names a runtime — otherwise Settings offers
   // a flavor the launch picker refuses.
   it('swaps the local OMP runtimes for the fleet supervisor under Aria mode', async () => {
+    // ariaMode is the user's SETTING, so it rides the config store; the query
+    // only supplies `launchable` (whether a bridge is actually reachable).
     ompAvailabilityMock.mockResolvedValue({ launchable: true, ariaMode: true });
-    await openDetail('Quick session');
+    await openDetail('Quick session', { ariaMode: true });
 
     const card = screen.getByTestId('knob-card-runtime');
     fireEvent.click(within(card).getByRole('switch'));
@@ -1032,7 +1034,10 @@ describe('RunTypeOverridesSection — detail screen', () => {
   // rewrite the stored override on the next save of any other field.
   it('keeps a stored runtime the flavor would hide in its own dropdown', async () => {
     ompAvailabilityMock.mockResolvedValue({ launchable: true, ariaMode: true });
-    await openDetail('Quick session', { runTypeDefaults: { quick: { agentRuntime: 'omp-sdk' } } });
+    await openDetail('Quick session', {
+      ariaMode: true,
+      runTypeDefaults: { quick: { agentRuntime: 'omp-sdk' } },
+    });
 
     const card = screen.getByTestId('knob-card-runtime');
     await waitFor(() => {
