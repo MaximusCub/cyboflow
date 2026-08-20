@@ -376,12 +376,14 @@ const fleetRegistryReader = new FleetRegistryReader();
  * and the fleet session manager share ONE identity and ONE trail.
  *
  * Resolved lazily rather than as a module-scope const: the supervise capability
- * now comes from Aria mode (`configManager.getAriaMode()`), and configManager is
- * not constructed at module-evaluation time. Calling this per tRPC context keeps
- * the ROUTER's view of the capability live, so revoking Aria mode forbids
- * commands immediately. The fleet session manager still reads it once at boot
- * (it owns long-lived remote workers), which is why the Settings copy says a
- * change takes effect on the next launch.
+ * comes from Aria mode (`configManager.getAriaMode()`), and configManager is not
+ * constructed at module-evaluation time.
+ *
+ * Every consumer takes this FUNCTION, never a snapshot of its result — the tRPC
+ * context calls it per request, and both `OmpSupervisedAdapter` instances hold
+ * the thunk and resolve per command. So flipping Aria mode takes effect on the
+ * next call in either direction, with no relaunch: granting it makes fleet
+ * sessions launchable, revoking it forbids the very next command.
  */
 function currentOmpPrincipal(): OmpPrincipal {
   // Guarded: a caller before initializeServices() gets the fail-closed answer
@@ -415,7 +417,10 @@ function buildOmpCommandAdapter(): OmpCommandAdapter {
   logger.info(`omp:command adapter configured for session ${config.sessionId}`);
   return new OmpSupervisedAdapter(
     new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId)),
-    currentOmpPrincipal(),
+    // The THUNK, not a snapshot: this adapter is built once per window attach
+    // and retained, so a captured principal would freeze the capability at
+    // whatever Aria mode was when the window opened.
+    currentOmpPrincipal,
     auditOmp,
   );
 }
@@ -853,8 +858,11 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         ompCommand,
         principal: currentOmpPrincipal(),
         auditOmp,
-        // The manager is built once at boot (it owns remote workers), so the
-        // picker asks whether it EXISTS rather than re-deriving the config.
+        // The manager exists iff the BRIDGE is configured — a boot-time,
+        // env-driven fact, so the picker asks whether it exists rather than
+        // re-deriving the config. The other half of `launchable` is the live
+        // `hasSupervise(ctx.principal)` check in the availability query, which
+        // is what makes the Aria toggle take effect without a relaunch.
         ompFleetLaunchable: () => ompSessionManager !== undefined,
         ompAriaMode: () => configManager.getAriaMode(),
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
@@ -1616,22 +1624,28 @@ async function initializeServices(): Promise<boolean> {
     // the ompCommand router refuses without the capability, so the manager that
     // drives it from the panel seams must refuse on the same terms — otherwise
     // the product's actual path sits outside the authorization model.
-    const bootPrincipal = currentOmpPrincipal();
-    if (ompBridgeConfig !== undefined && !hasSupervise(bootPrincipal)) {
+    if (ompBridgeConfig !== undefined && !hasSupervise(currentOmpPrincipal())) {
       logger.info(
         'omp:fleet bridge is configured but the supervise capability is absent ' +
           '(turn on Aria mode in Settings → Advanced Options, or set CYBOFLOW_OMP_SUPERVISE ' +
-          'on a headless host) — fleet sessions stay unavailable',
+          'on a headless host) — fleet sessions stay unavailable until it is granted',
       );
     }
+    // Constructed on the BRIDGE CONFIG alone. The supervise capability is
+    // deliberately NOT a construction condition: it comes from Aria mode, which
+    // the user flips at runtime, and gating construction on it froze the answer
+    // at launch — granting Aria appeared to do nothing until a restart. The
+    // capability is enforced per call by OmpSupervisedAdapter instead, which is
+    // strictly stronger: revoking Aria now forbids the very next command rather
+    // than leaving an already-built manager authorized for the rest of the run.
     ompSessionManager =
-      ompBridgeConfig !== undefined && hasSupervise(bootPrincipal)
+      ompBridgeConfig !== undefined
         ? new OmpSessionManager(
             new OmpSupervisedAdapter(
               new OmpBridgeCommandAdapter(
                 new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
               ),
-              bootPrincipal,
+              currentOmpPrincipal,
               auditOmp,
             ),
             cyboflowLogger,

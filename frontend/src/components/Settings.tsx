@@ -56,8 +56,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // gate can be exercised live. Hidden in the stable DMG; inert in packaged builds.
   const [forceAskUserQuestionGateFailure, setForceAskUserQuestionGateFailure] = useState(false);
   // Aria mode: supervise a REMOTE OMP fleet instead of running OMP locally.
-  // Read at boot to build the fleet session manager, so a change lands on the
-  // next launch — the copy below says so.
+  // Enforced per command (OmpSupervisedAdapter holds the principal THUNK), so a
+  // change lands on the next call — no relaunch. A launch picker already on
+  // screen keeps its old list until remount, which is what the copy calls out.
   const [ariaMode, setAriaMode] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   // demoMode is read once at app startup, so the saved value only takes effect
@@ -641,13 +642,14 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 <p className="text-xs text-text-tertiary mt-1">
                   Supervise a remote OMP fleet over the Prime bridge instead of running OMP locally.
                   On, the runtime picker offers <strong>OMP fleet</strong>; off, it offers <strong>OMP</strong> and{' '}
-                  <strong>OMP terminal</strong>. The two are alternatives, so only one appears at a time.
+                  <strong>OMP (CLI)</strong>. The two are alternatives, so only one appears at a time.
                 </p>
                 <p className="text-xs text-text-tertiary mt-1">
                   Turning this on also authorizes Cyboflow to spawn and stop remote workers on your behalf.
                   It needs the OMP provider enabled in Integrations and a configured bridge
                   (<code>OMP_BRIDGE_TOKEN_FILE</code> and <code>OMP_BRIDGE_SESSION_ID</code>); without those,
-                  OMP fleet stays hidden. Note: changes require restarting Cyboflow to take effect.
+                  OMP fleet stays hidden. Changes take effect right away — reopen a launch picker that is
+                  already on screen to see the new list.
                 </p>
               </SettingsSection>
 

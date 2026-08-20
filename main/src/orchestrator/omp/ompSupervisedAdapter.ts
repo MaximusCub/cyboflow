@@ -55,12 +55,27 @@ export interface OmpSupervisedAuditEntry {
 
 export type OmpSupervisedAuditSink = (entry: OmpSupervisedAuditEntry) => void;
 
+/**
+ * Where the adapter reads its identity from.
+ *
+ * A THUNK is the form production uses, and the distinction is load-bearing: the
+ * supervise capability comes from Aria mode, a setting the user can flip while
+ * the app is running. Capturing an `OmpPrincipal` value at construction freezes
+ * the answer at whatever it was when the owning object was built — which for a
+ * boot-time singleton means "whatever it was at launch", so granting the
+ * capability appeared to do nothing until a restart and revoking it kept
+ * authorizing commands. Resolving per call makes both directions immediate.
+ *
+ * A plain value stays accepted for tests, which want a fixed identity.
+ */
+export type OmpPrincipalSource = OmpPrincipal | (() => OmpPrincipal);
+
 export class OmpSupervisedAdapter implements OmpCommandAdapter {
   readonly authority = 'supervise' as const;
 
   constructor(
     private readonly inner: OmpCommandAdapter,
-    private readonly principal: OmpPrincipal,
+    private readonly principalSource: OmpPrincipalSource,
     private readonly audit: OmpSupervisedAuditSink,
   ) {}
 
@@ -92,6 +107,20 @@ export class OmpSupervisedAdapter implements OmpCommandAdapter {
 
   // ── internals ──────────────────────────────────────────────────────────
 
+  /**
+   * The identity for THIS call. Never cached: see {@link OmpPrincipalSource}.
+   * A throwing provider (config not yet constructed) is the fail-closed answer,
+   * not a crash — an empty capability set forbids everything.
+   */
+  private principal(): OmpPrincipal {
+    if (typeof this.principalSource !== 'function') return this.principalSource;
+    try {
+      return this.principalSource();
+    } catch {
+      return { userId: 'unknown', capabilities: new Set<string>() };
+    }
+  }
+
   private forbidden(operationId: string): OmpCommandResult {
     return {
       ok: false,
@@ -114,10 +143,11 @@ export class OmpSupervisedAdapter implements OmpCommandAdapter {
     invoke: () => Promise<OmpCommandResult>,
   ): Promise<OmpCommandResult> {
     const id = operationId || randomUUID();
-    const principal = this.principal.userId;
+    const identity = this.principal();
+    const principal = identity.userId;
     this.audit({ verb, principal, outcome: 'attempted', operationId: id, detail: '' });
 
-    if (!hasSupervise(this.principal)) {
+    if (!hasSupervise(identity)) {
       this.audit({ verb, principal, outcome: 'completed', operationId: id, detail: 'forbidden' });
       return this.forbidden(id);
     }
@@ -149,7 +179,7 @@ export class OmpSupervisedAdapter implements OmpCommandAdapter {
     operationId: string,
     invoke: () => Promise<OmpCommandResult>,
   ): Promise<OmpCommandResult> {
-    if (!hasSupervise(this.principal)) return this.forbidden(operationId || randomUUID());
+    if (!hasSupervise(this.principal())) return this.forbidden(operationId || randomUUID());
     try {
       return await invoke();
     } catch (error) {

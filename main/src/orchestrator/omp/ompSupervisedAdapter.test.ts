@@ -176,3 +176,79 @@ describe('OmpSupervisedAdapter — with the supervise capability', () => {
     }
   });
 });
+
+describe('OmpSupervisedAdapter — a live principal (Aria mode flipped at runtime)', () => {
+  /** Same harness, but the identity comes from a mutable cell via a thunk. */
+  function makeLive(): {
+    adapter: OmpSupervisedAdapter;
+    calls: string[];
+    setSupervise: (on: boolean) => void;
+  } {
+    const { inner, calls } = makeInner();
+    let supervise = false;
+    const adapter = new OmpSupervisedAdapter(
+      inner,
+      () => ({
+        userId: 'local',
+        capabilities: supervise ? new Set([OMP_SUPERVISE_CAPABILITY]) : new Set<string>(),
+      }),
+      () => {},
+    );
+    return { adapter, calls, setSupervise: (on: boolean) => { supervise = on; } };
+  }
+
+  // The restart bug: the manager captured its principal at boot, so granting
+  // Aria mode did nothing until relaunch. Resolving per call fixes it.
+  it('authorizes commands as soon as the capability is granted, with no rebuild', async () => {
+    const { adapter, calls, setSupervise } = makeLive();
+
+    expect((await invoke(adapter, 'spawn', 'op-1')).ok).toBe(false);
+    expect(calls).toEqual([]);
+
+    setSupervise(true);
+
+    expect((await invoke(adapter, 'spawn', 'op-2')).ok).toBe(true);
+    expect(calls).toEqual(['spawn']);
+  });
+
+  // The same freeze in the dangerous direction: a captured principal kept an
+  // already-built adapter authorized for the rest of the run.
+  it('forbids the very next command once the capability is revoked', async () => {
+    const { adapter, calls, setSupervise } = makeLive();
+    setSupervise(true);
+    expect((await invoke(adapter, 'kill', 'op-1')).ok).toBe(true);
+
+    setSupervise(false);
+
+    const result = await invoke(adapter, 'kill', 'op-2');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe('forbidden');
+    // The revoked call never reached the bridge.
+    expect(calls).toEqual(['kill']);
+  });
+
+  it('gates the read-only verbs on the live capability too', async () => {
+    const { adapter, calls, setSupervise } = makeLive();
+    expect((await adapter.read({ operationId: 'op-1', workerId: 'w1' })).ok).toBe(false);
+    setSupervise(true);
+    expect((await adapter.read({ operationId: 'op-2', workerId: 'w1' })).ok).toBe(true);
+    expect(calls).toEqual(['read']);
+  });
+
+  // A provider that throws (config not yet constructed at an early call) must
+  // fail CLOSED rather than crash the caller.
+  it('forbids rather than throwing when the principal provider throws', async () => {
+    const { inner, calls } = makeInner();
+    const adapter = new OmpSupervisedAdapter(
+      inner,
+      () => {
+        throw new Error('configManager not ready');
+      },
+      () => {},
+    );
+    const result = await invoke(adapter, 'spawn', 'op-1');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe('forbidden');
+    expect(calls).toEqual([]);
+  });
+});
