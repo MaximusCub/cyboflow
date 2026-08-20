@@ -36,7 +36,10 @@ ALLOWLIST: anything not on it is refused, including `sed`, `awk`, `env` and
 `command` — each of those can execute or write without any of the syntax the
 guard rejects, so they are not available at all rather than available in a
 narrowed form. `git` is limited to its reading subcommands, and to their reading
-arguments: `git config --get x` reads, `git config x y` writes. If something you want is refused, use `Read`/`Grep`/`Glob` — and
+arguments: `git config --get x` reads, `git config x y` writes. Command substitution,
+redirection and `&&`/`;` chaining are all refused, so run ONE command per call — and
+note you already start in the project root, so the reflexive `cd "$(pwd)" && …` opener
+is refused for the substitution alone. If something you want is refused, use `Read`/`Grep`/`Glob` — and
 if you genuinely cannot establish an answer without running the project, that is
 what `not-possible` is for.
 
