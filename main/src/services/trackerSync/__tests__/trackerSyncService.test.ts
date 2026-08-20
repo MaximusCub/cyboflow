@@ -521,6 +521,32 @@ describe('TrackerSyncService boot recovery', () => {
     expect(getConnection(raw, 'conn-sibling')?.push_target).toBe(0);
     expect(getConnection(raw, 'conn-plane')?.push_target).toBe(1);
   });
+
+  it('boot repair keeps the oldest ARMED row — a deliberately demoted older row is never re-armed', () => {
+    // Mixed state: the OLDEST row was explicitly demoted (a user's push-target
+    // choice), and two younger siblings are both armed (the replay defect). The
+    // repair must pick among the ARMED rows only — re-arming the demoted one
+    // would overturn an explicit choice to fix an unrelated inconsistency.
+    makeConnection({ push_target: 0 });
+    makeConnection({
+      id: 'conn-armed-a',
+      source_json: JSON.stringify({ containerId: 'team-2', narrowId: 'all', narrowKind: 'all' }),
+    });
+    makeConnection({
+      id: 'conn-armed-b',
+      source_json: JSON.stringify({ containerId: 'team-3', narrowId: 'all', narrowKind: 'all' }),
+    });
+    const stamp = raw.prepare('UPDATE tracker_connections SET created_at = ? WHERE id = ?');
+    stamp.run('2026-07-01 00:00:00', CONN_ID);
+    stamp.run('2026-07-02 00:00:00', 'conn-armed-a');
+    stamp.run('2026-07-03 00:00:00', 'conn-armed-b');
+
+    service.start();
+
+    expect(getConnection(raw, CONN_ID)?.push_target).toBe(0);
+    expect(getConnection(raw, 'conn-armed-a')?.push_target).toBe(1);
+    expect(getConnection(raw, 'conn-armed-b')?.push_target).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

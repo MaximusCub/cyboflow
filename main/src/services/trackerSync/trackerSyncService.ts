@@ -541,30 +541,26 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
-   * Boot crash recovery: every `in_flight` outbox row belongs to a write whose
-   * outcome the last app lifetime never learned, so it becomes `ambiguous` and
-   * the next pass reconciles it before retrying anything. Fail-soft per
-   * connection — one unreadable connection must not strand the others.
-   */
-  /**
    * Boot repair for the one-pusher-per-(project, provider) invariant. connect()
    * never leaves two armed rows behind, but a ledger-wiped migration replay
    * can: 105's table recreate predates 109, so a full replay drops push_target
    * and 109 re-adds it at DEFAULT 1 on EVERY row (109's header documents this).
    * Left alone, the next pushed idea would file one remote issue per armed
-   * sibling. The oldest row keeps the flag — the stable choice, and for any
-   * pre-replay state the row most likely to have held it.
+   * sibling. The oldest ARMED row keeps the flag — stable, and for any
+   * pre-replay state the row most likely to have held it; a row someone
+   * deliberately demoted is never re-armed by the repair.
    */
   private reconcilePushTargets(): void {
     try {
       for (const pair of listDuplicatePushTargets(this.db)) {
         const rows = listConnectionsForProviderProject(this.db, pair.project_id, pair.provider);
-        if (rows.length === 0) continue;
-        claimPushTarget(this.db, pair.project_id, pair.provider, rows[0].id);
+        const armed = rows.filter((row) => row.push_target === 1);
+        if (armed.length === 0) continue;
+        claimPushTarget(this.db, pair.project_id, pair.provider, armed[0].id);
         this.logger?.warn('[trackerSync] boot recovery: demoted duplicate push targets', {
           projectId: pair.project_id,
           provider: pair.provider,
-          keptConnectionId: rows[0].id,
+          keptConnectionId: armed[0].id,
         });
       }
     } catch (err) {
@@ -574,6 +570,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
   }
 
+  /**
+   * Boot crash recovery: every `in_flight` outbox row belongs to a write whose
+   * outcome the last app lifetime never learned, so it becomes `ambiguous` and
+   * the next pass reconciles it before retrying anything. Fail-soft per
+   * connection — one unreadable connection must not strand the others.
+   */
   private recoverInFlightWrites(): void {
     let connections: TrackerConnectionRow[];
     try {
