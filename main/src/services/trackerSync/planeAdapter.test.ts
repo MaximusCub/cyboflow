@@ -264,6 +264,56 @@ describe('PlaneAdapter composite externalId round-trip', () => {
   });
 });
 
+describe('PlaneAdapter.listGroups', () => {
+  it('offers one whole-project group per project, scoped for states by project id', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/',
+        respond: () => ({
+          status: 200,
+          body: {
+            results: [
+              { id: 'p1', name: 'Proj One', identifier: 'ONE' },
+              { id: 'p2', name: 'Proj Two', identifier: 'TWO' },
+            ],
+            next_cursor: null,
+            next_page_results: false,
+          },
+        }),
+      },
+    ]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const { sections } = await adapter.listGroups();
+
+    expect(sections).toEqual([
+      {
+        label: 'Projects',
+        groups: [
+          {
+            id: 'p1',
+            name: 'Proj One',
+            key: 'ONE',
+            sourceLabel: 'Proj One · whole project',
+            selection: { containerId: 'p1', narrowId: 'all', narrowKind: 'all' },
+            // Plane states are per-project, so each group is its own scope.
+            stateScopeKey: 'p1',
+          },
+          {
+            id: 'p2',
+            name: 'Proj Two',
+            key: 'TWO',
+            sourceLabel: 'Proj Two · whole project',
+            selection: { containerId: 'p2', narrowId: 'all', narrowKind: 'all' },
+            stateScopeKey: 'p2',
+          },
+        ],
+      },
+    ]);
+  });
+});
+
 describe('PlaneAdapter pagination', () => {
   it('follows next_cursor until next_page_results is false', async () => {
     const { fetchImpl, calls } = scriptedFetch([

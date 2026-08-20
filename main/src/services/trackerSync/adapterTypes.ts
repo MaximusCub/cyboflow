@@ -13,6 +13,7 @@
 import type {
   TrackerProvider,
   TrackerWorkspaceIdentity,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -57,6 +58,20 @@ export interface TrackerAdapter {
 
   /** Live probe of the stored key. Rejects with a typed error on 401/403. */
   validateCredentials(): Promise<TrackerWorkspaceIdentity>;
+
+  /**
+   * The Map step's unit: every tracker GROUPING that can be mapped onto a
+   * cyboflow project, in labelled sections. A group is the level a team
+   * organizes work at, which differs per provider — Linear offers one group per
+   * (project × team) pair plus a "Whole teams" fallback (many workspaces do not
+   * use projects); Plane offers its projects; Dart offers the spaces implied by
+   * the '/' prefix on dartboard titles, falling back to per-board groups.
+   *
+   * Each group carries a READY-MADE {@link TrackerSourceSelection}, so the
+   * wizard and the engine consume the tree without knowing which provider built
+   * it, and a mapping is minted by handing that selection straight to `connect`.
+   */
+  listGroups(): Promise<TrackerGroupTree>;
 
   /** Wizard Step 1, top level (Linear teams / Plane projects). */
   listContainers(): Promise<TrackerSourceTree>;

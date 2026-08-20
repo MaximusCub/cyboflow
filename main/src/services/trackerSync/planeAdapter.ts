@@ -33,6 +33,7 @@
 import type {
   TrackerProvider,
   TrackerWorkspaceIdentity,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -251,6 +252,33 @@ export class PlaneAdapter implements TrackerAdapter {
       workspaceId: this.workspaceSlug,
       workspaceName: this.workspaceSlug,
       actorLabel: deriveActorLabel(me),
+    };
+  }
+
+  /**
+   * The Map step's groups: one per Plane project, which is already the level
+   * this adapter containers at — so a group's selection is the whole-project
+   * one `listContainers` + the 'all' narrow would have produced, and
+   * `stateScopeKey` is the project id because Plane states are per-project.
+   */
+  async listGroups(): Promise<TrackerGroupTree> {
+    const projects = await this.paginateAll<PlaneProjectWire>(
+      `/workspaces/${this.workspaceSlug}/projects/`
+    );
+    return {
+      sections: [
+        {
+          label: 'Projects',
+          groups: projects.map((project) => ({
+            id: project.id,
+            name: project.name,
+            key: project.identifier ?? null,
+            sourceLabel: `${project.name} · whole project`,
+            selection: { containerId: project.id, narrowId: 'all', narrowKind: 'all' as const },
+            stateScopeKey: project.id,
+          })),
+        },
+      ],
     };
   }
 

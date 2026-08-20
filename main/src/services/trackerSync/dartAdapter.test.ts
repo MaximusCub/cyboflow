@@ -83,6 +83,41 @@ function configRoute(): RouteHandler {
   };
 }
 
+/**
+ * A workspace using the `"<Space>/<Board>"` convention: two boards under
+ * Engineering, one under Design, one board outside any space. `/config` order is
+ * what makes Engineering's FIRST board its default push target.
+ */
+const SPACE_CONFIG = {
+  dartboards: [BOARD, 'Engineering/Backlog', 'Design/Board', 'Inbox'],
+  statuses: CONFIG.statuses,
+};
+
+const SPACE_SELECTION: TrackerSourceSelection = {
+  containerId: 'Engineering',
+  narrowId: 'all',
+  narrowKind: 'space',
+  pushContainerId: BOARD,
+};
+
+function spaceConfigRoute(dartboards: string[] = SPACE_CONFIG.dartboards): RouteHandler {
+  return {
+    test: (m, p) => m === 'GET' && p.endsWith('/config'),
+    respond: () => ({ status: 200, body: { ...SPACE_CONFIG, dartboards } }),
+  };
+}
+
+/** `POST /tasks` echoing back what it was sent, with a server-minted id. */
+function createRoute(): RouteHandler {
+  return {
+    test: (m, p) => m === 'POST' && p.endsWith('/tasks'),
+    respond: (body) => ({
+      status: 200,
+      body: { item: task({ ...(body as { item: object }).item, id: 'newnewnewnew' }) },
+    }),
+  };
+}
+
 /** `GET /tasks/list` returning one page of concise rows. */
 function listRoute(rows: unknown[], assertParams?: (p: URLSearchParams) => void): RouteHandler {
   return {
@@ -91,6 +126,33 @@ function listRoute(rows: unknown[], assertParams?: (p: URLSearchParams) => void)
       assertParams?.(params);
       // Honour BOTH limit and offset — a stub that ignores limit hands back the
       // whole set on page one and would silently pass a broken pager.
+      const offset = Number(params.get('offset') ?? '0');
+      const limit = Number(params.get('limit') ?? String(rows.length));
+      const page = rows.slice(offset, offset + limit);
+      return {
+        status: 200,
+        body: { count: rows.length, next: offset + page.length < rows.length ? 'next' : null, results: page },
+      };
+    },
+  };
+}
+
+/**
+ * `GET /tasks/list` scoped by the `dartboard` param. A request carrying NO
+ * dartboard gets EVERY row, exactly as the live endpoint would — which is what
+ * makes an assertion on the returned union a mutation pin on the filter itself,
+ * rather than on the fixture.
+ */
+function boardListRoute(
+  byBoard: Record<string, Record<string, unknown>[]>,
+  seen?: string[],
+): RouteHandler {
+  return {
+    test: (m, p) => m === 'GET' && p.endsWith('/tasks/list'),
+    respond: (_b, params) => {
+      const board = params.get('dartboard');
+      seen?.push(board ?? '<unscoped>');
+      const rows = board === null ? Object.values(byBoard).flat() : (byBoard[board] ?? []);
       const offset = Number(params.get('offset') ?? '0');
       const limit = Number(params.get('limit') ?? String(rows.length));
       const page = rows.slice(offset, offset + limit);
@@ -212,6 +274,120 @@ describe('DartAdapter source discovery', () => {
       { id: BOARD, name: BOARD, key: null, openIssueCount: null },
       { id: 'Design/Backlog', name: 'Design/Backlog', key: null, openIssueCount: null },
     ]);
+  });
+
+  it('derives spaces from the dartboard-title prefix, pushing to the space’s first board', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/config'),
+        respond: () => ({
+          status: 200,
+          body: {
+            // Two boards under one space, plus a second space — /config order is
+            // what makes the first board a stable push target.
+            dartboards: [BOARD, 'Engineering/Backlog', 'Design/Backlog'],
+            statuses: CONFIG.statuses,
+          },
+        }),
+      },
+    ]);
+
+    const { sections } = await new DartAdapter({ apiKey: 'k', fetchImpl }).listGroups();
+
+    expect(sections).toEqual([
+      {
+        label: 'Spaces',
+        groups: [
+          {
+            id: 'Engineering',
+            name: 'Engineering',
+            key: null,
+            sourceLabel: 'Engineering · whole space',
+            selection: {
+              containerId: 'Engineering',
+              narrowId: 'all',
+              narrowKind: 'space',
+              // A create needs a concrete board; the space's first one is it.
+              pushContainerId: BOARD,
+            },
+            // Dart statuses are workspace-wide, so every group shares a scope.
+            stateScopeKey: 'workspace',
+          },
+          {
+            id: 'Design',
+            name: 'Design',
+            key: null,
+            sourceLabel: 'Design · whole space',
+            selection: {
+              containerId: 'Design',
+              narrowId: 'all',
+              narrowKind: 'space',
+              pushContainerId: 'Design/Backlog',
+            },
+            stateScopeKey: 'workspace',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('falls back to per-board groups for titles with no space prefix, omitting the empty section', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/config'),
+        respond: () => ({
+          status: 200,
+          // The '/' convention is observed, not enforced by Dart: a workspace
+          // that ignores it must still be mappable.
+          body: { dartboards: ['Tasks', 'Inbox'], statuses: CONFIG.statuses },
+        }),
+      },
+    ]);
+
+    const { sections } = await new DartAdapter({ apiKey: 'k', fetchImpl }).listGroups();
+
+    expect(sections).toEqual([
+      {
+        label: 'Dartboards',
+        groups: [
+          {
+            id: 'Tasks',
+            name: 'Tasks',
+            key: null,
+            sourceLabel: 'Tasks',
+            // The pre-rev-4 selection exactly: a plain dartboard scope.
+            selection: { containerId: 'Tasks', narrowId: 'all', narrowKind: 'all' },
+            stateScopeKey: 'workspace',
+          },
+          {
+            id: 'Inbox',
+            name: 'Inbox',
+            key: null,
+            sourceLabel: 'Inbox',
+            selection: { containerId: 'Inbox', narrowId: 'all', narrowKind: 'all' },
+            stateScopeKey: 'workspace',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('reads a LEADING slash as no space, not as an empty one', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/config'),
+        respond: () => ({
+          status: 200,
+          body: { dartboards: ['/Odd', 'Engineering/Sprint'], statuses: CONFIG.statuses },
+        }),
+      },
+    ]);
+
+    const { sections } = await new DartAdapter({ apiKey: 'k', fetchImpl }).listGroups();
+
+    expect(sections.map((s) => s.label)).toEqual(['Spaces', 'Dartboards']);
+    expect(sections[0].groups.map((g) => g.id)).toEqual(['Engineering']);
+    expect(sections[1].groups.map((g) => g.id)).toEqual(['/Odd']);
   });
 
   it("offers only the whole-dartboard narrow, and it is the contract's 'all'", async () => {
@@ -458,6 +634,184 @@ describe('DartAdapter.listIssues', () => {
     const ids = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssueIds(SELECTION);
     expect(ids).toEqual(['aaaaaaaaaaaa', 'bbbbbbbbbbbb']);
     expect(calls.some(isDetailCall)).toBe(false);
+  });
+});
+
+describe('DartAdapter space-scoped selections', () => {
+  const sprintRows = [concise({ id: 'engsprint001' }), concise({ id: 'engsprint002' })];
+  const backlogRows = [concise({ id: 'engbacklog01' })];
+  const designRows = [concise({ id: 'designbrd001' })];
+  const BY_BOARD: Record<string, Record<string, unknown>[]> = {
+    [BOARD]: sprintRows,
+    'Engineering/Backlog': backlogRows,
+    'Design/Board': designRows,
+    Inbox: [],
+  };
+  const DETAIL: Record<string, unknown> = Object.fromEntries(
+    [...sprintRows, ...backlogRows, ...designRows].map((row) => [row.id, task({ id: row.id })]),
+  );
+
+  it('unions the member boards, one dartboard-scoped fetch each, in /config order', async () => {
+    // Dropping the `dartboard` param from the fetch would hand back every row in
+    // the workspace (the mock answers an unscoped list the way Dart does), so
+    // the Design board's task appearing here is the mutation this pins.
+    const seen: string[] = [];
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(),
+      boardListRoute(BY_BOARD, seen),
+      makeDetailRoute(DETAIL),
+    ]);
+    const issues = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues(SPACE_SELECTION);
+    expect(seen).toEqual([BOARD, 'Engineering/Backlog']);
+    // Concatenation, not a merge: a Dart task carries exactly one dartboard, so
+    // two member boards can never return the same task.
+    expect(issues.map((i) => i.externalId)).toEqual(['engsprint001', 'engsprint002', 'engbacklog01']);
+  });
+
+  it('unions the member boards for listIssueIds too, still WITHOUT hydration', async () => {
+    const seen: string[] = [];
+    const { fetchImpl, calls } = scriptedFetch([spaceConfigRoute(), boardListRoute(BY_BOARD, seen)]);
+    const ids = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssueIds(SPACE_SELECTION);
+    expect(seen).toEqual([BOARD, 'Engineering/Backlog']);
+    expect(ids).toEqual(['engsprint001', 'engsprint002', 'engbacklog01']);
+    // The sweep stays cheap however many boards a space holds.
+    expect(calls.some(isDetailCall)).toBe(false);
+  });
+
+  it('carries the since bound onto EVERY member board', async () => {
+    const since = '2026-08-16T10:00:00.000Z';
+    const sentAfter: (string | null)[] = [];
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(),
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/tasks/list'),
+        respond: (_b, params) => {
+          sentAfter.push(params.get('updated_at_after'));
+          const rows = BY_BOARD[String(params.get('dartboard'))] ?? [];
+          return { status: 200, body: { count: rows.length, next: null, results: rows } };
+        },
+      },
+      makeDetailRoute(DETAIL),
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues(SPACE_SELECTION, since);
+    expect(sentAfter).toEqual(['2026-08-16T09:59:59.000Z', '2026-08-16T09:59:59.000Z']);
+  });
+
+  it('fails LOUD on a space whose member boards are all gone, not with an empty page', async () => {
+    // Same hazard as a renamed dartboard: a space is DERIVED from titles, so a
+    // prefix nothing matches unions to zero rows — which listIssueIds would hand
+    // the deletion sweep as "every task in this space was deleted remotely".
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(['Design/Board', 'Inbox']),
+      boardListRoute(BY_BOARD),
+      createRoute(),
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+    await expect(adapter.listIssues(SPACE_SELECTION)).rejects.toThrow(/no longer exists/i);
+    await expect(adapter.listIssueIds(SPACE_SELECTION)).rejects.toThrow(/no longer exists/i);
+    await expect(adapter.createIssue(SPACE_SELECTION, { title: 'T' }, CLIENT_KEY)).rejects.toThrow(
+      /no longer exists/i,
+    );
+  });
+
+  it('does not let one space claim another whose name it prefixes', async () => {
+    const seen: string[] = [];
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(['Design/Board', 'DesignOps/Board']),
+      boardListRoute({ 'Design/Board': designRows, 'DesignOps/Board': [concise({ id: 'opsboard0001' })] }, seen),
+      makeDetailRoute(DETAIL),
+    ]);
+    const issues = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues({
+      containerId: 'Design',
+      narrowId: 'all',
+      narrowKind: 'space',
+    });
+    expect(seen).toEqual(['Design/Board']);
+    expect(issues.map((i) => i.externalId)).toEqual(['designbrd001']);
+  });
+
+  it('files a create on the space selection pushContainerId', async () => {
+    const { fetchImpl, calls } = scriptedFetch([spaceConfigRoute(), createRoute()]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).createIssue(
+      { ...SPACE_SELECTION, pushContainerId: 'Engineering/Backlog' },
+      { title: 'New task' },
+      CLIENT_KEY,
+    );
+    expect((postBody(calls) as { item: Record<string, unknown> }).item.dartboard).toBe('Engineering/Backlog');
+  });
+
+  it('refuses a pushContainerId that is no longer a member of the space', async () => {
+    // The push target was persisted at connect time; a create filed on a board
+    // this connection does not READ would sync outbound once and then never be
+    // seen again. No POST route is scripted, so a create that reached the
+    // network would fail as an unhandled request instead of passing quietly.
+    const { fetchImpl } = scriptedFetch([spaceConfigRoute(), boardListRoute(BY_BOARD)]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).createIssue(
+        { ...SPACE_SELECTION, pushContainerId: 'Design/Board' },
+        { title: 'T' },
+        CLIENT_KEY,
+      ),
+    ).rejects.toThrow(/not part of the Dart space/i);
+  });
+
+  it("falls back to the space's first board when the selection carries no push target", async () => {
+    const { fetchImpl, calls } = scriptedFetch([spaceConfigRoute(), createRoute()]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).createIssue(
+      { containerId: 'Engineering', narrowId: 'all', narrowKind: 'space' },
+      { title: 'T' },
+      CLIENT_KEY,
+    );
+    expect((postBody(calls) as { item: Record<string, unknown> }).item.dartboard).toBe(BOARD);
+  });
+
+  it('scans EVERY member board for the recovery marker', async () => {
+    // The outbox records a containerId with no narrowKind, so a space name
+    // arrives here looking like a dartboard — and `dartboard=Engineering` matches
+    // nothing, which the outbox would read as PROOF the create never landed.
+    const seen: string[] = [];
+    const marked = task({ id: 'engbacklog01', description: `Body\n\ncyboflow-sync: ${CLIENT_KEY}` });
+    const { fetchImpl } = scriptedFetch([
+      spaceConfigRoute(),
+      boardListRoute(BY_BOARD, seen),
+      makeDetailRoute({ ...DETAIL, engbacklog01: marked }),
+    ]);
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: 'Engineering', parentExternalId: null },
+      CLIENT_KEY,
+    );
+    expect(found?.externalId).toBe('engbacklog01');
+    expect(seen).not.toContain('Engineering');
+    expect(new Set(seen)).toEqual(new Set([BOARD, 'Engineering/Backlog']));
+  });
+
+  it('still fails LOUD in recovery for a title that is neither a board nor a space', async () => {
+    const { fetchImpl } = scriptedFetch([spaceConfigRoute(), boardListRoute(BY_BOARD)]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+        { containerId: 'Renamed', parentExternalId: null },
+        CLIENT_KEY,
+      ),
+    ).rejects.toThrow(/no longer exists/i);
+  });
+
+  it('keeps a PLAIN board selection on that one board, siblings in its space included', async () => {
+    // The pre-rev-4 behaviour, byte-identical: narrowKind 'all' names a
+    // dartboard, never the space its title happens to sit under.
+    const seen: string[] = [];
+    const { fetchImpl, calls } = scriptedFetch([
+      spaceConfigRoute(),
+      boardListRoute(BY_BOARD, seen),
+      makeDetailRoute(DETAIL),
+      createRoute(),
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+    const issues = await adapter.listIssues(SELECTION);
+    expect(issues.map((i) => i.externalId)).toEqual(['engsprint001', 'engsprint002']);
+    expect(await adapter.listIssueIds(SELECTION)).toEqual(['engsprint001', 'engsprint002']);
+    expect(seen).toEqual([BOARD, BOARD]);
+    await adapter.createIssue(SELECTION, { title: 'T' }, CLIENT_KEY);
+    expect((postBody(calls) as { item: Record<string, unknown> }).item.dartboard).toBe(BOARD);
   });
 });
 

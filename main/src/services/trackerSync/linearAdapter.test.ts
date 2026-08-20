@@ -5,7 +5,8 @@
  * call — so the GraphQL request shape (headers, variables, pagination) and
  * the response-mapping/error-classification logic are asserted
  * deterministically. Covers: bare-key auth + happy-path identity mapping,
- * HTTP-401 → TrackerAuthError, listIssues cross-page pagination with the
+ * HTTP-401 → TrackerAuthError, listGroups' project×team pairing (and the whole-
+ * teams fallback), listIssues cross-page pagination with the
  * `updatedAt.gte` filter threaded through, Linear's "canceled" state type
  * mapping to the canonical "cancelled" group, createSubIssue's
  * client-key-as-id idempotency wiring, getIssue swallowing an
@@ -124,6 +125,174 @@ describe('LinearAdapter auth failures', () => {
     const adapter = new LinearAdapter({ apiKey: 'bad-key', fetchImpl });
 
     await expect(adapter.validateCredentials()).rejects.toBeInstanceOf(TrackerAuthError);
+  });
+});
+
+/**
+ * A `FetchLike` that answers PER OPERATION rather than per call index, keyed by
+ * a substring of the query text. `listGroups` fires its two root queries
+ * concurrently, so the call ORDER the other tests rely on is not stable there.
+ * Each key's responses are consumed in order (the last repeats).
+ */
+function createQueryFetchMock(byOperation: Record<string, QueuedResponse[]>): {
+  fetchImpl: FetchLike;
+  calls: RecordedCall[];
+} {
+  const calls: RecordedCall[] = [];
+  const consumed = new Map<string, number>();
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const call = { url: String(input), init: init ?? {} };
+    calls.push(call);
+    const { query } = parseBody(call);
+    const key = Object.keys(byOperation).find((name) => query.includes(name));
+    if (key === undefined) throw new Error(`createQueryFetchMock: unhandled operation in ${query}`);
+    const responses = byOperation[key];
+    const index = consumed.get(key) ?? 0;
+    consumed.set(key, index + 1);
+    const queued = responses[index] ?? responses[responses.length - 1];
+    return jsonResponse(queued.status, queued.body);
+  }) as FetchLike;
+  return { fetchImpl, calls };
+}
+
+describe('LinearAdapter.listGroups', () => {
+  it('pairs each project with every team it spans, and paginates the project query', async () => {
+    const { fetchImpl, calls } = createQueryFetchMock({
+      ListProjectsWithTeams: [
+        {
+          status: 200,
+          body: {
+            data: {
+              projects: {
+                nodes: [
+                  {
+                    id: 'proj-1',
+                    name: 'Platform',
+                    teams: { nodes: [{ id: 'team-core', name: 'Core', key: 'COR' }] },
+                  },
+                ],
+                pageInfo: { hasNextPage: true, endCursor: 'cursor-1' },
+              },
+            },
+          },
+        },
+        {
+          status: 200,
+          body: {
+            data: {
+              projects: {
+                nodes: [
+                  {
+                    id: 'proj-2',
+                    name: 'Redesign',
+                    teams: {
+                      nodes: [
+                        { id: 'team-core', name: 'Core', key: 'COR' },
+                        { id: 'team-web', name: 'Web', key: 'WEB' },
+                      ],
+                    },
+                  },
+                  // A project no team owns has no addressable filter.
+                  { id: 'proj-orphan', name: 'Orphan', teams: { nodes: [] } },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      ],
+      ListTeams: [
+        {
+          status: 200,
+          body: {
+            data: {
+              teams: {
+                nodes: [{ id: 'team-core', name: 'Core', key: 'COR' }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      ],
+    });
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    const { sections } = await adapter.listGroups();
+
+    expect(sections.map((section) => section.label)).toEqual(['Projects', 'Whole teams']);
+    expect(sections[0].groups).toEqual([
+      {
+        id: 'team-core/proj-1',
+        // Single-team project: the team is not spelled into the name.
+        name: 'Platform',
+        key: 'COR',
+        sourceLabel: 'Platform · Core',
+        selection: { containerId: 'team-core', narrowId: 'proj-1', narrowKind: 'project' },
+        stateScopeKey: 'team-core',
+      },
+      {
+        id: 'team-core/proj-2',
+        name: 'Redesign · Core',
+        key: 'COR',
+        sourceLabel: 'Redesign · Core',
+        selection: { containerId: 'team-core', narrowId: 'proj-2', narrowKind: 'project' },
+        stateScopeKey: 'team-core',
+      },
+      {
+        id: 'team-web/proj-2',
+        name: 'Redesign · Web',
+        key: 'WEB',
+        sourceLabel: 'Redesign · Web',
+        selection: { containerId: 'team-web', narrowId: 'proj-2', narrowKind: 'project' },
+        // Linear states are per-TEAM, so the same project maps under two scopes.
+        stateScopeKey: 'team-web',
+      },
+    ]);
+    expect(calls.filter((call) => parseBody(call).query.includes('ListProjectsWithTeams'))).toHaveLength(2);
+  });
+
+  it('offers whole teams as their own section, so an issue in no project is reachable', async () => {
+    const { fetchImpl } = createQueryFetchMock({
+      ListProjectsWithTeams: [
+        {
+          status: 200,
+          body: {
+            data: { projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+          },
+        },
+      ],
+      ListTeams: [
+        {
+          status: 200,
+          body: {
+            data: {
+              teams: {
+                nodes: [{ id: 'team-core', name: 'Core', key: 'COR' }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      ],
+    });
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    const { sections } = await adapter.listGroups();
+
+    expect(sections[0].groups).toEqual([]);
+    expect(sections[1]).toEqual({
+      label: 'Whole teams',
+      groups: [
+        {
+          id: 'team:team-core',
+          name: 'Core',
+          key: 'COR',
+          sourceLabel: 'Core · whole team',
+          selection: { containerId: 'team-core', narrowId: 'all', narrowKind: 'all' },
+          stateScopeKey: 'team-core',
+        },
+      ],
+    });
   });
 });
 

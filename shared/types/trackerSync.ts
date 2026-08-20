@@ -45,7 +45,13 @@ export interface TrackerSourceContainer {
   openIssueCount: number | null;
 }
 
-export type TrackerNarrowKind = 'all' | 'project' | 'view' | 'cycle' | 'module';
+/**
+ * The second-level scope on a source selection. `'space'` is Dart's and only
+ * Dart's: a space is the dartboard-title prefix before the first '/', which no
+ * endpoint enumerates, so the adapter resolves the member boards from `/config`
+ * at call time and unions the per-board fetches.
+ */
+export type TrackerNarrowKind = 'all' | 'project' | 'view' | 'cycle' | 'module' | 'space';
 
 export interface TrackerSourceNarrow {
   id: string;
@@ -65,6 +71,48 @@ export interface TrackerSourceSelection {
   containerId: string;
   narrowId: string;
   narrowKind: TrackerNarrowKind;
+  /**
+   * Where a CREATE lands when the selection itself is not a concrete container
+   * — Dart space groups, whose `containerId` is a space name no create can be
+   * filed against. Absent everywhere else, since every other selection's
+   * container is already the level the provider files an issue at.
+   */
+  pushContainerId?: string;
+}
+
+/**
+ * One row of the wizard's Map step: a tracker GROUPING that can be mapped onto
+ * a cyboflow project. The grouping unit is provider-defined — Linear projects
+ * (each paired with a team) plus whole teams, Plane projects, Dart spaces — and
+ * the group carries its READY-MADE `selection`, so nothing downstream has to
+ * know which provider produced it.
+ */
+export interface TrackerGroup {
+  /** Stable within one tree; the Map step's row key, never persisted. */
+  id: string;
+  name: string;
+  /** Short key chip (Linear team key, Plane project identifier); null when none. */
+  key: string | null;
+  /** The `sourceLabel` a connection minted from this group is persisted with. */
+  sourceLabel: string;
+  selection: TrackerSourceSelection;
+  /**
+   * Groups sharing this key share a state list, so the States step renders one
+   * mapping table per distinct value (Linear states are per-team, Plane's
+   * per-project, Dart's workspace-wide).
+   */
+  stateScopeKey: string;
+}
+
+/** A labelled band of groups in the Map step ("Projects", "Whole teams", …). */
+export interface TrackerGroupSection {
+  label: string;
+  groups: TrackerGroup[];
+}
+
+/** Everything `listGroups` offers, in the order the Map step renders it. */
+export interface TrackerGroupTree {
+  sections: TrackerGroupSection[];
 }
 
 /**
@@ -235,6 +283,8 @@ export interface TrackerConnectionSummary {
   pushMode: TrackerDirectionMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
+  /** This mapping is the one its provider pushes new ideas through. */
+  pushTarget: boolean;
   stateMapping: TrackerStateMapping;
   lastSyncAt: string | null;
   lastSyncLog: TrackerSyncLogEntry[];
@@ -320,6 +370,13 @@ export interface TrackerConnectPayload {
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   reconcile: TrackerReconcileDecision[];
+  /**
+   * May this mapping create new tracker issues? Omitted = true, which is the
+   * single-mapping shape every pre-rev-4 connection has. The Map step sets it
+   * false on every sibling but one where N groups target the same cyboflow
+   * project, so a locally filed idea is pushed once rather than N times.
+   */
+  pushTarget?: boolean;
 }
 
 /**

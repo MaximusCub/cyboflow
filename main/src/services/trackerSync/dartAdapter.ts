@@ -43,11 +43,21 @@
  * externalId is the bare 12-character Dart task id. Unlike Plane, no
  * compositing is needed: `/tasks/{id}` is not dartboard-scoped, so the id alone
  * addresses a task.
+ *
+ * A connection's source may also be a SPACE (`narrowKind: 'space'`), which Dart
+ * models nowhere: it is the `"<Space>/<Board>"` title prefix, resolved to its
+ * member boards from `/config` at call time — see
+ * {@link DartAdapter.resolveScopeBoards}. Every scoped path below therefore
+ * works over a LIST of dartboards, of which a plain board selection is the
+ * one-element case.
  */
 
 import type {
   TrackerProvider,
   TrackerWorkspaceIdentity,
+  TrackerGroup,
+  TrackerGroupSection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -263,6 +273,78 @@ export class DartAdapter implements TrackerAdapter {
     };
   }
 
+  /**
+   * The Map step's groups: Dart SPACES, with the dartboards that belong to no
+   * space listed on their own.
+   *
+   * Dart's API models no space at all — `/config` returns dartboard titles and
+   * nothing else — but the titles carry the space in a `"<Space>/<Board>"`
+   * convention that every Dart workspace observes. So a space here is the prefix
+   * before the FIRST '/', derived not fetched, and the whole feature degrades
+   * gracefully: a workspace that does not use the convention simply gets one
+   * group per dartboard, which is exactly the pre-rev-4 source.
+   *
+   * A space group carries `narrowKind: 'space'` (its `containerId` is a space
+   * name, which no `dartboard=` filter answers to) and a `pushContainerId`: a
+   * create needs a concrete board, and the space's FIRST board in `/config`
+   * order is the only non-arbitrary choice available.
+   *
+   * `stateScopeKey` is the constant 'workspace' for every group, space or not:
+   * Dart statuses are workspace-wide, so the States step renders exactly one
+   * mapping table however many groups are mapped.
+   */
+  async listGroups(): Promise<TrackerGroupTree> {
+    const config = await this.getConfig();
+
+    // Insertion-ordered, so both sections come out in /config order and each
+    // space's first board stays its first board.
+    const spaces = new Map<string, string[]>();
+    const looseBoards: string[] = [];
+    for (const title of config.dartboards) {
+      const slash = title.indexOf('/');
+      if (slash <= 0) {
+        looseBoards.push(title);
+        continue;
+      }
+      const space = title.slice(0, slash);
+      const members = spaces.get(space);
+      if (members === undefined) spaces.set(space, [title]);
+      else members.push(title);
+    }
+
+    const spaceGroups: TrackerGroup[] = [...spaces].map(([space, boards]) => ({
+      id: space,
+      name: space,
+      // Dart has no short key chip, at either level.
+      key: null,
+      sourceLabel: `${space} · whole space`,
+      selection: {
+        containerId: space,
+        narrowId: 'all',
+        narrowKind: 'space' as const,
+        pushContainerId: boards[0],
+      },
+      stateScopeKey: 'workspace',
+    }));
+
+    const boardGroups: TrackerGroup[] = looseBoards.map((title) => ({
+      id: title,
+      name: title,
+      key: null,
+      sourceLabel: title,
+      selection: { containerId: title, narrowId: 'all', narrowKind: 'all' as const },
+      stateScopeKey: 'workspace',
+    }));
+
+    const sections: TrackerGroupSection[] = [];
+    // An empty section is omitted rather than rendered: a workspace either uses
+    // the '/' convention or does not, and showing it the empty half of the other
+    // model is noise in a step whose whole job is picking from a list.
+    if (spaceGroups.length > 0) sections.push({ label: 'Spaces', groups: spaceGroups });
+    if (boardGroups.length > 0) sections.push({ label: 'Dartboards', groups: boardGroups });
+    return { sections };
+  }
+
   async listContainers(): Promise<TrackerSourceTree> {
     const config = await this.getConfig();
     return {
@@ -303,36 +385,31 @@ export class DartAdapter implements TrackerAdapter {
   }
 
   async listIssues(selection: TrackerSourceSelection, sinceIso?: string): Promise<TrackerIssue[]> {
-    await this.assertContainerExists(selection.containerId);
-    const params: Record<string, string> = { dartboard: selection.containerId };
-    if (sinceIso !== undefined) {
-      // MEASURED: `updated_at_after` is INCLUSIVE (a task queried at exactly its
-      // own updatedAt comes back; one second later it does not), which is what
-      // the adapter contract requires. The one-second widening and the exact
-      // client-side re-filter below are kept anyway: they cost at most a second
-      // of overlap the sync core already tolerates, and they keep the contract
-      // satisfied if Dart ever tightens the bound to exclusive.
-      params.updated_at_after = shiftIsoBySeconds(sinceIso, -1);
+    const boards = await this.resolveScopeBoards(selection);
+    const issues: TrackerIssue[] = [];
+    // SEQUENTIAL, and no dedup. Sequential because each board's fetch already
+    // fans out to HYDRATION_CONCURRENCY detail requests, so running the boards
+    // in parallel would multiply the only concurrency this adapter bounds. No
+    // dedup because a Dart task carries exactly one `dartboard`, so two member
+    // boards can never return the same task — the union is a concatenation, and
+    // each board's internal order is preserved.
+    for (const board of boards) {
+      issues.push(...(await this.listBoardIssues(board, sinceIso)));
     }
-    const concise = await this.paginate<DartConciseTaskWire>('/tasks/list', params);
-    const scoped =
-      sinceIso === undefined
-        ? concise
-        : concise.filter((task) => Date.parse(task.updatedAt) >= Date.parse(sinceIso));
-    // Hydration, not decoration: the list shape has no description, and the sync
-    // core merges on it (file header, point 2).
-    const hydrated = await this.hydrate(scoped);
-    return hydrated.map((task) => this.mapIssue(task));
+    return issues;
   }
 
   async listIssueIds(selection: TrackerSourceSelection): Promise<string[]> {
-    await this.assertContainerExists(selection.containerId);
-    const concise = await this.paginate<{ id: string }>('/tasks/list', {
-      dartboard: selection.containerId,
-    });
-    // Deliberately un-hydrated: the deletion sweep only needs ids, and those are
-    // on the concise shape.
-    return concise.map((task) => task.id);
+    const boards = await this.resolveScopeBoards(selection);
+    const ids: string[] = [];
+    for (const board of boards) {
+      const concise = await this.paginate<{ id: string }>('/tasks/list', { dartboard: board });
+      // Deliberately un-hydrated: the deletion sweep only needs ids, and those
+      // are on the concise shape — which is also why the sweep stays cheap over
+      // a whole space.
+      ids.push(...concise.map((task) => task.id));
+    }
+    return ids;
   }
 
   async getIssue(externalId: string): Promise<TrackerIssue | null> {
@@ -383,19 +460,18 @@ export class DartAdapter implements TrackerAdapter {
    * top-level create that commits and loses its response is recovered by exactly
    * the same marker lookup ({@link DartAdapter.findIssueByClientKey}), which is
    * only conclusive because EVERY create writes the marker.
+   *
+   * A SPACE selection has no board of its own to file against, so the create
+   * lands on `selection.pushContainerId` — see
+   * {@link DartAdapter.resolveCreateBoard}.
    */
   async createIssue(
     selection: TrackerSourceSelection,
     draft: IssueDraft,
     clientKey: string
   ): Promise<TrackerIssue> {
-    // Same guard the read paths carry, for the same measured reason: a renamed
-    // dartboard is not an error to Dart, so an unguarded create would either be
-    // filed somewhere unintended or fail with an opaque 4xx that the outbox
-    // treats as terminal and DROPS the push. Failing here keeps the row
-    // retryable until the source selection is repaired.
-    await this.assertContainerExists(selection.containerId);
-    return this.postTask({ dartboard: selection.containerId }, draft, clientKey);
+    const board = await this.resolveCreateBoard(selection);
+    return this.postTask({ dartboard: board }, draft, clientKey);
   }
 
   async updateIssueState(externalId: string, stateId: string): Promise<void> {
@@ -413,11 +489,13 @@ export class DartAdapter implements TrackerAdapter {
    *
    * `scope.parentExternalId` narrows the search to one parent's children (a
    * mirrored `create_sub_issue`) via Dart's server-side `parent_id` filter;
-   * otherwise the search is the selection's dartboard (a top-level
-   * `create_issue`). BOTH forms match on the client key alone — title is
-   * deliberately NOT a criterion, because a dartboard routinely holds two tasks
-   * with the same title and adopting the wrong one would silently redirect every
-   * later write-back onto an unrelated task.
+   * otherwise the search is the selection's dartboard, or EVERY member board
+   * when the selection is a space (a top-level `create_issue` — the outbox row
+   * records no board, and `pushContainerId` may since have moved). BOTH forms
+   * match on the client key alone — title is deliberately NOT a criterion,
+   * because a dartboard routinely holds two tasks with the same title and
+   * adopting the wrong one would silently redirect every later write-back onto
+   * an unrelated task.
    *
    * COST, and why it is shaped this way. The marker lives in the description,
    * which list responses omit, so a candidate can only be judged after a detail
@@ -438,44 +516,143 @@ export class DartAdapter implements TrackerAdapter {
     clientKey: string
   ): Promise<TrackerIssue | null> {
     const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
-    const scopeParams: Record<string, string> =
-      scope.parentExternalId !== null
-        ? { parent_id: scope.parentExternalId }
-        : scope.containerId !== null
-          ? { dartboard: scope.containerId }
-          : {};
-    if (Object.keys(scopeParams).length === 0) {
-      throw new TrackerApiError(
-        PROVIDER,
-        'client-key recovery needs either a parent task or a source dartboard'
-      );
-    }
     // THE DARTBOARD-SCOPED ARM MUST FAIL LOUD, NOT EMPTY. A renamed dartboard
     // makes `/tasks/list` answer 200 with zero rows (measured), and in THIS
     // method an empty result is not "no match" — it is read by the outbox as
     // PROOF the create never landed, which requeues a create that may already
     // have committed and duplicates it. Throwing leaves the row `ambiguous`,
-    // which is the correct unresolved state. The parent_id arm needs no such
-    // guard: it is addressed by id, which renames cannot invalidate.
-    if (scope.parentExternalId === null && scope.containerId !== null) {
-      await this.assertContainerExists(scope.containerId);
+    // which is the correct unresolved state; that guard lives in
+    // {@link DartAdapter.resolveRecoveryBoards}. The parent_id arm needs no such
+    // guard: it is addressed by id, which renames cannot invalidate — and must
+    // not pay a /config round-trip for one either.
+    const scopeParamSets: Record<string, string>[] =
+      scope.parentExternalId !== null
+        ? [{ parent_id: scope.parentExternalId }]
+        : scope.containerId !== null
+          ? (await this.resolveRecoveryBoards(scope.containerId)).map((board) => ({
+              dartboard: board,
+            }))
+          : [];
+    if (scopeParamSets.length === 0) {
+      throw new TrackerApiError(
+        PROVIDER,
+        'client-key recovery needs either a parent task or a source dartboard'
+      );
     }
 
-    // Fast path: let Dart do the filtering if it can.
-    const filtered = await this.paginate<DartConciseTaskWire>('/tasks/list', {
-      ...scopeParams,
-      description: marker,
-    });
-    const viaFilter = await this.firstMarkedTask(filtered, clientKey);
-    if (viaFilter !== null) return this.mapIssue(viaFilter);
+    // Cheapest first ACROSS the whole scope: every board's server-side filter
+    // before any board's full scan, so a space normally costs one filtered
+    // listing per member board and nothing more.
+    for (const scopeParams of scopeParamSets) {
+      const filtered = await this.paginate<DartConciseTaskWire>('/tasks/list', {
+        ...scopeParams,
+        description: marker,
+      });
+      const viaFilter = await this.firstMarkedTask(filtered, clientKey);
+      if (viaFilter !== null) return this.mapIssue(viaFilter);
+    }
 
     // Fall back to the full scoped scan — see the COST note above.
-    const all = await this.paginate<DartConciseTaskWire>('/tasks/list', scopeParams);
-    const viaScan = await this.firstMarkedTask(all, clientKey);
-    return viaScan === null ? null : this.mapIssue(viaScan);
+    for (const scopeParams of scopeParamSets) {
+      const all = await this.paginate<DartConciseTaskWire>('/tasks/list', scopeParams);
+      const viaScan = await this.firstMarkedTask(all, clientKey);
+      if (viaScan !== null) return this.mapIssue(viaScan);
+    }
+    return null;
   }
 
   // ---- internals -----------------------------------------------------
+
+  /**
+   * The dartboards a selection covers: the space's member boards for
+   * `narrowKind: 'space'`, otherwise the one board the selection names.
+   *
+   * The EMPTY space is an error, not an empty result, for exactly the reason
+   * {@link DartAdapter.assertContainerExists} exists: a space is derived from
+   * board titles, so renaming (or deleting) every `"<Space>/…"` board leaves the
+   * connection pointing at a prefix nothing matches — and the union of zero
+   * boards is an empty page, which `listIssueIds` would hand the deletion sweep
+   * as "every task in this space was deleted remotely". Same hazard class, same
+   * loud failure.
+   */
+  private async resolveScopeBoards(selection: TrackerSourceSelection): Promise<string[]> {
+    if (selection.narrowKind !== 'space') {
+      await this.assertContainerExists(selection.containerId);
+      return [selection.containerId];
+    }
+    const config = await this.getConfig();
+    const members = spaceMembers(config.dartboards, selection.containerId);
+    if (members.length === 0) throw emptySpaceError(selection.containerId);
+    return members;
+  }
+
+  /** One board's slice of {@link DartAdapter.listIssues}; the board is already validated. */
+  private async listBoardIssues(board: string, sinceIso?: string): Promise<TrackerIssue[]> {
+    const params: Record<string, string> = { dartboard: board };
+    if (sinceIso !== undefined) {
+      // MEASURED: `updated_at_after` is INCLUSIVE (a task queried at exactly its
+      // own updatedAt comes back; one second later it does not), which is what
+      // the adapter contract requires. The one-second widening and the exact
+      // client-side re-filter below are kept anyway: they cost at most a second
+      // of overlap the sync core already tolerates, and they keep the contract
+      // satisfied if Dart ever tightens the bound to exclusive.
+      params.updated_at_after = shiftIsoBySeconds(sinceIso, -1);
+    }
+    const concise = await this.paginate<DartConciseTaskWire>('/tasks/list', params);
+    const scoped =
+      sinceIso === undefined
+        ? concise
+        : concise.filter((task) => Date.parse(task.updatedAt) >= Date.parse(sinceIso));
+    // Hydration, not decoration: the list shape has no description, and the sync
+    // core merges on it (file header, point 2).
+    const hydrated = await this.hydrate(scoped);
+    return hydrated.map((task) => this.mapIssue(task));
+  }
+
+  /**
+   * The board a create files against.
+   *
+   * A space cannot receive a task, so a space selection carries
+   * `pushContainerId` (minted by {@link DartAdapter.listGroups} as the space's
+   * first board). It is re-validated as a MEMBER of the space rather than
+   * trusted: it was persisted at connect time and the board may since have been
+   * renamed or moved out, and a create filed on a board this connection does not
+   * read would sync outbound once and then be invisible to every later pass.
+   *
+   * The plain-board arm carries the same guard the read paths do, for the same
+   * measured reason: a renamed dartboard is not an error to Dart, so an
+   * unguarded create would either be filed somewhere unintended or fail with an
+   * opaque 4xx that the outbox treats as terminal and DROPS the push. Failing
+   * here keeps the row retryable until the source selection is repaired.
+   */
+  private async resolveCreateBoard(selection: TrackerSourceSelection): Promise<string> {
+    const boards = await this.resolveScopeBoards(selection);
+    if (selection.narrowKind !== 'space') return boards[0];
+    const target = selection.pushContainerId;
+    if (target === undefined) return boards[0];
+    if (boards.includes(target)) return target;
+    throw new TrackerApiError(
+      PROVIDER,
+      `dartboard "${target}" is not part of the Dart space "${selection.containerId}" — it was ` +
+        'renamed, deleted or moved. Re-pick the source in Settings → Integrations.',
+      null
+    );
+  }
+
+  /**
+   * The boards {@link DartAdapter.findIssueByClientKey} searches for a
+   * containerId that reaches it WITHOUT a narrowKind (the outbox records only
+   * the id). A title in `/config` is a board; a title that prefixes at least one
+   * board is a space; anything else is the renamed/deleted case, which must
+   * throw rather than search nothing.
+   */
+  private async resolveRecoveryBoards(containerId: string): Promise<string[]> {
+    const config = await this.getConfig();
+    if (config.dartboards.includes(containerId)) return [containerId];
+    const members = spaceMembers(config.dartboards, containerId);
+    if (members.length > 0) return members;
+    throw missingDartboardError(containerId);
+  }
 
   /**
    * The first candidate whose hydrated description carries `clientKey`, or null.
@@ -585,12 +762,7 @@ export class DartAdapter implements TrackerAdapter {
   private async assertContainerExists(containerId: string): Promise<void> {
     const config = await this.getConfig();
     if (config.dartboards.includes(containerId)) return;
-    throw new TrackerApiError(
-      PROVIDER,
-      `dartboard "${containerId}" no longer exists in this Dart space — it was renamed or ` +
-        'deleted. Re-pick the source dartboard in Settings → Integrations.',
-      null
-    );
+    throw missingDartboardError(containerId);
   }
 
   /**
@@ -745,6 +917,36 @@ export function inferStateGroup(name: string): TrackerStateGroup {
   }
   if (has('backlog', 'someday', 'icebox')) return 'backlog';
   return 'backlog';
+}
+
+/**
+ * The dartboards belonging to `space` under the `"<Space>/<Board>"` title
+ * convention {@link DartAdapter.listGroups} derives spaces from. The trailing
+ * '/' is part of the match, so the space "Design" never claims "DesignOps/…".
+ */
+function spaceMembers(dartboards: string[], space: string): string[] {
+  const prefix = `${space}/`;
+  return dartboards.filter((title) => title.startsWith(prefix));
+}
+
+/** The loud title-no-longer-resolves failure — see {@link DartAdapter.assertContainerExists}. */
+function missingDartboardError(containerId: string): TrackerApiError {
+  return new TrackerApiError(
+    PROVIDER,
+    `dartboard "${containerId}" no longer exists in this Dart space — it was renamed or ` +
+      'deleted. Re-pick the source dartboard in Settings → Integrations.',
+    null
+  );
+}
+
+/** The same failure one level up: a space whose every member board is gone. */
+function emptySpaceError(space: string): TrackerApiError {
+  return new TrackerApiError(
+    PROVIDER,
+    `Dart space "${space}" no longer exists in this Dart workspace — every "${space}/…" ` +
+      'dartboard was renamed or deleted. Re-pick the source in Settings → Integrations.',
+    null
+  );
 }
 
 function deriveActorLabel(user: DartUserWire): string {

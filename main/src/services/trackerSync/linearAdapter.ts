@@ -22,6 +22,9 @@
 import type {
   TrackerProvider,
   TrackerWorkspaceIdentity,
+  TrackerGroup,
+  TrackerGroupSection,
+  TrackerGroupTree,
   TrackerSourceTree,
   TrackerSourceContainer,
   TrackerSourceNarrow,
@@ -88,6 +91,11 @@ interface LinearProjectNode {
   name: string;
 }
 
+/** A workspace-root project node, carrying the teams it spans (the Map step). */
+interface LinearProjectWithTeamsNode extends LinearProjectNode {
+  teams: { nodes: LinearTeamNode[] };
+}
+
 interface LinearCycleNode {
   id: string;
   number: number;
@@ -128,6 +136,10 @@ interface ValidateCredentialsResponse {
 
 interface ListTeamsResponse {
   teams: LinearConnection<LinearTeamNode>;
+}
+
+interface ListProjectsWithTeamsResponse {
+  projects: LinearConnection<LinearProjectWithTeamsNode>;
 }
 
 interface ListTeamProjectsResponse {
@@ -236,6 +248,37 @@ const LIST_TEAMS_QUERY = `
         id
         name
         key
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+/**
+ * Projects at the WORKSPACE root, each with the teams it spans — the Map step's
+ * source. A root query rather than the per-team one below because the Map step
+ * wants every project in one pass, and Linear's `Project.teams` is what turns a
+ * project into the (project × team) pairs the engine's team+project issue
+ * filter can actually address. `teams(first: 50)` is unpaginated by design: a
+ * project spanning more than fifty teams is not a mapping unit anyone will pick
+ * from a list, and the whole-teams section below covers it.
+ */
+const LIST_PROJECTS_WITH_TEAMS_QUERY = `
+  query ListProjectsWithTeams($after: String) {
+    projects(first: 100, after: $after) {
+      nodes {
+        id
+        name
+        teams(first: 50) {
+          nodes {
+            id
+            name
+            key
+          }
+        }
       }
       pageInfo {
         hasNextPage
@@ -525,6 +568,69 @@ export class LinearAdapter implements TrackerAdapter {
       workspaceName: data.organization.name,
       actorLabel: data.viewer.displayName ?? data.viewer.name,
     };
+  }
+
+  /**
+   * The Map step's groups: Linear PROJECTS first, whole TEAMS as a fallback
+   * section.
+   *
+   * A project is emitted once per team it spans, not once per project, because
+   * the selection a group carries has to be one the engine can already filter
+   * on: `{team, project}` is exactly `buildIssueFilter`'s existing narrow, so no
+   * engine change is needed and a project spanning two teams cannot land its
+   * two teams' issues under one state mapping (Linear workflow states are
+   * per-team — hence `stateScopeKey` = the team id).
+   *
+   * The "Whole teams" section is not redundant: many workspaces do not use
+   * projects at all, and an issue in NO project is only reachable through a team
+   * group.
+   */
+  async listGroups(): Promise<TrackerGroupTree> {
+    const [projects, teams] = await Promise.all([
+      paginateConnection<LinearProjectWithTeamsNode>((after) =>
+        this.request<ListProjectsWithTeamsResponse>(LIST_PROJECTS_WITH_TEAMS_QUERY, { after }).then(
+          (data) => data.projects
+        )
+      ),
+      paginateConnection<LinearTeamNode>((after) =>
+        this.request<ListTeamsResponse>(LIST_TEAMS_QUERY, { after }).then((data) => data.teams)
+      ),
+    ]);
+
+    const projectGroups: TrackerGroup[] = [];
+    for (const project of projects) {
+      const projectTeams = project.teams?.nodes ?? [];
+      // A project with no team has no addressable issue filter — it is skipped
+      // rather than guessed at; its issues stay reachable via a team group.
+      for (const team of projectTeams) {
+        const sourceLabel = `${project.name} · ${team.name}`;
+        projectGroups.push({
+          id: `${team.id}/${project.id}`,
+          // The team only disambiguates where it has to: a single-team project
+          // reads as itself, which is how the workspace names it.
+          name: projectTeams.length === 1 ? project.name : sourceLabel,
+          key: team.key,
+          sourceLabel,
+          selection: { containerId: team.id, narrowId: project.id, narrowKind: 'project' },
+          stateScopeKey: team.id,
+        });
+      }
+    }
+
+    const teamGroups: TrackerGroup[] = teams.map((team) => ({
+      id: `team:${team.id}`,
+      name: team.name,
+      key: team.key,
+      sourceLabel: `${team.name} · whole team`,
+      selection: { containerId: team.id, narrowId: 'all', narrowKind: 'all' },
+      stateScopeKey: team.id,
+    }));
+
+    const sections: TrackerGroupSection[] = [
+      { label: 'Projects', groups: projectGroups },
+      { label: 'Whole teams', groups: teamGroups },
+    ];
+    return { sections };
   }
 
   async listContainers(): Promise<TrackerSourceTree> {
