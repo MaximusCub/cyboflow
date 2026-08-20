@@ -129,6 +129,14 @@ cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch   #
   rebuild that DMG by hand from the (complete, signed, stapled) `.zip` — full
   recipe in `[[project_cross_arch_build_foreign_binaries]]`.
 
+- **Expect a ~46 MB/arch jump on the first release after `claude-agent-sdk`
+  0.3.224.** The SDK's bundled `claude` core grew 231.7 MB → 277.5 MB, and it
+  ships unpacked via the `asarUnpack` glob in `package.json`, so the increase
+  lands in every DMG AND in every auto-update payload. That makes the expected
+  sizes above stale by roughly that much — re-baseline them from the first good
+  build rather than treating the jump as a leak, and confirm by inventory as
+  above. Re-check this after any future SDK bump; the bundled core moves with it.
+
 - **Bundled `peekaboo` capture binary.** It ships unpacked beside the asar and
   is RE-SIGNED under our Team ID (it arrives already signed as
   `com.steipete.peekaboo`, which notarization would otherwise reject as a
