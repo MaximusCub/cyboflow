@@ -217,7 +217,8 @@ function createMockSessionManager(
 function createMockConfigManager(): ConfigManager {
   return {
     getConfig: vi.fn(() => ({ claudeExecutablePath: undefined })),
-    // Fan-out dispatch mode, read once per spawn (floors to 'prose').
+    // Fan-out dispatch mode, read once per spawn; this mock pins 'prose'
+    // so these tests keep asserting the prose prompt/install path.
     getFanOutDispatch: vi.fn(() => 'prose'),
   } as unknown as ConfigManager;
 }

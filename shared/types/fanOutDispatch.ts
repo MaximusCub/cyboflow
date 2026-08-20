@@ -4,7 +4,7 @@
  *
  * - `prose` — the orchestrator agent drives each lane itself via Agent-tool
  *   subagents, following the instruction block `fan-out-instructions.ts`
- *   renders. Today's behavior, and the floor.
+ *   renders. The pre-0.2.5 behavior, now the explicit opt-out.
  * - `workflow` — the orchestrator dispatches a BATCH of consecutive non-gated
  *   inner stages for ONE wave to a pre-installed Claude Code dynamic workflow
  *   (`.claude/workflows/cyboflow-*.js`, rendered by `fanOutStageScript.ts`),
@@ -45,8 +45,31 @@
 /** How a fan-out step's inner chain is executed. */
 export type FanOutDispatch = 'prose' | 'workflow';
 
-/** The floor: today's agent-driven prose behavior. */
+/**
+ * The NEUTRAL library floor for callers that do not specify a mode.
+ *
+ * Deliberately still 'prose', and load-bearing: `workflowPromptReaderAdapter`
+ * (the SDK prompt composer) calls `buildFanOutAppend(def)` with NO opts, while
+ * `claudeCodeManager` installs the workflow bundle with 'prose' EXPLICITLY. If
+ * this floor became 'workflow', the SDK orchestrator would be instructed to
+ * dispatch to `.claude/workflows/cyboflow-*.js` scripts that were never written
+ * to its worktree. The shipped-ON default belongs to the INTERACTIVE read
+ * instead — see {@link INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT}.
+ */
 export const DEFAULT_FAN_OUT_DISPATCH: FanOutDispatch = 'prose';
+
+/**
+ * The SHIPPED default for orchestrated INTERACTIVE runs — what
+ * `ConfigManager.getFanOutDispatch()` floors to, so dispatch is ON unless a user
+ * pins `fanOutDispatch: 'prose'` in config.json. Scoped to the interactive read
+ * rather than the shared floor precisely so the SDK path above is unaffected.
+ *
+ * NOT gated on `agentPermissionMode`, deliberately. Dispatch is verified only
+ * under 'auto'; under 'dontAsk' the CLI's own review gate prompts in a terminal
+ * nobody watches. That is a defect in how cyboflow maps 'dontAsk' onto the CLI,
+ * tracked separately — not something this default compensates for.
+ */
+export const INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT: FanOutDispatch = 'workflow';
 
 /** Runtime guard — config.json is user-editable, so reads are validated. */
 export function isFanOutDispatch(value: unknown): value is FanOutDispatch {

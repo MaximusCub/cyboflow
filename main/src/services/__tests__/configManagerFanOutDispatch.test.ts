@@ -1,11 +1,13 @@
 /**
  * ConfigManager.getFanOutDispatch coverage — the global fan-out dispatch mode
  * for orchestrated INTERACTIVE runs ('prose' = today's agent-driven lanes,
- * 'workflow' = stage-major dispatch to installed dynamic-workflow scripts).
+ * 'workflow' = batched lane-major dispatch to installed dynamic-workflow scripts).
  *
  * Mirrors configManagerExecutionModel.test.ts. The contract that matters is the
- * FLOOR: this feature must be inert until deliberately switched on, so an absent
- * key, an absent config.json, and a bogus persisted value all read 'prose'.
+ * DEFAULT: dispatch ships ON, so an absent key, an absent config.json, and a
+ * bogus persisted value all read 'workflow'. 'prose' is reachable only as an
+ * explicit, VALID opt-out — which is why the bogus-value case must land on the
+ * default rather than falling back to the old behavior.
  *
  * Hermetic: each test points ConfigManager at a unique temp dir via
  * setCyboflowDirectory(), so the real ~/.cyboflow config is never touched.
@@ -29,18 +31,18 @@ afterEach(async () => {
 });
 
 describe('ConfigManager.getFanOutDispatch', () => {
-  it("floors to 'prose' on a fresh instance (before initialize)", () => {
+  it("defaults to 'workflow' on a fresh instance (before initialize)", () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
-    expect(mgr.getFanOutDispatch()).toBe('prose');
+    expect(mgr.getFanOutDispatch()).toBe('workflow');
   });
 
   it('is NOT seeded into the constructor defaults (config.json stays byte-identical)', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     expect(mgr.getConfig().fanOutDispatch).toBeUndefined();
-    expect(mgr.getFanOutDispatch()).toBe('prose');
+    expect(mgr.getFanOutDispatch()).toBe('workflow');
   });
 
-  it("reads 'prose' from a config.json with no fanOutDispatch key", async () => {
+  it("reads 'workflow' from a config.json with no fanOutDispatch key", async () => {
     await fs.writeFile(
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo' }, null, 2),
@@ -50,7 +52,7 @@ describe('ConfigManager.getFanOutDispatch', () => {
     await mgr.initialize();
 
     expect(mgr.getConfig().fanOutDispatch).toBeUndefined();
-    expect(mgr.getFanOutDispatch()).toBe('prose');
+    expect(mgr.getFanOutDispatch()).toBe('workflow');
   });
 
   it("round-trips an explicit 'workflow' through a fresh initialize()", async () => {
@@ -64,10 +66,22 @@ describe('ConfigManager.getFanOutDispatch', () => {
     expect(reopened.getFanOutDispatch()).toBe('workflow');
   });
 
-  it("floors a BOGUS persisted value to 'prose' rather than trusting it", async () => {
+  it("floors a BOGUS persisted value to the default rather than trusting it", async () => {
     await fs.writeFile(
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', fanOutDispatch: 'ultracode' }, null, 2),
+    );
+
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    expect(mgr.getFanOutDispatch()).toBe('workflow');
+  });
+
+  it("honors an explicit 'prose' opt-out", async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ gitRepoPath: '/some/repo', fanOutDispatch: 'prose' }, null, 2),
     );
 
     const mgr = new ConfigManager('/tmp/test-git-path');

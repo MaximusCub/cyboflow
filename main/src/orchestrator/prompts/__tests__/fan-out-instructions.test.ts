@@ -23,6 +23,10 @@ import { describe, it, expect } from 'vitest';
 import { buildFanOutAppend } from '../fan-out-instructions';
 import { fanOutBatchWorkflowName } from '../fanOutStageScript';
 import { WORKFLOW_DEFINITIONS, type WorkflowDefinition } from '../../../../../shared/types/workflows';
+import {
+  DEFAULT_FAN_OUT_DISPATCH,
+  INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT,
+} from '../../../../../shared/types/fanOutDispatch';
 
 /**
  * Build a single-phase def whose one step declares the canonical sprint fan-out
@@ -228,8 +232,24 @@ describe('buildFanOutAppend — fail-soft', () => {
 describe('buildFanOutAppend — dispatch mode', () => {
   const def = canonicalFanOutDef();
 
+  // LOAD-BEARING, not incidental. `workflowPromptReaderAdapter` (the SDK prompt
+  // composer) calls buildFanOutAppend(def) with NO opts, while claudeCodeManager
+  // installs the workflow bundle with 'prose' EXPLICITLY. So if the no-opts
+  // default ever became 'workflow', the SDK orchestrator would be instructed to
+  // dispatch to `.claude/workflows/cyboflow-*.js` scripts that were never written
+  // to its worktree — a prompt/disk mismatch no typecheck can see.
+  //
+  // The shipped-ON default for INTERACTIVE runs lives in
+  // INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT (read by ConfigManager.getFanOutDispatch)
+  // precisely so it cannot reach this call site. Do not "fix" this test by
+  // retargeting it at 'workflow'.
   it('defaults to prose — byte-identical to an explicit prose request', () => {
     expect(buildFanOutAppend(def)).toBe(buildFanOutAppend(def, { dispatch: 'prose' }));
+  });
+
+  it('pins the two defaults apart: neutral floor prose, interactive workflow', () => {
+    expect(DEFAULT_FAN_OUT_DISPATCH).toBe('prose');
+    expect(INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT).toBe('workflow');
   });
 
   it('the prose arm never mentions the Workflow tool', () => {

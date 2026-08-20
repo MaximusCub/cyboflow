@@ -74,7 +74,7 @@ export interface AppConfig {
   // Fan-out dispatch mode for orchestrated INTERACTIVE runs ('prose' | 'workflow').
   // 'workflow' dispatches each inner stage of a wave to a pre-installed dynamic
   // workflow script instead of the agent driving lanes by hand; the orchestrator
-  // stays the single writer either way. Floors to 'prose' when unset, and is NOT
+  // stays the single writer either way. Defaults to 'workflow' when unset, and is NOT
   // seeded into the constructor defaults so existing config.json files stay
   // byte-identical.
   fanOutDispatch?: FanOutDispatch;

@@ -24,7 +24,7 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../s
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { type ExecutionModel, isExecutionModel } from '../../../shared/types/executionModel';
 import {
-  DEFAULT_FAN_OUT_DISPATCH,
+  INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT,
   isFanOutDispatch,
   type FanOutDispatch,
 } from '../../../shared/types/fanOutDispatch';
@@ -620,7 +620,7 @@ export class ConfigManager extends EventEmitter {
    * fan-out step's inner chain is driven by the agent as prose, or dispatched
    * stage-by-stage to pre-installed dynamic-workflow scripts.
    *
-   * Floors to the shared DEFAULT ('prose' — today's behavior) when unset OR when
+   * Floors to INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT ('workflow' — shipped ON) when unset OR when
    * the persisted value is not a valid mode (config.json is user-editable). The
    * resolved value is snapshotted ONCE per spawn and threaded to both prompt
    * composition and bundle installation, so a mid-run config flip can never
@@ -629,7 +629,7 @@ export class ConfigManager extends EventEmitter {
    */
   getFanOutDispatch(): FanOutDispatch {
     const value = this.config.fanOutDispatch;
-    return isFanOutDispatch(value) ? value : DEFAULT_FAN_OUT_DISPATCH;
+    return isFanOutDispatch(value) ? value : INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT;
   }
 
   /**
