@@ -199,10 +199,16 @@ export class DatabaseBackupService {
     const backups = entries.filter((f) => BACKUP_FILENAME_RE.test(f)).sort().reverse();
 
     for (const stale of backups.slice(DATABASE_BACKUP_RETAIN_COUNT)) {
-      try {
-        fs.unlinkSync(path.join(this.backupsDir, stale));
-      } catch (err) {
-        this.logger.error(`[DatabaseBackup] failed to prune stale backup ${stale}`, errorContext(err));
+      // The backup inherits WAL journal mode, so an external tool that opened
+      // it (e.g. sqlite3 for a restore dry-run) leaves `-wal`/`-shm` sidecars
+      // beside it — prune those with their backup or they orphan forever.
+      for (const suffix of ['', '-wal', '-shm']) {
+        const target = path.join(this.backupsDir, `${stale}${suffix}`);
+        try {
+          if (suffix === '' || fs.existsSync(target)) fs.unlinkSync(target);
+        } catch (err) {
+          this.logger.error(`[DatabaseBackup] failed to prune stale backup ${stale}${suffix}`, errorContext(err));
+        }
       }
     }
   }

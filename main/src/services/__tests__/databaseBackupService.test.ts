@@ -108,6 +108,11 @@ describe('DatabaseBackupService', () => {
     for (const d of dummyDays) {
       writeFileSync(join(backupsDir, `sessions-2026-08-${d}.db`), 'junk');
     }
+    // A reader that opened an old backup leaves WAL sidecars beside it — they
+    // must be pruned along with their backup, and only theirs.
+    writeFileSync(join(backupsDir, 'sessions-2026-08-01.db-wal'), 'junk');
+    writeFileSync(join(backupsDir, 'sessions-2026-08-01.db-shm'), 'junk');
+    writeFileSync(join(backupsDir, 'sessions-2026-08-09.db-wal'), 'junk');
 
     const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
     await svc.tick();
@@ -126,10 +131,14 @@ describe('DatabaseBackupService', () => {
       'sessions-2026-08-05.db',
       'sessions-2026-08-04.db',
     ]);
-    // The oldest three (01, 02, 03) must be gone.
+    // The oldest three (01, 02, 03) must be gone, including 01's sidecars —
+    // while the retained 09's sidecar survives with its backup.
     expect(existsSync(join(backupsDir, 'sessions-2026-08-01.db'))).toBe(false);
+    expect(existsSync(join(backupsDir, 'sessions-2026-08-01.db-wal'))).toBe(false);
+    expect(existsSync(join(backupsDir, 'sessions-2026-08-01.db-shm'))).toBe(false);
     expect(existsSync(join(backupsDir, 'sessions-2026-08-02.db'))).toBe(false);
     expect(existsSync(join(backupsDir, 'sessions-2026-08-03.db'))).toBe(false);
+    expect(existsSync(join(backupsDir, 'sessions-2026-08-09.db-wal'))).toBe(true);
   });
 
   it('sweeps a stale .partial left over from a crash', async () => {
