@@ -20,12 +20,14 @@
  *
  * Grouped into four sections mirroring the four tables:
  *   - Connections: insertConnection / getConnection / listConnections /
- *     updateConnectionSettings / connectionMatchesIdentity /
- *     findDisconnectedConnection / reactivateConnection / advanceCursor /
+ *     listConnectionsByIdentity / updateConnectionSettings /
+ *     connectionMatchesIdentity / findDisconnectedConnection /
+ *     storedSourceContainerId / reactivateConnection / advanceCursor /
  *     storeSecret / readSecret / clearSecret.
  *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
- *     listLinks / updateBaseline / markOrphaned / listLinksByParentExternal /
- *     listActiveLinksWithoutEntity / hasActiveLinkedDescendant.
+ *     findSiblingLinkForExternal / listLinks / updateBaseline / markOrphaned /
+ *     listLinksByParentExternal / listActiveLinksWithoutEntity /
+ *     hasActiveLinkedDescendant.
  *   - Outbox: enqueueOutbox / supersedeQueuedStateWrites / claimNextPending /
  *     resolveOutbox / listUnresolvedOutbox / findOutboxByClientKey /
  *     requeueInFlightAsAmbiguous.
@@ -62,13 +64,13 @@ export function insertConnection(db: Database.Database, row: NewConnectionRow): 
       `INSERT INTO tracker_connections (
          id, project_id, provider, status, workspace_id, workspace_name, actor_label,
          base_url, secret_ciphertext, source_json, selection_mode, selection_json,
-         state_mapping_json, status_sync_mode, pull_mode, push_mode,
+         state_mapping_json, status_sync_mode, pull_mode, push_mode, push_target,
          mirror_subissues, conflict_mode,
          cursor_updated_at, cursor_external_id, last_sync_at, last_sync_log_json
        ) VALUES (
          @id, @project_id, @provider, @status, @workspace_id, @workspace_name, @actor_label,
          @base_url, @secret_ciphertext, @source_json, @selection_mode, @selection_json,
-         @state_mapping_json, @status_sync_mode, @pull_mode, @push_mode,
+         @state_mapping_json, @status_sync_mode, @pull_mode, @push_mode, @push_target,
          @mirror_subissues, @conflict_mode,
          @cursor_updated_at, @cursor_external_id, @last_sync_at, @last_sync_log_json
        )
@@ -125,6 +127,8 @@ export interface ConnectionSettingsPatch {
   status_sync_mode?: TrackerConnectionRow['status_sync_mode'];
   pull_mode?: TrackerConnectionRow['pull_mode'];
   push_mode?: TrackerConnectionRow['push_mode'];
+  /** 0 | 1 — see TrackerConnectionRow.push_target (migration 109). */
+  push_target?: number;
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];
   source_json?: string | null;
@@ -144,6 +148,7 @@ const CONNECTION_SETTINGS_COLUMNS = [
   'status_sync_mode',
   'pull_mode',
   'push_mode',
+  'push_target',
   'mirror_subissues',
   'conflict_mode',
   'source_json',
@@ -290,6 +295,18 @@ export function connectionMatchesIdentity(
  * canonicalize a URL, and matching the stored string verbatim would fork the
  * identity on a trailing slash.
  *
+ * `sourceContainerId` JOINED THE KEY with multi-project mapping (design doc
+ * "Multi-project mapping (rev 4)"): one workspace now legitimately owns SEVERAL
+ * retired rows in one project — one per mapped tracker group — and they differ
+ * in nothing but their source. Without this, re-connecting one group would
+ * revive whichever sibling was touched last and rewrite it onto the new source,
+ * stranding that sibling's links on a row now pointing somewhere else. The
+ * container is compared, not the whole selection, because it is the level a
+ * mapping is minted at; re-picking a NARROW under the same container is still
+ * the same mapping and still revives (a narrowed scope cannot strand a link —
+ * the cursor reset re-fetches it and the deletion sweep's point lookup
+ * distinguishes out-of-scope from deleted).
+ *
  * Only `disconnected` rows are candidates. An active or paused connection is
  * still the project's live connection for that workspace, and silently
  * repointing it from a wizard run would move someone else's links. A stored
@@ -306,6 +323,7 @@ export function findDisconnectedConnection(
   provider: TrackerConnectionRow['provider'],
   workspaceId: string,
   baseUrl: string | null,
+  sourceContainerId: string | null,
 ): TrackerConnectionRow | null {
   const rows = db
     .prepare(
@@ -314,7 +332,64 @@ export function findDisconnectedConnection(
         ORDER BY updated_at DESC, id DESC`,
     )
     .all(projectId, provider, workspaceId) as TrackerConnectionRow[];
-  return rows.find((row) => connectionMatchesIdentity(row, workspaceId, baseUrl)) ?? null;
+  return (
+    rows.find(
+      (row) =>
+        connectionMatchesIdentity(row, workspaceId, baseUrl) &&
+        storedSourceContainerId(row) === sourceContainerId,
+    ) ?? null
+  );
+}
+
+/**
+ * The container a row's persisted source names, or null when it has none (a row
+ * minted before a source was chosen, or an unparseable blob).
+ *
+ * `source_json` is the wizard's selection PLUS its display label on one blob
+ * (see TrackerSyncService.connect), so only the one key is read and everything
+ * else is ignored — the same by-name read parseSourceSelection does.
+ */
+export function storedSourceContainerId(row: TrackerConnectionRow): string | null {
+  if (row.source_json === null) return null;
+  try {
+    const parsed = JSON.parse(row.source_json) as { containerId?: unknown };
+    return typeof parsed.containerId === 'string' ? parsed.containerId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every LIVE connection (active or paused) sharing one tracker identity —
+ * `(provider, workspace_id, base_url)`, across ALL projects.
+ *
+ * The fan-out set for a credential rotation. Multi-project mapping mints N
+ * sibling rows from one wizard run, each holding its OWN copy of the same
+ * encrypted key, so rotating the key on one of them would leave the others
+ * paused on a credential that no longer works — with no affordance to fix them
+ * except re-pasting the key once per mapping. One paste resumes all of them.
+ *
+ * Disconnected rows are excluded: their secret was deliberately cleared, and a
+ * rotation must not silently re-arm a connection the user retired.
+ *
+ * Base-URL comparison is the NORMALIZED one for the reason
+ * {@link findDisconnectedConnection} gives — sqlite cannot canonicalize a URL —
+ * so it runs in JS over the workspace-scoped candidate set.
+ */
+export function listConnectionsByIdentity(
+  db: Database.Database,
+  provider: TrackerConnectionRow['provider'],
+  workspaceId: string,
+  baseUrl: string | null,
+): TrackerConnectionRow[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM tracker_connections
+        WHERE provider = ? AND workspace_id = ? AND status != 'disconnected'
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(provider, workspaceId) as TrackerConnectionRow[];
+  return rows.filter((row) => connectionMatchesIdentity(row, workspaceId, baseUrl));
 }
 
 /**
@@ -349,6 +424,7 @@ export function reactivateConnection(
          selection_mode = @selection_mode, selection_json = @selection_json,
          state_mapping_json = @state_mapping_json,
          status_sync_mode = @status_sync_mode, pull_mode = @pull_mode, push_mode = @push_mode,
+         push_target = @push_target,
          mirror_subissues = @mirror_subissues, conflict_mode = @conflict_mode,
          cursor_updated_at = @cursor_updated_at, cursor_external_id = @cursor_external_id,
          last_sync_at = @last_sync_at, last_sync_log_json = @last_sync_log_json,
@@ -506,6 +582,68 @@ export function getLinkByExternal(
     .prepare('SELECT * FROM entity_external_links WHERE connection_id = ? AND external_id = ?')
     .get(connectionId, externalId) as EntityExternalLinkRow | undefined;
   return row ?? null;
+}
+
+/** {@link findSiblingLinkForExternal}'s lookup key — a tracker identity plus one issue. */
+export interface SiblingLinkQuery {
+  provider: EntityExternalLinkRow['provider'];
+  workspaceId: string;
+  baseUrl: string | null;
+  externalId: string;
+  /** The connection ASKING. Its own link is never its sibling. */
+  excludeConnectionId: string;
+}
+
+/**
+ * The link some OTHER live connection on the same tracker identity —
+ * `(provider, workspace_id, base_url)` — already holds for `externalId`, or
+ * null when the issue is unclaimed.
+ *
+ * The cross-scope duplicate-import guard (design doc "Multi-project mapping
+ * (rev 4)"). Mapped groups can OVERLAP by construction: a Linear team group and
+ * a project group beneath it both fetch the same issue, and a remote move
+ * between two mapped groups hands it to a second connection while the first
+ * still owns it. Either way the issue is already an idea in some cyboflow
+ * project, and importing it again would mint a second one that no local edit
+ * could ever reconcile — the two ideas would fight over one remote issue.
+ *
+ * Orphaned links do NOT claim: their remote issue was deleted/archived and
+ * applied locally, so a re-appearance is a fresh import, not a duplicate.
+ * `disconnected` connections do not claim either — a retired mapping's retained
+ * links exist only so a REVIVAL can re-bind them, and nothing else reads them.
+ *
+ * Base-URL comparison is the NORMALIZED one ({@link findDisconnectedConnection}
+ * explains why it cannot live in the WHERE clause), so it runs in JS over the
+ * workspace-scoped candidate set.
+ */
+export function findSiblingLinkForExternal(
+  db: Database.Database,
+  query: SiblingLinkQuery,
+): EntityExternalLinkRow | null {
+  const rows = db
+    .prepare(
+      `SELECT l.*, c.base_url AS connection_base_url FROM entity_external_links l
+         JOIN tracker_connections c ON c.id = l.connection_id
+        WHERE l.provider = ? AND l.external_id = ? AND l.orphaned_at IS NULL
+          AND l.connection_id != ?
+          AND c.workspace_id = ? AND c.status != 'disconnected'
+        ORDER BY l.created_at ASC, l.id ASC`,
+    )
+    .all(
+      query.provider,
+      query.externalId,
+      query.excludeConnectionId,
+      query.workspaceId,
+    ) as Array<EntityExternalLinkRow & { connection_base_url: string | null }>;
+  const hit = rows.find(
+    (row) =>
+      normalizeBaseUrl(query.provider, row.connection_base_url) ===
+      normalizeBaseUrl(query.provider, query.baseUrl),
+  );
+  // Re-read by id rather than hand back the joined row: the connection column
+  // was only ever an argument to the filter, and a link row with an extra key
+  // on it is a shape no caller should have to know about.
+  return hit === undefined ? null : getLinkById(db, hit.id);
 }
 
 /**

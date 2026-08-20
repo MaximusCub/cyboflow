@@ -503,6 +503,13 @@ export interface TrackerConnectionRow {
   pull_mode: 'auto' | 'manual';
   /** Creating a TOP-LEVEL tracker issue for a NEW cyboflow idea. */
   push_mode: 'auto' | 'manual';
+  /**
+   * 0 | 1 (migration 109) — may THIS mapping row create new tracker issues?
+   * Several sibling rows can map different tracker groups onto one cyboflow
+   * project; exactly one per provider carries a 1, or a locally filed idea
+   * would enqueue a create per sibling and duplicate remotely.
+   */
+  push_target: number; // 0 | 1
   mirror_subissues: number; // 0 | 1
   conflict_mode: 'auto' | 'manual';
   cursor_updated_at: string | null;
