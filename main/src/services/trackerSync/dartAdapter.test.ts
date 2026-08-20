@@ -648,6 +648,53 @@ describe('DartAdapter.findIssueByClientKey', () => {
     expect(found?.externalId).toBe('foundfoundfo');
   });
 
+  it('adopts a task whose marker line Dart REFLOWED', async () => {
+    // Dart normalizes stored markdown (it re-emits emphasis, reflows lists, and
+    // linkifies dotted tokens), so the description that comes back is not always
+    // the one that went out. A literal substring match on the marker treats a
+    // reflowed line as "no such task" — which the outbox reads as proof the
+    // create never landed, so it POSTs again and duplicates it. Parsing the key
+    // is what keeps a mangled body recoverable.
+    const reflowed = task({
+      id: 'foundfoundfo',
+      description: `Body\n\ncyboflow-sync:\n  ${CLIENT_KEY}`,
+    });
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      listRoute([concise({ id: 'foundfoundfo' })]),
+      makeDetailRoute({ foundfoundfo: reflowed }),
+    ]);
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: BOARD, parentExternalId: null },
+      CLIENT_KEY,
+    );
+    expect(found?.externalId).toBe('foundfoundfo');
+    // Recognized AND stripped — the two must stay in lockstep, or the marker
+    // leaks into the local idea body.
+    expect(found?.description).toBe('Body');
+    expect(found?.recoveryClientKey).toBe(CLIENT_KEY);
+  });
+
+  it('does NOT adopt a task carrying a DIFFERENT key', async () => {
+    // Loosening the whitespace must not loosen the identity: the UUID is the
+    // whole proof, and adopting a sibling create would redirect every later
+    // write-back onto it.
+    const other = task({
+      id: 'siblingsibs1',
+      description: `cyboflow-sync: 11111111-2222-3333-4444-555555555555`,
+    });
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      listRoute([concise({ id: 'siblingsibs1' })]),
+      makeDetailRoute({ siblingsibs1: other }),
+    ]);
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: BOARD, parentExternalId: null },
+      CLIENT_KEY,
+    );
+    expect(found).toBeNull();
+  });
+
   it('returns null when nothing carries the key — the proof a retry is safe', async () => {
     const { fetchImpl } = scriptedFetch([
       configRoute(),

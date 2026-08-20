@@ -105,17 +105,32 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
  */
 const SYNC_MARKER_PREFIX = 'cyboflow-sync:';
 
-/** `cyboflow-sync: <uuid>` — the exact shape the create paths emit. */
+/**
+ * `cyboflow-sync: <uuid>` — the shape the create paths emit, matched loosely on
+ * the WHITESPACE between the prefix and the key.
+ *
+ * `\s*` rather than `[ \t]*` deliberately. Dart normalizes the markdown it
+ * stores (MEASURED: it re-emits emphasis runs, reflows lists, and rewrites
+ * dotted tokens as links), so the body that comes back is not always the body
+ * that went out. A marker whose line got reflowed is still OUR marker, and the
+ * UUID that follows makes a false positive vanishingly unlikely — whereas a
+ * false NEGATIVE is expensive: {@link DartAdapter.findIssueByClientKey} reads
+ * "no candidate carries it" as proof a create never landed, and duplicates it.
+ */
 const SYNC_MARKER_RE =
-  /cyboflow-sync:[ \t]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  /cyboflow-sync:\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 /**
  * {@link SYNC_MARKER_RE} with the key captured. A SEPARATE, NON-GLOBAL copy on
  * purpose: `exec` on a /g regex carries `lastIndex` between calls, which would
  * make the read stateful across tasks.
+ *
+ * Kept in lockstep with SYNC_MARKER_RE: read and STRIP must agree on what a
+ * marker is, or a marker loose enough to be recognized but too loose to be
+ * removed would leak into a local idea body.
  */
 const SYNC_MARKER_KEY_RE =
-  /cyboflow-sync:[ \t]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+  /cyboflow-sync:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 /** Dart's list endpoints cap out well above this; 100 keeps pages small and predictable. */
 const PAGE_SIZE = 100;
@@ -451,28 +466,37 @@ export class DartAdapter implements TrackerAdapter {
       ...scopeParams,
       description: marker,
     });
-    const viaFilter = await this.firstMarkedTask(filtered, marker);
+    const viaFilter = await this.firstMarkedTask(filtered, clientKey);
     if (viaFilter !== null) return this.mapIssue(viaFilter);
 
     // Fall back to the full scoped scan — see the COST note above.
     const all = await this.paginate<DartConciseTaskWire>('/tasks/list', scopeParams);
-    const viaScan = await this.firstMarkedTask(all, marker);
+    const viaScan = await this.firstMarkedTask(all, clientKey);
     return viaScan === null ? null : this.mapIssue(viaScan);
   }
 
   // ---- internals -----------------------------------------------------
 
-  /** The first candidate whose hydrated description carries `marker`, or null. */
+  /**
+   * The first candidate whose hydrated description carries `clientKey`, or null.
+   *
+   * Judged by PARSING the marker ({@link readRecoveryClientKey}) rather than by
+   * a literal `description.includes(marker)`. The two differ exactly when Dart's
+   * normalizer has touched the marker line, and this is the one place where
+   * being too strict is costly: a miss here is read by the outbox as proof the
+   * create never landed, so it POSTs again and duplicates a task that already
+   * exists. Parsing also keeps this in step with the recovery key the adapter
+   * surfaces on every mapped issue, so the two paths cannot disagree about what
+   * counts as ours.
+   */
   private async firstMarkedTask(
     candidates: DartConciseTaskWire[],
-    marker: string
+    clientKey: string
   ): Promise<DartTaskWire | null> {
     for (const candidate of candidates) {
       const full = await this.fetchTaskWire(candidate.id);
       if (full === null) continue;
-      if (typeof full.description === 'string' && full.description.includes(marker)) {
-        return full;
-      }
+      if (readRecoveryClientKey(full) === clientKey.toLowerCase()) return full;
     }
     return null;
   }
