@@ -553,8 +553,16 @@ async function mintArchDesignForOwnedIdeas(
   }
 }
 
-/** Fixed label for the idea-summary hub tab (mirrors arch-design's fixed label). */
+/** Fixed label for the SINGLE-idea idea-summary hub tab (mirrors arch-design's fixed label). */
 const IDEA_SUMMARY_LABEL = 'Idea summary';
+
+/**
+ * Label STEM for the COMBINED multi-idea hub tab; the idea count is appended
+ * ('Idea summaries · 4 ideas'). Its own constant rather than a pluralization of
+ * IDEA_SUMMARY_LABEL because 'summary' → 'summaries' is not the suffix rule
+ * `pluralize` implements.
+ */
+const IDEA_SUMMARIES_LABEL = 'Idea summaries';
 
 /**
  * CONTENT GATE for idea-summary: true when at least one of the idea's five
@@ -574,8 +582,9 @@ function hasMeaningfulComponentState(states: IdeaComponentState[]): boolean {
  * sourceRef = ideaId. Content (the ledger snapshot + links to sibling
  * deliverables) is entirely re-derived on read (mode 'template') by the
  * frontend's useArtifactData (idea + `cyboflow.ideaComponents.get`), so
- * payloadJson stays null here. Missing idea row -> fail-soft. Shared by the
- * run-start and entity-write paths (see IDEA_SUMMARY_WORKFLOWS above).
+ * payloadJson stays null here. Missing idea row -> fail-soft. Reached ONLY via
+ * mintIdeaSummaryForOwnedIdeas's SINGLE-idea branch (a multi-idea batch mints
+ * one combined tab instead — see that function).
  *
  * CONTENT GATE: only minted when resolveIdeaComponents finds at least one
  * component with real state (hasMeaningfulComponentState) — see that
@@ -619,12 +628,30 @@ async function mintIdeaSummaryForIdea(
 }
 
 /**
- * idea-summary mint for EVERY idea the run OWNS — the per-entity sibling of
- * mintArchDesignForOwnedIdeas (idea-summary is per-entity: migration 102 keys
- * its identity (run_id, atype, source_ref), alongside idea-spec/arch-design).
- * A multi-idea planner batch surfaces one hub tab per idea. Each per-idea mint
- * is content-gated inside mintIdeaSummaryForIdea. No resolvable idea ->
- * fail-soft (logs + returns).
+ * idea-summary mint for the ideas the run OWNS.
+ *
+ * SINGLE-idea run: one per-idea hub tab, sourceRef = the idea, label = the fixed
+ * IDEA_SUMMARY_LABEL — unchanged since migration 102.
+ *
+ * MULTI-idea batch: ONE run-scoped COMBINED tab (the mintIdeaSpecForOwnedIdeas
+ * pattern) instead of N per-idea tabs that all carry the SAME fixed label and are
+ * therefore indistinguishable in the tab strip. sourceRef anchors on the FIRST
+ * owned idea so the row minted while the batch was still size 1 is ADOPTED in
+ * place by the (run_id, atype, source_ref) UPSERT — the single→multi transition
+ * converts that row rather than orphaning it. `payload_json.combined = true` is
+ * the renderer's branch marker (it re-derives the batch's ideas from the live
+ * entity model via tasks.runDecomposition + ideaComponents.getMany, exactly like
+ * the combined idea-spec tab).
+ *
+ * CONTENT GATE (batch): mirrors the per-idea gate across the batch — the tab is
+ * minted once at least ONE owned idea's ledger carries real state
+ * (hasMeaningfulComponentState). Ideas whose ledger is still the untouched
+ * "not started" default DO get a row on the combined tab (five "not started"
+ * cells is real information about the batch, unlike a lone hub over a blank
+ * ledger), so the label counts every non-archived owned idea rather than only
+ * the state-bearing ones.
+ *
+ * No resolvable idea → fail-soft (logs + returns).
  */
 async function mintIdeaSummaryForOwnedIdeas(
   db: DatabaseLike,
@@ -638,9 +665,47 @@ async function mintIdeaSummaryForOwnedIdeas(
     logger?.debug('[autoMintArtifacts] idea-summary skipped — run owns no resolvable idea', { runId });
     return;
   }
-  for (const ideaId of ideaIds) {
-    await mintIdeaSummaryForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
+
+  if (ideaIds.length === 1) {
+    await mintIdeaSummaryForIdea(db, runId, projectId, ideaIds[0], stepOrigin, logger);
+    return;
   }
+
+  // CONTENT GATE + label count in one pass: `withState` gates the tab (at least
+  // one real ledger state anywhere in the batch), `rendered` is the row count the
+  // renderer will show (non-archived owned ideas) and so the count in the label.
+  let withState = 0;
+  let rendered = 0;
+  for (const ideaId of ideaIds) {
+    const row = db.prepare('SELECT archived_at AS archivedAt FROM ideas WHERE id = ?').get(ideaId) as
+      | { archivedAt: unknown }
+      | undefined;
+    if (!row) continue;
+    if (row.archivedAt === null || row.archivedAt === undefined) rendered += 1;
+    if (hasMeaningfulComponentState(resolveIdeaComponents(db, ideaId))) withState += 1;
+  }
+  if (withState === 0) {
+    logger?.debug('[autoMintArtifacts] combined idea-summary skipped — no idea has a meaningful ledger yet', {
+      runId,
+    });
+    return;
+  }
+  if (rendered === 0) {
+    logger?.debug('[autoMintArtifacts] combined idea-summary skipped — every owned idea is archived', { runId });
+    return;
+  }
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'idea-summary',
+    label: IDEA_SUMMARIES_LABEL + ' · ' + pluralize(rendered, 'idea'),
+    sourceRef: ideaIds[0],
+    stepOrigin,
+    payloadJson: JSON.stringify({ combined: true }),
+    isNew: true,
+    actor: 'orchestrator',
+  });
 }
 
 /** Narrow projection for a batch-gate payload row (one per owned idea). */
@@ -1236,9 +1301,10 @@ export async function handleEntityWrite(
           logger,
         );
       }
-      // idea-summary refreshes for every owned idea — the idea's own spec/
-      // architecture components just changed (or a bare stub idea's ledger
-      // finally became meaningful).
+      // idea-summary refreshes the run's hub — the idea's own spec/architecture
+      // components just changed (or a bare stub idea's ledger finally became
+      // meaningful). One per-idea tab on a single-idea run, one combined tab on
+      // a batch.
       if (IDEA_SUMMARY_WORKFLOWS.has(meta.workflowName)) {
         await mintIdeaSummaryForOwnedIdeas(
           db,
@@ -1259,7 +1325,7 @@ export async function handleEntityWrite(
       );
       // epics/stories are two of the five ledger components, and an epic/task
       // write can change either for ANY idea the run owns (not just `ideaId`,
-      // the first) — refresh every owned idea's hub rather than a single one.
+      // the first) — refresh over the whole owned set rather than a single idea.
       if (IDEA_SUMMARY_WORKFLOWS.has(meta.workflowName)) {
         await mintIdeaSummaryForOwnedIdeas(
           db,
