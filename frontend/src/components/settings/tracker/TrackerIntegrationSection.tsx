@@ -4,11 +4,13 @@
  *
  * One row per entry in TRACKER_PROVIDERS (Linear, Plane, Dart) — the catalog is
  * data-driven, so a new provider is one row in that table and nothing here.
- * A connection is project-scoped and
- * the wizard can target ANY cyboflow project, so each row lists EVERY project's
- * connection for that provider (project chip + status + Manage) — not just the
- * active project's. The Connect button stays visible while the ACTIVE project
- * has no connection for that provider (it seeds the wizard's Project step).
+ * A connection is one (tracker group -> cyboflow project) mapping, so a single
+ * wizard run can mint several sibling connections at once; each row lists
+ * EVERY project's connection for that provider (project chip + status +
+ * Manage) — not just the active project's. Connect stays visible whenever a
+ * project is active, even if that project already has a mapping for this
+ * provider: the wizard's Map step is where a second mapping (another group
+ * into the same project, or the same group into a different one) gets added.
  *
  * Connections are read across all projects and re-read on every
  * `onTrackerChanged` notification (one subscription per project): the event is
@@ -146,9 +148,6 @@ export function TrackerIntegrationSection(): React.JSX.Element {
       <div className="divide-y divide-border-primary overflow-hidden rounded-none border border-border-primary bg-surface-primary">
         {TRACKER_PROVIDERS.map((meta) => {
           const providerConnections = connections.filter((c) => c.provider === meta.provider);
-          const activeConnected =
-            activeProjectId !== null &&
-            providerConnections.some((c) => c.projectId === activeProjectId);
           return (
             <div key={meta.provider} className="flex items-start gap-3 px-4 py-4">
               <ProviderTile mark={meta.mark} />
@@ -193,18 +192,16 @@ export function TrackerIntegrationSection(): React.JSX.Element {
                     </div>
                   );
                 })}
-                {!activeConnected && (
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    className="rounded-none"
-                    disabled={activeProjectId === null}
-                    onClick={() => setWizardProvider(meta.provider)}
-                  >
-                    Connect
-                  </Button>
-                )}
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  className="rounded-none"
+                  disabled={activeProjectId === null}
+                  onClick={() => setWizardProvider(meta.provider)}
+                >
+                  Connect
+                </Button>
               </div>
             </div>
           );

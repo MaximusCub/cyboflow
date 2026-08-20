@@ -45,7 +45,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     provider: 'linear',
     name: 'Linear',
     description:
-      'Import a Linear team, project, view or cycle as cyboflow ideas and write status back.',
+      'Map Linear projects or teams to cyboflow projects with two-way status sync.',
     mark: 'LN',
     apiKeyLabel: 'Personal API key',
     apiKeyHint: 'Linear → Settings → Security & access → Personal API keys.',
@@ -61,7 +61,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     provider: 'plane',
     name: 'Plane',
     description:
-      'Import a Plane project, cycle or module — cloud or self-hosted — with two-way status sync.',
+      'Map Plane projects — cloud or self-hosted — to cyboflow projects with two-way status sync.',
     mark: 'PL',
     apiKeyLabel: 'Personal access token',
     apiKeyHint: 'Plane → Workspace settings → API tokens.',
@@ -76,8 +76,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
   {
     provider: 'dart',
     name: 'Dart',
-    description:
-      'Import a Dart dartboard as cyboflow ideas and write status back.',
+    description: 'Map Dart spaces to cyboflow projects and write status back.',
     mark: 'DT',
     apiKeyLabel: 'Personal authentication token',
     apiKeyHint: 'Dart → Settings → Account → Authentication token.',

@@ -8,7 +8,8 @@
  * a whole-connection write); mirroring is hidden while two-way is off; the log
  * renders the summary's entries verbatim; "Sync now" swaps in the pass's log;
  * the conflicts card appears for Manual mode / a non-zero count and its two
- * buttons resolve with the right choice; Disconnect confirms inline first.
+ * buttons resolve with the right choice; Disconnect confirms inline first; the
+ * push-target note appears only when this mapping is not the pusher.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -65,6 +66,7 @@ function makeConnection(
     pushMode: 'auto',
     mirrorSubissues: true,
     conflictMode: 'auto',
+    pushTarget: true,
     stateMapping: { triage: 'dont', backlog: 'idea', todo: 'ready', done: 'done' },
     lastSyncAt: '2026-07-30T10:00:00.000Z',
     lastSyncLog: [
@@ -180,6 +182,24 @@ describe('TrackerConnectedView — sync settings', () => {
     await waitFor(() =>
       expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', conflictMode: 'manual' }),
     );
+  });
+});
+
+describe('TrackerConnectedView — push target', () => {
+  it('shows the muted note when this mapping does not push', () => {
+    renderView(makeConnection({ pushTarget: false }));
+
+    expect(
+      screen.getByText('New ideas push · off — another mapping for this project pushes'),
+    ).toBeInTheDocument();
+  });
+
+  it('hides the note when this mapping is the pusher', () => {
+    renderView(makeConnection({ pushTarget: true }));
+
+    expect(
+      screen.queryByText('New ideas push · off — another mapping for this project pushes'),
+    ).not.toBeInTheDocument();
   });
 });
 

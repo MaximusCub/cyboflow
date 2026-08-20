@@ -18,7 +18,9 @@
  * re-read (driven by the parent's onTrackerChanged subscription) reconciles it.
  * v1 has NO edit deep-links back into the wizard: `updateSettings` covers the
  * direction/mirroring/conflict rows, and changing the source, selection or state
- * mapping means re-running the wizard.
+ * mapping means re-running the wizard. `pushTarget` is read straight off the
+ * summary (no local mirror, no toggle) — it is set by the wizard's Map step
+ * when several sibling connections share a cyboflow project.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { inferRouterInputs } from '@trpc/server';
@@ -485,6 +487,20 @@ export function TrackerConnectedView({
                       ariaLabel={`Push to ${meta.name}`}
                     />
                   </div>
+
+                  {/*
+                   * Multi-project mapping: several sibling connections can
+                   * share this cyboflow project, but only one per provider
+                   * pushes new ideas out (push_target). No edit affordance —
+                   * push target is set by the wizard's Map step, not here.
+                   */}
+                  {!connection.pushTarget && (
+                    <div className="px-3 py-2.5">
+                      <p className="text-[11px] text-text-tertiary">
+                        New ideas push · off — another mapping for this project pushes
+                      </p>
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <div className="min-w-0">

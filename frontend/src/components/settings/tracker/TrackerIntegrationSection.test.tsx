@@ -8,8 +8,10 @@
  * Coverage: exactly two rows regardless of what came back; connections are
  * listed ACROSS projects with a project chip (a connection on a non-active
  * project must not render as "Not connected"); paused renders as a warning, not
- * green; Connect stays while the active project lacks a connection; no active
- * project disables Connect; the live subscription re-reads on a change event.
+ * green; Connect always shows while a project is active — even for an
+ * already-mapped provider, since the wizard can mint another sibling mapping;
+ * no active project disables Connect; the live subscription re-reads on a
+ * change event.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -81,6 +83,7 @@ function makeConnection(
     pushMode: 'auto',
     mirrorSubissues: true,
     conflictMode: 'auto',
+    pushTarget: true,
     stateMapping: { s1: 'idea', s2: 'ready' },
     lastSyncAt: '2026-07-30T10:00:00.000Z',
     lastSyncLog: [],
@@ -122,7 +125,7 @@ describe('TrackerIntegrationSection', () => {
     );
   });
 
-  it('shows Connected + Manage for a connected provider and leaves its sibling connectable', async () => {
+  it('shows Connected + Manage for a connected provider and keeps every row connectable', async () => {
     stubConnections({ 7: [makeConnection()] });
     render(<TrackerIntegrationSection />);
 
@@ -131,8 +134,10 @@ describe('TrackerIntegrationSection', () => {
     expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
     // Only Linear's active project is taken, so every OTHER row stays connectable.
     expect(screen.getAllByText('Not connected')).toHaveLength(TRACKER_PROVIDERS.length - 1);
+    // Connect stays visible even on Linear's own row — the wizard can mint
+    // another sibling mapping (a second group, or a second project) in one run.
     expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(
-      TRACKER_PROVIDERS.length - 1,
+      TRACKER_PROVIDERS.length,
     );
   });
 
