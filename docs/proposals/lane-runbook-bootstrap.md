@@ -643,3 +643,80 @@ could not be made structurally safe and the compensating controls were the trade
 They were right, and defect 4 is the proof: the controls were specified
 correctly and wired only into the success paths. A control that exists on the
 happy path is not a control.
+
+## 17. First live smoke (2026-08-20)
+
+Three real sprint runs against three throwaway projects, in an isolated dev
+instance (own `CYBOFLOW_DIR`, vite `:4531`, CDP `:9233`). Everything below was
+observed against the running app, not a fake.
+
+**Round 1 — `widgetboard`, rung 0: the feature works.** A lane whose visual
+verification would have been skipped derived a runbook, committed it, proved it,
+and then verified and integrated normally. The proof screenshot carries build id
+`wb-<uuid>` rather than the default `wb-dev`: the verification agent read the
+drafting agent's `levers.notes`, injected the build-time nonce, and the served
+page carried it — so the `dom-marker` attestation actually discriminated. The
+drafting agent found `/healthz` unprompted and used it for `readyWhen`.
+
+**Round 2 — `dialboard`, port literal under `scripts/`: honest failure.** The
+agent noticed the hardcoded port, correctly declined `port-from-env` because
+`scripts/` is denied for every operation, and shipped a runbook with no port
+lever. The harness leased 29260, the server bound 4300, the attestation could not
+bind, the proof failed, the record stayed `unproven-draft`, the lane's own
+request enqueued unpinned and was `skipped`, and suppression was written. It
+never manufactured a pass, and the recorded reason names the cause, the fix that
+would work, and why that fix is refused.
+
+**Round 3 — `gaugeboard`, port literal in a root config: rung 1 fires
+correctly.** Two separate single-file commits; the config diff is exactly one
+line (`port: 4300,` → `port: Number(process.env.PORT ?? 4300),`) with the
+comments and neighbouring keys untouched. The proof still failed — see the flake
+below — and the §15A finding was published naming `app.config.mjs`, its isolated
+commit sha, and the fact that the change bought nothing and should probably be
+reverted. That is the review-backed control working on the failure path, which
+is the only path where it matters.
+
+**Confirmed live, beyond the above:** migrations 106+107 apply in order on a
+fresh DB (`rung1_path`/`rung1_commit_sha` present); `cyboflow-runbook-bootstrap`
+ships in the sprint bundle byte-identical to source; the runbook commits land
+despite `.gitignore` excluding `.cyboflow/` (the `git add -f` path) and never
+sweep a sibling lane's staged work; the eval excises the machine-authored runbook
+from the graded diff; a bootstrap proof goes terminal with the lane untouched;
+and the read-only shell guard refused a real command in all three runs.
+
+**The toggle read is live.** `autoBootstrapRunbook` was switched on in Settings
+with no relaunch. Against the boot snapshot the preflight would have logged
+`declined: disabled` forever; it bootstrapped instead.
+
+### What the smoke found
+
+**A rung-0 bootstrap that committed and then refused published NOTHING** —
+`publishAbandoned` keyed on `rung1` alone. Fixed, with a test pinning round 2's
+exact sequence. This is defect 4 recurring one level down: §8.1 gives the rung-1
+edit a SECOND commit, and the guard mistook "no rung-1 edit" for "changed
+nothing".
+
+**The drafting agent's shell opener is always refused.** Three agents, three
+`cd "$(pwd)" && …` openers, three rejections. The prompt named the allowed heads
+but never said composition is refused. Fixed in both bundle copies.
+
+### Open after the smoke
+
+**The verification agent is not reproducible across runs, and that decides
+bootstrap outcomes.** Rounds 1 and 3 were the same project shape with the same
+`levers` and the same nonce mechanism documented in `notes`. Round 1's agent
+applied the build-time nonce and PASSED; round 3's ran `serve` verbatim, found
+the leased port empty, recovered by hand with `PORT=$VERIFY_PORT` — proving the
+project and the rung-1 edit were both fine — and still returned `fail`. Round
+3's second drafting round then concluded the deliverable "has no way to reflect
+the per-request nonce", contradicting the mechanism its own round-1 notes
+described. So a correct runbook and a correct config edit were discarded, and the
+project was suppressed on a reason that is not true. The controls all held; what
+did not hold is the judgment upstream of them. Worth a look before this is
+turned on by default.
+
+**A runbook with no port lever binds a fixed port in the snapshot** and collides
+with anything else on it, including a concurrent verification. Observed directly:
+round 2's proof server held 4300 and answered a probe meant for another project.
+
+Still not done: no `*.itest.ts` end-to-end (§14).
