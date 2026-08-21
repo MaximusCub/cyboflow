@@ -16,7 +16,7 @@
  * The interactive-Claude path is pinned too, from the other side: a socket that
  * dies there really is a dead subprocess, and must still settle.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -283,6 +283,42 @@ describe('omp-sdk deferred approvals', () => {
     handler.handleMessage(ask('r3', { substrate: 'omp' }), third.socket);
     await settle();
     expect(approvalRows()).toHaveLength(2);
+    expect(lastVerdict(third.writes)).toBeUndefined();
+  });
+
+  // The parked verdict is a consumable authorization, so it expires as well as
+  // being single-use. The ENTRY is still never reaped — that is what lets a
+  // retry find its own card across turns — only the standing "yes" ages out.
+  it('asks again when the parked verdict is too old to stand in for consent', async () => {
+    const first = makeSocketDouble();
+    handler.handleMessage(ask('r1', { substrate: 'omp' }), first.socket);
+    await settle();
+    const [approval] = approvalRows();
+
+    first.hangUp();
+    await settle();
+    await ApprovalRouter.getInstance().respond(approval!.id, { behavior: 'allow' });
+
+    // Well past the window. Spying on Date.now rather than faking timers keeps
+    // the handler's own async settle working.
+    const parkedAt = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(parkedAt + 10 * 60 * 1000);
+    try {
+      const retry = makeSocketDouble();
+      handler.handleMessage(ask('r2', { substrate: 'omp' }), retry.socket);
+      await settle();
+
+      // Asked again — a fresh approval, and no verdict written from the stale one.
+      expect(approvalRows()).toHaveLength(2);
+      expect(lastVerdict(retry.writes)).toBeUndefined();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    // …and the expired verdict is spent, not lying in wait for a later retry.
+    const third = makeSocketDouble();
+    handler.handleMessage(ask('r3', { substrate: 'omp' }), third.socket);
+    await settle();
     expect(lastVerdict(third.writes)).toBeUndefined();
   });
 

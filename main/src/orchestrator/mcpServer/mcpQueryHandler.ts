@@ -1356,17 +1356,42 @@ interface InFlightShellApproval {
  *     rather than opening a second approval, so one human answer maps to one
  *     execution and the queue does not fill with duplicates of the same ask.
  *
- * `decision` is SINGLE-USE: consumed by the first matching retry and deleted.
+ * `parked` is SINGLE-USE: consumed by the first matching retry and deleted.
  * A human's "yes" authorizes the call they were shown, not every future call
- * that happens to serialize identically.
+ * that happens to serialize identically. It also EXPIRES — see
+ * {@link OMP_PARKED_DECISION_MAX_AGE_MS}.
  */
+/**
+ * How long a verdict that arrived with no requester keeps authorizing a retry.
+ *
+ * The ENTRY itself is deliberately not reaped — it must survive across turns so
+ * a retry re-attaches to its own card instead of opening a duplicate, and a TTL
+ * on it destroys exactly that. A parked DECISION is a different object: it is a
+ * consumable authorization, and the window it stays valid in used to be bounded
+ * only by the gate's ~25s budget. Raising that budget to 30 minutes
+ * (`OMP_RAISED_DECISION_BUDGET_MS`) turned an incidental bound into a real one:
+ * without this, a "yes" the human gave could sit in memory for the rest of the
+ * run and authorize a call the model issues much later, in a context the human
+ * never saw.
+ *
+ * Expiry is not silent — the retry falls through to a FRESH approval, so the
+ * human is asked again rather than the call being denied out from under them.
+ * Two minutes is generous for the mechanism this serves: OMP retries an
+ * identical call within the same turn, seconds after the handler returns.
+ */
+const OMP_PARKED_DECISION_MAX_AGE_MS = 120_000;
+
 interface DeferredOmpApproval {
   /** Live requester, or null while the approval is orphaned. */
   client: net.Socket | null;
   /** requestId of the CURRENT requester — a retry replaces it. */
   requestId: string;
-  /** Verdict that arrived with no requester attached. Single-use. */
-  decision?: ApprovalDecision;
+  /**
+   * Verdict that arrived with no requester attached. Single-use, and stamped so
+   * it can also expire: see {@link OMP_PARKED_DECISION_MAX_AGE_MS}. One object
+   * rather than two optional fields, so "decided" and "when" cannot drift.
+   */
+  parked?: { decision: ApprovalDecision; at: number };
   /**
    * The approvals row this entry owns, once ApprovalRouter has minted it.
    *
@@ -5655,17 +5680,26 @@ export class McpQueryHandler {
     const ompKey = msg.substrate === 'omp' ? ompCallKey(msg.toolName, msg.toolInput) : null;
     if (ompKey !== null) {
       const deferred = this.ompDeferredApprovals.get(msg.runId)?.get(ompKey);
-      if (deferred?.decision !== undefined) {
-        const { decision } = deferred;
+      if (deferred?.parked !== undefined) {
+        const { decision, at } = deferred.parked;
+        // Consumed either way — a stale verdict is spent, not left to be picked
+        // up by a later retry.
         this.dropDeferredOmpApproval(msg.runId, ompKey);
+        if (Date.now() - at <= OMP_PARKED_DECISION_MAX_AGE_MS) {
+          this.logger?.debug(
+            '[Cyboflow MCP Query] omp retry matched a decided approval — replaying the human verdict',
+            { runId: msg.runId, toolName: msg.toolName, decision: decision.behavior },
+          );
+          this.writeShellVerdict(client, msg.requestId, decision);
+          return;
+        }
+        // Too old to stand in for consent. Falling through opens a fresh
+        // approval below, so the human is ASKED again rather than denied.
         this.logger?.debug(
-          '[Cyboflow MCP Query] omp retry matched a decided approval — replaying the human verdict',
-          { runId: msg.runId, toolName: msg.toolName, decision: decision.behavior },
+          '[Cyboflow MCP Query] omp parked verdict expired — asking the human again',
+          { runId: msg.runId, toolName: msg.toolName, ageMs: Date.now() - at },
         );
-        this.writeShellVerdict(client, msg.requestId, decision);
-        return;
-      }
-      if (deferred !== undefined) {
+      } else if (deferred !== undefined) {
         // Still awaiting the human. Adopt the fresh socket as the requester and
         // register it so ITS disconnect is observed too; no second approvals row.
         deferred.client = client;
@@ -6170,7 +6204,7 @@ export class McpQueryHandler {
     const entry = this.ompDeferredApprovals.get(runId)?.get(key);
     if (!entry) return;
     if (entry.client === null) {
-      entry.decision = decision;
+      entry.parked = { decision, at: Date.now() };
       this.logger?.debug(
         '[Cyboflow MCP Query] omp verdict arrived with no requester — parked for the retry',
         { runId, decision: decision.behavior },
