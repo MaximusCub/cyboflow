@@ -504,9 +504,20 @@ export class ApprovalRouter extends EventEmitter {
         // 'awaiting_review' at respond() time, and before orphaning existed the
         // only path to 'running' with a live pending entry was a cancel that
         // settled the entry first.
+        // 'stuck' is accepted alongside these for the same reason 'running' is:
+        // it is a NON-terminal state everywhere else in the system (runLauncher's
+        // live-run set, runRecovery), and it is precisely the state a human's
+        // answer exists to clear. StuckDetector marks a run stuck after 5 minutes
+        // of a stale pending approval — SHORTER than the ~30 minutes the OMP gate
+        // now gives a human to decide — so without this an OMP approval answered
+        // after ~6 minutes had the human's YES converted into a synthetic deny.
+        // Observed live on 2026-08-21: run marked stuck (cross_run_deadlock) at
+        // 5m23s, approved at 6m14s, recorded 'rejected' by 'auto-policy'.
         const updateStmt = this.db.prepare(
-          `UPDATE workflow_runs SET status = 'running', updated_at = ?
-           WHERE id = ? AND status IN ('awaiting_review', 'running')`,
+          `UPDATE workflow_runs
+              SET status = 'running', updated_at = ?,
+                  stuck_reason = NULL, stuck_detected_at = NULL
+           WHERE id = ? AND status IN ('awaiting_review', 'running', 'stuck')`,
         );
         const info = updateStmt.run(now, request.runId) as { changes: number };
 
@@ -547,10 +558,14 @@ export class ApprovalRouter extends EventEmitter {
         // deny: transition workflow_runs back to 'running' so the agent can
         // retry with a different tool/approach. The user denied this specific
         // call, not the entire run. Guarded UPDATE so a concurrent cancel
-        // wins — if the run is no longer awaiting_review, it stays where it is.
+        // wins — if the run is terminal, it stays where it is. 'stuck' revives
+        // for the same reason it does on the allow path above: the human just
+        // answered, which is the event that unblocks it.
         this.db.prepare(
-          `UPDATE workflow_runs SET status = 'running', updated_at = ?
-           WHERE id = ? AND status = 'awaiting_review'`,
+          `UPDATE workflow_runs
+              SET status = 'running', updated_at = ?,
+                  stuck_reason = NULL, stuck_detected_at = NULL
+           WHERE id = ? AND status IN ('awaiting_review', 'stuck')`,
         ).run(now, request.runId);
 
         this.db.prepare(
