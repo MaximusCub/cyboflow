@@ -421,17 +421,17 @@ const IDEA_SUMMARY_LEGEND: ReadonlyArray<{ glyph: string; color: string; label: 
 
 /** Short column heads for the matrix, paired with the full labels by key. */
 /**
- * Floor width for one matrix row: the five fixed 54px status columns + the 14px
- * chevron + the row's 10px padding either side + the idea column's own 96px
+ * Floor width for one matrix row: the five fixed 58px status columns + the 16px
+ * chevron + the row's 10px padding either side + the idea column's own 112px
  * minimum. Applied to the column heads and the row list so a narrowed artifact
  * pane SCROLLS the matrix sideways instead of clipping the last column and
  * squeezing the idea title out of existence — a hidden status cell reads as
  * "no such component", which is exactly the confusion this tab exists to end.
  */
-const IDEA_SUMMARY_MATRIX_MIN_WIDTH = 400;
+const IDEA_SUMMARY_MATRIX_MIN_WIDTH = 424;
 
 /** Floor width for the idea (ref + title) column, so the title never collapses to nothing. */
-const IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH = 96;
+const IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH = 112;
 
 const IDEA_SUMMARY_COLUMN_HEADS: Record<IdeaComponentKey, string> = {
   'idea-spec': 'SPEC',
@@ -683,7 +683,7 @@ function IdeaSummariesMatrix({
       {/* Column heads */}
       <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px 8px', minWidth: IDEA_SUMMARY_MATRIX_MIN_WIDTH }}>
         <span
-          style={{ flex: 1, minWidth: IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH, fontSize: '8px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: FAINT }}
+          style={{ flex: 1, minWidth: IDEA_SUMMARY_IDEA_COLUMN_MIN_WIDTH, fontSize: '9.5px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: FAINT }}
         >
           Idea
         </span>
@@ -691,12 +691,12 @@ function IdeaSummariesMatrix({
           <span
             key={key}
             title={IDEA_COMPONENT_LABELS[key]}
-            style={{ width: 54, flexShrink: 0, textAlign: 'center', fontSize: '8px', fontWeight: 700, letterSpacing: '.1em', color: FAINT }}
+            style={{ width: 58, flexShrink: 0, textAlign: 'center', fontSize: '9.5px', fontWeight: 700, letterSpacing: '.1em', color: FAINT }}
           >
             {IDEA_SUMMARY_COLUMN_HEADS[key]}
           </span>
         ))}
-        <span style={{ width: 14, flexShrink: 0 }} />
+        <span style={{ width: 16, flexShrink: 0 }} />
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: IDEA_SUMMARY_MATRIX_MIN_WIDTH }}>
@@ -729,11 +729,11 @@ function IdeaSummariesMatrix({
                     gap: 3,
                   }}
                 >
-                  <span style={{ fontSize: '8.5px', fontWeight: 700, letterSpacing: '.16em', color: accent }}>
+                  <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '.16em', color: accent }}>
                     {idea.ref}
                   </span>
                   <span
-                    style={{ fontSize: '11px', color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    style={{ fontSize: '13px', color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   >
                     {idea.title}
                   </span>
@@ -746,7 +746,7 @@ function IdeaSummariesMatrix({
                       data-testid={`artifact-idea-summaries-cell-${idea.id}-${key}`}
                       title={`${IDEA_COMPONENT_LABELS[key]}: ${mark.text}`}
                       aria-label={`${IDEA_COMPONENT_LABELS[key]}: ${mark.text}`}
-                      style={{ width: 54, flexShrink: 0, textAlign: 'center', fontSize: '12px', fontWeight: 700, color: mark.color }}
+                      style={{ width: 58, flexShrink: 0, textAlign: 'center', fontSize: '15px', fontWeight: 700, color: mark.color }}
                     >
                       {mark.glyph}
                     </span>
@@ -754,7 +754,7 @@ function IdeaSummariesMatrix({
                 })}
                 <span
                   aria-hidden
-                  style={{ width: 14, flexShrink: 0, textAlign: 'right', fontSize: '9px', color: FAINT }}
+                  style={{ width: 16, flexShrink: 0, textAlign: 'right', fontSize: '11px', color: FAINT }}
                 >
                   {open ? '▾' : '▸'}
                 </span>
@@ -772,7 +772,7 @@ function IdeaSummariesMatrix({
                   }}
                 >
                   <div
-                    style={{ fontSize: '8px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: MUTED, marginBottom: 8 }}
+                    style={{ fontSize: '9.5px', fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase', color: MUTED, marginBottom: 8 }}
                   >
                     Deliverables
                   </div>
@@ -793,10 +793,10 @@ function IdeaSummariesMatrix({
       <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginTop: 16, padding: '0 10px', flexWrap: 'wrap' }}>
         {IDEA_SUMMARY_LEGEND.map((entry) => (
           <span key={entry.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span aria-hidden style={{ fontSize: '11px', fontWeight: 700, color: entry.color }}>
+            <span aria-hidden style={{ fontSize: '13px', fontWeight: 700, color: entry.color }}>
               {entry.glyph}
             </span>
-            <span style={{ fontSize: '9px', color: FAINT }}>{entry.label}</span>
+            <span style={{ fontSize: '11px', color: FAINT }}>{entry.label}</span>
           </span>
         ))}
       </div>

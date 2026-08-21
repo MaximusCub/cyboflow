@@ -2402,15 +2402,15 @@ describe('ArtifactTabRenderer', () => {
     // Heads and rows carry the SAME floor, so they scroll together and the
     // column heads stay aligned over the cells they label.
     const rows = screen.getByTestId('artifact-idea-summaries-row-IDEA-018').parentElement?.parentElement;
-    expect(rows).toHaveStyle({ minWidth: '400px' });
+    expect(rows).toHaveStyle({ minWidth: '424px' });
     const heads = doc.firstElementChild as HTMLElement;
-    expect(heads).toHaveStyle({ minWidth: '400px' });
+    expect(heads).toHaveStyle({ minWidth: '424px' });
 
     // The idea column keeps a floor of its own — without it the title, not the
     // fixed-width cells, is what the flexbox squeezes to zero first.
     const ideaColumn = screen.getByTestId('artifact-idea-summaries-row-IDEA-018')
       .firstElementChild as HTMLElement;
-    expect(ideaColumn).toHaveStyle({ minWidth: '96px' });
+    expect(ideaColumn).toHaveStyle({ minWidth: '112px' });
   });
 
   it('hides each row\'s deliverables until the row is expanded', () => {
