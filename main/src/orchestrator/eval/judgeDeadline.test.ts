@@ -58,9 +58,9 @@ describe('resolveJudgeDeadlineMs', () => {
     }
   });
 
-  it('stays under the ceiling at the diff-truncation cap (worst REACHABLE diff)', () => {
+  it('stays under the ceiling at the diff-truncation cap (where the PROMPT stops growing)', () => {
     const atCap = resolveJudgeDeadlineMs(BASE, MAX_DIFF_CHARS);
-    expect(atCap).toBe(BASE + 3 * JUDGE_DEADLINE_STEP_MS);
+    expect(atCap).toBe(BASE + 7 * JUDGE_DEADLINE_STEP_MS);
     expect(atCap).toBeLessThan(JUDGE_DEADLINE_MAX_MS);
   });
 

@@ -34,11 +34,16 @@ export const JUDGE_DEADLINE_STEP_MS = 300_000;
 
 /**
  * Hard ceiling on the stretched deadline. A juror past this is hung, not slow —
- * the eval is a background grade, but it still has to terminate. At the diff
- * truncation cap (evalJury.MAX_DIFF_CHARS = 200k) the curve lands at 25 min, so
- * this ceiling is headroom above the worst REACHABLE case, not the normal bound.
+ * the eval is a background grade, but it still has to terminate.
+ *
+ * 60 min. The curve reaches 45 min at the diff-truncation cap
+ * (evalJury.MAX_DIFF_CHARS = 400k) and saturates here at 500k chars, so the ceiling
+ * binds only for diffs whose PROMPT is already capped — i.e. where the extra time
+ * buys worktree exploration, not more reading. A stuck slot holds one of the three
+ * judgeConcurrency 'normal' permits for that hour, which is survivable precisely
+ * because the other two slots are unaffected; it is not a budget to spend freely.
  */
-export const JUDGE_DEADLINE_MAX_MS = 1_800_000;
+export const JUDGE_DEADLINE_MAX_MS = 3_600_000;
 
 /**
  * Stretch `baseTimeoutMs` for a diff of `diffChars`. Returns the base unchanged for
