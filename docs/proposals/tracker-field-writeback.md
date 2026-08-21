@@ -374,3 +374,52 @@ All six findings were accepted and folded into the sections above:
   check only, with a loud sync-log line when the check fails.
 - D7/L3 (self-write bumps `updatedAt`): if yes, nothing extra — the stamp absorbs it; if no, the
   stamp is still correct (it just never gets exercised by the echo).
+
+## Phase 0 probe transcript (run 2026-08-21, live workspaces, self-created probe tasks only)
+
+**Dart — all probes green.** Against the real `Personal/Tutorial tasks` board; probe tasks
+trashed at the end (which doubled as D5).
+
+- **D1** `PUT {priority:'High'}` → 200, echoed and persisted. Negative: `priority:'Bogus'` →
+  **400 with the valid-value list in the error body** (`Valid values are: [null, critical, high,
+  low, medium]`). Invalid mappings fail LOUD — the pre-flight `/config` membership check is a UX
+  nicety, not a correctness requirement.
+- **D2** `priority: null` → 200; the cleared field comes back as an **absent key**, not
+  `null` — Dart omits null fields from every payload (create echo, detail GET, concise list).
+  Inbound must read absent-as-null. P6 ⇄ unset round-trip viable.
+- **D3** `type:'Subtask'` → 200 persisted; bogus type → 400 loud with valid values. Category
+  write-back viable.
+- **D4** title+description PUT → 200; the `cyboflow-sync:` marker line survived verbatim.
+- **D5** `DELETE` → 200 + full item echo; GET → 404; visible under `in_trash=true`; second
+  DELETE → **404** (`Task with ID … not found`) — the 404-is-success arm is required.
+- **D6** `/config` carries `types: [Task, Subtask, Project, Milestone]` and
+  `priorities: [critical, high, medium, low]` (plus dartboards/statuses/assignees/tags/sizes/
+  skills/customProperties). Mapping seeds have a live source.
+- **D7** priority-only PUT bumps `updatedAt` (~3s delta observed) — the response stamp absorbs
+  the echo; nothing extra needed.
+- **D8** the concise `/tasks/list` row **does carry `priority` and `type` when set**
+  (omit-when-null: a null-priority row has no `priority` key at all; a Critical row does).
+  Inbound rides the existing list — zero extra requests, no hydration change.
+- **Casing (follow-up probe)**: writes are case-insensitive (`priority:'critical'` accepted) but
+  every read returns **Title case** (`Critical`), while `/config.priorities` lists **lowercase**
+  (`critical`). The priority/category mappings MUST match case-insensitively on the toLocal side
+  and stamp baselines from the (Title-case) response values.
+
+**Linear — all probes green.** Two probe issues (BAHV-39/40) in the synced team; both ended
+trashed (their cleanup IS the archive probe).
+
+- **L1** route locked: `issueArchive(id, trash: true)` → `success`, entity returns
+  `archivedAt` set AND `trashed: true`, selectable in the mutation payload (stamp source works).
+  The alternative `issueUpdate({trashed:true})` is **rejected** (`invalid trashed state`) — it is
+  not a valid trash entry point. Post-archive: direct `issue(id)` still resolves (archived
+  entities reachable by id), `issues(includeArchived:true)` includes it, `includeArchived:false`
+  excludes it — inbound echo visibility exactly as the deletion sweep expects.
+- **L2** the personal API key executed `issueArchive` — scope covers it.
+- **L3** priority-only `issueUpdate` bumps `updatedAt` — stamp absorbs, like Dart.
+
+**Plane — UNPROBED: the stored token is invalid** (403 `Given API token is not valid`; the
+connection has been `paused`, its key evidently revoked). Consequences, per the pre-agreed
+fallbacks: Plane ships with `archive: 'none'` (UI caption "unsupported"), and the Plane
+content-write arm is implemented from the documented lowercase priority enum + the existing
+create-path `description_html` precedent, with P1–P3 re-run before any Plane live smoke once a
+fresh token is connected. No plan-shape change.
