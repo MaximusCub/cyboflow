@@ -39,6 +39,29 @@ import type { OmpGateConfig } from './gate/ompGateTypes';
  *   ast_grep  ↔ Grep-class     (`tools/ast-grep.ts:151`)
  *   todo      ↔ TodoWrite      (`tools/todo.ts:797`)
  *
+ * Plus two of OMP's HIDDEN tools (`HIDDEN_TOOL_NAMES = ['yield','goal','think']`,
+ * `tools/builtin-names.ts`), which have no Claude counterpart because Claude has
+ * no equivalent concept. Neither reaches outside the model's own turn:
+ *
+ *   yield     the agent's RETURN VALUE — "submit data or error", how a task
+ *             reports success or failure (`tools/yield.ts`). Pure control flow.
+ *   think     "private scratchpad; not shown to user" (`tools/think.ts`).
+ *
+ * `goal` is the third hidden tool and is deliberately NOT here: it sets a
+ * persistent autonomous objective for the session, which is precisely the kind
+ * of self-direction a human gate exists to show someone.
+ *
+ * WHAT IS NOT HERE, AND WHY — these two were proposed for this list and both
+ * would have been holes:
+ *
+ *   eval  executes Python/JavaScript/Ruby/Julia in a persistent backend
+ *         (`tools/eval.ts`). Arbitrary code execution, not coordination. It is
+ *         already named in the gate's own `AUTO_MODE_HAZARD_TOOLS`.
+ *   hub   is coordination AND process control behind one name: `op:'start'`
+ *         runs an arbitrary `application`, and `op:'send'` with `name` types
+ *         into a live process's stdin. It is classified BY ARGUMENT in the
+ *         gate (`isCoordinationHubCall`), which a name list cannot express.
+ *
  * Everything else OMP happens to tier `read` is deliberately absent, because
  * cyboflow's set is about "touches nothing outside this repo", not about OMP's
  * tier: `web_search` reaches the network; `memory_edit`/`retain` mutate OMP's
@@ -54,7 +77,15 @@ import type { OmpGateConfig } from './gate/ompGateTypes';
  * reaches the human even though `read` is named here. Do not "fix" that by
  * splitting this list — the argument is what decides, and only the gate sees it.
  */
-export const OMP_AUTO_ALLOW_TOOLS: readonly string[] = ['read', 'glob', 'grep', 'ast_grep', 'todo'];
+export const OMP_AUTO_ALLOW_TOOLS: readonly string[] = [
+  'read',
+  'glob',
+  'grep',
+  'ast_grep',
+  'todo',
+  'yield',
+  'think',
+];
 
 /**
  * OMP's file-mutating built-ins — the `acceptEdits`/`auto` allowance, mirroring

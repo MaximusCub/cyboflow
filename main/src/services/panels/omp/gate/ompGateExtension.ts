@@ -127,6 +127,91 @@ export const OMP_TASK_TOOL_NAME = 'task';
 export const OMP_BASH_TOOL_NAME = 'bash';
 
 /**
+ * OMP's peer-messaging / job-supervision tool (`tools/hub/index.ts`, summary
+ * "Message peer agents, control background jobs, and supervise long-running
+ * processes").
+ *
+ * ONE NAME, TWO VERY DIFFERENT POWERS — which is why this gate classifies it by
+ * ARGUMENT and never by name. Its `op` spans pure coordination (message a peer,
+ * wait for a reply, read an inbox) and full process control: `start` takes an
+ * `application` + `args` + `env` + `cwd` and runs it. That last one is
+ * arbitrary execution wearing a different key name — it carries no `command`
+ * string, so the bash classifier never sees it — and before this rung existed
+ * `auto` mode auto-allowed it by name, since `hub` is not in
+ * {@link AUTO_MODE_HAZARD_TOOLS}.
+ */
+export const OMP_HUB_TOOL_NAME = 'hub';
+
+/**
+ * `hub` operations that only move MESSAGES or READ state — no process is
+ * created, signalled, or destroyed by any of them:
+ *
+ *   wait / inbox   receive or peek at peer messages, or await a job's lifecycle
+ *   list / jobs    enumerate peer agents and running jobs
+ *   ps / describe  inspect a job
+ *   logs           read a job's captured output (`grep`/`lines` narrow it)
+ *
+ * `send` is DELIBERATELY ABSENT from this set even though it is the archetypal
+ * coordination op, because it is overloaded — see {@link isCoordinationHubCall}.
+ *
+ * `start`, `stop`, `restart` and `cancel` are absent because they are process
+ * lifecycle: launching, killing, and re-launching real processes on the user's
+ * machine. Those reach the human in every mode.
+ */
+const OMP_HUB_COORDINATION_OPS: ReadonlySet<string> = new Set([
+  'wait',
+  'inbox',
+  'list',
+  'jobs',
+  'ps',
+  'describe',
+  'logs',
+]);
+
+/**
+ * The `send` arguments that turn a peer message into PROCESS INPUT.
+ *
+ * `hub {op:'send'}` means one of two unrelated things depending on whether it
+ * addresses an agent (`to`) or a running job (`name`):
+ *
+ *   to:   "deliver this text to another agent"            — coordination
+ *   name: "write `text` to that process's stdin, append   — remote control of a
+ *          Enter, send terminal `keys`, deliver `signal`"    live PTY
+ *
+ * The second form can type any command into an interactive shell the agent
+ * started earlier, or SIGKILL it. Presence of ANY of these keys therefore
+ * disqualifies the coordination shortcut, regardless of what else the call
+ * carries — a `send` that names both a recipient and a process is exactly the
+ * ambiguity to refuse rather than resolve.
+ */
+const OMP_HUB_PROCESS_INPUT_KEYS: readonly string[] = ['name', 'text', 'keys', 'signal'];
+
+/**
+ * True when a `hub` call is provably coordination-only, and therefore safe to
+ * auto-allow at the same tier as `read`/`glob`: it touches nothing outside the
+ * agent group's own message bus and job table.
+ *
+ * Fail-closed in every uncertain direction — a missing `op`, a non-string `op`,
+ * an unrecognized `op` (a future OMP addition), or a `send` that carries any
+ * process-input key all answer `false` and reach the human.
+ */
+export function isCoordinationHubCall(input: Record<string, unknown>): boolean {
+  const op = input['op'];
+  if (typeof op !== 'string') return false;
+  const normalized = op.trim().toLowerCase();
+
+  if (normalized === 'send') {
+    if (OMP_HUB_PROCESS_INPUT_KEYS.some((key) => input[key] !== undefined)) return false;
+    // A peer send must actually name a peer. Without `to` the op is
+    // underspecified, and guessing what OMP would do with it is not this gate's
+    // job.
+    return typeof input['to'] === 'string' && input['to'].trim().length > 0;
+  }
+
+  return OMP_HUB_COORDINATION_OPS.has(normalized);
+}
+
+/**
  * A URI scheme sitting at a token boundary inside a tool argument: `ssh://`,
  * `file://`, `http://`, `ftp://`, anything of that shape.
  *
@@ -185,6 +270,11 @@ const FILE_BODY_KEYS_BY_TOOL: ReadonlyMap<string, ReadonlySet<string>> = new Map
   ['write', new Set(['content'])],
   ['edit', new Set(['old_string', 'new_string'])],
   ['ast_edit', new Set(['pat', 'out'])],
+  // `message` is text bound for another agent, `pattern`/`grep` are regexes
+  // filtering a job's output. All three are cargo. `hub`'s real target keys —
+  // `application` and `cwd` — occur only on `start`, which this gate never
+  // auto-allows, so excluding the cargo keys cannot widen anything.
+  ['hub', new Set(['message', 'pattern', 'grep'])],
 ]);
 
 /**
@@ -1126,6 +1216,8 @@ export type OmpGateAllowRule =
   | 'cyboflow-mcp'
   | 'dont-ask'
   | 'auto-allow-tool'
+  /** `hub` proven coordination-only by its arguments ({@link isCoordinationHubCall}). */
+  | 'hub-coordination'
   | 'edit-tool'
   | 'safe-bash'
   | 'allow-rule'
@@ -1292,6 +1384,13 @@ export function decideToolCall(
     if (config.autoAllowTools.includes(toolName)) {
       return { kind: 'allow', rule: 'auto-allow-tool' };
     }
+    // The argument-aware `hub` rung, at the same tier as the read-safe names
+    // above because a coordination op reaches less far than a file read does.
+    // Name matched EXACTLY, like the bash rung: an unfamiliar casing is a tool
+    // this gate has not verified.
+    if (toolName === OMP_HUB_TOOL_NAME && isCoordinationHubCall(input)) {
+      return { kind: 'allow', rule: 'hub-coordination' };
+    }
     if (
       (config.permissionMode === 'acceptEdits' || config.permissionMode === 'auto') &&
       config.editTools.includes(toolName)
@@ -1327,6 +1426,16 @@ export function decideToolCall(
       // `command` the same way — so it falls through to the human, matching the
       // `safe-bash` rung's own exact-name discipline.
       const carriesCommand = typeof input['command'] === 'string';
+      // `hub` is argument-classified, never name-classified — and the rung that
+      // does it already ran above. Reaching here means the call was NOT
+      // coordination-only, i.e. it is `start`/`stop`/`restart`/`cancel` or a
+      // `send` that drives a process's stdin. Allowing that by name (which is
+      // what happened before this branch existed, since `hub` is not a hazard
+      // tool and carries no `command` key) would let `auto` launch an arbitrary
+      // `application` without a human ever seeing it.
+      if (toolName === OMP_HUB_TOOL_NAME) {
+        return { kind: 'ask' };
+      }
       if (toolName === OMP_BASH_TOOL_NAME) {
         if (carriesCommand && isAutoModeAllowedBashCommand(input['command'] as string)) {
           return { kind: 'allow', rule: 'auto-bash' };
