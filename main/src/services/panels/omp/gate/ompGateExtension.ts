@@ -1178,11 +1178,35 @@ function escapesWorkingTree(token: string): boolean {
   return token === '..' || token.startsWith('../') || token.includes('/../') || token.endsWith('/..');
 }
 
+/**
+ * The name a hazard table should be consulted with, given the program token as
+ * written.
+ *
+ * Every table below is keyed by a BARE program name (`rm`, `zsh`, `sudo`), so
+ * matching the token verbatim let an absolute or relative path walk past all of
+ * them: `/bin/rm -rf ~`, `/bin/zsh -lc '…'` and `/usr/bin/sudo rm -rf /` were
+ * each auto-allowed because `/bin/rm` is not the string `rm`. Taking the
+ * basename closes that, and it is the whole fix — a path is not a different
+ * program, and `zsh` reached by any route runs code this classifier cannot see.
+ *
+ * Deliberately NOT resolved further: no symlink following, no `$PATH` lookup,
+ * no argv[0] rewriting. Those need a filesystem this pure function does not
+ * touch, and the tier is allow-unless-hazardous, so the honest statement is
+ * that this closes the literal-path bypass and nothing more.
+ *
+ * The prove-it-safe tiers need no equivalent: they are allowlists, so an
+ * unrecognized `/bin/cat` already fails closed there.
+ */
+function programName(token: string): string {
+  const slash = token.lastIndexOf('/');
+  return slash === -1 ? token : token.slice(slash + 1);
+}
+
 /** True if ONE segment trips a hazard table. */
 function isAutoModeHazardousSegment(segment: string): boolean {
   const tokens = tokenizeSegment(segment);
   if (tokens.length === 0) return true;
-  const program = tokens[0]!;
+  const program = programName(tokens[0]!);
   const args = tokens.slice(1);
 
   if (PRIVILEGE_ESCALATION_PROGRAMS.has(program)) return true;

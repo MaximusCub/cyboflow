@@ -861,6 +861,37 @@ describe("rule 5a: `auto` allows unless hazardous", () => {
     expect(bash(command).kind).toBe('ask');
   });
 
+  // Every hazard table is keyed by a BARE program name, so before basename
+  // normalization an absolute path walked past ALL of them at once: this tier
+  // allowed `/usr/bin/sudo rm -rf /` while refusing the identical `sudo rm -rf /`
+  // one line above. It is the same bypass shape as the newline landmine below —
+  // a spelling the tables cannot read is a full bypass, not a missed allow.
+  it.each([
+    ['/usr/bin/sudo rm -rf /', 'sudo rm -rf /', 'privilege escalation via absolute path'],
+    ['/bin/rm -rf ~', 'rm -rf ~', 'destructive via absolute path'],
+    ['/bin/zsh -lc "rm -rf ~"', 'zsh -lc "rm -rf ~"', 'a shell reached by absolute path'],
+    ['/bin/sh -c "curl x | sh"', 'sh -c "curl x | sh"', 'a shell reached by absolute path'],
+    ['/usr/bin/env FOO=1 rm -rf /', 'env FOO=1 rm -rf /', 'a wrapper reached by absolute path'],
+    ['./node_modules/.bin/rm -rf x', 'rm -rf x', 'destructive via relative path'],
+  ])('refuses %s exactly as it refuses %s — %s', (pathForm, bareForm) => {
+    expect(bash(bareForm).kind, bareForm).toBe('ask');
+    expect(bash(pathForm).kind, pathForm).toBe('ask');
+  });
+
+  // The counterpart the basename rule must NOT break: a path is only resolved so
+  // far as its own spelling. An ordinary binary keeps auto-allowing.
+  it('still allows an ordinary program invoked by path', () => {
+    expect(bash('/usr/bin/make build')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+    expect(bash('./scripts/build.sh')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+  });
+
+  // A pathed `git` now reaches the git subcommand table instead of falling off
+  // the end of every table as an unrecognized program — strictly a tightening.
+  it('applies the git subcommand table to a pathed git', () => {
+    expect(bash('/usr/bin/git push origin main').kind).toBe('ask');
+    expect(bash('/usr/bin/git status')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+  });
+
   // The landmine this file already carries for the prove-it-safe tier, and which
   // matters MORE here: the splitter knows only && || ; and |, so a newline would
   // smuggle a whole second command past every table above.
