@@ -248,9 +248,12 @@ import {
   type DesignSessionLaunchDeps,
 } from './orchestrator/designSessionLaunch';
 import { validateDesignIdeaLink } from './services/designIdeaValidation';
-import { detectClaudeCredentials } from './utils/claudeCredentials';
-import { detectClaudeBinary } from './utils/claudeCodeTest';
-import { computeState as computeClaudeDetectionState } from './ipc/claudeDetection';
+import {
+  runClaudeSdkSessionPreflights,
+  type ClaudeSdkPreflightFailure,
+} from './services/claudeSdkSessionPreflight';
+import { findIdeaBusyReason } from './orchestrator/ideaBusy';
+import { setOpenIdeaSessionDeps } from './services/openIdeaSessionCore';
 import { agentThreadEvents } from './orchestrator/trpc/routers/agentThread';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
@@ -305,6 +308,22 @@ import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from '.
 import { runGitAsync } from './utils/runGit';
 
 export let mainWindow: BrowserWindow | null = null;
+
+/**
+ * Design-mode-FORK wording for each rung of the shared SDK-pinned pre-flight
+ * ladder (services/claudeSdkSessionPreflight.ts). Deliberately terser than the
+ * `sessions:create-quick` handler's copy — this fork has no renderer client, so
+ * the text lands in a review-queue finding rather than a toast. Kept
+ * byte-identical to what createDesignSession threw before the ladder was
+ * extracted.
+ */
+const DESIGN_FORK_PREFLIGHT_MESSAGES: Readonly<Record<ClaudeSdkPreflightFailure, string>> = {
+  provider_disabled: 'Design sessions require Claude, which is turned off in Settings → Integrations.',
+  claude_not_detected:
+    'Design sessions require the Claude SDK substrate — Claude credentials/binary not detected.',
+  interactive_pty_only:
+    'Design sessions cannot run on the interactive substrate, but this app is locked to interactive-PTY-only mode.',
+};
 
 // Strip PER-RUN cyboflow env inherited from a HOSTING cyboflow session
 // (dogfooding: `pnpm dev` launched from a shell inside another cyboflow
@@ -3691,6 +3710,10 @@ async function initializeServices(): Promise<boolean> {
     // variant (explicit pin or weighted random over active variants) pre-createRun
     // so every launch surface inherits rotation from one place.
     new VariantResolver(cyboflowDb),
+    // Idea-session nesting lineage (migration 112): launch() stamps
+    // sessions.origin_idea_id for a SINGULAR idea-seeded launch, then refreshes
+    // the session so the sidebar regroups it under the idea immediately.
+    sessionManager,
   );
 
   // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
@@ -5242,8 +5265,19 @@ app.whenReady().then(async () => {
       } catch {
         /* fail-soft */
       }
-      // 3. Remove the worktree (non-main-repo sessions).
-      if (dbSession?.worktree_name && dbSession.project_id && !dbSession.is_main_repo) {
+      // 3. Remove the worktree — worktree-backed, non-main-repo sessions only.
+      // An IN-PLACE session (migration 047) has NO worktree of its own: its
+      // worktree_path IS the project checkout. Attempting removeWorktree for one
+      // is at best a no-op on a nonexistent path and at worst aimed at the user's
+      // real checkout, so it is skipped outright. This became load-bearing when
+      // the idea-session door (openIdeaSessionCore) started using this same
+      // primitive to compensate a half-created IN-PLACE home session.
+      if (
+        dbSession?.worktree_name &&
+        dbSession.project_id &&
+        !dbSession.is_main_repo &&
+        !dbSession.in_place
+      ) {
         const project = databaseService.getProject(dbSession.project_id);
         if (project) {
           try {
@@ -5510,6 +5544,40 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] experiments deps wired');
 
+    // Open-idea-session door (idea sessions plan, Stage 1). The IPC handler in
+    // ipc/session.ts is thin by contract; every collaborator is assembled HERE
+    // because two of them only exist at this composition root: the FULL safe
+    // session-dismiss (dismissSessionFully — now in-place-aware, see its step 3)
+    // and the lazily-bound Claude panel registrar. Deliberately placed AFTER
+    // dismissSessionFully so the compensation primitive is in scope.
+    setOpenIdeaSessionDeps({
+      getDb: () => databaseService.getDb(),
+      quickSession: {
+        taskQueue: taskQueue!,
+        sessionManager,
+        workflowRegistry,
+        getDb: () => databaseService.getDb(),
+        // The idea door pins substrate/runtime itself, so createRun should never
+        // reject the combo — but the core's compensation window is the only
+        // layer holding the session id when it does.
+        dismissHalfCreatedSession: dismissSessionFully,
+      },
+      runPreflights: () => runClaudeSdkSessionPreflights(configManager),
+      panelManager,
+      getClaudePanelRegistrar: () => {
+        // Lazy require, mirroring ipc/panels.ts: the handler assigns the export
+        // at boot, long before any Open, but it is not readable at wiring time.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
+        return claudePanelManager;
+      },
+      refreshSession: (sessionId) => {
+        sessionManager.refreshSessionFromDatabase(sessionId);
+      },
+      dismissSession: dismissSessionFully,
+    });
+    console.log('[Main] open-idea-session deps wired');
+
     // Boot recovery: reconcile non-terminal A/B experiments (migration 049).
     // running→grading when both arms are settled; a half-created experiment (crash
     // mid-startSideBySide, one arm never launched) → abandoned, THEN its two arm
@@ -5653,32 +5721,26 @@ app.whenReady().then(async () => {
     QuestionRouter.getInstance().setDesignSessionLaunchDeps({
       validateIdeaLink: (ideaId, projectId) => {
         const result = validateDesignIdeaLink(databaseService.getDb(), ideaId, projectId);
-        return result.ok ? { ok: true } : { ok: false, error: result.error };
+        if (!result.ok) return { ok: false, error: result.error };
+        // Max-one-running-per-idea (idea sessions plan, Stage 1): the design
+        // fork is one of the doors the hard rule guards. Same rejection channel
+        // as a dead idea link — the saga reports either as "could not launch".
+        const busy = findIdeaBusyReason(databaseService.getDb(), ideaId);
+        return busy === null ? { ok: true } : { ok: false, error: busy.message };
       },
       createDesignSession: async ({ projectId, ideaId, nameHint }) => {
-        // Fail-closed Claude/SDK availability pre-flight — mirrors
-        // sessions:create-quick's design branch (ipc/session.ts ~804-834): a
+        // Fail-closed Claude/SDK availability pre-flight — the SHARED ladder
+        // (services/claudeSdkSessionPreflight.ts) the design branch of
+        // sessions:create-quick and the open-idea-session door also run: a
         // design session is hard-pinned to the Claude SDK substrate, so an
         // unavailable Claude login/binary must reject BEFORE any worktree is
-        // cut, rather than let substrate resolution silently fall through.
-        if (!configManager.isAgentProviderEnabled('claude')) {
-          throw new Error(
-            'Design sessions require Claude, which is turned off in Settings → Integrations.',
-          );
-        }
-        const [designCredentials, designBinary] = await Promise.all([
-          detectClaudeCredentials(),
-          detectClaudeBinary(configManager.getConfig()?.claudeExecutablePath),
-        ]);
-        if (computeClaudeDetectionState(designCredentials.found, designBinary.found) !== 'detected') {
-          throw new Error(
-            'Design sessions require the Claude SDK substrate — Claude credentials/binary not detected.',
-          );
-        }
-        if (configManager.isInteractivePtyOnly()) {
-          throw new Error(
-            'Design sessions cannot run on the interactive substrate, but this app is locked to interactive-PTY-only mode.',
-          );
+        // cut, rather than let substrate resolution silently fall through. Only
+        // the wording is local — this fork's messages are terser than the IPC
+        // handler's (no "Enable Claude to start a design session." tail) and
+        // stay byte-identical to what it threw before the extraction.
+        const designPreflight = await runClaudeSdkSessionPreflights(configManager);
+        if (!designPreflight.ok) {
+          throw new Error(DESIGN_FORK_PREFLIGHT_MESSAGES[designPreflight.reason]);
         }
 
         const { session, runId, resolvedSubstrate } = await createQuickSessionCore(
@@ -5714,6 +5776,14 @@ app.whenReady().then(async () => {
           stampDesignIdeaId: () => {
             const dbHandle = databaseService.getDb();
             dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
+            // `origin_idea_id` (migration 112): a design session IS a session
+            // launched from the idea, and the sidebar nests children by that
+            // column. Lineage, not a claim — no unique index. Kept a SEPARATE
+            // statement, mirroring the sessions:create-quick design branch.
+            dbHandle.prepare(`UPDATE sessions SET origin_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
+          },
+          refreshSession: (sessionId) => {
+            sessionManager.refreshSessionFromDatabase(sessionId);
           },
           dismissSession: dismissSessionFully,
           onCompensationFailure: (dismissErr) => {

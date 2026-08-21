@@ -10,6 +10,7 @@ import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
+import type { OpenIdeaSessionRequest } from '../../../shared/types/ideaSession';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
@@ -115,6 +116,14 @@ export class API {
     async createQuick(request: CreateSessionRequest) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.createQuick(request);
+    },
+
+    // Backlog idea card "Open" — find-or-create the idea's persistent home
+    // session. `created: false` means an existing home was reused; either way
+    // `claudePanelId` is a registered (not started) Chat panel.
+    async openIdeaSession(request: OpenIdeaSessionRequest) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.openIdeaSession(request);
     },
 
     async delete(sessionId: string) {

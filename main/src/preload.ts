@@ -17,6 +17,7 @@ import type {
 } from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
+import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../shared/types/ideaSession';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../shared/types/sessionDefaults';
 import type {
   BugReportPreview,
@@ -261,6 +262,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // and frontend/src/types/electron.d.ts (IPC handler ↔ declared T parity).
     createQuick: (request: CreateSessionRequest): Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string; claudePanelId?: string }>> =>
       ipcRenderer.invoke('sessions:create-quick', request),
+    // Backlog idea card "Open" — find-or-create the idea's ONE persistent,
+    // in-place, SDK-pinned home session. Request/response shapes come from
+    // shared/types/ideaSession.ts so this bridge, the handler, and the renderer
+    // wrapper all read ONE declaration.
+    openIdeaSession: (request: OpenIdeaSessionRequest): Promise<IPCResponse<OpenIdeaSessionResponse>> =>
+      ipcRenderer.invoke('sessions:open-idea-session', request),
     delete: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:delete', sessionId),
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
     continue: (sessionId: string, prompt?: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:continue', sessionId, prompt, model),

@@ -62,7 +62,10 @@ export interface DesignSessionLaunchDeps {
    * captured when the gate was FIRST asked is stale by the time it resolves.
    * Mirrors validateDesignIdeaLink's read-only contract (exists / same-project
    * / not-decomposed / not-archived) — wired at the composition root as a thin
-   * wrapper over that exact function.
+   * wrapper over that exact function, COMPOSED with the max-one-running-per-idea
+   * guard (orchestrator/ideaBusy.ts): a design session is one of the things that
+   * occupies an idea, and both rejections are the same "this idea cannot take a
+   * design session right now" answer, reported through the same path.
    */
   validateIdeaLink(ideaId: string, projectId: number): DesignIdeaLinkValidation;
 
@@ -123,12 +126,23 @@ export interface FinishDesignSessionCreateArgs {
   /** The substrate `createQuickSessionCore` actually resolved to. */
   resolvedSubstrate: string;
   /**
-   * Stamp `sessions.design_idea_id = ideaId` for this session. A thin closure
-   * over the concrete DB handle, injected so this module stays
-   * standalone-typecheck-clean (no `better-sqlite3` import here). Throws on
-   * failure exactly like the raw `.run(...)` call it wraps.
+   * Stamp the session's idea links — `design_idea_id` (the design claim) AND
+   * `origin_idea_id` (migration 112 nesting lineage: a design session IS a
+   * session launched from the idea). A thin closure over the concrete DB
+   * handle, injected so this module stays standalone-typecheck-clean (no
+   * `better-sqlite3` import here). Throws on failure exactly like the raw
+   * `.run(...)` call it wraps.
    */
   stampDesignIdeaId: () => void;
+  /**
+   * Optional: make the stamp visible to the renderer
+   * (SessionManager.refreshSessionFromDatabase — re-map + `session-updated`).
+   * A raw UPDATE alone never reaches the UI, so without this the sidebar would
+   * not nest the new design session under its idea until the next session read.
+   * Called ONLY after the stamp succeeds; a throw here is treated exactly like
+   * a stamp failure (compensate + rethrow).
+   */
+  refreshSession?: (sessionId: string) => void;
   /**
    * The FULL safe session-dismiss primitive (dismissSessionFully in
    * main/src/index.ts — the SAME one the saga's own `dismissSession` dep is
@@ -172,6 +186,7 @@ export async function finishDesignSessionCreate(args: FinishDesignSessionCreateA
       );
     }
     args.stampDesignIdeaId();
+    args.refreshSession?.(args.sessionId);
   } catch (err) {
     try {
       await args.dismissSession(args.sessionId);

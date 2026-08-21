@@ -11,6 +11,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
+import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../../shared/types/ideaSession';
 import type {
   BugReportPreview,
   BugReportRunLink,
@@ -142,6 +143,13 @@ interface ElectronAPI {
     // callers must then SKIP their own claude createPanel. KEEP IN SYNC with the
     // sessions:create-quick handler (IPC handler ↔ declared T parity rule).
     createQuick: (request: CreateSessionRequest) => Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string; claudePanelId?: string }>>;
+    /**
+     * Backlog idea card "Open" — find-or-create the idea's ONE persistent,
+     * in-place, SDK-pinned home session, plus a REGISTERED (never started) Chat
+     * panel. Shapes come from shared/types/ideaSession.ts, the same declaration
+     * main/src/preload.ts and the handler use.
+     */
+    openIdeaSession: (request: OpenIdeaSessionRequest) => Promise<IPCResponse<OpenIdeaSessionResponse>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
