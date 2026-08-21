@@ -636,6 +636,49 @@ function readDesignSessionPrompt(): string {
   return cachedDesignSessionPrompt;
 }
 
+/** Cache for the idea-session first-turn prompt (read once per process). */
+let cachedIdeaSessionPrompt: string | null = null;
+
+/**
+ * The idea-session first-turn prompt (idea-session.md), loaded the SAME way as
+ * {@link readDesignSessionPrompt} — a `join(__dirname, …)` against the compiled
+ * workflow-prompt bundle `copy-workflow-assets.js` ships alongside the built-in
+ * flow prompts, so the relative resolve works in both dev (source tree) and
+ * packaged builds. Like design.md, idea-session.md carries NO frontmatter (a
+ * pure prompt body), so it is read + trimmed verbatim. Cached module-wide — the
+ * file never changes at runtime; a read failure is surfaced rather than
+ * silently stripping the idea-session's operating contract.
+ */
+function readIdeaSessionPrompt(): string {
+  if (cachedIdeaSessionPrompt !== null) return cachedIdeaSessionPrompt;
+  const promptPath = path.join(__dirname, '..', '..', '..', 'orchestrator', 'workflows', 'idea-session.md');
+  cachedIdeaSessionPrompt = fs.readFileSync(promptPath, 'utf-8').trim();
+  return cachedIdeaSessionPrompt;
+}
+
+/**
+ * Resolve the `Linked idea: <REF> (<id>) — <title>` line appended to an idea
+ * session's first-turn prompt (see `readIdeaSessionPrompt`'s caller). Reads
+ * fresh from `ideas` per spawn — restart-safe and reflects a rename that
+ * happened between turns — using the same direct-table-by-id pattern
+ * `mcpQueryHandler`'s design-scope idea lookup uses (ideas carry `ref`/`title`
+ * directly; no join needed). On any lookup miss (the idea was deleted,
+ * decomposed, or the row is otherwise gone) falls back to the raw id so the
+ * agent still knows which idea it's linked to even when the friendly ref/title
+ * can't be resolved.
+ */
+function resolveLinkedIdeaLine(db: Database.Database, ideaId: string): string {
+  const row = db.prepare('SELECT ref, title FROM ideas WHERE id = ?').get(ideaId) as
+    | { ref?: unknown; title?: unknown }
+    | undefined;
+  const ref = typeof row?.ref === 'string' ? row.ref : null;
+  const title = typeof row?.title === 'string' ? row.title : null;
+  if (ref !== null && title !== null) {
+    return `\n\nLinked idea: ${ref} (${ideaId}) — ${title}`;
+  }
+  return `\n\nLinked idea: ${ideaId}`;
+}
+
 /**
  * The minimal contract an injected per-spawn events sink must satisfy (S0.2(c)).
  *
@@ -4379,6 +4422,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // warm reuse is unaffected.
     const designIdeaId = this.sessionManager.getDbSession(sessionId)?.design_idea_id;
     const isDesignSession = typeof designIdeaId === 'string' && designIdeaId.length > 0;
+    // Idea session (idea-session.md): a quick session linked to an idea via
+    // sessions.home_idea_id (migration 111) is that idea's persistent home —
+    // Read/Grep/Glob only (no code-writing tools; this is a thinking space, not
+    // an implementation session) plus the idea-session first-turn prompt and a
+    // per-spawn "Linked idea" line. Design branch checked FIRST and left
+    // byte-identical: a session can't be both. Deliberately carries NO mcpScope
+    // — the full run-scoped cyboflow MCP family (cyboflow_get_task,
+    // cyboflow_update_task, cyboflow_set_idea_component, …) is intentional here,
+    // unlike design's minimal scoped toolset.
+    const rawHomeIdeaId = this.sessionManager.getDbSession(sessionId)?.home_idea_id;
+    const homeIdeaId =
+      !isDesignSession && typeof rawHomeIdeaId === 'string' && rawHomeIdeaId.length > 0 ? rawHomeIdeaId : null;
     const options: ClaudeSpawnOptions = {
       panelId,
       sessionId,
@@ -4391,7 +4446,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
       reasoningEffort,
       ...(isDesignSession
         ? { mcpScope: 'design' as const, systemPromptAppend: readDesignSessionPrompt() }
-        : {}),
+        : homeIdeaId !== null
+          ? {
+              tools: ['Read', 'Grep', 'Glob'],
+              systemPromptAppend: readIdeaSessionPrompt() + resolveLinkedIdeaLine(this.db, homeIdeaId),
+            }
+          : {}),
       // Quick/legacy SDK sessions resolve their 4-mode agent permission from the
       // per-session override (sessions.agent_permission_mode, migration 021) when
       // set, else the GLOBAL default — so both the Settings control AND the
