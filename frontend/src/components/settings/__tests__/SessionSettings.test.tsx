@@ -16,6 +16,7 @@ import {
   WORKFLOW_AGENT_RUNTIMES,
 } from '../../../../../shared/types/agentRuntime';
 import { isRuntimeSelectableInPickers } from '../../../../../shared/types/agentCapabilities';
+import { SPRINT_BATCH_MAX_TASKS_DEFAULTS } from '../../../../../shared/types/sprintBatch';
 
 vi.mock('../../../utils/telemetry', () => ({
   trackEvent: vi.fn(),
@@ -97,6 +98,10 @@ function renderGroup(over: Partial<SessionSettingsProps> = {}) {
     onQuickSessionWorktreeModeChange: vi.fn(),
     quickSessionDefaultSubstrate: 'interactive',
     onQuickSessionDefaultSubstrateChange: vi.fn(),
+    sprintMaxTasksSdk: SPRINT_BATCH_MAX_TASKS_DEFAULTS.sdk,
+    onSprintMaxTasksSdkChange: vi.fn(),
+    sprintMaxTasksInteractive: SPRINT_BATCH_MAX_TASKS_DEFAULTS.interactive,
+    onSprintMaxTasksInteractiveChange: vi.fn(),
     codeReviewEvalEnabled: true,
     onCodeReviewEvalEnabledChange: vi.fn(),
     autoGradeVariantRuns: true,
@@ -114,6 +119,7 @@ const SESSION_SETTINGS_SECTIONS = [
   'Default Launch Model',
   'Default Agent Runtime',
   'Workflow Orchestration',
+  'Sprint Batch Size',
   'Quick Sessions',
   'Quick Session Runtime',
   'Code Review Eval',
