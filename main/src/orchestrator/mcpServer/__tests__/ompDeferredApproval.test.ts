@@ -139,6 +139,9 @@ function buildDb(): Database.Database {
       UNIQUE (entity_type, entity_id, seq)
     );
   `);
+  // 007 adds stuck_detected_at, which approvalRouter's revive-on-answer UPDATE
+  // clears alongside stuck_reason (006 already has the latter).
+  db.exec(readFileSync(join(migDir, '007_add_stuck_reason.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '111_approval_awaited.sql'), 'utf-8'));
   // resolveRunPermissionMode joins the owning session; this fixture predates the
   // migrations that add those columns, so add the minimal join surface. No mode

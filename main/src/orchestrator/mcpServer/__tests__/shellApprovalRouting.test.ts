@@ -151,7 +151,7 @@ describe('shell-approval-request handler branch', () => {
   let fakeHome: string;
 
   beforeEach(() => {
-    db = createTestDb({ disableForeignKeys: true });
+    db = createTestDb({ disableForeignKeys: true, includeStuckDetectedAt: true });
     // resolveRunPermissionMode now joins the owning SESSION (permission-mode
     // redesign §3c#3); the GATE_SCHEMA carries neither, so layer the run.session_id
     // link column + a minimal sessions table the join reads.
@@ -588,6 +588,9 @@ describe('shell-approval-request review_item fold (P4, socket still held)', () =
     // carry no mode ⇒ the join yields null ⇒ the conservative router gate (the
     // existing behavior under test).
     reviewDb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    // approvalRouter's revive-on-answer UPDATE clears stuck_detected_at alongside
+    // stuck_reason, so this narrow schema needs migration 007's column too.
+    reviewDb.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
     reviewDb.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     return reviewDb;
   }
@@ -679,7 +682,7 @@ describe('shell-approval-request over a live OrchSocketServer (held-open socket)
   let fakeHome: string;
 
   beforeEach(async () => {
-    db = createTestDb({ disableForeignKeys: true });
+    db = createTestDb({ disableForeignKeys: true, includeStuckDetectedAt: true });
     // Run→session join surface for resolveRunPermissionMode (§3c#3); these runs
     // carry no mode ⇒ the join yields null ⇒ the conservative router gate.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
