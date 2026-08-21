@@ -35,6 +35,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseService } from '../../../database/database';
+import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
+import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
 import type { TrackerConnectionRow, TrackerOutboxRow } from '../../../database/models';
 import type {
   TrackerIssue,
@@ -78,6 +80,13 @@ const STATES: TrackerState[] = [
 let tmpDir: string;
 let svc: DatabaseService;
 let raw: Database.Database;
+/**
+ * The REAL entity-write chokepoint, exactly as inboundSync.test.ts uses it: the
+ * one local write this module makes (the post-create description alignment)
+ * must go through it, and a fake that only records the call would not prove the
+ * body actually lands.
+ */
+let router: TaskChangeRouter;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-trackersync-outbox-'));
@@ -85,6 +94,7 @@ beforeEach(() => {
   svc.initialize();
   raw = svc.getDb();
   raw.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run(PROJECT_ID, 'Proj 1', '/tmp/p1');
+  router = new TaskChangeRouter(dbAdapter(raw));
 });
 
 afterEach(() => {
@@ -259,6 +269,52 @@ class FakeMarkerAdapter extends FakeAdapter {
 }
 
 /**
+ * A provider that NORMALIZES the markdown it stores — Dart measurably does (it
+ * re-emits emphasis runs, reflows lists and linkifies dotted tokens), so the
+ * description a create echoes back is not always the one it was sent.
+ *
+ * `normalize` is identity by default, which makes the class usable as a plain
+ * "echoes the draft description back" adapter too.
+ */
+class NormalizingAdapter extends FakeAdapter {
+  normalize: (sent: string | undefined) => string | null = (sent) => sent ?? null;
+
+  async createSubIssue(
+    parentExternalId: string,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.createCalls.push({ parentExternalId, draft, clientKey });
+    if (this.failCreate) throw this.takeFailure('failCreate');
+    return makeIssue(clientKey, {
+      title: draft.title,
+      parentExternalId,
+      description: this.normalize(draft.description),
+    });
+  }
+
+  async createIssue(
+    selection: TrackerSourceSelection,
+    draft: IssueDraft,
+    clientKey: string,
+  ): Promise<TrackerIssue> {
+    this.createCalls.push({
+      parentExternalId: null,
+      containerId: selection.containerId,
+      pushContainerId: selection.pushContainerId,
+      draft,
+      clientKey,
+    });
+    if (this.failCreate) throw this.takeFailure('failCreate');
+    return makeIssue(clientKey, {
+      title: draft.title,
+      stateId: draft.stateId ?? 'state-backlog',
+      description: this.normalize(draft.description),
+    });
+  }
+}
+
+/**
  * The lost-response case: the server COMMITS the child and the caller still
  * sees a failure (5xx, timeout, dropped connection). The created issue is
  * recorded — marker and all — exactly as the real remote would hold it, so a
@@ -371,7 +427,7 @@ function seedConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
 }
 
 function makeDeps(adapter: TrackerAdapter, now: string = NOW): OutboxDeps {
-  return { db: raw, adapterFor: () => adapter, nowIso: () => now };
+  return { db: raw, adapterFor: () => adapter, router, nowIso: () => now };
 }
 
 function enqueueStateWrite(
@@ -671,6 +727,137 @@ describe('drainOutbox — top-level issue creation (push)', () => {
     expect(fetchOutbox(row.id).state).toBe('ambiguous');
     expect(report.retriesScheduled).toBe(1);
     expect(getLinkByEntity(raw, 'idea', 'ide_1', 'plane')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drain — post-create description alignment
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — aligning the local body with what the provider stored', () => {
+  /** A real idea row, since the alignment writes through the entity chokepoint. */
+  function seedIdea(id: string, body: string | null): void {
+    svc.seedDefaultBoard(PROJECT_ID);
+    const stageIds = resolveStageIds(raw, PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO ideas (id, project_id, ref, title, summary, body, board_id, stage_id)
+         VALUES (?, ?, 'IDEA-1', 'Ship the push direction', NULL, ?, ?, ?)`,
+      )
+      .run(id, PROJECT_ID, body, `board-${PROJECT_ID}-default`, stageIds.idea);
+  }
+
+  /** The mirrored TASK a `create_sub_issue` row points at. */
+  function seedTask(id: string, body: string | null): void {
+    svc.seedDefaultBoard(PROJECT_ID);
+    const stageIds = resolveStageIds(raw, PROJECT_ID);
+    raw
+      .prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, summary, body, board_id, stage_id)
+         VALUES (?, ?, 'TASK-1', 'Task TASK-1', NULL, ?, ?, ?)`,
+      )
+      .run(id, PROJECT_ID, body, `board-${PROJECT_ID}-default`, stageIds.ready);
+  }
+
+  function enqueuePush(connectionId: string, entityId: string, clientKey: string): TrackerOutboxRow {
+    return enqueueOutbox(raw, {
+      connection_id: connectionId,
+      kind: 'create_issue',
+      entity_type: 'idea',
+      entity_id: entityId,
+      client_key: clientKey,
+      payload_json: '{}',
+    });
+  }
+
+  function readBody(table: 'ideas' | 'tasks', id: string): string | null {
+    return (raw.prepare(`SELECT body FROM ${table} WHERE id = ?`).get(id) as { body: string | null }).body;
+  }
+
+  /** Every event the tracker itself wrote for an entity — the audit half of the fix. */
+  function providerEvents(entityId: string): Array<{ kind: string; actor: string }> {
+    return raw
+      .prepare('SELECT kind, actor FROM entity_events WHERE entity_id = ? ORDER BY seq')
+      .all(entityId) as Array<{ kind: string; actor: string }>;
+  }
+
+  it('rewrites a mirrored task body when the provider normalized what it stored', async () => {
+    // The baseline is snapshotted from the RETURNED description, so a local body
+    // left holding the authored text disagrees with it from day one — and the
+    // next genuine remote edit merges against a baseline the local never
+    // matched, whole-field-replacing the local body with the mangled copy.
+    const connection = seedConnection({ provider: 'dart' });
+    seedTask('tsk_1', 'body one');
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    const adapter = new NormalizingAdapter();
+    adapter.provider = 'dart';
+    adapter.normalize = (sent) => `*${sent}*`;
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(fetchOutbox(row.id).state).toBe('done');
+    expect(readBody('tasks', 'tsk_1')).toBe('*body one*');
+    // Local and baseline now agree, which is the whole point.
+    const link = getLinkByEntity(raw, 'task', 'tsk_1', 'dart');
+    expect(JSON.parse(link?.baseline_json ?? '{}')).toMatchObject({ description: '*body one*' });
+    // Attributed to the tracker, not to a user or an agent.
+    expect(providerEvents('tsk_1')).toEqual([{ kind: 'updated', actor: 'dart' }]);
+  });
+
+  it('PRESERVES the local provenance footer when it rewrites a pushed idea body', async () => {
+    // The footer is cyboflow's half of the body and belongs to no provider, so
+    // the alignment replaces the description half only — exactly as an inbound
+    // merge would.
+    const footer = '---\n<!-- cyboflow:tracker dart:ext-9 -->\nImported from Dart';
+    const connection = seedConnection({ provider: 'dart' });
+    seedIdea('ide_1', `The local description.\n\n${footer}`);
+    enqueuePush(connection.id, 'ide_1', 'client-key-push');
+    const adapter = new NormalizingAdapter();
+    adapter.provider = 'dart';
+    adapter.normalize = (sent) => `${sent} (reflowed)`;
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    // The footer never reached the wire in the first place...
+    expect(adapter.createCalls[0].draft.description).toBe('The local description.');
+    // ...and it survives the correction that comes back.
+    expect(readBody('ideas', 'ide_1')).toBe(`The local description. (reflowed)\n\n${footer}`);
+    const link = getLinkByEntity(raw, 'idea', 'ide_1', 'dart');
+    expect(JSON.parse(link?.baseline_json ?? '{}')).toMatchObject({
+      description: 'The local description. (reflowed)',
+    });
+  });
+
+  it('writes NOTHING when the provider echoed the description back unchanged', async () => {
+    // The ordinary case on every provider. A local write here would be an entity
+    // event with nothing behind it — the merge would never have diffed on it.
+    const connection = seedConnection({ provider: 'dart' });
+    seedTask('tsk_1', 'body one');
+    const adapter = new NormalizingAdapter();
+    adapter.provider = 'dart';
+    enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(readBody('tasks', 'tsk_1')).toBe('body one');
+    expect(providerEvents('tsk_1')).toEqual([]);
+  });
+
+  it('leaves the body alone when the local entity was edited after the create was enqueued', async () => {
+    // The comparison is against what we SENT, never against the local body: the
+    // two differ exactly when the user edited in between, and there the local
+    // text is newer than the create's echo.
+    const connection = seedConnection({ provider: 'dart' });
+    seedTask('tsk_1', 'a newer local edit');
+    const adapter = new NormalizingAdapter();
+    adapter.provider = 'dart';
+    // The payload still carries 'body one' — what the enqueue captured.
+    enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(readBody('tasks', 'tsk_1')).toBe('a newer local edit');
+    expect(providerEvents('tsk_1')).toEqual([]);
   });
 });
 

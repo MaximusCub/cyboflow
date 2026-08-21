@@ -74,7 +74,12 @@ import {
   resolveStageIds,
   stageIdToWriteBackGroup,
 } from './stateMapping';
-import { splitBody } from './inboundSync';
+import {
+  joinBody,
+  normalizeDescription,
+  splitBody,
+  type EntityWriteRouter,
+} from './inboundSync';
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -84,6 +89,14 @@ export interface OutboxDeps {
   db: Database.Database;
   /** Build (or reuse) the provider client for a connection — decrypts the stored key. */
   adapterFor(connection: TrackerConnectionRow): TrackerAdapter;
+  /**
+   * The entity-write chokepoint — the SAME structural slice of TaskChangeRouter
+   * the inbound pass takes. This module writes exactly one local field, on
+   * exactly one occasion: aligning a body with the description the provider
+   * actually stored for a create (see {@link alignLocalDescription}). Everything
+   * else it touches is tracker bookkeeping, which belongs to store.ts.
+   */
+  router: EntityWriteRouter;
   /**
    * Current timestamp. Normalized to sqlite's `datetime('now')` shape
    * ('YYYY-MM-DD HH:MM:SS', UTC) before it is compared against or written to
@@ -357,22 +370,30 @@ async function processCreate(
     });
   }
 
-  adoptCreatedIssue(deps, connection, row, issue, payload.parentExternalId);
+  await adoptCreatedIssue(deps, connection, row, issue, payload.parentExternalId, payload.description);
   report.created += 1;
   return false;
 }
 
 /**
  * Record a created (or recovered) sub-issue: link it, snapshot its baseline,
- * settle the outbox row. Post-send bookkeeping — never inside a catch.
+ * settle the outbox row, then align the local body with what the provider
+ * stored. Post-send bookkeeping — never inside a catch.
+ *
+ * `sentDescription` is what the create actually PUT ON THE WIRE, or undefined
+ * when that is unknowable (no path has that gap today: a sub-issue's draft
+ * description is the payload's, on the live and the recovery path alike). See
+ * {@link alignLocalDescription} for why the comparison is against the sent text
+ * rather than the local body.
  */
-function adoptCreatedIssue(
+async function adoptCreatedIssue(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
   row: TrackerOutboxRow,
   issue: TrackerIssue,
   parentExternalId: string,
-): void {
+  sentDescription: string | null | undefined,
+): Promise<void> {
   upsertLink(deps.db, {
     connection_id: connection.id,
     entity_type: 'task',
@@ -385,6 +406,7 @@ function adoptCreatedIssue(
     baseline_json: JSON.stringify(baselineSnapshot(issue)),
   });
   resolveOutbox(deps.db, row.id, 'done');
+  await alignLocalDescription(deps, connection, 'task', row.entity_id as string, issue, sentDescription);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +483,14 @@ async function processPush(
     });
   }
 
-  adoptPushedIssue(deps, connection, row, issue, groupOfState(providerStates, issue.stateId));
+  await adoptPushedIssue(
+    deps,
+    connection,
+    row,
+    issue,
+    groupOfState(providerStates, issue.stateId),
+    draft.description ?? null,
+  );
   report.created += 1;
   report.pushedIdeas += 1;
   return false;
@@ -511,14 +540,21 @@ function composePushDraft(
  * and queues nothing. A group outside the three write-back ones — the ordinary
  * case, a freshly-filed idea in `backlog` — stamps NOTHING, because a stale key
  * there would suppress the first genuine Done/Won't-do write-back.
+ *
+ * `sentDescription` is the draft description this push put on the wire, or
+ * undefined on the RECOVERY path, which cannot know it: the row carries no
+ * payload (the draft is composed at drain time from an idea that may have moved
+ * on since), so there is nothing to compare the returned body against and the
+ * alignment stands down. See {@link alignLocalDescription}.
  */
-function adoptPushedIssue(
+async function adoptPushedIssue(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
   row: TrackerOutboxRow,
   issue: TrackerIssue,
   group: WriteBackGroup | null,
-): void {
+  sentDescription: string | null | undefined,
+): Promise<void> {
   const snapshot = baselineSnapshot(issue);
   upsertLink(deps.db, {
     connection_id: connection.id,
@@ -534,6 +570,85 @@ function adoptPushedIssue(
     ),
   });
   resolveOutbox(deps.db, row.id, 'done');
+  await alignLocalDescription(deps, connection, 'idea', row.entity_id as string, issue, sentDescription);
+}
+
+/**
+ * AFTER A CREATE, MAKE THE LOCAL BODY SAY WHAT THE BASELINE SAYS.
+ *
+ * A provider is free to normalize the markdown it stores, and Dart MEASURABLY
+ * does (dartAdapter.ts's SYNC_MARKER_RE note: it re-emits emphasis runs,
+ * reflows lists and linkifies dotted tokens). The adoption paths above snapshot
+ * the baseline from the issue the provider RETURNED — the normalized text —
+ * while the local entity keeps the text the user authored. Left alone the two
+ * disagree from the moment of creation, and the disagreement is silent until
+ * the remote description genuinely changes: inboundSync's three-way merge then
+ * diffs the new remote against a baseline the local body never matched, reads
+ * "both sides moved", and whole-field-replaces the local body with the
+ * provider's mangled copy. Description has no outbound path in v1, so nothing
+ * ever pushes the authored text back.
+ *
+ * Aligning here converts that latent corruption into an immediate, attributable
+ * correction: one `body` write through the entity chokepoint, attributed to the
+ * PROVIDER actor, visible in the entity's event log the moment it happens.
+ *
+ * THE COMPARISON IS AGAINST WHAT WE SENT, not against the local body. They
+ * differ exactly when the user edited the entity between enqueue and drain —
+ * and there the local text is NEWER than the create, so overwriting it with the
+ * create's echo would discard a real edit. Equal-after-normalization counts as
+ * agreement, because that is precisely what the merge counts as agreement (see
+ * inboundSync.normalizeDescription): a difference it would never diff on is a
+ * local event with nothing behind it.
+ *
+ * ORDER: strictly last, after the link and after the row is settled `done`. A
+ * throw here (a deleted entity, a sqlite failure) propagates like any other
+ * post-send bookkeeping failure — see the file header — and because the row is
+ * already settled it can never cause the create to be re-sent. The cost of that
+ * failure is the baseline divergence we have today, not a duplicate issue.
+ *
+ * NO OUTBOUND ECHO: writeBack.route has no content trigger at all, so a body
+ * write enqueues nothing on its own. (An entity sitting in a write-back stage
+ * can enqueue one redundant, idempotent state write off this event — bounded at
+ * one by the `lastWrittenGroup` stamp the very same write records.)
+ */
+async function alignLocalDescription(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  entityType: 'idea' | 'task',
+  entityId: string,
+  issue: TrackerIssue,
+  sentDescription: string | null | undefined,
+): Promise<void> {
+  // Unknowable (the recovery push path) or absent: nothing to compare against,
+  // and a provider that returned no description at all has said nothing about
+  // what it stored.
+  if (sentDescription === undefined || issue.description === null) return;
+  if (normalizeDescription(issue.description) === normalizeDescription(sentDescription)) return;
+
+  const body = readEntityBody(deps.db, entityType, entityId);
+  if (body === undefined) return;
+  // The footer is cyboflow's half of the body and belongs to no provider —
+  // preserved exactly as an inbound merge would preserve it.
+  const { footer } = splitBody(body);
+  await deps.router.applyChange(connection.project_id, {
+    actor: connection.provider,
+    entityType,
+    taskId: entityId,
+    fields: { body: joinBody(issue.description, footer) },
+  });
+}
+
+/** One entity's stored body, or undefined when the row is gone. */
+function readEntityBody(
+  db: Database.Database,
+  entityType: 'idea' | 'task',
+  entityId: string,
+): string | null | undefined {
+  const table = entityType === 'idea' ? 'ideas' : 'tasks';
+  const row = db.prepare(`SELECT body FROM ${table} WHERE id = ?`).get(entityId) as
+    | { body: string | null }
+    | undefined;
+  return row === undefined ? undefined : row.body;
 }
 
 /** An idea's pushable columns, or null when the row is gone. */
@@ -699,10 +814,10 @@ export async function resolveAmbiguous(
   }
 
   if (payload !== null) {
-    adoptCreatedIssue(deps, connection, row, found, payload.parentExternalId);
+    await adoptCreatedIssue(deps, connection, row, found, payload.parentExternalId, payload.description);
     return 'adopted';
   }
-  return adoptOrOrphanPush(deps, connection, row, found);
+  return await adoptOrOrphanPush(deps, connection, row, found);
 }
 
 /**
@@ -731,12 +846,12 @@ export async function resolveAmbiguous(
  * its only effect is suppressing ONE redundant (idempotent) state write the next
  * time this idea moves. The sub-issue adopt path makes the same trade.
  */
-function adoptOrOrphanPush(
+async function adoptOrOrphanPush(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
   row: TrackerOutboxRow,
   issue: TrackerIssue,
-): AmbiguousOutcome {
+): Promise<AmbiguousOutcome> {
   const idea = row.entity_id === null ? null : readPushableIdea(deps.db, row.entity_id);
   if (idea === null || idea.archived_at !== null) {
     resolveOutbox(deps.db, row.id, 'done', {
@@ -746,7 +861,9 @@ function adoptOrOrphanPush(
     });
     return 'orphaned';
   }
-  adoptPushedIssue(deps, connection, row, issue, null);
+  // `undefined`, not null: what this push sent is genuinely unknown here — see
+  // {@link adoptPushedIssue}.
+  await adoptPushedIssue(deps, connection, row, issue, null, undefined);
   return 'adopted';
 }
 

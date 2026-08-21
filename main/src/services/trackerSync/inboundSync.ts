@@ -394,8 +394,16 @@ export function joinBody(description: string | null, footer: string | null): str
   return desc === null ? block : `${desc}\n\n${block}`;
 }
 
-/** Empty and absent descriptions are the same thing on both sides of a diff. */
-function normalizeDescription(value: string | null): string {
+/**
+ * Empty and absent descriptions are the same thing on both sides of a diff.
+ *
+ * Exported for the outbox worker's post-create alignment
+ * (outboxWorker.alignLocalDescription), which must call "the same description"
+ * exactly as the merge below does — anything this treats as equal can never
+ * become a later three-way diff, so writing the local body for it would be a
+ * local event with nothing behind it.
+ */
+export function normalizeDescription(value: string | null): string {
   return value === null ? '' : value.trim();
 }
 

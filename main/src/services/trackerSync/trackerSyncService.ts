@@ -859,7 +859,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
     entries: TrackerSyncLogEntry[],
     allowedKinds: readonly TrackerOutboxRow['kind'][],
   ): Promise<WriteBackOutcome> {
-    const deps: OutboxDeps = { db: this.db, adapterFor: () => adapter, nowIso: this.nowIso };
+    const deps: OutboxDeps = {
+      db: this.db,
+      adapterFor: () => adapter,
+      router: this.router,
+      nowIso: this.nowIso,
+    };
     // DELIBERATELY NOT kind-filtered: an `ambiguous` row is a write whose
     // outcome nobody knows, and leaving one unreconciled halts the inbound
     // batch for every direction. Reconciling is establishing what already
@@ -909,7 +914,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
     if (!hasUnresolvedCreateRecovery(this.db, connection.id, adapter)) {
       return { proceed: true, paused: false };
     }
-    const deps: OutboxDeps = { db: this.db, adapterFor: () => adapter, nowIso: this.nowIso };
+    const deps: OutboxDeps = {
+      db: this.db,
+      adapterFor: () => adapter,
+      router: this.router,
+      nowIso: this.nowIso,
+    };
     const recovered = await processAmbiguous(deps, connection);
     appendWriteBackLines(entries, recovered, null);
     if (recovered.authPaused) return { proceed: false, paused: true };
