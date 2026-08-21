@@ -798,6 +798,10 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         workflowRegistry,
         agentOverrideRouter: AgentOverrideRouter.getInstance(),
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        // The per-substrate sprint task-cap override (Settings → Sessions), read
+        // LIVE per request so raising the cap takes effect without a restart —
+        // runs.start layers it over the built-in defaults.
+        getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).
@@ -2803,6 +2807,10 @@ async function initializeServices(): Promise<boolean> {
       // so toggling the master switch in Settings takes effect on the next tool
       // call rather than requiring a restart.
       getVisualVerifyConfig: () => configManager.getVisualVerifyConfig(),
+      // The sprint task-cap override, read LIVE for the same reason: the
+      // cyboflow_create_sprint_batch backstop must honor the CURRENT setting, not
+      // one frozen at launch.
+      getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
@@ -5216,6 +5224,10 @@ app.whenReady().then(async () => {
     setExperimentsDeps({
       db: experimentsDb,
       runLauncher,
+      // Sprint seed-task cap: the same live Settings override runs.start and the
+      // batch picker read, so an experiment arm accepts exactly what a normal
+      // sprint launch would.
+      getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
       // settleQuickArm write barrier: refuse to rest a quick arm whose session
       // has an agent turn mid-write (grading would snapshot a partial diff).
       // Routed through the facade so every substrate manager is consulted.

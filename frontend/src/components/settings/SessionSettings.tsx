@@ -1,4 +1,4 @@
-import { Bot, Cpu, FileText, FolderOpen, ShieldCheck, SlidersHorizontal, Terminal, Zap } from 'lucide-react';
+import { Bot, Cpu, FileText, FolderOpen, Layers, ShieldCheck, SlidersHorizontal, Terminal, Zap } from 'lucide-react';
 import { Checkbox, Textarea } from '../ui/Input';
 import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
@@ -19,6 +19,12 @@ import {
 import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import type { ExecutionModel } from '../../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import {
+  SPRINT_BATCH_CAP,
+  SPRINT_BATCH_MAX_TASKS_DEFAULTS,
+  SPRINT_MAX_TASKS_MAX,
+  SPRINT_MAX_TASKS_MIN,
+} from '../../../../shared/types/sprintBatch';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../../shared/types/worktreeMode';
 
@@ -65,6 +71,17 @@ export interface SessionSettingsProps {
   onQuickSessionWorktreeModeChange: (mode: QuickSessionWorktreeMode) => void;
   quickSessionDefaultSubstrate: CliSubstrate;
   onQuickSessionDefaultSubstrateChange: (substrate: CliSubstrate) => void;
+  /**
+   * `config.sprintMaxTasks.sdk` / `.interactive` — how many tasks may be
+   * multi-selected into ONE sprint batch, per substrate. `number | ''` so
+   * clearing the field renders empty rather than `NaN`; the save path in
+   * `Settings.tsx` floors an empty/invalid entry back to the built-in default and
+   * clamps to [SPRINT_MAX_TASKS_MIN, SPRINT_MAX_TASKS_MAX].
+   */
+  sprintMaxTasksSdk: number | '';
+  onSprintMaxTasksSdkChange: (value: number | '') => void;
+  sprintMaxTasksInteractive: number | '';
+  onSprintMaxTasksInteractiveChange: (value: number | '') => void;
   codeReviewEvalEnabled: boolean;
   onCodeReviewEvalEnabledChange: (enabled: boolean) => void;
   autoGradeVariantRuns: boolean;
@@ -87,6 +104,10 @@ export function SessionSettings({
   onQuickSessionWorktreeModeChange,
   quickSessionDefaultSubstrate,
   onQuickSessionDefaultSubstrateChange,
+  sprintMaxTasksSdk,
+  onSprintMaxTasksSdkChange,
+  sprintMaxTasksInteractive,
+  onSprintMaxTasksInteractiveChange,
   codeReviewEvalEnabled,
   onCodeReviewEvalEnabledChange,
   autoGradeVariantRuns,
@@ -447,6 +468,62 @@ export function SessionSettings({
               run always includes a chat supervisor you can query mid-run; escalations always go to
               the human review queue and are also surfaced in chat. Only affects SDK runs started
               after you save — the interactive terminal substrate always runs orchestrated.
+            </p>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Sprint Batch Size"
+            description="How many tasks may be selected into a single sprint run, per runtime"
+            icon={<Layers className="w-4 h-4" />}
+          >
+            <div className="flex flex-wrap gap-4">
+              {([
+                {
+                  id: 'sprintMaxTasksSdk',
+                  label: 'SDK',
+                  value: sprintMaxTasksSdk,
+                  onChange: onSprintMaxTasksSdkChange,
+                  substrate: 'sdk',
+                },
+                {
+                  id: 'sprintMaxTasksInteractive',
+                  label: 'Interactive terminal',
+                  value: sprintMaxTasksInteractive,
+                  onChange: onSprintMaxTasksInteractiveChange,
+                  substrate: 'interactive',
+                },
+              ] as const).map(({ id, label, value, onChange, substrate }) => (
+                <div key={id} className="flex flex-col">
+                  <label htmlFor={id} className="block text-sm text-text-secondary mb-1">
+                    {label}
+                  </label>
+                  <input
+                    id={id}
+                    data-testid={id}
+                    type="number"
+                    step={1}
+                    /* Deliberately NO min/max attributes: native constraint
+                       validation would block the WHOLE Settings form (every tab)
+                       on an out-of-range entry in this one field. The save path
+                       clamps instead, and the IPC boundary clamps again. */
+                    value={value}
+                    onChange={(e) => onChange(e.target.value === '' ? '' : e.target.valueAsNumber)}
+                    className="w-28 px-3 py-2 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary"
+                  />
+                  <span className="text-xs text-text-tertiary mt-1">
+                    Default {SPRINT_BATCH_MAX_TASKS_DEFAULTS[substrate]}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-text-tertiary mt-2">
+              The cap the sprint task picker enforces (and the launch seams re-check) when you
+              multi-select tasks for one sprint run. It bounds how much ONE run takes on, not how many
+              tasks execute at once — parallel task agents stay capped at {SPRINT_BATCH_CAP}. Raise it
+              when context pressure is not the limiting factor (programmatic runs walk the DAG in the
+              host loop rather than through a single orchestrator's context). Values are clamped to{' '}
+              {SPRINT_MAX_TASKS_MIN}–{SPRINT_MAX_TASKS_MAX}; leaving a field empty restores its
+              default.
             </p>
           </SettingsSection>
 

@@ -175,7 +175,11 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
-import { SPRINT_BATCH_MAX_TASKS, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
+import {
+  resolveSprintMaxTasks,
+  AWAITING_VERIFY_STEP,
+  type SprintMaxTasksOverrides,
+} from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
 import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
@@ -1449,6 +1453,19 @@ export interface McpQueryHandlerDeps {
    * without it keep passing unchanged.
    */
   getVisualVerifyConfig?(): ResolvedVisualVerifyConfig;
+
+  /**
+   * The user's per-substrate sprint task-cap override
+   * (ConfigManager.getSprintMaxTasks), already clamped — read LIVE for the same
+   * reason getVisualVerifyConfig is: the cap is a Settings value, not something
+   * frozen onto the run at launch, so `cyboflow_create_sprint_batch` must honor
+   * what the setting says NOW rather than what it said when the run started.
+   *
+   * Absent ⇒ resolveSprintMaxTasks falls back to the built-in per-substrate
+   * defaults (the pre-setting behavior), so every fixture that builds a deps bag
+   * without it keeps passing unchanged.
+   */
+  getSprintMaxTasks?(): SprintMaxTasksOverrides;
 }
 
 /**
@@ -3166,7 +3183,8 @@ export class McpQueryHandler {
    *      (ids the run did not create are dropped); the full created set when no
    *      subset is passed.
    *   4. EMPTY — no resolvable tasks → ok:false 'ship_no_tasks_to_materialize'.
-   *   5. CAP backstop — more tasks than SPRINT_BATCH_MAX_TASKS[substrate] →
+   *   5. CAP backstop — more tasks than the effective per-substrate cap
+   *      (resolveSprintMaxTasks over the user's Settings override) →
    *      ok:false 'ship_batch_too_large' (the human gate is the primary control).
    *   6. createForRun(projectId, substrate, taskIds) → { batchId }.
    *   7. COMPARE-AND-SET — UPDATE workflow_runs SET batch_id WHERE id AND
@@ -3249,7 +3267,7 @@ export class McpQueryHandler {
         }
 
         // 5. CAP backstop (defense — the human gate is the primary control).
-        if (taskIds.length > SPRINT_BATCH_MAX_TASKS[substrate]) {
+        if (taskIds.length > resolveSprintMaxTasks(this.deps.getSprintMaxTasks?.(), substrate)) {
           return { ok: false, error: 'ship_batch_too_large' };
         }
 

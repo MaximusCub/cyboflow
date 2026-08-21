@@ -3,6 +3,7 @@ import type { AssistantContextRetention } from '../../../shared/types/agentThrea
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
+import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
@@ -78,6 +79,12 @@ export interface AppConfig {
   // seeded into the constructor defaults so existing config.json files stay
   // byte-identical.
   fanOutDispatch?: FanOutDispatch;
+  // Per-substrate override of the sprint task-selection cap N (how many tasks may
+  // be multi-selected into ONE sprint batch). SPARSE: an absent member falls back
+  // to SPRINT_BATCH_MAX_TASKS_DEFAULTS for that substrate. Always read through
+  // resolveSprintMaxTasks() — never the raw map — so the picker's client-side cap
+  // matches the server-side 400 in runs.start.
+  sprintMaxTasks?: SprintMaxTasksOverrides;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Floors to 'worktree' when unset. The launch wizard's Advanced "Workspace"
   // tri-state overrides it per launch; workflow-host sessions always pin

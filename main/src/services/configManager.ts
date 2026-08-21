@@ -35,6 +35,10 @@ import {
 } from '../../../shared/types/worktreeMode';
 import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../shared/types/artifacts';
 import {
+  clampSprintMaxTasks,
+  type SprintMaxTasksOverrides,
+} from '../../../shared/types/sprintBatch';
+import {
   VISUAL_VERIFY_DEFAULTS,
   type ResolvedVisualVerifyConfig,
 } from '../../../shared/types/visualVerification';
@@ -630,6 +634,30 @@ export class ConfigManager extends EventEmitter {
   getFanOutDispatch(): FanOutDispatch {
     const value = this.config.fanOutDispatch;
     return isFanOutDispatch(value) ? value : INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT;
+  }
+
+  /**
+   * The user's per-substrate sprint task-selection cap override, SANITIZED: each
+   * member is clamped to [SPRINT_MAX_TASKS_MIN, SPRINT_MAX_TASKS_MAX] and a
+   * non-numeric member (config.json is hand-editable) is DROPPED rather than
+   * coerced, so the consumer falls back to the built-in default for that
+   * substrate. Returns `{}` when the block is absent — which is the byte-identical
+   * default, since `sprintMaxTasks` is deliberately NOT seeded into the
+   * constructor defaults.
+   *
+   * Consumers must not read this map directly for a decision: pass it to
+   * `resolveSprintMaxTasks(overrides, substrate)`, the one place the override and
+   * the built-in default are layered.
+   */
+  getSprintMaxTasks(): SprintMaxTasksOverrides {
+    const stored = this.config.sprintMaxTasks;
+    if (!stored || typeof stored !== 'object') return {};
+    const out: SprintMaxTasksOverrides = {};
+    for (const substrate of ['sdk', 'interactive'] as const) {
+      const clamped = clampSprintMaxTasks(stored[substrate]);
+      if (clamped !== null) out[substrate] = clamped;
+    }
+    return out;
   }
 
   /**

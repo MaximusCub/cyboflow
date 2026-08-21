@@ -40,7 +40,7 @@ import {
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
-import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
+import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
 import { countPendingBlockingReviewItems } from '../../reviewItemListing';
 import { ReviewItemRouter } from '../../reviewItemRouter';
@@ -1227,7 +1227,7 @@ export const runsRouter = router({
       if (input.taskIds !== undefined) {
         const forced = ctx.getForcedSubstrate?.() ?? null;
         const capSubstrate: CliSubstrate = forced ?? launchSubstrate ?? 'sdk';
-        const max = SPRINT_BATCH_MAX_TASKS[capSubstrate];
+        const max = resolveSprintMaxTasks(ctx.getSprintMaxTasks?.(), capSubstrate);
         if (input.taskIds.length > max) {
           throw new TRPCError({
             code: 'BAD_REQUEST',

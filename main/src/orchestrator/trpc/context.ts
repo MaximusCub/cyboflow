@@ -14,6 +14,7 @@ import type { NativeGrantProbe, VerificationModality } from '../../../../shared/
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { SprintMaxTasksOverrides } from '../../../../shared/types/sprintBatch';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
@@ -306,6 +307,19 @@ export interface ContextDeps {
   getForcedSubstrate?: () => CliSubstrate | null;
 
   /**
+   * Reads the user's per-substrate sprint task-cap override
+   * (ConfigManager.getSprintMaxTasks), already clamped.
+   *
+   * Injected from `main/src/index.ts` as a closure over the ConfigManager
+   * singleton — a plain callback, like `getForcedSubstrate` above, so the
+   * standalone-typecheck invariant holds (no 'main/src/services/*' import here).
+   * `runs.start` layers it over the built-in defaults via resolveSprintMaxTasks
+   * so the server-side 400 matches the cap the picker showed. Defaults to
+   * `() => ({})` (no override → the built-in per-substrate defaults).
+   */
+  getSprintMaxTasks?: () => SprintMaxTasksOverrides;
+
+  /**
    * Captures the diff of an absolute worktree path. With `baseRef` (the run's
    * base_sha) it diffs the working tree against that ref — surfacing committed,
    * uncommitted, and untracked changes since launch — which is what a flow that
@@ -422,6 +436,7 @@ export function createContext(deps: ContextDeps = {}): {
   workflowRegistry?: WorkflowRegistryLike;
   agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
+  getSprintMaxTasks: () => SprintMaxTasksOverrides;
   gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
   agentThreadService?: AgentThreadServiceLike;
   agentThreadStore?: AgentThreadStoreLike;
@@ -435,6 +450,7 @@ export function createContext(deps: ContextDeps = {}): {
     workflowRegistry,
     agentOverrideRouter,
     getForcedSubstrate = () => null,
+    getSprintMaxTasks = () => ({}),
     gitDiff,
     agentThreadService,
     agentThreadStore,
@@ -449,6 +465,7 @@ export function createContext(deps: ContextDeps = {}): {
     workflowRegistry,
     agentOverrideRouter,
     getForcedSubstrate,
+    getSprintMaxTasks,
     gitDiff,
     agentThreadService,
     agentThreadStore,

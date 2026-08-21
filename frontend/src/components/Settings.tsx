@@ -10,6 +10,11 @@ import type { AgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import {
+  clampSprintMaxTasks,
+  resolveSprintMaxTasks,
+  SPRINT_BATCH_MAX_TASKS_DEFAULTS,
+} from '../../../shared/types/sprintBatch';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { useConfigStore } from '../stores/configStore';
@@ -134,6 +139,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Auto-surface idle PTY quick sessions into the human review queue (default ON).
   // A blocking human_task is minted for an interactive quick session that finished
   // a turn and has sat unviewed longer than idleReviewThresholdMinutes.
+  // Sprint task-selection cap, per substrate. `number | ''` so clearing the field
+  // renders empty (never value={NaN}); the save path floors an empty/invalid entry
+  // back to the built-in default and clamps the rest.
+  const [sprintMaxTasksSdk, setSprintMaxTasksSdk] = useState<number | ''>(
+    SPRINT_BATCH_MAX_TASKS_DEFAULTS.sdk,
+  );
+  const [sprintMaxTasksInteractive, setSprintMaxTasksInteractive] = useState<number | ''>(
+    SPRINT_BATCH_MAX_TASKS_DEFAULTS.interactive,
+  );
   const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
@@ -207,6 +221,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
       setQuickSessionDefaultSubstrate(data.quickSessionDefaultSubstrate ?? 'interactive');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
+      // Show the effective cap: an absent/invalid override renders as the built-in
+      // default, which is exactly what a launch would use.
+      setSprintMaxTasksSdk(resolveSprintMaxTasks(data.sprintMaxTasks, 'sdk'));
+      setSprintMaxTasksInteractive(resolveSprintMaxTasks(data.sprintMaxTasks, 'interactive'));
       setComputeCostFromRates(data.computeCostFromRates ?? false);
       setAutoGradeVariantRuns(data.autoGradeVariantRuns ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
@@ -290,6 +308,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         quickSessionWorktreeMode,
         quickSessionDefaultSubstrate,
         codeReviewEvalEnabled,
+        // Sprint task-selection cap. An empty/NaN field falls back to the built-in
+        // default for that substrate and every value is clamped, so a typo cannot
+        // persist a 0 (which would make every sprint launch impossible) or a
+        // 10_000. The IPC handler re-clamps — this is the friendly half.
+        sprintMaxTasks: {
+          sdk: clampSprintMaxTasks(sprintMaxTasksSdk) ?? SPRINT_BATCH_MAX_TASKS_DEFAULTS.sdk,
+          interactive:
+            clampSprintMaxTasks(sprintMaxTasksInteractive) ?? SPRINT_BATCH_MAX_TASKS_DEFAULTS.interactive,
+        },
         computeCostFromRates,
         autoGradeVariantRuns,
         // Empty field → undefined → the getter floors to the default (config.json
@@ -733,6 +760,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onQuickSessionWorktreeModeChange={setQuickSessionWorktreeMode}
               quickSessionDefaultSubstrate={quickSessionDefaultSubstrate}
               onQuickSessionDefaultSubstrateChange={setQuickSessionDefaultSubstrate}
+              sprintMaxTasksSdk={sprintMaxTasksSdk}
+              onSprintMaxTasksSdkChange={setSprintMaxTasksSdk}
+              sprintMaxTasksInteractive={sprintMaxTasksInteractive}
+              onSprintMaxTasksInteractiveChange={setSprintMaxTasksInteractive}
               codeReviewEvalEnabled={codeReviewEvalEnabled}
               onCodeReviewEvalEnabledChange={setCodeReviewEvalEnabled}
               autoGradeVariantRuns={autoGradeVariantRuns}

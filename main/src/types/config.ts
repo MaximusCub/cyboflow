@@ -1,6 +1,7 @@
 import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
@@ -129,6 +130,14 @@ export interface AppConfig {
   // seeded into the constructor defaults so existing config.json files stay
   // byte-identical.
   fanOutDispatch?: FanOutDispatch;
+  // Per-substrate override of the sprint task-selection cap N (how many tasks may
+  // be multi-selected into ONE sprint batch). SPARSE: an absent member falls back
+  // to SPRINT_BATCH_MAX_TASKS_DEFAULTS for that substrate, so an install that never
+  // touches the setting keeps the built-in 15 (sdk) / 10 (interactive). Read via
+  // getSprintMaxTasks() and resolved with resolveSprintMaxTasks() — values are
+  // clamped to [SPRINT_MAX_TASKS_MIN, SPRINT_MAX_TASKS_MAX] on read because
+  // config.json is hand-editable. NOT seeded into the constructor defaults.
+  sprintMaxTasks?: SprintMaxTasksOverrides;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Read via getQuickSessionWorktreeMode() (floor 'worktree') by the
   // sessions:create-quick handler when the request omits worktreeMode. NOT
@@ -292,6 +301,8 @@ export interface UpdateConfigRequest {
   // seeded into the constructor defaults so existing config.json files stay
   // byte-identical.
   fanOutDispatch?: FanOutDispatch;
+  // Per-substrate override of the sprint task-selection cap (see AppConfig.sprintMaxTasks).
+  sprintMaxTasks?: SprintMaxTasksOverrides;
   // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global default CLI substrate for new QUICK sessions (see AppConfig.quickSessionDefaultSubstrate).
