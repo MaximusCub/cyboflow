@@ -463,9 +463,27 @@ export class PlaneAdapter implements TrackerAdapter {
    * Not part of `TrackerAdapter`: the marker is stripped from every description
    * this adapter returns, so the match cannot be performed by the sync core
    * over a mapped `TrackerIssue` — it has to read the raw payload here.
+   *
+   * `scope.updatedAfterIso` is a COST bound on the scan, applied CLIENT-SIDE:
+   * the project listing is one paginated walk either way, but a candidate older
+   * than the floor is skipped before the per-candidate detail re-fetch below,
+   * which is where the GETs actually accumulate. Deliberately not pushed onto
+   * the request as a Plane filter — this adapter's list params are the ones its
+   * live API was verified against, and a filter Plane silently ignored would
+   * cost nothing, while one it honoured differently than assumed would hide a
+   * landed create and duplicate it.
    */
   async findIssueByClientKey(
-    scope: { containerId: string | null; parentExternalId: string | null },
+    scope: {
+      containerId: string | null;
+      parentExternalId: string | null;
+      /**
+       * A floor on the candidates' `updated_at`: a work item this create
+       * produced cannot have been touched before the create was enqueued.
+       * Optional — omitting it scans every candidate.
+       */
+      updatedAfterIso?: string | null;
+    },
     clientKey: string
   ): Promise<TrackerIssue | null> {
     // Project-scoped by construction: a Plane sub-issue always lives in its
@@ -488,8 +506,13 @@ export class PlaneAdapter implements TrackerAdapter {
       { expand: 'assignees' }
     );
     const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
+    const floorMs =
+      typeof scope.updatedAfterIso === 'string' ? Date.parse(scope.updatedAfterIso) : Number.NaN;
     for (const candidate of raw) {
       if (parentIssueId !== null && candidate.parent !== parentIssueId) continue;
+      // An unparseable floor (or none) leaves every candidate in the scan — the
+      // bound may only ever skip work, never decide the answer.
+      if (!Number.isNaN(floorMs) && Date.parse(candidate.updated_at) < floorMs) continue;
       // Documented choice: Plane's list payload does not reliably carry any
       // description field, and the marker lives only in the description — so a
       // candidate that arrived without one is re-fetched from the detail

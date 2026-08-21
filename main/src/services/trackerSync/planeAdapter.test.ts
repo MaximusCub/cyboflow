@@ -764,6 +764,63 @@ describe('PlaneAdapter.findIssueByClientKey', () => {
     expect(found?.parentExternalId).toBeNull();
   });
 
+  it('skips pre-floor candidates before paying for their detail fetch', async () => {
+    // The floor is a COST bound: the project listing is one walk either way, but
+    // a candidate that predates the create cannot be ours, and re-fetching it
+    // for a description is where this scan's GETs actually accumulate.
+    const { fetchImpl, calls } = listFetch(
+      [
+        // No description on either row, so both would otherwise be re-fetched.
+        { ...childBase, id: 'ancient', name: 'Sub task', parent: 'parentIss', updated_at: '2026-01-01T00:00:00.000Z' },
+        { ...childBase, id: 'ours', name: 'Sub task', parent: 'parentIss' },
+      ],
+      {
+        ...childBase,
+        id: 'ours',
+        name: 'Sub task',
+        parent: 'parentIss',
+        description_html: `<p>mine</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`,
+      }
+    );
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const found = await adapter.findIssueByClientKey(
+      {
+        containerId: 'proj1',
+        parentExternalId: 'proj1/parentIss',
+        updatedAfterIso: '2026-06-01T00:00:00.000Z',
+      },
+      CLIENT_KEY
+    );
+
+    expect(found?.externalId).toBe('proj1/ours');
+    expect(calls.some((c) => c.url.includes('/work-items/ancient/'))).toBe(false);
+  });
+
+  it('keeps every candidate when the floor is absent or unparseable', async () => {
+    // The bound may only ever skip work: a floor nobody can read must not be
+    // allowed to decide that a landed create is not there.
+    const rows = [
+      {
+        ...childBase,
+        id: 'ours',
+        name: 'Sub task',
+        parent: 'parentIss',
+        updated_at: '2026-01-01T00:00:00.000Z',
+        description_html: `<p>mine</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`,
+      },
+    ];
+    for (const floor of [undefined, 'not-a-date']) {
+      const { fetchImpl } = listFetch(rows);
+      const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+      const found = await adapter.findIssueByClientKey(
+        { containerId: 'proj1', parentExternalId: 'proj1/parentIss', updatedAfterIso: floor },
+        CLIENT_KEY
+      );
+      expect(found?.externalId).toBe('proj1/ours');
+    }
+  });
+
   it('throws rather than answering "not there" when it has neither a parent nor a container', async () => {
     const { fetchImpl } = listFetch([]);
     const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });

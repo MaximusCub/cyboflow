@@ -1234,6 +1234,158 @@ describe('DartAdapter.findIssueByClientKey', () => {
   });
 });
 
+describe('DartAdapter recovery-scan cost bounds', () => {
+  const marked = task({ id: 'foundfoundfo', description: `Body\n\ncyboflow-sync: ${CLIENT_KEY}` });
+
+  /**
+   * `GET /tasks/list` that HONOURS `updated_at_after` the way Dart does, so an
+   * assertion on which tasks came back is a pin on the request the adapter
+   * actually sent rather than on the fixture.
+   */
+  function sinceAwareListRoute(
+    rows: Record<string, unknown>[],
+    seen: { since: string | null | undefined }[],
+  ): RouteHandler {
+    return {
+      test: (m, p) => m === 'GET' && p.endsWith('/tasks/list'),
+      respond: (_b, params) => {
+        seen.push({ since: params.get('updated_at_after') });
+        // The description fast path must MISS, so the fallback scan runs.
+        if (params.get('description') !== null) {
+          return { status: 200, body: { count: 0, next: null, results: [] } };
+        }
+        const after = params.get('updated_at_after');
+        const kept =
+          after === null
+            ? rows
+            : rows.filter((r) => Date.parse(String(r.updatedAt)) >= Date.parse(after));
+        return { status: 200, body: { count: kept.length, next: null, results: kept } };
+      },
+    };
+  }
+
+  it('sends the caller’s time floor on the fallback scan, never fetching details for older tasks', async () => {
+    // The floor is what turns "detail-fetch every task on the board" into
+    // "detail-fetch the ones that could possibly be ours".
+    const floor = '2026-08-15T00:00:00.000Z';
+    const seen: { since: string | null | undefined }[] = [];
+    const rows = [
+      concise({ id: 'ancient00000', updatedAt: '2026-01-01T00:00:00Z' }),
+      concise({ id: 'foundfoundfo', updatedAt: '2026-08-16T10:00:00Z' }),
+    ];
+    const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
+      sinceAwareListRoute(rows, seen),
+      makeDetailRoute({ ancient00000: task({ id: 'ancient00000' }), foundfoundfo: marked }),
+    ]);
+
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: BOARD, parentExternalId: null, updatedAfterIso: floor },
+      CLIENT_KEY,
+    );
+
+    expect(found?.externalId).toBe('foundfoundfo');
+    // The fast path is unbounded; only the fallback scan carries the floor.
+    expect(seen).toEqual([{ since: null }, { since: floor }]);
+    // The pre-floor task never cost a detail fetch.
+    expect(calls.filter(isDetailCall).map((c) => new URL(c.url).pathname)).toEqual([
+      '/api/v0/public/tasks/foundfoundfo',
+    ]);
+  });
+
+  it('scans the WHOLE scope when no floor is given', async () => {
+    const seen: { since: string | null | undefined }[] = [];
+    const rows = [concise({ id: 'ancient00000', updatedAt: '2026-01-01T00:00:00Z' })];
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      sinceAwareListRoute(rows, seen),
+      makeDetailRoute({
+        ancient00000: task({ id: 'ancient00000', description: `x\n\ncyboflow-sync: ${CLIENT_KEY}` }),
+      }),
+    ]);
+
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: BOARD, parentExternalId: null },
+      CLIENT_KEY,
+    );
+
+    // An omitted bound must never narrow anything: this task predates any
+    // plausible floor and is still found.
+    expect(found?.externalId).toBe('ancient00000');
+    expect(seen).toEqual([{ since: null }, { since: null }]);
+  });
+
+  it('judges the scan in bounded batches, stopping at the batch that matches', async () => {
+    // Sequentially, a miss on a large board is the whole board one GET at a
+    // time. Batched, the in-flight ceiling is hydration's — and the scan still
+    // stops at the first batch carrying the marker instead of walking on.
+    const rows = Array.from({ length: 40 }, (_, i) => concise({ id: `scan${String(i).padStart(8, '0')}` }));
+    const detail: Record<string, unknown> = {};
+    for (const row of rows) detail[row.id as string] = task({ id: row.id });
+    // The marker sits in the FIRST batch, at index 1.
+    detail['scan00000001'] = task({ id: 'scan00000001', description: `x\n\ncyboflow-sync: ${CLIENT_KEY}` });
+    const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
+      sinceAwareListRoute(rows, []),
+      makeDetailRoute(detail),
+    ]);
+
+    const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+      { containerId: BOARD, parentExternalId: null },
+      CLIENT_KEY,
+    );
+
+    expect(found?.externalId).toBe('scan00000001');
+    // Exactly one batch of six, not forty — and not two, which is what dropping
+    // the short-circuit would cost.
+    expect(calls.filter(isDetailCall)).toHaveLength(6);
+  });
+
+  it('fetches a task detail ONCE per pass, and never remembers a 404', async () => {
+    // One adapter instance IS one sync pass, and the recovery scan and the
+    // hydration walk routinely want the same task. A remembered ABSENCE would be
+    // a different thing entirely: absence is what this adapter reads as proof —
+    // of a create that never landed, of a trashed parent — and trash state can
+    // change under a pass.
+    const { fetchImpl, calls } = scriptedFetch([
+      configRoute(),
+      makeDetailRoute({ AbCdEfGhIjKl: task() }),
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+
+    expect((await adapter.getIssue('AbCdEfGhIjKl'))?.externalId).toBe('AbCdEfGhIjKl');
+    expect((await adapter.getIssue('AbCdEfGhIjKl'))?.externalId).toBe('AbCdEfGhIjKl');
+    expect(calls.filter(isDetailCall)).toHaveLength(1);
+
+    expect(await adapter.getIssue('missing00000')).toBeNull();
+    expect(await adapter.getIssue('missing00000')).toBeNull();
+    expect(calls.filter(isDetailCall)).toHaveLength(3);
+  });
+
+  it('drops the memoized copy of a task it just wrote to', async () => {
+    // The drain writes state early in a pass and the inbound merge hydrates the
+    // same board later in it. Serving the pre-write copy there would diff
+    // against the baseline our own write just stamped and read as the remote
+    // moving backwards.
+    const { fetchImpl, calls } = scriptedFetch([
+      makeDetailRoute({ AbCdEfGhIjKl: task() }),
+      {
+        test: (m, p) => m === 'PUT' && p.endsWith('/tasks/AbCdEfGhIjKl'),
+        respond: () => ({ status: 200, body: { item: task({ status: 'Done' }) } }),
+      },
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+
+    await adapter.getIssue('AbCdEfGhIjKl');
+    await adapter.updateIssueState('AbCdEfGhIjKl', 'Done');
+    await adapter.getIssue('AbCdEfGhIjKl');
+
+    // Two reads, both of which reached the network (isDetailCall matches the
+    // PUT's path too, so the method filter is what makes this a read count).
+    expect(calls.filter((c) => c.method === 'GET' && isDetailCall(c))).toHaveLength(2);
+  });
+});
+
 describe('DartAdapter transport failures', () => {
   it('surfaces a timeout as a NULL-status TrackerApiError, keeping it retryable', async () => {
     // outboxWorker only terminalizes a 4xx, so a null status takes the backoff

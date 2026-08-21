@@ -147,10 +147,12 @@ const SYNC_MARKER_KEY_RE =
 const PAGE_SIZE = 100;
 
 /**
- * How many `GET /tasks/{id}` hydration fetches may be in flight at once.
- * Bounded because a full first import of a large dartboard issues one per task
- * (see the file header, point 2) and Dart publishes no rate-limit headers to
- * pace against — so the ceiling is ours to choose rather than to discover.
+ * How many `GET /tasks/{id}` detail fetches may be in flight at once, on either
+ * path that issues one per task: hydration ({@link DartAdapter.hydrate}) and the
+ * recovery scan ({@link DartAdapter.firstMarkedTask}). Bounded because a full
+ * first import of a large dartboard issues one per task (see the file header,
+ * point 2) and Dart publishes no rate-limit headers to pace against — so the
+ * ceiling is ours to choose rather than to discover.
  */
 const HYDRATION_CONCURRENCY = 6;
 
@@ -236,6 +238,11 @@ export class DartAdapter implements TrackerAdapter {
   private readonly requestTimeoutMs: number;
   /** `GET /config` is one call serving containers, states and validation; cached per pass. */
   private configCache: DartConfigWire | null = null;
+  /**
+   * `GET /tasks/{id}` results, keyed by id — see
+   * {@link DartAdapter.fetchTaskWire} for what may and may not go in here.
+   */
+  private readonly taskCache = new Map<string, DartTaskWire>();
 
   constructor(options: DartAdapterOptions) {
     this.apiKey = options.apiKey;
@@ -484,6 +491,12 @@ export class DartAdapter implements TrackerAdapter {
     await this.request<DartWrapped<DartTaskWire>>('PUT', `/tasks/${encodeURIComponent(externalId)}`, {
       item: { id: externalId, status: stateId },
     });
+    // This pass may still READ this task (the inbound merge hydrates the same
+    // board the drain just wrote to), and the memoized copy now holds the state
+    // we replaced — which the merge would diff against our own fresh baseline
+    // and read as the remote moving backwards. See
+    // {@link DartAdapter.fetchTaskWire}.
+    this.taskCache.delete(externalId);
   }
 
   /**
@@ -512,6 +525,15 @@ export class DartAdapter implements TrackerAdapter {
    * through only costs time, whereas trusting an unexpectedly-narrow filter as
    * proof of absence would duplicate a create that actually landed.
    *
+   * THREE THINGS BOUND THAT FALLBACK, none of which may narrow it enough to
+   * MISS a landed create: `scope.updatedAfterIso` drops candidates that predate
+   * the create outright (the caller supplies a deliberately generous floor —
+   * see the outbox worker's recoveryScanFloor), the surviving candidates are
+   * judged {@link HYDRATION_CONCURRENCY} at a time rather than one by one, and
+   * every detail fetch is memoized for the rest of the pass
+   * ({@link DartAdapter.fetchTaskWire}). Absent the hint the scan is the whole
+   * scope, exactly as before.
+   *
    * Not part of `TrackerAdapter`: the marker is stripped from every description
    * this adapter returns, so the match cannot be performed by the sync core over
    * a mapped `TrackerIssue` — it has to read the raw payload here.
@@ -521,6 +543,12 @@ export class DartAdapter implements TrackerAdapter {
       containerId: string | null;
       narrowKind?: TrackerNarrowKind | null;
       parentExternalId: string | null;
+      /**
+       * A floor on the candidates' `updatedAt`: a task this create produced
+       * cannot have been touched before the create was enqueued. Optional —
+       * omitting it scans the whole scope.
+       */
+      updatedAfterIso?: string | null;
     },
     clientKey: string
   ): Promise<TrackerIssue | null> {
@@ -569,9 +597,17 @@ export class DartAdapter implements TrackerAdapter {
       if (viaFilter !== null) return this.mapIssue(viaFilter);
     }
 
-    // Fall back to the full scoped scan — see the COST note above.
+    // Fall back to the full scoped scan — see the COST note above. The time
+    // floor rides on the LIST request rather than filtering its results, so it
+    // shrinks the number of rows Dart returns, not just the number this adapter
+    // then fetches details for.
+    const sinceParams: Record<string, string> =
+      typeof scope.updatedAfterIso === 'string' ? { updated_at_after: scope.updatedAfterIso } : {};
     for (const scopeParams of scopeParamSets) {
-      const all = await this.paginate<DartConciseTaskWire>('/tasks/list', scopeParams);
+      const all = await this.paginate<DartConciseTaskWire>('/tasks/list', {
+        ...scopeParams,
+        ...sinceParams,
+      });
       const viaScan = await this.firstMarkedTask(all, clientKey);
       if (viaScan !== null) return this.mapIssue(viaScan);
     }
@@ -703,20 +739,55 @@ export class DartAdapter implements TrackerAdapter {
     candidates: DartConciseTaskWire[],
     clientKey: string
   ): Promise<DartTaskWire | null> {
-    for (const candidate of candidates) {
-      const full = await this.fetchTaskWire(candidate.id);
-      if (full === null) continue;
-      if (readRecoveryClientKey(full) === clientKey.toLowerCase()) return full;
+    const wanted = clientKey.toLowerCase();
+    // BATCHED, not sequential: the full-scope fallback judges every task on the
+    // board one detail fetch at a time, and a true miss on a large board is the
+    // whole board serially. Batches of {@link HYDRATION_CONCURRENCY} keep the
+    // in-flight ceiling identical to hydration's while cutting the wall clock by
+    // that factor.
+    //
+    // ORDER IS PRESERVED WITHIN A BATCH and the scan stops at the first batch
+    // that yields a match, so the answer does not depend on which fetch settles
+    // first. Correctness never rested on order anyway — the marker is unique per
+    // clientKey, so at most one candidate can carry it — but a scan whose result
+    // varies with network timing is not one anybody can reason about later. The
+    // price is up to HYDRATION_CONCURRENCY-1 detail fetches past the match,
+    // which {@link DartAdapter.fetchTaskWire}'s cache makes free to this pass's
+    // later hydration.
+    for (let start = 0; start < candidates.length; start += HYDRATION_CONCURRENCY) {
+      const batch = candidates.slice(start, start + HYDRATION_CONCURRENCY);
+      const fetched = await Promise.all(batch.map((candidate) => this.fetchTaskWire(candidate.id)));
+      for (const full of fetched) {
+        if (full !== null && readRecoveryClientKey(full) === wanted) return full;
+      }
     }
     return null;
   }
 
-  /** Raw detail fetch; null on 404 (the task does not exist / was hard-deleted). */
+  /**
+   * Raw detail fetch; null on 404 (the task does not exist / was hard-deleted).
+   *
+   * MEMOIZED PER ADAPTER INSTANCE, which is per SYNC PASS — the sync core builds
+   * one adapter and reuses it across processAmbiguous, drainOutbox and the
+   * inbound pass, exactly as the {@link DartAdapter.getConfig} cache relies on.
+   * That is the point: this is the one call the pass can genuinely repeat, since
+   * a recovery scan and the same pass's hydration walk overlapping tasks.
+   *
+   * A 404 IS NEVER CACHED. Absence is the answer this adapter treats as proof —
+   * of a create that never landed, of a trashed parent
+   * ({@link DartAdapter.findIssueByClientKey}) — and trash state can change
+   * under a pass. A remembered "gone" would turn one moment's absence into the
+   * pass's whole truth; a remembered "present" only means the task existed a few
+   * seconds earlier, which every read in a pass already assumes.
+   */
   private async fetchTaskWire(taskId: string): Promise<DartTaskWire | null> {
+    const cached = this.taskCache.get(taskId);
+    if (cached !== undefined) return cached;
     const response = await this.send('GET', `/tasks/${encodeURIComponent(taskId)}`);
     if (response.status === 404) return null;
     this.assertOk(response);
     const wrapped = (await response.json()) as DartWrapped<DartTaskWire>;
+    this.taskCache.set(taskId, wrapped.item);
     return wrapped.item;
   }
 

@@ -791,6 +791,8 @@ export async function resolveAmbiguous(
           containerId: selection?.containerId ?? null,
           narrowKind: selection?.narrowKind ?? null,
           parentExternalId: payload?.parentExternalId ?? null,
+          // A cost bound, not a correctness one — see {@link recoveryScanFloor}.
+          updatedAfterIso: recoveryScanFloor(row),
         });
   } catch (err) {
     if (err instanceof TrackerAuthError) {
@@ -884,9 +886,45 @@ interface ClientKeyRecoverableAdapter {
       /** What `containerId` names (the selection's narrow kind), or null when only a parent scopes the search. */
       narrowKind: TrackerNarrowKind | null;
       parentExternalId: string | null;
+      /**
+       * A floor on the candidates' remote `updatedAt` (see
+       * {@link recoveryScanFloor}) — the adapter may skip anything older
+       * outright. OPTIONAL: an adapter free to ignore it still searches its
+       * whole scope, which is only slower, never wrong.
+       */
+      updatedAfterIso?: string | null;
     },
     clientKey: string,
   ): Promise<TrackerIssue | null>;
+}
+
+/**
+ * How far BEFORE the outbox row was written a landed create's `updatedAt` is
+ * still believed. A whole day, deliberately: the row's `created_at` is OUR
+ * clock and `updated_at` is the PROVIDER'S, and the two are related by nothing
+ * stronger than both parties roughly knowing the time. Missing the real task
+ * re-creates the duplicate this entire mechanism exists to prevent, whereas a
+ * floor that is a day too generous just leaves a few more candidates in the
+ * scan.
+ */
+const RECOVERY_SCAN_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The earliest remote `updatedAt` a task created by THIS row could carry: the
+ * row's own enqueue time, less {@link RECOVERY_SCAN_SKEW_MS}. A create cannot
+ * have touched anything before it was queued, so everything older than this is
+ * a candidate no recovery scan needs to fetch details for.
+ *
+ * Returns undefined for a row whose timestamp will not parse — an unbounded
+ * scan is the correct fallback, since the alternative is a floor derived from a
+ * value nobody can vouch for.
+ */
+function recoveryScanFloor(row: TrackerOutboxRow): string | undefined {
+  const raw = row.created_at;
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  const parsed = new Date(raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+  return new Date(parsed.getTime() - RECOVERY_SCAN_SKEW_MS).toISOString();
 }
 
 function supportsClientKeyRecovery(
@@ -922,6 +960,7 @@ async function findByClientKey(
     containerId: string | null;
     narrowKind: TrackerNarrowKind | null;
     parentExternalId: string | null;
+    updatedAfterIso?: string | null;
   },
 ): Promise<TrackerIssue | null> {
   if (!supportsClientKeyRecovery(adapter)) {

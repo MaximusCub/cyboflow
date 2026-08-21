@@ -242,6 +242,7 @@ class FakeMarkerAdapter extends FakeAdapter {
     containerId: string | null;
     narrowKind?: TrackerNarrowKind | null;
     parentExternalId: string | null;
+    updatedAfterIso?: string | null;
   }> = [];
 
   async findIssueByClientKey(
@@ -249,6 +250,7 @@ class FakeMarkerAdapter extends FakeAdapter {
       containerId: string | null;
       narrowKind?: TrackerNarrowKind | null;
       parentExternalId: string | null;
+      updatedAfterIso?: string | null;
     },
     clientKey: string,
   ): Promise<TrackerIssue | null> {
@@ -464,6 +466,16 @@ function enqueueCreate(connectionId: string, entityId: string, clientKey: string
 
 function fetchOutbox(id: number): TrackerOutboxRow {
   return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as TrackerOutboxRow;
+}
+
+/**
+ * The `updatedAfterIso` floor a recovery lookup for this row must carry: its
+ * own enqueue time, less the day of clock skew the worker allows between our
+ * `created_at` and the provider's `updated_at`.
+ */
+function expectedScanFloor(rowId: number): string {
+  const createdAt = fetchOutbox(rowId).created_at;
+  return new Date(Date.parse(`${createdAt.replace(' ', 'T')}Z`) - 24 * 60 * 60 * 1000).toISOString();
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,10 +1342,34 @@ describe('processAmbiguous', () => {
     // Scoped by the connection's source container, with NO parent constraint:
     // a top-level issue has no parent to key on. The narrow KIND rides along so
     // an adapter never has to guess what the container id names (a Dart space
-    // and a board can share a title).
+    // and a board can share a title), and the scan floor bounds how much of that
+    // container the adapter has to fetch details for.
     expect(adapter.clientKeyScopes).toEqual([
-      { containerId: SELECTION.containerId, narrowKind: SELECTION.narrowKind, parentExternalId: null },
+      {
+        containerId: SELECTION.containerId,
+        narrowKind: SELECTION.narrowKind,
+        parentExternalId: null,
+        updatedAfterIso: expectedScanFloor(row.id),
+      },
     ]);
+  });
+
+  it('bounds the recovery scan a DAY BEFORE the row was enqueued, never after it', async () => {
+    // The floor is what turns a full-board scan into a slice of it, so it must
+    // sit far enough back that the provider's own clock cannot push a landed
+    // create underneath it — missing one re-creates the duplicate this whole
+    // mechanism exists to prevent.
+    const connection = seedConnection({ provider: 'plane' });
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    makeAmbiguous(row.id, connection.id);
+    const adapter = new FakeMarkerAdapter();
+
+    await processAmbiguous(makeDeps(adapter), connection);
+
+    const sent = adapter.clientKeyScopes[0].updatedAfterIso;
+    expect(sent).toBe(expectedScanFloor(row.id));
+    const enqueuedAtMs = Date.parse(`${fetchOutbox(row.id).created_at.replace(' ', 'T')}Z`);
+    expect(enqueuedAtMs - Date.parse(sent as string)).toBe(24 * 60 * 60 * 1000);
   });
 
   /** A board + one idea row, so a recovered push has something to adopt onto. */
