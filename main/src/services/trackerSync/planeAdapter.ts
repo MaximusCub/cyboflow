@@ -48,6 +48,7 @@ import type {
   TrackerAdapterCapabilities,
   FetchLike,
   IssueDraft,
+  IssueContentPatch,
 } from './adapterTypes';
 import {
   TrackerApiError,
@@ -76,6 +77,17 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   // every create stamps into the description — see SYNC_MARKER_PREFIX and
   // {@link PlaneAdapter.findIssueByClientKey}.
   idempotentCreate: false,
+  // Plane has no issue-type field at all (category is Dart-only, per the
+  // locked scope decision — no label emulation in v1).
+  contentWrite: { title: true, description: true, priority: true, category: false },
+  // UNPROBED: Phase 0's P1 could not run (the stored token was invalid, 403
+  // "Given API token is not valid"), and Plane's public v1 API documents no
+  // archive endpoint at all — so this ships as 'none' per the pre-agreed
+  // fallback rather than guessing at an unverified PATCH. Revisit if Plane
+  // ships one, or once P1 re-runs against a live workspace with a fresh
+  // token. `archiveIssue` below throws accordingly — it must be unreachable,
+  // since Phase 5 gates every archive enqueue on this capability.
+  archive: 'none',
 };
 
 /**
@@ -455,6 +467,9 @@ export class PlaneAdapter implements TrackerAdapter {
     if (draft.stateId !== undefined) {
       body.state = draft.stateId;
     }
+    if (draft.priority !== undefined) {
+      body.priority = draft.priority;
+    }
     const raw = await this.requestWorkItem<PlaneIssueWire>(
       'POST',
       (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/`,
@@ -470,6 +485,73 @@ export class PlaneAdapter implements TrackerAdapter {
       'PATCH',
       (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/${issueId}/`,
       { state: stateId }
+    );
+  }
+
+  /**
+   * `PATCH` with only the keys `patch` actually carries (checked via
+   * `!== undefined`, per `IssueContentPatch`'s contract). `description` goes
+   * through the SAME markdown→html conversion `createIssue` uses
+   * ({@link toDescriptionHtml}) — with NO separate marker-wrapping step: the
+   * caller already composed the full body, marker included where one is
+   * needed, so this sends exactly what it converts, unlike
+   * {@link toCreateDescriptionHtml} which appends one unconditionally. `null`
+   * clears the description to Plane's own empty-body shape ({@link
+   * EMPTY_PARAGRAPH}), matching how an empty draft body is represented on
+   * create.
+   *
+   * Returns the PATCH response mapped through the same {@link mapIssue} path
+   * every other read uses — the echo-suppression baseline's stamp source
+   * (invariant 1); Plane's stamp-from-response is what keeps the
+   * plaintext-ified html round trip (this API does not preserve markdown
+   * verbatim) from generating phantom edits on the next inbound pass.
+   *
+   * UNVERIFIED AGAINST A LIVE WORKSPACE: Phase 0's P2/P3 probes could not run
+   * (the stored token was invalid — see `CAPABILITIES.archive`'s note), so
+   * this is implemented from Plane's documented lowercase priority enum and
+   * the existing create-path `description_html` precedent. Re-run P2/P3
+   * before any Plane live smoke once a fresh token is connected.
+   */
+  async updateIssueContent(externalId: string, patch: IssueContentPatch): Promise<TrackerIssue | null> {
+    const { projectId, issueId } = splitExternalId(externalId);
+    const body: Record<string, unknown> = {};
+    if (patch.title !== undefined) {
+      body.name = patch.title;
+    }
+    if (patch.description !== undefined) {
+      body.description_html =
+        patch.description === null ? EMPTY_PARAGRAPH : toDescriptionHtml(patch.description);
+    }
+    if (patch.priority !== undefined) {
+      body.priority = patch.priority;
+    }
+    const raw = await this.requestWorkItem<PlaneIssueWire>(
+      'PATCH',
+      (segment) => `/workspaces/${this.workspaceSlug}/projects/${projectId}/${segment}/${issueId}/`,
+      body
+    );
+    const identifier = await this.getProjectIdentifier(projectId);
+    return this.mapIssue(projectId, identifier, raw);
+  }
+
+  /**
+   * UNSUPPORTED — throws unconditionally. `capabilities.archive === 'none'`:
+   * Plane's public v1 API documents no archive endpoint, and Phase 0's P1
+   * probe (which would have tested `PATCH {archived_at}`) could not run
+   * against a live workspace (stored token invalid). This method must be
+   * unreachable in practice — the caller (Phase 5) gates every
+   * `archive_issue` enqueue on the capability, so a call reaching here would
+   * itself be the bug. Plane's `DELETE` (hard delete) is never called from
+   * any path in this adapter, archive included — see the locked scope
+   * decision that outbound archive is never a hard delete.
+   */
+  async archiveIssue(_externalId: string): Promise<void> {
+    throw new TrackerApiError(
+      PROVIDER,
+      'Plane archive is unsupported: no verified archive endpoint exists in the public v1 API ' +
+        '(Phase 0 probe P1 could not run — the stored token was invalid). The caller must gate on ' +
+        "capabilities.archive === 'none' before ever calling this.",
+      null
     );
   }
 

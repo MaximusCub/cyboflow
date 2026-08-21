@@ -1140,6 +1140,168 @@ describe('DartAdapter.updateIssueState', () => {
   });
 });
 
+describe('DartAdapter.updateIssueContent', () => {
+  it('PUTs only the patched keys, and returns the mapped post-write issue (the echo-suppression stamp source)', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (m, p) => m === 'PUT' && /\/tasks\/[^/]+$/.test(p),
+        respond: (body) => ({ status: 200, body: { item: task({ ...(body as { item: object }).item }) } }),
+      },
+    ]);
+    const issue = await new DartAdapter({ apiKey: 'k', fetchImpl }).updateIssueContent('AbCdEfGhIjKl', {
+      priority: 'High',
+      category: 'Bug',
+    });
+    expect(calls[0].body).toEqual({
+      item: { id: 'AbCdEfGhIjKl', priority: 'High', type: 'Bug' },
+    });
+    expect(issue?.priority).toBe('High');
+    expect(issue?.category).toBe('Bug');
+  });
+
+  it('leaves an unpatched field alone — undefined never reaches the PUT body', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (m, p) => m === 'PUT' && /\/tasks\/[^/]+$/.test(p),
+        respond: (body) => ({ status: 200, body: { item: task({ ...(body as { item: object }).item }) } }),
+      },
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).updateIssueContent('AbCdEfGhIjKl', { title: 'New title' });
+    expect(calls[0].body).toEqual({ item: { id: 'AbCdEfGhIjKl', title: 'New title' } });
+  });
+
+  it('sends description VERBATIM — the caller owns marker re-append, not this adapter', async () => {
+    const bodyWithMarker = `New body\n\ncyboflow-sync: ${CLIENT_KEY}`;
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (m, p) => m === 'PUT' && /\/tasks\/[^/]+$/.test(p),
+        respond: (body) => ({ status: 200, body: { item: task({ ...(body as { item: object }).item }) } }),
+      },
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).updateIssueContent('AbCdEfGhIjKl', {
+      description: bodyWithMarker,
+    });
+    expect((calls[0].body as { item: Record<string, unknown> }).item.description).toBe(bodyWithMarker);
+  });
+
+  it('sends null to CLEAR priority/category — Dart\'s own clearing value', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (m, p) => m === 'PUT' && /\/tasks\/[^/]+$/.test(p),
+        respond: () => ({ status: 200, body: { item: task() } }),
+      },
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).updateIssueContent('AbCdEfGhIjKl', {
+      priority: null,
+      category: null,
+    });
+    expect(calls[0].body).toEqual({ item: { id: 'AbCdEfGhIjKl', priority: null, type: null } });
+  });
+
+  it('drops the memoized copy of a task it just wrote to (invariant 10)', async () => {
+    // Same shape as the updateIssueState cache test above: a fixed GET route,
+    // so a cache hit and a cache miss return identical bodies — the only
+    // observable difference is whether the SECOND getIssue reaches the
+    // network at all.
+    const { fetchImpl, calls } = scriptedFetch([
+      makeDetailRoute({ AbCdEfGhIjKl: task() }),
+      {
+        test: (m, p) => m === 'PUT' && p.endsWith('/tasks/AbCdEfGhIjKl'),
+        respond: () => ({ status: 200, body: { item: task({ status: 'Done' }) } }),
+      },
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+
+    await adapter.getIssue('AbCdEfGhIjKl');
+    await adapter.updateIssueContent('AbCdEfGhIjKl', { title: 'x' });
+    await adapter.getIssue('AbCdEfGhIjKl');
+
+    // Both getIssue calls reached the network — nothing served from a stale cache.
+    expect(calls.filter((c) => c.method === 'GET' && isDetailCall(c))).toHaveLength(2);
+  });
+});
+
+describe('DartAdapter.archiveIssue', () => {
+  it('DELETEs /tasks/{id}', async () => {
+    const { fetchImpl, calls } = scriptedFetch([
+      {
+        test: (m, p) => m === 'DELETE' && /\/tasks\/[^/]+$/.test(p),
+        respond: () => ({ status: 200, body: { item: task() } }),
+      },
+    ]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).archiveIssue('AbCdEfGhIjKl');
+    expect(calls[0].method).toBe('DELETE');
+    expect(new URL(calls[0].url).pathname).toBe('/api/v0/public/tasks/AbCdEfGhIjKl');
+  });
+
+  it('resolves without error on a 404 — the twin was already trashed/deleted (probe D5)', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'DELETE' && /\/tasks\/[^/]+$/.test(p),
+        respond: () => ({ status: 404, body: { errors: ['Task with ID … not found'] } }),
+      },
+    ]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).archiveIssue('AbCdEfGhIjKl'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still fails loud on a genuine non-404 error', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'DELETE' && /\/tasks\/[^/]+$/.test(p),
+        respond: () => ({ status: 500, body: {} }),
+      },
+    ]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).archiveIssue('AbCdEfGhIjKl'),
+    ).rejects.toMatchObject({ name: 'TrackerApiError', status: 500 });
+  });
+
+  it('drops the memoized copy on archive too, even on the 404 idempotent path (invariant 10)', async () => {
+    const byId: Record<string, unknown> = { AbCdEfGhIjKl: task() };
+    const { fetchImpl } = scriptedFetch([
+      makeDetailRoute(byId),
+      {
+        test: (m, p) => m === 'DELETE' && /\/tasks\/[^/]+$/.test(p),
+        respond: () => {
+          delete byId.AbCdEfGhIjKl;
+          return { status: 404, body: {} };
+        },
+      },
+    ]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+
+    expect(await adapter.getIssue('AbCdEfGhIjKl')).not.toBeNull();
+    await adapter.archiveIssue('AbCdEfGhIjKl');
+    // A cached "present" copy would have hidden the trash from this pass's
+    // own next read; the cache must be dropped even though the DELETE 404'd.
+    expect(await adapter.getIssue('AbCdEfGhIjKl')).toBeNull();
+  });
+});
+
+describe('DartAdapter creates — draft priority/category', () => {
+  it('sends draft.priority/category in the item when present', async () => {
+    const { fetchImpl, calls } = scriptedFetch([configRoute(), createRoute()]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).createIssue(
+      SELECTION,
+      { title: 'T', priority: 'High', category: 'Bug' },
+      CLIENT_KEY,
+    );
+    const sent = (postBody(calls) as { item: Record<string, unknown> }).item;
+    expect(sent.priority).toBe('High');
+    expect(sent.type).toBe('Bug');
+  });
+
+  it('omits priority/type entirely when the draft does not carry them', async () => {
+    const { fetchImpl, calls } = scriptedFetch([configRoute(), createRoute()]);
+    await new DartAdapter({ apiKey: 'k', fetchImpl }).createIssue(SELECTION, { title: 'T' }, CLIENT_KEY);
+    const sent = (postBody(calls) as { item: Record<string, unknown> }).item;
+    expect(sent).not.toHaveProperty('priority');
+    expect(sent).not.toHaveProperty('type');
+  });
+});
+
 describe('DartAdapter.findIssueByClientKey', () => {
   const marked = task({ id: 'foundfoundfo', description: `Body\n\ncyboflow-sync: ${CLIENT_KEY}` });
 

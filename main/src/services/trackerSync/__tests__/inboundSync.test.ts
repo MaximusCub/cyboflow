@@ -123,6 +123,8 @@ class FakeAdapter implements TrackerAdapter {
     nativeParentAutoClose: true,
     selfHostedBaseUrl: false,
     idempotentCreate: true,
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    archive: 'trash',
   };
 
   issues: TrackerIssue[] = [];
@@ -180,6 +182,12 @@ class FakeAdapter implements TrackerAdapter {
     throw new Error('not used');
   }
   async updateIssueState(): Promise<void> {
+    throw new Error('not used');
+  }
+  async updateIssueContent(): Promise<TrackerIssue | null> {
+    throw new Error('not used');
+  }
+  async archiveIssue(): Promise<void> {
     throw new Error('not used');
   }
 }

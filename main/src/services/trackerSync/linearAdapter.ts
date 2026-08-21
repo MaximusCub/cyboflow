@@ -34,7 +34,13 @@ import type {
   TrackerIssue,
   TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
-import type { TrackerAdapter, TrackerAdapterCapabilities, FetchLike, IssueDraft } from './adapterTypes';
+import type {
+  TrackerAdapter,
+  TrackerAdapterCapabilities,
+  FetchLike,
+  IssueDraft,
+  IssueContentPatch,
+} from './adapterTypes';
 import {
   TrackerApiError,
   TrackerAuthError,
@@ -193,6 +199,14 @@ interface UpdateIssueStateResponse {
   issueUpdate: { success: boolean };
 }
 
+interface UpdateIssueContentResponse {
+  issueUpdate: { success: boolean; issue: LinearIssueNode | null };
+}
+
+interface ArchiveIssueResponse {
+  issueArchive: { success: boolean };
+}
+
 interface LinearIdEqFilter {
   eq: string;
 }
@@ -212,6 +226,24 @@ interface LinearIssueCreateInput {
   title: string;
   description?: string;
   stateId?: string;
+  /** `IssueDraft.priority`, converted to Linear's Int scale — see {@link toLinearPriorityInt}. */
+  priority?: number | null;
+}
+
+/** `IssueUpdateInput`, restricted to the fields `updateIssueContent` writes. */
+interface LinearIssueUpdateInput {
+  title?: string;
+  /**
+   * Linear takes markdown directly (no rich-format conversion, unlike Plane),
+   * so this is `IssueContentPatch.description` passed straight through —
+   * Linear never writes a recovery marker in the first place
+   * (`capabilities.idempotentCreate` is true, so there is nothing for a
+   * content write to preserve), which is why there is no marker-composition
+   * step here at all, symmetric with `createIssue`/`createSubIssue` below.
+   */
+  description?: string | null;
+  /** `IssueContentPatch.priority`, converted to Linear's Int scale — see {@link toLinearPriorityInt}. */
+  priority?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +453,42 @@ const UPDATE_ISSUE_STATE_MUTATION = `
   }
 `;
 
+/**
+ * The `updateIssueContent` write. A SEPARATE mutation from
+ * `UPDATE_ISSUE_STATE_MUTATION` rather than a shared one selecting
+ * `issue { ...ISSUE_NODE_FIELDS }` unconditionally: the state write never
+ * needs the echoed issue back (it returns void), so paying for the full
+ * selection on every state move would be pure waste. This one DOES need it —
+ * per invariant 1, the caller stamps the baseline from exactly these
+ * (post-normalizer) values, and `issueUpdate` is the only route to them.
+ */
+const UPDATE_ISSUE_CONTENT_MUTATION = `
+  mutation UpdateIssueContent($id: String!, $input: IssueUpdateInput!) {
+    issueUpdate(id: $id, input: $input) {
+      success
+      issue {
+${ISSUE_NODE_FIELDS}
+      }
+    }
+  }
+`;
+
+/**
+ * `issueArchive(trash: true)` — the ONLY route probe L1 found that actually
+ * archives: `issueUpdate({ trashed: true })` is REJECTED outright ("invalid
+ * trashed state"), so `issueUpdate` must never be used for this. `success`
+ * is all this needs to select — `archiveIssue` returns void, and the probe
+ * confirmed a direct `issue(id)` lookup still resolves post-archive if a
+ * caller ever needs the echoed state (nothing here does).
+ */
+const ARCHIVE_ISSUE_MUTATION = `
+  mutation ArchiveIssue($id: String!) {
+    issueArchive(id: $id, trash: true) {
+      success
+    }
+  }
+`;
+
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
@@ -505,6 +573,23 @@ function deriveInitials(name: string): string {
  */
 function mapPriority(value: number | null): string | null {
   return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : null;
+}
+
+/**
+ * The write-side inverse of {@link mapPriority}: a provider-raw token
+ * (`'0'..'4'`, already mapped by the caller — see `IssueDraft.priority` /
+ * `IssueContentPatch.priority`) to the Int Linear's mutations take.
+ * `undefined` (field not present in the draft/patch) stays `undefined` so the
+ * caller's "leave alone" / "provider default" intent survives into the
+ * GraphQL variables unchanged; `null` passes through as-is (Linear's
+ * `IssueUpdateInput.priority`/`IssueCreateInput.priority` are nullable Ints)
+ * even though in practice the priority mapping never actually produces `null`
+ * for this provider — `'0'` (No priority) is Linear's real unset rung, per
+ * `TrackerIssue.priority`'s doc comment.
+ */
+function toLinearPriorityInt(token: string | null | undefined): number | null | undefined {
+  if (token === undefined || token === null) return token;
+  return Number(token);
 }
 
 function mapIssueNode(node: LinearIssueNode): TrackerIssue {
@@ -592,6 +677,14 @@ export class LinearAdapter implements TrackerAdapter {
     nativeParentAutoClose: true,
     selfHostedBaseUrl: false,
     idempotentCreate: true,
+    // Linear has no issue-type field at all (category is Dart-only, per the
+    // locked scope decision — no label emulation in v1).
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    // `issueArchive(trash: true)` — probe L1 confirmed it sets `archivedAt`
+    // and `trashed`, is restorable (visible under `includeArchived: true`,
+    // and by direct id lookup), and is exactly the milder-than-delete
+    // operation the locked scope decision requires.
+    archive: 'trash',
   };
 
   private readonly apiKey: string;
@@ -810,6 +903,7 @@ export class LinearAdapter implements TrackerAdapter {
       title: draft.title,
       description: draft.description,
       stateId: draft.stateId,
+      priority: toLinearPriorityInt(draft.priority),
     };
     return this.issueCreate(input);
   }
@@ -832,6 +926,7 @@ export class LinearAdapter implements TrackerAdapter {
       title: draft.title,
       description: draft.description,
       stateId: draft.stateId,
+      priority: toLinearPriorityInt(draft.priority),
     });
   }
 
@@ -851,6 +946,60 @@ export class LinearAdapter implements TrackerAdapter {
     });
     if (!data.issueUpdate.success) {
       throw new TrackerApiError('linear', `issueUpdate reported failure for ${externalId}`, null);
+    }
+  }
+
+  /**
+   * One generalized `issueUpdate` carrying only the keys `patch` actually
+   * sets (checked via `!== undefined`, per `IssueContentPatch`'s contract),
+   * selecting the full issue node back — the echo-suppression baseline's
+   * stamp source (invariant 1).
+   *
+   * `category` is never mapped onto anything: Linear has no issue-type
+   * field, `capabilities.contentWrite.category` says so, and the caller is
+   * the one that must never populate it for this provider.
+   */
+  async updateIssueContent(externalId: string, patch: IssueContentPatch): Promise<TrackerIssue | null> {
+    const input: LinearIssueUpdateInput = {};
+    if (patch.title !== undefined) input.title = patch.title;
+    if (patch.description !== undefined) input.description = patch.description;
+    if (patch.priority !== undefined) input.priority = toLinearPriorityInt(patch.priority);
+    const data = await this.request<UpdateIssueContentResponse>(UPDATE_ISSUE_CONTENT_MUTATION, {
+      id: externalId,
+      input,
+    });
+    if (!data.issueUpdate.success || !data.issueUpdate.issue) {
+      throw new TrackerApiError('linear', `issueUpdate reported failure for ${externalId}`, null);
+    }
+    return mapIssueNode(data.issueUpdate.issue);
+  }
+
+  /**
+   * `issueArchive(trash: true)` — the L1-winning route (see
+   * `ARCHIVE_ISSUE_MUTATION`; `issueUpdate({ trashed: true })` is rejected
+   * and must never be used). An "entity not found"-class GraphQL error is
+   * treated as SUCCESS — the twin was already trashed/deleted by some other
+   * path — mirroring the 404-is-success rule the REST adapters apply to
+   * their own not-found status; every other error still propagates.
+   */
+  async archiveIssue(externalId: string): Promise<void> {
+    const { data, errors, status } = await this.execute<ArchiveIssueResponse>(ARCHIVE_ISSUE_MUTATION, {
+      id: externalId,
+    });
+    if (status === 401 || isAuthError(errors)) {
+      throw new TrackerAuthError('linear', authMessage(errors, status), status);
+    }
+    if (isEntityNotFoundError(errors)) {
+      return;
+    }
+    if (errors.length > 0) {
+      throw new TrackerApiError('linear', errors.map((error) => error.message).join('; '), status);
+    }
+    if (!httpOk(status)) {
+      throw new TrackerApiError('linear', `unexpected HTTP status ${status}`, status);
+    }
+    if (!data?.issueArchive.success) {
+      throw new TrackerApiError('linear', `issueArchive reported failure for ${externalId}`, null);
     }
   }
 

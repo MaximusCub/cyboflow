@@ -584,6 +584,170 @@ describe('LinearAdapter.updateIssueState', () => {
   });
 });
 
+describe('LinearAdapter.updateIssueContent', () => {
+  it('sends only the patched keys, converts the priority TOKEN to an Int, and returns the mapped post-write issue', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      {
+        status: 200,
+        body: {
+          data: {
+            issueUpdate: {
+              success: true,
+              issue: issueNode({ id: 'issue-99', identifier: 'COR-5', priority: 1 }),
+            },
+          },
+        },
+      },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    const issue = await adapter.updateIssueContent('issue-99', { title: 'New title', priority: '1' });
+
+    expect(calls).toHaveLength(1);
+    const body = parseBody(calls[0]);
+    expect(body.query).toContain('mutation UpdateIssueContent');
+    // The full issue node is selected — this write is the echo-suppression
+    // baseline's stamp source, and only the response carries it.
+    expect(body.query).toContain('trashed');
+    expect(body.variables).toEqual({ id: 'issue-99', input: { title: 'New title', priority: 1 } });
+    expect(issue?.priority).toBe('1');
+  });
+
+  it('converts the "0" (No priority) token to the Int 0, never dropping it', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      { status: 200, body: { data: { issueUpdate: { success: true, issue: issueNode({ priority: 0 }) } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await adapter.updateIssueContent('issue-1', { priority: '0' });
+
+    const body = parseBody(calls[0]);
+    expect((body.variables?.input as Record<string, unknown>).priority).toBe(0);
+  });
+
+  it('leaves an unpatched field out of the mutation input entirely', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      { status: 200, body: { data: { issueUpdate: { success: true, issue: issueNode({}) } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await adapter.updateIssueContent('issue-1', { description: 'new body' });
+
+    const body = parseBody(calls[0]);
+    expect(body.variables?.input).toEqual({ description: 'new body' });
+  });
+
+  it('passes description straight through with no marker composition (Linear never writes one)', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      { status: 200, body: { data: { issueUpdate: { success: true, issue: issueNode({}) } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await adapter.updateIssueContent('issue-1', { description: 'plain markdown body' });
+
+    const body = parseBody(calls[0]);
+    expect((body.variables?.input as Record<string, unknown>).description).toBe('plain markdown body');
+  });
+
+  it('throws when issueUpdate reports failure or returns no issue', async () => {
+    const { fetchImpl } = createFetchMock([
+      { status: 200, body: { data: { issueUpdate: { success: false, issue: null } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(adapter.updateIssueContent('issue-1', { title: 'x' })).rejects.toThrow(
+      /issueUpdate reported failure/,
+    );
+  });
+});
+
+describe('LinearAdapter.archiveIssue', () => {
+  it('uses issueArchive(trash: true), never issueUpdate({ trashed: true })', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      { status: 200, body: { data: { issueArchive: { success: true } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await adapter.archiveIssue('issue-1');
+
+    expect(calls).toHaveLength(1);
+    const body = parseBody(calls[0]);
+    expect(body.query).toContain('issueArchive');
+    expect(body.query).toContain('trash: true');
+    expect(body.query).not.toContain('issueUpdate');
+    expect(body.variables).toEqual({ id: 'issue-1' });
+  });
+
+  it('tolerates an entity-not-found error as success — the twin was already trashed/deleted', async () => {
+    const { fetchImpl } = createFetchMock([
+      {
+        status: 200,
+        body: {
+          data: null,
+          errors: [{ message: 'Entity not found: Issue', extensions: { type: 'not_found' } }],
+        },
+      },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(adapter.archiveIssue('missing-id')).resolves.toBeUndefined();
+  });
+
+  it('throws TrackerAuthError on an HTTP 401', async () => {
+    const { fetchImpl } = createFetchMock([{ status: 401, body: { errors: [] } }]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(adapter.archiveIssue('issue-1')).rejects.toBeInstanceOf(TrackerAuthError);
+  });
+
+  it('throws when issueArchive reports failure', async () => {
+    const { fetchImpl } = createFetchMock([
+      { status: 200, body: { data: { issueArchive: { success: false } } } },
+    ]);
+    const adapter = new LinearAdapter({ apiKey: 'key', fetchImpl });
+
+    await expect(adapter.archiveIssue('issue-1')).rejects.toThrow(/issueArchive reported failure/);
+  });
+});
+
+describe('LinearAdapter creates — draft priority', () => {
+  it('converts IssueDraft.priority to Int on both createSubIssue and createIssue', async () => {
+    const { fetchImpl: subFetch, calls: subCalls } = createFetchMock([
+      { status: 200, body: { data: { issue: { team: { id: 'team-1' } } } } },
+      { status: 200, body: { data: { issueCreate: { success: true, issue: issueNode({}) } } } },
+    ]);
+    await new LinearAdapter({ apiKey: 'key', fetchImpl: subFetch }).createSubIssue(
+      'parent-1',
+      { title: 'Sub', priority: '2' },
+      'client-key-1',
+    );
+    expect((parseBody(subCalls[1]).variables?.input as Record<string, unknown>).priority).toBe(2);
+
+    const { fetchImpl: topFetch, calls: topCalls } = createFetchMock([
+      { status: 200, body: { data: { issueCreate: { success: true, issue: issueNode({}) } } } },
+    ]);
+    await new LinearAdapter({ apiKey: 'key', fetchImpl: topFetch }).createIssue(
+      { containerId: 'team-1', narrowId: 'all', narrowKind: 'all' },
+      { title: 'Top', priority: '4' },
+      'client-key-2',
+    );
+    expect((parseBody(topCalls[0]).variables?.input as Record<string, unknown>).priority).toBe(4);
+  });
+
+  it('leaves priority undefined on the input when the draft omits it', async () => {
+    const { fetchImpl, calls } = createFetchMock([
+      { status: 200, body: { data: { issueCreate: { success: true, issue: issueNode({}) } } } },
+    ]);
+    await new LinearAdapter({ apiKey: 'key', fetchImpl }).createIssue(
+      { containerId: 'team-1', narrowId: 'all', narrowKind: 'all' },
+      { title: 'No priority set' },
+      'client-key-3',
+    );
+    const input = parseBody(calls[0]).variables?.input as Record<string, unknown>;
+    expect(input.priority).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Request timeouts
 // ---------------------------------------------------------------------------

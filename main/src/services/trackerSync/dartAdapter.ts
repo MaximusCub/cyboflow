@@ -73,6 +73,7 @@ import type {
   TrackerAdapterCapabilities,
   FetchLike,
   IssueDraft,
+  IssueContentPatch,
 } from './adapterTypes';
 import {
   TrackerApiError,
@@ -97,6 +98,15 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   // marker every create stamps into the description — see SYNC_MARKER_PREFIX
   // and {@link DartAdapter.findIssueByClientKey}.
   idempotentCreate: false,
+  // Dart writes all four fields directly on `TaskUpdate` (D1/D3/D4 all green —
+  // see the Phase 0 probe transcript in the field-writeback proposal) and has
+  // a live workspace vocabulary for both priority and type, so nothing here is
+  // unsupported.
+  contentWrite: { title: true, description: true, priority: true, category: true },
+  // `DELETE /tasks/{id}` trashes (probe D5: the item survives under
+  // `in_trash=true`, not a hard delete) — one-way in this API (no restore
+  // endpoint this adapter uses), but still 'trash', never 'delete'.
+  archive: 'trash',
 };
 
 /**
@@ -544,6 +554,63 @@ export class DartAdapter implements TrackerAdapter {
   }
 
   /**
+   * `PUT /tasks/{id}` with ONLY the keys `patch` actually carries — an absent
+   * field means "leave alone" (checked via `!== undefined`, never truthiness,
+   * per {@link IssueContentPatch}'s contract), and an explicit `null` on
+   * `priority`/`category` sends Dart's own clearing value (D2: a cleared
+   * priority PUT returns 200 and the field comes back as an absent key on
+   * every later read — Dart's own spelling of "unset", not a distinguishable
+   * `null`).
+   *
+   * `description` is sent VERBATIM — no marker composition happens here; see
+   * {@link IssueContentPatch.description} for why that responsibility sits
+   * with the caller, not this adapter.
+   *
+   * Invalid `priority`/`category` values fail LOUD (D1/D3: a 400 with the
+   * valid-value list in Dart's own error body) — no pre-flight `/config`
+   * membership check, because the mapping layer upstream already refuses to
+   * compose a token it does not recognize, and re-validating here would just
+   * be a second, redundant `/config` round trip for the same guarantee.
+   *
+   * Never returns `null`: Dart's PUT response always echoes the updated item
+   * (this is the echo-suppression baseline's stamp source — see
+   * `TrackerAdapter.updateIssueContent`).
+   */
+  async updateIssueContent(externalId: string, patch: IssueContentPatch): Promise<TrackerIssue | null> {
+    const item: Record<string, unknown> = { id: externalId };
+    if (patch.title !== undefined) item.title = patch.title;
+    if (patch.description !== undefined) item.description = patch.description;
+    if (patch.priority !== undefined) item.priority = patch.priority;
+    if (patch.category !== undefined) item.type = patch.category;
+    const wrapped = await this.request<DartWrapped<DartTaskWire>>(
+      'PUT',
+      `/tasks/${encodeURIComponent(externalId)}`,
+      { item }
+    );
+    // Same reasoning as updateIssueState: a stale memoized copy would read
+    // this pass's own write as the remote moving backwards.
+    this.taskCache.delete(externalId);
+    return this.mapIssue(wrapped.item);
+  }
+
+  /**
+   * `DELETE /tasks/{id}` — a real trash (D5: the item survives, invisible to
+   * every ordinary listing, but recoverable under `in_trash=true`; there is
+   * no restore endpoint this adapter uses, so it is one-way from cyboflow's
+   * side). A 404 is SUCCESS (D5, second DELETE: `Task with ID … not found`) —
+   * the twin was already trashed or deleted by some other path, which is
+   * exactly the state this call was trying to reach.
+   */
+  async archiveIssue(externalId: string): Promise<void> {
+    const response = await this.send('DELETE', `/tasks/${encodeURIComponent(externalId)}`);
+    // Invariant 10 applies to archive too, and a 404 does not change that —
+    // whatever this pass thought it knew about the task is stale either way.
+    this.taskCache.delete(externalId);
+    if (response.status === 404) return;
+    this.assertOk(response);
+  }
+
+  /**
    * Ambiguous-create recovery (see the outbox worker): the task in scope that
    * carries `clientKey` in its {@link SYNC_MARKER_PREFIX} line, or null when
    * none carries it — which, because every create sends the marker, PROVES the
@@ -848,6 +915,12 @@ export class DartAdapter implements TrackerAdapter {
     };
     if (draft.stateId !== undefined) {
       item.status = draft.stateId;
+    }
+    if (draft.priority !== undefined) {
+      item.priority = draft.priority;
+    }
+    if (draft.category !== undefined) {
+      item.type = draft.category;
     }
     const wrapped = await this.request<DartWrapped<DartTaskWire>>('POST', '/tasks', { item });
     return this.mapIssue(wrapped.item);

@@ -18,6 +18,8 @@
  * latch, and the both-404 error).
  */
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PlaneAdapter } from './planeAdapter';
 import type { FetchLike } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
@@ -555,6 +557,175 @@ describe('PlaneAdapter.createSubIssue', () => {
     expect(issue.externalId).toBe('proj1/child1');
     expect(issue.parentExternalId).toBeNull();
     expect(issue.description).toBe('the idea body');
+  });
+});
+
+describe('PlaneAdapter.updateIssueContent', () => {
+  const BASE_WIRE = {
+    id: 'iss1',
+    name: 'Old title',
+    sequence_id: 42,
+    state: 'state-open',
+    assignees: [] as string[],
+    estimate_point: null,
+    parent: null,
+    updated_at: '2026-07-01T00:00:00.000Z',
+    archived_at: null,
+  };
+
+  function patchFetch(echoBody: (sent: Record<string, unknown>) => Record<string, unknown>) {
+    return scriptedFetch([
+      {
+        test: (method, path) =>
+          method === 'PATCH' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/iss1/',
+        respond: (body) => ({ status: 200, body: echoBody(body as Record<string, unknown>) }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+  }
+
+  it('PATCHes only the patched keys and returns the mapped post-write issue (the echo-suppression stamp source)', async () => {
+    const { fetchImpl, calls } = patchFetch((sent) => ({ ...BASE_WIRE, ...sent }));
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    const issue = await adapter.updateIssueContent('proj1/iss1', { title: 'New title', priority: 'high' });
+
+    const patchCall = calls.find((c) => c.method === 'PATCH');
+    expect(patchCall?.body).toEqual({ name: 'New title', priority: 'high' });
+    expect(issue?.title).toBe('New title');
+    expect(issue?.priority).toBe('high');
+  });
+
+  it('leaves an unpatched field out of the PATCH body entirely', async () => {
+    const { fetchImpl, calls } = patchFetch((sent) => ({ ...BASE_WIRE, ...sent }));
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await adapter.updateIssueContent('proj1/iss1', { title: 'Only title' });
+
+    const patchCall = calls.find((c) => c.method === 'PATCH');
+    expect(patchCall?.body).toEqual({ name: 'Only title' });
+  });
+
+  it('converts markdown through the SAME html conversion createIssue uses, with NO separate marker step', async () => {
+    const { fetchImpl, calls } = patchFetch((sent) => ({ ...BASE_WIRE, ...sent }));
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    // The caller already composed the marker into the markdown body — this
+    // adapter must not wrap or append a second one (contrast with
+    // toCreateDescriptionHtml, which appends unconditionally).
+    const bodyWithMarker = `Updated body\n\ncyboflow-sync: ${CLIENT_KEY}`;
+    await adapter.updateIssueContent('proj1/iss1', { description: bodyWithMarker });
+
+    const patchCall = calls.find((c) => c.method === 'PATCH');
+    expect(patchCall?.body).toHaveProperty(
+      'description_html',
+      `<p>Updated body</p><p>cyboflow-sync: ${CLIENT_KEY}</p>`
+    );
+  });
+
+  it('clears the description to the empty-paragraph shape on null', async () => {
+    const { fetchImpl, calls } = patchFetch((sent) => ({ ...BASE_WIRE, ...sent }));
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await adapter.updateIssueContent('proj1/iss1', { description: null });
+
+    const patchCall = calls.find((c) => c.method === 'PATCH');
+    expect(patchCall?.body).toEqual({ description_html: '<p></p>' });
+  });
+
+  it('passes the priority token straight through, raw ("none" included)', async () => {
+    const { fetchImpl, calls } = patchFetch((sent) => ({ ...BASE_WIRE, ...sent }));
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await adapter.updateIssueContent('proj1/iss1', { priority: 'none' });
+
+    const patchCall = calls.find((c) => c.method === 'PATCH');
+    expect(patchCall?.body).toEqual({ priority: 'none' });
+  });
+});
+
+describe('PlaneAdapter.archiveIssue', () => {
+  it('throws — no verified archive endpoint exists (capability "none")', async () => {
+    const { fetchImpl, calls } = scriptedFetch([]);
+    const adapter = new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl });
+
+    await expect(adapter.archiveIssue('proj1/iss1')).rejects.toMatchObject({ name: 'TrackerApiError' });
+    // Genuinely unreachable per the capability contract — not even a network
+    // call is attempted.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('never issues a DELETE call anywhere in this adapter (source-level guard)', () => {
+    // The locked scope decision is that cyboflow never hard-deletes in
+    // someone else's workspace — Plane's DELETE is that hard-delete verb, and
+    // nothing in this file should ever construct one, archive path included.
+    const source = readFileSync(join(__dirname, 'planeAdapter.ts'), 'utf-8');
+    expect(source).not.toMatch(/['"]DELETE['"]/);
+  });
+});
+
+describe('PlaneAdapter creates — draft priority', () => {
+  function createFetchWithPriority() {
+    return scriptedFetch([
+      {
+        test: (method, path) => method === 'POST' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: (body) => ({
+          status: 201,
+          body: {
+            id: 'child1',
+            name: 'Sub',
+            sequence_id: 1,
+            state: 's1',
+            parent: (body as { parent?: string }).parent ?? null,
+            assignees: [],
+            estimate_point: null,
+            updated_at: '2026-07-05T00:00:00.000Z',
+            archived_at: null,
+            priority: (body as { priority?: string }).priority ?? null,
+          },
+        }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj', identifier: 'PROJ' } }),
+      },
+    ]);
+  }
+
+  it('sends draft.priority on both createSubIssue and createIssue', async () => {
+    const { fetchImpl: subFetch, calls: subCalls } = createFetchWithPriority();
+    const subIssue = await new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl: subFetch,
+    }).createSubIssue('proj1/parentIss', { title: 'Sub', priority: 'urgent' }, CLIENT_KEY);
+    const subPost = subCalls.find((c) => c.method === 'POST');
+    expect(subPost?.body).toMatchObject({ priority: 'urgent' });
+    expect(subIssue.priority).toBe('urgent');
+
+    const { fetchImpl: topFetch, calls: topCalls } = createFetchWithPriority();
+    const topIssue = await new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl: topFetch,
+    }).createIssue({ containerId: 'proj1', narrowId: 'all', narrowKind: 'all' }, { title: 'Top', priority: 'low' }, CLIENT_KEY);
+    const topPost = topCalls.find((c) => c.method === 'POST');
+    expect(topPost?.body).toMatchObject({ priority: 'low' });
+    expect(topIssue.priority).toBe('low');
+  });
+
+  it('omits priority entirely when the draft does not carry it', async () => {
+    const { fetchImpl, calls } = createFetchWithPriority();
+    await new PlaneAdapter({ apiKey: 'k', workspaceSlug: 'acme', fetchImpl }).createIssue(
+      { containerId: 'proj1', narrowId: 'all', narrowKind: 'all' },
+      { title: 'Pushed' },
+      CLIENT_KEY
+    );
+    const postCall = calls.find((c) => c.method === 'POST');
+    expect(postCall?.body).not.toHaveProperty('priority');
   });
 });
 

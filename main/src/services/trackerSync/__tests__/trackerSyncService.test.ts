@@ -123,6 +123,8 @@ class FakeAdapter implements TrackerAdapter {
     nativeParentAutoClose: true,
     selfHostedBaseUrl: false,
     idempotentCreate: true,
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    archive: 'trash',
   };
 
   /** Every method call, in order — the phase-sequence assertion. */
@@ -219,6 +221,12 @@ class FakeAdapter implements TrackerAdapter {
     if (this.updateStateGate !== null) await this.updateStateGate;
     this.updateCalls.push({ externalId, stateId });
   }
+  async updateIssueContent(): Promise<TrackerIssue | null> {
+    throw new Error('not used');
+  }
+  async archiveIssue(): Promise<void> {
+    throw new Error('not used');
+  }
 
   /** Calls filtered to the ones the phase-order assertion cares about. */
   phaseCalls(): string[] {
@@ -240,6 +248,8 @@ class PlaneLikeAdapter implements TrackerAdapter {
     nativeParentAutoClose: false,
     selfHostedBaseUrl: true,
     idempotentCreate: false,
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    archive: 'none',
   };
 
   /** The tracker's own issue list — createSubIssue appends to it before failing. */
@@ -319,6 +329,12 @@ class PlaneLikeAdapter implements TrackerAdapter {
     throw new TrackerApiError('plane', 'request failed (500)', 500);
   }
   async updateIssueState(): Promise<void> {
+    throw new Error('not used');
+  }
+  async updateIssueContent(): Promise<TrackerIssue | null> {
+    throw new Error('not used');
+  }
+  async archiveIssue(): Promise<void> {
     throw new Error('not used');
   }
 

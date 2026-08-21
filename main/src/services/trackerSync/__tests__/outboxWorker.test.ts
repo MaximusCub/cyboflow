@@ -132,6 +132,8 @@ class FakeAdapter implements TrackerAdapter {
     nativeParentAutoClose: true,
     selfHostedBaseUrl: false,
     idempotentCreate: true,
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    archive: 'trash',
   };
 
   states: TrackerState[] = STATES;
@@ -213,6 +215,13 @@ class FakeAdapter implements TrackerAdapter {
     this.updateCalls.push({ externalId, stateId });
     if (this.failUpdate) throw this.takeFailure('failUpdate');
   }
+  /** Unused by the drain until Phase 5 wires a caller (see outboxWorker.ts's stub). */
+  async updateIssueContent(): Promise<TrackerIssue | null> {
+    throw new Error('not used');
+  }
+  async archiveIssue(): Promise<void> {
+    throw new Error('not used');
+  }
 
   protected takeFailure(key: 'failUpdate' | 'failCreate' | 'failLookup'): Error {
     const err = this[key] as Error;
@@ -236,6 +245,8 @@ class FakeMarkerAdapter extends FakeAdapter {
     nativeParentAutoClose: false,
     selfHostedBaseUrl: true,
     idempotentCreate: false,
+    contentWrite: { title: true, description: true, priority: true, category: false },
+    archive: 'none',
   };
 
   /** externalId -> the client key stamped into that issue's description. */
