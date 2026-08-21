@@ -48,11 +48,23 @@ export function TypeTag({ type }: { type: TaskType }): React.JSX.Element {
   );
 }
 
+/**
+ * 7-level ramp (migration 111 widen; was P0-P2). P0/P1/P2 keep their original
+ * colors (hottest red -> warning amber -> the existing neutral) as the TOP of
+ * the ramp; P3-P6 continue it downward by fading the SAME neutral tokens
+ * P2 already uses, so the scale reads as one continuous cool-down rather than
+ * a second unrelated palette bolted on. P6 lands on `text-disabled` — the
+ * dimmest text token in the theme — for the most muted tier.
+ */
 const PRIORITY_CLASS: Record<Priority, string> = {
   // P0 = highest urgency (warm-red error token), P1 = warning, P2 = neutral.
   P0: 'border-status-error/40 bg-status-error/10 text-status-error',
   P1: 'border-status-warning/40 bg-status-warning/10 text-status-warning',
   P2: 'border-border-primary bg-bg-tertiary text-text-tertiary',
+  P3: 'border-border-primary/70 bg-bg-tertiary/70 text-text-tertiary/90',
+  P4: 'border-border-primary/50 bg-bg-tertiary/50 text-text-tertiary/70',
+  P5: 'border-border-primary/30 bg-bg-tertiary/40 text-text-tertiary/50',
+  P6: 'border-border-primary/20 bg-bg-tertiary/25 text-text-disabled',
 };
 
 export function PriorityTag({ priority }: { priority: Priority }): React.JSX.Element {

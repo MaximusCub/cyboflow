@@ -318,7 +318,7 @@ export interface IdeaRow {
   summary: string | null;
   body: string | null;
   scope: 'small' | 'large' | null;
-  priority: 'P0' | 'P1' | 'P2';
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 111 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
@@ -342,7 +342,7 @@ export interface EpicRow {
   title: string;
   summary: string | null;
   body: string | null;
-  priority: 'P0' | 'P1' | 'P2';
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 111 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
@@ -368,7 +368,7 @@ export interface TaskRow {
   title: string;
   summary: string | null;
   body: string | null;
-  priority: 'P0' | 'P1' | 'P2';
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 111 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;

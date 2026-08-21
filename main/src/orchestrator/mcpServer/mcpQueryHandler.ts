@@ -1217,7 +1217,7 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 function isAgentPriority(v: unknown): v is Priority {
-  return v === 'P0' || v === 'P1' || v === 'P2';
+  return v === 'P0' || v === 'P1' || v === 'P2' || v === 'P3' || v === 'P4' || v === 'P5' || v === 'P6';
 }
 
 function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {

@@ -488,8 +488,8 @@ const DESIGN_TOOLS = [
         },
         priority: {
           type: 'string',
-          enum: ['P0', 'P1', 'P2'],
-          description: "Optional priority; defaults to 'P2'.",
+          enum: ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'],
+          description: "Optional priority (P0-P6); defaults to 'P2'.",
         },
       },
       required: ['title'],
@@ -600,7 +600,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             task_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: "Optional task type; defaults to 'idea'" },
             summary: { type: 'string', description: 'Optional SHORT one-line descriptor shown on the board card (keep it to a sentence). For the rich spec / acceptance criteria, use body.' },
             body: { type: 'string', description: 'Optional full markdown body — the canonical rich detail (the idea spec, the task description + acceptance criteria, file/dependency hints). This is what the entity artifact renders, so prefer it for anything multi-line; leave summary as the short caption.' },
-            priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: "Optional priority; defaults to 'P2'" },
+            priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'], description: "Optional priority (P0-P6); defaults to 'P2'" },
             category: { type: 'string', enum: ['feature', 'bug', 'chore'], description: "Optional entity CLASSIFICATION (feature|bug|chore); defaults to 'feature'. Unrelated to cyboflow_report_finding's free-text grouping `category`." },
             repo: { type: 'string', description: 'Optional repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id' },
@@ -627,7 +627,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             title: { type: 'string', description: 'Optional new title' },
             summary: { type: 'string', description: 'Optional new SHORT one-line descriptor shown on the board card. For the rich spec / acceptance criteria, use body.' },
             body: { type: 'string', description: 'Optional new full markdown body — the canonical rich detail rendered in the entity artifact (idea spec, task description + acceptance criteria). Prefer it over summary for anything multi-line.' },
-            priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: 'Optional new priority' },
+            priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'], description: 'Optional new priority (P0-P6)' },
             category: { type: 'string', enum: ['feature', 'bug', 'chore'], description: "Optional new entity CLASSIFICATION (feature|bug|chore). Unrelated to cyboflow_report_finding's free-text grouping `category`." },
             repo: { type: 'string', description: 'Optional new repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id (re-parent)' },
@@ -1581,8 +1581,17 @@ async function handleDesignScopeCallTool(request: {
       if (body !== undefined && typeof body !== 'string') {
         return invalidArgs('body: string (optional)');
       }
-      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
-        return invalidArgs("priority: 'P0' | 'P1' | 'P2' (optional)");
+      if (
+        priority !== undefined &&
+        priority !== 'P0' &&
+        priority !== 'P1' &&
+        priority !== 'P2' &&
+        priority !== 'P3' &&
+        priority !== 'P4' &&
+        priority !== 'P5' &&
+        priority !== 'P6'
+      ) {
+        return invalidArgs("priority: 'P0'..'P6' (optional)");
       }
       // Design scope mints follow-up TASKS only — taskType/category are pinned
       // server-side here, never taken from the caller.
@@ -1801,12 +1810,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
-      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
+      if (
+        priority !== undefined &&
+        priority !== 'P0' &&
+        priority !== 'P1' &&
+        priority !== 'P2' &&
+        priority !== 'P3' &&
+        priority !== 'P4' &&
+        priority !== 'P5' &&
+        priority !== 'P6'
+      ) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0' | 'P1' | 'P2' (optional)" }),
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0'..'P6' (optional)" }),
             },
           ],
         };
@@ -1950,12 +1968,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
-      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
+      if (
+        priority !== undefined &&
+        priority !== 'P0' &&
+        priority !== 'P1' &&
+        priority !== 'P2' &&
+        priority !== 'P3' &&
+        priority !== 'P4' &&
+        priority !== 'P5' &&
+        priority !== 'P6'
+      ) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0' | 'P1' | 'P2' (optional)" }),
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0'..'P6' (optional)" }),
             },
           ],
         };

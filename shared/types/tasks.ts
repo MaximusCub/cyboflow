@@ -29,7 +29,8 @@ export type TaskType = 'idea' | 'epic' | 'task';
 /** The nullable idea size hint set at idea-spec time. */
 export type IdeaScope = 'small' | 'large';
 
-export type Priority = 'P0' | 'P1' | 'P2';
+/** 7-level entity priority (migration 111 widen; was P0-P2 through migration 015). */
+export type Priority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
 
 /** Entity classification (migration 059), mirroring `Priority`'s shape. */
 export type EntityCategory = 'feature' | 'bug' | 'chore';
