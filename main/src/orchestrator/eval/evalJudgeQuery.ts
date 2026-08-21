@@ -29,6 +29,7 @@ import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
+import { resolveJudgeDeadlineMs } from './judgeDeadline';
 
 /**
  * Default per-sample deadline. A hung claude binary must not stall the worker.
@@ -39,6 +40,10 @@ import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
  * wall while its siblings landed, silently shrinking the jury to 2/3 samples;
  * the extra headroom (plus the trimmed JUDGE_MAX_TURNS below) keeps the common
  * case landing the FULL sample count, not just one.
+ *
+ * This is the BASE, applied verbatim to a small diff. A caller that reports
+ * `diffChars` gets it stretched by the shared judgeDeadline curve — a large diff
+ * is more reading, and a flat wall made exactly those evals time out.
  */
 export const EVAL_JUDGE_TIMEOUT_MS = 600_000;
 
@@ -69,6 +74,11 @@ export interface EvalStructuredQueryFn {
     cwd?: string;
     model?: string;
     signal?: AbortSignal;
+    /**
+     * Size of the graded diff, used to stretch the deadline (see judgeDeadline).
+     * Optional: a caller that omits it gets the plain base deadline.
+     */
+    diffChars?: number;
   }): Promise<unknown>;
 }
 
@@ -112,9 +122,10 @@ function makeDeadline(
  */
 export function makeEvalJudgeQuery(
   logger?: LoggerLike,
-  timeoutMs: number = EVAL_JUDGE_TIMEOUT_MS,
+  baseTimeoutMs: number = EVAL_JUDGE_TIMEOUT_MS,
 ): EvalStructuredQueryFn {
-  return async ({ prompt, schema, cwd, model, signal }) => {
+  return async ({ prompt, schema, cwd, model, signal, diffChars }) => {
+    const timeoutMs = resolveJudgeDeadlineMs(baseTimeoutMs, diffChars);
     const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
     try {
       // Single-shot STRING prompt (not streaming-input): this is a bounded,

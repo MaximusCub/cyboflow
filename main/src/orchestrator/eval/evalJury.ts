@@ -299,6 +299,10 @@ export class ClaudeJudge implements JudgeClient {
     const raw = await this.deps.structuredQuery({
       prompt,
       schema: JUDGE_OUTPUT_SCHEMA,
+      // Reported so the query boundary can stretch its deadline for a big diff
+      // (judgeDeadline). Pre-truncation length: the judge is told to grep the
+      // snapshot for elided hunks, so a truncated diff is MORE work, not less.
+      diffChars: input.diff.length,
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(this.resolvedModel ? { model: this.resolvedModel } : {}),
       ...(input.signal ? { signal: input.signal } : {}),

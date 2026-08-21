@@ -1,6 +1,7 @@
 import type { EvalStructuredQueryFn } from '../../../orchestrator/eval/evalJudgeQuery';
 import { CodexJurorUnavailableError } from '../../../orchestrator/eval/codexJudge';
 import { EvalJudgeTimeoutError } from '../../../orchestrator/eval/judgeErrors';
+import { resolveJudgeDeadlineMs } from '../../../orchestrator/eval/judgeDeadline';
 import type { LoggerLike } from '../../../orchestrator/types';
 import {
   CODEX_EXECUTABLE_VERSION,
@@ -31,7 +32,9 @@ import { toStrictOutputSchema } from './appServer/strictOutputSchema';
 
 // 10 min (was 5), matching the Claude juror deadline (EVAL_JUDGE_TIMEOUT_MS): the
 // Codex app-server juror can also miss the wall under host contention, and a
-// whole-eval failure needs EVERY juror to time out.
+// whole-eval failure needs EVERY juror to time out. This is the BASE for a small
+// diff; a caller reporting `diffChars` gets it stretched by the same shared
+// judgeDeadline curve the Claude slots use.
 export const CODEX_EVAL_JUDGE_TIMEOUT_MS = 600_000;
 
 export interface CodexEvalAppServerClient extends TurnSessionClient {
@@ -212,12 +215,13 @@ export function makeCodexEvalJudgeQuery(
   logger?: LoggerLike,
   opts: CodexEvalJudgeQueryOptions = {},
 ): CodexEvalStructuredQueryFn {
-  const timeoutMs = opts.timeoutMs ?? CODEX_EVAL_JUDGE_TIMEOUT_MS;
+  const baseTimeoutMs = opts.timeoutMs ?? CODEX_EVAL_JUDGE_TIMEOUT_MS;
   const createClient = opts.clientFactory ?? defaultClientFactory;
   const resolveExecutable = opts.resolveExecutable ?? resolveCodexExecutablePath;
   let resolvedModel: string | null = null;
 
-  const execute: EvalStructuredQueryFn = async ({ prompt, schema, cwd, model, signal }) => {
+  const execute: EvalStructuredQueryFn = async ({ prompt, schema, cwd, model, signal, diffChars }) => {
+    const timeoutMs = resolveJudgeDeadlineMs(baseTimeoutMs, diffChars);
     let executable: ResolvedCodexExecutable;
     try {
       executable = resolveExecutable();

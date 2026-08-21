@@ -55,6 +55,8 @@ export class CodexJudge implements JudgeClient {
       const raw = await this.deps.structuredQuery({
         prompt,
         schema: JUDGE_OUTPUT_SCHEMA,
+        // Same deadline-stretch signal the Claude slots send (judgeDeadline).
+        diffChars: input.diff.length,
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(this.deps.model ? { model: this.deps.model } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
