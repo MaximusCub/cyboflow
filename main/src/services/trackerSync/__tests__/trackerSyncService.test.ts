@@ -394,6 +394,10 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
+    content_sync_mode: 'off',
+    archive_sync_mode: 'off',
+    priority_mapping_json: '{}',
+    category_mapping_json: '{}',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -1030,6 +1034,11 @@ describe('TrackerSyncService sync log', () => {
     await service.syncConnection(CONN_ID);
 
     expect(renderedLog()).toEqual([
+      // Every connection defaults both migration-112 modes to 'off' until
+      // Phase 6 wires a wizard control — surfaced so "sync complete" does not
+      // look broken on a connection that never opted into write-back.
+      '· content changes off',
+      '· archive off',
       '▸ GET issues',
       '· matched 0',
       '✓ created 1 idea',
@@ -1486,5 +1495,104 @@ describe('TrackerSyncService direction modes', () => {
     expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
     expect(adapter.createIssueCalls).toHaveLength(1);
     expect(ideas().map((i) => i.title)).toContain('Remote newcomer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content/archive sync modes (migration 112) — the THREE-state gate.
+//
+// Phase 5 has not wired an enqueue trigger for either kind yet, so these tests
+// enqueue an `update_content`/`archive_issue` row directly (exactly the shape
+// a Phase-5 trigger will produce) and drive it through the real drain via
+// `syncConnection` (auto trigger) / `syncNow` (manual trigger) — proving the
+// MODE GATE (drainKinds' claim filter) independently of who does the
+// enqueuing. A claimed row terminally fails with the Phase-5 stub error
+// (outboxWorker.processUnimplementedContentKind); the point here is only that
+// 'off' and 'manual' correctly withhold the CLAIM.
+// ---------------------------------------------------------------------------
+
+describe('TrackerSyncService content/archive sync modes', () => {
+  function enqueueContentRow(
+    connectionId: string,
+    kind: 'update_content' | 'archive_issue',
+    externalId = 'ext-1',
+  ): TrackerOutboxRow {
+    return enqueueOutbox(raw, {
+      connection_id: connectionId,
+      kind,
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      external_id: externalId,
+      payload_json: '{}',
+    });
+  }
+
+  function outboxRow(id: number): TrackerOutboxRow {
+    return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as TrackerOutboxRow;
+  }
+
+  it('content OFF: neither an automatic pass nor Sync now ever claims the queued row', async () => {
+    const connection = makeConnection({ content_sync_mode: 'off' });
+    const row = enqueueContentRow(connection.id, 'update_content');
+
+    const auto = await service.syncConnection(CONN_ID);
+    expect(outboxRow(row.id).state).toBe('pending');
+    expect(auto.entries.map((e) => e.line)).toContain('content changes off');
+
+    // Unlike the auto/manual directions, 'off' is not something "Sync now" can
+    // unstick — invariant 5's whole point.
+    await service.syncNow(CONN_ID);
+    expect(outboxRow(row.id).state).toBe('pending');
+  });
+
+  it('content MANUAL: an automatic pass holds the row; Sync now claims it', async () => {
+    const connection = makeConnection({ content_sync_mode: 'manual' });
+    const row = enqueueContentRow(connection.id, 'update_content');
+
+    const auto = await service.syncConnection(CONN_ID);
+    expect(outboxRow(row.id).state).toBe('pending');
+    expect(auto.entries.map((e) => e.line)).toContain('content changes held (manual) · use Sync now');
+
+    await service.syncNow(CONN_ID);
+    // Claimed and terminally failed (no Phase-5 handler) — but claimed is the
+    // property this test is about.
+    expect(outboxRow(row.id).state).toBe('failed');
+  });
+
+  it('content AUTO: an automatic pass claims the row immediately', async () => {
+    const connection = makeConnection({ content_sync_mode: 'auto' });
+    const row = enqueueContentRow(connection.id, 'update_content');
+
+    const auto = await service.syncConnection(CONN_ID);
+
+    expect(outboxRow(row.id).state).toBe('failed');
+    expect(auto.entries.map((e) => e.line)).not.toContain('content changes off');
+    expect(auto.entries.map((e) => e.line)).not.toContain('content changes held (manual) · use Sync now');
+  });
+
+  /** Flip one connection's archive_sync_mode after the fixture work is done. */
+  function setArchiveMode(mode: 'auto' | 'manual' | 'off'): void {
+    raw.prepare('UPDATE tracker_connections SET archive_sync_mode = ? WHERE id = ?').run(mode, CONN_ID);
+  }
+
+  it('archive OFF/MANUAL/AUTO gate the same way, independently of content_sync_mode', async () => {
+    makeConnection({ content_sync_mode: 'off', archive_sync_mode: 'off' });
+    const offRow = enqueueContentRow(CONN_ID, 'archive_issue', 'ext-off');
+    const autoPass1 = await service.syncConnection(CONN_ID);
+    expect(outboxRow(offRow.id).state).toBe('pending');
+    expect(autoPass1.entries.map((e) => e.line)).toContain('archive off');
+
+    setArchiveMode('manual');
+    const manualRow = enqueueContentRow(CONN_ID, 'archive_issue', 'ext-manual');
+    const autoPass2 = await service.syncConnection(CONN_ID);
+    expect(outboxRow(manualRow.id).state).toBe('pending');
+    expect(autoPass2.entries.map((e) => e.line)).toContain('archive held (manual) · use Sync now');
+    await service.syncNow(CONN_ID);
+    expect(outboxRow(manualRow.id).state).toBe('failed');
+
+    setArchiveMode('auto');
+    const autoRow = enqueueContentRow(CONN_ID, 'archive_issue', 'ext-auto');
+    await service.syncConnection(CONN_ID);
+    expect(outboxRow(autoRow.id).state).toBe('failed');
   });
 });

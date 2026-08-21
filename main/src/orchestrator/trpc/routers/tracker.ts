@@ -229,6 +229,15 @@ const conflictModeSchema = z.enum(['auto', 'manual']);
  */
 const directionModeSchema = z.enum(['auto', 'manual']);
 
+/**
+ * TrackerContentSyncMode — field write-back / archive cadence (migration 112).
+ * A SEPARATE declaration from `directionModeSchema`, deliberately: 'off' is a
+ * real third answer here ("never"), and coupling it onto the two-state schema
+ * above would let status/pull/push silently accept a value they must never
+ * see.
+ */
+const contentSyncModeSchema = z.enum(['auto', 'manual', 'off']);
+
 const selectionJsonSchema = z.object({
   assigneeIds: z.array(z.string()).optional(),
   issueIds: z.array(z.string()).optional(),
@@ -469,6 +478,10 @@ export const trackerRouter = router({
         statusSyncMode: directionModeSchema,
         pullMode: directionModeSchema,
         pushMode: directionModeSchema,
+        /** Omitted = 'off' — no wizard step sends this yet (Phase 6). */
+        contentSyncMode: contentSyncModeSchema.optional(),
+        /** Omitted = 'off'; see contentSyncMode. */
+        archiveSyncMode: contentSyncModeSchema.optional(),
         mirrorSubissues: z.boolean(),
         conflictMode: conflictModeSchema,
         reconcile: z.array(reconcileDecisionSchema),
@@ -573,6 +586,8 @@ export const trackerRouter = router({
         statusSyncMode: directionModeSchema.optional(),
         pullMode: directionModeSchema.optional(),
         pushMode: directionModeSchema.optional(),
+        contentSyncMode: contentSyncModeSchema.optional(),
+        archiveSyncMode: contentSyncModeSchema.optional(),
         mirrorSubissues: z.boolean().optional(),
         conflictMode: conflictModeSchema.optional(),
         stateMapping: stateMappingSchema.optional(),

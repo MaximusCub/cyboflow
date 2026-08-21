@@ -284,6 +284,28 @@ export type TrackerConnectionStatus = 'active' | 'paused' | 'disconnected';
  */
 export type TrackerDirectionMode = 'auto' | 'manual';
 
+/**
+ * Per-connection cadence for field write-back ("Sync task fields") and remote
+ * archive/trash (migration 112). A SEPARATE type from {@link
+ * TrackerDirectionMode} rather than a widening of it — deliberately: the
+ * existing three directions (status/pull/push) answer "auto or manual", never
+ * "never", and coupling a third value onto that pair would let an unrelated
+ * direction accidentally compile against 'off'. `'off'` is the default for
+ * both new modes: an existing connection never consented to writing derived
+ * field values, or archiving issues, into someone else's tracker workspace.
+ *
+ *  - `contentSyncMode`: title/description/priority/category, LINKED items,
+ *    OUTBOUND only.
+ *  - `archiveSyncMode`: a local archive/delete becomes a remote trash/archive
+ *    (never a hard delete).
+ *
+ * Unlike `TrackerDirectionMode`, `'off'` gates at the ENQUEUE rather than the
+ * drain (docs/proposals/tracker-field-writeback.md invariant 5) — a queued row
+ * under an 'off' direction would be undrainable even by "Sync now", which
+ * would permanently stall the inbound cursor.
+ */
+export type TrackerContentSyncMode = 'auto' | 'manual' | 'off';
+
 /** The three entity tables a tracker link can point at (mirrors EntityExternalLinkRow). */
 export type TrackerEntityType = 'idea' | 'epic' | 'task';
 
@@ -346,6 +368,10 @@ export interface TrackerConnectionSummary {
   statusSyncMode: TrackerDirectionMode;
   pullMode: TrackerDirectionMode;
   pushMode: TrackerDirectionMode;
+  /** Field write-back cadence (migration 112); 'off' on every pre-Phase-3 connection. */
+  contentSyncMode: TrackerContentSyncMode;
+  /** Remote archive/trash cadence (migration 112); 'off' on every pre-Phase-3 connection. */
+  archiveSyncMode: TrackerContentSyncMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   /** This mapping is the one its provider pushes new ideas through. */
@@ -447,6 +473,15 @@ export interface TrackerConnectPayload {
   statusSyncMode: TrackerDirectionMode;
   pullMode: TrackerDirectionMode;
   pushMode: TrackerDirectionMode;
+  /**
+   * Omitted = 'off', matching the column default — no wizard step offers this
+   * control yet (docs/proposals/tracker-field-writeback.md Phase 6), so every
+   * connect() call in this build takes the safe default rather than silently
+   * requiring a field the renderer does not send.
+   */
+  contentSyncMode?: TrackerContentSyncMode;
+  /** Omitted = 'off'; see contentSyncMode. */
+  archiveSyncMode?: TrackerContentSyncMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   reconcile: TrackerReconcileDecision[];
@@ -467,6 +502,8 @@ export interface TrackerSettingsPatch {
   statusSyncMode?: TrackerDirectionMode;
   pullMode?: TrackerDirectionMode;
   pushMode?: TrackerDirectionMode;
+  contentSyncMode?: TrackerContentSyncMode;
+  archiveSyncMode?: TrackerContentSyncMode;
   mirrorSubissues?: boolean;
   conflictMode?: TrackerConflictMode;
   stateMapping?: TrackerStateMapping;

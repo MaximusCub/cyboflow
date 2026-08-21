@@ -135,6 +135,10 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
+    content_sync_mode: 'off',
+    archive_sync_mode: 'off',
+    priority_mapping_json: '{}',
+    category_mapping_json: '{}',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -232,6 +236,29 @@ describe('trackerSync store — connections', () => {
     expect(getConnection(raw, 'nope')).toBeNull();
   });
 
+  it('inserts the migration-112 columns verbatim, and a caller can override them off their default', () => {
+    const defaults = insertConnection(raw, makeConnectionRow({ id: 'conn-112-default' }));
+    expect(defaults.content_sync_mode).toBe('off');
+    expect(defaults.archive_sync_mode).toBe('off');
+    expect(defaults.priority_mapping_json).toBe('{}');
+    expect(defaults.category_mapping_json).toBe('{}');
+
+    const overridden = insertConnection(
+      raw,
+      makeConnectionRow({
+        id: 'conn-112-overridden',
+        content_sync_mode: 'auto',
+        archive_sync_mode: 'manual',
+        priority_mapping_json: '{"toProvider":{"P0":"urgent"}}',
+        category_mapping_json: '{"toProvider":{"bug":"Bug"}}',
+      }),
+    );
+    expect(overridden.content_sync_mode).toBe('auto');
+    expect(overridden.archive_sync_mode).toBe('manual');
+    expect(overridden.priority_mapping_json).toBe('{"toProvider":{"P0":"urgent"}}');
+    expect(overridden.category_mapping_json).toBe('{"toProvider":{"bug":"Bug"}}');
+  });
+
   it('listConnections excludes disconnected connections by default and includes them with the option', () => {
     seedConnection({ id: 'conn-a', status: 'active' });
     seedConnection({ id: 'conn-b', status: 'disconnected', provider: 'plane' });
@@ -266,6 +293,21 @@ describe('trackerSync store — connections', () => {
     // Untouched fields survive the partial patch.
     expect(after.status_sync_mode).toBe(beforeRow.status_sync_mode);
     expect(after.selection_mode).toBe(beforeRow.selection_mode);
+  });
+
+  it('updateConnectionSettings patches content_sync_mode / archive_sync_mode independently', () => {
+    const id = seedConnection({ id: 'conn-1' });
+    expect(getConnection(raw, id)?.content_sync_mode).toBe('off');
+    expect(getConnection(raw, id)?.archive_sync_mode).toBe('off');
+
+    updateConnectionSettings(raw, id, { content_sync_mode: 'auto' });
+    expect(getConnection(raw, id)?.content_sync_mode).toBe('auto');
+    // The untouched direction keeps its stored value.
+    expect(getConnection(raw, id)?.archive_sync_mode).toBe('off');
+
+    updateConnectionSettings(raw, id, { archive_sync_mode: 'manual' });
+    expect(getConnection(raw, id)?.content_sync_mode).toBe('auto');
+    expect(getConnection(raw, id)?.archive_sync_mode).toBe('manual');
   });
 
   it('push_target round-trips through insert and is patchable', () => {

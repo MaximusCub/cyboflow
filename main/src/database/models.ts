@@ -514,6 +514,25 @@ export interface TrackerConnectionRow {
    * would enqueue a create per sibling and duplicate remotely.
    */
   push_target: number; // 0 | 1
+  /**
+   * Field write-back ("Sync task fields": title/description/priority/category)
+   * for LINKED items, OUTBOUND only (migration 112). A SEPARATE three-state
+   * schema from status_sync_mode/pull_mode/push_mode above — 'off' is a real
+   * third answer here ("never"), not something those two-state columns can
+   * express — see TrackerContentSyncMode in shared/types/trackerSync.ts.
+   * Defaults 'off': an existing connection never consented to write-back.
+   */
+  content_sync_mode: 'auto' | 'manual' | 'off';
+  /** Remote trash/archive on a local archive/delete (migration 112). Same three-state shape as content_sync_mode, same default reasoning. */
+  archive_sync_mode: 'auto' | 'manual' | 'off';
+  /**
+   * The persisted OVERLAY half of priorityMapping.ts's seed-then-overlay
+   * contract (migration 112) — `{}` until the wizard's mapping table (Phase 6)
+   * writes one. See PriorityMappingOverlay / resolveEffectivePriorityMapping.
+   */
+  priority_mapping_json: string;
+  /** categoryMapping.ts's overlay, same shape and default as priority_mapping_json. */
+  category_mapping_json: string;
   mirror_subissues: number; // 0 | 1
   conflict_mode: 'auto' | 'manual';
   cursor_updated_at: string | null;
@@ -566,11 +585,24 @@ export interface EntityExternalLinkRow {
  * `create_issue` (migration 094) is the PUSH kind: a TOP-LEVEL issue minted in
  * the connection's source container for a locally-created idea, as opposed to
  * `create_sub_issue`'s mirrored child of an existing issue.
+ *
+ * `update_content` / `archive_issue` (migration 112) are the field write-back
+ * and archive/trash kinds (docs/proposals/tracker-field-writeback.md Phase 5
+ * drains them; Phase 3 only widens the CHECK and the row type — a claimed row
+ * of either kind terminally fails with a "no handler until Phase 5" error
+ * rather than falling through to the state-write dispatch, per that plan's
+ * invariant 8).
  */
 export interface TrackerOutboxRow {
   id: number;
   connection_id: string;
-  kind: 'create_sub_issue' | 'create_issue' | 'update_state' | 'close_parent';
+  kind:
+    | 'create_sub_issue'
+    | 'create_issue'
+    | 'update_state'
+    | 'close_parent'
+    | 'update_content'
+    | 'archive_issue';
   entity_type: string | null;
   entity_id: string | null;
   external_id: string | null;

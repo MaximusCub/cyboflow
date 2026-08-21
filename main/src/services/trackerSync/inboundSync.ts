@@ -899,18 +899,17 @@ export async function runInboundSync(
   // provider — Linear and Plane state their fixed scales, and Dart serves this
   // off the same cached `/config` listStates just used.
   const fieldOptions = await adapter.listFieldOptions();
-  // Phase 2 has no persisted overlay yet (the columns arrive with migration
-  // 112), so both resolve to their seed. The parameter is threaded now so the
-  // merge never has to learn where the overlay comes from.
+  // Migration 112 columns: an empty '{}' overlay (every pre-Phase-6 connection)
+  // resolves to the seed, exactly like Phase 2's `null` placeholder did.
   const priorityMapping = resolveEffectivePriorityMapping(
     connection.provider,
     fieldOptions.priorities,
-    null,
+    connection.priority_mapping_json,
   );
   const categoryMapping = resolveEffectiveCategoryMapping(
     connection.provider,
     fieldOptions.categories,
-    null,
+    connection.category_mapping_json,
   );
 
   const issues = await adapter.listIssues(selection, computeSince(connection));

@@ -422,6 +422,10 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
+    content_sync_mode: 'off',
+    archive_sync_mode: 'off',
+    priority_mapping_json: '{}',
+    category_mapping_json: '{}',
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -1174,6 +1178,74 @@ describe('drainOutbox — failure handling', () => {
     expect(report.sent).toBe(0);
     expect(adapter.updateCalls).toHaveLength(0);
     expect(fetchOutbox(row.id).state).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drain — migration 112's new kinds, before Phase 5 wires a real handler
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — update_content / archive_issue terminally fail (no Phase-5 handler yet)', () => {
+  it('claims and terminally fails an update_content row without touching the adapter', async () => {
+    const connection = seedConnection();
+    const row = enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'update_content',
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      external_id: 'ext-1',
+      payload_json: '{}',
+    });
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.failedTerminal).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('failed');
+    expect(settled.last_error).toContain('update_content');
+    expect(settled.last_error).toContain('Phase 5');
+    // No fall-through to the state-write dispatch: nothing was sent.
+    expect(adapter.updateCalls).toHaveLength(0);
+  });
+
+  it('claims and terminally fails an archive_issue row the same way', async () => {
+    const connection = seedConnection();
+    const row = enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'archive_issue',
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      external_id: 'ext-1',
+      payload_json: '{}',
+    });
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.failedTerminal).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('failed');
+    expect(settled.last_error).toContain('archive_issue');
+    expect(adapter.updateCalls).toHaveLength(0);
+  });
+
+  it('does not halt the drain: a later, real state write still sends after the stub fails', async () => {
+    const connection = seedConnection();
+    enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'update_content',
+      external_id: 'ext-1',
+      payload_json: '{}',
+    });
+    const stateRow = enqueueStateWrite(connection.id, 'ext-2', 'completed');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.failedTerminal).toBe(1);
+    expect(report.sent).toBe(1);
+    expect(fetchOutbox(stateRow.id).state).toBe('done');
   });
 });
 

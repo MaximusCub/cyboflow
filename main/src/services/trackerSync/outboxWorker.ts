@@ -231,7 +231,32 @@ async function processRow(
   if (row.kind === 'create_issue') {
     return await processPush(deps, connection, adapter, states, row, report);
   }
+  if (row.kind === 'update_content' || row.kind === 'archive_issue') {
+    return processUnimplementedContentKind(deps, row, report);
+  }
   return await processStateWrite(deps, connection, adapter, states, row, report);
+}
+
+/**
+ * `update_content` / `archive_issue` (migration 112): the outbox kind exists so
+ * the CHECK constraint and store plumbing are ready, but
+ * docs/proposals/tracker-field-writeback.md Phase 5 has not wired an enqueue
+ * trigger OR a drain handler for either kind yet. A claimed row of either kind
+ * in THIS build is therefore unreachable in practice (nothing enqueues one) —
+ * but per that plan's invariant 8, it terminally fails with a diagnostic
+ * rather than falling through to {@link processStateWrite}, which would
+ * misread its payload as a state write. Replaced by real handlers in Phase 5.
+ */
+function processUnimplementedContentKind(
+  deps: OutboxDeps,
+  row: TrackerOutboxRow,
+  report: OutboxReport,
+): boolean {
+  resolveOutbox(deps.db, row.id, 'failed', {
+    lastError: `${row.kind}: no drain handler until Phase 5 (docs/proposals/tracker-field-writeback.md)`,
+  });
+  report.failedTerminal += 1;
+  return false;
 }
 
 /**

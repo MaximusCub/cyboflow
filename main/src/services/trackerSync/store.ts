@@ -65,12 +65,14 @@ export function insertConnection(db: Database.Database, row: NewConnectionRow): 
          id, project_id, provider, status, workspace_id, workspace_name, actor_label,
          base_url, secret_ciphertext, source_json, selection_mode, selection_json,
          state_mapping_json, status_sync_mode, pull_mode, push_mode, push_target,
+         content_sync_mode, archive_sync_mode, priority_mapping_json, category_mapping_json,
          mirror_subissues, conflict_mode,
          cursor_updated_at, cursor_external_id, last_sync_at, last_sync_log_json
        ) VALUES (
          @id, @project_id, @provider, @status, @workspace_id, @workspace_name, @actor_label,
          @base_url, @secret_ciphertext, @source_json, @selection_mode, @selection_json,
          @state_mapping_json, @status_sync_mode, @pull_mode, @push_mode, @push_target,
+         @content_sync_mode, @archive_sync_mode, @priority_mapping_json, @category_mapping_json,
          @mirror_subissues, @conflict_mode,
          @cursor_updated_at, @cursor_external_id, @last_sync_at, @last_sync_log_json
        )
@@ -129,6 +131,13 @@ export interface ConnectionSettingsPatch {
   push_mode?: TrackerConnectionRow['push_mode'];
   /** 0 | 1 — see TrackerConnectionRow.push_target (migration 110). */
   push_target?: number;
+  /** Field write-back cadence (migration 112). */
+  content_sync_mode?: TrackerConnectionRow['content_sync_mode'];
+  /** Remote archive/trash cadence (migration 112). */
+  archive_sync_mode?: TrackerConnectionRow['archive_sync_mode'];
+  // priority_mapping_json / category_mapping_json are NOT patchable here yet —
+  // no wizard/settings surface writes them until Phase 6; until then they are
+  // set once at insertConnection and otherwise read verbatim.
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];
   source_json?: string | null;
@@ -149,6 +158,8 @@ const CONNECTION_SETTINGS_COLUMNS = [
   'pull_mode',
   'push_mode',
   'push_target',
+  'content_sync_mode',
+  'archive_sync_mode',
   'mirror_subissues',
   'conflict_mode',
   'source_json',
@@ -552,6 +563,8 @@ export function reactivateConnection(
          state_mapping_json = @state_mapping_json,
          status_sync_mode = @status_sync_mode, pull_mode = @pull_mode, push_mode = @push_mode,
          push_target = @push_target,
+         content_sync_mode = @content_sync_mode, archive_sync_mode = @archive_sync_mode,
+         priority_mapping_json = @priority_mapping_json, category_mapping_json = @category_mapping_json,
          mirror_subissues = @mirror_subissues, conflict_mode = @conflict_mode,
          cursor_updated_at = @cursor_updated_at, cursor_external_id = @cursor_external_id,
          last_sync_at = @last_sync_at, last_sync_log_json = @last_sync_log_json,

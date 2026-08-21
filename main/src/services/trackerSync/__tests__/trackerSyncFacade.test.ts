@@ -358,6 +358,10 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
+    content_sync_mode: 'off',
+    archive_sync_mode: 'off',
+    priority_mapping_json: '{}',
+    category_mapping_json: '{}',
     mirror_subissues: 1,
     conflict_mode: 'manual',
     cursor_updated_at: null,
@@ -668,6 +672,12 @@ describe('TrackerSyncService.connect', () => {
     expect(row?.status_sync_mode).toBe('auto');
     expect(row?.pull_mode).toBe('auto');
     expect(row?.push_mode).toBe('auto');
+    // The payload sends neither yet (no wizard control until Phase 6) — both
+    // default to 'off', the write-back-declined state.
+    expect(row?.content_sync_mode).toBe('off');
+    expect(row?.archive_sync_mode).toBe('off');
+    expect(row?.priority_mapping_json).toBe('{}');
+    expect(row?.category_mapping_json).toBe('{}');
     expect(row?.mirror_subissues).toBe(1);
     expect(row?.conflict_mode).toBe('auto');
     expect(JSON.parse(row?.source_json ?? '{}')).toEqual({ ...SOURCE, label: 'Core · Whole team' });
@@ -1557,6 +1567,9 @@ describe('TrackerSyncService.connections', () => {
     expect(summary.statusSyncMode).toBe('auto');
     expect(summary.pullMode).toBe('auto');
     expect(summary.pushMode).toBe('auto');
+    // Every pre-Phase-6 connection carries the write-back-declined default.
+    expect(summary.contentSyncMode).toBe('off');
+    expect(summary.archiveSyncMode).toBe('off');
     expect(summary.mirrorSubissues).toBe(true);
     expect(summary.conflictMode).toBe('manual');
     expect(summary.pushTarget).toBe(true);
@@ -1580,6 +1593,8 @@ describe('TrackerSyncService.connections', () => {
     await service.updateSettings(CONN_ID, {
       statusSyncMode: 'manual',
       pushMode: 'manual',
+      contentSyncMode: 'auto',
+      archiveSyncMode: 'manual',
       conflictMode: 'auto',
       selectionMode: 'assignee',
       selectionJson: { assigneeIds: ['user-1'] },
@@ -1588,6 +1603,8 @@ describe('TrackerSyncService.connections', () => {
     const row = getConnection(raw, CONN_ID);
     expect(row?.status_sync_mode).toBe('manual');
     expect(row?.push_mode).toBe('manual');
+    expect(row?.content_sync_mode).toBe('auto');
+    expect(row?.archive_sync_mode).toBe('manual');
     // An omitted direction keeps its stored value.
     expect(row?.pull_mode).toBe('auto');
     expect(row?.conflict_mode).toBe('auto');

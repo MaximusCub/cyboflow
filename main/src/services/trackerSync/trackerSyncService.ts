@@ -86,6 +86,7 @@ import type {
   TrackerConflictSummary,
   TrackerConnectPayload,
   TrackerConnectionSummary,
+  TrackerContentSyncMode,
   TrackerCredentialsInput,
   TrackerDirectionMode,
   TrackerEntityLinkRef,
@@ -250,6 +251,31 @@ function directionRuns(mode: TrackerDirectionMode, trigger: TrackerSyncTrigger):
 }
 
 /**
+ * The outbox kinds the CONTENT direction owns (field write-back, migration 112).
+ */
+const CONTENT_OUTBOX_KINDS = ['update_content'] as const;
+
+/**
+ * The outbox kinds the ARCHIVE direction owns (remote trash/archive, migration
+ * 112).
+ */
+const ARCHIVE_OUTBOX_KINDS = ['archive_issue'] as const;
+
+/**
+ * True when a {@link TrackerContentSyncMode} direction may run under `trigger`.
+ *
+ * `'off'` short-circuits BEFORE the `trigger === 'manual'` escape — the one
+ * place this differs from {@link directionRuns} — because "Sync now" must
+ * never drain a direction the user has declined altogether (invariant 5 of
+ * docs/proposals/tracker-field-writeback.md): unlike `auto`/`manual`, which
+ * only disagree about WHEN a direction runs, `'off'` disagrees about WHETHER
+ * it ever does.
+ */
+function contentDirectionRuns(mode: TrackerContentSyncMode, trigger: TrackerSyncTrigger): boolean {
+  return mode !== 'off' && (mode === 'auto' || trigger === 'manual');
+}
+
+/**
  * The outbox kinds this pass may CLAIM. Rows of every other kind stay `pending`
  * and in order until a pass whose filter includes them comes along — the whole
  * "manual delays work, it never drops it" contract, expressed as a claim
@@ -262,6 +288,8 @@ function drainKinds(
   const kinds: TrackerOutboxRow['kind'][] = [];
   if (directionRuns(connection.status_sync_mode, trigger)) kinds.push(...STATUS_OUTBOX_KINDS);
   if (directionRuns(connection.push_mode, trigger)) kinds.push(...PUSH_OUTBOX_KINDS);
+  if (contentDirectionRuns(connection.content_sync_mode, trigger)) kinds.push(...CONTENT_OUTBOX_KINDS);
+  if (contentDirectionRuns(connection.archive_sync_mode, trigger)) kinds.push(...ARCHIVE_OUTBOX_KINDS);
   return kinds;
 }
 
@@ -1186,6 +1214,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
       pull_mode: 'manual',
       push_mode: 'manual',
       push_target: 0,
+      content_sync_mode: 'off',
+      archive_sync_mode: 'off',
+      priority_mapping_json: '{}',
+      category_mapping_json: '{}',
       mirror_subissues: 0,
       conflict_mode: 'auto',
       cursor_updated_at: null,
@@ -1512,6 +1544,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // Omitted = the push target, which is what a single-mapping connect (every
       // pre-rev-4 one) means. Only the Map step's sibling mappings send false.
       push_target: payload.pushTarget === false ? 0 : 1,
+      // Omitted = 'off' (the column default) — no wizard step sends either yet
+      // (Phase 6). Mapping overlays start empty; the wizard has no editor for
+      // them until then either.
+      content_sync_mode: payload.contentSyncMode ?? 'off',
+      archive_sync_mode: payload.archiveSyncMode ?? 'off',
+      priority_mapping_json: '{}',
+      category_mapping_json: '{}',
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -1872,6 +1911,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
       statusSyncMode: row.status_sync_mode,
       pullMode: row.pull_mode,
       pushMode: row.push_mode,
+      contentSyncMode: row.content_sync_mode,
+      archiveSyncMode: row.archive_sync_mode,
       mirrorSubissues: row.mirror_subissues === 1,
       conflictMode: row.conflict_mode,
       pushTarget: row.push_target !== 0,
@@ -1898,6 +1939,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
       ...(patch.statusSyncMode !== undefined ? { status_sync_mode: patch.statusSyncMode } : {}),
       ...(patch.pullMode !== undefined ? { pull_mode: patch.pullMode } : {}),
       ...(patch.pushMode !== undefined ? { push_mode: patch.pushMode } : {}),
+      ...(patch.contentSyncMode !== undefined ? { content_sync_mode: patch.contentSyncMode } : {}),
+      ...(patch.archiveSyncMode !== undefined ? { archive_sync_mode: patch.archiveSyncMode } : {}),
       ...(patch.mirrorSubissues !== undefined
         ? { mirror_subissues: patch.mirrorSubissues ? 1 : 0 }
         : {}),
@@ -2767,6 +2810,30 @@ function appendHeldDirectionLines(
   if (!directionRuns(connection.push_mode, trigger)) held.push('push');
   for (const direction of held) {
     entries.push({ marker: '·', line: `${direction} held · manual — use Sync now` });
+  }
+
+  // The two content-sync-mode directions get their OWN phrasing rather than
+  // reusing the loop above: 'off' is not something "Sync now" can unstick (it
+  // gates at the enqueue, never the drain — invariant 5), so a held line that
+  // said "use Sync now" for an 'off' direction would promise a fix that does
+  // nothing.
+  appendContentModeLine(entries, 'content changes', connection.content_sync_mode, trigger);
+  appendContentModeLine(entries, 'archive', connection.archive_sync_mode, trigger);
+}
+
+/** One {@link appendHeldDirectionLines} line for a single content-sync-mode direction, or none. */
+function appendContentModeLine(
+  entries: TrackerSyncLogEntry[],
+  label: string,
+  mode: TrackerContentSyncMode,
+  trigger: TrackerSyncTrigger,
+): void {
+  if (mode === 'off') {
+    entries.push({ marker: '·', line: `${label} off` });
+    return;
+  }
+  if (mode === 'manual' && trigger !== 'manual') {
+    entries.push({ marker: '·', line: `${label} held (manual) · use Sync now` });
   }
 }
 

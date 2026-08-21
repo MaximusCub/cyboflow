@@ -101,6 +101,12 @@ describe('Migration 093: tracker-sync data model', () => {
       // Appended by 110 (multi-project mapping's per-connection push flag),
       // asserted for real in migration110.test.ts.
       'push_target',
+      // Appended by 112 (content/archive write-back modes + mapping
+      // overlays), asserted for real in migration112.test.ts.
+      'content_sync_mode',
+      'archive_sync_mode',
+      'priority_mapping_json',
+      'category_mapping_json',
     ]);
 
     expect(columnNames(raw, 'entity_external_links')).toEqual([

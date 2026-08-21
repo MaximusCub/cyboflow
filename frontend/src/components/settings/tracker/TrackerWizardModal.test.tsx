@@ -268,6 +268,8 @@ const SOURCE_CONNECTION: TrackerConnectionSummary = {
   statusSyncMode: 'auto',
   pullMode: 'auto',
   pushMode: 'auto',
+  contentSyncMode: 'off',
+  archiveSyncMode: 'off',
   mirrorSubissues: true,
   conflictMode: 'auto',
   pushTarget: true,
