@@ -193,6 +193,14 @@ describe('omp-sdk deferred approvals', () => {
       )
       .all(RUN_ID) as Array<{ blocking: number }>).map((r) => r.blocking);
 
+  const permissionSources = (): string[] =>
+    (db
+      .prepare(
+        `SELECT source FROM review_items
+          WHERE run_id = ? AND kind = 'permission' ORDER BY created_at`,
+      )
+      .all(RUN_ID) as Array<{ source: string }>).map((r) => r.source);
+
   const runStatus = (): string =>
     (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(RUN_ID) as { status: string })
       .status;
@@ -377,6 +385,17 @@ describe('omp-sdk deferred approvals', () => {
     await settle();
 
     expect(lastVerdict(retry.writes)?.permissionDecision).toBe('allow');
+  });
+
+  // The inbox row's `source` is the only field recording which substrate is
+  // blocked, and both transports arrive at the same handler. Reading every OMP
+  // ask as an interactive-shell one made the inbox misattribute the agent.
+  it('stamps the folded review_item with the omp substrate', async () => {
+    const first = makeSocketDouble();
+    handler.handleMessage(ask('r1', { substrate: 'omp' }), first.socket);
+    await settle();
+
+    expect(permissionSources()).toEqual(['approval:omp']);
   });
 
   it('never writes the awaited mark on the interactive substrate', async () => {

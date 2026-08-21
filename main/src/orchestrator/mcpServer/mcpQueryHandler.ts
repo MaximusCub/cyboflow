@@ -214,6 +214,17 @@ import {
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
 
 /**
+ * Provenance stamped on the folded permission review_item, per transport.
+ *
+ * Both the interactive Claude shell hook and the OMP gate extension reach
+ * `handleShellApprovalRequest` over the same socket, so the source is the only
+ * thing in the row that records which substrate is actually blocked.
+ * (Codex has its own, `CODEX_APP_SERVER_APPROVAL_SOURCE`.)
+ */
+const APPROVAL_SOURCE_INTERACTIVE = 'approval:interactive';
+const APPROVAL_SOURCE_OMP = 'approval:omp';
+
+/**
  * Wire error per ad-hoc-eval rejection reason (`cyboflow_run_eval`). Keyed by the
  * AdHocSnapshotResult reason union, so a new reason fails the build here instead
  * of silently degrading to an undefined error string. Each value is
@@ -5552,7 +5563,8 @@ export class McpQueryHandler {
    * non-edit tools).
    *
    * P4 fold: requestApproval co-writes a blocking permission review_item into the
-   * unified inbox (source 'approval:interactive') inside its own transaction. The
+   * unified inbox (source 'approval:interactive', or 'approval:omp' when the
+   * requester is the OMP gate extension) inside its own transaction. The
    * socket-held-open contract is UNCHANGED — the review_item is purely additive
    * and the socketReply closure remains the only place a verdict is written.
    *
@@ -5703,10 +5715,13 @@ export class McpQueryHandler {
           }
           this.writeShellVerdict(client, msg.requestId, decision);
         },
-        // P4: stamp the folded permission review_item with the interactive
-        // substrate provenance. The co-write happens inside requestApproval's
-        // transaction (commit 1); the socketReply closure above is unchanged.
-        'approval:interactive',
+        // P4: stamp the folded permission review_item with the substrate that
+        // actually asked. Both transports arrive here, and reading every OMP ask
+        // as an interactive-shell one makes the inbox lie about which agent is
+        // blocked — the same attribution gap the pending-approval card had.
+        // The co-write happens inside requestApproval's transaction (commit 1);
+        // the socketReply closure above is unchanged.
+        ompKey === null ? APPROVAL_SOURCE_INTERACTIVE : APPROVAL_SOURCE_OMP,
         // omp lane only: record which approval this deferred entry owns, so the
         // ~25s hangup can mark it un-awaited. The entry may already be gone (a
         // fail-closed catch dropped it); then there is nothing to record.
