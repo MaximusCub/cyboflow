@@ -525,25 +525,31 @@ export class DartAdapter implements TrackerAdapter {
     clientKey: string
   ): Promise<TrackerIssue | null> {
     const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
-    // THE DARTBOARD-SCOPED ARM MUST FAIL LOUD, NOT EMPTY. A renamed dartboard
-    // makes `/tasks/list` answer 200 with zero rows (measured), and in THIS
-    // method an empty result is not "no match" — it is read by the outbox as
-    // PROOF the create never landed, which requeues a create that may already
-    // have committed and duplicates it. Throwing leaves the row `ambiguous`,
-    // which is the correct unresolved state; that guard lives in
-    // {@link DartAdapter.resolveRecoveryBoards}. The parent_id arm needs no such
-    // guard: it is addressed by id, which renames cannot invalidate — and must
-    // not pay a /config round-trip for one either.
-    const scopeParamSets: Record<string, string>[] =
-      scope.parentExternalId !== null
-        ? [{ parent_id: scope.parentExternalId }]
-        : scope.containerId !== null
-          ? (await this.resolveRecoveryBoards(scope.containerId, scope.narrowKind ?? null)).map(
-              (board) => ({
-                dartboard: board,
-              })
-            )
-          : [];
+    // NEITHER ARM MAY ANSWER "EMPTY" FOR A SCOPE THAT NO LONGER RESOLVES. In
+    // THIS method an empty result is not "no match" — it is read by the outbox
+    // as PROOF the create never landed, which requeues a create that may
+    // already have committed and duplicates it. Throwing instead leaves the row
+    // `ambiguous`, which is the correct unresolved state.
+    //
+    // The two arms lose their scope differently. A renamed dartboard makes
+    // `/tasks/list` answer 200 with zero rows (measured); that guard lives in
+    // {@link DartAdapter.resolveRecoveryBoards}. The parent_id arm IS immune to
+    // renames — it addresses by id — but not to a parent that was TRASHED or
+    // deleted: trashing is indistinguishable from deletion over this API (see
+    // {@link DartAdapter.mapIssue}), so a gone parent 404s on `GET /tasks/{id}`
+    // and a `parent_id` filter naming it returns that same empty page. So the
+    // parent is confirmed to exist first — one point GET, still not the /config
+    // round-trip this arm has no reason to pay.
+    const scopeParamSets: Record<string, string>[] = [];
+    if (scope.parentExternalId !== null) {
+      if ((await this.fetchTaskWire(scope.parentExternalId)) === null) {
+        throw missingParentError(scope.parentExternalId);
+      }
+      scopeParamSets.push({ parent_id: scope.parentExternalId });
+    } else if (scope.containerId !== null) {
+      const boards = await this.resolveRecoveryBoards(scope.containerId, scope.narrowKind ?? null);
+      scopeParamSets.push(...boards.map((board) => ({ dartboard: board })));
+    }
     if (scopeParamSets.length === 0) {
       throw new TrackerApiError(
         PROVIDER,
@@ -962,6 +968,23 @@ function missingDartboardError(containerId: string): TrackerApiError {
     PROVIDER,
     `dartboard "${containerId}" no longer exists in this Dart space — it was renamed or ` +
       'deleted. Re-pick the source dartboard in Settings → Integrations.',
+    null
+  );
+}
+
+/**
+ * The parent-scoped counterpart of {@link missingDartboardError}: the parent a
+ * client-key recovery would search under is gone. Trashing is MEASURED to be
+ * indistinguishable from deletion here (see {@link DartAdapter.mapIssue}), so
+ * this covers both — and it must fail loud for the same reason the dartboard
+ * arm does: a `parent_id` filter naming a gone parent returns an empty page the
+ * outbox would read as proof the create never landed.
+ */
+function missingParentError(parentExternalId: string): TrackerApiError {
+  return new TrackerApiError(
+    PROVIDER,
+    `parent task ${parentExternalId} no longer exists in this Dart space — it was trashed or ` +
+      'deleted, so a lost create cannot be recovered under it.',
     null
   );
 }

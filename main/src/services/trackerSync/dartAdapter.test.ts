@@ -582,13 +582,17 @@ describe('DartAdapter.listIssues', () => {
     ).rejects.toThrow(/no longer exists/i);
   });
 
-  it('does NOT guard the parent-scoped recovery arm — ids survive renames', async () => {
+  it('guards the parent-scoped recovery arm with a point GET, never a /config round-trip', async () => {
     // parent_id addressing cannot be invalidated by a dartboard rename, so that
-    // arm must keep working without a /config round-trip.
+    // arm still must not pay for /config — but it CAN be invalidated by a
+    // trashed parent, so the parent's own existence is confirmed first.
     const rows = [concise({ id: 'childchild00' })];
     const { fetchImpl, calls } = scriptedFetch([
       listRoute(rows),
-      makeDetailRoute({ childchild00: task({ id: 'childchild00', description: `x\n\ncyboflow-sync: ${CLIENT_KEY}` }) }),
+      makeDetailRoute({
+        parentparent: task({ id: 'parentparent' }),
+        childchild00: task({ id: 'childchild00', description: `x\n\ncyboflow-sync: ${CLIENT_KEY}` }),
+      }),
     ]);
     const found = await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
       { containerId: null, parentExternalId: 'parentparent' },
@@ -596,6 +600,23 @@ describe('DartAdapter.listIssues', () => {
     );
     expect(found?.externalId).toBe('childchild00');
     expect(calls.some((c) => new URL(c.url).pathname.endsWith('/config'))).toBe(false);
+    expect(calls.some((c) => new URL(c.url).pathname.endsWith('/tasks/parentparent'))).toBe(true);
+  });
+
+  it('fails LOUD when the recovery parent itself was trashed', async () => {
+    // A trashed Dart task 404s on GET /tasks/{id} and is absent from listings,
+    // so a parent_id filter naming it answers 200 with an EMPTY page — which the
+    // outbox reads as "the create never landed" and requeues a create that may
+    // already have committed. Same hazard class as the renamed dartboard, same
+    // loud failure. No POST route is scripted, so a create that reached the
+    // network would surface as an unhandled request instead.
+    const { fetchImpl } = scriptedFetch([listRoute([]), makeDetailRoute({})]);
+    await expect(
+      new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
+        { containerId: null, parentExternalId: 'goneparent00' },
+        CLIENT_KEY,
+      ),
+    ).rejects.toThrow(/no longer exists/i);
   });
 
   it('paginates to exhaustion via limit/offset', async () => {
@@ -1192,7 +1213,8 @@ describe('DartAdapter.findIssueByClientKey', () => {
           return { status: 200, body: { count: 1, next: null, results: [concise({ id: 'foundfoundfo' })] } };
         },
       },
-      makeDetailRoute({ foundfoundfo: marked }),
+      // The parent must resolve: the arm confirms it exists before filtering.
+      makeDetailRoute({ parentparent: task({ id: 'parentparent' }), foundfoundfo: marked }),
     ]);
     await new DartAdapter({ apiKey: 'k', fetchImpl }).findIssueByClientKey(
       { containerId: null, parentExternalId: 'parentparent' },
