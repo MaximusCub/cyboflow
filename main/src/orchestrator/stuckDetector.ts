@@ -1,6 +1,6 @@
 /**
- * StuckDetector — periodic service that scans for approvals pending longer
- * than STALE_THRESHOLD_MS (5 minutes), classifies the failure reason, and
+ * StuckDetector — periodic service that scans for AWAITED approvals pending
+ * longer than STALE_THRESHOLD_MS, classifies the failure reason, and
  * transitions the affected workflow_run to status='stuck'.
  *
  * Standalone-typecheck invariant (ROADMAP-001 §6.3):
@@ -110,13 +110,23 @@ export class StuckDetector {
     this.emitter = deps.emitter;
     this.logger = deps.logger;
 
+    // `awaited = 1` on every approval predicate below (migration 111): a
+    // pending row means two different things now. Either a requester is
+    // blocked on it right now, or the ask is still answerable but nobody is
+    // waiting — the omp-sdk gate hangs up at ~25s and the model may never
+    // retry. Only the first is evidence a run is wedged. Counting the second
+    // is how an OMP run that had long since moved on looked deadlocked.
     this.stmtStaleApprovals = this.db.prepare(
       `SELECT id, run_id, status, created_at FROM approvals
-       WHERE status = 'pending' AND created_at < ?`,
+       WHERE status = 'pending' AND awaited = 1 AND created_at < ?`,
     );
+    // Rung 3 additionally: orphanPendingForRun deliberately permits a SECOND
+    // pending approval per run on the OMP lane (it restores the run to
+    // 'running' while the ask stays collectable), so counting un-awaited rows
+    // here made a healthy OMP run look like an intra-run queue jam.
     this.stmtSelfDeadlockCount = this.db.prepare(
       `SELECT COUNT(*) as cnt FROM approvals
-       WHERE run_id = ? AND status = 'pending' AND id != ?`,
+       WHERE run_id = ? AND status = 'pending' AND awaited = 1 AND id != ?`,
     );
     // Rung 4 requires the CONFLICTING run to itself hold a stale pending
     // approval. Until now this query checked only `status='awaiting_review'`,
@@ -132,6 +142,7 @@ export class StuckDetector {
            SELECT 1 FROM approvals a
             WHERE a.run_id = wr.id
               AND a.status = 'pending'
+              AND a.awaited = 1
               AND a.created_at < ?
          )
        LIMIT 1`,

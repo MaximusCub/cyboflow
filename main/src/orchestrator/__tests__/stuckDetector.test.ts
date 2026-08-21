@@ -405,6 +405,62 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     rawDb.close();
   });
 
+  it('does NOT stamp when the only other blocked run holds an UN-AWAITED ask', () => {
+    // Migration 111 shape: the omp-sdk gate hung up, the row is still
+    // answerable, but nobody is blocked on it. It is not evidence of a wedge.
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+
+    seedRun(rawDb, 'run-x', 'awaiting_review');
+    seedRun(rawDb, 'run-y', 'awaiting_review');
+    seedApproval(rawDb, { id: 'approval-x', runId: 'run-x', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
+    seedApproval(rawDb, { id: 'approval-y', runId: 'run-y', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000), awaited: false });
+
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set(['run-x', 'run-y'])),
+      permissionServer: makePermissionServer(new Set(['run-x', 'run-y'])),
+      emitter,
+      logger,
+    });
+
+    const row = rawDb
+      .prepare("SELECT id, run_id, status, created_at FROM approvals WHERE id = 'approval-x'")
+      .get() as { id: string; run_id: string; status: string; created_at: string };
+
+    expect(detector.classifyStaleApproval(row)).toBeNull();
+
+    rawDb.close();
+  });
+
+  it('scan() ignores an UN-AWAITED stale approval entirely', () => {
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+
+    seedRun(rawDb, 'run-detached', 'awaiting_review');
+    seedApproval(rawDb, { id: 'approval-detached', runId: 'run-detached', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000), awaited: false });
+
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set()),
+      emitter,
+      logger,
+    });
+
+    void detector.scan();
+
+    const after = rawDb
+      .prepare("SELECT status FROM workflow_runs WHERE id = 'run-detached'")
+      .get() as { status: string };
+    expect(after.status).toBe('awaiting_review');
+
+    rawDb.close();
+  });
+
   it('does NOT stamp when the other run\'s approval is NOT yet stale', () => {
     // The conflicting run is genuinely blocked, but only just — it has not
     // crossed the staleness boundary, so it is not evidence of a deadlock.

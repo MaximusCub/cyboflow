@@ -415,6 +415,12 @@ export interface SeedApprovalOverrides {
   status?: 'pending' | 'approved' | 'rejected' | 'timed_out';
   /** The created_at ISO string. Defaults to the current time. */
   createdAt?: string;
+  /**
+   * Migration 111's `awaited`. Defaults to true (a blocked requester), which
+   * matches the column default and every non-OMP transport. Pass false to seed
+   * the omp-sdk detached shape: still-answerable, nobody waiting.
+   */
+  awaited?: boolean;
 }
 
 /**
@@ -433,12 +439,13 @@ export function seedApproval(db: Database.Database, overrides: SeedApprovalOverr
   const toolUseId = overrides.toolUseId ?? id;
   const status = overrides.status ?? 'pending';
   const createdAt = overrides.createdAt ?? new Date().toISOString();
+  const awaited = overrides.awaited ?? true;
 
   db.prepare(
     `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt);
+       (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at, awaited)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt, awaited ? 1 : 0);
 
   return id;
 }
