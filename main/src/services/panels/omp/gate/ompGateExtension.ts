@@ -1258,11 +1258,22 @@ function isAutoModeHazardousSegment(segment: string): boolean {
   if (programToken === null) return false;
   // A prefix consumed an option this function does not model. Refuse.
   if (programToken.startsWith('-')) return true;
+  // A VARIABLE decides what runs (`$X -rf ~`, `${CMD} …`, `"$TOOL" …`), so the
+  // token names nothing this classifier can look up. Refusing is the only
+  // readable answer: `X=rm; $X -rf ~` otherwise reaches no table at all.
+  if (programToken.includes('$')) return true;
   const program = programName(programToken);
   const args = tokens.slice(tokens.indexOf(programToken) + 1);
 
   if (PRIVILEGE_ESCALATION_PROGRAMS.has(program)) return true;
-  if (CODE_EXECUTING_PROGRAMS.has(program)) return true;
+  // `env` is code-executing because `env FOO=1 cmd` RUNS cmd. With no operand
+  // it runs nothing — it prints the environment, and `env | grep …` is one of
+  // the most common probes an agent makes (2 of the 12 escalations on the 0.2.5
+  // release smoke). An operand is anything that is not a flag, so `env FOO=1 rm`
+  // and `env -i sh` both stay hazardous; `env -u FOO` does too, conservatively,
+  // since this does not model which flags take a value.
+  const isEnvPrinter = program === 'env' && args.every((token) => token.startsWith('-'));
+  if (!isEnvPrinter && CODE_EXECUTING_PROGRAMS.has(program)) return true;
   if (DESTRUCTIVE_PROGRAMS.has(program)) return true;
   if (REMOTE_TRANSPORT_PROGRAMS.has(program)) return true;
 
@@ -1288,30 +1299,113 @@ function isAutoModeHazardousSegment(segment: string): boolean {
 }
 
 /**
+ * Redirections that can neither write a file nor read one: a discard
+ * (`2>/dev/null`, `>/dev/null`, `&>/dev/null`) or a descriptor duplication
+ * (`2>&1`). The `/dev/null` target must END the token, so `>/dev/nullx` and
+ * `>/dev/null/../etc/passwd` are NOT matched.
+ */
+const BENIGN_REDIRECT = /(?:&>>?|[0-9]*>>?)\s*(?:\/dev\/null|&[0-9])(?=\s|$)/g;
+
+/**
+ * The measured reason `auto` was still escalating roughly half of OMP's bash
+ * calls: `hasStructuralRefusal` refuses any `<`, `>` or `&`, and `2>/dev/null`
+ * is the single most common thing an agent appends to a probe. On the 0.2.5
+ * release smoke it accounted for 8 of the 12 escalations.
+ *
+ * Stripping only these two forms keeps the refusal's actual purpose intact —
+ * they name no file to write and open no file to read, so there is nothing the
+ * hazard tables failed to vet. Every other redirection still refuses, which is
+ * why the strip happens BEFORE {@link hasStructuralRefusal} rather than
+ * weakening it: `cat secrets > /tmp/exfil` and `echo hi > important.txt` are
+ * untouched, and so is the `&` that backgrounds.
+ */
+function stripBenignRedirects(segment: string): string {
+  return segment.replace(BENIGN_REDIRECT, ' ');
+}
+
+/**
+ * Stands in for a `$(...)` whose body has been lifted out and judged separately.
+ *
+ * Contains NO whitespace, so it stays ONE token through {@link tokenizeSegment}
+ * and cannot split `DIR="$(pwd)/x"` in two - which would strand the assignment
+ * and leave the placeholder sitting in program position. NUL cannot occur in a
+ * real command line, so a literal collision is impossible; were one contrived it
+ * could only force a refusal, never an allow.
+ */
+const SUBSTITUTION_PLACEHOLDER = '\u0000sub\u0000';
+
+/** Bounds the innermost-out rewrite below; a command this nested is refused. */
+const MAX_SUBSTITUTIONS = 32;
+
+/**
+ * Lift every `$(…)` body out innermost-first, leaving a placeholder behind.
+ *
+ * Returns `null` when the command cannot be read this way at all — a backtick
+ * (whose nesting this does not model) or an unbalanced/arithmetic `$((…))`
+ * form. `null` means refuse, which is the pre-existing behavior for all of them.
+ */
+function liftSubstitutions(command: string): { outer: string; bodies: string[] } | null {
+  if (command.includes('`')) return null;
+  const bodies: string[] = [];
+  let outer = command;
+  for (let i = 0; i < MAX_SUBSTITUTIONS && outer.includes('$('); i += 1) {
+    const match = /\$\(([^()]*)\)/.exec(outer);
+    if (match === null) return null; // `$((…))` or unbalanced — unreadable.
+    bodies.push(match[1]!);
+    outer = outer.slice(0, match.index) + SUBSTITUTION_PLACEHOLDER + outer.slice(match.index + match[0].length);
+  }
+  return outer.includes('$(') ? null : { outer, bodies };
+}
+
+/**
  * The `auto-bash` rung: a bash command every segment of which is free of the
  * hazard tables above.
  *
- * The two STRUCTURAL refusals are carried over from the prove-it-safe tier
- * verbatim, and both are load-bearing here rather than incidental:
+ * The raw-newline refusal is carried over from the prove-it-safe tier and stays
+ * absolute: a newline inside quotes survives the splitter, and under
+ * allow-unless-hazardous an unread line is a full bypass of every table above
+ * rather than merely a missed allow.
  *
- *  - {@link hasStructuralRefusal} — command substitution hides a command no
- *    table can see, and `<`/`>`/`&` read, write, or background outside the
- *    segment model. A hazard list can only classify what it can read, so an
- *    unreadable command is itself the hazard.
- *  - The raw-newline refusal — redundant with the splitter now that it treats a
- *    newline as a separator, and kept anyway: a newline inside quotes survives
- *    the split, and under allow-unless-hazardous an unread line is a full bypass
- *    of every table above rather than merely a missed allow.
+ * {@link hasStructuralRefusal}'s two halves are now handled separately, because
+ * measurement showed they were refusing for very different reasons:
+ *
+ *  - REDIRECTION was refusing overwhelmingly on `2>/dev/null`, which vets
+ *    nothing. {@link stripBenignRedirects} removes exactly the discard and
+ *    duplication forms; every real redirection still refuses.
+ *  - COMMAND SUBSTITUTION was refused because it "hides a command no table can
+ *    see". That premise holds only while the command stays hidden — so instead
+ *    of refusing the shape, each `$(…)` body is lifted out and put through THIS
+ *    SAME function recursively. A body that clears every hazard table is not
+ *    hidden, and one that cannot be read (a backtick, `$((…))`) still refuses.
+ *
+ * The load-bearing guard on that second relaxation: a substitution in PROGRAM
+ * position still refuses unconditionally. `$(echo rm) -rf ~` runs whatever the
+ * substitution returns, so judging the body says nothing about what executes —
+ * only a substitution used as a VALUE is judged by its body.
  */
 export function isAutoModeAllowedBashCommand(rawCommand: string): boolean {
   const command = rawCommand.trim();
   if (command.length === 0) return false;
   if (/[\r\n]/.test(command)) return false;
-  const segments = splitShellSegments(command);
+
+  const lifted = liftSubstitutions(command);
+  if (lifted === null) return false;
+
+  const segments = splitShellSegments(lifted.outer);
   if (segments.length === 0) return false;
-  return segments.every(
-    (segment) => !hasStructuralRefusal(segment) && !isAutoModeHazardousSegment(segment),
-  );
+
+  const segmentAllowed = (segment: string): boolean => {
+    const readable = stripBenignRedirects(segment);
+    if (hasStructuralRefusal(readable)) return false;
+    // A substitution that decides WHAT RUNS is never judged by its body.
+    const programToken = resolveProgramToken(tokenizeSegment(readable));
+    if (programToken !== null && programToken.includes(SUBSTITUTION_PLACEHOLDER)) return false;
+    return !isAutoModeHazardousSegment(readable);
+  };
+
+  if (!segments.every(segmentAllowed)) return false;
+  // Every lifted body must clear the same bar on its own.
+  return lifted.bodies.every((body) => isAutoModeAllowedBashCommand(body));
 }
 
 // ---------------------------------------------------------------------------
