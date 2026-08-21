@@ -35,6 +35,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   TrackerConnectionSummary,
+  TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
@@ -50,6 +51,7 @@ vi.mock('../../../trpc/client', () => ({
         wizardGroups: { mutate: vi.fn() },
         wizardIssues: { mutate: vi.fn() },
         wizardStates: { mutate: vi.fn() },
+        wizardFieldOptions: { mutate: vi.fn() },
         reconcilePreview: { mutate: vi.fn() },
         connect: { mutate: vi.fn() },
         disconnect: { mutate: vi.fn() },
@@ -73,6 +75,7 @@ const mockValidate = vi.mocked(trpc.cyboflow.tracker.wizardValidate.mutate);
 const mockGroups = vi.mocked(trpc.cyboflow.tracker.wizardGroups.mutate);
 const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
+const mockFieldOptions = vi.mocked(trpc.cyboflow.tracker.wizardFieldOptions.mutate);
 const mockReconcile = vi.mocked(trpc.cyboflow.tracker.reconcilePreview.mutate);
 const mockConnect = vi.mocked(trpc.cyboflow.tracker.connect.mutate);
 const mockDisconnect = vi.mocked(trpc.cyboflow.tracker.disconnect.mutate);
@@ -222,6 +225,24 @@ const PLAT_STATES: TrackerState[] = [
   { id: 'plat-done', name: 'Shipped', color: null, group: 'completed' },
 ];
 
+/**
+ * The mapping tables' vocabulary — one fetch per wizard run, not per scope
+ * (unlike states). Linear has no category concept, so `categories` is null
+ * and the seed's category `toProvider` is all-null.
+ */
+const FIELD_OPTIONS: TrackerFieldOptions = {
+  priorities: ['0', '1', '2', '3', '4'],
+  categories: null,
+  defaultPriorityMapping: {
+    toProvider: { P0: '1', P1: '2', P2: '3', P3: '3', P4: '4', P5: '4', P6: '0' },
+    toLocal: { '0': 'P6', '1': 'P0', '2': 'P1', '3': 'P2', '4': 'P4' },
+  },
+  defaultCategoryMapping: {
+    toProvider: { feature: null, bug: null, chore: null },
+    toLocal: {},
+  },
+};
+
 /** The Cyboflow project's pre-existing backlog; its one suggestion is a Beta issue. */
 const RECONCILE_7: TrackerReconcileItem[] = [
   {
@@ -270,6 +291,11 @@ const SOURCE_CONNECTION: TrackerConnectionSummary = {
   pushMode: 'auto',
   contentSyncMode: 'off',
   archiveSyncMode: 'off',
+  priorityMapping: {
+    toProvider: { P0: '1', P1: '2', P2: '3', P3: '3', P4: '4', P5: '4', P6: '0' },
+    toLocal: { '0': 'P6', '1': 'P0', '2': 'P1', '3': 'P2', '4': 'P4' },
+  },
+  categoryMapping: { toProvider: { feature: null, bug: null, chore: null }, toLocal: {} },
   mirrorSubissues: true,
   conflictMode: 'auto',
   pushTarget: true,
@@ -326,6 +352,7 @@ beforeEach(() => {
     ({ selection }: { selection: TrackerSourceSelection }): Promise<TrackerState[]> =>
       Promise.resolve(selection.containerId === 'core' ? CORE_STATES : PLAT_STATES),
   );
+  mockFieldOptions.mockResolvedValue(FIELD_OPTIONS);
   mockReconcile.mockImplementation(
     ({ projectId }: { projectId: number }): Promise<TrackerReconcileItem[]> =>
       Promise.resolve(projectId === 7 ? RECONCILE_7 : RECONCILE_9),
@@ -650,6 +677,159 @@ describe('TrackerWizardModal — States step', () => {
   });
 });
 
+describe('TrackerWizardModal — priority/category mapping + content modes', () => {
+  it('seeds the priority table from the default mapping, one fetch for the whole run', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    // Selection-free, unlike wizardStates: ONE call for the run, not per group.
+    expect(mockFieldOptions).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Linear priority for P0')).toHaveValue('1');
+    expect(screen.getByLabelText('Linear priority for P2')).toHaveValue('3');
+    expect(screen.getByLabelText('Linear priority for P6')).toHaveValue('0');
+  });
+
+  it('lets a priority row be edited', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    fireEvent.change(screen.getByLabelText('Linear priority for P0'), { target: { value: '2' } });
+    expect(screen.getByLabelText('Linear priority for P0')).toHaveValue('2');
+    // Choosing the explicit "not sent" option clears it to null.
+    fireEvent.change(screen.getByLabelText('Linear priority for P1'), { target: { value: '' } });
+    expect(screen.getByLabelText('Linear priority for P1')).toHaveValue('');
+  });
+
+  it('renders no category table for a provider with no issue type, only a caption', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    expect(screen.queryByTestId('tracker-category-mapping')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Linear has no issue type — category stays local.'),
+    ).toBeInTheDocument();
+  });
+
+  it('the content/archive controls default to Off and expose all three states', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    const contentGroup = screen.getByRole('group', { name: 'Sync task fields' });
+    expect(within(contentGroup).getByRole('button', { name: 'Off' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(within(contentGroup).getByRole('button', { name: 'Auto' }));
+    expect(within(contentGroup).getByRole('button', { name: 'Auto' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    const archiveGroup = screen.getByRole('group', { name: 'Archive in Linear' });
+    expect(within(archiveGroup).getByRole('button', { name: 'Off' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(within(archiveGroup).getByRole('button', { name: 'Manual' }));
+    expect(within(archiveGroup).getByRole('button', { name: 'Manual' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('submits the edited priority mapping and the chosen modes on connect', async () => {
+    renderWizard();
+    await authorize();
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    fireEvent.change(screen.getByLabelText('Linear priority for P0'), { target: { value: '2' } });
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Sync task fields' })).getByRole('button', {
+        name: 'Auto',
+      }),
+    );
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Archive in Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
+
+    await advance(2, 3); // → Reconcile → Review
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 3 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(3));
+
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        contentSyncMode: 'auto',
+        archiveSyncMode: 'manual',
+        priorityMapping: {
+          toProvider: { ...FIELD_OPTIONS.defaultPriorityMapping.toProvider, P0: '2' },
+        },
+      }),
+    );
+    // Every mapping in the run carries the SAME global modes/mapping.
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ contentSyncMode: 'auto', archiveSyncMode: 'manual' }),
+    );
+  });
+});
+
+describe('TrackerWizardModal — Dart category mapping', () => {
+  it('renders the category table only for a provider with an issue type, seeded from the default mapping', async () => {
+    const dartFieldOptions: TrackerFieldOptions = {
+      ...FIELD_OPTIONS,
+      categories: ['Task', 'Bug'],
+      defaultCategoryMapping: {
+        toProvider: { feature: null, bug: 'Bug', chore: null },
+        toLocal: { bug: 'bug' },
+      },
+    };
+    mockFieldOptions.mockResolvedValue(dartFieldOptions);
+
+    render(
+      <TrackerWizardModal
+        isOpen
+        provider="dart"
+        projectId={7}
+        onClose={onClose}
+        onConnected={onConnected}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Personal authentication token'), {
+      target: { value: 'dsa_x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize' }));
+    await screen.findByTestId('tracker-authorized-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByText('Map Dart onto cyboflow projects');
+
+    mapDefaults();
+    await advance(2); // → Tasks → States
+
+    // No "unsupported" caption where the provider DOES model an issue type.
+    expect(screen.queryByTestId('tracker-category-unsupported')).not.toBeInTheDocument();
+    const categoryTable = screen.getByTestId('tracker-category-mapping');
+    expect(within(categoryTable).getByLabelText('Dart type for bug')).toHaveValue('Bug');
+    expect(within(categoryTable).getByLabelText('Dart type for feature')).toHaveValue('');
+
+    fireEvent.change(within(categoryTable).getByLabelText('Dart type for feature'), {
+      target: { value: 'Task' },
+    });
+    expect(within(categoryTable).getByLabelText('Dart type for feature')).toHaveValue('Task');
+  });
+});
+
 describe('TrackerWizardModal — Reconcile step', () => {
   it('previews each target project once and groups the rows under it', async () => {
     renderWizard();
@@ -720,6 +900,11 @@ describe('TrackerWizardModal — Review + connect', () => {
       statusSyncMode: 'auto',
       pullMode: 'auto',
       pushMode: 'auto',
+      contentSyncMode: 'off',
+      archiveSyncMode: 'off',
+      // The seed's own toProvider table, unedited — Linear has no category
+      // concept, so categoryMapping is omitted entirely (no table rendered).
+      priorityMapping: { toProvider: FIELD_OPTIONS.defaultPriorityMapping.toProvider },
       mirrorSubissues: true,
       conflictMode: 'auto',
       reconcile: [{ entityType: 'task', entityId: 'task-7', action: 'keep' }],

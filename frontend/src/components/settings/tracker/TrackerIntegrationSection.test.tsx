@@ -93,6 +93,11 @@ function makeConnection(
     pushMode: 'auto',
     contentSyncMode: 'off',
     archiveSyncMode: 'off',
+    priorityMapping: {
+      toProvider: { P0: '1', P1: '2', P2: '3', P3: '3', P4: '4', P5: '4', P6: '0' },
+      toLocal: { '0': 'P6', '1': 'P0', '2': 'P1', '3': 'P2', '4': 'P4' },
+    },
+    categoryMapping: { toProvider: { feature: null, bug: null, chore: null }, toLocal: {} },
     mirrorSubissues: true,
     conflictMode: 'auto',
     pushTarget: true,

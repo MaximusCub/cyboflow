@@ -32,7 +32,6 @@ import type {
   TrackerState,
   TrackerStateGroup,
   TrackerIssue,
-  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type {
   TrackerAdapter,
@@ -40,6 +39,7 @@ import type {
   FetchLike,
   IssueDraft,
   IssueContentPatch,
+  TrackerFieldOptionsRaw,
 } from './adapterTypes';
 import {
   TrackerApiError,
@@ -842,7 +842,7 @@ export class LinearAdapter implements TrackerAdapter {
    *
    * `categories: null` — Linear models no issue type at all.
    */
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     return { priorities: [...LINEAR_PRIORITY_TOKENS], categories: null };
   }
 

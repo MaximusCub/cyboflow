@@ -62,10 +62,9 @@ import type {
   TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
-  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type { TrackerAdapter, TrackerAdapterCapabilities, TrackerFieldOptionsRaw} from '../adapterTypes';
 import type { TrackerConflictRow, TrackerConnectionRow, TrackerOutboxRow } from '../../../database/models';
 import {
   insertConnection,
@@ -134,7 +133,7 @@ class FakeAdapter implements TrackerAdapter {
    * Linear's fixed scale (this adapter's provider); a Dart-shaped test swaps in
    * a live `/config` list.
    */
-  fieldOptions: TrackerFieldOptions = { priorities: ['0', '1', '2', '3', '4'], categories: null };
+  fieldOptions: TrackerFieldOptionsRaw = { priorities: ['0', '1', '2', '3', '4'], categories: null };
   /** Overrides the deletion sweep's id set; null = derive it from `issues`. */
   remoteIds: string[] | null = null;
   /**
@@ -162,7 +161,7 @@ class FakeAdapter implements TrackerAdapter {
   async listStates(): Promise<TrackerState[]> {
     return this.states;
   }
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     return this.fieldOptions;
   }
   async listIssues(_selection: TrackerSourceSelection, sinceIso?: string): Promise<TrackerIssue[]> {

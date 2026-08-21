@@ -41,7 +41,6 @@ import type {
   TrackerStateGroup,
   TrackerIssue,
   TrackerUserRef,
-  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type {
   TrackerAdapter,
@@ -49,6 +48,7 @@ import type {
   FetchLike,
   IssueDraft,
   IssueContentPatch,
+  TrackerFieldOptionsRaw,
 } from './adapterTypes';
 import {
   TrackerApiError,
@@ -380,7 +380,7 @@ export class PlaneAdapter implements TrackerAdapter {
    *
    * `categories: null` — Plane models no issue type.
    */
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     return { priorities: [...PLANE_PRIORITY_TOKENS], categories: null };
   }
 

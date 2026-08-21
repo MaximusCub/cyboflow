@@ -71,7 +71,6 @@ import type {
   TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
-  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type {
@@ -79,6 +78,7 @@ import type {
   IssueDraft,
   TrackerAdapter,
   TrackerAdapterCapabilities,
+  TrackerFieldOptionsRaw,
 } from '../adapterTypes';
 import { TrackerApiError, TrackerAuthError } from '../errors';
 import {
@@ -182,7 +182,7 @@ class FakeAdapter implements TrackerAdapter {
     this.calls.push('listStates');
     return this.states;
   }
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     this.calls.push('listFieldOptions');
     return { priorities: ['0', '1', '2', '3', '4'], categories: null };
   }
@@ -294,7 +294,7 @@ class PlaneLikeAdapter implements TrackerAdapter {
     this.calls.push('listStates');
     return STATES;
   }
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     this.calls.push('listFieldOptions');
     return { priorities: ['urgent', 'high', 'medium', 'low', 'none'], categories: null };
   }

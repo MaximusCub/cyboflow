@@ -114,10 +114,9 @@ import type {
   TrackerSourceSelection,
   TrackerSourceTree,
   TrackerState,
-  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities, TrackerFieldOptionsRaw} from '../adapterTypes';
 import { TrackerAuthError } from '../errors';
 import { joinBody, splitBody, type EntityWriteRouter } from '../inboundSync';
 import {
@@ -201,7 +200,7 @@ class FakeAdapter implements TrackerAdapter {
   states: TrackerState[] = STATES;
   issues: TrackerIssue[] = [];
   groups: TrackerGroupTree = GROUPS;
-  fieldOptions: TrackerFieldOptions = { priorities: ['0', '1', '2', '3', '4'], categories: null };
+  fieldOptions: TrackerFieldOptionsRaw = { priorities: ['0', '1', '2', '3', '4'], categories: null };
   /** Scripted failure for validateCredentials (the auth-error path). */
   failValidate: Error | null = null;
   /** The workspace the live probe reports — the reconnect identity key. */
@@ -228,7 +227,7 @@ class FakeAdapter implements TrackerAdapter {
     this.calls.push('listStates');
     return this.states;
   }
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     this.calls.push('listFieldOptions');
     return this.fieldOptions;
   }
@@ -537,10 +536,22 @@ describe('TrackerSyncService wizard probes', () => {
     await expect(service.wizardGroups({ credentials: CREDENTIALS })).resolves.toEqual(GROUPS);
 
     // The mapping tables' vocabulary. No selection: none of the three providers
-    // scopes its priority/type lists to a container.
+    // scopes its priority/type lists to a container. The two default* mappings
+    // are computed HERE (seedDefaultPriorityMapping/seedDefaultCategoryMapping
+    // over the adapter's raw options) — never left to the wizard to re-derive.
     await expect(service.wizardFieldOptions({ credentials: CREDENTIALS })).resolves.toEqual({
       priorities: ['0', '1', '2', '3', '4'],
       categories: null,
+      defaultPriorityMapping: {
+        toProvider: { P0: '1', P1: '2', P2: '3', P3: '3', P4: '4', P5: '4', P6: '0' },
+        toLocal: { '0': 'P6', '1': 'P0', '2': 'P1', '3': 'P2', '4': 'P4' },
+      },
+      // Linear has no category concept, so the seed is all-null regardless of
+      // liveOptions — providerSupportsCategorySync short-circuits it.
+      defaultCategoryMapping: {
+        toProvider: { feature: null, bug: null, chore: null },
+        toLocal: {},
+      },
     });
 
     adapter.issues = [makeIssue()];
@@ -680,8 +691,8 @@ describe('TrackerSyncService.connect', () => {
     expect(row?.status_sync_mode).toBe('auto');
     expect(row?.pull_mode).toBe('auto');
     expect(row?.push_mode).toBe('auto');
-    // The payload sends neither yet (no wizard control until Phase 6) — both
-    // default to 'off', the write-back-declined state.
+    // This payload omits every Phase-6 field — both modes default to 'off'
+    // (the write-back-declined state) and both mappings default to the seed.
     expect(row?.content_sync_mode).toBe('off');
     expect(row?.archive_sync_mode).toBe('off');
     expect(row?.priority_mapping_json).toBe('{}');
@@ -725,6 +736,32 @@ describe('TrackerSyncService.connect', () => {
     });
     expect(adapter.calls).toContain('listIssues');
     expect(broadcasts.some((e) => e.kind === 'sync')).toBe(true);
+  });
+
+  it('persists a priorityMapping/categoryMapping overlay verbatim, and defaults to the seed without one', async () => {
+    // Dart, not the fixture's default Linear: category sync is Dart-only
+    // (categoryMapping.ts's providerSupportsCategorySync), so only a Dart row's
+    // overlay survives resolveEffectiveCategoryMapping's provider gate.
+    const { connectionId } = await service.connect(
+      connectPayload({
+        credentials: { provider: 'dart', apiKey: API_KEY },
+        priorityMapping: { toProvider: { P0: 'urgent', P6: null } },
+        categoryMapping: { toProvider: { bug: 'Bug' } },
+      }),
+    );
+
+    const row = getConnection(raw, connectionId);
+    expect(JSON.parse(row?.priority_mapping_json ?? '{}')).toEqual({
+      toProvider: { P0: 'urgent', P6: null },
+    });
+    expect(JSON.parse(row?.category_mapping_json ?? '{}')).toEqual({ toProvider: { bug: 'Bug' } });
+
+    // An overlay actually changes what the connection's SUMMARY reports —
+    // proof the persisted JSON round-trips through resolveEffective*Mapping,
+    // not just that the literal bytes match.
+    const [summary] = await service.connections(PROJECT_ID);
+    expect(summary.priorityMapping.toProvider.P0).toBe('urgent');
+    expect(summary.categoryMapping.toProvider.bug).toBe('Bug');
   });
 
   it('writes nothing at all when the live credential probe fails', async () => {
@@ -1578,6 +1615,11 @@ describe('TrackerSyncService.connections', () => {
     // Every pre-Phase-6 connection carries the write-back-declined default.
     expect(summary.contentSyncMode).toBe('off');
     expect(summary.archiveSyncMode).toBe('off');
+    // No overlay stored yet — the resolved mapping is the linear seed, all
+    // seven levels present (this fixture's live options are null: no probe
+    // ran, matching stateMapping's own no-network-call summary read).
+    expect(Object.keys(summary.priorityMapping.toProvider)).toHaveLength(7);
+    expect(summary.categoryMapping.toProvider).toEqual({ feature: null, bug: null, chore: null });
     expect(summary.mirrorSubissues).toBe(true);
     expect(summary.conflictMode).toBe('manual');
     expect(summary.pushTarget).toBe(true);
@@ -1603,6 +1645,8 @@ describe('TrackerSyncService.connections', () => {
       pushMode: 'manual',
       contentSyncMode: 'auto',
       archiveSyncMode: 'manual',
+      priorityMapping: { toProvider: { P0: 'urgent' } },
+      categoryMapping: { toProvider: { bug: 'Bug' } },
       conflictMode: 'auto',
       selectionMode: 'assignee',
       selectionJson: { assigneeIds: ['user-1'] },
@@ -1613,6 +1657,10 @@ describe('TrackerSyncService.connections', () => {
     expect(row?.push_mode).toBe('manual');
     expect(row?.content_sync_mode).toBe('auto');
     expect(row?.archive_sync_mode).toBe('manual');
+    expect(JSON.parse(row?.priority_mapping_json ?? '{}')).toEqual({
+      toProvider: { P0: 'urgent' },
+    });
+    expect(JSON.parse(row?.category_mapping_json ?? '{}')).toEqual({ toProvider: { bug: 'Bug' } });
     // An omitted direction keeps its stored value.
     expect(row?.pull_mode).toBe('auto');
     expect(row?.conflict_mode).toBe('auto');

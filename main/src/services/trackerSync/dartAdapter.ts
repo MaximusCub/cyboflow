@@ -66,7 +66,6 @@ import type {
   TrackerStateGroup,
   TrackerIssue,
   TrackerUserRef,
-  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type {
   TrackerAdapter,
@@ -74,6 +73,7 @@ import type {
   FetchLike,
   IssueDraft,
   IssueContentPatch,
+  TrackerFieldOptionsRaw,
 } from './adapterTypes';
 import {
   TrackerApiError,
@@ -452,7 +452,7 @@ export class DartAdapter implements TrackerAdapter {
    * that half — "nothing live to seed from" — and the mapping falls back to the
    * canonical token list rather than seeding an empty map.
    */
-  async listFieldOptions(): Promise<TrackerFieldOptions> {
+  async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
     const config = await this.getConfig();
     return {
       priorities: config.priorities ?? null,

@@ -80,6 +80,11 @@ function makeConnection(
     pushMode: 'auto',
     contentSyncMode: 'off',
     archiveSyncMode: 'off',
+    priorityMapping: {
+      toProvider: { P0: '1', P1: '2', P2: '3', P3: '3', P4: '4', P5: '4', P6: '0' },
+      toLocal: { '0': 'P6', '1': 'P0', '2': 'P1', '3': 'P2', '4': 'P4' },
+    },
+    categoryMapping: { toProvider: { feature: null, bug: null, chore: null }, toLocal: {} },
     mirrorSubissues: true,
     conflictMode: 'auto',
     pushTarget: true,
@@ -202,6 +207,64 @@ describe('TrackerConnectedView — sync settings', () => {
     await waitFor(() =>
       expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', conflictMode: 'manual' }),
     );
+  });
+
+  it('patches the two field write-back modes independently, all three states available', async () => {
+    renderView();
+
+    const contentGroup = screen.getByRole('group', { name: 'Sync task fields' });
+    // Three states, unlike the binary direction rows above.
+    expect(within(contentGroup).getAllByRole('button')).toHaveLength(3);
+    expect(within(contentGroup).getByRole('button', { name: 'Off' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(within(contentGroup).getByRole('button', { name: 'Auto' }));
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', contentSyncMode: 'auto' }),
+    );
+
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Archive in Linear' })).getByRole('button', {
+        name: 'Manual',
+      }),
+    );
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        archiveSyncMode: 'manual',
+      }),
+    );
+  });
+
+  it('renders the priority/category mapping counts read-only, category gated by provider support', async () => {
+    renderView(
+      makeConnection({
+        priorityMapping: {
+          toProvider: { P0: '1', P1: '2', P2: null, P3: null, P4: null, P5: null, P6: '0' },
+          toLocal: {},
+        },
+      }),
+    );
+
+    expect(screen.getByText('3 of 7 priorities mapped')).toBeInTheDocument();
+    // Linear has no category concept — no row, no editor.
+    expect(screen.queryByText(/categories mapped/)).not.toBeInTheDocument();
+    // Settles the mappings-card fetch fired on mount before the test returns.
+    await screen.findAllByTestId('tracker-mapping-row');
+  });
+
+  it('shows the category count only for a provider with an issue type', async () => {
+    renderView(
+      makeConnection({
+        provider: 'dart',
+        categoryMapping: { toProvider: { feature: null, bug: 'Bug', chore: null }, toLocal: {} },
+      }),
+    );
+
+    expect(screen.getByText('1 of 3 categories mapped')).toBeInTheDocument();
+    await screen.findAllByTestId('tracker-mapping-row');
   });
 });
 

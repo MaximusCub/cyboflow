@@ -62,8 +62,10 @@ import type { Project } from '../../../types/project';
 import type {
   TrackerConflictMode,
   TrackerConnectionSummary,
+  TrackerContentSyncMode,
   TrackerCredentialsInput,
   TrackerDirectionMode,
+  TrackerFieldOptions,
   TrackerGroup,
   TrackerGroupTree,
   TrackerIssue,
@@ -78,11 +80,17 @@ import type {
   TrackerWizardSourceInput,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
+import type { EntityCategory, Priority } from '../../../../../shared/types/tasks';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
 import {
+  CONTENT_MODE_OPTIONS,
+  ENTITY_CATEGORIES,
   MAPPING_TARGETS,
+  PRIORITY_LEVELS,
   mappingTargetNote,
   providerMeta,
+  seedCategoryMapping,
+  seedPriorityMapping,
   seedStateMapping,
   trackerInputClass,
   trackerSelectClass,
@@ -262,6 +270,25 @@ export function TrackerWizardModal({
   const [pushMode, setPushMode] = useState<TrackerDirectionMode>('auto');
   const [mirrorSubissues, setMirrorSubissues] = useState(true);
   const [conflictMode, setConflictMode] = useState<TrackerConflictMode>('auto');
+  /**
+   * The priority/category mapping tables' vocabulary — fetched ONCE per
+   * credential source (like `groupTree`, and unlike `statesByScope`: none of
+   * the three providers scopes these lists to a container, so a mapping
+   * change never invalidates this cache — see the credential-edit effect
+   * below, not the mapping-change one).
+   */
+  const [fieldOptions, setFieldOptions] = useState<TrackerFieldOptions | null>(null);
+  const [fieldOptionsLoaded, setFieldOptionsLoaded] = useState(false);
+  /** The edited `toProvider` half only — `toLocal` is never sent (see trackerVocabulary.ts). */
+  const [priorityMapping, setPriorityMapping] = useState<Record<Priority, string | null> | null>(
+    null,
+  );
+  const [categoryMapping, setCategoryMapping] = useState<Record<
+    EntityCategory,
+    string | null
+  > | null>(null);
+  const [contentSyncMode, setContentSyncMode] = useState<TrackerContentSyncMode>('off');
+  const [archiveSyncMode, setArchiveSyncMode] = useState<TrackerContentSyncMode>('off');
 
   // ── Step 4 · reconcile ────────────────────────────────────────────────────
   const [reconcileByProject, setReconcileByProject] = useState<
@@ -749,6 +776,13 @@ export function TrackerWizardModal({
     setAuthError(null);
     setGroupTree(null);
     setMappings({});
+    // The field-options cache is credential-scoped, same as groupTree — a
+    // different key can name a different workspace with a different
+    // priority/type vocabulary.
+    setFieldOptions(null);
+    setFieldOptionsLoaded(false);
+    setPriorityMapping(null);
+    setCategoryMapping(null);
     setMaxStep(0);
   }, [apiKey, baseUrl, workspaceSlug, sourceConnection]);
 
@@ -889,6 +923,23 @@ export function TrackerWizardModal({
     setStatesLoaded(true);
   };
 
+  /**
+   * The priority/category mapping tables' vocabulary + seeded defaults. Fired
+   * alongside `ensureStates` (both belong to Step 3) but cached independently
+   * of `mappedGroups`: no selection argument, since none of the three
+   * providers scopes these lists to a container.
+   */
+  const ensureFieldOptions = async (): Promise<void> => {
+    if (fieldOptionsLoaded) return;
+    const version = probeVersionRef.current;
+    const options = await trpc.cyboflow.tracker.wizardFieldOptions.mutate({ ...probeSource });
+    if (probeVersionRef.current !== version) return;
+    setFieldOptions(options);
+    setPriorityMapping(seedPriorityMapping(options.defaultPriorityMapping.toProvider, priorityMapping ?? undefined));
+    setCategoryMapping(seedCategoryMapping(options.defaultCategoryMapping.toProvider, categoryMapping ?? undefined));
+    setFieldOptionsLoaded(true);
+  };
+
   const ensureReconcile = async (): Promise<void> => {
     if (reconcileLoaded) return;
     // Claim this request's version before the awaits so a later call (a fresh
@@ -985,7 +1036,10 @@ export function TrackerWizardModal({
       if (target >= 1) await ensureGroups();
       if (mappedGroups.length > 0) {
         if (target >= 2) await ensureIssues();
-        if (target >= 3) await ensureStates();
+        if (target >= 3) {
+          await ensureStates();
+          await ensureFieldOptions();
+        }
         if (target >= 4) await ensureReconcile();
       } else if (target > MAP_STEP && stagedUnlinks.length === 0) {
         // Past Map with nothing mapped and nothing staged — Review would have no
@@ -1137,6 +1191,18 @@ export function TrackerWizardModal({
             statusSyncMode,
             pullMode,
             pushMode,
+            contentSyncMode,
+            archiveSyncMode,
+            // Always sent once fetched (Step 3 gates every forward path
+            // through ensureFieldOptions, so this is non-null by Review) —
+            // the seed's own table when the user never touched a picker.
+            ...(priorityMapping !== null ? { priorityMapping: { toProvider: priorityMapping } } : {}),
+            // Omitted entirely for a provider with no category concept: no
+            // table rendered, and an overlay would be silently dropped
+            // server-side anyway (categoryMapping.ts's provider gate).
+            ...(meta.supportsCategorySync && categoryMapping !== null
+              ? { categoryMapping: { toProvider: categoryMapping } }
+              : {}),
             mirrorSubissues,
             conflictMode,
             reconcile: reconcileForGroup(group),
@@ -1760,6 +1826,84 @@ export function TrackerWizardModal({
         );
       })}
 
+      <div className={CARD} data-testid="tracker-priority-mapping">
+        <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3 border-b border-border-primary bg-surface-secondary px-3 py-2">
+          <Eyebrow>Cyboflow priority</Eyebrow>
+          <Eyebrow>{meta.name} priority</Eyebrow>
+        </div>
+        <div className="divide-y divide-border-primary">
+          {PRIORITY_LEVELS.map((level) => (
+            <div
+              key={level}
+              className="grid grid-cols-[minmax(0,1fr)_240px] items-center gap-3 px-3 py-2"
+            >
+              <span className="text-xs text-text-primary">{level}</span>
+              <select
+                aria-label={`${meta.name} priority for ${level}`}
+                value={priorityMapping?.[level] ?? ''}
+                onChange={(e) => {
+                  const next = e.target.value === '' ? null : e.target.value;
+                  setPriorityMapping((prev) => ({
+                    ...(prev ?? ({} as Record<Priority, string | null>)),
+                    [level]: next,
+                  }));
+                }}
+                className={cn(trackerSelectClass, 'w-full')}
+              >
+                <option value="">— Not sent</option>
+                {(fieldOptions?.priorities ?? []).map((token) => (
+                  <option key={token} value={token}>
+                    {token}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {meta.supportsCategorySync ? (
+        <div className={CARD} data-testid="tracker-category-mapping">
+          <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3 border-b border-border-primary bg-surface-secondary px-3 py-2">
+            <Eyebrow>Cyboflow category</Eyebrow>
+            <Eyebrow>{meta.name} type</Eyebrow>
+          </div>
+          <div className="divide-y divide-border-primary">
+            {ENTITY_CATEGORIES.map((category) => (
+              <div
+                key={category}
+                className="grid grid-cols-[minmax(0,1fr)_240px] items-center gap-3 px-3 py-2"
+              >
+                <span className="text-xs capitalize text-text-primary">{category}</span>
+                <select
+                  aria-label={`${meta.name} type for ${category}`}
+                  value={categoryMapping?.[category] ?? ''}
+                  onChange={(e) => {
+                    const next = e.target.value === '' ? null : e.target.value;
+                    setCategoryMapping((prev) => ({
+                      ...(prev ?? ({} as Record<EntityCategory, string | null>)),
+                      [category]: next,
+                    }));
+                  }}
+                  className={cn(trackerSelectClass, 'w-full')}
+                >
+                  <option value="">— Not sent</option>
+                  {(fieldOptions?.categories ?? []).map((token) => (
+                    <option key={token} value={token}>
+                      {token}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="text-[11px] text-text-tertiary" data-testid="tracker-category-unsupported">
+          {meta.name} has no issue type — category stays local.
+        </p>
+      )}
+
       <div className={cn(CARD, 'p-3')}>
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
@@ -1810,6 +1954,37 @@ export function TrackerWizardModal({
             value={pushMode}
             onChange={setPushMode}
             ariaLabel={`Push to ${meta.name}`}
+          />
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">Sync task fields</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              Title, description, priority{meta.supportsCategorySync ? ', and category' : ''} push
+              out to {meta.name}.
+            </p>
+          </div>
+          <Segmented
+            options={CONTENT_MODE_OPTIONS}
+            value={contentSyncMode}
+            onChange={setContentSyncMode}
+            ariaLabel="Sync task fields"
+          />
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-text-primary">Archive in {meta.name}</p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              A local archive or delete trashes the linked issue — never a hard delete.
+            </p>
+          </div>
+          <Segmented
+            options={CONTENT_MODE_OPTIONS}
+            value={archiveSyncMode}
+            onChange={setArchiveSyncMode}
+            ariaLabel={`Archive in ${meta.name}`}
           />
         </div>
 

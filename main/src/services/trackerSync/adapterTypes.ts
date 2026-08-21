@@ -25,6 +25,16 @@ import type {
 /** Injected at construction so adapter tests never touch the network. */
 export type FetchLike = typeof fetch;
 
+/**
+ * What an ADAPTER's {@link TrackerAdapter.listFieldOptions} returns — the live
+ * `priorities`/`categories` vocabularies only. The two seeded-mapping fields on
+ * the IPC-facing {@link TrackerFieldOptions} (`defaultPriorityMapping` /
+ * `defaultCategoryMapping`) are computed one layer up, in
+ * `TrackerSyncService.wizardFieldOptions` — an adapter is a pure API client and
+ * has no business seeding a mapping, so its contract stays the narrower shape.
+ */
+export type TrackerFieldOptionsRaw = Pick<TrackerFieldOptions, 'priorities' | 'categories'>;
+
 export interface TrackerAdapterCapabilities {
   /**
    * Provider auto-closes a parent when all sub-issues complete (Linear, since
@@ -200,7 +210,7 @@ export interface TrackerAdapter {
    * are fixed scales the adapter states rather than fetches. See
    * {@link TrackerFieldOptions} for what a `null` half means.
    */
-  listFieldOptions(): Promise<TrackerFieldOptions>;
+  listFieldOptions(): Promise<TrackerFieldOptionsRaw>;
 
   /**
    * Issues in the selection, updated at/after `sinceIso` (the caller widens

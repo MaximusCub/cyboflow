@@ -11,12 +11,14 @@
  * type that crosses the IPC boundary.
  */
 import type {
+  TrackerContentSyncMode,
   TrackerMappingTarget,
   TrackerProvider,
   TrackerState,
   TrackerStateGroup,
   TrackerStateMapping,
 } from '../../../../../shared/types/trackerSync';
+import type { EntityCategory, Priority } from '../../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
 // Providers
@@ -38,6 +40,15 @@ export interface TrackerProviderMeta {
   /** Documentation card on Step 0 — what cyboflow reads and writes. */
   scopes: { label: string; granted: boolean }[];
   scopeFootnote: string;
+  /**
+   * Does this provider model a native issue TYPE the category mapping table
+   * can target? Mirrors `categoryMapping.ts`'s `providerSupportsCategorySync`
+   * table (main-side) — kept as its own table here, not derived from it,
+   * because the wizard/connected-view bundle must not import main/src/services/*.
+   * The house rule this exists for: no provider-string branches in tracker UI —
+   * a caller reads this flag instead of checking `provider === 'dart'`.
+   */
+  supportsCategorySync: boolean;
 }
 
 export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
@@ -56,6 +67,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
       { label: 'write:issues', granted: true },
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
+    supportsCategorySync: false,
   },
   {
     provider: 'plane',
@@ -72,6 +84,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
       { label: 'write:issues', granted: true },
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
+    supportsCategorySync: false,
   },
   {
     provider: 'dart',
@@ -89,6 +102,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
       { label: 'write:tasks', granted: true },
     ],
     scopeFootnote: 'No access to docs, comments, attachments, or billing.',
+    supportsCategorySync: true,
   },
 ];
 
@@ -171,6 +185,62 @@ export function seedStateMapping(
     seeded[state.id] = previous?.[state.id] ?? DEFAULT_TARGET_BY_GROUP[state.group];
   }
   return seeded;
+}
+
+// ---------------------------------------------------------------------------
+// Field write-back cadence (migration 112) — a THREE-state cousin of the
+// direction controls above. `contentSyncMode`/`archiveSyncMode` are a
+// SEPARATE type (TrackerContentSyncMode) from TrackerDirectionMode precisely
+// so 'off' cannot leak onto status/pull/push — see trackerSync.ts's header —
+// which is also why this gets its OWN options list and label function rather
+// than reusing the wizard/connected-view's local `DIRECTION_OPTIONS` /
+// `directionLabel` (a binary ternary that would render 'off' as "Manual").
+// ---------------------------------------------------------------------------
+
+export const CONTENT_MODE_OPTIONS: readonly { value: TrackerContentSyncMode; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'manual', label: 'Manual' },
+  { value: 'off', label: 'Off' },
+];
+
+export function contentModeLabel(mode: TrackerContentSyncMode): string {
+  if (mode === 'auto') return 'Auto';
+  if (mode === 'manual') return 'Manual';
+  return 'Off';
+}
+
+// ---------------------------------------------------------------------------
+// Priority / category mapping (migration 112, Phase 6) — the wizard's value
+// pickers. Both tables edit only `toProvider`; `toLocal` is never sent (the
+// resolver falls back to the seed's own inbound table — see
+// TrackerPriorityMappingOverlay's header in shared/types/trackerSync.ts), so
+// there is exactly one half to seed and re-seed here.
+// ---------------------------------------------------------------------------
+
+/** P0-P6 in escalation order — the priority mapping table's row order. */
+export const PRIORITY_LEVELS: readonly Priority[] = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
+
+/** feature/bug/chore — the category mapping table's row order. */
+export const ENTITY_CATEGORIES: readonly EntityCategory[] = ['feature', 'bug', 'chore'];
+
+/**
+ * The priority table's initial value. Unlike {@link seedStateMapping}, the key
+ * set never varies (always exactly the seven `Priority` levels), so a `previous`
+ * edit survives a re-fetch wholesale rather than key-by-key.
+ */
+export function seedPriorityMapping(
+  defaults: Record<Priority, string | null>,
+  previous?: Record<Priority, string | null>,
+): Record<Priority, string | null> {
+  return previous ?? { ...defaults };
+}
+
+/** Same as {@link seedPriorityMapping}, for the category table. */
+export function seedCategoryMapping(
+  defaults: Record<EntityCategory, string | null>,
+  previous?: Record<EntityCategory, string | null>,
+): Record<EntityCategory, string | null> {
+  return previous ?? { ...defaults };
 }
 
 // ---------------------------------------------------------------------------

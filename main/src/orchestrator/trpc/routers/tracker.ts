@@ -238,6 +238,27 @@ const directionModeSchema = z.enum(['auto', 'manual']);
  */
 const contentSyncModeSchema = z.enum(['auto', 'manual', 'off']);
 
+const priorityLevelSchema = z.enum(['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6']);
+const entityCategorySchema = z.enum(['feature', 'bug', 'chore']);
+
+/**
+ * The wizard's edited priority-mapping overlay (migration 112's
+ * `priority_mapping_json`). `toProvider` only — `toLocal` is deliberately
+ * never sent by the wizard; the resolver falls back to the seed's own inbound
+ * table when it is absent (see shared/types/trackerSync.ts's
+ * TrackerPriorityMappingOverlay). A record schema validates only the keys it
+ * sees, so a caller may send any subset of the seven levels — the same
+ * looseness `stateMappingSchema` has.
+ */
+const priorityMappingOverlaySchema = z.object({
+  toProvider: z.record(priorityLevelSchema, z.string().nullable()),
+});
+
+/** Same shape as {@link priorityMappingOverlaySchema}, for the category mapping. */
+const categoryMappingOverlaySchema = z.object({
+  toProvider: z.record(entityCategorySchema, z.string().nullable()),
+});
+
 const selectionJsonSchema = z.object({
   assigneeIds: z.array(z.string()).optional(),
   issueIds: z.array(z.string()).optional(),
@@ -478,10 +499,14 @@ export const trackerRouter = router({
         statusSyncMode: directionModeSchema,
         pullMode: directionModeSchema,
         pushMode: directionModeSchema,
-        /** Omitted = 'off' — no wizard step sends this yet (Phase 6). */
+        /** Omitted = 'off'. */
         contentSyncMode: contentSyncModeSchema.optional(),
         /** Omitted = 'off'; see contentSyncMode. */
         archiveSyncMode: contentSyncModeSchema.optional(),
+        /** Omitted = the seed only, no user override. */
+        priorityMapping: priorityMappingOverlaySchema.optional(),
+        /** Omitted = the seed only; also omitted for a provider with no category sync. */
+        categoryMapping: categoryMappingOverlaySchema.optional(),
         mirrorSubissues: z.boolean(),
         conflictMode: conflictModeSchema,
         reconcile: z.array(reconcileDecisionSchema),
@@ -588,6 +613,8 @@ export const trackerRouter = router({
         pushMode: directionModeSchema.optional(),
         contentSyncMode: contentSyncModeSchema.optional(),
         archiveSyncMode: contentSyncModeSchema.optional(),
+        priorityMapping: priorityMappingOverlaySchema.optional(),
+        categoryMapping: categoryMappingOverlaySchema.optional(),
         mirrorSubissues: z.boolean().optional(),
         conflictMode: conflictModeSchema.optional(),
         stateMapping: stateMappingSchema.optional(),

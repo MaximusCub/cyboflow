@@ -11,6 +11,7 @@
  * exactly once at connect time; no shape in this file ever carries the stored
  * key back to the renderer.
  */
+import type { EntityCategory, Priority } from './tasks';
 
 export type TrackerProvider = 'linear' | 'plane' | 'dart';
 
@@ -191,6 +192,51 @@ export interface TrackerFieldOptions {
   priorities: string[] | null;
   /** Provider-raw type/category titles; null where the provider has no such field. */
   categories: string[] | null;
+  /**
+   * The seeded priority mapping for this provider's `priorities` above,
+   * computed main-side (`priorityMapping.ts`'s `seedDefaultPriorityMapping`) so
+   * the wizard never re-derives the seed table client-side. The Phase-6
+   * mapping picker's initial values, before any edit.
+   */
+  defaultPriorityMapping: TrackerPriorityMapping;
+  /** Same as `defaultPriorityMapping`, for `categories` (`categoryMapping.ts`). */
+  defaultCategoryMapping: TrackerCategoryMapping;
+}
+
+/**
+ * A connection's resolved priority mapping, mirroring the main-side
+ * `PriorityMapping` (priorityMapping.ts) across the wizard/connected-view IPC
+ * boundary. `toProvider[p] === null` means the level has no provider token to
+ * send (see the main-side module header); `toLocal` is keyed by the
+ * lowercased provider token.
+ */
+export interface TrackerPriorityMapping {
+  toProvider: Record<Priority, string | null>;
+  toLocal: Record<string, Priority>;
+}
+
+/** A connection's resolved category mapping, mirroring `CategoryMapping` (categoryMapping.ts). */
+export interface TrackerCategoryMapping {
+  toProvider: Record<EntityCategory, string | null>;
+  toLocal: Record<string, EntityCategory>;
+}
+
+/**
+ * The wizard's edited priority-mapping OVERLAY (migration 112's
+ * `priority_mapping_json`) — `toProvider` only. `toLocal` is deliberately
+ * never sent: the wizard's picker edits only which provider token each local
+ * level sends, and the resolver (`resolveEffectivePriorityMapping`) falls back
+ * to the seed's own `toLocal` when the overlay omits it — which is exactly
+ * the canonical inbound table the picker was seeded from, so there is nothing
+ * for the wizard to re-derive or re-send.
+ */
+export interface TrackerPriorityMappingOverlay {
+  toProvider: Partial<Record<Priority, string | null>>;
+}
+
+/** Same shape as {@link TrackerPriorityMappingOverlay}, for the category mapping. */
+export interface TrackerCategoryMappingOverlay {
+  toProvider: Partial<Record<EntityCategory, string | null>>;
 }
 
 export interface TrackerUserRef {
@@ -377,6 +423,10 @@ export interface TrackerConnectionSummary {
   /** This mapping is the one its provider pushes new ideas through. */
   pushTarget: boolean;
   stateMapping: TrackerStateMapping;
+  /** The connection's RESOLVED priority mapping (seed + stored overlay) — the mappings card's read-only count. */
+  priorityMapping: TrackerPriorityMapping;
+  /** Same, for category; `toProvider` is all-null on a provider `providerSupportsCategorySync` refuses. */
+  categoryMapping: TrackerCategoryMapping;
   lastSyncAt: string | null;
   lastSyncLog: TrackerSyncLogEntry[];
   /** Active (non-orphaned) entity links on this connection. */
@@ -482,6 +532,17 @@ export interface TrackerConnectPayload {
   contentSyncMode?: TrackerContentSyncMode;
   /** Omitted = 'off'; see contentSyncMode. */
   archiveSyncMode?: TrackerContentSyncMode;
+  /**
+   * Omitted = the seed only, no user override (every pre-Phase-6 connect()
+   * call). The wizard's Phase-6 mapping table sends the edited `toProvider`
+   * table verbatim; see {@link TrackerPriorityMappingOverlay}.
+   */
+  priorityMapping?: TrackerPriorityMappingOverlay;
+  /**
+   * Omitted = the seed only; also omitted by the wizard for a provider
+   * `providerSupportsCategorySync` refuses (no editor renders for it).
+   */
+  categoryMapping?: TrackerCategoryMappingOverlay;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;
   reconcile: TrackerReconcileDecision[];
@@ -504,6 +565,10 @@ export interface TrackerSettingsPatch {
   pushMode?: TrackerDirectionMode;
   contentSyncMode?: TrackerContentSyncMode;
   archiveSyncMode?: TrackerContentSyncMode;
+  /** See {@link TrackerConnectPayload.priorityMapping}; no v1 UI patches this yet (mirrors stateMapping below). */
+  priorityMapping?: TrackerPriorityMappingOverlay;
+  /** See {@link TrackerConnectPayload.categoryMapping}. */
+  categoryMapping?: TrackerCategoryMappingOverlay;
   mirrorSubissues?: boolean;
   conflictMode?: TrackerConflictMode;
   stateMapping?: TrackerStateMapping;

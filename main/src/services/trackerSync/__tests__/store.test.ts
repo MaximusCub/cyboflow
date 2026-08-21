@@ -310,6 +310,25 @@ describe('trackerSync store — connections', () => {
     expect(getConnection(raw, id)?.archive_sync_mode).toBe('manual');
   });
 
+  it('updateConnectionSettings patches priority_mapping_json / category_mapping_json independently', () => {
+    const id = seedConnection({ id: 'conn-1' });
+    expect(getConnection(raw, id)?.priority_mapping_json).toBe('{}');
+    expect(getConnection(raw, id)?.category_mapping_json).toBe('{}');
+
+    updateConnectionSettings(raw, id, {
+      priority_mapping_json: '{"toProvider":{"P0":"urgent"}}',
+    });
+    expect(getConnection(raw, id)?.priority_mapping_json).toBe('{"toProvider":{"P0":"urgent"}}');
+    // The untouched mapping keeps its stored value.
+    expect(getConnection(raw, id)?.category_mapping_json).toBe('{}');
+
+    updateConnectionSettings(raw, id, {
+      category_mapping_json: '{"toProvider":{"bug":"Bug"}}',
+    });
+    expect(getConnection(raw, id)?.priority_mapping_json).toBe('{"toProvider":{"P0":"urgent"}}');
+    expect(getConnection(raw, id)?.category_mapping_json).toBe('{"toProvider":{"bug":"Bug"}}');
+  });
+
   it('push_target round-trips through insert and is patchable', () => {
     // The sibling mappings a multi-project connect mints: one pushes, the rest
     // are read + write-back only.

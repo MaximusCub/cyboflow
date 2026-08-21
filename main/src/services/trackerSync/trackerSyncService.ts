@@ -174,8 +174,8 @@ import {
   type InboundSyncReport,
   type ReviewFindingRouter,
 } from './inboundSync';
-import { isPriority } from './priorityMapping';
-import { isCategory } from './categoryMapping';
+import { isPriority, resolveEffectivePriorityMapping, seedDefaultPriorityMapping } from './priorityMapping';
+import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping } from './categoryMapping';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
@@ -1358,9 +1358,19 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * scopes these lists to a container (Dart's are workspace-wide `/config`
    * lists; Linear's and Plane's are fixed scales), so asking for one would
    * invent a dependency the seam does not have.
+   *
+   * The seeded mappings are computed HERE, main-side, over the just-fetched
+   * live options — never left for the wizard to re-derive, which would
+   * duplicate priorityMapping.ts/categoryMapping.ts's seed tables client-side.
    */
   async wizardFieldOptions(source: TrackerWizardSourceInput): Promise<TrackerFieldOptions> {
-    return this.adapterForCredentials(this.credentialsFromSource(source)).listFieldOptions();
+    const credentials = this.credentialsFromSource(source);
+    const options = await this.adapterForCredentials(credentials).listFieldOptions();
+    return {
+      ...options,
+      defaultPriorityMapping: seedDefaultPriorityMapping(credentials.provider, options.priorities),
+      defaultCategoryMapping: seedDefaultCategoryMapping(credentials.provider, options.categories),
+    };
   }
 
   /**
@@ -1548,13 +1558,15 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // Omitted = the push target, which is what a single-mapping connect (every
       // pre-rev-4 one) means. Only the Map step's sibling mappings send false.
       push_target: payload.pushTarget === false ? 0 : 1,
-      // Omitted = 'off' (the column default) — no wizard step sends either yet
-      // (Phase 6). Mapping overlays start empty; the wizard has no editor for
-      // them until then either.
+      // Omitted = 'off' (the column default) — a pre-Phase-6 caller that never
+      // offered the control.
       content_sync_mode: payload.contentSyncMode ?? 'off',
       archive_sync_mode: payload.archiveSyncMode ?? 'off',
-      priority_mapping_json: '{}',
-      category_mapping_json: '{}',
+      // Omitted = the seed only, no user override — same reasoning.
+      priority_mapping_json:
+        payload.priorityMapping !== undefined ? JSON.stringify(payload.priorityMapping) : '{}',
+      category_mapping_json:
+        payload.categoryMapping !== undefined ? JSON.stringify(payload.categoryMapping) : '{}',
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -1924,6 +1936,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // overlay, filtered to valid targets" — the defensive parse we want, with
       // no network round-trip for the provider's live state list.
       stateMapping: resolveEffectiveMapping([], row.state_mapping_json),
+      // No live options round-trip for a summary read either — same
+      // no-network-call reasoning as stateMapping above; the seed's static
+      // canonical tokens (or, for Dart, whatever the overlay itself names)
+      // are what a summary can answer without probing the provider.
+      priorityMapping: resolveEffectivePriorityMapping(row.provider, null, row.priority_mapping_json),
+      categoryMapping: resolveEffectiveCategoryMapping(row.provider, null, row.category_mapping_json),
       lastSyncAt: row.last_sync_at,
       lastSyncLog: parseLogEntries(row.last_sync_log_json),
       linkedCount: listLinks(this.db, row.id, { activeOnly: true }).length,
@@ -1953,6 +1971,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
       ...(patch.pushMode !== undefined ? { push_mode: patch.pushMode } : {}),
       ...(patch.contentSyncMode !== undefined ? { content_sync_mode: patch.contentSyncMode } : {}),
       ...(patch.archiveSyncMode !== undefined ? { archive_sync_mode: patch.archiveSyncMode } : {}),
+      ...(patch.priorityMapping !== undefined
+        ? { priority_mapping_json: JSON.stringify(patch.priorityMapping) }
+        : {}),
+      ...(patch.categoryMapping !== undefined
+        ? { category_mapping_json: JSON.stringify(patch.categoryMapping) }
+        : {}),
       ...(patch.mirrorSubissues !== undefined
         ? { mirror_subissues: patch.mirrorSubissues ? 1 : 0 }
         : {}),

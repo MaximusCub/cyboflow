@@ -44,12 +44,19 @@ import type {
   TrackerConflictSummary,
   TrackerConnectionStatus,
   TrackerConnectionSummary,
+  TrackerContentSyncMode,
   TrackerDirectionMode,
   TrackerMappingTarget,
   TrackerSyncLogEntry,
 } from '../../../../../shared/types/trackerSync';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
-import { logMarkerClass, mappingTargetLabel, providerMeta, trackerInputClass } from './trackerVocabulary';
+import {
+  CONTENT_MODE_OPTIONS,
+  logMarkerClass,
+  mappingTargetLabel,
+  providerMeta,
+  trackerInputClass,
+} from './trackerVocabulary';
 
 const CARD = 'rounded-none border border-border-primary bg-surface-primary';
 
@@ -132,6 +139,12 @@ export function TrackerConnectedView({
   );
   const [pullMode, setPullMode] = useState<TrackerDirectionMode>(connection.pullMode);
   const [pushMode, setPushMode] = useState<TrackerDirectionMode>(connection.pushMode);
+  const [contentSyncMode, setContentSyncMode] = useState<TrackerContentSyncMode>(
+    connection.contentSyncMode,
+  );
+  const [archiveSyncMode, setArchiveSyncMode] = useState<TrackerContentSyncMode>(
+    connection.archiveSyncMode,
+  );
   const [mirrorSubissues, setMirrorSubissues] = useState(connection.mirrorSubissues);
   const [conflictMode, setConflictMode] = useState<TrackerConflictMode>(connection.conflictMode);
 
@@ -152,6 +165,8 @@ export function TrackerConnectedView({
     setStatusSyncMode(connection.statusSyncMode);
     setPullMode(connection.pullMode);
     setPushMode(connection.pushMode);
+    setContentSyncMode(connection.contentSyncMode);
+    setArchiveSyncMode(connection.archiveSyncMode);
     setMirrorSubissues(connection.mirrorSubissues);
     setConflictMode(connection.conflictMode);
     setLog(connection.lastSyncLog);
@@ -159,6 +174,8 @@ export function TrackerConnectedView({
     connection.statusSyncMode,
     connection.pullMode,
     connection.pushMode,
+    connection.contentSyncMode,
+    connection.archiveSyncMode,
     connection.mirrorSubissues,
     connection.conflictMode,
     connection.lastSyncLog,
@@ -257,6 +274,16 @@ export function TrackerConnectedView({
     patchSettings({ connectionId: connection.id, pushMode: next });
   };
 
+  const handleContentSyncMode = (next: TrackerContentSyncMode): void => {
+    setContentSyncMode(next);
+    patchSettings({ connectionId: connection.id, contentSyncMode: next });
+  };
+
+  const handleArchiveSyncMode = (next: TrackerContentSyncMode): void => {
+    setArchiveSyncMode(next);
+    patchSettings({ connectionId: connection.id, archiveSyncMode: next });
+  };
+
   const handleMirror = (next: boolean): void => {
     setMirrorSubissues(next);
     patchSettings({ connectionId: connection.id, mirrorSubissues: next });
@@ -326,6 +353,18 @@ export function TrackerConnectedView({
 
   const mappedCount = Object.values(connection.stateMapping).filter((t) => t !== 'dont').length;
   const totalStates = Object.keys(connection.stateMapping).length;
+  /**
+   * Read-only counts, wizard-only editing per house convention (no inline
+   * editor here). `toProvider` always carries every level's key (the seed
+   * fills all of them, whether the user ever touched a picker or not), so the
+   * denominator is fixed rather than read off the connection.
+   */
+  const priorityMappedCount = Object.values(connection.priorityMapping.toProvider).filter(
+    (t) => t !== null,
+  ).length;
+  const categoryMappedCount = Object.values(connection.categoryMapping.toProvider).filter(
+    (t) => t !== null,
+  ).length;
 
   /**
    * The distinct cyboflow stages this connection IMPORTS into. 'indev' is
@@ -719,6 +758,39 @@ export function TrackerConnectedView({
 
                   <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">Sync task fields</p>
+                      <p className="text-[11px] text-text-tertiary">
+                        Title, description, priority
+                        {meta.supportsCategorySync ? ', and category' : ''} push out to {meta.name}.
+                      </p>
+                    </div>
+                    <Segmented
+                      options={CONTENT_MODE_OPTIONS}
+                      value={contentSyncMode}
+                      onChange={handleContentSyncMode}
+                      ariaLabel="Sync task fields"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">
+                        Archive in {meta.name}
+                      </p>
+                      <p className="text-[11px] text-text-tertiary">
+                        A local archive or delete trashes the linked issue — never a hard delete.
+                      </p>
+                    </div>
+                    <Segmented
+                      options={CONTENT_MODE_OPTIONS}
+                      value={archiveSyncMode}
+                      onChange={handleArchiveSyncMode}
+                      ariaLabel={`Archive in ${meta.name}`}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
                       <p className="text-xs font-semibold text-text-primary">
                         Mirror task breakdowns
                       </p>
@@ -759,6 +831,31 @@ export function TrackerConnectedView({
                       {mappedTargets || 'nothing imported'}
                     </span>
                   </div>
+
+                  {/*
+                   * Read-only, like State mapping above — editing either
+                   * table means re-running the wizard (v1's mapping-only
+                   * editing rule), so this is a count, never a picker.
+                   */}
+                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-text-primary">Priority mapping</p>
+                      <p className="text-[11px] text-text-tertiary">
+                        {priorityMappedCount} of 7 priorities mapped
+                      </p>
+                    </div>
+                  </div>
+
+                  {meta.supportsCategorySync && (
+                    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-text-primary">Category mapping</p>
+                        <p className="text-[11px] text-text-tertiary">
+                          {categoryMappedCount} of 3 categories mapped
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

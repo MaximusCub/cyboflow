@@ -167,7 +167,18 @@ async function codeOf(call: Promise<unknown>): Promise<string> {
 }
 
 describe('cyboflow.tracker.wizardFieldOptions', () => {
-  const OPTIONS = { priorities: ['critical', 'high'], categories: ['Bug'] };
+  const OPTIONS: TrackerFieldOptions = {
+    priorities: ['critical', 'high'],
+    categories: ['Bug'],
+    defaultPriorityMapping: {
+      toProvider: { P0: 'critical', P1: 'high', P2: null, P3: null, P4: null, P5: null, P6: null },
+      toLocal: { critical: 'P0', high: 'P1' },
+    },
+    defaultCategoryMapping: {
+      toProvider: { feature: null, bug: 'Bug', chore: null },
+      toLocal: { bug: 'bug' },
+    },
+  };
 
   it('passes a pasted-key probe through and returns the provider vocabularies', async () => {
     const seen: TrackerWizardSourceInput[] = [];
@@ -227,6 +238,118 @@ describe('cyboflow.tracker.wizardFieldOptions', () => {
     expect(
       await codeOf(caller.wizardFieldOptions({ credentials: { provider: 'dart', apiKey: 'x' } })),
     ).toBe('UNAUTHORIZED');
+  });
+});
+
+/** A minimal `connect` input the router's zod schema accepts as-is. */
+const BASE_CONNECT_INPUT = {
+  projectId: 1,
+  credentials: { provider: 'dart' as const, apiKey: 'dsa_1' },
+  source: { containerId: 'space-1', narrowId: 'all', narrowKind: 'all' as const },
+  sourceLabel: 'Personal',
+  selectionMode: 'all' as const,
+  selectionJson: null,
+  stateMapping: {},
+  statusSyncMode: 'auto' as const,
+  pullMode: 'auto' as const,
+  pushMode: 'auto' as const,
+  mirrorSubissues: true,
+  conflictMode: 'auto' as const,
+  reconcile: [],
+};
+
+describe('cyboflow.tracker.connect — priority/category mapping overlay', () => {
+  it('accepts a priorityMapping/categoryMapping overlay and passes it through verbatim', async () => {
+    const seen: TrackerConnectPayload[] = [];
+    const facade = new UnusedFacade();
+    facade.connect = async (payload) => {
+      seen.push(payload);
+      return { connectionId: 'trk_1' };
+    };
+    const caller = await callerWith(facade);
+
+    await caller.connect({
+      ...BASE_CONNECT_INPUT,
+      priorityMapping: { toProvider: { P0: 'critical', P6: null } },
+      categoryMapping: { toProvider: { bug: 'Bug' } },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].priorityMapping).toEqual({ toProvider: { P0: 'critical', P6: null } });
+    expect(seen[0].categoryMapping).toEqual({ toProvider: { bug: 'Bug' } });
+  });
+
+  it('connects fine with neither overlay — every pre-Phase-6 caller', async () => {
+    const seen: TrackerConnectPayload[] = [];
+    const facade = new UnusedFacade();
+    facade.connect = async (payload) => {
+      seen.push(payload);
+      return { connectionId: 'trk_1' };
+    };
+    const caller = await callerWith(facade);
+
+    await caller.connect(BASE_CONNECT_INPUT);
+
+    expect(seen[0].priorityMapping).toBeUndefined();
+    expect(seen[0].categoryMapping).toBeUndefined();
+  });
+
+  it('rejects an unknown priority level or category key in the overlay', async () => {
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(
+      caller.connect({
+        ...BASE_CONNECT_INPUT,
+        priorityMapping: { toProvider: { P9: 'critical' } },
+      } as never),
+    ).rejects.toThrow();
+
+    await expect(
+      caller.connect({
+        ...BASE_CONNECT_INPUT,
+        categoryMapping: { toProvider: { epic: 'Epic' } },
+      } as never),
+    ).rejects.toThrow();
+  });
+});
+
+describe('cyboflow.tracker.updateSettings — priority/category mapping overlay', () => {
+  it('patches the overlay through to the facade, JSON shape untouched', async () => {
+    const seen: Array<{ connectionId: string; patch: TrackerSettingsPatch }> = [];
+    const facade = new UnusedFacade();
+    facade.updateSettings = async (connectionId, patch) => {
+      seen.push({ connectionId, patch });
+    };
+    const caller = await callerWith(facade);
+
+    await caller.updateSettings({
+      connectionId: 'trk_1',
+      priorityMapping: { toProvider: { P0: 'critical' } },
+      categoryMapping: { toProvider: { bug: 'Bug' } },
+    });
+
+    expect(seen).toEqual([
+      {
+        connectionId: 'trk_1',
+        patch: {
+          priorityMapping: { toProvider: { P0: 'critical' } },
+          categoryMapping: { toProvider: { bug: 'Bug' } },
+        },
+      },
+    ]);
+  });
+
+  it('rejects a malformed overlay before reaching the facade', async () => {
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(
+      caller.updateSettings({
+        connectionId: 'trk_1',
+        priorityMapping: { toProvider: 'not-an-object' },
+      } as never),
+    ).rejects.toThrow();
   });
 });
 

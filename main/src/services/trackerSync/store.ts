@@ -135,9 +135,10 @@ export interface ConnectionSettingsPatch {
   content_sync_mode?: TrackerConnectionRow['content_sync_mode'];
   /** Remote archive/trash cadence (migration 112). */
   archive_sync_mode?: TrackerConnectionRow['archive_sync_mode'];
-  // priority_mapping_json / category_mapping_json are NOT patchable here yet —
-  // no wizard/settings surface writes them until Phase 6; until then they are
-  // set once at insertConnection and otherwise read verbatim.
+  /** The priority mapping overlay JSON (migration 112); see priorityMapping.ts. */
+  priority_mapping_json?: string;
+  /** The category mapping overlay JSON (migration 112); see categoryMapping.ts. */
+  category_mapping_json?: string;
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];
   source_json?: string | null;
@@ -160,6 +161,8 @@ const CONNECTION_SETTINGS_COLUMNS = [
   'push_target',
   'content_sync_mode',
   'archive_sync_mode',
+  'priority_mapping_json',
+  'category_mapping_json',
   'mirror_subissues',
   'conflict_mode',
   'source_json',
