@@ -1582,18 +1582,25 @@ describe('TrackerSyncService content/archive sync modes', () => {
     return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as TrackerOutboxRow;
   }
 
-  it('content OFF: neither an automatic pass nor Sync now ever claims the queued row', async () => {
+  it('content OFF: the row is never CLAIMED — and the pass settles it rather than leaving it', async () => {
     const connection = makeConnection({ content_sync_mode: 'off' });
     const row = enqueueContentRow(connection.id, 'update_content');
 
     const auto = await service.syncConnection(CONN_ID);
-    expect(outboxRow(row.id).state).toBe('pending');
-    expect(auto.entries.map((e) => e.line)).toContain('content changes off');
 
-    // Unlike the auto/manual directions, 'off' is not something "Sync now" can
-    // unstick — invariant 5's whole point.
+    // Nothing was sent: 'off' is not something a pass — or "Sync now" — can
+    // unstick, which is invariant 5's whole point.
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(auto.entries.map((e) => e.line)).toContain('content changes off');
+    // And it is not left sitting there either. A pending row of an off kind is
+    // UNDRAINABLE, and the kind-agnostic inbound blocker would halt the batch
+    // at its issue on every pass forever — so the pass settles it on sight.
+    expect(outboxRow(row.id).state).toBe('done');
+    expect(outboxRow(row.id).last_error).toContain('content sync is off');
+    expect(auto.entries.map((e) => e.line)).toContain('1 queued write dropped · that direction is off');
+
     await service.syncNow(CONN_ID);
-    expect(outboxRow(row.id).state).toBe('pending');
+    expect(adapter.contentCalls).toHaveLength(0);
   });
 
   it('content MANUAL: an automatic pass holds the row; Sync now claims it', async () => {
@@ -1631,7 +1638,10 @@ describe('TrackerSyncService content/archive sync modes', () => {
     makeConnection({ content_sync_mode: 'off', archive_sync_mode: 'off' });
     const offRow = enqueueContentRow(CONN_ID, 'archive_issue', 'ext-off');
     const autoPass1 = await service.syncConnection(CONN_ID);
-    expect(outboxRow(offRow.id).state).toBe('pending');
+    // Settled unsent, for the same reason the content-off row is — see above.
+    expect(adapter.archiveCalls).toHaveLength(0);
+    expect(outboxRow(offRow.id).state).toBe('done');
+    expect(outboxRow(offRow.id).last_error).toContain('archive sync is off');
     expect(autoPass1.entries.map((e) => e.line)).toContain('archive off');
 
     setArchiveMode('manual');
@@ -1754,6 +1764,10 @@ describe('TrackerSyncService content write-back — echo suppression', () => {
 // ---------------------------------------------------------------------------
 
 describe('TrackerSyncService content/archive flip to off', () => {
+  function outboxRow(id: number): TrackerOutboxRow {
+    return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as TrackerOutboxRow;
+  }
+
   it('settles the PENDING rows of the direction being turned off, and leaves in-flight alone', async () => {
     makeConnection({ content_sync_mode: 'auto', archive_sync_mode: 'auto' });
     const pending = enqueueOutbox(raw, {
@@ -1797,37 +1811,92 @@ describe('TrackerSyncService content/archive flip to off', () => {
     expect(outboxRows().find((row) => row.id === archiveRow.id)?.state).toBe('done');
   });
 
-  it('a stranded row would have wedged inbound — after the flip, the cursor moves', async () => {
+  it('SELF-HEALS a row that becomes pending AFTER the flip (the retry path)', async () => {
+    // The flip-time sweep settles what is pending AT THE FLIP. An in_flight row
+    // is deliberately left alone — its request cannot be recalled — and when it
+    // fails retryably it lands right back in `pending`, of a kind nothing will
+    // ever claim. Left there it halts inbound at that issue forever.
     makeConnection({ content_sync_mode: 'auto' });
     adapter.issues = [makeIssue()];
     service.start();
     await service.syncConnection(CONN_ID);
+    const ideaId = getLinkByExternal(raw, CONN_ID, 'ext-1')?.entity_id ?? '';
 
-    enqueueOutbox(raw, {
+    const row = enqueueOutbox(raw, {
       connection_id: CONN_ID,
       kind: 'update_content',
       entity_type: 'idea',
-      entity_id: getLinkByExternal(raw, CONN_ID, 'ext-1')?.entity_id ?? '',
+      entity_id: ideaId,
       external_id: 'ext-1',
       payload_json: '{}',
     });
-    // With the row still unresolved, inbound halts AT that issue…
+    raw.prepare("UPDATE tracker_outbox SET state = 'in_flight' WHERE id = ?").run(row.id);
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'off' });
+    // Untouched by the flip, exactly as intended…
+    expect(outboxRow(row.id).state).toBe('in_flight');
+
+    // …then the in-flight request fails retryably and the row returns to the
+    // queue, now undrainable.
+    raw
+      .prepare("UPDATE tracker_outbox SET state = 'pending', attempts = 1 WHERE id = ?")
+      .run(row.id);
+
     adapter.issues = [makeIssue({ updatedAt: '2026-07-30T13:00:00.000Z' })];
-    raw.prepare('UPDATE tracker_connections SET content_sync_mode = ? WHERE id = ?').run('off', CONN_ID);
-    const stalled = await service.syncNow(CONN_ID);
-    expect(stalled.entries.map((entry) => entry.line)).toContain(
+    const pass = await service.syncNow(CONN_ID);
+
+    expect(outboxRow(row.id).state).toBe('done');
+    expect(outboxRow(row.id).last_error).toContain('content sync is off');
+    // The stall never happens: the sweep runs BEFORE the blocker scan.
+    expect(pass.entries.map((entry) => entry.line)).not.toContain(
       'held at ext-1 — our write is in flight',
     );
+    expect(getConnection(raw, CONN_ID)?.cursor_updated_at).toBe('2026-07-30T13:00:00.000Z');
+  });
 
-    // …and 'off' means nothing will ever drain it, so the flip has to settle it.
-    raw.prepare('UPDATE tracker_connections SET content_sync_mode = ? WHERE id = ?').run('auto', CONN_ID);
-    await service.updateSettings(CONN_ID, { contentSyncMode: 'off' });
+  it('SELF-HEALS the boot-recovery path: ambiguous -> requeued -> pending, of an off kind', async () => {
+    // The other route back into `pending`: a crash leaves the row `in_flight`,
+    // boot recovery demotes it to `ambiguous`, and processAmbiguous requeues
+    // every NON-CREATE kind straight to pending (re-performing them is
+    // idempotent). Nothing in that chain consults the direction mode.
+    makeConnection({ content_sync_mode: 'off', archive_sync_mode: 'off' });
+    adapter.issues = [makeIssue()];
 
-    const recovered = await service.syncNow(CONN_ID);
-    expect(recovered.entries.map((entry) => entry.line)).not.toContain(
+    const content = enqueueOutbox(raw, {
+      connection_id: CONN_ID,
+      kind: 'update_content',
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      external_id: 'ext-1',
+      payload_json: '{}',
+    });
+    const archive = enqueueOutbox(raw, {
+      connection_id: CONN_ID,
+      kind: 'archive_issue',
+      entity_type: 'idea',
+      entity_id: 'idea-2',
+      external_id: 'ext-2',
+      payload_json: '{}',
+    });
+    raw.prepare("UPDATE tracker_outbox SET state = 'in_flight'").run();
+
+    // start() demotes both to ambiguous…
+    service.start();
+    expect(outboxRows().map((r) => r.state)).toEqual(['ambiguous', 'ambiguous']);
+
+    // …and the pass requeues them to pending, then heals them in the same pass.
+    const pass = await service.syncConnection(CONN_ID);
+
+    expect(outboxRows().map((r) => r.state)).toEqual(['done', 'done']);
+    expect(outboxRow(content.id).last_error).toContain('content sync is off');
+    expect(outboxRow(archive.id).last_error).toContain('archive sync is off');
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(adapter.archiveCalls).toHaveLength(0);
+    expect(pass.entries.map((entry) => entry.line)).not.toContain(
       'held at ext-1 — our write is in flight',
     );
   });
+
 });
 
 // ---------------------------------------------------------------------------

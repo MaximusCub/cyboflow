@@ -297,6 +297,37 @@ function drainKinds(
   return kinds;
 }
 
+/**
+ * The outbox kinds NO trigger can drain for this connection right now — the
+ * exact complement {@link drainKinds} can never include, whatever the trigger.
+ *
+ * Only the two migration-112 modes have an `'off'` state at all; the other
+ * three are binary (`TrackerDirectionMode = 'auto' | 'manual'`), so their kinds
+ * are always claimable by SOME trigger and can never become undrainable. That
+ * is a type-level guarantee, not a convention — which is why this reads the two
+ * content-sync modes directly rather than asking {@link drainKinds} what it
+ * left out.
+ */
+function undrainableKinds(connection: TrackerConnectionRow): {
+  kinds: TrackerOutboxRow['kind'][];
+  reason: string;
+}[] {
+  const off: { kinds: TrackerOutboxRow['kind'][]; reason: string }[] = [];
+  if (connection.content_sync_mode === 'off') {
+    off.push({
+      kinds: [...CONTENT_OUTBOX_KINDS],
+      reason: 'cancelled — content sync is off for this connection',
+    });
+  }
+  if (connection.archive_sync_mode === 'off') {
+    off.push({
+      kinds: [...ARCHIVE_OUTBOX_KINDS],
+      reason: 'cancelled — archive sync is off for this connection',
+    });
+  }
+  return off;
+}
+
 // ---------------------------------------------------------------------------
 // Public shapes
 // ---------------------------------------------------------------------------
@@ -813,6 +844,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
       if (!paused && inboundAllowed) {
         if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
+        // THE LAST MOMENT BEFORE THE BLOCKER SCAN, and deliberately not earlier
+        // — see {@link settleUndrainableRows} for why every requeue source in
+        // this pass has to have run first.
+        this.settleUndrainableRows(connection, entries);
         entries.push({ marker: '▸', line: 'GET issues' });
         const inbound = await runInboundSync(
           {
@@ -964,6 +999,66 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
     entries.push({ marker: '⚠', line: 'inbound deferred · unresolved create recovery' });
     return { proceed: false, paused: false };
+  }
+
+  /**
+   * SELF-HEALING GATE against a permanent inbound stall: settle every PENDING
+   * row whose direction is currently `'off'`, whatever kind it is.
+   *
+   * WHY THE FLIP-TIME SWEEP IS NOT ENOUGH, even though it exists and stays.
+   * `updateSettings` settles the rows that are pending AT THE MOMENT of the
+   * flip, which is the right thing to do for immediacy — but `pending` is not a
+   * terminal state, and rows keep ARRIVING in it from behind:
+   *
+   *   - an `in_flight` row (deliberately left alone by the flip, since its
+   *     request cannot be recalled) fails retryably afterwards, and
+   *     `resolveOutbox`'s retry arm puts it back to `pending`;
+   *   - an `ambiguous` row (likewise left alone) is requeued to `pending` by
+   *     {@link processAmbiguous} — every non-create kind takes that path by
+   *     design, because re-performing them is idempotent;
+   *   - a crash mid-flight demotes to `ambiguous` at boot and then follows the
+   *     same route.
+   *
+   * Each of those lands a claimable-looking row of a kind
+   * {@link claimNextPending} will never claim — and `collectOutboxBlockers` is
+   * KIND-AGNOSTIC, so `runInboundSync` halts at that issue on every pass,
+   * forever. Chasing the transitions individually would mean auditing every
+   * present and future path into `pending`; asking the question once per pass,
+   * where the modes are already resolved, cannot be forgotten by code written
+   * later.
+   *
+   * PLACED IMMEDIATELY BEFORE THE INBOUND FETCH, which is the only correct
+   * point and was worth getting wrong once to learn. It has to be LATE enough
+   * that every requeue source in this pass has already run — `processAmbiguous`
+   * fires twice per pass (once inside the write-back phase, once inside
+   * {@link recoverCreatesBeforeInbound}) and each one can move an off-kind row
+   * from `ambiguous` to `pending`, so a sweep at the top of the pass heals rows
+   * that are then re-stranded behind it. And EARLY enough to precede
+   * `runInboundSync`, which is where `collectOutboxBlockers` reads the queue
+   * and where the stall would otherwise materialize.
+   *
+   * The drain needs no protection from either side of that: `claimNextPending`
+   * is already filtered by {@link drainKinds}, so an off-kind row is invisible
+   * to it whether or not this has run. The debounced write-back drain
+   * ({@link drainConnection}) therefore does not call this at all — it performs
+   * no inbound fetch, so it has no blocker scan to protect, and the next full
+   * pass heals whatever it leaves.
+   */
+  private settleUndrainableRows(
+    connection: TrackerConnectionRow,
+    entries: TrackerSyncLogEntry[],
+  ): void {
+    let settled = 0;
+    for (const off of undrainableKinds(connection)) {
+      settled += cancelPendingKinds(this.db, connection.id, off.kinds, off.reason);
+    }
+    if (settled === 0) return;
+    // Loud, not silent: these are writes the user's own edits produced, and
+    // dropping them is a consequence of a setting they may not connect to it.
+    entries.push({
+      marker: '⚠',
+      line: `${plural(settled, 'queued write')} dropped · that direction is off`,
+    });
   }
 
   /**

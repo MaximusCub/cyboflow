@@ -88,7 +88,12 @@
  */
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import type { BacklogTaskItem, TaskChangedEvent } from '../../../../shared/types/tasks';
+import type {
+  BacklogTaskItem,
+  EntityCategory,
+  Priority,
+  TaskChangedEvent,
+} from '../../../../shared/types/tasks';
 import type {
   EntityExternalLinkRow,
   TrackerConnectionRow,
@@ -138,11 +143,26 @@ export interface UpdateStatePayload {
   desiredGroup: WriteBackGroup;
 }
 
-/** `payload_json` for the `create_sub_issue` outbox kind. */
+/**
+ * `payload_json` for the `create_sub_issue` outbox kind.
+ *
+ * The LOCAL priority/category are snapshotted here beside the title and
+ * description, so the whole draft speaks for the one moment the decomposition
+ * captured. The provider TOKENS they map to are deliberately NOT stored: a
+ * mapping can only be resolved against the workspace's live vocabulary, which
+ * exists at drain time and not here (this module makes no network calls).
+ *
+ * Both are NULLABLE for rows queued before these keys existed — a mirror that
+ * has been sitting in a held push direction since an earlier build. A null pair
+ * simply omits the fields from the draft, and the provider's own defaults
+ * apply, exactly as they did then.
+ */
 export interface CreateSubIssuePayload {
   parentExternalId: string;
   title: string;
   description: string | null;
+  priority: Priority | null;
+  category: EntityCategory | null;
 }
 
 /**
@@ -490,6 +510,9 @@ interface MintedTaskRow {
   title: string;
   summary: string | null;
   body: string | null;
+  /** Both columns are NOT NULL with defaults on every entity table (migs 015/059). */
+  priority: Priority;
+  category: EntityCategory;
 }
 
 /**
@@ -502,7 +525,7 @@ interface MintedTaskRow {
 function listMintedTasks(db: Database.Database, ideaId: string): MintedTaskRow[] {
   return db
     .prepare(
-      `SELECT id, title, summary, body
+      `SELECT id, title, summary, body, priority, category
          FROM tasks
         WHERE originating_idea_id = ? AND archived_at IS NULL
         ORDER BY created_at ASC, ref ASC`,
@@ -552,6 +575,8 @@ function handleDecomposition(
       parentExternalId: link.external_id,
       title: task.title,
       description: task.body ?? task.summary ?? null,
+      priority: task.priority,
+      category: task.category,
     };
     enqueueOutbox(db, {
       connection_id: connection.id,

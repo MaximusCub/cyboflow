@@ -172,6 +172,9 @@ class FakeAdapter implements TrackerAdapter {
   /** A provider that rewrites the markdown it stores. Identity by default. */
   normalizeStored: (description: string | null) => string | null = (description) => description;
 
+  /** Runs INSIDE updateIssueContent — a test's hook for a mid-flight local edit. */
+  onContentWrite: (() => void) | undefined = undefined;
+
   readonly updateCalls: UpdateCall[] = [];
   readonly createCalls: CreateCall[] = [];
   readonly contentCalls: Array<{ externalId: string; patch: IssueContentPatch }> = [];
@@ -195,8 +198,11 @@ class FakeAdapter implements TrackerAdapter {
     this.listStatesCalls += 1;
     return this.states;
   }
+  /** The provider's live vocabulary — a Dart-shaped fake overrides it. */
+  fieldOptions: TrackerFieldOptionsRaw = { priorities: ['0', '1', '2', '3', '4'], categories: null };
+
   async listFieldOptions(): Promise<TrackerFieldOptionsRaw> {
-    return { priorities: ['0', '1', '2', '3', '4'], categories: null };
+    return this.fieldOptions;
   }
   async listIssues(): Promise<TrackerIssue[]> {
     this.listIssuesCalls += 1;
@@ -253,6 +259,9 @@ class FakeAdapter implements TrackerAdapter {
     patch: IssueContentPatch,
   ): Promise<TrackerIssue | null> {
     this.contentCalls.push({ externalId, patch });
+    // The concurrent-edit seam: whatever a test does here happens between the
+    // send and the settle, exactly as a real user edit would.
+    this.onContentWrite?.();
     if (this.failContent) throw this.takeFailure('failContent');
     if (this.contentReturnsNull) return null;
     const base = this.issuesById.get(externalId) ?? makeIssue(externalId);
@@ -529,6 +538,8 @@ function enqueueCreate(connectionId: string, entityId: string, clientKey: string
     parentExternalId: 'ext-idea',
     title: 'Task TASK-1',
     description: 'body one',
+    priority: 'P0',
+    category: 'bug',
   };
   return enqueueOutbox(raw, {
     connection_id: connectionId,
@@ -758,7 +769,13 @@ describe('drainOutbox — sub-issue creation', () => {
     expect(adapter.createCalls).toEqual([
       {
         parentExternalId: 'ext-idea',
-        draft: { title: 'Task TASK-1', description: 'body one' },
+        draft: {
+          title: 'Task TASK-1',
+          description: 'body one',
+          // The payload's LOCAL P0, mapped here against the provider's live
+          // scale. Category is absent: Linear has no issue type to carry one.
+          priority: '1',
+        },
         clientKey: 'client-key-1',
       },
     ]);
@@ -771,6 +788,10 @@ describe('drainOutbox — sub-issue creation', () => {
     expect(JSON.parse(link?.baseline_json ?? '{}')).toMatchObject({
       stateId: 'state-backlog',
       title: 'Task TASK-1',
+      // Seeded from the RESPONSE. An absent key here would read as "never
+      // synced" and stand the whole field down on both directions.
+      priority: '3',
+      category: null,
     });
   });
 });
@@ -783,14 +804,21 @@ describe('drainOutbox — top-level issue creation (push)', () => {
   /** A real board + idea row: the push draft is composed from them at drain time. */
   function seedIdea(
     id: string,
-    opts: { title?: string; body?: string | null; stage?: 'idea' | 'done'; archived?: boolean } = {},
+    opts: {
+      title?: string;
+      body?: string | null;
+      stage?: 'idea' | 'done';
+      archived?: boolean;
+      priority?: string;
+      category?: string;
+    } = {},
   ): void {
     svc.seedDefaultBoard(PROJECT_ID);
     const stageIds = resolveStageIds(raw, PROJECT_ID);
     raw
       .prepare(
-        `INSERT INTO ideas (id, project_id, ref, title, summary, body, board_id, stage_id, archived_at)
-         VALUES (?, ?, 'IDEA-1', ?, NULL, ?, ?, ?, ?)`,
+        `INSERT INTO ideas (id, project_id, ref, title, summary, body, board_id, stage_id, archived_at, priority, category)
+         VALUES (?, ?, 'IDEA-1', ?, NULL, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -800,8 +828,63 @@ describe('drainOutbox — top-level issue creation (push)', () => {
         `board-${PROJECT_ID}-default`,
         opts.stage === 'done' ? stageIds.done : stageIds.idea,
         opts.archived === true ? '2026-07-30 11:00:00' : null,
+        opts.priority ?? 'P2',
+        opts.category ?? 'feature',
       );
   }
+
+  it('carries the MAPPED priority and category per provider, and suppresses what a provider cannot hold', async () => {
+    // Dart: both fields land, in the workspace's own spelling.
+    const dart = seedConnection({ id: 'conn-dart', provider: 'dart' });
+    seedIdea('ide_dart', { priority: 'P0', category: 'bug' });
+    enqueuePush(dart.id, 'ide_dart', 'ck-dart');
+    const dartAdapter = new FakeAdapter();
+    dartAdapter.provider = 'dart';
+    dartAdapter.capabilities = {
+      ...dartAdapter.capabilities,
+      contentWrite: { title: true, description: true, priority: true, category: true },
+    };
+    dartAdapter.fieldOptions = {
+      priorities: ['critical', 'high', 'medium', 'low'],
+      categories: ['Task', 'Bug', 'Milestone'],
+    };
+
+    await drainOutbox(makeDeps(dartAdapter), dart);
+
+    expect(dartAdapter.createCalls[0].draft).toMatchObject({
+      priority: 'critical',
+      // The WORKSPACE's spelling, not the local literal — a bogus type 400s.
+      category: 'Bug',
+    });
+
+    // Linear: same idea, same category, but no issue type exists to put it on.
+    const linear = seedConnection({ id: 'conn-linear' });
+    raw.prepare("UPDATE ideas SET id = 'ide_lin' WHERE id = 'ide_dart'").run();
+    enqueuePush(linear.id, 'ide_lin', 'ck-lin');
+    const linearAdapter = new FakeAdapter();
+
+    await drainOutbox(makeDeps(linearAdapter), linear);
+
+    expect(linearAdapter.createCalls[0].draft).toMatchObject({ priority: '1' });
+    expect(linearAdapter.createCalls[0].draft).not.toHaveProperty('category');
+  });
+
+  it('omits a priority the live mapping can no longer express, rather than guessing', async () => {
+    const connection = seedConnection({ id: 'conn-dart2', provider: 'dart' });
+    seedIdea('ide_1', { priority: 'P0' });
+    enqueuePush(connection.id, 'ide_1', 'ck-1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'dart';
+    // The workspace renamed 'critical' away — Dart addresses priorities BY
+    // TITLE, so the seed's token resolves to nothing.
+    adapter.fieldOptions = { priorities: ['high', 'medium', 'low'], categories: null };
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    // Omitted, so the provider's own default applies. Sending an unknown token
+    // is a 400 on Dart (probe D1), which is strictly worse than a default.
+    expect(adapter.createCalls[0].draft).not.toHaveProperty('priority');
+  });
 
   function enqueuePush(connectionId: string, entityId: string, clientKey: string): TrackerOutboxRow {
     return enqueueOutbox(raw, {
@@ -838,6 +921,8 @@ describe('drainOutbox — top-level issue creation (push)', () => {
           // Stage 'Idea' maps to no write-back group, so the create falls back
           // to the BACKLOG-group state.
           stateId: 'state-backlog',
+          // The idea's own P2, mapped to Linear's Medium.
+          priority: '3',
         },
         clientKey: 'client-key-push',
       },
@@ -849,7 +934,12 @@ describe('drainOutbox — top-level issue creation (push)', () => {
     expect(link?.external_id).toBe('client-key-push');
     expect(link?.external_parent_id).toBeNull();
     const baseline = JSON.parse(link?.baseline_json ?? '{}') as Record<string, unknown>;
-    expect(baseline).toMatchObject({ stateId: 'state-backlog', title: 'Ship the push direction' });
+    expect(baseline).toMatchObject({
+      stateId: 'state-backlog',
+      title: 'Ship the push direction',
+      priority: '3',
+      category: null,
+    });
     // Backlog is not a write-back group, so no stamp — a stale one would
     // suppress the first genuine Done/Won't-do write-back.
     expect(baseline).not.toHaveProperty('lastWrittenGroup');
@@ -1598,6 +1688,44 @@ describe('drainOutbox — update_content', () => {
     expect(second.failedTerminal).toBe(1);
     expect(fetchOutbox(row.id).state).toBe('failed');
     expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
+  });
+
+  it('does NOT clobber an edit that lands while the write is in flight', async () => {
+    // The window is ORDINARY, not exotic: the pending-only dedupe deliberately
+    // enqueues a SUCCESSOR row for exactly this case, so an edit mid-flight is
+    // the shape the design expects. Aligning the body here would overwrite the
+    // newer text with the older write's echo — and the successor would then
+    // compose its patch from the clobbered body and push the loss remotely.
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T', body: 'first draft' });
+    linkTask(connection.id, 'ext-1', {
+      title: 'T',
+      description: 'was',
+      stateId: 'state-backlog',
+      priority: '3',
+      category: null,
+    });
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    // The provider normalizes, so the alignment WOULD fire but for the guard…
+    adapter.normalizeStored = (description) => description?.toUpperCase() ?? null;
+    // …and the user edits while the request is on the wire.
+    adapter.onContentWrite = () => {
+      raw.prepare("UPDATE tasks SET body = 'second draft' WHERE id = ?").run('tsk_1');
+    };
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    // The newer edit survives untouched.
+    expect(bodyOf('tsk_1')).toBe('second draft');
+
+    // And the successor row composes from THAT text, so the newer edit is what
+    // actually reaches the tracker.
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    adapter.onContentWrite = undefined;
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls[1].patch.description).toBe('second draft');
   });
 
   it('falls back to a re-read when the adapter breaks its contract and returns nothing', async () => {

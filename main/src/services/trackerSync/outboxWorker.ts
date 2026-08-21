@@ -51,6 +51,7 @@ import type {
 import type {
   TrackerIssue,
   TrackerNarrowKind,
+  TrackerProvider,
   TrackerSourceSelection,
   TrackerState,
 } from '../../../../shared/types/trackerSync';
@@ -90,13 +91,15 @@ import {
   type EntityWriteRouter,
 } from './inboundSync';
 import {
-  localPriorityForToken,
+  isPriority,
   providerPriorityToken,
+  seedDefaultPriorityMapping,
   providerTokensEqual,
   resolveEffectivePriorityMapping,
   type PriorityMapping,
 } from './priorityMapping';
 import {
+  isCategory,
   providerCategoryToken,
   providerSupportsCategorySync,
   resolveEffectiveCategoryMapping,
@@ -257,10 +260,10 @@ async function processRow(
   report: OutboxReport,
 ): Promise<boolean> {
   if (row.kind === 'create_sub_issue') {
-    return await processCreate(deps, connection, adapter, row, report);
+    return await processCreate(deps, connection, adapter, fields, row, report);
   }
   if (row.kind === 'create_issue') {
-    return await processPush(deps, connection, adapter, states, row, report);
+    return await processPush(deps, connection, adapter, states, fields, row, report);
   }
   if (row.kind === 'update_content') {
     return await processContentWrite(deps, connection, adapter, fields, row, report);
@@ -626,14 +629,10 @@ function composeContentPatch(
   }
 
   if (writable.priority && 'priority' in baseline) {
-    const token = providerPriorityToken(mappings.priority, entity.priority);
+    const token = writablePriorityToken(connection.provider, mappings.priority, entity.priority);
     const stored = typeof baseline.priority === 'string' ? baseline.priority : null;
-    // A null token is Dart's "unset" only where the mapping round-trips it back
-    // to a local level; elsewhere it is an unmappable value, not a clear.
-    const clearable = localPriorityForToken(mappings.priority, null) !== null;
-    if (!providerTokensEqual(token, stored) && (token !== null || clearable)) {
-      patch.priority = token;
-    }
+    // `undefined` is "the mapping cannot express this level" — never a clear.
+    if (token !== undefined && !providerTokensEqual(token, stored)) patch.priority = token;
   }
 
   if (
@@ -825,6 +824,7 @@ async function processCreate(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
   adapter: TrackerAdapter,
+  fields: FieldMappingCache,
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
@@ -834,11 +834,31 @@ async function processCreate(
     return false;
   }
 
+  // THE LOCAL VALUES ARE SNAPSHOTTED, THE MAPPING IS RESOLVED NOW. The payload
+  // carries the task's `priority`/`category` as the decomposition saw them —
+  // the same moment its title and description were captured, so the whole draft
+  // speaks for one instant — while the provider TOKENS they translate to can
+  // only be resolved against the workspace's live vocabulary, which exists
+  // here. A row queued before those keys existed carries neither, and
+  // {@link mappedDraftFields} is simply not consulted for it.
+  let mapped: Pick<IssueDraft, 'priority' | 'category'> = {};
+  if (payload.priority !== null && payload.category !== null) {
+    try {
+      mapped = mappedDraftFields(adapter, connection, await fields.load(), {
+        priority: payload.priority,
+        category: payload.category,
+      });
+    } catch (err) {
+      // The field-option fetch; nothing has been sent, so a plain retry is safe.
+      return recordAdapterFailure(deps, connection, row, report, err);
+    }
+  }
+
   let issue: TrackerIssue;
   try {
     issue = await adapter.createSubIssue(
       payload.parentExternalId,
-      { title: payload.title, description: payload.description ?? undefined },
+      { title: payload.title, description: payload.description ?? undefined, ...mapped },
       row.client_key,
     );
   } catch (err) {
@@ -902,6 +922,9 @@ interface PushableIdea {
   body: string | null;
   stage_id: string;
   archived_at: string | null;
+  /** Both columns are NOT NULL with defaults on every entity table (migs 015/059). */
+  priority: Priority;
+  category: EntityCategory;
 }
 
 /**
@@ -923,6 +946,7 @@ async function processPush(
   connection: TrackerConnectionRow,
   adapter: TrackerAdapter,
   states: StateCache,
+  fields: FieldMappingCache,
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
@@ -947,10 +971,10 @@ async function processPush(
   let providerStates: TrackerState[];
   try {
     providerStates = await states.load();
-    draft = composePushDraft(deps, connection, idea, providerStates);
+    draft = composePushDraft(deps, connection, adapter, idea, providerStates, await fields.load());
   } catch (err) {
-    // Covers the state fetch AND the local board-stage resolution; neither has
-    // sent anything, so an ordinary backoff retry is safe.
+    // Covers the state fetch, the field-option fetch AND the local board-stage
+    // resolution; none has sent anything, so a backoff retry is safe.
     return recordAdapterFailure(deps, connection, row, report, err);
   }
 
@@ -991,12 +1015,20 @@ async function processPush(
  * `backlog` group. A workspace with no state in the resolved group leaves
  * `stateId` unset and takes the provider's own default — for a create that is a
  * reasonable answer, unlike a state WRITE where the state is the entire point.
+ *
+ * PRIORITY AND CATEGORY RIDE ALONG (see {@link mappedDraftFields}), and filing
+ * them WITH the create rather than in a follow-up write is what keeps the
+ * link's first baseline honest: the issue comes back carrying the tokens we
+ * asked for, {@link baselineSnapshot} records those, and the next local change
+ * to either field diffs against something real instead of against an absence.
  */
 function composePushDraft(
   deps: OutboxDeps,
   connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
   idea: PushableIdea,
   states: TrackerState[],
+  mappings: FieldMappings,
 ): IssueDraft {
   const stageIds = resolveStageIds(deps.db, connection.project_id);
   const group = stageIdToWriteBackGroup(idea.stage_id, stageIds) ?? 'backlog';
@@ -1010,6 +1042,7 @@ function composePushDraft(
     title: idea.title,
     description: description ?? undefined,
     stateId: state?.id,
+    ...mappedDraftFields(adapter, connection, mappings, idea),
   };
 }
 
@@ -1121,9 +1154,32 @@ async function alignLocalDescription(
 
   const body = readEntityBody(deps.db, entityType, entityId);
   if (body === undefined) return;
+  const { description: current, footer } = splitBody(body);
+
+  // THE ENTITY MUST STILL HOLD THE TEXT WE SENT. Everything above compares the
+  // RESPONSE against what went on the wire; this compares the wire against what
+  // the entity says NOW, and they diverge exactly when the user edited between
+  // the send and this line — a window the content path makes ordinary rather
+  // than rare, since a pending-only dedupe deliberately enqueues a SUCCESSOR
+  // row for an edit that lands while a write is in flight.
+  //
+  // Aligning there would overwrite the newer edit with the older write's echo,
+  // and the damage would not stop at one field: the successor row composes its
+  // patch from the body it finds, so it would faithfully push the clobbered
+  // text to the tracker and make the loss permanent on both sides.
+  //
+  // SKIPPING IS SAFE, and is not merely the lesser evil. The alignment exists
+  // to stop a baseline (stamped from the provider's normalized text) from
+  // silently disagreeing with a local body nothing will ever push back — and
+  // the successor row is exactly the thing that pushes it back. It sends the
+  // newer text, stamps the baseline from THAT response, and runs this alignment
+  // again against a body it can vouch for. The only case we give up is a
+  // normalization difference on text the user has already replaced, which no
+  // later diff can act on.
+  if (normalizeDescription(current) !== normalizeDescription(sentDescription)) return;
+
   // The footer is cyboflow's half of the body and belongs to no provider —
   // preserved exactly as an inbound merge would preserve it.
-  const { footer } = splitBody(body);
   await deps.router.applyChange(connection.project_id, {
     actor: connection.provider,
     entityType,
@@ -1148,7 +1204,7 @@ function readEntityBody(
 /** An idea's pushable columns, or null when the row is gone. */
 function readPushableIdea(db: Database.Database, ideaId: string): PushableIdea | null {
   const row = db
-    .prepare('SELECT title, body, stage_id, archived_at FROM ideas WHERE id = ?')
+    .prepare('SELECT title, body, stage_id, archived_at, priority, category FROM ideas WHERE id = ?')
     .get(ideaId) as PushableIdea | undefined;
   return row ?? null;
 }
@@ -1705,23 +1761,130 @@ function parseSelection(connection: TrackerConnectionRow): TrackerSourceSelectio
 /** Typed read of a `create_sub_issue` payload, or null when it is unusable. */
 function readCreatePayload(row: TrackerOutboxRow): CreateSubIssuePayload | null {
   const parsed = parseJsonObject(row.payload_json);
-  const { parentExternalId, title, description } = parsed;
+  const { parentExternalId, title, description, priority, category } = parsed;
   if (typeof parentExternalId !== 'string' || typeof title !== 'string') return null;
   return {
     parentExternalId,
     title,
     description: typeof description === 'string' ? description : null,
+    // NARROWED, not cast: a row written by an older build carries neither key,
+    // and a hand-edited one could carry anything. Either way an unusable value
+    // reads as null and the draft simply omits the field.
+    priority: isPriority(priority) ? priority : null,
+    category: isCategory(category) ? category : null,
   };
 }
 
-/** The last-synced field snapshot the conflict engine three-way-merges against. */
+/**
+ * The last-synced field snapshot the conflict engine three-way-merges against.
+ *
+ * `priority` and `category` are emitted UNCONDITIONALLY, including as null, and
+ * that is load-bearing rather than tidy. `TrackerBaseline` treats an ABSENT key
+ * as "never synced" and stands the whole field down for that link (invariant 3,
+ * the backfill arm) — so a create that seeded a baseline without them would
+ * leave every entity it links unable to diff those fields until an inbound pass
+ * happened to overlay a fresh snapshot. Worse for the OUTBOUND half: the
+ * content trigger reads the same absence as "no evidence the remote disagrees"
+ * and declines to enqueue, so the first local priority change after a push
+ * would silently never reach the tracker.
+ *
+ * The values come from the issue the provider RETURNED, like every other key
+ * here — the same post-normalizer stamp source invariant 1 requires.
+ */
 function baselineSnapshot(issue: TrackerIssue): Record<string, unknown> {
   return {
     stateId: issue.stateId,
     title: issue.title,
     description: issue.description,
     updatedAt: issue.updatedAt,
+    priority: issue.priority,
+    category: issue.category,
   };
+}
+
+/**
+ * The provider token to WRITE for a local priority, or `undefined` when the
+ * mapping cannot express it at all.
+ *
+ * A NULL TOKEN IS TWO DIFFERENT ANSWERS WEARING THE SAME SHAPE, and telling
+ * them apart is the whole reason this exists:
+ *
+ *   - "this level MEANS no priority" — Dart spells an unset priority by
+ *     omitting the field, so P6 legitimately maps to null and writing null is
+ *     how the user's P6 reaches the tracker;
+ *   - "this level has no token" — the workspace renamed the value the mapping
+ *     named (Dart addresses priorities BY TITLE), or the provider's scale
+ *     never had one.
+ *
+ * Conflating them clears a priority the user never asked to clear: an
+ * unmappable P0 would go out as "unset" and DEMOTE the issue.
+ *
+ * THE DISCRIMINATOR IS THE CANONICAL SEED, not the effective mapping, and that
+ * distinction is the entire subtlety. Asking the EFFECTIVE mapping "which level
+ * means unset" (`localPriorityForToken(mapping, null)`) is unsound precisely
+ * when it matters: once a rename has degraded a level to no token, that lookup
+ * returns whichever null-mapped level it happens to scan first — the broken one
+ * — and reports the unmappable P0 as the unset level. The seed resolved with NO
+ * live list cannot be degraded, so it answers the provider-static question this
+ * actually needs: does this level mean "no priority" ON THIS PROVIDER? (Dart's
+ * P6 does; Linear and Plane have no such level, their unset rung being a real
+ * token.)
+ *
+ * A user OVERLAY that deliberately points a level at null is therefore read as
+ * "do not sync this level" rather than "clear it remotely" — the reading that
+ * cannot destroy a value nobody asked to destroy.
+ */
+function writablePriorityToken(
+  provider: TrackerProvider,
+  mapping: PriorityMapping,
+  priority: Priority,
+): string | null | undefined {
+  const token = providerPriorityToken(mapping, priority);
+  if (token !== null) return token;
+  const canonical = seedDefaultPriorityMapping(provider, null);
+  return providerPriorityToken(canonical, priority) === null ? null : undefined;
+}
+
+/**
+ * The MAPPED half of a create draft: the entity's local priority and category
+ * translated into the provider's own tokens.
+ *
+ * OMITTED, NEVER GUESSED. `IssueDraft` reads an absent field as "let the
+ * provider default apply", which is the honest answer whenever the mapping
+ * cannot express the local value — a workspace that renamed the token away, or
+ * one that models no matching type at all. Sending a token the provider does
+ * not know is a 400 on Dart (probe D3) and a silent drop elsewhere, and neither
+ * is better than its default.
+ *
+ * CATEGORY IS DOUBLE-GATED, on the adapter's declared capability AND on the
+ * provider table: the capability is what the seam promises, and
+ * `providerSupportsCategorySync` is what the mapping layer was seeded under.
+ * They agree today (Dart only) and the redundancy is deliberate — this composes
+ * a payload that goes over the wire, so it gates on both rather than trusting
+ * them to stay in step.
+ */
+function mappedDraftFields(
+  adapter: TrackerAdapter,
+  connection: TrackerConnectionRow,
+  mappings: FieldMappings,
+  entity: { priority: Priority; category: EntityCategory },
+): Pick<IssueDraft, 'priority' | 'category'> {
+  const fields: Pick<IssueDraft, 'priority' | 'category'> = {};
+
+  if (adapter.capabilities.contentWrite.priority) {
+    const token = writablePriorityToken(connection.provider, mappings.priority, entity.priority);
+    if (token !== undefined) fields.priority = token;
+  }
+
+  if (
+    adapter.capabilities.contentWrite.category &&
+    providerSupportsCategorySync(connection.provider)
+  ) {
+    const token = providerCategoryToken(mappings.category, entity.category);
+    if (token !== null) fields.category = token;
+  }
+
+  return fields;
 }
 
 /**

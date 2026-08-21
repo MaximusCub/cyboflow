@@ -455,11 +455,15 @@ describe('writeBack — decomposition', () => {
       expect(create.entity_type).toBe('task');
       expect(create.client_key).toMatch(/^[0-9a-f-]{36}$/);
     }
-    // Description prefers the body, falling back to the summary.
+    // Description prefers the body, falling back to the summary. The LOCAL
+    // priority/category ride along so the drain can map them against the
+    // workspace's live vocabulary — which only exists there.
     expect(JSON.parse(creates[0].payload_json)).toEqual({
       parentExternalId: 'ext-idea',
       title: 'Task TASK-1',
       description: 'body one',
+      priority: 'P2',
+      category: 'feature',
     });
     expect(JSON.parse(creates[1].payload_json).description).toBe('summary TASK-2');
   });
