@@ -29,7 +29,7 @@
  *   - a push carrying `pushContainerId` (a Dart space group) reaches the
  *     adapter with the concrete board its create must land in.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,7 +37,11 @@ import { join } from 'node:path';
 import { DatabaseService } from '../../../database/database';
 import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
-import type { TrackerConnectionRow, TrackerOutboxRow } from '../../../database/models';
+import type {
+  EntityExternalLinkRow,
+  TrackerConnectionRow,
+  TrackerOutboxRow,
+} from '../../../database/models';
 import type {
   TrackerIssue,
   TrackerProvider,
@@ -50,13 +54,20 @@ import type {
   TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
-import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
+import type {
+  IssueContentPatch,
+  IssueDraft,
+  TrackerAdapter,
+  TrackerAdapterCapabilities,
+} from '../adapterTypes';
 import { TrackerApiError, TrackerAuthError } from '../errors';
 import {
   enqueueOutbox,
   getConnection,
   getLinkByEntity,
+  getLinkById,
   insertConnection,
+  markOrphaned,
   requeueInFlightAsAmbiguous,
   supersedeQueuedStateWrites,
   updateConnectionSettings,
@@ -95,6 +106,9 @@ beforeEach(() => {
   svc.initialize();
   raw = svc.getDb();
   raw.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run(PROJECT_ID, 'Proj 1', '/tmp/p1');
+  // The content and archive fixtures write real entity rows, which need a board
+  // and its stages. Idempotent, so the tests that seed it themselves still do.
+  svc.seedDefaultBoard(PROJECT_ID);
   router = new TaskChangeRouter(dbAdapter(raw));
 });
 
@@ -145,9 +159,23 @@ class FakeAdapter implements TrackerAdapter {
   failUpdate: Error | null = null;
   failCreate: Error | null = null;
   failLookup: Error | null = null;
+  failContent: Error | null = null;
+  failArchive: Error | null = null;
+
+  /**
+   * The contract-violating case `TrackerAdapter.updateIssueContent` reserves
+   * `null` for — no adapter here takes it, so the worker's loud fallback needs
+   * a fake that does.
+   */
+  contentReturnsNull = false;
+
+  /** A provider that rewrites the markdown it stores. Identity by default. */
+  normalizeStored: (description: string | null) => string | null = (description) => description;
 
   readonly updateCalls: UpdateCall[] = [];
   readonly createCalls: CreateCall[] = [];
+  readonly contentCalls: Array<{ externalId: string; patch: IssueContentPatch }> = [];
+  readonly archiveCalls: string[] = [];
   listStatesCalls = 0;
   listIssuesCalls = 0;
 
@@ -215,15 +243,40 @@ class FakeAdapter implements TrackerAdapter {
     this.updateCalls.push({ externalId, stateId });
     if (this.failUpdate) throw this.takeFailure('failUpdate');
   }
-  /** Unused by the drain until Phase 5 wires a caller (see outboxWorker.ts's stub). */
-  async updateIssueContent(): Promise<TrackerIssue | null> {
-    throw new Error('not used');
+  /**
+   * Echoes the patched issue back, which is what makes it a usable ECHO-
+   * SUPPRESSION STAMP SOURCE. `normalizeStored` models a provider that rewrites
+   * the markdown it is handed (Dart measurably does) — identity by default.
+   */
+  async updateIssueContent(
+    externalId: string,
+    patch: IssueContentPatch,
+  ): Promise<TrackerIssue | null> {
+    this.contentCalls.push({ externalId, patch });
+    if (this.failContent) throw this.takeFailure('failContent');
+    if (this.contentReturnsNull) return null;
+    const base = this.issuesById.get(externalId) ?? makeIssue(externalId);
+    const next: TrackerIssue = {
+      ...base,
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.description !== undefined
+        ? { description: this.normalizeStored(stripMarker(patch.description)) }
+        : {}),
+      ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
+      ...(patch.category !== undefined ? { category: patch.category } : {}),
+    };
+    this.issuesById.set(externalId, next);
+    this.issues = this.issues.map((issue) => (issue.externalId === externalId ? next : issue));
+    return next;
   }
-  async archiveIssue(): Promise<void> {
-    throw new Error('not used');
+  async archiveIssue(externalId: string): Promise<void> {
+    this.archiveCalls.push(externalId);
+    if (this.failArchive) throw this.takeFailure('failArchive');
   }
 
-  protected takeFailure(key: 'failUpdate' | 'failCreate' | 'failLookup'): Error {
+  protected takeFailure(
+    key: 'failUpdate' | 'failCreate' | 'failLookup' | 'failContent' | 'failArchive',
+  ): Error {
     const err = this[key] as Error;
     this[key] = null;
     return err;
@@ -489,6 +542,133 @@ function enqueueCreate(connectionId: string, entityId: string, clientKey: string
 
 function fetchOutbox(id: number): TrackerOutboxRow {
   return raw.prepare('SELECT * FROM tracker_outbox WHERE id = ?').get(id) as TrackerOutboxRow;
+}
+
+// ---------------------------------------------------------------------------
+// Content / archive fixtures
+// ---------------------------------------------------------------------------
+
+/** The client key a Plane/Dart create would have stamped into a description. */
+const CLIENT_KEY = '11111111-2222-3333-4444-555555555555';
+
+/**
+ * A baseline that AGREES with `seedTask`'s defaults on every field except the
+ * title — so a test that changes nothing else produces exactly one difference.
+ */
+const BASE_BASELINE = {
+  title: 'Old title',
+  description: null,
+  stateId: 'state-backlog',
+  priority: '3',
+  category: null,
+};
+
+const BOARD_ID = `board-${PROJECT_ID}-default`;
+
+/** A task row with the content columns a patch is composed from. */
+function seedTask(
+  id: string,
+  opts: {
+    title?: string;
+    body?: string | null;
+    priority?: string;
+    category?: string;
+    archived?: boolean;
+  } = {},
+): void {
+  raw
+    .prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, priority, category, archived_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      PROJECT_ID,
+      id.toUpperCase(),
+      opts.title ?? 'Old title',
+      opts.body ?? null,
+      BOARD_ID,
+      resolveStageIds(raw, PROJECT_ID).ready,
+      opts.priority ?? 'P2',
+      opts.category ?? 'feature',
+      opts.archived === true ? '2026-07-30 11:00:00' : null,
+    );
+}
+
+function seedIdeaRow(id: string): void {
+  raw
+    .prepare(
+      'INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(id, PROJECT_ID, id.toUpperCase(), `Idea ${id}`, BOARD_ID, resolveStageIds(raw, PROJECT_ID).idea);
+}
+
+function linkTask(
+  connectionId: string,
+  externalId: string,
+  baseline: Record<string, unknown>,
+  provider: 'linear' | 'plane' | 'dart' = 'linear',
+  entityId = 'tsk_1',
+): EntityExternalLinkRow {
+  return upsertLink(raw, {
+    connection_id: connectionId,
+    entity_type: 'task',
+    entity_id: entityId,
+    provider,
+    external_id: externalId,
+    baseline_json: JSON.stringify(baseline),
+  });
+}
+
+function enqueueContentWrite(
+  connectionId: string,
+  externalId: string,
+  entityId: string,
+): TrackerOutboxRow {
+  return enqueueOutbox(raw, {
+    connection_id: connectionId,
+    kind: 'update_content',
+    entity_type: 'task',
+    entity_id: entityId,
+    external_id: externalId,
+    payload_json: '{}',
+  });
+}
+
+function enqueueArchiveRow(
+  connectionId: string,
+  externalId: string,
+  entityId: string,
+): TrackerOutboxRow {
+  return enqueueOutbox(raw, {
+    connection_id: connectionId,
+    kind: 'archive_issue',
+    entity_type: 'task',
+    entity_id: entityId,
+    external_id: externalId,
+    payload_json: '{}',
+  });
+}
+
+function baselineOf(entityId: string): unknown {
+  const row = raw
+    .prepare('SELECT baseline_json FROM entity_external_links WHERE entity_id = ?')
+    .get(entityId) as { baseline_json: string | null } | undefined;
+  return JSON.parse(row?.baseline_json ?? '{}') as unknown;
+}
+
+function bodyOf(entityId: string): string | null {
+  const row = raw.prepare('SELECT body FROM tasks WHERE id = ?').get(entityId) as
+    | { body: string | null }
+    | undefined;
+  return row?.body ?? null;
+}
+
+/** The recovery marker the adapters strip from every description they return. */
+function stripMarker(description: string | null): string | null {
+  if (description === null) return null;
+  const cleaned = description.replace(/cyboflow-sync:\s*\S+/gi, '').trim();
+  return cleaned.length > 0 ? cleaned : null;
 }
 
 /**
@@ -1196,67 +1376,429 @@ describe('drainOutbox — failure handling', () => {
 // Drain — migration 112's new kinds, before Phase 5 wires a real handler
 // ---------------------------------------------------------------------------
 
-describe('drainOutbox — update_content / archive_issue terminally fail (no Phase-5 handler yet)', () => {
-  it('claims and terminally fails an update_content row without touching the adapter', async () => {
+// ---------------------------------------------------------------------------
+// Drain — update_content
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — update_content', () => {
+  it('sends ONLY the fields that differ from the baseline and stamps the response back', async () => {
     const connection = seedConnection();
-    const row = enqueueOutbox(raw, {
-      connection_id: connection.id,
-      kind: 'update_content',
-      entity_type: 'task',
-      entity_id: 'tsk_1',
-      external_id: 'ext-1',
-      payload_json: '{}',
+    seedTask('tsk_1', { title: 'New title', body: 'New body', priority: 'P0' });
+    linkTask(connection.id, 'ext-1', {
+      title: 'Old title',
+      description: 'New body',
+      stateId: 'state-backlog',
+      priority: '3',
+      category: null,
     });
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
-    expect(report.failedTerminal).toBe(1);
-    const settled = fetchOutbox(row.id);
-    expect(settled.state).toBe('failed');
-    expect(settled.last_error).toContain('update_content');
-    expect(settled.last_error).toContain('Phase 5');
-    // No fall-through to the state-write dispatch: nothing was sent.
-    expect(adapter.updateCalls).toHaveLength(0);
+    expect(report.contentWritten).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    // description matched the baseline after normalization, so it is absent.
+    expect(adapter.contentCalls).toEqual([
+      { externalId: 'ext-1', patch: { title: 'New title', priority: '1' } },
+    ]);
+
+    // The stamp names ONLY what was written; every other baseline key survives.
+    expect(baselineOf('tsk_1')).toEqual({
+      title: 'New title',
+      description: 'New body',
+      stateId: 'state-backlog',
+      priority: '1',
+      category: null,
+      lastWrittenAt: NOW,
+    });
   });
 
-  it('claims and terminally fails an archive_issue row the same way', async () => {
+  it('stamps the PROVIDER-NORMALIZED text, not what we sent, and realigns the local body', async () => {
     const connection = seedConnection();
-    const row = enqueueOutbox(raw, {
-      connection_id: connection.id,
-      kind: 'archive_issue',
-      entity_type: 'idea',
-      entity_id: 'idea-1',
-      external_id: 'ext-1',
-      payload_json: '{}',
+    seedTask('tsk_1', { title: 'T', body: '*emphasis*' });
+    linkTask(connection.id, 'ext-1', {
+      title: 'T',
+      description: 'was',
+      stateId: 'state-backlog',
+      priority: '3',
+      category: null,
     });
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    // Dart's measured behaviour: the markdown it stores is not the markdown it
+    // was handed.
+    adapter.normalizeStored = (description) => description?.replace('*emphasis*', '_emphasis_') ?? null;
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    const baseline = baselineOf('tsk_1') as { description: string };
+    expect(baseline.description).toBe('_emphasis_');
+    // …and the LOCAL body is corrected to match, so the next genuine remote
+    // edit merges cleanly instead of reading as "both sides moved".
+    expect(bodyOf('tsk_1')).toBe('_emphasis_');
+  });
+
+  it('settles `done` WITHOUT sending when nothing differs any more', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'Same', body: 'Same body' });
+    linkTask(connection.id, 'ext-1', {
+      title: 'Same',
+      description: 'Same body',
+      stateId: 'state-backlog',
+      priority: '3',
+      category: null,
+    });
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
-    expect(report.failedTerminal).toBe(1);
-    const settled = fetchOutbox(row.id);
-    expect(settled.state).toBe('failed');
-    expect(settled.last_error).toContain('archive_issue');
-    expect(adapter.updateCalls).toHaveLength(0);
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(report.contentWritten).toBe(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
   });
 
-  it('does not halt the drain: a later, real state write still sends after the stub fails', async () => {
+  it('never sends a field the provider cannot write, or one the baseline never synced', async () => {
+    const connection = seedConnection({ provider: 'dart' });
+    seedTask('tsk_1', { title: 'New title', category: 'bug' });
+    // No `priority` / `category` key at all: a link written before the fields
+    // were synced. Invariant 3 — an unknown remote is not a difference.
+    linkTask(
+      connection.id,
+      'ext-1',
+      { title: 'Old title', description: null, stateId: 'state-backlog' },
+      'dart',
+    );
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'dart';
+    // Category IS writable on this provider — the omission below is the
+    // backfill arm, not a capability gate.
+    adapter.capabilities = {
+      ...adapter.capabilities,
+      contentWrite: { title: true, description: true, priority: true, category: true },
+    };
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls[0].patch).toEqual({ title: 'New title' });
+  });
+
+  it('drops category for a provider that has no issue type', async () => {
     const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T', category: 'bug' });
+    linkTask(connection.id, 'ext-1', {
+      title: 'T',
+      description: null,
+      stateId: 'state-backlog',
+      priority: '3',
+      category: 'Task',
+    });
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    // Linear declares contentWrite.category = false, so the only difference the
+    // composer could have found is one it must not send — nothing goes out.
+    expect(adapter.contentCalls).toHaveLength(0);
+  });
+
+  it('re-appends the recovery marker to a body write on a provider that carries one', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    seedTask('tsk_1', { title: 'T', body: 'Fresh body' });
+    linkTask(
+      connection.id,
+      'ext-1',
+      { title: 'T', description: 'stale', stateId: 'state-backlog', priority: '3', category: null },
+      'plane',
+    );
+    // The create that minted this issue — the only durable record of the key
+    // its `cyboflow-sync:` marker carries.
     enqueueOutbox(raw, {
       connection_id: connection.id,
-      kind: 'update_content',
-      external_id: 'ext-1',
+      kind: 'create_issue',
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      client_key: CLIENT_KEY,
       payload_json: '{}',
     });
-    const stateRow = enqueueStateWrite(connection.id, 'ext-2', 'completed');
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'plane';
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls[0].patch.description).toBe(`Fresh body\n\ncyboflow-sync: ${CLIENT_KEY}`);
+    // The marker is sync plumbing: it must never reach the baseline (the
+    // adapters strip it from every description they return).
+    expect((baselineOf('tsk_1') as { description: string }).description).toBe('Fresh body');
+  });
+
+  it('sends the body verbatim for an IMPORTED issue, which never carried a marker', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    seedTask('tsk_1', { title: 'T', body: 'Fresh body' });
+    linkTask(
+      connection.id,
+      'ext-1',
+      { title: 'T', description: 'stale', stateId: 'state-backlog', priority: '3', category: null },
+      'plane',
+    );
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'plane';
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls[0].patch.description).toBe('Fresh body');
+  });
+
+  it('settles `done` unsent when the link is gone, orphaned, or the entity is archived', async () => {
+    const connection = seedConnection();
+    // (a) no link at all
+    seedTask('tsk_1', { title: 'T' });
+    const noLink = enqueueContentWrite(connection.id, 'ext-none', 'tsk_1');
+    // (b) an orphaned link
+    seedTask('tsk_2', { title: 'T' });
+    const orphaned = linkTask(connection.id, 'ext-orphan', BASE_BASELINE, 'linear', 'tsk_2');
+    markOrphaned(raw, orphaned.id);
+    const orphanRow = enqueueContentWrite(connection.id, 'ext-orphan', 'tsk_2');
+    // (c) a live link whose entity has been archived
+    seedTask('tsk_3', { title: 'Renamed', archived: true });
+    linkTask(connection.id, 'ext-gone', BASE_BASELINE, 'linear', 'tsk_3');
+    const archivedRow = enqueueContentWrite(connection.id, 'ext-gone', 'tsk_3');
     const adapter = new FakeAdapter();
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(report.failedTerminal).toBe(0);
+    for (const row of [noLink, orphanRow, archivedRow]) {
+      expect(fetchOutbox(row.id).state).toBe('done');
+    }
+  });
+
+  it('retries a 5xx and settles a 4xx terminally, without stamping either', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.failContent = new TrackerApiError('linear', 'boom', 500);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.retriesScheduled).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('pending');
+    expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
+
+    adapter.failContent = new TrackerApiError('linear', 'bad request', 400);
+    const second = await drainOutbox(makeDeps(adapter, '2026-07-30 13:00:00'), connection);
+    expect(second.failedTerminal).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('failed');
+    expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
+  });
+
+  it('falls back to a re-read when the adapter breaks its contract and returns nothing', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.contentReturnsNull = true;
+    adapter.issuesById.set('ext-1', makeIssue('ext-1', { title: 'New title' }));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.contentWritten).toBe(1);
+    // LOUD: an unstamped write is a phantom conflict on the next pass.
+    expect(logged).toHaveBeenCalledOnce();
+    expect((baselineOf('tsk_1') as { title: string }).title).toBe('New title');
+    logged.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drain — archive_issue
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — archive_issue', () => {
+  it('archives remotely, stamps the write, and takes the link out of sync', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T', archived: true });
+    const link = linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.archiveCalls).toEqual(['ext-1']);
+    expect(report.archived).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    expect((baselineOf('tsk_1') as { archivedWrittenAt: string }).archivedWrittenAt).toBe(NOW);
+    expect(getLinkById(raw, link.id)?.orphaned_at).not.toBeNull();
+  });
+
+  it('settles a second archive unsent — the stamp is the idempotence', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T', archived: true });
+    linkTask(connection.id, 'ext-1', { ...BASE_BASELINE, archivedWrittenAt: NOW });
+    const row = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.archiveCalls).toHaveLength(0);
+    expect(report.archived).toBe(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
+  });
+
+  it('leaves the link LIVE and retries when the archive fails', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T', archived: true });
+    const link = linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.failArchive = new TrackerApiError('linear', 'boom', 503);
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(fetchOutbox(row.id).state).toBe('pending');
+    // Orphaning on a FAILED archive would leave the twin live in the tracker
+    // with nothing left that could retire it.
+    expect(getLinkById(raw, link.id)?.orphaned_at).toBeNull();
+    expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
+  });
+
+  it('fails terminally rather than calling an adapter with no archive endpoint', async () => {
+    const connection = seedConnection({ provider: 'plane' });
+    seedTask('tsk_1', { title: 'T', archived: true });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'plane');
+    const row = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'plane';
+    adapter.capabilities = { ...adapter.capabilities, archive: 'none' };
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.archiveCalls).toHaveLength(0);
     expect(report.failedTerminal).toBe(1);
-    expect(report.sent).toBe(1);
-    expect(fetchOutbox(stateRow.id).state).toBe('done');
+    expect(fetchOutbox(row.id).last_error).toContain('no archive endpoint');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Supersession matrix
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — the supersession matrix', () => {
+  it('content supersedes content, and NEVER a state write (nor the reverse)', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const staleContent = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const stateWrite = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const freshContent = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    // The older content row is settled by the newer one…
+    expect(fetchOutbox(staleContent.id).state).toBe('done');
+    expect(report.superseded).toBe(1);
+    // …the state write in between is untouched by both and still SENDS…
+    expect(fetchOutbox(stateWrite.id).state).toBe('done');
+    expect(adapter.updateCalls).toEqual([{ externalId: 'ext-1', stateId: 'state-done' }]);
+    // …and the surviving content row sends exactly once.
+    expect(fetchOutbox(freshContent.id).state).toBe('done');
+    expect(adapter.contentCalls).toHaveLength(1);
+  });
+
+  it('an archive supersedes every queued kind for its issue', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title', archived: true });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const stateWrite = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const contentWrite = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const archive = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(fetchOutbox(stateWrite.id).state).toBe('done');
+    expect(fetchOutbox(contentWrite.id).state).toBe('done');
+    expect(report.superseded).toBe(2);
+    // Nothing but the archive reached the tracker: a state or content write
+    // landing after it would resurrect the issue into a listing.
+    expect(adapter.updateCalls).toHaveLength(0);
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(adapter.archiveCalls).toEqual(['ext-1']);
+    expect(fetchOutbox(archive.id).state).toBe('done');
+  });
+
+  it('an archive is NOT superseded by a later state or content write', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const archive = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    // Enqueued AFTER the archive, so a naive "newest wins" would settle it.
+    raw
+      .prepare("INSERT INTO tracker_outbox (connection_id, kind, external_id, payload_json) VALUES (?, 'update_state', 'ext-1', ?)")
+      .run(connection.id, JSON.stringify({ desiredGroup: 'completed' }));
+    const adapter = new FakeAdapter();
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(fetchOutbox(archive.id).state).toBe('done');
+    expect(adapter.archiveCalls).toEqual(['ext-1']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Kind coverage
+// ---------------------------------------------------------------------------
+
+describe('drainOutbox — every kind has an explicit handler', () => {
+  it('drains one row of EVERY TrackerOutboxRow kind without falling through', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_state', { title: 'T' });
+    seedTask('tsk_content', { title: 'New title' });
+    seedTask('tsk_archive', { title: 'T', archived: true });
+    seedIdeaRow('idea_push');
+    linkTask(connection.id, 'ext-content', BASE_BASELINE, 'linear', 'tsk_content');
+    linkTask(connection.id, 'ext-archive', BASE_BASELINE, 'linear', 'tsk_archive');
+
+    const rows: Record<TrackerOutboxRow['kind'], number> = {
+      update_state: enqueueStateWrite(connection.id, 'ext-state', 'completed').id,
+      close_parent: enqueueStateWrite(connection.id, 'ext-parent', 'completed', 'close_parent').id,
+      create_sub_issue: enqueueCreate(connection.id, 'tsk_state', 'ck-sub').id,
+      create_issue: enqueueOutbox(raw, {
+        connection_id: connection.id,
+        kind: 'create_issue',
+        entity_type: 'idea',
+        entity_id: 'idea_push',
+        client_key: 'ck-push',
+        payload_json: '{}',
+      }).id,
+      update_content: enqueueContentWrite(connection.id, 'ext-content', 'tsk_content').id,
+      archive_issue: enqueueArchiveRow(connection.id, 'ext-archive', 'tsk_archive').id,
+    };
+    const adapter = new FakeAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    // NOTHING fell through to the state-write dispatch and failed on a payload
+    // it could not read — every kind was handled by its own branch.
+    expect(report.failedTerminal).toBe(0);
+    for (const [kind, id] of Object.entries(rows)) {
+      expect(`${kind}:${fetchOutbox(id).state}`).toBe(`${kind}:done`);
+    }
+    expect(report.sent).toBe(2);
+    expect(report.created).toBe(2);
+    expect(report.contentWritten).toBe(1);
+    expect(report.archived).toBe(1);
   });
 });
 

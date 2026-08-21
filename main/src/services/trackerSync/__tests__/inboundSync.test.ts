@@ -2520,6 +2520,42 @@ describe('runInboundSync — an open conflict must not swallow a pending stage c
     expect(second.stageDeferred).toBe(0);
     expect(reload().cursor_updated_at).toBe('2026-07-30T12:00:00.000Z');
   });
+
+  it('HOLDS the cursor for a remote content change no open conflict records', async () => {
+    // The hazard the content arm closes: an item parked by a TITLE conflict
+    // whose remote DESCRIPTION also moved. Resolving the title advances only
+    // the title half of the baseline, so nothing would ever re-derive the
+    // description — and once the cursor passes the issue, only another remote
+    // edit would ever fetch it again.
+    const connection = makeConnection({ conflict_mode: 'manual' });
+    const ideaId = await importOnce(connection);
+
+    await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Local title' },
+    });
+    adapter.issues = [makeIssue({ title: 'Remote title', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await runInboundSync(deps, reload());
+    expect(conflicts().map((row) => row.field)).toEqual(['title']);
+    const parkedAt = reload().cursor_updated_at;
+
+    adapter.issues = [
+      makeIssue({
+        title: 'Remote title',
+        description: 'A body change nobody recorded',
+        updatedAt: '2026-07-30T12:00:00.000Z',
+      }),
+    ];
+    const second = await runInboundSync(deps, reload());
+
+    expect(second.contentDeferred).toBe(1);
+    expect(second.stageDeferred).toBe(0);
+    // The cursor stays put, so the description is re-offered until the title
+    // conflict is answered and the merge can apply the whole item.
+    expect(reload().cursor_updated_at).toBe(parkedAt);
+  });
 });
 
 // ---------------------------------------------------------------------------

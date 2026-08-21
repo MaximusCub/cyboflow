@@ -288,7 +288,7 @@ describe('CardActionsMenu', () => {
       expect(screen.queryByTestId('tracker-unlink-dialog')).not.toBeInTheDocument();
     });
 
-    it('"Cancel in <provider>" stages cancelRemote and then opens the archive confirm', async () => {
+    it('"Archive in <provider>" stages cancelRemote and then opens the archive confirm', async () => {
       mockLinkForEntity.mockResolvedValue(LINK);
       render(<CardActionsMenu task={makeTask({ type: 'idea', id: 'ide_9' })} />);
       fireEvent.click(screen.getByTestId('task-actions-trigger'));

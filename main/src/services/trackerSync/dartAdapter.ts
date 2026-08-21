@@ -81,6 +81,8 @@ import {
   TRACKER_REQUEST_TIMEOUT_MS,
   describeTransportFailure,
 } from './errors';
+import { PROVIDER_ARCHIVE_CAPABILITY } from './providerCapabilities';
+import { RECOVERY_MARKER_PREFIX, appendRecoveryMarker } from './recoveryMarker';
 
 const PROVIDER: TrackerProvider = 'dart';
 const API_BASE_URL = 'https://app.dartai.com/api/v0/public';
@@ -105,8 +107,10 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   contentWrite: { title: true, description: true, priority: true, category: true },
   // `DELETE /tasks/{id}` trashes (probe D5: the item survives under
   // `in_trash=true`, not a hard delete) — one-way in this API (no restore
-  // endpoint this adapter uses), but still 'trash', never 'delete'.
-  archive: 'trash',
+  // endpoint this adapter uses), but still 'trash', never 'delete'. Read from
+  // the shared table so the outbound trigger — which gates on the capability
+  // WITHOUT an adapter in hand — can never disagree with this adapter.
+  archive: PROVIDER_ARCHIVE_CAPABILITY.dart,
 };
 
 /**
@@ -124,8 +128,14 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
  *
  * Dart descriptions are markdown (not Plane's rich html), so the marker is
  * written and matched as plain text with no escaping in between.
+ *
+ * The literal itself lives in {@link import('./recoveryMarker')}, which the
+ * OUTBOUND CONTENT WRITE also composes from when it re-appends this marker to a
+ * body write-back (invariant 4 of docs/proposals/tracker-field-writeback.md) —
+ * a second copy of the string here is exactly the drift that would silently
+ * break {@link DartAdapter.findIssueByClientKey}'s absence proof.
  */
-const SYNC_MARKER_PREFIX = 'cyboflow-sync:';
+const SYNC_MARKER_PREFIX = RECOVERY_MARKER_PREFIX;
 
 /**
  * `cyboflow-sync: <uuid>` — the shape the create paths emit, matched loosely on
@@ -1238,11 +1248,13 @@ function readRecoveryClientKey(raw: DartTaskWire): string | null {
  * its own trailing line. The marker is UNCONDITIONAL — findIssueByClientKey
  * reads "no candidate carries it" as proof the create never landed, which only
  * holds if every create carries it, empty-bodied ones included.
+ *
+ * Delegates to the shared composer the outbound content write also uses, so a
+ * body write-back re-appends the marker in EXACTLY the shape a create emitted
+ * it (and {@link SYNC_MARKER_RE} keeps matching it).
  */
 function toCreateDescription(markdown: string | undefined, clientKey: string): string {
-  const marker = `${SYNC_MARKER_PREFIX} ${clientKey}`;
-  const body = (markdown ?? '').trim();
-  return body.length === 0 ? marker : `${body}\n\n${marker}`;
+  return appendRecoveryMarker(markdown, clientKey);
 }
 
 /**

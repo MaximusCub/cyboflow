@@ -43,18 +43,25 @@
  *                                    {@link processAmbiguous}'s client-key lookup.
  */
 import type Database from 'better-sqlite3';
-import type { TrackerConnectionRow, TrackerOutboxRow } from '../../database/models';
+import type {
+  EntityExternalLinkRow,
+  TrackerConnectionRow,
+  TrackerOutboxRow,
+} from '../../database/models';
 import type {
   TrackerIssue,
   TrackerNarrowKind,
   TrackerSourceSelection,
   TrackerState,
 } from '../../../../shared/types/trackerSync';
-import type { IssueDraft, TrackerAdapter } from './adapterTypes';
+import type { EntityCategory, Priority } from '../../../../shared/types/tasks';
+import type { IssueContentPatch, IssueDraft, TrackerAdapter } from './adapterTypes';
 import { TrackerApiError, TrackerAuthError } from './errors';
 import {
   claimNextPending,
+  findCreateClientKey,
   listUnresolvedOutbox,
+  markOrphaned,
   resolveOutbox,
   updateBaseline,
   updateConnectionSettings,
@@ -63,7 +70,9 @@ import {
 } from './store';
 import {
   parseJsonObject,
+  readArchivedWrittenAt,
   readDesiredGroup,
+  type ArchiveBaselineStamp,
   type CreateSubIssuePayload,
   type WriteBackBaselineStamp,
   type WriteBackGroup,
@@ -80,6 +89,20 @@ import {
   splitBody,
   type EntityWriteRouter,
 } from './inboundSync';
+import {
+  localPriorityForToken,
+  providerPriorityToken,
+  providerTokensEqual,
+  resolveEffectivePriorityMapping,
+  type PriorityMapping,
+} from './priorityMapping';
+import {
+  providerCategoryToken,
+  providerSupportsCategorySync,
+  resolveEffectiveCategoryMapping,
+  type CategoryMapping,
+} from './categoryMapping';
+import { appendRecoveryMarker } from './recoveryMarker';
 
 // ---------------------------------------------------------------------------
 // Public shapes
@@ -117,6 +140,10 @@ export interface OutboxReport {
    * "pushed", not mislabel it a mirrored sub-issue.
    */
   pushedIdeas: number;
+  /** `update_content` rows whose patch actually reached the tracker. */
+  contentWritten: number;
+  /** `archive_issue` rows the provider confirmed (a 404 counts — the twin was already gone). */
+  archived: number;
   /** Rows that will never be retried (4xx, unresolvable state, malformed payload). */
   failedTerminal: number;
   /** Rows re-queued with a backoff `next_attempt_at`. */
@@ -140,6 +167,8 @@ function emptyReport(): OutboxReport {
     sent: 0,
     created: 0,
     pushedIdeas: 0,
+    contentWritten: 0,
+    archived: 0,
     failedTerminal: 0,
     retriesScheduled: 0,
     ambiguousResolved: 0,
@@ -203,11 +232,12 @@ export async function drainOutbox(
   const report = emptyReport();
   const adapter = deps.adapterFor(connection);
   const states = new StateCache(adapter, connection);
+  const fields = new FieldMappingCache(adapter, connection);
 
   for (;;) {
     const row = claimNextPending(deps.db, connection.id, toSqliteUtc(deps.nowIso()), allowedKinds);
     if (!row) break;
-    const halted = await processRow(deps, connection, adapter, states, row, report);
+    const halted = await processRow(deps, connection, adapter, states, fields, row, report);
     if (halted) break;
   }
   return report;
@@ -222,6 +252,7 @@ async function processRow(
   connection: TrackerConnectionRow,
   adapter: TrackerAdapter,
   states: StateCache,
+  fields: FieldMappingCache,
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
@@ -231,60 +262,74 @@ async function processRow(
   if (row.kind === 'create_issue') {
     return await processPush(deps, connection, adapter, states, row, report);
   }
-  if (row.kind === 'update_content' || row.kind === 'archive_issue') {
-    return processUnimplementedContentKind(deps, row, report);
+  if (row.kind === 'update_content') {
+    return await processContentWrite(deps, connection, adapter, fields, row, report);
+  }
+  if (row.kind === 'archive_issue') {
+    return await processArchive(deps, connection, adapter, row, report);
   }
   return await processStateWrite(deps, connection, adapter, states, row, report);
 }
 
 /**
- * `update_content` / `archive_issue` (migration 112): the outbox kind exists so
- * the CHECK constraint and store plumbing are ready, but
- * docs/proposals/tracker-field-writeback.md Phase 5 has not wired an enqueue
- * trigger OR a drain handler for either kind yet. A claimed row of either kind
- * in THIS build is therefore unreachable in practice (nothing enqueues one) —
- * but per that plan's invariant 8, it terminally fails with a diagnostic
- * rather than falling through to {@link processStateWrite}, which would
- * misread its payload as a state write. Replaced by real handlers in Phase 5.
+ * WHICH KINDS CAN SUPERSEDE A CLAIMED ROW OF EACH KIND — the supersession
+ * matrix, as a `Record` so a new outbox kind fails to compile here (invariant 8
+ * of docs/proposals/tracker-field-writeback.md) instead of silently inheriting
+ * whichever branch an if/else fell through to.
+ *
+ * THREE RULES, and the reasoning behind each:
+ *
+ *  - STATUS KINDS SUPERSEDE EACH OTHER. `update_state` and `close_parent` both
+ *    move ONE issue's state, so a later row of either kind states the truth the
+ *    earlier one is now wrong about — the original rule, unchanged.
+ *  - CONTENT AND STATE NEVER CROSS. They are orthogonal statements about the
+ *    same issue: one moves its status, the other its text. Letting either
+ *    settle the other would silently drop a write nothing else will re-derive.
+ *  - `archive_issue` SUPERSEDES EVERYTHING, the one legitimate cross-kind
+ *    sweep, and nothing supersedes it back. Once the twin is bound for the
+ *    tracker's trash, a state or content write against it is not just
+ *    redundant — a backoff that let one drain AFTERWARDS would resurrect the
+ *    issue into a listing.
+ *
+ * Creates are listed with EMPTY sets. They cannot participate either way: a
+ * create carries a null `external_id`, which is the key the whole mechanism is
+ * scoped by, and adopting one is how an issue GETS an external id in the first
+ * place.
  */
-function processUnimplementedContentKind(
-  deps: OutboxDeps,
-  row: TrackerOutboxRow,
-  report: OutboxReport,
-): boolean {
-  resolveOutbox(deps.db, row.id, 'failed', {
-    lastError: `${row.kind}: no drain handler until Phase 5 (docs/proposals/tracker-field-writeback.md)`,
-  });
-  report.failedTerminal += 1;
-  return false;
-}
+const SUPERSEDING_KINDS: Record<
+  TrackerOutboxRow['kind'],
+  readonly TrackerOutboxRow['kind'][]
+> = {
+  update_state: ['update_state', 'close_parent', 'archive_issue'],
+  close_parent: ['update_state', 'close_parent', 'archive_issue'],
+  update_content: ['update_content', 'archive_issue'],
+  archive_issue: ['archive_issue'],
+  create_sub_issue: [],
+  create_issue: [],
+};
 
 /**
- * Is this claimed state write STALE — does a NEWER unsettled write for the same
- * issue already exist?
+ * Is this claimed row STALE — does a NEWER unsettled write that SUPERSEDES it
+ * (see {@link SUPERSEDING_KINDS}) already exist for the same issue?
  *
  * THE BACKSTOP HALF of supersession, not the primary one. The ordering hazard
  * is fixed where both rows are knowable — at ENQUEUE, in
- * store.supersedeQueuedStateWrites, which is the only moment that can see a
- * newer write that has already LANDED and settled. This check enforces the same
+ * store.supersedeQueuedWrites, which is the only moment that can see a newer
+ * write that has already LANDED and settled. This check enforces the same
  * invariant at the point of USE, for a row that never met that sweep: anything
  * queued before this behaviour existed, or by an enqueue path added later that
  * forgets to call it. Redundant on the ordinary path, and deliberately so — the
- * cost is one already-cheap query per claimed state write, and the failure it
- * prevents is silent.
+ * cost is one already-cheap query per claimed row, and the failure it prevents
+ * is silent.
  *
- * THE KEY is `external_id` + the two STATUS kinds, deliberately not `kind`
- * alone — the same key writeBack's enqueue dedupe uses, and for the same
- * reason: `update_state` and `close_parent` both move the SAME issue's state,
- * so a later one of either kind states the truth the earlier one is now wrong
- * about. Newer means a higher autoincrement `id`; unsettled means
+ * Newer means a higher autoincrement `id`; unsettled means
  * pending/in_flight/ambiguous, so a row that already failed terminally cannot
  * supersede anything.
  *
  * CRASH-SAFE by the existing state machine: the decision is made on a row we
  * have just CLAIMED, under the same exclusion the send would have had. A crash
  * between this check and the settle leaves the row `in_flight`, boot recovery
- * demotes it to `ambiguous`, and {@link resolveAmbiguous} returns a state write
+ * demotes it to `ambiguous`, and {@link resolveAmbiguous} returns a non-create
  * straight to `pending` — where the next claim asks the same question again,
  * against data that is by then even fresher. Nothing is lost, nothing is sent
  * twice.
@@ -295,12 +340,26 @@ function isSuperseded(
   row: TrackerOutboxRow,
 ): boolean {
   if (row.external_id === null) return false;
+  const supersedingKinds = SUPERSEDING_KINDS[row.kind];
+  if (supersedingKinds.length === 0) return false;
   return listUnresolvedOutbox(db, connectionId).some(
     (other) =>
       other.id > row.id &&
       other.external_id === row.external_id &&
-      (other.kind === 'update_state' || other.kind === 'close_parent'),
+      supersedingKinds.includes(other.kind),
   );
+}
+
+/**
+ * Settle a claimed row that a newer write has replaced. `done`, not `failed`: a
+ * superseded write is not a problem, it is an instruction the user has already
+ * replaced. Sending it would be the bug.
+ */
+function settleSuperseded(deps: OutboxDeps, row: TrackerOutboxRow, report: OutboxReport): void {
+  resolveOutbox(deps.db, row.id, 'done', {
+    lastError: `superseded by a newer write for the same issue`,
+  });
+  report.superseded += 1;
 }
 
 /** `update_state` / `close_parent`: resolve the provider state, write it, stamp the baseline. */
@@ -312,13 +371,8 @@ async function processStateWrite(
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
-  // Settled, not failed: a superseded write is not a problem, it is an
-  // instruction the user has already replaced. Sending it would be the bug.
   if (isSuperseded(deps.db, connection.id, row)) {
-    resolveOutbox(deps.db, row.id, 'done', {
-      lastError: 'superseded by a newer state write for the same issue',
-    });
-    report.superseded += 1;
+    settleSuperseded(deps, row, report);
     return false;
   }
 
@@ -359,6 +413,410 @@ async function processStateWrite(
   resolveOutbox(deps.db, row.id, 'done');
   report.sent += 1;
   stampWriteBackBaseline(deps, connection, externalId, state.id, desiredGroup);
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// update_content — the CONTENT write-back
+// ---------------------------------------------------------------------------
+
+/** The entity columns a content patch is composed from. */
+interface ContentEntity {
+  title: string;
+  body: string | null;
+  priority: Priority;
+  category: EntityCategory;
+}
+
+/**
+ * `update_content`: compose the patch from the entity AS IT STANDS NOW, send
+ * it, then stamp the link's baseline from the PROVIDER'S OWN RESPONSE.
+ *
+ * COMPOSED HERE, not at enqueue time (writeBack.UPDATE_CONTENT_PAYLOAD_JSON):
+ * a content row can wait — 'manual' content sync is the whole point of the
+ * mode — and a burst of edits collapses onto one pending row, so the tracker
+ * should receive the text the entity HAS, not the text it had when the first
+ * keystroke landed.
+ *
+ * THE PATCH IS A DIFF, not a snapshot. Only fields that actually differ from
+ * the baseline are sent, because `IssueContentPatch` treats an absent field as
+ * "leave alone" and sending an unchanged one would bump the remote's
+ * `updatedAt` for nothing — pulling the issue back into the next inbound
+ * window with no change in it.
+ *
+ * THE STAMP COMES FROM THE RESPONSE (invariant 1), never from what we sent.
+ * Providers normalize: Dart reflows markdown, Plane round-trips a body through
+ * plaintext-ified html, and both may Title-case a priority token we sent in
+ * lower case. A baseline stamped with the SENT values would differ from the
+ * remote's own copy on the very next inbound pass, which reads as a remote
+ * edit — the echo this whole mechanism exists to suppress.
+ *
+ * FOUR SETTLE-WITHOUT-SENDING CASES, all `done` rather than `failed`, because
+ * nothing went wrong in any of them: the row is superseded, the link is gone or
+ * orphaned (the entity stopped syncing while the row waited), the entity itself
+ * is gone or archived (the last thing the user said about it was "take it
+ * away"), or the diff came out empty (an inbound pass already merged the change
+ * this row was queued for, or the live mapping can no longer express it).
+ */
+async function processContentWrite(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  fields: FieldMappingCache,
+  row: TrackerOutboxRow,
+  report: OutboxReport,
+): Promise<boolean> {
+  if (isSuperseded(deps.db, connection.id, row)) {
+    settleSuperseded(deps, row, report);
+    return false;
+  }
+  if (row.external_id === null || row.entity_id === null || row.entity_type === null) {
+    failTerminal(deps, row, report, 'malformed row: external_id / entity_id / entity_type missing');
+    return false;
+  }
+  const entityType = asLinkedEntityType(row.entity_type);
+  if (entityType === null) {
+    failTerminal(deps, row, report, `unsupported entity_type '${row.entity_type}' for a content write`);
+    return false;
+  }
+
+  const externalId = row.external_id;
+  const link = getLinkByExternal(deps.db, connection.id, externalId);
+  if (link === null || link.orphaned_at !== null) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'the entity is no longer linked to this issue',
+    });
+    return false;
+  }
+
+  const entity = readContentEntity(deps.db, entityType, row.entity_id);
+  if (entity === null) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'the entity is gone or archived — nothing left to write',
+    });
+    return false;
+  }
+
+  let patch: IssueContentPatch;
+  let sentDescription: string | null | undefined;
+  try {
+    const mappings = await fields.load();
+    const composed = composeContentPatch(deps.db, connection, adapter, link, entity, mappings);
+    patch = composed.patch;
+    sentDescription = composed.sentDescription;
+  } catch (err) {
+    // The field-option fetch is the only thing here that can throw, and it has
+    // sent nothing — an ordinary backoff retry is safe.
+    return recordAdapterFailure(deps, connection, row, report, err);
+  }
+
+  if (Object.keys(patch).length === 0) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'nothing left to write — the entity already agrees with the baseline',
+    });
+    return false;
+  }
+
+  let written: TrackerIssue | null;
+  try {
+    written = await adapter.updateIssueContent(externalId, patch);
+  } catch (err) {
+    return recordAdapterFailure(deps, connection, row, report, err);
+  }
+
+  // Past the send: local bookkeeping only, deliberately OUTSIDE the catch (see
+  // the file header — a throw here must leave nothing that could re-send).
+  resolveOutbox(deps.db, row.id, 'done');
+  report.contentWritten += 1;
+  const settled = written ?? (await rereadAfterBlindWrite(deps, connection, adapter, externalId));
+  if (settled === null) return false;
+  stampContentBaseline(deps, connection, externalId, settled, patch);
+  await alignLocalDescription(deps, connection, entityType, row.entity_id, settled, sentDescription);
+  return false;
+}
+
+/**
+ * The post-write issue when the adapter returned nothing.
+ *
+ * UNREACHABLE BY THE SEAM'S OWN CONTRACT — every adapter here documents that
+ * its write echoes the updated object, and `TrackerAdapter.updateIssueContent`
+ * reserves `null` for a provider that genuinely returns none. So this is a LOUD
+ * diagnostic first and a fallback second: without a post-write snapshot the
+ * baseline cannot be stamped, and an unstamped write is precisely the echo that
+ * re-opens as a phantom remote edit on the next pass.
+ *
+ * The re-read is swallowed on failure rather than thrown: the row is already
+ * settled `done` and the remote write already landed, so there is nothing left
+ * to retry and letting this abort the whole drain would punish every row behind
+ * it. The cost of giving up here is one phantom conflict, which the user can
+ * resolve; the cost of throwing is a stalled queue.
+ */
+async function rereadAfterBlindWrite(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  externalId: string,
+): Promise<TrackerIssue | null> {
+  console.error(
+    `[trackerSync/outboxWorker] ${connection.provider} updateIssueContent returned no issue for ` +
+      `${externalId}; the echo-suppression stamp needs one — falling back to a re-read`,
+  );
+  try {
+    return await adapter.getIssue(externalId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `IssueContentPatch` for one link: every synced field whose LOCAL value
+ * now differs from the baseline, and nothing else.
+ *
+ * PROVIDER SPACE FOR THE MAPPED FIELDS (invariant 2) — the local priority and
+ * category are mapped OUT and compared as tokens, case-insensitively, exactly
+ * as the inbound merge compares them. A local-space comparison would send a P3
+ * as `medium` and read the echo back as P2.
+ *
+ * AN ABSENT BASELINE KEY SENDS NOTHING (invariant 3): `undefined` means the
+ * field was never synced, so there is no evidence the remote disagrees, and
+ * pushing our value over a value we have never seen is the outbound face of the
+ * conflict the backfill arm exists to avoid.
+ *
+ * CAPABILITY-GATED PER FIELD, from the adapter's own declaration rather than a
+ * provider check: `category` never reaches Linear or Plane, which have no issue
+ * type to put it on.
+ *
+ * A NULL PRIORITY TOKEN IS ONLY SENT WHERE IT MEANS SOMETHING. Dart spells "no
+ * priority" by omitting the field, so `null` is a real value to write there;
+ * Linear's `'0'` and Plane's `'none'` are ordinary rungs of their enums, so a
+ * null token on those providers means the mapping could not express the local
+ * level at all — and sending it would clear a priority the user never asked to
+ * clear. That case is skipped, and the inbound pass's unmapped-value warning is
+ * what tells the user their mapping needs attention.
+ *
+ * `sentDescription` is what the body write puts on the wire WITHOUT the
+ * recovery marker — the text the response is compared against by
+ * {@link alignLocalDescription}, which sees the marker-stripped description the
+ * adapter returns.
+ */
+function composeContentPatch(
+  db: Database.Database,
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  link: EntityExternalLinkRow,
+  entity: ContentEntity,
+  mappings: FieldMappings,
+): { patch: IssueContentPatch; sentDescription: string | null | undefined } {
+  const baseline = parseJsonObject(link.baseline_json);
+  const writable = adapter.capabilities.contentWrite;
+  const patch: IssueContentPatch = {};
+  let sentDescription: string | null | undefined;
+
+  if (writable.title && typeof baseline.title === 'string' && baseline.title !== entity.title) {
+    patch.title = entity.title;
+  }
+
+  if (writable.description && 'description' in baseline) {
+    const remote = typeof baseline.description === 'string' ? baseline.description : null;
+    const { description } = splitBody(entity.body);
+    if (normalizeDescription(description) !== normalizeDescription(remote)) {
+      sentDescription = description;
+      patch.description = withRecoveryMarker(db, connection, link, description);
+    }
+  }
+
+  if (writable.priority && 'priority' in baseline) {
+    const token = providerPriorityToken(mappings.priority, entity.priority);
+    const stored = typeof baseline.priority === 'string' ? baseline.priority : null;
+    // A null token is Dart's "unset" only where the mapping round-trips it back
+    // to a local level; elsewhere it is an unmappable value, not a clear.
+    const clearable = localPriorityForToken(mappings.priority, null) !== null;
+    if (!providerTokensEqual(token, stored) && (token !== null || clearable)) {
+      patch.priority = token;
+    }
+  }
+
+  if (
+    writable.category &&
+    providerSupportsCategorySync(connection.provider) &&
+    'category' in baseline
+  ) {
+    const token = providerCategoryToken(mappings.category, entity.category);
+    const stored = typeof baseline.category === 'string' ? baseline.category : null;
+    // An unmapped category has no token to send, and inventing one would be a
+    // 400 on Dart (probe D3) — so it is simply left alone.
+    if (token !== null && !providerTokensEqual(token, stored)) patch.category = token;
+  }
+
+  return { patch, sentDescription };
+}
+
+/**
+ * The body to SEND for a description write: the local description with this
+ * link's `cyboflow-sync` recovery marker re-appended (invariant 4).
+ *
+ * WHY THE MARKER CANNOT JUST RIDE ALONG. The adapters STRIP it from every
+ * description they return, so the local body has never held it — meaning a
+ * write of the local text verbatim ERASES it from the remote issue. That breaks
+ * `findIssueByClientKey`'s absence proof ("no candidate carries this key ⇒ the
+ * create never landed") for this link forever after, and the next create whose
+ * response is lost gets duplicated instead of adopted.
+ *
+ * The key is not on the link — it is the client key of the CREATE that minted
+ * the issue, which only the outbox row records. An issue this connection
+ * IMPORTED never had a marker and gets none now: `findCreateClientKey` answers
+ * null and the body is sent as-is.
+ *
+ * A provider with idempotent creates (Linear) stamps no marker at all — its
+ * client key IS the issue id — so the lookup answers null there by construction
+ * and this is a no-op.
+ */
+function withRecoveryMarker(
+  db: Database.Database,
+  connection: TrackerConnectionRow,
+  link: EntityExternalLinkRow,
+  description: string | null,
+): string | null {
+  const clientKey = findCreateClientKey(db, connection.id, link.entity_type, link.entity_id);
+  if (clientKey === null) return description;
+  return appendRecoveryMarker(description, clientKey);
+}
+
+/**
+ * Stamp our own content write onto the link's baseline (ECHO SUPPRESSION): the
+ * next inbound pass sees the remote's fields equal to the baseline's and reads
+ * "unchanged" instead of a remote edit.
+ *
+ * ONLY THE FIELDS WE WROTE, merged onto the blob. The rest of the baseline
+ * belongs to the inbound half (and to the state stamp), and a wholesale replace
+ * here would drop `lastWrittenGroup` and re-queue a state write we already made
+ * — the `composeBaselineJson` discipline, applied from the outbound side.
+ *
+ * `priority`/`category` are stamped from the RESPONSE too, and that matters
+ * more than it looks: Dart echoes a Title-case token for the lower-case one it
+ * was sent, so stamping the sent value would leave a baseline the provider's
+ * own reads disagree with (case-insensitively equal, but a mismatch the moment
+ * anything compares them literally).
+ */
+function stampContentBaseline(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  externalId: string,
+  issue: TrackerIssue,
+  patch: IssueContentPatch,
+): void {
+  const link = getLinkByExternal(deps.db, connection.id, externalId);
+  if (!link) return;
+  const stamp: Record<string, unknown> = { lastWrittenAt: toSqliteUtc(deps.nowIso()) };
+  if (patch.title !== undefined) stamp.title = issue.title;
+  if (patch.description !== undefined) stamp.description = issue.description;
+  if (patch.priority !== undefined) stamp.priority = issue.priority;
+  if (patch.category !== undefined) stamp.category = issue.category;
+  updateBaseline(
+    deps.db,
+    link.id,
+    JSON.stringify({ ...parseJsonObject(link.baseline_json), ...stamp }),
+  );
+}
+
+/** One entity's content columns, or null when the row is gone or archived. */
+function readContentEntity(
+  db: Database.Database,
+  entityType: 'idea' | 'task',
+  entityId: string,
+): ContentEntity | null {
+  const table = entityType === 'idea' ? 'ideas' : 'tasks';
+  const row = db
+    .prepare(`SELECT title, body, priority, category, archived_at FROM ${table} WHERE id = ?`)
+    .get(entityId) as (ContentEntity & { archived_at: string | null }) | undefined;
+  if (row === undefined || row.archived_at !== null) return null;
+  return { title: row.title, body: row.body, priority: row.priority, category: row.category };
+}
+
+/** The two entity types a content write can address; epics are never linked. */
+function asLinkedEntityType(value: string): 'idea' | 'task' | null {
+  return value === 'idea' || value === 'task' ? value : null;
+}
+
+// ---------------------------------------------------------------------------
+// archive_issue — the remote trash/archive
+// ---------------------------------------------------------------------------
+
+/**
+ * `archive_issue`: trash the remote twin, then take the link out of sync.
+ *
+ * A 404 IS SUCCESS, and it is the adapters that own that (each documents how
+ * its provider signals "already gone"). The state this write is trying to reach
+ * is "the issue is not in anyone's listing"; a twin somebody already trashed is
+ * in exactly that state, so treating it as a failure would strand the row and,
+ * through the kind-agnostic inbound blocker, halt the pass at that issue.
+ *
+ * ALREADY-STAMPED ROWS SETTLE UNSENT. `archivedWrittenAt` on the baseline says
+ * we have already told this provider to trash the issue; a second row (a
+ * replayed event, a ruling that raced the listener) has nothing to add.
+ *
+ * ORPHANING THE LINK IS THE LAST STEP, and only after the provider CONFIRMS.
+ * An orphaned link is invisible to every trigger and to the inbound merge, so
+ * orphaning first would make a failed archive unretryable and silently leave
+ * the twin live in the tracker. On the ruled-removal path the link is already
+ * orphaned before this runs — `markOrphaned` is idempotent, and the stamp is
+ * what carries the idempotence either way.
+ *
+ * THE CAPABILITY CHECK is a guard against an unreachable state, not a routine
+ * branch: every enqueue site gates on the provider having an archive endpoint,
+ * so a row that gets here for an `archive: 'none'` provider means an enqueue
+ * site forgot to — which fails terminally with a diagnostic rather than calling
+ * an adapter that can only throw.
+ */
+async function processArchive(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  row: TrackerOutboxRow,
+  report: OutboxReport,
+): Promise<boolean> {
+  if (isSuperseded(deps.db, connection.id, row)) {
+    settleSuperseded(deps, row, report);
+    return false;
+  }
+  if (row.external_id === null) {
+    failTerminal(deps, row, report, 'malformed row: external_id missing');
+    return false;
+  }
+  if (adapter.capabilities.archive === 'none') {
+    failTerminal(
+      deps,
+      row,
+      report,
+      `${connection.provider} has no archive endpoint — this row should never have been enqueued`,
+    );
+    return false;
+  }
+
+  const externalId = row.external_id;
+  const link = getLinkByExternal(deps.db, connection.id, externalId);
+  if (link !== null && readArchivedWrittenAt(link) !== null) {
+    resolveOutbox(deps.db, row.id, 'done', { lastError: 'already archived remotely' });
+    return false;
+  }
+
+  try {
+    await adapter.archiveIssue(externalId);
+  } catch (err) {
+    return recordAdapterFailure(deps, connection, row, report, err);
+  }
+
+  resolveOutbox(deps.db, row.id, 'done');
+  report.archived += 1;
+  if (link !== null) {
+    const stamp: ArchiveBaselineStamp = { archivedWrittenAt: toSqliteUtc(deps.nowIso()) };
+    updateBaseline(
+      deps.db,
+      link.id,
+      JSON.stringify({ ...parseJsonObject(link.baseline_json), ...stamp }),
+    );
+    markOrphaned(deps.db, link.id);
+  }
   return false;
 }
 
@@ -599,19 +1057,20 @@ async function adoptPushedIssue(
 }
 
 /**
- * AFTER A CREATE, MAKE THE LOCAL BODY SAY WHAT THE BASELINE SAYS.
+ * AFTER A CREATE OR A BODY WRITE, MAKE THE LOCAL BODY SAY WHAT THE BASELINE SAYS.
  *
  * A provider is free to normalize the markdown it stores, and Dart MEASURABLY
  * does (dartAdapter.ts's SYNC_MARKER_RE note: it re-emits emphasis runs,
- * reflows lists and linkifies dotted tokens). The adoption paths above snapshot
- * the baseline from the issue the provider RETURNED — the normalized text —
- * while the local entity keeps the text the user authored. Left alone the two
- * disagree from the moment of creation, and the disagreement is silent until
+ * reflows lists and linkifies dotted tokens); Plane round-trips a body through
+ * plaintext-ified html, which is lossier still. Every path that stamps a
+ * baseline from a write RESPONSE therefore records the NORMALIZED text, while
+ * the local entity keeps the text the user authored. Left alone the two
+ * disagree from the moment of the write, and the disagreement is silent until
  * the remote description genuinely changes: inboundSync's three-way merge then
  * diffs the new remote against a baseline the local body never matched, reads
- * "both sides moved", and whole-field-replaces the local body with the
- * provider's mangled copy. Description has no outbound path in v1, so nothing
- * ever pushes the authored text back.
+ * "both sides moved", and — in Manual mode — opens a conflict the user cannot
+ * make sense of, or in Auto mode whole-field-replaces the local body with the
+ * provider's mangled copy.
  *
  * Aligning here converts that latent corruption into an immediate, attributable
  * correction: one `body` write through the entity chokepoint, attributed to the
@@ -619,22 +1078,32 @@ async function adoptPushedIssue(
  *
  * THE COMPARISON IS AGAINST WHAT WE SENT, not against the local body. They
  * differ exactly when the user edited the entity between enqueue and drain —
- * and there the local text is NEWER than the create, so overwriting it with the
- * create's echo would discard a real edit. Equal-after-normalization counts as
+ * and there the local text is NEWER than our write, so overwriting it with the
+ * echo would discard a real edit. Equal-after-normalization counts as
  * agreement, because that is precisely what the merge counts as agreement (see
- * inboundSync.normalizeDescription): a difference it would never diff on is a
- * local event with nothing behind it.
+ * normalizeDescription): a difference it would never diff on is a local event
+ * with nothing behind it. The sent text is the UN-MARKERED description — the
+ * adapters strip the recovery marker from everything they return, so comparing
+ * against the markered body we put on the wire would report a difference on
+ * every single write.
  *
  * ORDER: strictly last, after the link and after the row is settled `done`. A
  * throw here (a deleted entity, a sqlite failure) propagates like any other
  * post-send bookkeeping failure — see the file header — and because the row is
- * already settled it can never cause the create to be re-sent. The cost of that
+ * already settled it can never cause the write to be re-sent. The cost of that
  * failure is the baseline divergence we have today, not a duplicate issue.
  *
- * NO OUTBOUND ECHO: writeBack.route has no content trigger at all, so a body
- * write enqueues nothing on its own. (An entity sitting in a write-back stage
- * can enqueue one redundant, idempotent state write off this event — bounded at
- * one by the `lastWrittenGroup` stamp the very same write records.)
+ * NO OUTBOUND ECHO — but the reason CHANGED when the content trigger landed,
+ * and it is no longer structural. writeBack.route now HAS a content trigger,
+ * and this write does move a field it watches; what stops the loop is the
+ * ACTOR FILTER: `applyChange` runs as `actor: connection.provider`, and the
+ * trigger skips provider-authored events outright. The baseline diff is the
+ * backstop underneath that — the very write this alignment mirrors has already
+ * stamped the baseline from the same response, so even an unattributed replay
+ * of this event finds the entity and the baseline in agreement and queues
+ * nothing. (An entity sitting in a write-back stage can still enqueue one
+ * redundant, idempotent state write off this event — bounded at one by the
+ * `lastWrittenGroup` stamp the very same write records.)
  */
 async function alignLocalDescription(
   deps: OutboxDeps,
@@ -761,8 +1230,20 @@ export async function processAmbiguous(
  *   - `create_sub_issue` without idempotent creates (Plane): ask the adapter for
  *     the child of this parent carrying the row's client key (see
  *     {@link ClientKeyRecoverableAdapter}) — same two answers, same guarantee.
- *   - `update_state` / `close_parent`: idempotent by nature — straight back to
- *     pending, the drain will simply write the state again.
+ *   - EVERY OTHER KIND is idempotent by nature and goes straight back to
+ *     pending, where the drain simply performs it again:
+ *       · `update_state` / `close_parent` — writing a state twice is writing it
+ *         once.
+ *       · `update_content` — the row carries no payload at all, so the retry
+ *         RE-COMPOSES from the entity as it stands and re-diffs against the
+ *         baseline. If the lost write actually landed, its own inbound echo (or
+ *         the re-composed diff) leaves nothing to send and the row settles with
+ *         no request; if it did not, the retry is the write.
+ *       · `archive_issue` — a 404 on the second attempt IS success (the twin
+ *         was already trashed), which is exactly the ambiguity this state
+ *         exists for, resolved by the write rather than by a lookup.
+ *     Only a CREATE can be duplicated by a blind retry, which is why only
+ *     creates take the lookup path below.
  *
  * A failed lookup leaves the row `ambiguous` (returning it to pending is only
  * safe once we KNOW the write did not land — otherwise a retry duplicates the
@@ -1147,6 +1628,53 @@ class StateCache {
     }
     this.states = await this.adapter.listStates(selection);
     return this.states;
+  }
+}
+
+/** The two mapped-field translations a content write composes through. */
+interface FieldMappings {
+  priority: PriorityMapping;
+  category: CategoryMapping;
+}
+
+/**
+ * Fetch-once-per-drain field mappings — the sibling of {@link StateCache}, and
+ * for the same reason: every content write in a drain wants the same two, and
+ * the option list behind them costs a round trip on the one provider that has a
+ * live vocabulary (Dart's `/config`; Linear and Plane state fixed scales).
+ *
+ * RESOLVED AGAINST THE LIVE LIST, unlike the TRIGGER's own resolution, which
+ * has no adapter and passes null. That asymmetry is deliberate and this is the
+ * authoritative side: a Dart workspace that renamed a priority out from under a
+ * persisted mapping resolves that level to NO TOKEN here, so the patch simply
+ * omits the field instead of sending a value Dart would 400 on (probe D1) —
+ * while the trigger, working from the seed, may have optimistically enqueued a
+ * row for it. A row that composes to nothing settles `done`, unsent.
+ */
+class FieldMappingCache {
+  private mappings: FieldMappings | null = null;
+
+  constructor(
+    private readonly adapter: TrackerAdapter,
+    private readonly connection: TrackerConnectionRow,
+  ) {}
+
+  async load(): Promise<FieldMappings> {
+    if (this.mappings !== null) return this.mappings;
+    const options = await this.adapter.listFieldOptions();
+    this.mappings = {
+      priority: resolveEffectivePriorityMapping(
+        this.connection.provider,
+        options.priorities,
+        this.connection.priority_mapping_json,
+      ),
+      category: resolveEffectiveCategoryMapping(
+        this.connection.provider,
+        options.categories,
+        this.connection.category_mapping_json,
+      ),
+    };
+    return this.mappings;
   }
 }
 

@@ -83,7 +83,7 @@ describe('TrackerUnlinkDialog', () => {
     renderDialog();
     expect(screen.getByTestId('tracker-unlink-keep')).toHaveTextContent('Keep in Linear');
     expect(screen.getByTestId('tracker-unlink-cancel-remote')).toHaveTextContent(
-      'Cancel in Linear',
+      'Archive in Linear',
     );
     // The promise the design makes: cyboflow never deletes the remote issue.
     expect(screen.getByTestId('tracker-unlink-dialog')).toHaveTextContent(
@@ -114,7 +114,7 @@ describe('TrackerUnlinkDialog', () => {
     expect(mockClear).not.toHaveBeenCalled();
   });
 
-  it('"Cancel in <provider>" stages the remote cancel, then releases the delete', async () => {
+  it('"Archive in <provider>" stages the remote archive, then releases the delete', async () => {
     renderDialog({ action: 'archive', entityType: 'idea', entityId: 'ide_9' });
     fireEvent.click(screen.getByTestId('tracker-unlink-cancel-remote'));
 

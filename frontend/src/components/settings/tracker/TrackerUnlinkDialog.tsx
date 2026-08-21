@@ -4,12 +4,20 @@
  * a LINKED backlog entity asks what should happen to the tracker issue before
  * the local delete runs. Exactly two answers, both of which drop the link:
  *
- *   Keep in <provider>   -> unlink only; the issue is left exactly as it is.
- *   Cancel in <provider> -> unlink AND queue the write that moves the issue into
- *                           the tracker's cancelled group.
+ *   Keep in <provider>    -> unlink only; the issue is left exactly as it is.
+ *   Archive in <provider> -> unlink AND queue the strongest non-destructive
+ *                            write the provider offers: its own trash/archive
+ *                            where one exists (Linear, Dart), and a move into
+ *                            the tracker's CANCELLED group where none does
+ *                            (Plane, whose public v1 API has no archive
+ *                            endpoint).
  *
- * We never hard-delete on the remote side, so "cancel" is deliberately the
- * strongest option offered.
+ * We never hard-delete on the remote side, so archiving is deliberately the
+ * strongest option offered. The copy stays PROVIDER-AGNOSTIC on purpose: the
+ * archive capability lives on the adapter seam in the main process and does not
+ * cross IPC, so the dialog says what is true of every provider — nothing is
+ * deleted, and the fallback is named in the body rather than guessed at in the
+ * button.
  *
  * THIS DIALOG ONLY COLLECTS THE ANSWER. Both buttons call
  * `cyboflow.tracker.stageUnlinkRuling`, which mutates NOTHING — it records the
@@ -36,7 +44,7 @@
  * mirrors the Backlog confirm dialogs' Modal/Header/Body/Footer shape.
  */
 import { useEffect, useState } from 'react';
-import { Link2Off, Ban } from 'lucide-react';
+import { Link2Off, Archive } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../../ui/Modal';
 import { trpc } from '../../../trpc/client';
 import { providerMeta } from './trackerVocabulary';
@@ -147,8 +155,10 @@ export function TrackerUnlinkDialog({
             </p>
           )}
           <p className="text-xs text-text-tertiary">
-            Either way the {entityLabel} stops syncing with {providerName}. Nothing happens until
-            you confirm the {action} on the next step.
+            Archiving moves the issue to {providerName}&apos;s trash or archive; where{' '}
+            {providerName} has no archive, it is marked cancelled instead. Either way the{' '}
+            {entityLabel} stops syncing with {providerName}, and nothing happens until you confirm
+            the {action} on the next step.
           </p>
           {error && (
             <p className="text-xs text-status-error" role="alert">
@@ -182,8 +192,8 @@ export function TrackerUnlinkDialog({
           data-testid="tracker-unlink-cancel-remote"
           className="inline-flex items-center gap-1 rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <Ban className="h-3.5 w-3.5" />
-          Cancel in {providerName}
+          <Archive className="h-3.5 w-3.5" />
+          Archive in {providerName}
         </button>
       </ModalFooter>
     </Modal>

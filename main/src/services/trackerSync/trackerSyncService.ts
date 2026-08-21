@@ -128,6 +128,7 @@ import { PlaneAdapter } from './planeAdapter';
 import { DartAdapter } from './dartAdapter';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
+  cancelPendingKinds,
   clearSecret,
   connectionMatchesIdentity,
   enqueueOutbox,
@@ -179,6 +180,8 @@ import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type Outbo
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
   createWriteBackListener,
+  enqueueArchiveWrite,
+  enqueueContentWrite,
   parseJsonObject,
   readDesiredGroup,
   writeBackGroupForStage,
@@ -186,6 +189,7 @@ import {
   type WriteBackGroup,
   type WriteBackListener,
 } from './writeBack';
+import { providerSupportsRemoteArchive } from './providerCapabilities';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -1931,6 +1935,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * Patch the connected view's editable settings. Only the keys present on
    * `patch` are written (mirroring the store's own patch semantics); an unknown
    * connection id is an idempotent no-op.
+   *
+   * TURNING A CONTENT DIRECTION OFF ALSO CLEARS ITS QUEUE — see
+   * {@link cancelPendingKinds}. Flipping `auto`/`manual` → `'off'` while rows
+   * are still pending would STRAND them: `'off'` is enforced at the claim, so
+   * nothing (not even "Sync now") would ever drain them, and the kind-agnostic
+   * inbound blocker would halt the pass at those issues forever. The sweep runs
+   * after the write so it can never settle rows for a mode the write then
+   * failed to apply, and only for the direction the user actually turned off.
    */
   async updateSettings(connectionId: string, patch: TrackerSettingsPatch): Promise<void> {
     const connection = getConnection(this.db, connectionId);
@@ -1956,6 +1968,24 @@ export class TrackerSyncService implements TrackerSyncFacade {
           }
         : {}),
     });
+
+    if (patch.contentSyncMode === 'off') {
+      cancelPendingKinds(
+        this.db,
+        connectionId,
+        CONTENT_OUTBOX_KINDS,
+        'cancelled — content sync was turned off for this connection',
+      );
+    }
+    if (patch.archiveSyncMode === 'off') {
+      cancelPendingKinds(
+        this.db,
+        connectionId,
+        ARCHIVE_OUTBOX_KINDS,
+        'cancelled — archive sync was turned off for this connection',
+      );
+    }
+
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
   }
 
@@ -2094,13 +2124,12 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
   /**
    * A three-way field conflict the Manual mode parked. 'remote' applies the
-   * stored `remote_value` to the entity; 'local' leaves the entity alone and —
-   * for a STAGE conflict only — queues the write-back that makes the tracker
-   * converge onto our stage. The other four fields (title, description,
-   * priority, category) have no outbound path yet (the adapter seam writes
-   * state, not content), so accepting the local side of one is purely a "stop
-   * asking me" ruling. Either way the link's BASELINE has to move, or the
-   * ruling does not stick — see {@link acceptLocalFieldValue}.
+   * stored `remote_value` to the entity; 'local' leaves the entity alone and
+   * queues the write-back that makes the TRACKER converge onto our value — a
+   * state write for a stage conflict, a content write for the other four
+   * (title, description, priority, category). Either way the link's BASELINE
+   * has to move, or the ruling does not stick — see
+   * {@link acceptLocalFieldValue}.
    */
   private async resolveFieldConflict(
     connection: TrackerConnectionRow,
@@ -2130,6 +2159,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * remote-unchanged + local-changed and lets the local value win silently,
    * while a LATER genuine remote edit still diverges from the stamp and
    * conflicts again — which is the whole point of keeping a baseline.
+   *
+   * STAMP BEFORE ENQUEUE, on every arm. The stamp is what the outbound content
+   * trigger diffs against, and the enqueue helpers dedupe against the rows that
+   * already exist — so stamping first means the ruling's own row is composed
+   * against a baseline that already tells the truth, and an entity event
+   * arriving in between cannot queue a second row for the same edit. It also
+   * mirrors {@link applyRemoteFieldValue}'s ordering, where the reason is
+   * sharper still (writeBack's listener runs INLINE inside applyChange).
    */
   private acceptLocalFieldValue(
     connection: TrackerConnectionRow,
@@ -2162,6 +2199,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // A title conflict always carries the remote's title; a null would only
       // corrupt the baseline into unparseability, so it is left alone.
       if (conflict.remote_value !== null) this.stampBaseline(link, { title: conflict.remote_value });
+      this.enqueueContentWriteBack(connection, link);
       return;
     }
 
@@ -2169,6 +2207,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // null is a legitimate remote description ("this issue has no body"), so
       // it is stamped as-is rather than guarded away.
       this.stampBaseline(link, { description: conflict.remote_value });
+      this.enqueueContentWriteBack(connection, link);
       return;
     }
 
@@ -2180,7 +2219,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
     if (conflict.field === 'priority') this.stampBaseline(link, { priority: conflict.remote_value });
     else if (conflict.field === 'category') {
       this.stampBaseline(link, { category: conflict.remote_value });
+    } else {
+      // An unrecognized field (a row from a future build, or hand-edited): the
+      // conflict still resolves, but nothing is stamped and nothing is queued —
+      // guessing which field to write would be worse than doing nothing.
+      return;
     }
+    this.enqueueContentWriteBack(connection, link);
   }
 
   /** Write one conflict's `remote_value` onto the linked entity, per field. */
@@ -2363,6 +2408,62 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return true;
   }
 
+  /**
+   * The remote write a "cancel it in the tracker" ruling turns into — see
+   * {@link dropLink} for the choice between the two and why the mode only gates
+   * the `'off'` end.
+   */
+  private enqueueRemovalWriteBack(
+    connection: TrackerConnectionRow,
+    link: EntityExternalLinkRow,
+  ): boolean {
+    if (
+      connection.archive_sync_mode !== 'off' &&
+      providerSupportsRemoteArchive(connection.provider)
+    ) {
+      return enqueueArchiveWrite(
+        { db: this.db, nowIso: this.nowIso },
+        { link, connection },
+        link.entity_type,
+        link.entity_id,
+      );
+    }
+    return this.enqueueGroupWriteBack(connection, link, 'cancelled');
+  }
+
+  /**
+   * Queue ONE content write for a link's issue after the user accepts the LOCAL
+   * side of a title/description/priority/category conflict — the ruling's own
+   * convergence write, mirroring what {@link enqueueStageWriteBack} does for a
+   * stage conflict.
+   *
+   * GATED ON `content_sync_mode !== 'off'`, and this is the one enqueue site
+   * where that gate is easy to miss (invariant 5 calls it out by name). The
+   * `auto`/`manual` distinction says WHEN a ruling reaches the tracker and is
+   * therefore not consulted here — the enqueue is durable intent, and the drain
+   * is where a held direction waits. `'off'` says WHETHER, and an off-mode
+   * ruling must stamp the baseline ONLY: an `update_content` row it enqueued
+   * could not be claimed by any pass, not even "Sync now", while still halting
+   * the inbound batch at that issue forever.
+   *
+   * The payload is empty for the same reason writeBack's own content enqueue
+   * leaves it empty: the drain composes from the entity as it stands then.
+   */
+  private enqueueContentWriteBack(
+    connection: TrackerConnectionRow,
+    link: EntityExternalLinkRow,
+  ): void {
+    if (connection.content_sync_mode === 'off') return;
+    const entityType = link.entity_type;
+    if (entityType === 'epic') return;
+    enqueueContentWrite(
+      { db: this.db, nowIso: this.nowIso },
+      { link, connection },
+      entityType,
+      link.entity_id,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Entity link lookup + the local-removal ruling
   //
@@ -2495,27 +2596,42 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
-   * Orphan ONE link, first queueing the cancelled-group write when the ruling
-   * asked for it.
+   * Orphan ONE link, first queueing the remote write the ruling asked for.
    *
    * ORDER IS LOAD-BEARING: the enqueue reads the LIVE link (it needs the
    * external id, and the dedup scan is against rows for that issue), and a
-   * half-applied ruling — orphaned but never cancelled — is exactly the outcome
-   * the user asked us to avoid.
+   * half-applied ruling — orphaned but never acted on — is exactly the outcome
+   * the user asked us to avoid. The outbox row addresses `(connection,
+   * external_id)`, so the drain does not need the link to still be live; only
+   * this enqueue does.
    *
-   * `status_sync_mode` is NOT consulted for the cancel. That mode governs the
-   * AUTOMATIC cadence — whether stage moves stream out on their own — whereas
-   * this is a direct instruction about the one issue in front of the user,
-   * answered in a dialog that named it, and it lands in the outbox either way.
-   * A disconnected connection is skipped instead: its stored key is gone, so
-   * the row could never drain.
+   * WHICH WRITE, and why it is no longer always the cancelled-state one. The
+   * locked scope decision is that a local removal becomes a remote TRASH or
+   * ARCHIVE — never a delete, and no longer a mere status change where the
+   * provider offers something better. So a provider with a real archive
+   * endpoint (Linear, Dart) gets `archive_issue`; `archive: 'none'` (Plane)
+   * keeps the cancelled-state write, which is the strongest thing its API can
+   * actually do.
+   *
+   * `archive_sync_mode` GATES ONLY THE `'off'` END OF THAT CHOICE, for
+   * invariant 5's reason and no other: an `archive_issue` row whose direction
+   * is off can never be claimed, and an unclaimable row halts inbound for that
+   * issue forever. An off connection therefore falls back to the cancelled
+   * -state write too — the user's explicit ruling still reaches the tracker,
+   * through a direction that can carry it. `auto` vs `manual` is NOT consulted,
+   * exactly as `status_sync_mode` is not: those modes govern the AUTOMATIC
+   * cadence, whereas this is a direct instruction about the one issue in front
+   * of the user, answered in a dialog that named it.
+   *
+   * A disconnected connection is skipped entirely: its stored key is gone, so
+   * no row of any kind could drain.
    */
   private dropLink(link: EntityExternalLinkRow, cancelRemote: boolean): void {
     const connection = getConnection(this.db, link.connection_id);
 
     if (cancelRemote && connection !== null && connection.status !== 'disconnected') {
-      if (this.enqueueGroupWriteBack(connection, link, 'cancelled')) {
-        // Same 2s nudge a stage move gets — without it the cancel would sit
+      if (this.enqueueRemovalWriteBack(connection, link)) {
+        // Same 2s nudge a stage move gets — without it the write would sit
         // until the next 5-minute poll, long after the entity is gone.
         this.armDrainTimer(connection.id);
       }
@@ -2706,6 +2822,8 @@ function appendWriteBackLines(
   const created = ambiguous.created + (drained?.created ?? 0);
   const pushed = ambiguous.pushedIdeas + (drained?.pushedIdeas ?? 0);
   const mirrored = created - pushed;
+  const contentWritten = ambiguous.contentWritten + (drained?.contentWritten ?? 0);
+  const archived = ambiguous.archived + (drained?.archived ?? 0);
   const recovered = ambiguous.ambiguousResolved;
   const retries = ambiguous.retriesScheduled + (drained?.retriesScheduled ?? 0);
   const failed = ambiguous.failedTerminal + (drained?.failedTerminal ?? 0);
@@ -2718,8 +2836,16 @@ function appendWriteBackLines(
   if (sent > 0) entries.push({ marker: '✓', line: `wrote ${plural(sent, 'issue state')}` });
   if (pushed > 0) entries.push({ marker: '✓', line: `pushed ${plural(pushed, 'idea')}` });
   if (mirrored > 0) entries.push({ marker: '✓', line: `mirrored ${plural(mirrored, 'sub-issue')}` });
+  if (contentWritten > 0) {
+    entries.push({ marker: '✓', line: `updated ${plural(contentWritten, 'issue')} in the tracker` });
+  }
+  // "archived" is the local vocabulary; what the provider actually performs is
+  // its trash or archive, never a delete — see the locked scope decision.
+  if (archived > 0) {
+    entries.push({ marker: '✓', line: `archived ${plural(archived, 'issue')} in the tracker` });
+  }
   if (superseded > 0) {
-    entries.push({ marker: '·', line: `${plural(superseded, 'stale state write')} superseded` });
+    entries.push({ marker: '·', line: `${plural(superseded, 'stale write')} superseded` });
   }
   // The ONLY surface that names a remote issue we created and can no longer
   // point at — see outboxWorker.adoptOrOrphanPush. The row's `last_error`
@@ -2867,6 +2993,12 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
     entries.push({
       marker: '·',
       line: `${plural(report.importDeferred, 'new issue')} held — use Sync now`,
+    });
+  }
+  if (report.contentDeferred > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(report.contentDeferred, 'content change')} waiting on an open conflict`,
     });
   }
   if (report.entityLocked > 0) {

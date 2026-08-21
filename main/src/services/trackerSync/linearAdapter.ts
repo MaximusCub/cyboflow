@@ -47,6 +47,7 @@ import {
   TRACKER_REQUEST_TIMEOUT_MS,
   describeTransportFailure,
 } from './errors';
+import { PROVIDER_ARCHIVE_CAPABILITY } from './providerCapabilities';
 
 const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
@@ -683,8 +684,10 @@ export class LinearAdapter implements TrackerAdapter {
     // `issueArchive(trash: true)` — probe L1 confirmed it sets `archivedAt`
     // and `trashed`, is restorable (visible under `includeArchived: true`,
     // and by direct id lookup), and is exactly the milder-than-delete
-    // operation the locked scope decision requires.
-    archive: 'trash',
+    // operation the locked scope decision requires. Read from the shared
+    // table so the outbound trigger — which gates on the capability WITHOUT
+    // an adapter in hand — can never disagree with this adapter.
+    archive: PROVIDER_ARCHIVE_CAPABILITY.linear,
   };
 
   private readonly apiKey: string;

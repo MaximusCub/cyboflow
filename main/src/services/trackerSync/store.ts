@@ -968,8 +968,8 @@ export function enqueueOutbox(db: Database.Database, input: EnqueueOutboxInput):
 }
 
 /**
- * Settle every still-QUEUED status write for `externalId` that `newRowId`
- * replaces, so a stale one can never reach the tracker after it.
+ * Settle every still-QUEUED write of one of `kinds` for `externalId` that
+ * `newRowId` replaces, so a stale one can never reach the tracker after it.
  *
  * WHY IT IS NEEDED AT ENQUEUE TIME. The drain is serial, so two writes are
  * never in flight at once — but they still land out of ORDER when the older one
@@ -991,15 +991,53 @@ export function enqueueOutbox(db: Database.Database, input: EnqueueOutboxInput):
  *     order.
  *   - `id < newRowId`, so this only ever settles rows the caller's own insert
  *     supersedes.
- *   - BOTH status kinds, deliberately not `kind` alone: `update_state` and
- *     `close_parent` move the SAME issue's state, so a later one of either kind
- *     states the truth the earlier one is now wrong about. Same key the enqueue
- *     dedupe uses.
+ *   - `kinds` is a SET, not the caller's own kind, because supersession is
+ *     about what a write SAYS rather than which code path enqueued it: see
+ *     {@link SUPERSEDING_KINDS} in outboxWorker for the table, and its header
+ *     for why content and state writes never cross-supersede while an archive
+ *     supersedes everything.
  *
  * `done` rather than `failed`: nothing went wrong and nothing is left to
- * attempt — the instruction was replaced. The reason is recorded on the row.
+ * attempt — the instruction was replaced. `reason` is recorded on the row.
  *
- * Returns how many rows were settled.
+ * Returns how many rows were settled. An EMPTY `kinds` settles nothing.
+ */
+export function supersedeQueuedWrites(
+  db: Database.Database,
+  connectionId: string,
+  externalId: string,
+  newRowId: number,
+  kinds: readonly TrackerOutboxRow['kind'][],
+  reason: string,
+): number {
+  if (kinds.length === 0) return 0;
+  // Parameterized IN list — the kinds are a closed union, but the placeholders
+  // keep this module's "no string-interpolated values in SQL" property intact.
+  const placeholders = kinds.map(() => '?').join(', ');
+  const result = db
+    .prepare(
+      `UPDATE tracker_outbox
+          SET state = 'done',
+              last_error = ?,
+              next_attempt_at = NULL,
+              updated_at = datetime('now')
+        WHERE connection_id = ? AND external_id = ? AND id < ?
+          AND state = 'pending'
+          AND kind IN (${placeholders})`,
+    )
+    .run(reason, connectionId, externalId, newRowId, ...kinds);
+  return result.changes;
+}
+
+/** The two kinds that both move ONE issue's state — see {@link supersedeQueuedWrites}. */
+const STATE_WRITE_KINDS: readonly TrackerOutboxRow['kind'][] = ['update_state', 'close_parent'];
+
+/**
+ * {@link supersedeQueuedWrites} for a newly-enqueued STATE write: it settles
+ * both status kinds, deliberately not `kind` alone, because `update_state` and
+ * `close_parent` move the SAME issue's state, so a later one of either kind
+ * states the truth the earlier one is now wrong about. Same key the enqueue
+ * dedupe uses.
  */
 export function supersedeQueuedStateWrites(
   db: Database.Database,
@@ -1007,18 +1045,55 @@ export function supersedeQueuedStateWrites(
   externalId: string,
   newRowId: number,
 ): number {
+  return supersedeQueuedWrites(
+    db,
+    connectionId,
+    externalId,
+    newRowId,
+    STATE_WRITE_KINDS,
+    'superseded by a newer state write for the same issue',
+  );
+}
+
+/**
+ * Settle every PENDING row of `kinds` for a connection, whatever issue it
+ * addresses — the "a direction was turned OFF" sweep.
+ *
+ * WHY A TURNED-OFF DIRECTION MUST NOT JUST STOP DRAINING. `'off'` gates at the
+ * ENQUEUE (invariant 5 of docs/proposals/tracker-field-writeback.md) precisely
+ * because {@link claimNextPending} will never claim a kind whose direction is
+ * off — so a row enqueued while the mode was `auto`/`manual` and left behind by
+ * the flip is not merely delayed, it is UNDRAINABLE. And an undrainable row is
+ * not inert: `collectOutboxBlockers` is kind-agnostic, so the inbound batch
+ * halts at that issue on every pass, forever. Settling the strandable rows at
+ * the moment of the flip is what keeps turning a direction off from wedging
+ * the direction the user did NOT turn off.
+ *
+ * `in_flight` rows are deliberately left alone: their request is already out
+ * and their resolution stamps the baseline. `ambiguous` likewise — its outcome
+ * is unknown, and only the reconcile may speak for it.
+ *
+ * Returns how many rows were settled.
+ */
+export function cancelPendingKinds(
+  db: Database.Database,
+  connectionId: string,
+  kinds: readonly TrackerOutboxRow['kind'][],
+  reason: string,
+): number {
+  if (kinds.length === 0) return 0;
+  const placeholders = kinds.map(() => '?').join(', ');
   const result = db
     .prepare(
       `UPDATE tracker_outbox
           SET state = 'done',
-              last_error = 'superseded by a newer state write for the same issue',
+              last_error = ?,
               next_attempt_at = NULL,
               updated_at = datetime('now')
-        WHERE connection_id = ? AND external_id = ? AND id < ?
-          AND state = 'pending'
-          AND kind IN ('update_state', 'close_parent')`,
+        WHERE connection_id = ? AND state = 'pending'
+          AND kind IN (${placeholders})`,
     )
-    .run(connectionId, externalId, newRowId);
+    .run(reason, connectionId, ...kinds);
   return result.changes;
 }
 
@@ -1109,6 +1184,42 @@ export function listUnresolvedOutbox(db: Database.Database, connectionId: string
         ORDER BY created_at ASC, id ASC`,
     )
     .all(connectionId) as TrackerOutboxRow[];
+}
+
+/**
+ * The client key of the CREATE that produced an entity's remote issue, or null
+ * when no create row records one (an issue this connection IMPORTED, so no
+ * cyboflow create ever ran for it).
+ *
+ * WHY THE OUTBOX IS THE RIGHT PLACE TO ASK. On a provider without idempotent
+ * creates, every issue this app creates carries a `cyboflow-sync: <clientKey>`
+ * recovery marker in its description, and an outbound BODY write-back has to
+ * re-append it (invariant 4 of docs/proposals/tracker-field-writeback.md) or
+ * `findIssueByClientKey`'s absence proof stops holding for that link. The
+ * marker's key is not on the link and is stripped from every description the
+ * adapters return, so the create row that minted it is the only durable record
+ * of it. Outbox rows are never pruned, so a long-settled create still answers.
+ *
+ * NEWEST FIRST: an entity re-created after an earlier create was orphaned
+ * carries the LATEST create's marker.
+ */
+export function findCreateClientKey(
+  db: Database.Database,
+  connectionId: string,
+  entityType: EntityExternalLinkRow['entity_type'],
+  entityId: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT client_key FROM tracker_outbox
+        WHERE connection_id = ? AND entity_type = ? AND entity_id = ?
+          AND kind IN ('create_issue', 'create_sub_issue')
+          AND client_key IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1`,
+    )
+    .get(connectionId, entityType, entityId) as { client_key: string } | undefined;
+  return row?.client_key ?? null;
 }
 
 /** Look up an outbox row by its client-generated idempotency key (outbox recovery). */

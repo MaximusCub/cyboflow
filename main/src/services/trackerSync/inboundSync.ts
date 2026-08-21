@@ -138,7 +138,7 @@ import {
   type CategoryMapping,
 } from './categoryMapping';
 import { isWriteBackGroup, parseJsonObject, type WriteBackGroup } from './writeBack';
-import { PROVENANCE_MARKER_PREFIX, provenanceMarker } from './provenance';
+import { provenanceMarker, splitBody, joinBody, normalizeDescription } from './provenance';
 
 // ---------------------------------------------------------------------------
 // Dependencies + public shapes
@@ -355,6 +355,13 @@ export interface InboundSyncReport {
    */
   importDeferred: number;
   /**
+   * Remote CONTENT changes an item PARKED behind an open conflict is sitting
+   * on, which no conflict row records (see {@link outcomeForParkedLink}). Pins
+   * the cursor: nothing else holds these, so letting the window move past one
+   * would lose a remote edit outright.
+   */
+  contentDeferred: number;
+  /**
    * Remote changes recognized but NOT applied because the LOCAL entity refused
    * the write — a live run owns its stage, or the mapped stage is
    * orchestrator-derived. Pins the cursor like the other deferrals: the entity
@@ -426,60 +433,23 @@ const PROVIDER_LABEL: Record<TrackerProvider, string> = {
   dart: 'Dart',
 };
 
-/** The markdown rule the footer block opens with. */
-const FOOTER_FENCE = '---\n';
-/** The substring that identifies a footer block inside a stored body. */
-const FOOTER_START = FOOTER_FENCE + PROVENANCE_MARKER_PREFIX;
-
 /** The provenance block appended to an imported idea's body (issue ref + URL). */
 function buildProvenanceFooter(provider: TrackerProvider, issue: TrackerIssue): string {
   const marker = provenanceMarker(provider, issue.externalId);
-  return `${marker}\nImported from ${PROVIDER_LABEL[provider]} · [${issue.identifier}](${issue.url})`;
+  return `${marker}\nImported from ${PROVIDER_LABEL[provider]} \u00b7 [${issue.identifier}](${issue.url})`;
 }
 
 /**
- * Split a stored body into the remote-owned description half and the
- * cyboflow-owned provenance footer half. A body with no footer (a
- * pre-existing entity linked through the wizard's Reconcile step) reads back
- * as description-only, and rejoins without one — we never retro-fit a footer
- * onto an entity the user wrote themselves.
+ * The body-split helpers now live in provenance.ts, beside the marker that
+ * DEFINES where a footer begins — writeBack.ts's content trigger needs the same
+ * description half, and this module already imports from writeBack, so keeping
+ * them here would close an import cycle.
  *
- * Exported (with {@link joinBody}) for the service layer's manual
- * conflict-resolution path, which applies a stored `remote_value` description
- * onto an entity and must preserve that entity's footer exactly as this pass
- * would have.
+ * Re-exported under their historical names so every existing call site (the
+ * outbox worker's body alignment, the service's conflict resolution, the tests)
+ * keeps importing them from the module that used to own them.
  */
-export function splitBody(body: string | null): { description: string | null; footer: string | null } {
-  if (body === null) return { description: null, footer: null };
-  const at = body.indexOf(FOOTER_START);
-  if (at < 0) return { description: body.length > 0 ? body : null, footer: null };
-  const description = body.slice(0, at).replace(/\s+$/, '');
-  return {
-    description: description.length > 0 ? description : null,
-    footer: body.slice(at + FOOTER_FENCE.length),
-  };
-}
-
-/** Inverse of {@link splitBody}. */
-export function joinBody(description: string | null, footer: string | null): string | null {
-  const desc = description !== null && description.trim().length > 0 ? description : null;
-  if (footer === null) return desc;
-  const block = `${FOOTER_FENCE}${footer}`;
-  return desc === null ? block : `${desc}\n\n${block}`;
-}
-
-/**
- * Empty and absent descriptions are the same thing on both sides of a diff.
- *
- * Exported for the outbox worker's post-create alignment
- * (outboxWorker.alignLocalDescription), which must call "the same description"
- * exactly as the merge below does — anything this treats as equal can never
- * become a later three-way diff, so writing the local body for it would be a
- * local event with nothing behind it.
- */
-export function normalizeDescription(value: string | null): string {
-  return value === null ? '' : value.trim();
-}
+export { splitBody, joinBody, normalizeDescription } from './provenance';
 
 // ---------------------------------------------------------------------------
 // Compound cursor
@@ -886,6 +856,7 @@ export async function runInboundSync(
     archivedRemotely: 0,
     stageDeferred: 0,
     importDeferred: 0,
+    contentDeferred: 0,
     entityLocked: 0,
     unmappedFieldValues: 0,
   };
@@ -974,6 +945,7 @@ export async function runInboundSync(
       cursorAdvances = false;
       if (outcome === 'stage-deferred') report.stageDeferred++;
       else if (outcome === 'entity-locked') report.entityLocked++;
+      else if (outcome === 'content-deferred') report.contentDeferred++;
       else report.importDeferred++;
     }
     if (cursorAdvances) advanceCursor(db, connection.id, issue.updatedAt, issue.externalId);
@@ -984,15 +956,22 @@ export async function runInboundSync(
 
 /**
  * What {@link applyIssue} did with one issue, as far as the CURSOR is concerned.
- * Both deferrals mean the issue is NOT finished with — a held direction
- * recognized work and declined to do it — so the cursor must not move past it:
- *   - 'stage-deferred'  — a remote stage change the status direction is holding.
- *   - 'import-deferred' — a new issue the import direction is holding.
- *   - 'entity-locked'   — a write the LOCAL entity refused; see
+ * Every deferral means the issue is NOT finished with — something recognized
+ * work and declined to do it — so the cursor must not move past it:
+ *   - 'stage-deferred'   — a remote stage change the status direction is holding.
+ *   - 'import-deferred'  — a new issue the import direction is holding.
+ *   - 'content-deferred' — a parked item is sitting on a remote content change
+ *     that no open conflict row records; see {@link outcomeForParkedLink}.
+ *   - 'entity-locked'    — a write the LOCAL entity refused; see
  *     {@link isDeferrableRejection}. Held by a live run rather than by a
  *     setting, but identical as far as the cursor is concerned.
  */
-type ApplyOutcome = 'applied' | 'stage-deferred' | 'import-deferred' | 'entity-locked';
+type ApplyOutcome =
+  | 'applied'
+  | 'stage-deferred'
+  | 'import-deferred'
+  | 'content-deferred'
+  | 'entity-locked';
 
 /** What the unresolved outbox makes untouchable this pass — see {@link collectOutboxBlockers}. */
 interface OutboxBlockers {
@@ -1234,9 +1213,68 @@ function outcomeForParkedLink(
   // The same delta mergeLinkedIssue computes, asked only for its existence.
   const baselineStageId = mappingTargetToStageId(ctx.mapping[baseline.stateId] ?? 'dont', ctx.stageIds);
   const remoteStageId = mappingTargetToStageId(targetFor(ctx, issue), ctx.stageIds);
-  const waiting =
+  const stageWaiting =
     remoteStageId !== null && remoteStageId !== baselineStageId && remoteStageId !== local.stageId;
-  return waiting ? 'stage-deferred' : 'applied';
+  if (stageWaiting) return 'stage-deferred';
+  return hasUnrecordedContentDelta(ctx, issue, link, baseline) ? 'content-deferred' : 'applied';
+}
+
+/**
+ * Is this parked item holding a remote CONTENT change that no open conflict
+ * records?
+ *
+ * THE SAME QUESTION THE STAGE ARM ASKS, about the other four fields. A park
+ * applies nothing, so every delta it computed is dropped on the floor; a delta
+ * that an open conflict row CARRIES is durable (resolving it applies or
+ * deliberately declines the change), and one that no row carries exists nowhere
+ * but in the fetched issue. Let the cursor past THAT one and it is gone for
+ * good — the issue is only ever refetched if the tracker touches it again.
+ *
+ * The ordinary shape of the hazard: an item parked by a TITLE conflict whose
+ * remote DESCRIPTION also changed. Resolving the title advances only the title
+ * half of the baseline, so nothing ever re-derives the description delta.
+ *
+ * THE COST IS A PINNED CURSOR, and it is the trade the stage arm already makes
+ * for a held direction: the fetch window stays open at this issue until the
+ * user answers the conflict the UI is showing them. Losing an edit silently is
+ * the worse of the two, and unlike the stage arm's `remote_deleted` escape
+ * there is no row here that would make the change durable on its own.
+ *
+ * PROVIDER SPACE for the two mapped fields (invariant 2), and an `undefined`
+ * baseline half is NOT a delta (invariant 3) — the same two rules the merge
+ * itself runs by, because this must agree with it exactly or the cursor would
+ * pin on a delta the merge would never compute.
+ */
+function hasUnrecordedContentDelta(
+  ctx: SyncContext,
+  issue: TrackerIssue,
+  link: EntityExternalLinkRow,
+  baseline: TrackerBaseline,
+): boolean {
+  const { db } = ctx;
+  const unrecorded = (field: FieldConflict['field'], changed: boolean): boolean =>
+    changed && !hasOpenConflictForLink(db, link.id, field);
+
+  if (unrecorded('title', issue.title !== baseline.title)) return true;
+  if (
+    unrecorded(
+      'description',
+      normalizeDescription(issue.description) !== normalizeDescription(baseline.description),
+    )
+  ) {
+    return true;
+  }
+  if (
+    baseline.priority !== undefined &&
+    unrecorded('priority', !providerTokensEqual(issue.priority, baseline.priority))
+  ) {
+    return true;
+  }
+  return (
+    ctx.categorySync &&
+    baseline.category !== undefined &&
+    unrecorded('category', !providerTokensEqual(issue.category, baseline.category))
+  );
 }
 
 /**

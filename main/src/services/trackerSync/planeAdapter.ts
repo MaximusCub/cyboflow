@@ -56,6 +56,8 @@ import {
   TRACKER_REQUEST_TIMEOUT_MS,
   describeTransportFailure,
 } from './errors';
+import { PROVIDER_ARCHIVE_CAPABILITY } from './providerCapabilities';
+import { RECOVERY_MARKER_PREFIX } from './recoveryMarker';
 
 const PROVIDER: TrackerProvider = 'plane';
 const DEFAULT_BASE_URL = 'https://api.plane.so';
@@ -86,8 +88,10 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   // fallback rather than guessing at an unverified PATCH. Revisit if Plane
   // ships one, or once P1 re-runs against a live workspace with a fresh
   // token. `archiveIssue` below throws accordingly — it must be unreachable,
-  // since Phase 5 gates every archive enqueue on this capability.
-  archive: 'none',
+  // since the outbound archive trigger gates every enqueue on this capability
+  // — reading it from the SHARED table, so the trigger (which has no adapter
+  // in hand) and this adapter can never disagree.
+  archive: PROVIDER_ARCHIVE_CAPABILITY.plane,
 };
 
 /**
@@ -102,8 +106,15 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
  * — but the key it carries is surfaced first, on `TrackerIssue.recoveryClientKey`
  * ({@link readRecoveryClientKey}), because the inbound pass needs it to
  * recognize a lost create's child before importing anything.
+ *
+ * The literal itself lives in {@link import('./recoveryMarker')}, which the
+ * OUTBOUND CONTENT WRITE also composes from when it re-appends this marker to a
+ * body write-back (invariant 4 of docs/proposals/tracker-field-writeback.md).
+ * It appends the marker as a trailing MARKDOWN paragraph, which
+ * {@link toDescriptionHtml}'s blank-line split then renders as exactly the
+ * `<p>` {@link toCreateDescriptionHtml} emits — same shape, one definition.
  */
-const SYNC_MARKER_PREFIX = 'cyboflow-sync:';
+const SYNC_MARKER_PREFIX = RECOVERY_MARKER_PREFIX;
 
 /** `cyboflow-sync: <uuid>` — the exact shape createSubIssue emits (client keys are UUIDs). */
 const SYNC_MARKER_RE =
