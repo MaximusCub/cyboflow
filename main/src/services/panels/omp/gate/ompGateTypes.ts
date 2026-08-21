@@ -80,6 +80,16 @@
  *     their factory functions run").
  *
  * (f) THE 30-SECOND HANDLER CAP — LOAD-BEARING, SEE ompGateExtension.ts
+ *     SUPERSEDED IN PART by omp 17.3.5, which made the cap the setting
+ *     `extensionHandlers.toolCallTimeoutMs` (changelog: "Made extension
+ *     tool-call timeouts configurable and paused them during user dialogs").
+ *     Read at `runner.ts` as
+ *     `O99(settings?.get('extensionHandlers.toolCallTimeoutMs') ?? 30000)`,
+ *     where the validator accepts ANY positive finite number — there is no
+ *     upper clamp — and falls back to 30000 for anything else. The paragraph
+ *     below is still exactly right for 17.3.4 and earlier, which is why
+ *     cyboflow gates the raise on the version
+ *     (`supportsConfigurableHandlerTimeout`) rather than assuming it.
  *     `extensibility/extensions/runner.ts:84` `EXTENSION_HANDLER_TIMEOUT_MS = 30_000`,
  *     applied at `runner.ts:1237` and enforced by `raceHandlerWithTimeout`
  *     (`runner.ts:192-227`). The only mutator is `testSetExtensionHandlerTimeoutMs`

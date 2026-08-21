@@ -297,7 +297,18 @@ function fileBodyKeysFor(toolName: string): ReadonlySet<string> | undefined {
  *
  * 25s leaves a 5s margin for the block to travel back through
  * `emitToolCall` before OMP's cap fires, so OUR reason is what the model sees.
- * Raising this above 30s would be inert; the OMP cap would simply win.
+ *
+ * NO LONGER THE WHOLE STORY, as of omp 17.3.5. The cap became the setting
+ * `extensionHandlers.toolCallTimeoutMs` ("Made extension tool-call timeouts
+ * configurable and paused them during user dialogs"), with no upper clamp, and
+ * cyboflow now raises it per spawn via a config overlay
+ * (`ompHandlerTimeoutOverlay.ts`) and passes the matching budget down as
+ * {@link OmpGateConfig.humanDecisionBudgetMs}.
+ *
+ * So this constant is the FLOOR, not the policy: it is what the gate uses when
+ * the host sent no budget — an OMP older than 17.3.5, a spawn whose overlay
+ * could not be written, or a damaged config. Raising THIS number is still inert
+ * on those paths, because the un-raised OMP cap would simply win.
  */
 export const HUMAN_DECISION_BUDGET_MS = 25_000;
 
