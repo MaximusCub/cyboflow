@@ -22,6 +22,7 @@ import type {
   TrackerCredentialsInput,
   TrackerEntityLinkRef,
   TrackerEntityType,
+  TrackerFieldOptions,
   TrackerIssue,
   TrackerReconcileItem,
   TrackerSettingsPatch,
@@ -67,6 +68,9 @@ class UnusedFacade implements TrackerSyncFacade {
     _src: TrackerWizardSourceInput,
     _s: TrackerSourceSelection,
   ): Promise<TrackerState[]> {
+    throw new Error('not used');
+  }
+  wizardFieldOptions(_src: TrackerWizardSourceInput): Promise<TrackerFieldOptions> {
     throw new Error('not used');
   }
   wizardIssues(
@@ -161,6 +165,70 @@ async function codeOf(call: Promise<unknown>): Promise<string> {
   }
   throw new Error('expected the call to reject');
 }
+
+describe('cyboflow.tracker.wizardFieldOptions', () => {
+  const OPTIONS = { priorities: ['critical', 'high'], categories: ['Bug'] };
+
+  it('passes a pasted-key probe through and returns the provider vocabularies', async () => {
+    const seen: TrackerWizardSourceInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardFieldOptions = async (source) => {
+      seen.push(source);
+      return OPTIONS;
+    };
+    const caller = await callerWith(facade);
+
+    const result = await caller.wizardFieldOptions({
+      credentials: { provider: 'dart', apiKey: 'dsa_1' },
+    });
+
+    expect(result).toEqual(OPTIONS);
+    expect(seen).toEqual([{ credentials: { provider: 'dart', apiKey: 'dsa_1' }, connectionId: undefined }]);
+  });
+
+  it('accepts the mapping-management path, where the key stays main-side', async () => {
+    const seen: TrackerWizardSourceInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardFieldOptions = async (source) => {
+      seen.push(source);
+      return OPTIONS;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardFieldOptions({ connectionId: 'trk_1' });
+
+    expect(seen).toEqual([{ credentials: undefined, connectionId: 'trk_1' }]);
+  });
+
+  it('refuses both credential sources at once, and neither, before the facade', async () => {
+    // The two keys answer the same question, so a payload carrying both is a
+    // caller bug and one carrying neither can probe nothing.
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(
+      caller.wizardFieldOptions({
+        credentials: { provider: 'dart', apiKey: 'dsa_1' },
+        connectionId: 'trk_1',
+      }),
+    ).rejects.toThrow();
+    await expect(caller.wizardFieldOptions({})).rejects.toThrow();
+  });
+
+  it('maps a rejected key to UNAUTHORIZED, like every other tracker probe', async () => {
+    const authError = new Error('invalid api key');
+    authError.name = 'TrackerAuthError';
+    const facade = new UnusedFacade();
+    facade.wizardFieldOptions = async () => {
+      throw authError;
+    };
+    const caller = await callerWith(facade);
+
+    expect(
+      await codeOf(caller.wizardFieldOptions({ credentials: { provider: 'dart', apiKey: 'x' } })),
+    ).toBe('UNAUTHORIZED');
+  });
+});
 
 describe('cyboflow.tracker.updateCredentials', () => {
   it('passes the rotation through and returns the validated identity', async () => {

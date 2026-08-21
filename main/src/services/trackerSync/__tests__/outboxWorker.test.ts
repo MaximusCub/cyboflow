@@ -47,6 +47,7 @@ import type {
   TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
+  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
@@ -163,6 +164,9 @@ class FakeAdapter implements TrackerAdapter {
   async listStates(): Promise<TrackerState[]> {
     this.listStatesCalls += 1;
     return this.states;
+  }
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    return { priorities: ['0', '1', '2', '3', '4'], categories: null };
   }
   async listIssues(): Promise<TrackerIssue[]> {
     this.listIssuesCalls += 1;
@@ -384,6 +388,10 @@ function makeIssue(externalId: string, overrides: Partial<TrackerIssue> = {}): T
     parentExternalId: null,
     updatedAt: '2026-07-30T11:59:00.000Z',
     archivedAt: null,
+    // The default mapping round-trips '3' (Linear Medium) with the P2 every
+    // entity here carries, so an untouched issue never produces a priority diff.
+    priority: '3',
+    category: null,
     recoveryClientKey: null,
     ...overrides,
   };

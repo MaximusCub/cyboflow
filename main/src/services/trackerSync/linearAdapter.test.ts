@@ -61,6 +61,8 @@ function issueNode(overrides: {
   id?: string;
   identifier?: string;
   parentId?: string | null;
+  /** Linear reads priority as a FLOAT — `2` arrives as `2.0`. */
+  priority?: number | null;
 }): unknown {
   return {
     id: overrides.id ?? 'issue-1',
@@ -74,6 +76,16 @@ function issueNode(overrides: {
     parent: overrides.parentId ? { id: overrides.parentId } : null,
     updatedAt: '2026-07-01T00:00:00.000Z',
     archivedAt: null,
+    priority: overrides.priority === undefined ? 3 : overrides.priority,
+    trashed: false,
+  };
+}
+
+/** One page of `issues`, for the single-page reads below. */
+function issuePage(nodes: unknown[]): { status: number; body: unknown } {
+  return {
+    status: 200,
+    body: { data: { issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } },
   };
 }
 
@@ -344,6 +356,75 @@ describe('LinearAdapter.listIssues', () => {
     expect(secondVariables.filter).toMatchObject({
       updatedAt: { gte: '2026-06-01T00:00:00.000Z' },
     });
+  });
+});
+
+describe('LinearAdapter priority mapping', () => {
+  it('normalizes the Float priority to the raw string token', async () => {
+    const { fetchImpl } = createFetchMock([issuePage([issueNode({ priority: 2 })])]);
+    const [issue] = await new LinearAdapter({ apiKey: 'key', fetchImpl }).listIssues({
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
+    expect(issue.priority).toBe('2');
+  });
+
+  it('treats 0 as the real "No priority" VALUE, never as an absence', async () => {
+    // The trap: `0` is falsy, and a `?? null` or a truthiness check would turn
+    // Linear's No-priority rung into "we did not read this field", which the
+    // merge would then take the never-synced arm on forever.
+    const { fetchImpl } = createFetchMock([issuePage([issueNode({ priority: 0 })])]);
+    const [issue] = await new LinearAdapter({ apiKey: 'key', fetchImpl }).listIssues({
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
+    expect(issue.priority).toBe('0');
+  });
+
+  it('rounds a non-integral Float onto a rung the mapping knows', async () => {
+    const { fetchImpl } = createFetchMock([issuePage([issueNode({ priority: 1.9999 })])]);
+    const [issue] = await new LinearAdapter({ apiKey: 'key', fetchImpl }).listIssues({
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
+    expect(issue.priority).toBe('2');
+  });
+
+  it('reads an absent priority as null and always reports no category', async () => {
+    const { fetchImpl } = createFetchMock([issuePage([issueNode({ priority: null })])]);
+    const [issue] = await new LinearAdapter({ apiKey: 'key', fetchImpl }).listIssues({
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
+    expect(issue.priority).toBeNull();
+    // Linear models no issue type; category is structurally null.
+    expect(issue.category).toBeNull();
+  });
+
+  it('selects priority and trashed on the shared issue-node selection', async () => {
+    // One selection serves list/get/create, so this pins all three at once.
+    const { fetchImpl, calls } = createFetchMock([issuePage([issueNode({})])]);
+    await new LinearAdapter({ apiKey: 'key', fetchImpl }).listIssues({
+      containerId: 'team-1',
+      narrowId: 'all',
+      narrowKind: 'all',
+    });
+    const { query } = parseBody(calls[0]);
+    expect(query).toContain('priority');
+    expect(query).toContain('trashed');
+  });
+});
+
+describe('LinearAdapter.listFieldOptions', () => {
+  it('states its fixed five-rung scale and no categories, without a request', async () => {
+    const { fetchImpl, calls } = createFetchMock([]);
+    const options = await new LinearAdapter({ apiKey: 'key', fetchImpl }).listFieldOptions();
+    expect(options).toEqual({ priorities: ['0', '1', '2', '3', '4'], categories: null });
+    expect(calls).toHaveLength(0);
   });
 });
 

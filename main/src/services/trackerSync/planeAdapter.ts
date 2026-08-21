@@ -41,6 +41,7 @@ import type {
   TrackerStateGroup,
   TrackerIssue,
   TrackerUserRef,
+  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type {
   TrackerAdapter,
@@ -59,6 +60,13 @@ const PROVIDER: TrackerProvider = 'plane';
 const DEFAULT_BASE_URL = 'https://api.plane.so';
 /** Cloud API and cloud app UI live on separate hosts; self-hosted shares one. */
 const CLOUD_APP_ORIGIN = 'https://app.plane.so';
+
+/**
+ * Plane's priority enum as RAW tokens, in the provider's own order. `'none'` is
+ * a rung of the enum (the column is NOT NULL), not the absence of one — see
+ * {@link PlaneAdapter.listFieldOptions}.
+ */
+const PLANE_PRIORITY_TOKENS: readonly string[] = ['urgent', 'high', 'medium', 'low', 'none'];
 
 const CAPABILITIES: TrackerAdapterCapabilities = {
   nativeParentAutoClose: false,
@@ -179,6 +187,13 @@ interface PlaneIssueWire {
   parent?: string | null;
   updated_at: string;
   archived_at?: string | null;
+  /**
+   * Plane's lowercase priority enum. The column is NOT NULL server-side and
+   * `'none'` is its unset token, so a null here means the field was not
+   * selected rather than "no priority" — {@link PlaneAdapter.mapIssue} passes
+   * whatever arrives through RAW, inventing nothing.
+   */
+  priority?: string | null;
 }
 
 /** Link record returned by the cycle-issues / module-issues endpoints. */
@@ -333,6 +348,17 @@ export class PlaneAdapter implements TrackerAdapter {
       color: state.color ?? null,
       group: normalizeStateGroup(state.group),
     }));
+  }
+
+  /**
+   * Plane's priority enum is FIXED by the API (a project owner configures
+   * states, never priorities), so this is stated rather than fetched. The tokens
+   * are the exact lowercase spellings Plane accepts and returns.
+   *
+   * `categories: null` — Plane models no issue type.
+   */
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    return { priorities: [...PLANE_PRIORITY_TOKENS], categories: null };
   }
 
   async listIssues(
@@ -615,6 +641,13 @@ export class PlaneAdapter implements TrackerAdapter {
       parentExternalId: raw.parent ? composeId(projectId, raw.parent) : null,
       updatedAt: raw.updated_at,
       archivedAt: raw.archived_at ?? null,
+      // Passed through exactly as Plane spelled it (see PlaneIssueWire.priority):
+      // 'none' is a real rung of the enum, not an absence, so it must reach the
+      // mapping as a token rather than being collapsed to null here.
+      priority: raw.priority ?? null,
+      // ALWAYS null for Plane: it models no issue TYPE, and label emulation is
+      // out of scope, so there is nothing a category could be read from.
+      category: null,
       // Read BEFORE mapDescription strips it — every path that maps a wire
       // issue (list, detail, create response, client-key recovery) goes through
       // here, so a marker-bearing issue surfaces its key no matter how it was

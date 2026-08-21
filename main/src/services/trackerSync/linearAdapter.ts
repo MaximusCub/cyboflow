@@ -32,6 +32,7 @@ import type {
   TrackerState,
   TrackerStateGroup,
   TrackerIssue,
+  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type { TrackerAdapter, TrackerAdapterCapabilities, FetchLike, IssueDraft } from './adapterTypes';
 import {
@@ -127,6 +128,20 @@ interface LinearIssueNode {
   parent: { id: string } | null;
   updatedAt: string;
   archivedAt: string | null;
+  /**
+   * Linear reads priority as a FLOAT (`2` arrives as `2.0`) even though the
+   * write side takes an Int and the scale has exactly five rungs. Normalized to
+   * the raw string token at {@link mapIssueNode}; `0` is Linear's real "No
+   * priority" rung, NOT an absence.
+   */
+  priority: number | null;
+  /**
+   * Set by `issueArchive(trash: true)` alongside `archivedAt` (probe L1).
+   * Selected here so the archive write-back's response stamp has it without a
+   * second selection edit; nothing reads it yet — `archivedAt` is what inbound
+   * classifies an archived issue on.
+   */
+  trashed: boolean | null;
 }
 
 interface ValidateCredentialsResponse {
@@ -225,6 +240,8 @@ const ISSUE_NODE_FIELDS = `
     }
     updatedAt
     archivedAt
+    priority
+    trashed
 `;
 
 const VALIDATE_CREDENTIALS_QUERY = `
@@ -408,6 +425,14 @@ const UPDATE_ISSUE_STATE_MUTATION = `
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Linear's five priority rungs as RAW tokens, in the provider's own order
+ * (`'0'` No priority, `'1'` Urgent … `'4'` Low). Fixed by the provider, so the
+ * adapter states them instead of discovering them — see
+ * {@link LinearAdapter.listFieldOptions}.
+ */
+const LINEAR_PRIORITY_TOKENS: readonly string[] = ['0', '1', '2', '3', '4'];
+
 /** Linear `WorkflowState.type` → cyboflow's canonical `TrackerStateGroup`. */
 const STATE_TYPE_TO_GROUP: Record<string, TrackerStateGroup> = {
   triage: 'triage',
@@ -468,6 +493,20 @@ function deriveInitials(name: string): string {
   return trimmed.slice(0, 2).toUpperCase();
 }
 
+/**
+ * Linear's Float priority as the raw string token the rest of the engine
+ * compares on ('0'..'4').
+ *
+ * ROUNDED, not truncated or formatted: `String(2.0)` is already `'2'`, but a
+ * value that ever arrives as `1.9999` would stringify to something no mapping
+ * knows, and the scale is integral by definition. `0` maps to `'0'` — Linear's
+ * "No priority" rung is a VALUE, not an absence, so it must never fall into the
+ * null branch. Null survives only if the field was not selected at all.
+ */
+function mapPriority(value: number | null): string | null {
+  return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : null;
+}
+
 function mapIssueNode(node: LinearIssueNode): TrackerIssue {
   return {
     externalId: node.id,
@@ -487,6 +526,10 @@ function mapIssueNode(node: LinearIssueNode): TrackerIssue {
     parentExternalId: node.parent?.id ?? null,
     updatedAt: node.updatedAt,
     archivedAt: node.archivedAt,
+    priority: mapPriority(node.priority),
+    // ALWAYS null for Linear: it models no issue TYPE, and label emulation is
+    // out of scope, so there is nothing a category could be read from.
+    category: null,
     // ALWAYS null for Linear, and stated explicitly rather than left off: this
     // adapter has `capabilities.idempotentCreate`, so the outbox's client key IS
     // the created issue's id. A lost create is recovered by external id (a
@@ -692,6 +735,19 @@ export class LinearAdapter implements TrackerAdapter {
       color: node.color,
       group: STATE_TYPE_TO_GROUP[node.type] ?? 'backlog',
     }));
+  }
+
+  /**
+   * Linear's priority scale is FIXED and workspace-independent (Urgent / High /
+   * Medium / Low / No priority), so this is stated rather than fetched — there is
+   * no query behind it and nothing a workspace owner can rename. The tokens are
+   * the RAW `'0'..'4'` values the engine compares on; the human labels are a UI
+   * concern and are attached where the picker is rendered, not here.
+   *
+   * `categories: null` — Linear models no issue type at all.
+   */
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    return { priorities: [...LINEAR_PRIORITY_TOKENS], categories: null };
   }
 
   async listIssues(selection: TrackerSourceSelection, sinceIso?: string): Promise<TrackerIssue[]> {

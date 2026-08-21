@@ -171,6 +171,28 @@ export type TrackerMappingTarget = 'dont' | 'idea' | 'ready' | 'done' | 'wontdo'
 /** Per-connection state mapping, keyed by tracker state id. */
 export type TrackerStateMapping = Record<string, TrackerMappingTarget>;
 
+/**
+ * What one provider offers for the two MAPPED fields — the seed source for
+ * `priorityMapping` / `categoryMapping` and, from Phase 6, the wizard's value
+ * pickers.
+ *
+ * `null` means "no live list to discover": either the provider's scale is
+ * STATIC and hard-coded in the adapter, or it has no such field at all. Both
+ * read the same way to a caller — there is nothing to fetch and nothing to
+ * re-confirm after a workspace edit — which is why they share one value rather
+ * than being distinguished here.
+ *
+ * Today Linear and Plane return their fixed priority scales (non-null, but
+ * constant) with `categories: null`; Dart returns the live `/config.priorities`
+ * and `/config.types` lists, which a workspace owner can rename at any time.
+ */
+export interface TrackerFieldOptions {
+  /** Provider-raw priority tokens, in the provider's own order. */
+  priorities: string[] | null;
+  /** Provider-raw type/category titles; null where the provider has no such field. */
+  categories: string[] | null;
+}
+
 export interface TrackerUserRef {
   id: string;
   name: string;
@@ -200,6 +222,33 @@ export interface TrackerIssue {
   updatedAt: string;
   /** Remote archive marker (Linear archivedAt); null = live. */
   archivedAt: string | null;
+  /**
+   * The remote priority as the PROVIDER spells it: Linear `'0'..'4'` (`'0'` is
+   * a real "No priority" value, never an absence), Plane
+   * `urgent|high|medium|low|none`, Dart the workspace's own priority title
+   * (`Critical`/`High`/…). null only where the provider genuinely carries none
+   * — Dart OMITS the key entirely for an unprioritized task, which reads back
+   * here as null.
+   *
+   * DELIBERATELY PROVIDER-RAW rather than a local {@link
+   * import('./tasks').Priority}: the local scale is 7 levels and every provider
+   * offers 4-5, so mapping on the way in and comparing in local space would flap
+   * a user's P3 down to P2 on every pass. The mapping (priorityMapping.ts) is
+   * applied only at the merge/compose edge; the baseline stores this same raw
+   * token so the three-way diff runs entirely in provider space.
+   */
+  priority: string | null;
+  /**
+   * The remote issue's TYPE, where the provider models one that can carry
+   * cyboflow's entity category (feature/bug/chore) — Dart's task type title.
+   *
+   * ALWAYS null on Linear and Plane: neither has a native type field, and label
+   * emulation is explicitly out of scope, so "unsupported by this provider" and
+   * "this issue has no type" are the same value here. The merge reads that as
+   * ABSENT rather than as a cleared category — see the category arm's provider
+   * gate in inboundSync.ts.
+   */
+  category: string | null;
   /**
    * The `cyboflow-sync` recovery marker found in the provider-native
    * description, surfaced BEFORE the adapter strips it; null when the issue
@@ -324,8 +373,18 @@ export interface TrackerConflictSummary {
   id: number;
   connectionId: string;
   kind: TrackerConflictKind;
-  /** 'title' | 'description' | 'stage' on a field conflict; null on remote_deleted. */
+  /**
+   * 'title' | 'description' | 'stage' | 'priority' | 'category' on a field
+   * conflict; null on remote_deleted.
+   */
   field: string | null;
+  /**
+   * The two sides' values as the conflict recorded them. Content fields carry
+   * the literal text; a STAGE row's `remoteValue` is the MAPPED board stage id;
+   * a PRIORITY or CATEGORY row carries BOTH sides as PROVIDER-RAW tokens (the
+   * local side run through the effective mapping), because that is the space the
+   * comparison happened in — see TrackerIssue.priority.
+   */
   localValue: string | null;
   remoteValue: string | null;
   entityRef: string | null;

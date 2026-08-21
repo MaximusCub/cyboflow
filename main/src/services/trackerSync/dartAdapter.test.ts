@@ -77,6 +77,10 @@ const CLIENT_KEY = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
 const CONFIG = {
   dartboards: [BOARD, 'Design/Backlog'],
   statuses: ['To-do', 'Doing', 'Done', "Won't do"],
+  // The probe workspace's real lists: priorities come back LOWERCASE here even
+  // though task reads Title-case them, and none of the types is a category.
+  types: ['Task', 'Subtask', 'Project', 'Milestone'],
+  priorities: ['critical', 'high', 'medium', 'low'],
 };
 
 /** `GET /config` — needed by nearly every path. */
@@ -266,6 +270,44 @@ describe('DartAdapter.validateCredentials', () => {
     await expect(new DartAdapter({ apiKey: 'bad', fetchImpl }).validateCredentials()).rejects.toBeInstanceOf(
       TrackerAuthError,
     );
+  });
+});
+
+describe('DartAdapter.listFieldOptions', () => {
+  it("returns the workspace's live priority and type lists off /config", async () => {
+    const { fetchImpl, calls } = scriptedFetch([configRoute()]);
+    const options = await new DartAdapter({ apiKey: 'k', fetchImpl }).listFieldOptions();
+    expect(options).toEqual({
+      priorities: ['critical', 'high', 'medium', 'low'],
+      categories: ['Task', 'Subtask', 'Project', 'Milestone'],
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('carries both lists through the /config CACHE, not just the first response', async () => {
+    // getConfig rebuilds a fresh literal from the response, so any key not
+    // repeated in it is silently dropped for the rest of the pass. This calls a
+    // DIFFERENT config-backed path first, so the values under test can only
+    // come from the cached copy.
+    const { fetchImpl, calls } = scriptedFetch([configRoute()]);
+    const adapter = new DartAdapter({ apiKey: 'k', fetchImpl });
+    await adapter.listStates(SELECTION);
+    const options = await adapter.listFieldOptions();
+    expect(options.priorities).toEqual(['critical', 'high', 'medium', 'low']);
+    expect(options.categories).toEqual(['Task', 'Subtask', 'Project', 'Milestone']);
+    // One fetch total — the second read was served from the cache.
+    expect(calls).toHaveLength(1);
+  });
+
+  it('reads a /config that omits either key as "nothing live to seed from"', async () => {
+    const { fetchImpl } = scriptedFetch([
+      {
+        test: (m, p) => m === 'GET' && p.endsWith('/config'),
+        respond: () => ({ status: 200, body: { dartboards: [BOARD], statuses: ['To-do'] } }),
+      },
+    ]);
+    const options = await new DartAdapter({ apiKey: 'k', fetchImpl }).listFieldOptions();
+    expect(options).toEqual({ priorities: null, categories: null });
   });
 });
 
@@ -520,8 +562,40 @@ describe('DartAdapter.listIssues', () => {
       parentExternalId: null,
       updatedAt: '2026-08-16T10:00:00Z',
       archivedAt: null,
+      // The fixture task carries neither key — Dart's omit-when-null shape —
+      // and both read back as null.
+      priority: null,
+      category: null,
       recoveryClientKey: null,
     });
+  });
+
+  it('reads an ABSENT priority/type key as null — Dart omits null fields entirely', async () => {
+    // MEASURED (probe D2/D8): clearing a priority makes the key VANISH from
+    // every payload rather than come back as `priority: null`, so "absent" is
+    // the only spelling of unset and the adapter must not confuse it with a
+    // field it forgot to read.
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      listRoute([concise()]),
+      makeDetailRoute({ AbCdEfGhIjKl: task() }),
+    ]);
+    const [issue] = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues(SELECTION);
+    expect(issue.priority).toBeNull();
+    expect(issue.category).toBeNull();
+  });
+
+  it("surfaces a present priority/type verbatim, in Dart's Title case", async () => {
+    // Reads come back Title-cased while /config lists lowercase; the raw token
+    // is passed through untouched and the mapping matches case-insensitively.
+    const { fetchImpl } = scriptedFetch([
+      configRoute(),
+      listRoute([concise()]),
+      makeDetailRoute({ AbCdEfGhIjKl: task({ priority: 'Critical', type: 'Bug' }) }),
+    ]);
+    const [issue] = await new DartAdapter({ apiKey: 'k', fetchImpl }).listIssues(SELECTION);
+    expect(issue.priority).toBe('Critical');
+    expect(issue.category).toBe('Bug');
   });
 
   it('drops a row whose detail fetch 404s rather than returning a null-bodied issue', async () => {

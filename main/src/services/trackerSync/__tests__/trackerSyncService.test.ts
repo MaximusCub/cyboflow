@@ -71,6 +71,7 @@ import type {
   TrackerGroupTree,
   TrackerSourceTree,
   TrackerState,
+  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
@@ -172,6 +173,10 @@ class FakeAdapter implements TrackerAdapter {
     this.calls.push('listStates');
     return this.states;
   }
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    this.calls.push('listFieldOptions');
+    return { priorities: ['0', '1', '2', '3', '4'], categories: null };
+  }
   async listIssues(): Promise<TrackerIssue[]> {
     this.calls.push('listIssues');
     if (this.gate !== null) await this.gate;
@@ -260,6 +265,10 @@ class PlaneLikeAdapter implements TrackerAdapter {
     this.calls.push('listStates');
     return STATES;
   }
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    this.calls.push('listFieldOptions');
+    return { priorities: ['urgent', 'high', 'medium', 'low', 'none'], categories: null };
+  }
   async listIssues(): Promise<TrackerIssue[]> {
     this.calls.push('listIssues');
     return this.issues;
@@ -344,6 +353,10 @@ function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     parentExternalId: null,
     updatedAt: '2026-07-30T10:00:00.000Z',
     archivedAt: null,
+    // The default mapping round-trips '3' (Linear Medium) with the P2 every
+    // entity here carries, so an untouched issue never produces a priority diff.
+    priority: '3',
+    category: null,
     recoveryClientKey: null,
     ...overrides,
   };
@@ -1043,6 +1056,22 @@ describe('TrackerSyncService sync log', () => {
     expect(lines).toContain('✓ updated 1 linked item');
     expect(lines).toContain('✎ conflicts 1');
     expect(lines[lines.length - 1]).toBe('✓ sync complete · next in 5m');
+  });
+
+  it('warns LOUDLY about a remote value no mapping can express', async () => {
+    // Dart addresses priorities by TITLE, so a workspace rename leaves a
+    // mapping pointing at a value nothing answers to. Nothing is applied and no
+    // conflict is opened — the user is asked to confirm the mapping instead,
+    // with the '⚠' the connected view renders as a problem rather than a note.
+    makeConnection();
+    adapter.issues = [makeIssue({ priority: '1' })];
+    service.start();
+    await service.syncConnection(CONN_ID);
+
+    adapter.issues = [makeIssue({ priority: '9', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    await service.syncNow(CONN_ID);
+
+    expect(renderedLog()).toContain('⚠ 1 unmapped remote value · confirm the mapping');
   });
 });
 

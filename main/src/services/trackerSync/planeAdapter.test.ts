@@ -264,6 +264,78 @@ describe('PlaneAdapter composite externalId round-trip', () => {
   });
 });
 
+describe('PlaneAdapter priority passthrough', () => {
+  const wire = {
+    id: 'iss1',
+    name: 'Fix the bug',
+    sequence_id: 42,
+    description: 'plain description',
+    state: 'state-open',
+    assignees: [] as string[],
+    estimate_point: null,
+    parent: null,
+    updated_at: '2026-07-01T00:00:00.000Z',
+    archived_at: null,
+  };
+
+  function listing(priority: string | null | undefined) {
+    const row = priority === undefined ? wire : { ...wire, priority };
+    return scriptedFetch([
+      {
+        test: (method, path) =>
+          method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/work-items/',
+        respond: () => ({ status: 200, body: { results: [row], next_cursor: null, next_page_results: false } }),
+      },
+      {
+        test: (method, path) => method === 'GET' && path === '/api/v1/workspaces/acme/projects/proj1/',
+        respond: () => ({ status: 200, body: { id: 'proj1', name: 'Proj One', identifier: 'PROJ' } }),
+      },
+    ]);
+  }
+
+  it("passes the lowercase enum token through RAW, 'none' included", async () => {
+    // 'none' is a rung of Plane's NOT NULL enum, not an absence — collapsing it
+    // to null would lose the P6 round trip.
+    for (const token of ['urgent', 'high', 'medium', 'low', 'none']) {
+      const { fetchImpl } = listing(token);
+      const [issue] = await new PlaneAdapter({
+        apiKey: 'k',
+        workspaceSlug: 'acme',
+        fetchImpl,
+      }).listIssues(ALL_SELECTION);
+      expect(issue.priority).toBe(token);
+    }
+  });
+
+  it('reads an unselected priority as null and always reports no category', async () => {
+    const { fetchImpl } = listing(undefined);
+    const [issue] = await new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl,
+    }).listIssues(ALL_SELECTION);
+    expect(issue.priority).toBeNull();
+    // Plane models no issue type; category is structurally null.
+    expect(issue.category).toBeNull();
+  });
+});
+
+describe('PlaneAdapter.listFieldOptions', () => {
+  it('states its fixed enum and no categories, without a request', async () => {
+    const { fetchImpl, calls } = scriptedFetch([]);
+    const options = await new PlaneAdapter({
+      apiKey: 'k',
+      workspaceSlug: 'acme',
+      fetchImpl,
+    }).listFieldOptions();
+    expect(options).toEqual({
+      priorities: ['urgent', 'high', 'medium', 'low', 'none'],
+      categories: null,
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('PlaneAdapter.listGroups', () => {
   it('offers one whole-project group per project, scoped for states by project id', async () => {
     const { fetchImpl } = scriptedFetch([

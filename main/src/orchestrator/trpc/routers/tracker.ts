@@ -3,7 +3,10 @@
  * Linear/Plane sync feature. Design: docs/proposals/tracker-sync-integration.md.
  *
  *   wizardValidate / wizardGroups / wizardContainers / wizardNarrows /
- *   wizardStates / wizardIssues   : mutations    -> stateless provider probes (persist nothing)
+ *   wizardStates / wizardFieldOptions /
+ *   wizardIssues                  : mutations    -> stateless provider probes (persist nothing)
+ *                                                   (wizardFieldOptions = the priority/type
+ *                                                    vocabularies the mapping tables offer)
  *   reconcilePreview              : mutation     -> TrackerReconcileItem[] (wizard Step 4)
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
  *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
@@ -55,6 +58,7 @@ import type {
   TrackerConflictSummary,
   TrackerConnectionSummary,
   TrackerEntityLinkRef,
+  TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
@@ -253,6 +257,11 @@ const issueSchema = z.object({
   parentExternalId: z.string().nullable(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
+  // Provider-RAW tokens (see TrackerIssue.priority): validated as opaque
+  // strings, deliberately not as an enum — each provider spells its own scale,
+  // and Dart's is workspace-defined.
+  priority: z.string().nullable(),
+  category: z.string().nullable(),
   recoveryClientKey: z.string().nullable(),
 });
 
@@ -357,6 +366,31 @@ export const trackerRouter = router({
           { credentials: input.credentials, connectionId: input.connectionId },
           input.selection,
         );
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * The priority/category mapping tables' options — the provider's priority
+   * tokens and (Dart only) type titles. Credential SOURCE, like `wizardStates`;
+   * no selection, because none of the three providers scopes these lists to a
+   * container.
+   */
+  wizardFieldOptions: protectedProcedure
+    .input(
+      z
+        .object(wizardSourceShape)
+        .refine((v) => exactlyOneCredentialSource(v.credentials, v.connectionId), {
+          message: 'exactly one of credentials / connectionId',
+        }),
+    )
+    .mutation(async ({ input }): Promise<TrackerFieldOptions> => {
+      try {
+        return await getTrackerSyncFacade().wizardFieldOptions({
+          credentials: input.credentials,
+          connectionId: input.connectionId,
+        });
       } catch (err) {
         rethrowAsTRPCError(err);
       }

@@ -114,6 +114,7 @@ import type {
   TrackerSourceSelection,
   TrackerSourceTree,
   TrackerState,
+  TrackerFieldOptions,
   TrackerWorkspaceIdentity,
 } from '../../../../../shared/types/trackerSync';
 import type { IssueDraft, TrackerAdapter, TrackerAdapterCapabilities } from '../adapterTypes';
@@ -198,6 +199,7 @@ class FakeAdapter implements TrackerAdapter {
   states: TrackerState[] = STATES;
   issues: TrackerIssue[] = [];
   groups: TrackerGroupTree = GROUPS;
+  fieldOptions: TrackerFieldOptions = { priorities: ['0', '1', '2', '3', '4'], categories: null };
   /** Scripted failure for validateCredentials (the auth-error path). */
   failValidate: Error | null = null;
   /** The workspace the live probe reports — the reconnect identity key. */
@@ -223,6 +225,10 @@ class FakeAdapter implements TrackerAdapter {
   async listStates(): Promise<TrackerState[]> {
     this.calls.push('listStates');
     return this.states;
+  }
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    this.calls.push('listFieldOptions');
+    return this.fieldOptions;
   }
   async listIssues(): Promise<TrackerIssue[]> {
     this.calls.push('listIssues');
@@ -271,6 +277,10 @@ function makeIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     parentExternalId: null,
     updatedAt: '2026-07-30T10:00:00.000Z',
     archivedAt: null,
+    // The default mapping round-trips '3' (Linear Medium) with the P2 every
+    // entity here carries, so an untouched issue never produces a priority diff.
+    priority: '3',
+    category: null,
     recoveryClientKey: null,
     ...overrides,
   };
@@ -407,6 +417,17 @@ function readIdea(id: string): EntityRow {
     .get(id) as EntityRow;
 }
 
+/** The two MAPPED fields, read straight off the row (readIdea does not select them). */
+function readIdeaPriority(id: string): string {
+  return (raw.prepare('SELECT priority FROM ideas WHERE id = ?').get(id) as { priority: string })
+    .priority;
+}
+
+function readIdeaCategory(id: string): string {
+  return (raw.prepare('SELECT category FROM ideas WHERE id = ?').get(id) as { category: string })
+    .category;
+}
+
 function conflictRow(id: number): TrackerConflictRow {
   return raw.prepare('SELECT * FROM tracker_conflicts WHERE id = ?').get(id) as TrackerConflictRow;
 }
@@ -503,6 +524,13 @@ describe('TrackerSyncService wizard probes', () => {
     // The Map step's groups, each carrying the selection a connect would persist.
     await expect(service.wizardGroups({ credentials: CREDENTIALS })).resolves.toEqual(GROUPS);
 
+    // The mapping tables' vocabulary. No selection: none of the three providers
+    // scopes its priority/type lists to a container.
+    await expect(service.wizardFieldOptions({ credentials: CREDENTIALS })).resolves.toEqual({
+      priorities: ['0', '1', '2', '3', '4'],
+      categories: null,
+    });
+
     adapter.issues = [makeIssue()];
     await expect(service.wizardIssues({ credentials: CREDENTIALS }, SOURCE)).resolves.toHaveLength(
       1,
@@ -513,6 +541,7 @@ describe('TrackerSyncService wizard probes', () => {
       'listNarrows:team-1',
       'listStates',
       'listGroups',
+      'listFieldOptions',
       'listIssues',
     ]);
   });
@@ -560,8 +589,11 @@ describe('TrackerSyncService wizard probes — { connectionId } credential sourc
 
     await expect(service.wizardStates({ connectionId: CONN_ID }, SOURCE)).resolves.toEqual(STATES);
     await expect(service.wizardIssues({ connectionId: CONN_ID }, SOURCE)).resolves.toHaveLength(1);
+    await expect(service.wizardFieldOptions({ connectionId: CONN_ID })).resolves.toMatchObject({
+      categories: null,
+    });
 
-    expect(factoryCalls.map((call) => call.secret)).toEqual([API_KEY, API_KEY]);
+    expect(factoryCalls.map((call) => call.secret)).toEqual([API_KEY, API_KEY, API_KEY]);
   });
 
   it('reports a DISCONNECTED connection as not-found — its key was deliberately cleared', async () => {
@@ -1668,6 +1700,7 @@ describe('TrackerSyncService conflict resolution', () => {
       field?: string | null;
       local_value?: string | null;
       remote_value?: string | null;
+      payload_json?: string | null;
     },
     idea: { title?: string; body?: string | null } = {},
   ): Promise<{ ideaId: string; link: EntityExternalLinkRow; conflictId: number }> {
@@ -1697,6 +1730,7 @@ describe('TrackerSyncService conflict resolution', () => {
       field: conflict.field ?? null,
       local_value: conflict.local_value ?? null,
       remote_value: conflict.remote_value ?? null,
+      payload_json: conflict.payload_json ?? null,
     });
     return { ideaId, link, conflictId: row.id };
   }
@@ -1761,6 +1795,100 @@ describe('TrackerSyncService conflict resolution', () => {
     expect(next).toContain('Fresh remote description');
     expect(next).toContain('<!-- cyboflow:tracker -->');
     expect(next).not.toContain('Old description');
+  });
+
+  it("field conflict + 'remote' on a PRIORITY applies the level the pass recorded", async () => {
+    // The row's `remote_value` is the provider-raw token (invariant 2), so the
+    // local level to write comes off the payload the detecting pass wrote —
+    // rebuilding the mapping here would mean a live provider probe from a UI
+    // click, and one that could answer differently than the pass did.
+    const { ideaId, link, conflictId } = await seedConflict({
+      kind: 'field_conflict',
+      field: 'priority',
+      local_value: '1',
+      remote_value: '2',
+      payload_json: JSON.stringify({ externalId: 'ext-1', mode: 'manual', remoteLocal: 'P1' }),
+    });
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    expect(readIdeaPriority(ideaId)).toBe('P1');
+    const baseline = JSON.parse(linkRow(link.id).baseline_json ?? '{}') as Record<string, unknown>;
+    // The baseline keeps the PROVIDER token, not the local level.
+    expect(baseline.priority).toBe('2');
+    expect(baseline.lastWrittenGroup).toBe('started');
+    expect(conflictRow(conflictId).resolution).toBe('manual-remote');
+  });
+
+  it("field conflict + 'remote' on a CATEGORY applies the Dart type the pass resolved", async () => {
+    const { ideaId, link, conflictId } = await seedConflict({
+      kind: 'field_conflict',
+      field: 'category',
+      local_value: 'Feature',
+      remote_value: 'Bug',
+      payload_json: JSON.stringify({ externalId: 'ext-1', mode: 'manual', remoteLocal: 'bug' }),
+    });
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    expect(readIdeaCategory(ideaId)).toBe('bug');
+    const baseline = JSON.parse(linkRow(link.id).baseline_json ?? '{}') as Record<string, unknown>;
+    expect(baseline.category).toBe('Bug');
+  });
+
+  it("field conflict + 'remote' on a mapped field applies NOTHING without a recorded level", async () => {
+    // A row written before the payload key existed, or hand-edited. Guessing a
+    // level is worse than leaving the entity alone: the conflict still
+    // resolves, and the next pass re-derives from the baseline.
+    const { ideaId, link, conflictId } = await seedConflict({
+      kind: 'field_conflict',
+      field: 'priority',
+      local_value: '1',
+      remote_value: '2',
+    });
+
+    await service.resolveConflictChoice(conflictId, 'remote');
+
+    expect(readIdeaPriority(ideaId)).toBe('P2');
+    const baseline = JSON.parse(linkRow(link.id).baseline_json ?? '{}') as Record<string, unknown>;
+    expect(baseline.priority).toBeUndefined();
+    expect(conflictRow(conflictId).state).toBe('resolved');
+  });
+
+  it("field conflict + 'local' on a mapped field stamps the baseline and writes nothing", async () => {
+    // Keeping the local value only sticks if the baseline moves: otherwise the
+    // next pass reads both-sides-changed and re-opens the settled conflict.
+    const { ideaId, link, conflictId } = await seedConflict({
+      kind: 'field_conflict',
+      field: 'priority',
+      local_value: '1',
+      remote_value: '2',
+      payload_json: JSON.stringify({ externalId: 'ext-1', mode: 'manual', remoteLocal: 'P1' }),
+    });
+
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    // The entity already HOLDS the value being kept.
+    expect(readIdeaPriority(ideaId)).toBe('P2');
+    const baseline = JSON.parse(linkRow(link.id).baseline_json ?? '{}') as Record<string, unknown>;
+    expect(baseline.priority).toBe('2');
+    expect(conflictRow(conflictId).resolution).toBe('manual-local');
+    // No outbound path for content in this phase.
+    expect(outboxRows()).toHaveLength(0);
+  });
+
+  it("field conflict + 'local' stamps a NULL priority as-is (Dart's cleared field)", async () => {
+    const { link, conflictId } = await seedConflict({
+      kind: 'field_conflict',
+      field: 'priority',
+      local_value: 'High',
+      remote_value: null,
+    });
+
+    await service.resolveConflictChoice(conflictId, 'local');
+
+    const baseline = JSON.parse(linkRow(link.id).baseline_json ?? '{}') as Record<string, unknown>;
+    expect(baseline).toHaveProperty('priority', null);
   });
 
   it("field conflict + 'local' on a stage queues the write-back that converges the tracker", async () => {

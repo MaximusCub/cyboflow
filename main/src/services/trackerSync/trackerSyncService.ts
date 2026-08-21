@@ -90,6 +90,7 @@ import type {
   TrackerDirectionMode,
   TrackerEntityLinkRef,
   TrackerEntityType,
+  TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
   TrackerNarrowKind,
@@ -161,6 +162,7 @@ import {
 } from './store';
 import {
   joinBody,
+  readConflictRemoteLocal,
   readConflictRemoteState,
   runDeletionSweep,
   runInboundSync,
@@ -170,6 +172,8 @@ import {
   type InboundSyncReport,
   type ReviewFindingRouter,
 } from './inboundSync';
+import { isPriority } from './priorityMapping';
+import { isCategory } from './categoryMapping';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
@@ -1309,6 +1313,21 @@ export class TrackerSyncService implements TrackerSyncFacade {
   }
 
   /**
+   * The provider's own priority and type vocabularies, backing the
+   * priority/category mapping tables. Credential SOURCE, like
+   * {@link wizardStates}: mapping management re-enters this step from an
+   * already-authorized connection with no pasted key to offer.
+   *
+   * NO SELECTION ARGUMENT, unlike wizardStates: none of the three providers
+   * scopes these lists to a container (Dart's are workspace-wide `/config`
+   * lists; Linear's and Plane's are fixed scales), so asking for one would
+   * invent a dependency the seam does not have.
+   */
+  async wizardFieldOptions(source: TrackerWizardSourceInput): Promise<TrackerFieldOptions> {
+    return this.adapterForCredentials(this.credentialsFromSource(source)).listFieldOptions();
+  }
+
+  /**
    * Wizard Step 2 — every issue in the chosen source (no `since` bound: the
    * wizard's pickers and the Reconcile suggestions need the full set, not an
    * incremental slice). Credential SOURCE, like {@link wizardGroups}.
@@ -2034,10 +2053,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * A three-way field conflict the Manual mode parked. 'remote' applies the
    * stored `remote_value` to the entity; 'local' leaves the entity alone and —
    * for a STAGE conflict only — queues the write-back that makes the tracker
-   * converge onto our stage. Title/description have no outbound path in v1 (the
-   * adapter seam writes state, not content), so accepting the local side of one
-   * is purely a "stop asking me" ruling. Either way the link's BASELINE has to
-   * move, or the ruling does not stick — see {@link acceptLocalFieldValue}.
+   * converge onto our stage. The other four fields (title, description,
+   * priority, category) have no outbound path yet (the adapter seam writes
+   * state, not content), so accepting the local side of one is purely a "stop
+   * asking me" ruling. Either way the link's BASELINE has to move, or the
+   * ruling does not stick — see {@link acceptLocalFieldValue}.
    */
   private async resolveFieldConflict(
     connection: TrackerConnectionRow,
@@ -2106,6 +2126,17 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // null is a legitimate remote description ("this issue has no body"), so
       // it is stamped as-is rather than guarded away.
       this.stampBaseline(link, { description: conflict.remote_value });
+      return;
+    }
+
+    // MAPPED fields (priority / category). `remote_value` is the PROVIDER-RAW
+    // token, which is exactly what the baseline stores (invariant 2), so the
+    // stamp is a straight copy — no mapping is needed on this path at all. A
+    // null is legitimate (Dart spells a cleared priority as no value) and is
+    // stamped as-is, like a null description.
+    if (conflict.field === 'priority') this.stampBaseline(link, { priority: conflict.remote_value });
+    else if (conflict.field === 'category') {
+      this.stampBaseline(link, { category: conflict.remote_value });
     }
   }
 
@@ -2177,6 +2208,43 @@ export class TrackerSyncService implements TrackerSyncFacade {
         fields: { body: joinBody(remote, footer) },
       });
       this.stampBaseline(link, { description: remote });
+      return;
+    }
+
+    // MAPPED fields. The local value to write is NOT derived here: the pass that
+    // detected the conflict resolved it under the live mapping and recorded it
+    // on the payload, so this applies the pass's own answer rather than
+    // rebuilding a mapping (which would need the provider's live option list —
+    // a network call from a UI click, and one that could answer differently
+    // now). A row that carries none — written before this key existed, or
+    // hand-edited — applies nothing rather than guessing a level; the conflict
+    // still resolves and the next pass re-derives from the baseline.
+    const remoteLocal = readConflictRemoteLocal(conflict.payload_json);
+
+    if (conflict.field === 'priority') {
+      if (!isPriority(remoteLocal)) return;
+      // STAMP BEFORE APPLY, for the reason the stage arm above documents:
+      // writeBack's listener runs INLINE on TaskChangeRouter's post-commit emit,
+      // and from Phase 5 a content write-back triggers on the entity diverging
+      // from its baseline. A priority write that lands while the baseline still
+      // says otherwise reads as a LOCAL change and queues an echo of the value
+      // we just took FROM the tracker. A stamp left behind by a failed
+      // applyChange is still TRUE: it says only where the remote stands.
+      this.stampBaseline(link, { priority: remote });
+      await this.router.applyChange(connection.project_id, {
+        ...base,
+        fields: { priority: remoteLocal },
+      });
+      return;
+    }
+
+    if (conflict.field === 'category') {
+      if (!isCategory(remoteLocal)) return;
+      this.stampBaseline(link, { category: remote });
+      await this.router.applyChange(connection.project_id, {
+        ...base,
+        fields: { category: remoteLocal },
+      });
     }
   }
 
@@ -2738,6 +2806,16 @@ function appendInboundLines(entries: TrackerSyncLogEntry[], report: InboundSyncR
     entries.push({
       marker: '·',
       line: `${plural(report.entityLocked, 'status change')} waiting on an active run`,
+    });
+  }
+  if (report.unmappedFieldValues > 0) {
+    // A '⚠' rather than a '·': this is the loud-failure convention for a value
+    // the tracker renamed out from under a mapping (Dart addresses priorities
+    // and types by title). Nothing was applied, and it stays reported on every
+    // pass until the mapping is confirmed.
+    entries.push({
+      marker: '⚠',
+      line: `${plural(report.unmappedFieldValues, 'unmapped remote value')} · confirm the mapping`,
     });
   }
   if (report.archivedRemotely > 0) {

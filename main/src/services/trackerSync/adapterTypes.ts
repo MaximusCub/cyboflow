@@ -19,6 +19,7 @@ import type {
   TrackerSourceSelection,
   TrackerState,
   TrackerIssue,
+  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 
 /** Injected at construction so adapter tests never touch the network. */
@@ -80,6 +81,26 @@ export interface TrackerAdapter {
 
   /** States for the mapping table, with canonical groups. */
   listStates(selection: TrackerSourceSelection): Promise<TrackerState[]>;
+
+  /**
+   * The provider's own vocabulary for the two MAPPED fields — priority and
+   * type/category — seeding `priorityMapping` / `categoryMapping` and, from
+   * Phase 6, the wizard's value pickers.
+   *
+   * WHY THIS IS ON THE SEAM rather than a private wire-shape detail: two
+   * separate consumers need the live list, and neither can reach into an
+   * adapter's internals. The wizard needs it to render pickers whose options are
+   * the workspace's ACTUAL values, and the sync pass needs it to notice that a
+   * value a persisted mapping names has been renamed away (Dart addresses
+   * priorities and types BY TITLE, so a rename silently invalidates a mapping
+   * and Dart drops the write rather than failing it).
+   *
+   * Selection-free by design: none of the three providers scopes these lists to
+   * a container. Dart's are workspace-wide `/config` lists; Linear's and Plane's
+   * are fixed scales the adapter states rather than fetches. See
+   * {@link TrackerFieldOptions} for what a `null` half means.
+   */
+  listFieldOptions(): Promise<TrackerFieldOptions>;
 
   /**
    * Issues in the selection, updated at/after `sinceIso` (the caller widens

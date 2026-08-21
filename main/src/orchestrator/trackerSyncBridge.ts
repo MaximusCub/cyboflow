@@ -25,6 +25,7 @@ import type {
   TrackerCredentialsInput,
   TrackerEntityLinkRef,
   TrackerEntityType,
+  TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
@@ -47,14 +48,14 @@ import type {
  * TrackerSyncService implements this directly (structurally AND nominally — it
  * declares `implements TrackerSyncFacade`).
  *
- * The six `wizard*` methods are STATELESS probes: they build a throwaway
+ * The seven `wizard*` methods are STATELESS probes: they build a throwaway
  * provider client from the credentials in hand, persist nothing, and are the
  * only methods that run before a connection row exists.
  *
- * Three of them (`wizardGroups` / `wizardStates` / `wizardIssues`) take a
- * credential SOURCE rather than credentials, because MAPPING MANAGEMENT re-enters
- * those steps from a connection the user already authorized and has no pasted key
- * to offer — main resolves the stored one, so no key crosses IPC on that path at
+ * Four of them (`wizardGroups` / `wizardStates` / `wizardFieldOptions` /
+ * `wizardIssues`) take a credential SOURCE rather than credentials, because
+ * MAPPING MANAGEMENT re-enters those steps from a connection the user already
+ * authorized and has no pasted key to offer — main resolves the stored one, so no key crosses IPC on that path at
  * all. `wizardValidate` / `wizardContainers` / `wizardNarrows` keep taking bare
  * credentials: they only ever run on the paste path, ahead of any connection.
  */
@@ -75,6 +76,12 @@ export interface TrackerSyncFacade {
     source: TrackerWizardSourceInput,
     selection: TrackerSourceSelection,
   ): Promise<TrackerState[]>;
+  /**
+   * The mapping step's field vocabularies — the provider's priority tokens and
+   * (Dart only) type titles. Takes no selection, unlike `wizardStates`: none of
+   * the three providers scopes these lists to a container.
+   */
+  wizardFieldOptions(source: TrackerWizardSourceInput): Promise<TrackerFieldOptions>;
   /** Wizard Step 2 — the issues in the chosen source (assignee/manual pickers + Reconcile). */
   wizardIssues(
     source: TrackerWizardSourceInput,

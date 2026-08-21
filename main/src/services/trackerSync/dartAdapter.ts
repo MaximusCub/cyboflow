@@ -66,6 +66,7 @@ import type {
   TrackerStateGroup,
   TrackerIssue,
   TrackerUserRef,
+  TrackerFieldOptions,
 } from '../../../../shared/types/trackerSync';
 import type {
   TrackerAdapter,
@@ -201,6 +202,18 @@ interface DartConfigWire {
   dartboards: string[];
   statuses: string[];
   assignees?: DartUserWire[];
+  /**
+   * The workspace's task TYPES (`Task`, `Subtask`, …) and PRIORITY tokens
+   * (`critical`, `high`, `medium`, `low`) — the mapping seeds behind
+   * {@link DartAdapter.listFieldOptions}.
+   *
+   * MEASURED CASING TRAP: `/config` lists priorities in LOWERCASE while every
+   * task read returns them in Title case (`Critical`). Nothing here normalizes
+   * either side — the mapping modules match case-insensitively instead, so both
+   * spellings stay exactly as Dart produced them.
+   */
+  types?: string[];
+  priorities?: string[];
 }
 
 /** `ConciseTask` (list) — the same shape as `Task` minus description/attachments/relationships. */
@@ -215,6 +228,18 @@ interface DartConciseTaskWire {
   assignees?: string[] | null;
   size?: string | number | null;
   updatedAt: string;
+  /**
+   * Task type and priority. BOTH OPTIONAL because Dart OMITS a null field from
+   * every payload it produces — MEASURED on the create echo, the detail GET and
+   * the concise list alike: an unprioritized task carries no `priority` key at
+   * all rather than `priority: null`. So "absent" is the only spelling of unset
+   * and {@link DartAdapter.mapIssue} reads it as such.
+   *
+   * The concise list carries both when set, so the inbound pass rides the
+   * existing fetch and needs no extra hydration for them.
+   */
+  type?: string | null;
+  priority?: string | null;
 }
 
 /** `Task` (detail/create/update) — adds the description the list shape omits. */
@@ -394,6 +419,25 @@ export class DartAdapter implements TrackerAdapter {
       color: null,
       group: inferStateGroup(title),
     }));
+  }
+
+  /**
+   * Dart is the one provider with LIVE field vocabularies: `/config` carries the
+   * workspace's own `priorities` and `types`, both renameable by its owner and
+   * both addressed BY TITLE on a write. Served off the same cached `/config`
+   * every other discovery path uses, so this costs no extra request inside a
+   * pass.
+   *
+   * A `/config` that omits either key (an older deployment) yields `null` for
+   * that half — "nothing live to seed from" — and the mapping falls back to the
+   * canonical token list rather than seeding an empty map.
+   */
+  async listFieldOptions(): Promise<TrackerFieldOptions> {
+    const config = await this.getConfig();
+    return {
+      priorities: config.priorities ?? null,
+      categories: config.types ?? null,
+    };
   }
 
   async listIssues(selection: TrackerSourceSelection, sinceIso?: string): Promise<TrackerIssue[]> {
@@ -844,10 +888,14 @@ export class DartAdapter implements TrackerAdapter {
   private async getConfig(): Promise<DartConfigWire> {
     if (this.configCache !== null) return this.configCache;
     const config = await this.request<DartConfigWire>('GET', '/config');
+    // EVERY key /config carries must be repeated here: this literal REPLACES the
+    // response, so a key omitted from it is silently dropped for the whole pass.
     this.configCache = {
       dartboards: Array.isArray(config.dartboards) ? config.dartboards : [],
       statuses: Array.isArray(config.statuses) ? config.statuses : [],
       assignees: config.assignees,
+      types: Array.isArray(config.types) ? config.types : undefined,
+      priorities: Array.isArray(config.priorities) ? config.priorities : undefined,
     };
     return this.configCache;
   }
@@ -982,6 +1030,11 @@ export class DartAdapter implements TrackerAdapter {
       // So the sweep's own getIssue confirmation already classifies it as gone,
       // and there is no archived-but-present state for this field to carry.
       archivedAt: null,
+      // Omit-when-null (see DartConciseTaskWire): an absent key is how Dart
+      // spells "no priority" / "no type", so both collapse to null here rather
+      // than being distinguished from an explicit null we will never receive.
+      priority: raw.priority ?? null,
+      category: raw.type ?? null,
       // Read BEFORE mapDescription strips it — every path that maps a wire task
       // (hydrated list, detail, create response, client-key recovery) goes
       // through here, so a marker-bearing task surfaces its key no matter how it
