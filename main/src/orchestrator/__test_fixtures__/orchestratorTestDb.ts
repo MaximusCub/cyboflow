@@ -439,13 +439,25 @@ export function seedApproval(db: Database.Database, overrides: SeedApprovalOverr
   const toolUseId = overrides.toolUseId ?? id;
   const status = overrides.status ?? 'pending';
   const createdAt = overrides.createdAt ?? new Date().toISOString();
-  const awaited = overrides.awaited ?? true;
 
-  db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at, awaited)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt, awaited ? 1 : 0);
+  // `awaited` is named ONLY when the caller asks for a specific value. Naming
+  // it unconditionally would break fixtures built from migration 006 alone
+  // (cyboflowSchema.test.ts), which predate 111 and have no such column — and
+  // omitting it is equivalent anyway wherever the column exists, since its
+  // DEFAULT is 1.
+  if (overrides.awaited === undefined) {
+    db.prepare(
+      `INSERT INTO approvals
+         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt);
+  } else {
+    db.prepare(
+      `INSERT INTO approvals
+         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at, awaited)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt, overrides.awaited ? 1 : 0);
+  }
 
   return id;
 }
