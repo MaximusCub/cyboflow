@@ -21,8 +21,8 @@
  * "auto-allowed when it should have asked". Specifically for Bash:
  *  - prefix rules (`Bash(git add:*)`) match on a WORD boundary, so `git add`
  *    does not match `git addendum`;
- *  - compound commands are split (quote-aware) on `&&`, `||`, `;`, `|` and
- *    EVERY segment must independently match an allow rule;
+ *  - compound commands are split (quote-aware) on `&&`, `||`, `;`, `|`, and a
+ *    raw newline, and EVERY segment must independently match an allow rule;
  *  - a segment containing command substitution (`$(` or a backtick) is never
  *    auto-allowed, to prevent `cat $(rm -rf /)`-style smuggling.
  *
@@ -73,6 +73,14 @@ export interface MergedPermissionRules {
 const SHELL_SEPARATORS = ['&&', '||', ';', '|'];
 
 /**
+ * Newline characters, which separate commands exactly as the operators above do
+ * — a distinct constant because they are single chars matched after the
+ * two-char operator check, and because their omission was a real auto-approval
+ * bypass rather than a stylistic gap (see {@link splitShellSegments}).
+ */
+const SHELL_NEWLINE_SEPARATORS = ['\n', '\r'];
+
+/**
  * Parse a raw rule string into `{ toolName, content }`.
  *
  * `Bash(git add:*)` → `{ toolName: 'Bash', content: 'git add:*' }`
@@ -98,9 +106,18 @@ export function parsePermissionRule(rule: string): ParsedRule | null {
 
 /**
  * Split a shell command into independently-evaluated segments on `&&`, `||`,
- * `;`, and `|`, ignoring separators inside single or double quotes.
+ * `;`, `|`, and a RAW NEWLINE, ignoring separators inside single or double
+ * quotes.
  *
  * Quote-aware so `git commit -m "a && b"` yields one segment, not three.
+ *
+ * The newline is a separator for the same reason the others are: a shell runs
+ * `git status\nrm -rf ~` as two commands. It was omitted originally, and every
+ * consumer here evaluates a segment by its FIRST token — so that command
+ * arrived as ONE segment reading `git status` with `rm -rf ~` trailing as
+ * unexamined positionals, and both {@link bashCommandAllowed} and the
+ * acceptEdits classifier declared it safe. Splitting on it is what makes
+ * "every segment must independently classify" mean what it says.
  */
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
@@ -128,7 +145,7 @@ export function splitShellSegments(command: string): string[] {
       i++; // consume the second operator char
       continue;
     }
-    if (ch === ';' || ch === '|') {
+    if (ch === ';' || ch === '|' || SHELL_NEWLINE_SEPARATORS.includes(ch)) {
       segments.push(current);
       current = '';
       continue;

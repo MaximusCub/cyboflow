@@ -340,6 +340,13 @@ const PERMISSION_MODES: readonly OmpGatePermissionMode[] = [
 /** Shell control operators that separate independently-evaluated commands. */
 const SHELL_SEPARATORS = ['&&', '||', ';', '|'] as const;
 
+/**
+ * Newline separators, kept apart from {@link SHELL_SEPARATORS} because that
+ * tuple is indexed positionally below. Port of `permissionRules.ts`'s
+ * `SHELL_NEWLINE_SEPARATORS`.
+ */
+const SHELL_NEWLINE_SEPARATORS: readonly string[] = ['\n', '\r'];
+
 // ---------------------------------------------------------------------------
 // Logger
 // ---------------------------------------------------------------------------
@@ -486,7 +493,10 @@ export function parsePermissionRule(rule: string): ParsedGateRule | null {
   return content.length === 0 ? { toolName } : { toolName, content };
 }
 
-/** Split a command on unquoted shell separators. Port of permissionRules.ts:84-125. */
+/**
+ * Split a command on unquoted shell separators — `&&`, `||`, `;`, `|`, and a raw
+ * newline. Port of permissionRules.ts's `splitShellSegments`.
+ */
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
   let current = '';
@@ -511,7 +521,11 @@ export function splitShellSegments(command: string): string[] {
       i++;
       continue;
     }
-    if (ch === SHELL_SEPARATORS[2] || ch === SHELL_SEPARATORS[3]) {
+    if (
+      ch === SHELL_SEPARATORS[2] ||
+      ch === SHELL_SEPARATORS[3] ||
+      SHELL_NEWLINE_SEPARATORS.includes(ch)
+    ) {
       segments.push(current);
       current = '';
       continue;
@@ -851,6 +865,7 @@ function isLocalOnlyGitWriteSegment(segment: string): boolean {
 export function isSafeReadOnlyBashCommand(rawCommand: string): boolean {
   const command = rawCommand.trim();
   if (command.length === 0) return false;
+  if (/[\r\n]/.test(command)) return false;
   const segments = splitShellSegments(command);
   if (segments.length === 0) return false;
   return segments.every(isSafeReadOnlySegment);
@@ -864,6 +879,7 @@ export function isSafeReadOnlyBashCommand(rawCommand: string): boolean {
 export function isLocalOnlyGitWriteCommand(rawCommand: string): boolean {
   const command = rawCommand.trim();
   if (command.length === 0) return false;
+  if (/[\r\n]/.test(command)) return false;
   const segments = splitShellSegments(command);
   if (segments.length === 0) return false;
   return segments.every(isLocalOnlyGitWriteSegment);
@@ -875,14 +891,19 @@ export function isLocalOnlyGitWriteCommand(rawCommand: string): boolean {
  * fine — `git status && git add -A && git commit -m x` is the shape a lane agent
  * actually runs.
  *
- * The raw-newline refusal is a NARROWING the mirrored classifier does not have.
- * {@link splitShellSegments} treats only `&&`, `||`, `;` and `|` as separators
- * (it must, to stay byte-identical to cyboflow's rule grammar in
- * {@link matchesAllowRules}), so `git status\nrm -rf ~` arrives as ONE segment
- * that whitespace-tokenizes to `git status` plus stray positionals — read-only
- * by the table, catastrophic in fact. Teaching the splitter a new separator
- * would desync the allow-rule matcher; refusing the character is the narrow fix,
- * and a multi-line command simply reaches the human instead of being auto-run.
+ * The raw-newline refusal is now belt AND braces. {@link splitShellSegments}
+ * splits on a newline like any other separator, so `git status\nrm -rf ~`
+ * arrives as two segments and the `rm` one fails the tables. The blunt refusal
+ * stays on top because a newline INSIDE quotes survives the split, and because
+ * the mirrored classifier refuses identically — the parity test pins the two
+ * together. A multi-line command simply reaches the human instead of being
+ * auto-run.
+ *
+ * It did not always work this way: the splitter originally ignored newlines
+ * "to stay byte-identical to cyboflow's rule grammar", which left that same
+ * grammar (and the acceptEdits classifier) auto-approving the command above.
+ * Splitting is strictly more conservative for both — an unmatched segment falls
+ * through to the human — so the sync was restored in the safe direction.
  */
 export function isGateSafeBashCommand(rawCommand: string): boolean {
   const command = rawCommand.trim();
@@ -1201,11 +1222,10 @@ function isAutoModeHazardousSegment(segment: string): boolean {
  *    table can see, and `<`/`>`/`&` read, write, or background outside the
  *    segment model. A hazard list can only classify what it can read, so an
  *    unreadable command is itself the hazard.
- *  - The raw-newline refusal — `splitShellSegments` treats only `&&`, `||`, `;`
- *    and `|` as separators, so `git status\nrm -rf ~` arrives as ONE segment
- *    that tokenizes to a harmless-looking `git status` plus stray positionals.
- *    Under a prove-it-safe tier that is merely a missed allow; under
- *    allow-unless-hazardous it would be a full bypass of every table above.
+ *  - The raw-newline refusal — redundant with the splitter now that it treats a
+ *    newline as a separator, and kept anyway: a newline inside quotes survives
+ *    the split, and under allow-unless-hazardous an unread line is a full bypass
+ *    of every table above rather than merely a missed allow.
  */
 export function isAutoModeAllowedBashCommand(rawCommand: string): boolean {
   const command = rawCommand.trim();

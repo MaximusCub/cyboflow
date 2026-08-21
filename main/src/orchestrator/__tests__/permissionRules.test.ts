@@ -275,3 +275,38 @@ describe('loadMergedPermissionRules — ask list', () => {
     expect(isToolAllowed('Bash', bash('git status'), merged)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Raw newlines
+//
+// The splitter originally treated `\n` as ordinary whitespace, so a granted
+// command with a second line appended arrived as ONE segment whose prefix
+// matched the rule — `Bash(git status:*)` auto-allowed `git status\nrm -rf ~`.
+// ---------------------------------------------------------------------------
+
+describe('splitShellSegments — a raw newline is a separator', () => {
+  it('splits on a newline like any other operator', () => {
+    expect(splitShellSegments('git status\nrm -rf ~')).toEqual(['git status', 'rm -rf ~']);
+  });
+  it('splits on a carriage return, and collapses a CRLF pair', () => {
+    expect(splitShellSegments('ls\r\nrm -rf ~')).toEqual(['ls', 'rm -rf ~']);
+  });
+  it('does not split a newline inside quotes', () => {
+    expect(splitShellSegments('echo "a\nb"')).toEqual(['echo "a\nb"']);
+  });
+});
+
+describe('isToolAllowed — a newline cannot smuggle a second command', () => {
+  it('refuses a granted command with an ungranted line appended', () => {
+    const r = rules(['Bash(git status:*)']);
+    expect(isToolAllowed('Bash', bash('git status\nrm -rf ~'), r)).toBe(false);
+  });
+  it('refuses regardless of which line carries the grant', () => {
+    const r = rules(['Bash(git status:*)']);
+    expect(isToolAllowed('Bash', bash('rm -rf ~\ngit status'), r)).toBe(false);
+  });
+  it('still allows a multi-line command when EVERY line is granted', () => {
+    const r = rules(['Bash(git add:*)', 'Bash(git status:*)']);
+    expect(isToolAllowed('Bash', bash('git status\ngit add .'), r)).toBe(true);
+  });
+});
