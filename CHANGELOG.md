@@ -6,9 +6,33 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-08-21
+
+### Added
+
+- **Multi-project tracker mapping.** A tracker connection can now map several tracker projects/spaces to their own cyboflow projects through sibling connection rows, each with an independent push target. The connected view gains a Project mappings card, and the wizard's Map step becomes a full mapping editor — linked rows with staged unlink, add-mapping mode that defers to the incumbent push target, and Connect surfaced only when a source is unconnected. Push-target identity is the full source scope and is enforced across runs (migration 110).
+- **Pairwise evaluation judge panel.** The pairwise judge is now an ordered 3-slot panel that classifies slot failures and backfills degraded ballots instead of collapsing, with a `CodexPairwiseJudge` implementation alongside the Claude one.
+- **Lane runbook bootstrap.** A verification lane derives, commits, and *proves* its own verification runbook — the harness exports the runbook's declared levers, and a committed config edit is always surfaced even when the bootstrap refuses (migrations 106–109).
+- **PTY fan-out dynamic-workflow dispatch**, shipped on by default for interactive runs: a fan-out step dispatches its lanes as a dynamic workflow.
+- **Configurable per-substrate sprint task cap.**
+- **Daily `sessions.db` backups** with 7-day retention, pruning WAL sidecars alongside stale backups.
+- **Main-process CPU/memory instrumentation** and a profiling harness.
+- Pending-approval cards now say **who is asking**, and gate log lines are tagged with the agent that produced them.
+
 ### Changed
 
 - **Multi-idea idea summaries collapse into one tab.** A planner run owning several ideas minted one idea-summary artifact per idea, all labelled "Idea summary", so the tab strip carried N indistinguishable tabs and each screen covered a single idea. A batch now mints one combined tab — following the same pattern the combined "Idea specs" tab already used — rendering a compact matrix: one row per idea against the five ledger components as columns, each row expanding to that idea's own deliverable links. Status is carried by shape as well as colour, with a legend. Single-idea runs are unchanged. Also fixes the per-idea "Idea spec" link, which pointed at a live tab for the batch's first idea only and read "not yet" for every other idea.
+
+### Fixed
+
+- **OMP approval reliability.** A human's answer now revives a run that was marked stuck while they were deciding (migration 111); a parked OMP verdict expires instead of standing for the whole run; humans get more than 25 seconds to answer; the OMP gate classifies `hub` calls by argument (no longer gating pure coordination), stops reading file bodies as remote targets, and stamps the approval's inbox row with the OMP substrate. A standing approval can no longer claim a blocked agent.
+- **Eval jury no longer starves on large diffs** — more diff is inlined and the juror deadline scales with diff size, so the panel grades from the change instead of collapsing to a single ballot.
+- **Dart recovery** — a create whose marker line the normalizer reflowed is recovered; the parent-scoped recovery arm is guarded against a trashed parent; a local body is aligned with what the create actually stored.
+- Native crash reports are scrubbed of absolute paths and tagged by process provenance.
+- The SDK path never auto-allows a tool call the user asked to be asked about, and stamps `origin { kind: 'human' }` on user turns.
+- `tailwind-merge` no longer drops Button text colors at `size=md`; the idea-summary matrix scrolls instead of clipping when narrow.
+- Escape closes only the top-most modal in a nested stack.
+- A busy local entity defers one item instead of wedging inbound sync; a throttled subscription tears down when its source goes idle.
 
 ## [0.2.4] — 2026-08-19
 
