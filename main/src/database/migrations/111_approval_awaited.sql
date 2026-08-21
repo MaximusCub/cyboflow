@@ -1,4 +1,15 @@
--- Migration 110: is anyone actually waiting on this approval?
+-- Migration 111: is anyone actually waiting on this approval?
+--
+-- Numbered 111, not 110: this branch minted its 110 against main@53fa9855, and
+-- 110_tracker_push_target.sql landed on main first. Nothing is lost when two
+-- files share a prefix — runFileBasedMigrations() ledgers each by FILENAME in
+-- user_preferences, so both apply — but their relative order then falls out of
+-- readdir rather than being stated, which is only safe for as long as nobody
+-- looks. Renumbering on collision is the repo's standing practice.
+--
+-- The ALTER below is idempotent (see the note at the bottom), so a database
+-- that already ran this file under its old number re-runs it harmlessly and the
+-- runner records the new ledger key.
 --
 -- Until now "pending" carried two meanings at once, and the review queue
 -- rendered both as the louder one: an agent is HALTED on this call right now,

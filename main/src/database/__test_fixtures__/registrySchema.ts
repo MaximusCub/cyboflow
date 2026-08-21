@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workfl
  * needed by the day-3 gate integration harness.
  * Source of truth for these tables: main/src/database/migrations/006_cyboflow_schema.sql
  * plus main/src/database/migrations/071_raw_events_dedup.sql and
- * main/src/database/migrations/110_approval_awaited.sql.
+ * main/src/database/migrations/111_approval_awaited.sql.
  */
 export const GATE_SCHEMA = REGISTRY_SCHEMA + `
 CREATE TABLE IF NOT EXISTS approvals (
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   decided_at DATETIME,
   decided_by TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  -- Migration 110: is a requester actually blocked on this ask right now? Only
+  -- Migration 111: is a requester actually blocked on this ask right now? Only
   -- the omp-sdk gate ever writes 0 (it hangs up at ~25s and the model may not
   -- retry); every other transport blocks for the whole window, hence DEFAULT 1.
   awaited INTEGER NOT NULL DEFAULT 1,

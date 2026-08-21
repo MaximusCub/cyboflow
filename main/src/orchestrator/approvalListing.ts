@@ -180,7 +180,7 @@ export function selectPendingApprovals(db: DatabaseLike): Approval[] {
     rationale: row.rationale,
     createdAt: new Date(row.createdAt).toISOString(),
     status: row.status as Approval['status'],
-    // Migration 110 backfills 1, so a row written before it (or by any transport
+    // Migration 111 backfills 1, so a row written before it (or by any transport
     // that never touches the column) reads as awaited — the honest default.
     awaited: row.awaited !== 0,
     ...toApprovalAttribution(row.sessionName, row.agentRuntime),

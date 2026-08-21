@@ -139,7 +139,7 @@ function buildDb(): Database.Database {
       UNIQUE (entity_type, entity_id, seq)
     );
   `);
-  db.exec(readFileSync(join(migDir, '110_approval_awaited.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '111_approval_awaited.sql'), 'utf-8'));
   // resolveRunPermissionMode joins the owning session; this fixture predates the
   // migrations that add those columns, so add the minimal join surface. No mode
   // ⇒ null ⇒ every call routes to the router gate, which is what we are testing.

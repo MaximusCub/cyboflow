@@ -80,7 +80,7 @@ export interface Approval {
    * cards claiming to block a run that had moved on. Surfaces MUST NOT show a
    * `false` row as blocked: no "blocked Nm" badge, no blocking counter.
    *
-   * Backed by `approvals.awaited` (migration 110).
+   * Backed by `approvals.awaited` (migration 111).
    */
   awaited: boolean;
 }
