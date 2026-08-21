@@ -7,6 +7,7 @@
  */
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
+import type { StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,26 @@ export interface OrchestratorDeps {
     projectId: number,
     change: ReviewItemCreate | ReviewItemTriage,
   ) => Promise<{ reviewItemId: string; event: { id: number; seq: number } }>;
+  /**
+   * Optional: the main-process sink for stuck-run notifications (the tRPC
+   * router's `stuckEvents`). StuckDetector emits 'runs:stuck' on its own
+   * per-instance emitter; Orchestrator.start() forwards those onto this sink
+   * as 'detected', which is the event name `events.onStuckDetected` subscribes
+   * to. When omitted the detector still writes the DB and emits telemetry —
+   * only the renderer push is skipped.
+   *
+   * Injected rather than imported so the orchestrator subtree keeps its
+   * standalone-typecheck invariant.
+   */
+  stuckEvents?: StuckEventSink;
+}
+
+/**
+ * The narrow emit surface Orchestrator needs from the stuck-event sink. Any
+ * Node EventEmitter satisfies it structurally.
+ */
+export interface StuckEventSink {
+  emit(event: string, payload: StuckDetectedEvent): boolean;
 }
 
 // Re-export narrow interfaces so callers that only need the interface shapes

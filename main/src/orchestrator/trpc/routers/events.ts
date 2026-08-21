@@ -45,11 +45,12 @@ export const approvalEvents = new EventEmitter();
 
 /**
  * Main-process EventEmitter for stuck-run lifecycle events.
- * The emit-source bridge (StuckDetector → stuckEvents) belongs in
- * stuck-detection-and-observability's instantiation step in main/src/index.ts.
- * Until that wiring lands, the subscription procedure exists and is
- * type-safe but yields no events — sufficient to eliminate the
- * "No subscription-procedure on path" runtime error.
+ *
+ * The emit-source bridge (StuckDetector 'runs:stuck' → this emitter's
+ * 'detected') is wired in Orchestrator.start(), which receives this emitter as
+ * OrchestratorDeps.stuckEvents from main/src/index.ts. It went unwired from the
+ * epic landing until 2026-08-21; the subscription was live the whole time and
+ * simply never received anything.
  */
 export const stuckEvents = new EventEmitter();
 
@@ -299,11 +300,10 @@ export const eventsRouter = router({
    * Subscribe to stuck-run detection notifications (all runs).
    *
    * Emitted when StuckDetector transitions a workflow_run to status='stuck'.
-   * The emit-source bridge (StuckDetector → stuckEvents) is wired in
-   * main/src/index.ts by the stuck-detection-and-observability epic.
-   * Until that wiring lands, the subscription yields no events but tears
-   * down cleanly — eliminating the "No subscription-procedure on path
-   * cyboflow.events.onStuckDetected" runtime error from reviewQueueSlice.
+   * The emit-source bridge lives in Orchestrator.start() (see stuckEvents
+   * above). This subscription is what writes the renderer's runStatusMap, and
+   * runStatusMap is the sole input to StuckBadge, "Why stuck?", "Cancel and
+   * restart" and useStuckNotifications — nothing else hydrates it.
    */
   onStuckDetected: protectedProcedure
     .subscription(async function* ({ signal }): AsyncGenerator<StuckDetectedEvent> {

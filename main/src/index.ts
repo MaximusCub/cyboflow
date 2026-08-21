@@ -214,7 +214,7 @@ import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
-import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
+import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents, stuckEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { ClaudeJudge } from './orchestrator/eval/evalJury';
 import { CodexJudge } from './orchestrator/eval/codexJudge';
@@ -4169,6 +4169,10 @@ app.whenReady().then(async () => {
       db,
       logger: loggerLike,
       runQueues,
+      // The stuck-run push channel the epic always specified but never wired.
+      // events.onStuckDetected subscribes to this emitter; without it the
+      // renderer's runStatusMap stays empty and the whole stuck UI is dead.
+      stuckEvents,
       // Review-item write chokepoint. Used at start to drain any LEGACY
       // idle-session review items (the mint was retired for the live
       // QuickSessionsTable — see Orchestrator.start / drainLegacyIdleReviewItems).

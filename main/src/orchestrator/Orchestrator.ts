@@ -13,6 +13,7 @@
 import { EventEmitter } from 'node:events';
 import type { OrchestratorDeps } from './types';
 import { StuckDetector, type ClaudeManagerLike } from './stuckDetector';
+import type { StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import { drainLegacyIdleReviewItems } from './drainLegacyIdleReviewItems';
 
 export class Orchestrator {
@@ -21,6 +22,12 @@ export class Orchestrator {
 
   /** Periodic stuck-state scanner — constructed in start(), stopped in stop(). */
   private detector?: StuckDetector;
+
+  /** The detector's own emitter, retained so stop() can detach the bridge. */
+  private detectorEvents?: EventEmitter;
+
+  /** The bridge listener, retained for symmetric teardown. */
+  private onDetectorStuck?: (event: StuckDetectedEvent) => void;
 
   /** Periodic idle-quick-session review scanner — constructed in start(), stopped in stop(). */
 
@@ -54,11 +61,38 @@ export class Orchestrator {
     const claudeManager: ClaudeManagerLike =
       this.deps.claudeManager ?? { hasActiveRunForId: () => true };
 
+    // The detector's own emitter, bridged below. Keeping it per-instance (as
+    // opposed to handing the detector the shared sink directly) keeps the
+    // detector's event name its own business and gives stop() something to
+    // detach from.
+    const detectorEvents = new EventEmitter();
+
+    // THE BRIDGE. events.ts has carried "the emit-source bridge is wired in
+    // main/src/index.ts" since the epic landed, and it never was: the detector
+    // emitted into an anonymous EventEmitter nobody held, while the tRPC
+    // subscription listened on a module-level emitter with zero emitters. So
+    // runStatusMap — which is ONLY ever written by that subscription — stayed
+    // empty forever, and every consumer downstream of it (StuckBadge, "Why
+    // stuck?", "Cancel and restart", useStuckNotifications) was unreachable
+    // code. Note the rename across the seam: 'runs:stuck' -> 'detected'.
+    const sink = this.deps.stuckEvents;
+    if (sink) {
+      this.onDetectorStuck = (event: StuckDetectedEvent): void => {
+        sink.emit('detected', event);
+      };
+      detectorEvents.on('runs:stuck', this.onDetectorStuck);
+    } else {
+      this.deps.logger.warn(
+        'orchestrator.start: stuckEvents sink not provided — stuck runs will be persisted but not pushed to the renderer',
+      );
+    }
+    this.detectorEvents = detectorEvents;
+
     this.detector = new StuckDetector({
       db: this.deps.db,
       claudeManager,
       permissionServer: this.deps.permissionServer,
-      emitter: new EventEmitter(),
+      emitter: detectorEvents,
       logger: this.deps.logger,
     });
 
@@ -92,11 +126,17 @@ export class Orchestrator {
     this.running = false;
     this.deps.logger.info('orchestrator.stop.begin');
 
-    // Stop the stuck detector before draining queues.
+    // Stop the stuck detector before draining queues, and detach the bridge so
+    // a restarted orchestrator does not stack a second forwarder on the sink.
     if (this.detector) {
       this.detector.stop();
       this.detector = undefined;
     }
+    if (this.detectorEvents && this.onDetectorStuck) {
+      this.detectorEvents.off('runs:stuck', this.onDetectorStuck);
+    }
+    this.detectorEvents = undefined;
+    this.onDetectorStuck = undefined;
 
     await this.deps.runQueues.drainAll();
     this.deps.logger.info('orchestrator.stop.complete');
