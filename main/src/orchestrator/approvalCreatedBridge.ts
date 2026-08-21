@@ -27,6 +27,7 @@ import type { ApprovalRequest } from '../../../shared/types/approval';
 import type { ApprovalCreatedEvent } from '../../../shared/types/approvals';
 import { truncatePayloadPreview } from '../../../shared/utils/approvals';
 import type { DatabaseLike } from './types';
+import { selectApprovalAttribution } from './approvalListing';
 
 /**
  * Build an ApprovalCreatedEvent from an in-memory ApprovalRequest by
@@ -81,6 +82,10 @@ export function buildApprovalCreatedEvent(
     );
   }
 
+  // Same derivation the queue-wide listing uses, so a card built from the live
+  // event and the same card after a refetch cannot disagree about who asked.
+  const attribution = selectApprovalAttribution(db, request.runId);
+
   const payloadJson = JSON.stringify(request.input);
   const payloadPreview = truncatePayloadPreview(payloadJson);
 
@@ -95,6 +100,7 @@ export function buildApprovalCreatedEvent(
       createdAt: new Date(request.timestamp).toISOString(),
       status: 'pending',
       awaited,
+      ...attribution,
     },
   };
 }

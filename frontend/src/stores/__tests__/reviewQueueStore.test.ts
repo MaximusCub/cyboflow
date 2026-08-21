@@ -95,6 +95,8 @@ function makeApproval(overrides: Partial<Approval> & { id: string }): Approval {
     createdAt: overrides.createdAt ?? '2026-01-01T00:00:00.000Z',
     status: overrides.status ?? 'pending',
     awaited: overrides.awaited ?? true,
+    sessionName: overrides.sessionName ?? null,
+    agentProvider: overrides.agentProvider ?? null,
   };
 }
 

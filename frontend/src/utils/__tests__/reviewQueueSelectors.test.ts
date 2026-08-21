@@ -22,6 +22,8 @@ function makeApproval(overrides: Partial<Approval> & { id: string }): Approval {
     createdAt: new Date().toISOString(),
     status: 'pending',
     awaited: true,
+    sessionName: null,
+    agentProvider: null,
     ...overrides,
   };
 }
