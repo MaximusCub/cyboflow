@@ -878,6 +878,41 @@ describe("rule 5a: `auto` allows unless hazardous", () => {
     expect(bash(pathForm).kind, pathForm).toBe('ask');
   });
 
+  // The same shadowing family as the path bypass: the hazard tables classify
+  // the FIRST token, so anything standing in that slot without being the
+  // program hid the program outright. All three of these were auto-allowed.
+  it.each([
+    ['FOO=1 rm -rf /', 'an assignment prefix'],
+    ['FOO=1 sudo rm -rf /', 'an assignment prefix in front of sudo'],
+    ['X=1 Y=2 zsh -lc "evil"', 'two assignment prefixes in front of a shell'],
+    ['FOO=1 git push origin main', 'an assignment prefix in front of a hazard subcommand'],
+    ['for i in 1; do rm -rf ~; done', 'a loop body hidden behind `do`'],
+    ['if true; then sudo rm -rf /; fi', 'a branch body hidden behind `then`'],
+    ['time rm -rf ~', 'a wrapper that runs its argument'],
+    ['nice rm -rf ~', 'a wrapper that runs its argument'],
+    ['command rm -rf ~', 'a wrapper that runs its argument'],
+  ])('refuses %s — %s', (command) => {
+    expect(bash(command).kind).toBe('ask');
+  });
+
+  // The prefixes are skipped, NOT trusted: a token that executes nothing is
+  // benign, and a prefix that consumed an option we do not model is refused
+  // rather than parsed (the discipline `git -C …` already gets).
+  it('allows a prefix that executes nothing, refuses one it cannot read', () => {
+    expect(bash('FOO=1')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+    expect(bash('FOO=1 pnpm test')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+    expect(bash('nice -n 5 rm -rf ~').kind).toBe('ask');
+  });
+
+  // `exec`/`source`/`nohup`/`xargs`/`env` are code-executing, so they must NOT
+  // be treated as transparent — skipping past one would inspect its argument
+  // instead of refusing the wrapper.
+  it('never skips past a code-executing wrapper', () => {
+    for (const command of ['exec ls', 'source ./x.sh', 'nohup ls', 'xargs ls', 'env ls']) {
+      expect(bash(command).kind, command).toBe('ask');
+    }
+  });
+
   // The counterpart the basename rule must NOT break: a path is only resolved so
   // far as its own spelling. An ordinary binary keeps auto-allowing.
   it('still allows an ordinary program invoked by path', () => {

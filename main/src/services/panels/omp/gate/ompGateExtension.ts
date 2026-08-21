@@ -1202,12 +1202,64 @@ function programName(token: string): string {
   return slash === -1 ? token : token.slice(slash + 1);
 }
 
+/** A `NAME=value` token: sets a variable, executes nothing. */
+const ASSIGNMENT_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Tokens that stand in FRONT of the real program without being it.
+ *
+ * The hazard tables classify `tokens[0]`, so anything occupying that slot
+ * without being the command shadows the command entirely. Three shapes did:
+ *
+ *     FOO=1 sudo rm -rf /            assignment prefix
+ *     for i in 1; do rm -rf ~; done  the `do` segment's keyword
+ *     time rm -rf ~ / nice rm -rf ~  a wrapper that runs its argument
+ *
+ * Every one of those was auto-allowed, because `FOO=1`, `do` and `time` are in
+ * no table. Skipping past them puts the actual program back in the slot the
+ * tables read.
+ *
+ * `exec`, `source`, `nohup`, `xargs`, `env` and the shells are deliberately
+ * ABSENT: they are already CODE_EXECUTING_PROGRAMS, and skipping past one would
+ * turn a refusal into an inspection of its argument — the opposite of the point.
+ */
+const TRANSPARENT_PREFIX_TOKENS: ReadonlySet<string> = new Set([
+  'if', 'then', 'else', 'elif', 'fi',
+  'for', 'while', 'until', 'do', 'done',
+  'case', 'esac', 'select', 'function',
+  'time', 'command', 'builtin', 'nice',
+  '{', '}', '(', ')', '!',
+]);
+
+/**
+ * The program a segment actually runs, or `null` when it runs nothing (a bare
+ * assignment, a lone `done`).
+ *
+ * Returns `'-'`-leading tokens as-is so the caller can refuse them: landing on
+ * a flag means a prefix consumed an option this function does not model
+ * (`nice -n 5 rm …`), and an unreadable form is refused rather than parsed —
+ * the same discipline `git -C …` already gets.
+ */
+function resolveProgramToken(tokens: readonly string[]): string | null {
+  for (const token of tokens) {
+    if (ASSIGNMENT_PREFIX.test(token)) continue;
+    if (TRANSPARENT_PREFIX_TOKENS.has(token)) continue;
+    return token;
+  }
+  return null;
+}
+
 /** True if ONE segment trips a hazard table. */
 function isAutoModeHazardousSegment(segment: string): boolean {
   const tokens = tokenizeSegment(segment);
   if (tokens.length === 0) return true;
-  const program = programName(tokens[0]!);
-  const args = tokens.slice(1);
+  const programToken = resolveProgramToken(tokens);
+  // Nothing is executed (a bare `FOO=1`, a lone `done`) — benign.
+  if (programToken === null) return false;
+  // A prefix consumed an option this function does not model. Refuse.
+  if (programToken.startsWith('-')) return true;
+  const program = programName(programToken);
+  const args = tokens.slice(tokens.indexOf(programToken) + 1);
 
   if (PRIVILEGE_ESCALATION_PROGRAMS.has(program)) return true;
   if (CODE_EXECUTING_PROGRAMS.has(program)) return true;
