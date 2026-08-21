@@ -4173,6 +4173,27 @@ app.whenReady().then(async () => {
       // events.onStuckDetected subscribes to this emitter; without it the
       // renderer's runStatusMap stays empty and the whole stuck UI is dead.
       stuckEvents,
+      // Rung 1 (orphan_pty) liveness. RunExecutor is the right supplier here
+      // and defaultCliManager is NOT: the CLI managers are per-provider, so
+      // asking the Claude SDK manager whether a run is alive answers "no" for
+      // every healthy OMP, Codex and interactive-PTY run and would stamp all
+      // of them orphaned. hasActiveExecution is provider-agnostic — it is true
+      // while ANY executor-driven walk holds the run between start and
+      // teardownRun, which is precisely the window in which somebody could
+      // still collect an approval.
+      //
+      // The ID domains line up by an enforced invariant, not by luck:
+      // RunExecutor.execute sets panelId = sessionId = runId (see the comment
+      // at its assignment), so no run->panel translation is needed.
+      //
+      // Honest about the proxy: this answers "an executor still holds this
+      // run", not "the agent process is alive". Those diverge if a walk hangs
+      // on a dead process, which this will still report as alive — strictly
+      // better than the `() => true` no-op it replaces, and it never reports a
+      // live run as dead, which is the direction that would cause damage.
+      claudeManager: {
+        hasActiveRunForId: (runId: string): boolean => runExecutor.hasActiveExecution(runId),
+      },
       // Review-item write chokepoint. Used at start to drain any LEGACY
       // idle-session review items (the mint was retired for the live
       // QuickSessionsTable — see Orchestrator.start / drainLegacyIdleReviewItems).

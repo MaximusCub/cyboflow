@@ -55,11 +55,24 @@ export class Orchestrator {
     this.running = true;
     this.deps.logger.info('orchestrator.start');
 
-    // Construct and start the stuck detector.  When claudeManager is not
-    // provided in deps, supply a no-op adapter that treats every run as alive
-    // (orphan_pty classification disabled but all other variants still work).
-    const claudeManager: ClaudeManagerLike =
-      this.deps.claudeManager ?? { hasActiveRunForId: () => true };
+    // Construct and start the stuck detector.  Production supplies a real
+    // claudeManager (index.ts wires RunExecutor.hasActiveExecution). The
+    // fallback below remains for tests and any embedder that has no executor:
+    // it treats every run as alive, which disables orphan_pty rather than
+    // misfiring it. Fail-open is deliberate — `() => false` would stamp every
+    // stale approval orphaned, which is a worse failure than detecting none.
+    // Unlike the permissionServer branch this fallback used to be silent; it
+    // now warns, because a silently inert rung is how it went unnoticed from
+    // TASK-501 until 2026-08-21.
+    let claudeManager: ClaudeManagerLike;
+    if (this.deps.claudeManager) {
+      claudeManager = this.deps.claudeManager;
+    } else {
+      this.deps.logger.warn(
+        'orchestrator.start: claudeManager not provided — orphan_pty classification disabled',
+      );
+      claudeManager = { hasActiveRunForId: () => true };
+    }
 
     // The detector's own emitter, bridged below. Keeping it per-instance (as
     // opposed to handing the detector the shared sink directly) keeps the
