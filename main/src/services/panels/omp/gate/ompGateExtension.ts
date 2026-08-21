@@ -334,7 +334,26 @@ export function parseGateConfig(raw: string | undefined, logger: OmpGateLogger):
     // Anything that is not an explicit `false` denies the subagent tool.
     denyTaskTool: obj['denyTaskTool'] === false ? false : true,
     cyboflowMcpToolNames: stringArray(obj['cyboflowMcpToolNames']) ?? [],
+    // A budget is honored only as a POSITIVE FINITE number. Anything else —
+    // absent, a string, NaN, zero, negative — leaves the field unset, and an
+    // unset field means the built-in ~25s budget. That asymmetry is deliberate:
+    // the damage from wrongly believing OMP will wait 30 minutes is a lost
+    // error message and a stranded socket, while the damage from wrongly
+    // keeping 25s is only a retry the deferred-approval path already handles.
+    ...(positiveBudget(obj['humanDecisionBudgetMs']) !== undefined
+      ? { humanDecisionBudgetMs: positiveBudget(obj['humanDecisionBudgetMs']) }
+      : {}),
   };
+}
+
+/**
+ * A `humanDecisionBudgetMs` value we are willing to act on: a finite number
+ * strictly greater than zero. `typeof x === 'number'` alone would admit NaN
+ * and Infinity, either of which turns `setTimeout` into "never fire".
+ */
+function positiveBudget(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1628,7 +1647,13 @@ export function createToolCallHandler(
       toolInput: event.input,
       logger,
       ...(runtime.connect ? { connect: runtime.connect } : {}),
-      ...(runtime.budgetMs !== undefined ? { budgetMs: runtime.budgetMs } : {}),
+      // Precedence: an explicit test override, then the host-configured budget,
+      // then `HUMAN_DECISION_BUDGET_MS` inside requestSocketDecision.
+      ...(runtime.budgetMs !== undefined
+        ? { budgetMs: runtime.budgetMs }
+        : config.humanDecisionBudgetMs !== undefined
+          ? { budgetMs: config.humanDecisionBudgetMs }
+          : {}),
       inFlight: runtime.inFlight,
     });
 

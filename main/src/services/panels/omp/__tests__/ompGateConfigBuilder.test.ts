@@ -244,3 +244,20 @@ describe('buildOmpGateConfig', () => {
     ).toBe('block');
   });
 });
+
+describe('buildOmpGateConfig — the human-decision budget', () => {
+  const base = { permissionMode: 'default' as const, cyboflowMcpAvailable: true };
+
+  it('omits the field entirely when no budget was resolved', () => {
+    // Absence is the signal that tells the gate to keep its built-in ~25s
+    // budget. A defaulted number here would be a claim that OMP was configured
+    // to allow a longer handler, which for an un-raised spawn is false.
+    const config = buildOmpGateConfig(base);
+    expect('humanDecisionBudgetMs' in config).toBe(false);
+  });
+
+  it('forwards the budget verbatim when one was resolved', () => {
+    const config = buildOmpGateConfig({ ...base, humanDecisionBudgetMs: 1_770_000 });
+    expect(config.humanDecisionBudgetMs).toBe(1_770_000);
+  });
+});

@@ -217,6 +217,22 @@ export interface OmpGateConfig {
    * fall through to the human gate like any other undecidable tool.
    */
   cyboflowMcpToolNames?: string[];
+  /**
+   * How long the gate may block waiting for a human verdict, in ms.
+   *
+   * Present only when the host has RAISED OMP's own extension-handler cap for
+   * this spawn (`ompHandlerTimeoutOverlay.ts`); the two numbers are computed
+   * together so the gate always gives up before OMP does and the model sees
+   * cyboflow's reason rather than OMP's generic timeout text.
+   *
+   * Optional, and the fallback matters: absent, malformed, or non-positive
+   * means the gate keeps its built-in ~25s budget, which is the only correct
+   * behavior against an OMP that still hard-caps handlers at 30s. A config
+   * that claims a longer budget than the runtime allows would lose the gate's
+   * own error text and strand the socket, so this field is trusted ONLY as
+   * written by a host that also wrote the matching overlay.
+   */
+  humanDecisionBudgetMs?: number;
 }
 
 // ---------------------------------------------------------------------------

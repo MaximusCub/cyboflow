@@ -926,3 +926,37 @@ describe("rule 5a: `auto` allows unless hazardous", () => {
     },
   );
 });
+
+describe('parseGateConfig — humanDecisionBudgetMs', () => {
+  const parse = (value: unknown): ReturnType<typeof parseGateConfig> =>
+    parseGateConfig(JSON.stringify({ humanDecisionBudgetMs: value }), silentLogger);
+
+  it('accepts a positive finite number', () => {
+    expect(parse(1_770_000).humanDecisionBudgetMs).toBe(1_770_000);
+  });
+
+  it('leaves the field unset when it is absent', () => {
+    // Unset means the gate keeps HUMAN_DECISION_BUDGET_MS, which is the only
+    // correct budget against an OMP that still hard-caps handlers at 30s.
+    expect('humanDecisionBudgetMs' in parseGateConfig('{}', silentLogger)).toBe(false);
+  });
+
+  it.each([
+    ['a string', '60000'],
+    ['null', null],
+    ['zero', 0],
+    ['negative', -1],
+  ])('ignores a %s budget rather than acting on it', (_label, value) => {
+    expect('humanDecisionBudgetMs' in parse(value)).toBe(false);
+  });
+
+  it('falls back to the restrictive policy on a bare Infinity literal', () => {
+    // JSON cannot express NaN or Infinity, so the finiteness half of the guard
+    // is unreachable through this parser and stays purely defensive. What a
+    // config CAN contain is the bare token, which is not valid JSON at all —
+    // and that must land on the restrictive policy, never on a budget.
+    const parsed = parseGateConfig('{"humanDecisionBudgetMs": Infinity}', silentLogger);
+    expect(parsed).toEqual(MOST_RESTRICTIVE_GATE_CONFIG);
+    expect('humanDecisionBudgetMs' in parsed).toBe(false);
+  });
+});

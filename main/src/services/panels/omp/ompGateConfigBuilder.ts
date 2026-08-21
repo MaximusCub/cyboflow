@@ -233,6 +233,15 @@ export interface OmpGateConfigInput {
    * undecidable and reach the human, which is exactly the desired outcome.
    */
   cyboflowMcpAvailable: boolean;
+  /**
+   * The human-decision budget to hand the gate, in ms. Pass this ONLY when the
+   * spawn also carries the matching `PI_CONFIG_FILES` overlay that raises OMP's
+   * own extension-handler cap — the two are halves of one change, and a budget
+   * without the overlay makes the gate outlive the runtime that hosts it.
+   * Omitted for an OMP older than
+   * `OMP_CONFIGURABLE_HANDLER_TIMEOUT_VERSION`, which ignores the setting.
+   */
+  humanDecisionBudgetMs?: number;
 }
 
 /**
@@ -269,5 +278,11 @@ export function buildOmpGateConfig(input: OmpGateConfigInput): OmpGateConfig {
     allowRules: [...(input.allowRules ?? [])],
     denyTaskTool: true,
     cyboflowMcpToolNames: input.cyboflowMcpAvailable ? cyboflowOmpMcpToolNames() : [],
+    // Omitted rather than defaulted: absence is what tells the gate to keep its
+    // own ~25s budget, and an explicit number here is a claim that OMP was
+    // configured to allow it.
+    ...(input.humanDecisionBudgetMs !== undefined
+      ? { humanDecisionBudgetMs: input.humanDecisionBudgetMs }
+      : {}),
   };
 }

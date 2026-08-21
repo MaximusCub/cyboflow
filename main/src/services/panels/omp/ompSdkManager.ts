@@ -39,10 +39,17 @@ import {
 } from './ompQuestionBridge';
 import { detectOmpAvailability } from './ompAvailability';
 import { buildOmpGateConfig } from './ompGateConfigBuilder';
+import {
+  composePiConfigFiles,
+  ensureHandlerTimeoutOverlay,
+  OMP_HANDLER_TIMEOUT_MS,
+  OMP_RAISED_DECISION_BUDGET_MS,
+} from './ompHandlerTimeoutOverlay';
 import { writeOmpMcpConfig } from './ompMcpConfigWriter';
 import { getSharedOmpModelCatalogProbe, type OmpModelCatalogProbe } from './ompModelCatalog';
 import { assertOmpRequiredSpawnFlags, ompApprovalModeForMode } from './ompPtyManager';
 import { OmpRawEventSink } from './ompRawEventSink';
+import { supportsConfigurableHandlerTimeout } from './ompVersions';
 import {
   lastAssistantTextIn,
   OMP_RPC_UI_MODE_ARGS,
@@ -630,11 +637,21 @@ export class OmpSdkManager extends AbstractCliManager {
       os.tmpdir(),
       `cyboflow-omp-gate-${randomUUID()}.json`,
     );
+    // The raised human-decision budget and the config overlay that makes it
+    // legal are ONE change: the overlay tells OMP to allow a longer handler,
+    // the budget tells the gate to use it. `overlayPath === null` means either
+    // this binary ignores the setting or the file could not be written, and
+    // BOTH halves then stay at their defaults (30s cap, ~25s budget) — never
+    // one without the other.
+    const overlayPath = this.resolveHandlerTimeoutOverlay(executable.version);
     const gateConfig = buildOmpGateConfig({
       permissionMode,
       ...(options.disallowedTools ? { disallowedTools: options.disallowedTools } : {}),
       allowRules: loadMergedPermissionRules(options.worktreePath).allow,
       cyboflowMcpAvailable: !this.isInPlaceSession(options.sessionId),
+      ...(overlayPath !== null
+        ? { humanDecisionBudgetMs: OMP_RAISED_DECISION_BUDGET_MS }
+        : {}),
     });
     const model = resolveAgentModelAlias('omp', options.model);
     const thinking = this.resolveThinkingLevel(options);
@@ -671,7 +688,7 @@ export class OmpSdkManager extends AbstractCliManager {
     ];
     assertOmpSdkSpawnFlags(baseArgs);
 
-    const env = this.buildSpawnEnvironment(runId, sentinelPath, gateConfig, runtimeConfig);
+    const env = this.buildSpawnEnvironment(runId, sentinelPath, gateConfig, runtimeConfig, overlayPath);
     const fingerprint = sha1(
       stableSerialize({
         executablePath: executable.executablePath,
@@ -704,6 +721,7 @@ export class OmpSdkManager extends AbstractCliManager {
     sentinelPath: string,
     gateConfig: OmpGateConfig,
     runtimeConfig: OmpMcpRuntimeConfig,
+    overlayPath: string | null,
   ): NodeJS.ProcessEnv {
     const inherited = process.env;
     const pathKey = Object.keys(inherited).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
@@ -719,11 +737,51 @@ export class OmpSdkManager extends AbstractCliManager {
       CYBOFLOW_RUN_ARTIFACTS_DIR: getCyboflowSubdirectory('artifacts', 'runs', runId),
       CYBOFLOW_OMP_GATE_CONFIG: JSON.stringify(gateConfig),
       CYBOFLOW_OMP_GATE_SENTINEL: sentinelPath,
+      // Raises OMP's tool_call handler cap so a human approval is not forced
+      // to be answered in ~25s (ompHandlerTimeoutOverlay.ts). The user's own
+      // PI_CONFIG_FILES entries are preserved and ours appended last, so a
+      // project that configures OMP itself keeps doing so. Absent when the
+      // raise is not in effect — an unset var is exactly OMP's default.
+      ...(overlayPath !== null
+        ? { PI_CONFIG_FILES: composePiConfigFiles(inherited['PI_CONFIG_FILES'], overlayPath) }
+        : {}),
       // Every command the OMP agent shells out to — including a project gate —
       // inherits this, which is what makes an OMP lane self-govern its vitest
       // fork pool.
       ...managedTestConcurrencyEnv(),
     };
+  }
+
+  /**
+   * Resolve the config overlay that raises OMP's extension-handler cap, or
+   * `null` to leave this spawn on OMP's 30s default.
+   *
+   * Two independent reasons to answer `null`, both non-fatal:
+   *  - the binary predates `extensionHandlers.toolCallTimeoutMs` (17.3.5), so
+   *    the setting would be read and ignored while our gate waited past the
+   *    cap OMP still enforces;
+   *  - the file could not be written, in which case naming it anyway would
+   *    take the whole spawn down (OMP throws "Config overlay not found"
+   *    BEFORE starting the session — see ompHandlerTimeoutOverlay.ts).
+   *
+   * The path is stable rather than per-spawn deliberately: it rides in the env
+   * that feeds the warm-session fingerprint, and a fresh temp path per spawn
+   * would make every turn look like a config change and cold-respawn.
+   */
+  private resolveHandlerTimeoutOverlay(version: string): string | null {
+    if (!supportsConfigurableHandlerTimeout(version)) {
+      this.logger?.info(
+        `[OmpSdkManager] omp ${version} predates configurable extension-handler timeouts; ` +
+          'OMP approvals for this session must be answered within ~25s or the gate hangs up ' +
+          'and asks the model to retry',
+      );
+      return null;
+    }
+    return ensureHandlerTimeoutOverlay(
+      getCyboflowSubdirectory('omp'),
+      OMP_HANDLER_TIMEOUT_MS,
+      this.logger,
+    );
   }
 
   private resolvePermissionMode(options: ClaudeSpawnerOptions): PermissionMode {
