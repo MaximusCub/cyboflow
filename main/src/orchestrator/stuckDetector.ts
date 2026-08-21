@@ -1,7 +1,7 @@
 /**
  * StuckDetector — periodic service that scans for AWAITED approvals pending
- * longer than STALE_THRESHOLD_MS, classifies the failure reason, and
- * transitions the affected workflow_run to status='stuck'.
+ * longer than STALE_THRESHOLD_MS (45 minutes), classifies the failure reason,
+ * and transitions the affected workflow_run to status='stuck'.
  *
  * Standalone-typecheck invariant (ROADMAP-001 §6.3):
  * This module must NOT import from 'electron', 'better-sqlite3', or any
@@ -19,8 +19,22 @@ import { emitSeamError } from './telemetrySink';
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Approvals older than this (ms) are considered stale. */
-const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+/**
+ * Approvals older than this (ms) are considered stale.
+ *
+ * 45 minutes, not the original 5. The threshold has to sit ABOVE the longest
+ * decision window the product itself sanctions, or it reclassifies patience as
+ * failure: the OMP gate gives a human ~30 minutes to answer, and 86d3fd1e
+ * records a real approval answered at 6m14s that this constant had already
+ * declared wedged at 5m. A human reading a diff before approving a shell
+ * command is the normal case, not the pathological one.
+ *
+ * This is a NOTIFICATION/ESCALATION boundary, not proof of a deadlock — the
+ * rungs below supply the proof. Raising it does not fix a wrong classification
+ * and is not trying to; it stops the clock from being the thing that
+ * manufactures one.
+ */
+const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
 
 /** How often the detector scans for stale approvals. */
 const SCAN_INTERVAL_MS = 60_000; // 60 seconds
