@@ -118,9 +118,22 @@ export class StuckDetector {
       `SELECT COUNT(*) as cnt FROM approvals
        WHERE run_id = ? AND status = 'pending' AND id != ?`,
     );
+    // Rung 4 requires the CONFLICTING run to itself hold a stale pending
+    // approval. Until now this query checked only `status='awaiting_review'`,
+    // which the docstring above never claimed: awaiting_review is also the
+    // plain rest state of every finished run waiting on Merge/Dismiss, so
+    // "another run exists" degenerated into "any other session finished a
+    // turn" and stamped healthy runs as deadlocked. The EXISTS clause is the
+    // behavior the docstring always described.
     this.stmtCrossRunDeadlock = this.db.prepare(
-      `SELECT id FROM workflow_runs
-       WHERE status = 'awaiting_review' AND id != ?
+      `SELECT wr.id FROM workflow_runs wr
+       WHERE wr.status = 'awaiting_review' AND wr.id != ?
+         AND EXISTS (
+           SELECT 1 FROM approvals a
+            WHERE a.run_id = wr.id
+              AND a.status = 'pending'
+              AND a.created_at < ?
+         )
        LIMIT 1`,
     );
     this.stmtTransitionToStuck = this.db.prepare(
@@ -186,7 +199,7 @@ export class StuckDetector {
       const rows = this.stmtStaleApprovals.all(cutoffIso) as ApprovalRow[];
 
       for (const approval of rows) {
-        const reason = this.classifyStaleApproval(approval);
+        const reason = this.classifyStaleApproval(approval, cutoffIso);
         if (reason === null) {
           continue;
         }
@@ -211,14 +224,18 @@ export class StuckDetector {
    * 2. stale_socket    — no permission-socket client connected for the run's ID.
    * 3. self_deadlock   — the same run has another pending approval distinct from
    *                      this one (intra-run queue jam).
-   * 4. cross_run_deadlock — v1 heuristic: another run is in 'awaiting_review'
-   *                         with a stale pending approval (conflictingRunId set).
+   * 4. cross_run_deadlock — another run is in 'awaiting_review' AND itself holds
+   *                         a stale pending approval (conflictingRunId set).
    *
    * Returns null when none of the above apply — the approval is stale but not
    * deterministically stuck, so no transition fires.
    */
-  classifyStaleApproval(approval: ApprovalRow): StuckReason | null {
+  classifyStaleApproval(approval: ApprovalRow, cutoffIso?: string): StuckReason | null {
     const { id: approvalId, run_id: runId } = approval;
+    // scan() already computed the cutoff for its own query; accept it so rung 4
+    // shares one staleness boundary with the row that triggered this call.
+    // Recomputed here only for direct callers (tests) that pass one approval.
+    const cutoff = cutoffIso ?? new Date(Date.now() - STALE_THRESHOLD_MS).toISOString();
 
     // 1. orphan_pty
     if (!this.claudeManager.hasActiveRunForId(runId)) {
@@ -247,7 +264,7 @@ export class StuckDetector {
     }
 
     // 4. cross_run_deadlock (v1 heuristic)
-    const crossRow = this.stmtCrossRunDeadlock.get(runId) as WorkflowRunRow | undefined;
+    const crossRow = this.stmtCrossRunDeadlock.get(runId, cutoff) as WorkflowRunRow | undefined;
     if (crossRow) {
       return { kind: 'cross_run_deadlock', conflictingRunId: crossRow.id };
     }

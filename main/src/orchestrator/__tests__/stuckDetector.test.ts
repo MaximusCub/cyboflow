@@ -337,7 +337,7 @@ describe('StuckDetector classification: self_deadlock', () => {
 // ---------------------------------------------------------------------------
 
 describe('StuckDetector classification: cross_run_deadlock', () => {
-  it('returns cross_run_deadlock when another run is awaiting_review', () => {
+  it('returns cross_run_deadlock when another run is awaiting_review with its OWN stale approval', () => {
     const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
@@ -346,6 +346,9 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     seedRun(rawDb, 'run-cross-1', 'awaiting_review');
     seedRun(rawDb, 'run-cross-2', 'awaiting_review'); // conflicting run
     seedApproval(rawDb, { id: 'approval-cross', runId: 'run-cross-1', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
+    // The conflicting run must itself be blocked on a stale approval — the
+    // condition rung 4's docstring always described.
+    seedApproval(rawDb, { id: 'approval-cross-2', runId: 'run-cross-2', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
 
     // Both runs active, both have sockets, no self_deadlock on run-cross-1
     const detector = new StuckDetector({
@@ -366,6 +369,68 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     if (reason !== null && reason.kind === 'cross_run_deadlock') {
       expect(reason.conflictingRunId).toBe('run-cross-2');
     }
+
+    rawDb.close();
+  });
+
+  it('does NOT stamp when the other awaiting_review run holds no stale approval (86d3fd1e shape)', () => {
+    // Regression pin for the 2026-08-21 incident: awaiting_review is ALSO the
+    // rest state of a finished run waiting on Merge/Dismiss, so a bare
+    // "another run exists" test stamped a healthy run whose human was simply
+    // still deciding. The conflicting run here is at rest with no approval of
+    // its own — there is no deadlock to report.
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+
+    seedRun(rawDb, 'run-live', 'awaiting_review');
+    seedRun(rawDb, 'run-at-rest', 'awaiting_review'); // finished, awaiting Merge/Dismiss
+    seedApproval(rawDb, { id: 'approval-live', runId: 'run-live', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
+
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set(['run-live', 'run-at-rest'])),
+      permissionServer: makePermissionServer(new Set(['run-live', 'run-at-rest'])),
+      emitter,
+      logger,
+    });
+
+    const row = rawDb
+      .prepare("SELECT id, run_id, status, created_at FROM approvals WHERE id = 'approval-live'")
+      .get() as { id: string; run_id: string; status: string; created_at: string };
+
+    expect(detector.classifyStaleApproval(row)).toBeNull();
+
+    rawDb.close();
+  });
+
+  it('does NOT stamp when the other run\'s approval is NOT yet stale', () => {
+    // The conflicting run is genuinely blocked, but only just — it has not
+    // crossed the staleness boundary, so it is not evidence of a deadlock.
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+
+    seedRun(rawDb, 'run-a', 'awaiting_review');
+    seedRun(rawDb, 'run-b', 'awaiting_review');
+    seedApproval(rawDb, { id: 'approval-a', runId: 'run-a', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
+    seedApproval(rawDb, { id: 'approval-b', runId: 'run-b', toolName: 'Bash', createdAt: ageMsToIso(1000) });
+
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set(['run-a', 'run-b'])),
+      permissionServer: makePermissionServer(new Set(['run-a', 'run-b'])),
+      emitter,
+      logger,
+    });
+
+    const row = rawDb
+      .prepare("SELECT id, run_id, status, created_at FROM approvals WHERE id = 'approval-a'")
+      .get() as { id: string; run_id: string; status: string; created_at: string };
+
+    expect(detector.classifyStaleApproval(row)).toBeNull();
 
     rawDb.close();
   });
