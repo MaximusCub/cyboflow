@@ -5,8 +5,13 @@
  * A card shows: a project chip row (All-projects view only, above the tag
  * pills); type tag, priority tag, FlowMarker(s) (multiple when parallel runs),
  * ReviewMarker, DoneFlag, the display ref; the title; the summary; and a
- * footer with repo, compact "Nm ago", and the per-card "Run" action. Epics
- * show an expand control ("N tasks") that reveals nested {@link TaskChildren}.
+ * footer with repo, compact "Nm ago", and the per-card primary action — "Run"
+ * for epics/tasks, **"Open"** for ideas (idea sessions plan, Stage 4:
+ * find-or-create the idea's persistent home session; unlike Run, never
+ * disabled by `inFlow`/In-development — opening the home is always valid —
+ * but disabled with a reason for an archived idea, since the door rejects
+ * one). Epics show an expand control ("N tasks") that reveals nested
+ * {@link TaskChildren}.
  *
  * Archive-in-place: an archived item (`archived_at` stamped) only reaches a card
  * while the header Archived toggle is on — it then renders dimmed (opacity-60)
@@ -19,8 +24,12 @@
  * breathing-glow on an in-flight card honours prefers-reduced-motion
  * (motion-reduce:* variants in the marker + ring).
  *
- * Launch state is threaded as `launchingTaskId` (not a pre-computed boolean) so
- * nested epic children also reflect their own in-flight launch correctly.
+ * In-flight state is threaded as `launchingTaskId` (not a pre-computed
+ * boolean) so nested epic children also reflect their own in-flight launch
+ * correctly. BacklogPane merges TWO launchers into this one prop — a Run
+ * launch (useTaskRunLauncher) and an idea Open (useIdeaSessionOpener) can
+ * never collide on the same card (an idea never renders Run; an epic/task
+ * never renders Open), so one shared id is enough.
  *
  * Idea component ledger (shared/types/ideaComponents.ts): ideas render five
  * LedgerChips (always all five, including skipped ones, so the row reads as a
@@ -115,7 +124,7 @@ function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | nul
   );
 }
 
-/** Footer: repo · time · root-idea back-link · Edit · Run. */
+/** Footer: repo · time · root-idea back-link · Edit · Run (Open, for ideas). */
 function CardFooter({
   task,
   onRun,
@@ -137,11 +146,23 @@ function CardFooter({
   /** Open the ledger expand (ideas with a resolved component set only). */
   onShowComponents?: () => void;
 }): React.JSX.Element {
+  // Shared in-flight indicator for BOTH the idea "Open" and the epic/task
+  // "Run" action — BacklogPane merges useTaskRunLauncher's launchingTaskId
+  // with useIdeaSessionOpener's openingTaskId before it ever reaches this
+  // prop (idea sessions plan, Stage 4), so a single guard works for whichever
+  // one this card renders (an idea never renders Run; an epic/task never
+  // renders Open).
   const isLaunching = launchingTaskId === task.id;
   // A live run association = the task is In development — the backend rejects a
   // second pull (double-pull guard), so don't offer one. The flow pill above
-  // carries the "why" (and opens the working session).
-  const inDevelopment = task.inFlow.length > 0;
+  // carries the "why" (and opens the working session). Ideas are exempt:
+  // opening the idea's persistent home is always valid, in-development or not.
+  const inDevelopment = task.type !== 'idea' && task.inFlow.length > 0;
+  // An archived idea's home cannot be opened — the door rejects it
+  // (validateIdeaSessionLink). Only ideas render the Open button, but this is
+  // computed unconditionally since it's cheap and keeps the JSX below simple.
+  const isIdea = task.type === 'idea';
+  const archived = isIdea && isArchived(task);
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
       <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-text-tertiary">
@@ -182,12 +203,24 @@ function CardFooter({
           <Pencil className="h-3 w-3" strokeWidth={2.5} />
           Edit
         </button>
+        {/* Ideas: "Open" — find-or-create the idea's persistent home session
+            (idea sessions plan, Stage 4). Epics/tasks: "Run" — launch a new
+            workflow run, unchanged. Same Play glyph + position; the label,
+            testid, and disable reason are the only things that differ. */}
         <button
           type="button"
           onClick={() => onRun(task)}
-          disabled={isLaunching || inDevelopment}
-          title={inDevelopment ? 'Already in development — a live session is working on this' : undefined}
-          data-testid="task-run-button"
+          disabled={isLaunching || (isIdea ? archived : inDevelopment)}
+          title={
+            isIdea
+              ? archived
+                ? 'Archived — restore to open'
+                : undefined
+              : inDevelopment
+                ? 'Already in development — a live session is working on this'
+                : undefined
+          }
+          data-testid={isIdea ? 'task-open-button' : 'task-run-button'}
           className="inline-flex items-center gap-1 rounded-button border border-interactive/50 px-2 py-0.5 text-[10.5px] font-semibold text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-interactive"
         >
           {isLaunching ? (
@@ -195,7 +228,7 @@ function CardFooter({
           ) : (
             <Play className="h-3 w-3" strokeWidth={2.5} />
           )}
-          Run
+          {isIdea ? 'Open' : 'Run'}
         </button>
         {/* Secondary actions (Move up/down/top / Change stage… / Archive)
             tucked behind a ⋯ menu. */}

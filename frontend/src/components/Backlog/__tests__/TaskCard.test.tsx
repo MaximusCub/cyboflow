@@ -119,6 +119,70 @@ describe('TaskCard scope badge', () => {
   });
 });
 
+// Backlog idea card "Open" (idea sessions plan, Stage 4). onRun is a single
+// shared prop for both actions — BacklogPane branches on task.type internally
+// (useIdeaSessionOpener vs useTaskRunLauncher); TaskCard only owns the
+// label/testid/disable-reason swap.
+describe('TaskCard "Open" button (idea sessions plan, Stage 4)', () => {
+  it('renders "Open" with the idea testid for an idea, and "Run" with the task testid otherwise', () => {
+    const { rerender } = render(
+      <BoardCard task={makeIdea()} onRun={onRun} launchingTaskId={null} now={Date.now()} />,
+    );
+    const openButton = screen.getByTestId('task-open-button');
+    expect(openButton).toHaveTextContent('Open');
+    expect(screen.queryByTestId('task-run-button')).not.toBeInTheDocument();
+
+    rerender(
+      <BoardCard task={makeIdea({ type: 'task', ref: 'TASK-001' })} onRun={onRun} launchingTaskId={null} now={Date.now()} />,
+    );
+    expect(screen.getByTestId('task-run-button')).toHaveTextContent('Run');
+    expect(screen.queryByTestId('task-open-button')).not.toBeInTheDocument();
+  });
+
+  it('calls onRun(task) when Open is clicked, same as Run', () => {
+    onRun.mockClear();
+    const idea = makeIdea();
+    render(<BoardCard task={idea} onRun={onRun} launchingTaskId={null} now={Date.now()} />);
+    fireEvent.click(screen.getByTestId('task-open-button'));
+    expect(onRun).toHaveBeenCalledWith(idea);
+  });
+
+  it('is NOT disabled by an in-development association (inFlow), unlike Run', () => {
+    render(
+      <BoardCard
+        task={makeIdea({
+          inFlow: [{ agent: 'executor', runId: 'run-1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+        })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    const openButton = screen.getByTestId('task-open-button');
+    expect(openButton).not.toBeDisabled();
+    expect(openButton).not.toHaveAttribute('title');
+  });
+
+  it('IS disabled with a reason for an archived idea', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ archived_at: '2026-06-02T00:00:00Z' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    const openButton = screen.getByTestId('task-open-button');
+    expect(openButton).toBeDisabled();
+    expect(openButton).toHaveAttribute('title', 'Archived — restore to open');
+  });
+
+  it('is disabled (in-flight guard) while launchingTaskId matches this idea, with no glyph/label change beyond the spinner', () => {
+    render(<BoardCard task={makeIdea()} onRun={onRun} launchingTaskId="idea_1" now={Date.now()} />);
+    expect(screen.getByTestId('task-open-button')).toBeDisabled();
+  });
+});
+
 describe('TaskCard "In experiment" badge (C2)', () => {
   it('renders the badge when the task is a live experiment seed', () => {
     render(
