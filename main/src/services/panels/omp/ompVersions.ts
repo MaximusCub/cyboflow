@@ -26,11 +26,17 @@
 export const OMP_MIN_SUPPORTED_VERSION = '17.3.0';
 
 /**
- * Newest version this integration has been verified against (the real
- * `~/.local/bin/omp` probe in scratchpad/omp-probe/PROBE-FINDINGS.md). Soft
- * ceiling only — never refuses, only warns.
+ * Newest version this integration has been verified against. Soft ceiling only
+ * — never refuses, only warns.
+ *
+ * 17.3.5 was smoked end to end on 2026-08-21 against the real
+ * `~/.local/bin/omp`: gate spawn, `PI_CONFIG_FILES` overlay, a human approval
+ * answered after six minutes and executed, and both halves of the `hub`
+ * argument classifier. Leaving the constant at 17.3.2 would keep warning about
+ * a version this integration is now pinned to by
+ * {@link OMP_CONFIGURABLE_HANDLER_TIMEOUT_VERSION}.
  */
-export const OMP_TESTED_VERSION = '17.3.2';
+export const OMP_TESTED_VERSION = '17.3.5';
 
 export interface OmpParsedVersion {
   major: number;
