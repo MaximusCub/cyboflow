@@ -33,6 +33,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - `tailwind-merge` no longer drops Button text colors at `size=md`; the idea-summary matrix scrolls instead of clipping when narrow.
 - Escape closes only the top-most modal in a nested stack.
 - A busy local entity defers one item instead of wedging inbound sync; a throttled subscription tears down when its source goes idle.
+- **Auto-mode command classification hardening.** Auto mode no longer escalates on discards, bare environment assignments, or value substitutions; it resolves the real program past assignment, keyword, and wrapper prefixes and matches its hazard tables on the program basename.
+- **Stuck-run and cross-run-deadlock detection.** A cross-run deadlock is stamped only on a real conflict; only approvals someone is actually blocked on count as stuck evidence; the stale clock no longer outruns the humans it measures; the stuck-run event bridge is now wired; and `orphan_pty` gets a real liveness probe instead of a silent no-op.
+- **`raw_events` integrity.** A `tool_result` carrying image blocks (e.g. base64 screenshots) is now narrowed and kept instead of falling to `__unknown__` and being dropped from the transcript; superseded Codex snapshot notifications collapse to last-write-wins (migration 112); and missing `run_usage` rollups are materialized at boot.
+
+> **Upgrade note.** Migration 112 runs a one-time cleanup on first launch that removes *superseded* Codex snapshot rows from `raw_events` — each is a cumulative snapshot whose successor already restates its full value, so no information is lost. It is idempotent; on a large history (~1.6 GB database) it clears tens of thousands of rows and adds roughly 20 seconds to that first boot. The database file itself will not shrink (the space returns to SQLite's freelist), but its growth stops.
 
 ## [0.2.4] — 2026-08-19
 
