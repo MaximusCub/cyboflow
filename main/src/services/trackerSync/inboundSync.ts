@@ -872,15 +872,26 @@ export async function runInboundSync(
   const fieldOptions = await adapter.listFieldOptions();
   // Migration 112 columns: an empty '{}' overlay (every pre-Phase-6 connection)
   // resolves to the seed, exactly like Phase 2's `null` placeholder did.
+  // A persisted mapping entry the workspace no longer offers is dropped rather
+  // than sent, and counted like the inbound values it cannot express: both are
+  // "the tracker renamed this out from under your mapping", both are fixed by
+  // confirming the mapping, and the pass's ⚠ line already says exactly that.
+  // Counted ONCE per pass, and re-counted every pass while the overlay stays
+  // stale — the same never-goes-quiet property the inbound half has.
+  const onStaleOverlayToken = (): void => {
+    report.unmappedFieldValues++;
+  };
   const priorityMapping = resolveEffectivePriorityMapping(
     connection.provider,
     fieldOptions.priorities,
     connection.priority_mapping_json,
+    onStaleOverlayToken,
   );
   const categoryMapping = resolveEffectiveCategoryMapping(
     connection.provider,
     fieldOptions.categories,
     connection.category_mapping_json,
+    onStaleOverlayToken,
   );
 
   const issues = await adapter.listIssues(selection, computeSince(connection));
@@ -1333,7 +1344,7 @@ async function repairHalfImport(
  */
 function mappedFieldsFor(ctx: SyncContext, issue: TrackerIssue): TaskFieldChanges {
   const fields: TaskFieldChanges = {};
-  const priority = localPriorityForToken(ctx.priorityMapping, issue.priority);
+  const priority = localPriorityForToken(ctx.connection.provider, ctx.priorityMapping, issue.priority);
   if (priority !== null) fields.priority = priority;
   if (ctx.categorySync) {
     const category = localCategoryForToken(ctx.categoryMapping, issue.category);
@@ -1639,7 +1650,7 @@ async function mergeLinkedIssue(
     remoteToken: issue.priority,
     localValue: local.priority,
     toProvider: (value) => providerPriorityToken(ctx.priorityMapping, value),
-    toLocal: (token) => localPriorityForToken(ctx.priorityMapping, token),
+    toLocal: (token) => localPriorityForToken(ctx.connection.provider, ctx.priorityMapping, token),
     conflicts,
     apply: (value) => {
       fields.priority = value;
@@ -1829,7 +1840,7 @@ function applyRemoteConflictValue(
       // The arm never files a conflict for a token it could not map, so this is
       // always present — guarded rather than asserted because the two halves of
       // a persisted mapping can be edited independently.
-      const next = localPriorityForToken(ctx.priorityMapping, issue.priority);
+      const next = localPriorityForToken(ctx.connection.provider, ctx.priorityMapping, issue.priority);
       if (next !== null) fields.priority = next;
       return;
     }

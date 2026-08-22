@@ -1342,6 +1342,44 @@ describe('runInboundSync — a remote value the mapping cannot express', () => {
     expect(ideas()[0].title).toBe('Retitled');
     expect(baselineOf('ext-1').title).toBe('Retitled');
   });
+
+  it('REPORTS a persisted mapping entry the workspace renamed away', async () => {
+    // The outbound half of the same rename, and it reaches the user through the
+    // same ⚠ line: the wizard persisted the whole seeded table, so 'critical'
+    // is in the overlay even though the seed just dropped it. Restoring it
+    // verbatim would queue a write Dart 400s on and the outbox calls terminal.
+    adapter.fieldOptions = { priorities: ['high', 'medium', 'low'], categories: [] };
+    const connection = makeConnection({
+      provider: 'dart',
+      priority_mapping_json: JSON.stringify({
+        toProvider: { P0: 'critical', P1: 'high', P2: 'medium', P4: 'low', P6: null },
+      }),
+    });
+    await importOnce(connection, makeIssue({ priority: 'Medium' }));
+
+    adapter.issues = [makeIssue({ priority: 'Medium', updatedAt: '2026-07-30T11:00:00.000Z' })];
+    const report = await runInboundSync(deps, reload());
+
+    // Counted once per pass, and again on the NEXT pass — a stale mapping stays
+    // reported until the user confirms it, exactly like an unmapped read.
+    expect(report.unmappedFieldValues).toBe(1);
+    adapter.issues = [makeIssue({ priority: 'Medium', updatedAt: '2026-07-30T12:00:00.000Z' })];
+    expect((await runInboundSync(deps, reload())).unmappedFieldValues).toBe(1);
+  });
+
+  it('imports an UNSET remote priority as P6 even when P0 is mapped to nothing', async () => {
+    // The regression: "— Not sent" on P0 used to make Dart's absent priority
+    // resolve to the first level with no outbound token, importing every
+    // unprioritized issue as CRITICAL.
+    adapter.fieldOptions = { priorities: ['critical', 'high', 'medium', 'low'], categories: [] };
+    const connection = makeConnection({
+      provider: 'dart',
+      priority_mapping_json: JSON.stringify({ toProvider: { P0: null } }),
+    });
+    const ideaId = await importOnce(connection, makeIssue({ priority: null }));
+
+    expect(priorityOf(ideaId)).toBe('P6');
+  });
 });
 
 describe('runInboundSync — the never-synced backfill arm', () => {

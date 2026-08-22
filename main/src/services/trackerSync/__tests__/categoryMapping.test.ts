@@ -156,6 +156,53 @@ describe('resolveEffectiveCategoryMapping — overlay', () => {
     expect(providerCategoryToken(mapping, 'bug')).toBeNull();
     expect(localCategoryForToken(mapping, 'Bug')).toBeNull();
   });
+
+  it('degrades an overlay type the workspace no longer offers, and says which', () => {
+    // TITLE-IS-THE-ID: the wizard persisted 'Defect', the owner renamed it, and
+    // restoring it verbatim over the seed would queue a write Dart 400s on.
+    const stale: string[] = [];
+    const mapping = resolveEffectiveCategoryMapping(
+      'dart',
+      ['Bug', 'Task'],
+      JSON.stringify({ toProvider: { bug: 'Defect', chore: 'Task' } }),
+      (token) => stale.push(token),
+    );
+    expect(providerCategoryToken(mapping, 'bug')).toBeNull();
+    expect(stale).toEqual(['Defect']);
+    expect(providerCategoryToken(mapping, 'chore')).toBe('Task');
+  });
+
+  it("adopts the live list's own casing for a surviving overlay type", () => {
+    const mapping = resolveEffectiveCategoryMapping(
+      'dart',
+      ['Defect'],
+      JSON.stringify({ toProvider: { bug: 'defect' } }),
+    );
+    expect(providerCategoryToken(mapping, 'bug')).toBe('Defect');
+  });
+
+  it('keeps the overlay verbatim when there is no live list to check against', () => {
+    const stale: string[] = [];
+    const mapping = resolveEffectiveCategoryMapping(
+      'dart',
+      null,
+      JSON.stringify({ toProvider: { bug: 'Defect' } }),
+      (token) => stale.push(token),
+    );
+    expect(providerCategoryToken(mapping, 'bug')).toBe('Defect');
+    expect(stale).toEqual([]);
+  });
+
+  it('does not report a category the overlay deliberately points at nothing', () => {
+    const stale: string[] = [];
+    resolveEffectiveCategoryMapping(
+      'dart',
+      CATEGORY_TYPES,
+      JSON.stringify({ toProvider: { chore: null } }),
+      (token) => stale.push(token),
+    );
+    expect(stale).toEqual([]);
+  });
 });
 
 describe('localCategoryForToken', () => {

@@ -116,14 +116,25 @@ export function seedDefaultCategoryMapping(
   const live = providerSupportsCategorySync(provider) ? liveOptions : null;
 
   for (const category of CATEGORIES) {
-    const match = live?.find((type) => type.toLowerCase() === category) ?? null;
     // The workspace's OWN spelling is kept ('Bug', not 'bug'), so a later write
     // sends back exactly what Dart offered.
+    const match = resolveType(category, live);
     toProvider[category] = match;
     if (match !== null) toLocal[match.toLowerCase()] = category;
   }
 
   return { toProvider, toLocal };
+}
+
+/**
+ * The workspace's own spelling of a type title, or null when it offers none.
+ *
+ * With no live list there is nothing to confirm against and nothing to fall back
+ * on either — unlike a priority scale there is no canonical vocabulary here
+ * (module header, point 2) — so an unconfirmable title is simply not mapped.
+ */
+function resolveType(title: string, live: string[] | null): string | null {
+  return live?.find((type) => type.toLowerCase() === title.toLowerCase()) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,11 +163,24 @@ interface CategoryMappingOverlay {
  *
  * `overlayJson` is null until migration 112 adds the column; every Phase-2
  * caller passes null and gets the seed.
+ *
+ * OVERLAY TITLES ARE RE-VALIDATED against the live type list whenever there is
+ * one, for the reason priorityMapping's twin gives: TITLE-IS-THE-ID here, the
+ * wizard persists the whole table, and a title the workspace renamed away would
+ * otherwise be re-introduced over a seed that correctly dropped it — a type Dart
+ * 400s on (probe D3), which the outbox reads as a terminal failure. A stale
+ * title degrades to null, i.e. the field is OMITTED from the write rather than
+ * cleared. With no live list (`liveOptions === null`) there is nothing to check
+ * against and the overlay stands verbatim.
+ *
+ * `onStaleOverlayToken` is called once per degraded entry with the dropped
+ * title, so a pass can surface "confirm the mapping".
  */
 export function resolveEffectiveCategoryMapping(
   provider: TrackerProvider,
   liveOptions: string[] | null,
   overlayJson: string | null,
+  onStaleOverlayToken?: (token: string) => void,
 ): CategoryMapping {
   const mapping = seedDefaultCategoryMapping(provider, liveOptions);
   // An overlay cannot re-enable a field the provider does not have: it would
@@ -169,7 +193,10 @@ export function resolveEffectiveCategoryMapping(
   if (overlay.toProvider !== undefined) {
     for (const [category, token] of Object.entries(overlay.toProvider)) {
       if (isCategory(category) && (token === null || typeof token === 'string')) {
-        mapping.toProvider[category] = token;
+        const resolved =
+          token === null || liveOptions === null ? token : resolveType(token, liveOptions);
+        if (resolved === null && token !== null) onStaleOverlayToken?.(token);
+        mapping.toProvider[category] = resolved;
       }
     }
   }

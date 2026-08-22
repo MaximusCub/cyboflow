@@ -95,6 +95,24 @@ const PRIORITIES = Object.keys(RUNG_FOR_LOCAL) as Priority[];
 const RUNGS = Object.keys(LOCAL_FOR_RUNG) as PriorityRung[];
 
 /**
+ * The local level that MEANS "no priority" on this provider, or null when the
+ * provider has none — Dart's P6 (its unset rung is the absent field), against
+ * Linear's and Plane's real `'0'` / `'none'` tokens.
+ *
+ * Read off the CANONICAL table, which is what makes it the provider-static
+ * answer: it is by construction `seedDefaultPriorityMapping(provider, null)`'s
+ * null arm (`resolveToken` returns the canonical token verbatim when there is
+ * no live list), so no live-option rename and no user overlay can move it. That
+ * immovability is the whole point — see {@link localPriorityForToken} and
+ * outboxWorker's `writablePriorityToken`, which discriminate the two meanings of
+ * a null token against exactly this.
+ */
+function unsetLevelFor(provider: TrackerProvider): Priority | null {
+  const canonical = CANONICAL_TOKENS[provider];
+  return PRIORITIES.find((priority) => canonical[RUNG_FOR_LOCAL[priority]] === null) ?? null;
+}
+
+/**
  * Each provider's own spelling of the five rungs — the CANONICAL tokens, used
  * to seed a mapping and, for Dart, to recognize the matching entry in the live
  * workspace list.
@@ -226,11 +244,31 @@ interface PriorityMappingOverlay {
  *
  * `overlayJson` is null until migration 112 adds the column; every Phase-2
  * caller passes null and gets the seed.
+ *
+ * AN OVERLAY TOKEN IS RE-VALIDATED AGAINST THE LIVE LIST, not restored verbatim,
+ * and that is the difference between "the user chose this" and "the user chose
+ * this and it still exists". The wizard persists the WHOLE seeded table, so
+ * every outbound row is an overlay row: without this, a Dart priority rename
+ * would be correctly dropped by the seed and then re-introduced by the overlay
+ * laid on top of it, and the write would 400 — which the outbox reads as a
+ * TERMINAL failure, not a mapping to confirm. A token the workspace no longer
+ * offers therefore degrades to null, which the outbound path reads as "not
+ * expressible" and OMITS (`writablePriorityToken`); it never clears the field.
+ *
+ * With no live list (`liveOptions === null`) the overlay stands verbatim: those
+ * callers — the write-back triggers, the connection summary — deliberately
+ * resolve offline, and having nothing to check against is not evidence of a
+ * rename.
+ *
+ * `onStaleOverlayToken` is called once per degraded entry with the token that
+ * was dropped, so a pass can surface "confirm the mapping" instead of failing
+ * silently.
  */
 export function resolveEffectivePriorityMapping(
   provider: TrackerProvider,
   liveOptions: string[] | null,
   overlayJson: string | null,
+  onStaleOverlayToken?: (token: string) => void,
 ): PriorityMapping {
   const mapping = seedDefaultPriorityMapping(provider, liveOptions);
   const overlay = parseOverlay(overlayJson);
@@ -239,7 +277,9 @@ export function resolveEffectivePriorityMapping(
   if (overlay.toProvider !== undefined) {
     for (const [priority, token] of Object.entries(overlay.toProvider)) {
       if (isPriority(priority) && (token === null || typeof token === 'string')) {
-        mapping.toProvider[priority] = token;
+        const resolved = resolveToken(token, liveOptions);
+        if (resolved === null && token !== null) onStaleOverlayToken?.(token);
+        mapping.toProvider[priority] = resolved;
       }
     }
   }
@@ -308,16 +348,31 @@ export function providerPriorityToken(
  * a level.
  *
  * A null TOKEN is the provider's absence of a priority, which is a different
- * question: it resolves to whichever local level maps OUT to nothing (P6 under
- * the seed), so the unset ⇄ P6 round trip closes. On Linear and Plane no local
- * level maps to nothing — their unset is a real token — so a null token there
- * is genuinely unmappable and answers null.
+ * question: it resolves to the level that MEANS "no priority" on this provider
+ * (Dart's P6), so the unset ⇄ P6 round trip closes. On Linear and Plane no level
+ * means that — their unset is a real token — so a null token there is genuinely
+ * unmappable and answers null.
+ *
+ * THAT LEVEL COMES FROM THE PROVIDER, NOT FROM THE EFFECTIVE MAPPING, which is
+ * why this takes the provider at all. Scanning `toProvider` for the first level
+ * with no token answers a different question — "which level currently has
+ * nothing to send" — and every degraded or deliberately-unmapped level is also
+ * an answer to it. A user who points P0 at "— Not sent" would make every unset
+ * remote priority import as CRITICAL. {@link unsetLevelFor} reads the canonical
+ * seed instead, which no rename and no overlay can move; it is the same
+ * discrimination outboxWorker's `writablePriorityToken` makes in the outbound
+ * direction, for the same reason.
+ *
+ * Remapping the unset level's OWN outbound token is still expressible and still
+ * makes unset ⇄ level asymmetric — the accepted caveat of an overlay that edits
+ * only one direction, unchanged here.
  */
 export function localPriorityForToken(
+  provider: TrackerProvider,
   mapping: PriorityMapping,
   token: string | null,
 ): Priority | null {
-  if (token === null) return PRIORITIES.find((p) => mapping.toProvider[p] === null) ?? null;
+  if (token === null) return unsetLevelFor(provider);
   return mapping.toLocal[token.toLowerCase()] ?? null;
 }
 
